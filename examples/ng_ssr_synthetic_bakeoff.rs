@@ -471,10 +471,19 @@ fn main() -> ExitCode {
 
     // The competitors. A new algorithm registers one line here: (name, evaluate(&aligner, ...)).
     // The winner is the highest composite with clean == 1.000 (no regression on error-free reads).
+    let anchor_firm =
+        pop_var_caller::ng::alignment::ssr_anchor_firm::SsrAnchorFirmAligner::new(
+            PerQualityEmission::new(),
+        );
+    let noise_robust =
+        pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner::new(
+            PerQualityEmission::new(),
+        );
     let cards: Vec<(&str, Card)> = vec![
         ("flat_gap (algo 3)", evaluate(&flat, &scen, &stutter)),
         ("unit_slip (algo 4)", evaluate(&unit, &scen, &stutter)),
-        // ("your_algo", evaluate(&your_aligner, &scen, &stutter)),
+        ("anchor_firm (algo 5)", evaluate(&anchor_firm, &scen, &stutter)),
+        ("noise_robust (algo 4n)", evaluate(&noise_robust, &scen, &stutter)),
     ];
 
     println!(
