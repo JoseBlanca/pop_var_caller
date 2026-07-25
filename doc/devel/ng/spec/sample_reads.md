@@ -68,8 +68,9 @@ file 2 ─▶ AlignmentFile ─▶ region source ─▶ ReadFilter ─▶ order-
                                                                           per region
                                         ┌──────────────────────────────────────┤
                                         ▼                                      ▼
-                               generic: pileup walker              STR: tract extractor
-                               (read_preparation_generic)          (read_preparation_ssr)
+                               generic: pileup walker              STR: observation generator
+                               (prepares each read, then           (aligns each read to its tract,
+                                gathers — read_preparation.md)       then tallies — locus_generation_ssr.md)
 ```
 
 **Two preconditions this module relies on and does not re-check** — both established by

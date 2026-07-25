@@ -33,10 +33,13 @@ src/ng/
 ├── read/             – steps 1+2, one read-handling module (see principle 1, note):
 │                        · filtering.rs – step 1: the fixed filtering prelude (a single
 │                          file — no bake-off; wraps the bam/alignment_input filters)
-│                        · mod.rs + left_align_baq.rs / ssr_delimit.rs –
-│                          step 2: ReadPreparer trait + its swappable impls, side by side.
-│                          The alignment algorithms they call live in alignment/, below —
-│                          a preparer composes one, it does not contain one.
+│                        · mod.rs + left_align_baq.rs – step 2 (GENERIC PATH ONLY): the
+│                          ReadPreparer trait + its impls, side by side. Read preparation is
+│                          a generic-only step (../spec/read_preparation.md §1); the STR path
+│                          has no preparer — its per-read alignment produces an observation and
+│                          lives in locus_generation/ssr.rs, calling alignment/. The alignment
+│                          algorithms a preparer calls live in alignment/, below — it composes
+│                          one, it does not contain one.
 ├── alignment/        – NOT a pipeline step: the shared alignment algorithms both step 2 and
 │                       step 7 call. Knows nothing about caller steps. mod.rs (the traits) +
 │                       one file per algorithm. Spec ../spec/alignment.md
@@ -183,7 +186,7 @@ and it lives inside `locus_generation/` with its siblings. Recorded rather than 
 because the old placement is what the tree above used to show.
 
 The related open question is **resolved**: `pileup/` is **built from** step 2's
-`ReadPreparer`, not a subsumer of it (`../spec/read_preparation.md` §2 — *compose, not
+`ReadPreparer`, not a subsumer of it (`../spec/read_preparation.md` §6 — *compose, not
 subsume*). The generic path does not opt out of the per-step bake-off.
 
 ## Crate boundary and the port-back
@@ -200,15 +203,17 @@ serialization when memory forces it or when the evidence types stop churning.
 
 ## Naming to confirm
 
-- `read/` (steps 1+2) — the merged read-handling module (see principle 1). Step 2's
-  files are named for the **transform they perform** (`left_align_baq.rs`, `ssr_delimit.rs`, …),
-  not for the taxonomy pole they sit on — "trust the mapper" is an *axis*
-  (`ng_proposal.md` §2) and names a family, not one implementation. The `ReadPreparer` trait
-  lives in `read/mod.rs`; its impls are `LeftAlignBaqPreparer` and `SsrDelimitPreparer`.
-  (`reassembly.rs` / `ReassemblyPreparer` were listed here until 2026-07-23; local reassembly is
-  now out of scope, not deferred — `../spec/read_preparation.md` §1. `pair_hmm.rs` was listed here
-  too; the pair-HMM moved to `alignment/`, and a preparer now composes it.) The "prep" abbreviation is gone: a `ReadPreparer` does `prepare_read`
-  and yields a `Prepared` observation (verb, agent noun, product).
+- `read/` (steps 1+2) — the merged read-handling module (see principle 1). Step 2 is
+  **generic-path only** (`../spec/read_preparation.md` §1); its files are named for the **transform
+  they perform** (`left_align_baq.rs`, …), not for the taxonomy pole they sit on — "trust the mapper"
+  is an *axis* (`ng_proposal.md` §2) and names a family, not one implementation. The `ReadPreparer`
+  trait lives in `read/mod.rs`; its impl is `LeftAlignBaqPreparer` (which also does the re-align mode).
+  (An `ssr_delimit.rs` / `SsrDelimitPreparer` and a `reassembly.rs` / `ReassemblyPreparer` were listed
+  here until 2026-07-25 / 2026-07-23: the STR "preparer" is not a preparer at all — its per-read
+  alignment produces a locus observation, so it lives in `locus_generation/ssr.rs` calling
+  `alignment/`; and local reassembly is out of scope. `pair_hmm.rs` was listed too; the pair-HMM lives
+  in `alignment/`.) The "prep" abbreviation is gone: a `ReadPreparer` does `prepare_read` and yields a
+  `PreparedRead` (verb, agent noun, product).
 - `types.rs` (the one shared-types file) — a common Rust convention, honest for a mixed
   starting file; naming.md leans against a *permanent* generic module, so the plan is to
   split it into concept modules (`units`/`locus`/`genotype`/`params`) as it grows
@@ -223,7 +228,7 @@ serialization when memory forces it or when the evidence types stop churning.
 - **How much of the production `pileup/walker/` lifts** into an in-memory context, versus a
   lean rewrite that calls its decompose/active-set core. Decide when `locus_generation/pileup/` is
   built. (*The subsume-or-compose half of this item is closed:* the pileup is **built from**
-  step 2's `ReadPreparer`, per `../spec/read_preparation.md` §2.)
+  step 2's `ReadPreparer`, per `../spec/read_preparation.md` §6.)
 - **Feature-gating.** If ng grows heavy, gate it behind a `cargo` feature so the production
   build need not compile the lab. Decide once there is code to gate.
 - **`bench/` vs the existing `benchmarks/` tree.** `benchmarks/` holds data + scripts; the

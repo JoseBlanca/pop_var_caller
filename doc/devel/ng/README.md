@@ -9,12 +9,11 @@ by document kind:
     taxonomy, the benchmark strategy, and the single-phase lab.
   - [`read_filtering.md`](spec/read_filtering.md) — step 1 (the whole-read keep/drop
     prelude) + the ng foundations it settles (skeleton, `types.rs` seed, conventions).
-  - [`read_preparation.md`](spec/read_preparation.md) — step 2 (the per-read transform),
-    the shared discipline; two path specs:
-    [`read_preparation_generic.md`](spec/read_preparation_generic.md) (SNP/indel: left-align +
-    BAQ → `PreparedRead`) and
-    [`read_preparation_ssr.md`](spec/read_preparation_ssr.md) (STR: tract extraction →
-    `SsrTractObs`).
+  - [`read_preparation.md`](spec/read_preparation.md) — step 2, the per-read, **locus-independent**
+    transform (pass-through / canonicalize / re-align → `PreparedRead`). It is a **generic-path-only**
+    step: the STR path has no read preparation — it goes filtering → observation generation, aligning
+    each read against its tract in [`locus_generation_ssr.md`](spec/locus_generation_ssr.md). (The old
+    `read_preparation_generic.md` and `read_preparation_ssr.md` are retired redirects.)
   - [`alignment.md`](spec/alignment.md) — the **alignment algorithms** both step 2 and step 7 call:
     best-path (one line-up) vs marginal (summed over all line-ups), affine vs repeat-aware, plus
     alignment normalization. Not a pipeline step — it knows no caller. Lists the seven algorithms

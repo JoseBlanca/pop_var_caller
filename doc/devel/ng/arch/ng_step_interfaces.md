@@ -250,40 +250,34 @@ step but a fixed prelude, so it gets its own doc rather than a trait sketch here
 `MappedRead`s while carrying a running `ReadFilterCounts`. It reuses the
 [`bam/alignment_input.rs`](../../../../src/bam/alignment_input.rs) predicates and constants.
 
-### Step 2 — read preparation / realignment
+### Step 2 — read preparation (generic path only)
 ```rust
 pub trait ReadPreparer {
-    /// What the impl needs to know about the locus — PATH-OWNED: () (generic — needs no locus)
-    /// or SsrLocus (STR — motif/borders/flanks make the delimiter's gaps tract-aware).
-    type Locus;
-    /// The per-read prepared observation — PATH-OWNED (no single unified type): PreparedRead
-    /// (generic, reused from pileup/walker) or SsrTractObs (STR). The two converge only
-    /// downstream, at SampleLocusObservations.
-    type Prepared;
-    /// Realign/delimit one read. The impl HOLDS its own RefSeq/RawRefSeq accessors and fetches
-    /// around the read's span — there is no window argument (production's process_read takes
-    /// none, and the generic transform needs both raw and canonical views). None if unusable.
-    fn prepare_read(&self, read: &MappedRead, locus: &Self::Locus) -> Option<Self::Prepared>;
+    /// Reused buffers (BAQ + alignment matrices) — allocated once per worker, never per read.
+    type Scratch: Default;
+    /// Prepare one filtered read against the reference around its OWN span. No locus argument
+    /// (the generic transform is locus-independent) and no window argument — the impl HOLDS its
+    /// RawRefSeq + RefSeq accessors and fetches what it needs. None if unusable (tallied).
+    fn prepare_read(&self, read: &MappedRead, scratch: &mut Self::Scratch) -> Option<PreparedRead>;
 }
 ```
-*Impls to bench:* trust-mapper+left-align (freebayes-style), per-read re-align against the
-reference, per-read pair-HMM to the tract (ours-STR / HipSTR-style). **Local reassembly
-(GATK-style) was listed here until 2026-07-23 and is struck: out of scope, not deferred** —
+*Impls to bench:* trust-mapper + left-align (BAQ on/off, the freebayes-style vs ours-SNP config
+toggle), and per-read re-align against the reference for reads whose placement is not trusted. Every
+impl yields the same `PreparedRead`. **Local reassembly (GATK-style) is out of scope, not deferred** —
 production already calls generic loci better than GATK without it
 ([`../spec/read_preparation.md`](../spec/read_preparation.md) §1).
 
-Design settled across three specs: the shared contract
-[`../spec/read_preparation.md`](../spec/read_preparation.md) plus the generic
-([`read_preparation_generic.md`](../spec/read_preparation_generic.md): left-align + BAQ →
-`PreparedRead` — production's, reused as-is — consumed by the pileup) and STR
-([`read_preparation_ssr.md`](../spec/read_preparation_ssr.md): Viterbi tract extraction →
-`SsrTractObs`, consumed by the tract tally + step-7 likelihood) paths. Read prep **composes**
-with the gatherer, it is not subsumed (resolving the `module_layout.md` open question). The
-trait's output is **path-owned** (`type Prepared`), not a single unified type — the two paths
-converge only downstream at `SampleLocusObservations`. There is **no window argument**: the preparer holds
-its own `RefSeq`/`RawRefSeq` accessors and fetches around each read's span (as step 1's
-`ReadFilter` does), and the only per-call context is the routed locus (`type Locus`) — `()` on the
-generic path, `SsrLocus` on the STR path.
+**Read preparation is a *generic-path-only* step**, and that is the load-bearing correction (settled
+2026-07-25, [`../spec/read_preparation.md`](../spec/read_preparation.md) §1). It is a per-read,
+*locus-independent* transform → `PreparedRead` (production's, reused as-is), consumed by the pileup.
+The **STR path has no read preparation**: its per-read operation aligns a read *against a specific
+tract* to produce an *observation about that locus* — it needs the locus, so it is observation
+generation ([`locus_generation_ssr.md`](../spec/locus_generation_ssr.md)), not preparation, and it
+calls the repeat-aware aligner ([`alignment.md`](../spec/alignment.md) §4.2). So the trait has **no
+`type Locus`** and **no `type Prepared`** — the path-owned associated types are gone with the STR arm
+(they could not compile as a `Box<dyn ReadPreparer>` anyway). Read prep **composes** with the gatherer,
+it is not subsumed. There is **no window argument**: the preparer holds its own `RefSeq`/`RawRefSeq`
+accessors and fetches around each read's span (as step 1's `ReadFilter` does).
 
 ### Step 3 — the typed-region generator
 
@@ -428,7 +422,11 @@ field, holds the rest, and re-measures.
 
 ```rust
 pub struct CallerRecipe {
-    pub read_preparer: Box<dyn ReadPreparer>,
+    // Generic path only: read prep is a generic-only step (read_preparation.md §1), and it is
+    // STATICALLY dispatched (billions of calls, no per-read virtual call — read_preparation.md §6),
+    // so this is a type parameter on the pipeline, not the `Box<dyn>` sketched here. The STR path has
+    // no preparer; its per-read alignment is inside the STR observation generator.
+    pub read_preparer: /* generic ReadPreparer, static */,
     // step 3 (region typing) is not in the recipe — it is a fixed concrete stage, not a swappable
     // impl (typed_regions.md). The `router` field is gone.
     pub rough_caller: Box<dyn Caller>,
@@ -521,7 +519,7 @@ were not freshly re-read.
 | ~~`RefWindow`~~ | — | **retired** (step-3 spec §6): its only consumer was `route_locus`, which is gone. The generator holds its own accessor and fetches for itself; production's `RefSpan` names a sequence-carrying span if one is ever wanted. Closes `LocusWindow` too |
 | `RefSeq` + `RawRefSeq` (traits) | `ChromRefFetcher` + `MultiChromRefFetcher` + `RepositoryRefFetcher` + `StreamingChromRefFetcher` + `ManualEvictChromRefFetcher` ([fasta/fetcher.rs](../../../../src/fasta/fetcher.rs)) | **consolidate** into `RefSeq` (universal canonical fetch) + the `RawRefSeq` capability + an inherent `evict_before` (no silent no-ops); reuse the fetcher impls behind them. Spec: [`../spec/ref_seq.md`](../spec/ref_seq.md) |
 | `MappedRead` | `MappedRead` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | reuse as-is (the step-2 input) |
-| `LocusRead` (prepared-read output) | — (name retired) | refined by the read-preparation specs into **path-owned** types — `PreparedRead` (generic) + `SsrTractObs` (STR); there is no single unified type (they converge downstream at `SampleLocusObservations`). **Correction:** an earlier row here called production's `PreparedRead` "a different concept (a decoded walker read)" and said not to reuse the name — the production survey disproved that: it *is* the generic step-2 output, field for field, so ng **reuses it as-is** (may want hoisting out of `pileup/walker/`). Downstream sketches that still say `LocusRead` reconcile when their steps are specced |
+| `LocusRead` (prepared-read output) | — (name retired) | **generic path only:** read preparation produces production's `PreparedRead`, reused as-is (may want hoisting out of `pileup/walker/`). There is **no STR counterpart** — the STR path has no read preparation; its per-read alignment produces a locus *observation* (`ObservedSequence` in `locus_generation_ssr.md`), not a prepared read. The old `SsrTractObs` path-owned type is gone with the retired STR read-prep spec |
 | `AlleleCandidates` | `CandidateSet` ([ssr/cohort/candidate_set.rs](../../../../src/ssr/cohort/candidate_set.rs)) | rename |
 | `SampleSummary` | ≈ the `.psp` `SampleSummary` ([sample_summary/](../../../../src/sample_summary/)) | reuse / align |
 | `ModelParams` | ≈ the SSR chemistry param set ([ssr/cohort/param_estimation.rs](../../../../src/ssr/cohort/param_estimation.rs)) + per-individual `F` | assemble from both levels |
