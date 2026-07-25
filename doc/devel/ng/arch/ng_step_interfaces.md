@@ -261,10 +261,11 @@ pub trait ReadPreparer {
     fn prepare_read(&self, read: &MappedRead, scratch: &mut Self::Scratch) -> Option<PreparedRead>;
 }
 ```
-*Impls to bench:* trust-mapper + left-align (BAQ on/off, the freebayes-style vs ours-SNP config
-toggle), and per-read re-align against the reference for reads whose placement is not trusted. Every
-impl yields the same `PreparedRead`. **Local reassembly (GATK-style) is out of scope, not deferred** —
-production already calls generic loci better than GATK without it
+*Impls to bench:* v1 is `LeftAlignPreparer` (pass-through + left-align), and a per-read re-align against
+the reference for reads whose placement is not trusted (gated — the affine aligner and its trigger are
+unbuilt). Every impl yields the same `PreparedRead`. **BAQ is deferred sine die** and **local reassembly
+(GATK-style) is out of scope** ([`../spec/read_preparation.md`](../spec/read_preparation.md) §10, §1) —
+production already calls generic loci better than GATK without reassembling
 ([`../spec/read_preparation.md`](../spec/read_preparation.md) §1).
 
 **Read preparation is a *generic-path-only* step**, and that is the load-bearing correction (settled

@@ -205,15 +205,16 @@ serialization when memory forces it or when the evidence types stop churning.
 
 - `read/` (steps 1+2) — the merged read-handling module (see principle 1). Step 2 is
   **generic-path only** (`../spec/read_preparation.md` §1); its files are named for the **transform
-  they perform** (`left_align_baq.rs`, …), not for the taxonomy pole they sit on — "trust the mapper"
+  they perform** (`left_align.rs`, …), not for the taxonomy pole they sit on — "trust the mapper"
   is an *axis* (`ng_proposal.md` §2) and names a family, not one implementation. The `ReadPreparer`
-  trait lives in `read/mod.rs`; its impl is `LeftAlignBaqPreparer` (which also does the re-align mode).
-  (An `ssr_delimit.rs` / `SsrDelimitPreparer` and a `reassembly.rs` / `ReassemblyPreparer` were listed
-  here until 2026-07-25 / 2026-07-23: the STR "preparer" is not a preparer at all — its per-read
-  alignment produces a locus observation, so it lives in `locus_generation/ssr.rs` calling
-  `alignment/`; and local reassembly is out of scope. `pair_hmm.rs` was listed too; the pair-HMM lives
-  in `alignment/`.) The "prep" abbreviation is gone: a `ReadPreparer` does `prepare_read` and yields a
-  `PreparedRead` (verb, agent noun, product).
+  trait lives in `read/mod.rs`; its v1 impl is `LeftAlignPreparer` (pass-through + left-align; BAQ is
+  deferred sine die and the re-align mode is gated — `../spec/read_preparation.md` §10). (An
+  `ssr_delimit.rs` / `SsrDelimitPreparer` and a `reassembly.rs` / `ReassemblyPreparer` were listed here
+  until 2026-07-25 / 2026-07-23: the STR "preparer" is not a preparer at all — its per-read alignment
+  produces a locus observation, so it lives in `locus_generation/ssr.rs` calling `alignment/`; and local
+  reassembly is out of scope. `pair_hmm.rs` was listed too; the pair-HMM lives in `alignment/`.) The
+  "prep" abbreviation is gone: a `ReadPreparer` does `prepare_read` and yields a `PreparedRead` (verb,
+  agent noun, product).
 - `types.rs` (the one shared-types file) — a common Rust convention, honest for a mixed
   starting file; naming.md leans against a *permanent* generic module, so the plan is to
   split it into concept modules (`units`/`locus`/`genotype`/`params`) as it grows
