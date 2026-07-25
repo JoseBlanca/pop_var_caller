@@ -22,6 +22,8 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_anchor_firm::SsrAnchorFirmAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner;
+use pop_var_caller::ng::alignment::ssr_robust_indel::SsrRobustIndelAligner;
+use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::ng::locus_generation::LocusGenerator;
 use pop_var_caller::ng::locus_generation::ReadCoverage;
 use pop_var_caller::ng::locus_generation::ssr::{
@@ -175,9 +177,13 @@ fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn
     let mut gen_unit = make_gen(fasta, &contigs, SsrUnitSlipAligner::new(e), bundle)?;
     let mut gen_af = make_gen(fasta, &contigs, SsrAnchorFirmAligner::new(e), bundle)?;
     let mut gen_nr = make_gen(fasta, &contigs, SsrNoiseRobustAligner::new(e), bundle)?;
+    let mut gen_ri = make_gen(fasta, &contigs, SsrRobustIndelAligner::new(e), bundle)?;
+    let mut gen_ur = make_gen(fasta, &contigs, SsrUnitRobustAligner::new(e), bundle)?;
 
     let mut af = Tally::default();
     let mut nr = Tally::default();
+    let mut ri = Tally::default();
+    let mut ur = Tally::default();
     let mut reads = 0u64;
 
     for (index, entry) in contigs.entries.iter().enumerate() {
@@ -192,12 +198,18 @@ fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn
             gen_unit.begin_segment(region.region);
             gen_af.begin_segment(region.region);
             gen_nr.begin_segment(region.region);
+            gen_ri.begin_segment(region.region);
+            gen_ur.begin_segment(region.region);
             let u = gen_unit.delimit_segment_reads(segment, &sample)?;
             let a = gen_af.delimit_segment_reads(segment, &sample)?;
             let n = gen_nr.delimit_segment_reads(segment, &sample)?;
+            let r = gen_ri.delimit_segment_reads(segment, &sample)?;
+            let ur_d = gen_ur.delimit_segment_reads(segment, &sample)?;
             reads += u.reads.len() as u64;
             af.fold(&u, &a);
             nr.fold(&u, &n);
+            ri.fold(&u, &r);
+            ur.fold(&u, &ur_d);
         }
     }
     if let Some(h) = verify {
@@ -207,5 +219,7 @@ fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn
     println!("reads compared: {reads}");
     af.report("anchor_firm");
     nr.report("noise_robust");
+    ri.report("robust_indel");
+    ur.report("unit_robust");
     Ok(())
 }

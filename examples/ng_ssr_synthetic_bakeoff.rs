@@ -549,11 +549,19 @@ fn main() -> ExitCode {
     let noise_robust = pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner::new(
         PerQualityEmission::new(),
     );
+    let robust_indel = pop_var_caller::ng::alignment::ssr_robust_indel::SsrRobustIndelAligner::new(
+        PerQualityEmission::new(),
+    );
+    let unit_robust = pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner::new(
+        PerQualityEmission::new(),
+    );
     let cards: Vec<(&str, Card)> = vec![
         ("flat_gap (algo 3)", evaluate(&flat, &scen, &stutter)),
         ("unit_slip (algo 4)", evaluate(&unit, &scen, &stutter)),
         ("anchor_firm (algo 5)", evaluate(&anchor_firm, &scen, &stutter)),
         ("noise_robust (algo 4n)", evaluate(&noise_robust, &scen, &stutter)),
+        ("robust_indel (algo 4r)", evaluate(&robust_indel, &scen, &stutter)),
+        ("unit_robust (algo 4u)", evaluate(&unit_robust, &scen, &stutter)),
     ];
 
     println!(

@@ -37,6 +37,8 @@ pub mod ssr_anchor_firm;
 pub mod ssr_best_path_flat_gap;
 pub mod ssr_best_path_unit_slip;
 pub mod ssr_noise_robust;
+pub mod ssr_robust_indel;
+pub mod ssr_unit_robust;
 pub mod ssr_marginal_sequence;
 pub mod ssr_marginal_whole_read;
 pub mod stutter;
