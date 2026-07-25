@@ -15,7 +15,10 @@
 //! public surface — [`SsrGenerator`], the [`LocusGenerator`](super::LocusGenerator) that turns one
 //! `SsrSegment` into one locus.
 
-use super::{LocusGenerationError, LocusGenerator, LocusKind, SampleLocusObservations, SsrDetail};
+use super::{
+    LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
+    SsrDetail,
+};
 use crate::bam::alignment_input::MappedRead;
 use crate::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use crate::ng::alignment::{
@@ -1427,6 +1430,110 @@ where
     pub fn counts(&self) -> &SsrGeneratorCounts {
         &self.counts
     }
+
+    /// Delimit every kept read for `segment` with this generator's aligner and return the per-read
+    /// outcomes — the view *behind* [`next_locus`](LocusGenerator::next_locus)'s tally, exposed for a
+    /// **delimiter bake-off** (run two generators, one per aligner, and compare read by read).
+    ///
+    /// It reuses the exact fetch + `classify_read` pipeline `next_locus` uses, so the measurements
+    /// match the real calling path — but it does **not** tally observations or touch the run-level
+    /// [`counts`](Self::counts), and it does not consume the one-locus latch, so it is a read-only
+    /// diagnostic sitting beside `next_locus`. `begin_segment` must have set the region first, the
+    /// same contract as `next_locus`.
+    pub fn delimit_segment_reads(
+        &mut self,
+        segment: &SsrSegment,
+        reads: &SampleReads,
+    ) -> Result<SegmentDelimitations, LocusGenerationError> {
+        let region = self
+            .current_region
+            .expect("begin_segment is called before delimit_segment_reads");
+        let contig = region.contig;
+
+        // (1)+(2) mirror next_locus: build the locus (tract ± flank) and fetch+cap its reads. No
+        // counts side effects — this path is a diagnostic, not part of the tally.
+        let locus = SsrLocus::fetch(
+            &self.reference,
+            contig,
+            segment.clone(),
+            self.config.flank_bp,
+            &mut self.margin_buffer,
+        )?;
+        let margin_start = locus.margin_start.get();
+        let margin_len = locus.tract_with_margin_bases.len() as u64;
+        let query_span = GenomeRegion {
+            contig,
+            start: Position(margin_start),
+            end: Position(margin_start + margin_len - 1),
+        };
+        let capped = fetch_capped_reads(
+            reads,
+            query_span,
+            seed_for_segment(segment),
+            self.config.max_reads_per_locus,
+            &mut self.make_reference,
+        )?;
+
+        // (3) Classify each kept read, keeping the per-read outcome instead of tallying it.
+        let mut delimited = Vec::with_capacity(capped.kept.len());
+        for read in &capped.kept {
+            let observation = match classify::classify_read(
+                read,
+                &locus,
+                &self.aligner,
+                &self.stutter,
+                &mut self.align_scratch,
+                &mut self.qual_buffer,
+            ) {
+                classify::Classified::Observed {
+                    bases, coverage, ..
+                } => Some((coverage, bases.into_vec())),
+                classify::Classified::NoObservation(_) => None,
+            };
+            delimited.push(ReadDelimitation {
+                qname: read.qname.clone(),
+                read_seq: read.seq.clone(),
+                observation,
+            });
+        }
+
+        let left = locus.left_flank_len();
+        let tract_len = segment.tract_len() as usize;
+        let bases = &locus.tract_with_margin_bases;
+        Ok(SegmentDelimitations {
+            reference_tract: bases[left..left + tract_len].to_vec(),
+            left_flank: bases[..left].to_vec(),
+            right_flank: bases[left + tract_len..].to_vec(),
+            reads: delimited,
+        })
+    }
+}
+
+/// One kept read's delimitation under a generator's aligner — the per-read view *behind* the tally,
+/// exposed for a delimiter bake-off ([`SsrGenerator::delimit_segment_reads`]). Not on the normal
+/// calling path.
+#[derive(Debug, Clone)]
+pub struct ReadDelimitation {
+    /// The read name — matches the same read across two generators (two aligners).
+    pub qname: Vec<u8>,
+    /// The read's sequence — the raw evidence a bake-off eyeballs to judge which aligner is right.
+    pub read_seq: Vec<u8>,
+    /// The measured tract bases and how the read covered the tract, or `None` for a no-observation
+    /// (anchored no border, or quality-gated out).
+    pub observation: Option<(ReadCoverage, Vec<u8>)>,
+}
+
+/// Every kept read's delimitation for one segment, plus the locus reference context a bake-off reads
+/// the outcomes against. Produced by [`SsrGenerator::delimit_segment_reads`].
+#[derive(Debug, Clone)]
+pub struct SegmentDelimitations {
+    /// The reference tract (REF), tract bases only, no flanks.
+    pub reference_tract: Vec<u8>,
+    pub left_flank: Vec<u8>,
+    pub right_flank: Vec<u8>,
+    /// One entry per kept read, in the reservoir's kept order (identical across aligners for the
+    /// same config, so two generators' vectors align by index as well as by `qname`).
+    pub reads: Vec<ReadDelimitation>,
 }
 
 impl<R, MF, A> LocusGenerator<SsrSegment> for SsrGenerator<R, MF, A>
