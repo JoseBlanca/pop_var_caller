@@ -219,6 +219,52 @@ fn partial_right(period: usize, ref_units: usize, reach: usize) -> Scenario {
     }
 }
 
+/// Build a complete-read scenario with a 1 bp indel injected into the READ's flank (not the tract),
+/// `side` = which flank, `insert` = true for an inserted base else a deletion. The reference frame is
+/// normal and the allele equals the reference, so the correct measurement is the reference tract
+/// length despite the flank indel — a delimiter that cannot place a gap in the flank mismeasures.
+fn flank_indel(period: usize, ref_units: usize, right_side: bool, insert: bool) -> Scenario {
+    let motif = motif_for(period).to_vec();
+    let left = clean_left(&motif);
+    let right = clean_right(&motif);
+    let ref_tract = tract(&motif, ref_units);
+    // The reference frame is normal; its flank lengths are what the geometry reports.
+    let mut frame = left.clone();
+    frame.extend_from_slice(&ref_tract);
+    frame.extend_from_slice(&right);
+    // The read carries a 1 bp indel in the middle of one flank (away from the junction).
+    let edit = |flank: &[u8], at: usize| -> Vec<u8> {
+        let mut f = flank.to_vec();
+        if insert {
+            f.insert(at, b'T');
+        } else {
+            f.remove(at);
+        }
+        f
+    };
+    let (read_left, read_right) = if right_side {
+        (left.clone(), edit(&right, right.len() / 2))
+    } else {
+        (edit(&left, left.len() / 2), right.clone())
+    };
+    let mut read = read_left;
+    read.extend_from_slice(&ref_tract);
+    read.extend_from_slice(&read_right);
+    Scenario {
+        family: "FLANK_INDEL",
+        period,
+        motif,
+        left_flank_len: left.len(),
+        right_flank_len: right.len(),
+        ref_tract_len: ref_tract.len(),
+        truth_len: ref_tract.len(),
+        complete: true,
+        allele: format!("{}{}", if right_side { "R" } else { "L" }, if insert { "+1" } else { "-1" }),
+        frame,
+        read,
+    }
+}
+
 /// Run one delimiter on `read` against the scenario's frame, returning the measured span. `read` is
 /// passed explicitly so a noisy replicate can be scored without rebuilding the scenario.
 fn measure_read<A: RepeatDelimiter>(
@@ -405,24 +451,42 @@ fn scenarios() -> Vec<Scenario> {
         for reach in [55usize, 85] {
             out.push(partial_right(period, ref_units, reach));
         }
+
+        // FLANK_INDEL — a real 1 bp indel in the read's flank (not the tract). The tract length is
+        // unchanged, so the correct measurement is the reference length — but a delimiter that bans
+        // flank gaps cannot represent the indel and may mismeasure. Both sides, insertion + deletion.
+        for right_side in [false, true] {
+            for insert in [false, true] {
+                out.push(flank_indel(period, ref_units, right_side, insert));
+            }
+        }
     }
     out
 }
 
-/// A per-aligner scorecard on the synthetic set — the fitness function for the bake-off. All numbers
-/// are fractions correct (higher is better).
+/// A per-aligner scorecard — the fitness function. All entries are fractions correct (higher better).
+/// v2 adds the two axes real-data validation exposed: `partial_noise` (a genuine one-anchored partial
+/// must STAY a partial under sequencing error, not collapse to none — the failure that halved
+/// anchor_firm's real partials), and `flank_indel` (a real indel in the flank must not derail the
+/// tract measurement — the risk of banning flank gaps).
 struct Card {
-    clean: f64,             // error-free complete scenarios measured to the exact injected length
-    partial: f64,           // long-allele reads correctly called a lower bound (not a spurious complete)
-    noise: Vec<(f64, f64)>, // (error rate, fraction of noisy complete replicates measured correctly)
-    composite: f64,         // 0 if clean regresses below 0.999; else 0.5·partial + 0.5·mean(noise)
+    clean: f64,        // error-free complete reads, no flank indel, measured to the exact length
+    partial: f64,      // error-free long alleles correctly called a lower bound
+    partial_noise: f64,// NOISY long alleles still called a lower bound (mean over rates)
+    noise: f64,        // noisy complete reads measured to the exact length (mean over rates)
+    flank_indel: f64,  // complete reads with a 1 bp flank indel measured to the exact tract length
+    composite: f64,    // 0 if clean < 0.999; else mean of the four axes above
 }
 
 const REPS: u32 = 200;
 const RATES: [f64; 4] = [0.005, 0.01, 0.02, 0.04];
 
-/// Score one delimiter over `scenarios`. Noise uses a seed that depends only on the scenario/rate
-/// (not the aligner), so every aligner is judged on the **identical** noisy reads — a paired test.
+fn is_indel(s: &Scenario) -> bool {
+    s.family == "FLANK_INDEL"
+}
+
+/// Score one delimiter. Noise seeds depend only on the scenario/rate (not the aligner), so every
+/// aligner faces the **identical** noisy reads — a paired test.
 fn evaluate<A: RepeatDelimiter>(aligner: &A, scenarios: &[Scenario], stutter: &StutterModel) -> Card {
     let frac = |it: &mut dyn Iterator<Item = bool>| {
         let (mut ok, mut n) = (0u64, 0u64);
@@ -432,35 +496,42 @@ fn evaluate<A: RepeatDelimiter>(aligner: &A, scenarios: &[Scenario], stutter: &S
         }
         if n == 0 { 1.0 } else { ok as f64 / n as f64 }
     };
-    let clean = frac(
-        &mut scenarios
-            .iter()
-            .filter(|s| s.complete)
-            .map(|s| correct(s, &measure(aligner, s, stutter))),
-    );
-    let partial = frac(
-        &mut scenarios
-            .iter()
-            .filter(|s| !s.complete)
-            .map(|s| correct(s, &measure(aligner, s, stutter))),
-    );
-    let complete: Vec<&Scenario> = scenarios.iter().filter(|s| s.complete).collect();
-    let mut noise = Vec::new();
-    for (ri, &p) in RATES.iter().enumerate() {
-        let (mut ok, mut n) = (0u64, 0u64);
-        for (si, s) in complete.iter().enumerate() {
-            let mut rng = Rng(0xD1B54A32D192ED03 ^ ((ri as u64) << 40) ^ ((si as u64) << 8));
-            for _ in 0..REPS {
-                let read = mutate(&s.read, p, &mut rng);
-                ok += correct(s, &measure_read(aligner, s, &read, stutter)) as u64;
-                n += 1;
+    // Pools: the "clean" baseline excludes the flank-indel family (that is its own axis).
+    let clean_pool: Vec<&Scenario> =
+        scenarios.iter().filter(|s| s.complete && !is_indel(s)).collect();
+    let partial_pool: Vec<&Scenario> = scenarios.iter().filter(|s| !s.complete).collect();
+    let indel_pool: Vec<&Scenario> = scenarios.iter().filter(|s| is_indel(s)).collect();
+
+    let clean = frac(&mut clean_pool.iter().map(|s| correct(s, &measure(aligner, s, stutter))));
+    let partial = frac(&mut partial_pool.iter().map(|s| correct(s, &measure(aligner, s, stutter))));
+    let flank_indel = frac(&mut indel_pool.iter().map(|s| correct(s, &measure(aligner, s, stutter))));
+
+    // Noise over a pool of scenarios: mutate each read REPS times at each rate, average correctness.
+    let noise_over = |pool: &[&Scenario]| -> f64 {
+        let mut acc = 0.0;
+        for (ri, &p) in RATES.iter().enumerate() {
+            let (mut ok, mut n) = (0u64, 0u64);
+            for (si, s) in pool.iter().enumerate() {
+                let mut rng = Rng(0xD1B54A32D192ED03 ^ ((ri as u64) << 40) ^ ((si as u64) << 8));
+                for _ in 0..REPS {
+                    let read = mutate(&s.read, p, &mut rng);
+                    ok += correct(s, &measure_read(aligner, s, &read, stutter)) as u64;
+                    n += 1;
+                }
             }
+            acc += ok as f64 / n.max(1) as f64;
         }
-        noise.push((p, ok as f64 / n as f64));
-    }
-    let mean_noise = noise.iter().map(|x| x.1).sum::<f64>() / noise.len() as f64;
-    let composite = if clean < 0.999 { 0.0 } else { 0.5 * partial + 0.5 * mean_noise };
-    Card { clean, partial, noise, composite }
+        acc / RATES.len() as f64
+    };
+    let noise = noise_over(&clean_pool);
+    let partial_noise = noise_over(&partial_pool);
+
+    let composite = if clean < 0.999 {
+        0.0
+    } else {
+        (partial + partial_noise + noise + flank_indel) / 4.0
+    };
+    Card { clean, partial, partial_noise, noise, flank_indel, composite }
 }
 
 fn main() -> ExitCode {
@@ -469,16 +540,15 @@ fn main() -> ExitCode {
     let stutter = StutterModel::hipstr_shipped();
     let scen = scenarios();
 
-    // The competitors. A new algorithm registers one line here: (name, evaluate(&aligner, ...)).
-    // The winner is the highest composite with clean == 1.000 (no regression on error-free reads).
-    let anchor_firm =
-        pop_var_caller::ng::alignment::ssr_anchor_firm::SsrAnchorFirmAligner::new(
-            PerQualityEmission::new(),
-        );
-    let noise_robust =
-        pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner::new(
-            PerQualityEmission::new(),
-        );
+    // A new algorithm registers one line here: (name, evaluate(&aligner, &scen, &stutter)).
+    // Winner = highest composite with clean == 1.000. Composite is the mean of partial,
+    // partial_noise, noise, and flank_indel — the four axes that matter on real data.
+    let anchor_firm = pop_var_caller::ng::alignment::ssr_anchor_firm::SsrAnchorFirmAligner::new(
+        PerQualityEmission::new(),
+    );
+    let noise_robust = pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner::new(
+        PerQualityEmission::new(),
+    );
     let cards: Vec<(&str, Card)> = vec![
         ("flat_gap (algo 3)", evaluate(&flat, &scen, &stutter)),
         ("unit_slip (algo 4)", evaluate(&unit, &scen, &stutter)),
@@ -487,31 +557,24 @@ fn main() -> ExitCode {
     ];
 
     println!(
-        "{:<22} {:>7} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10}",
-        "delimiter", "clean", "partial", "noise.5%", "noise1%", "noise2%", "noise4%", "COMPOSITE"
+        "{:<23} {:>6} {:>8} {:>9} {:>7} {:>11} {:>10}",
+        "delimiter", "clean", "partial", "p_noise", "noise", "flank_indel", "COMPOSITE"
     );
     for (name, c) in &cards {
         println!(
-            "{:<22} {:>6.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>8.3} {:>10.4}",
-            name,
-            c.clean,
-            c.partial,
-            c.noise[0].1,
-            c.noise[1].1,
-            c.noise[2].1,
-            c.noise[3].1,
-            c.composite,
+            "{:<23} {:>6.3} {:>8.3} {:>9.3} {:>7.3} {:>11.3} {:>10.4}",
+            name, c.clean, c.partial, c.partial_noise, c.noise, c.flank_indel, c.composite
         );
     }
     println!(
-        "\nclean must stay 1.000 (error-free complete reads); a value below 0.999 zeroes COMPOSITE.\n\
-         partial = long alleles correctly called a lower bound; noise = fraction of noisy complete\n\
-         replicates measured to the exact injected length. Higher is better throughout.\n\
-         Scenarios: {} total ({} complete, {} partial), {} noisy replicates/aligner.",
+        "\nclean must stay 1.000 (error-free, no-indel complete reads) or COMPOSITE is zeroed.\n\
+         partial/p_noise = long alleles kept as a lower bound (error-free / noisy).\n\
+         noise = noisy complete reads measured exactly. flank_indel = a 1 bp flank indel tolerated.\n\
+         COMPOSITE = mean(partial, p_noise, noise, flank_indel). Scenarios: {} ({} clean, {} partial, {} flank-indel).",
         scen.len(),
-        scen.iter().filter(|s| s.complete).count(),
+        scen.iter().filter(|s| s.complete && !is_indel(s)).count(),
         scen.iter().filter(|s| !s.complete).count(),
-        scen.iter().filter(|s| s.complete).count() as u32 * REPS * RATES.len() as u32,
+        scen.iter().filter(|s| is_indel(s)).count(),
     );
     ExitCode::SUCCESS
 }
