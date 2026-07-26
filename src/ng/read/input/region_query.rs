@@ -287,6 +287,54 @@ pub(crate) struct DecodedContainer {
     /// Every record of the container, in file order — *not* filtered to any region, because the
     /// next query filters against its own.
     records: Vec<RecordBuf>,
+    /// Each record's reference footprint, resolved **once per decode**: one entry per `records`
+    /// entry, in the same order.
+    ///
+    /// A record's footprint cannot change after it is decoded, but the region it is asked about
+    /// changes with every query — and a container is re-filtered on every query that reuses it
+    /// (one per locus, so ~5,500 per sample per chromosome on the STR path against a container of
+    /// ~10⁴ records). Recomputing it there meant a fresh CIGAR walk per record per query, which a
+    /// sampling profile put at 9.4% of a cohort run. Resolving it here trades that for 12 bytes a
+    /// record.
+    footprints: Vec<Footprint>,
+}
+
+/// One record's reference footprint — what [`overlaps`] needs and all it needs.
+///
+/// `start`/`end` are 1-based inclusive, matching [`GenomeRegion`]. An unmapped or
+/// position-less record gets `reference_sequence_id: None` and never overlaps anything, which is
+/// exactly what the `RecordBuf`-shaped test it replaces did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Footprint {
+    reference_sequence_id: Option<usize>,
+    start: u64,
+    end: u64,
+}
+
+impl Footprint {
+    /// The footprint of `record`, one CIGAR walk.
+    fn of(record: &sam::alignment::RecordBuf) -> Self {
+        match (record.alignment_start(), record.alignment_end()) {
+            (Some(first), Some(last)) => Self {
+                reference_sequence_id: record.reference_sequence_id(),
+                start: usize::from(first) as u64,
+                end: usize::from(last) as u64,
+            },
+            _ => Self {
+                reference_sequence_id: None,
+                start: 0,
+                end: 0,
+            },
+        }
+    }
+
+    /// Whether this footprint is on `contig` and touches `region`. The same test [`overlaps`]
+    /// applies, against pre-resolved coordinates.
+    fn overlaps(&self, contig: usize, region: GenomeRegion) -> bool {
+        self.reference_sequence_id == Some(contig)
+            && self.start <= region.end.get()
+            && self.end >= region.start.get()
+    }
 }
 
 /// The reads of one region of a CRAM.
@@ -448,7 +496,12 @@ impl<'a> CramRegionSource<'a> {
                     // End of stream reached through the index — nothing further.
                     return Ok(false);
                 };
-                self.container = Some(DecodedContainer { offset, records });
+                let footprints = records.iter().map(Footprint::of).collect();
+                self.container = Some(DecodedContainer {
+                    offset,
+                    records,
+                    footprints,
+                });
             }
             let held = self
                 .container
@@ -456,13 +509,13 @@ impl<'a> CramRegionSource<'a> {
                 .expect("just decoded, or already held at this offset");
 
             let overlapping: Vec<RecordBuf> = held
-                .records
+                .footprints
                 .iter()
-                .filter(|record| {
-                    record.reference_sequence_id() == Some(self.target_reference_sequence_id)
-                        && overlaps(record, self.region)
+                .zip(&held.records)
+                .filter(|(footprint, _)| {
+                    footprint.overlaps(self.target_reference_sequence_id, self.region)
                 })
-                .cloned()
+                .map(|(_, record)| record.clone())
                 .collect();
 
             if !overlapping.is_empty() {

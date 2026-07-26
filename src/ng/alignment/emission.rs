@@ -185,21 +185,34 @@ static PER_QUALITY_LN: LazyLock<[BaseScores; 256]> = LazyLock::new(|| {
 
 /// Scores each base with the read's own quality — the default, and production's model.
 ///
-/// Stateless: the scores live in a shared table built once, so constructing one of these
-/// is free and holding one costs nothing. That is what lets an aligner take it by value
-/// as a type parameter.
+/// Holds a borrow of the shared table rather than reaching for it per call, so constructing
+/// one costs a single [`LazyLock`] resolution and holding one costs a pointer. That is what
+/// lets an aligner take it by value as a type parameter.
+///
+/// **Why the borrow is a field.** [`Self::scores_for`] is called from inside the delimiters'
+/// innermost DP loop, and a `LazyLock` deref there is not just a load: it is an acquire-load
+/// of the once-guard plus a *live call site* to the initialiser. `cargo asm` on
+/// `classify::delimit` showed seven of each inside one function, and because LLVM must treat
+/// the loop's live values as call-clobbered at every one of them, the per-row constants —
+/// including the read base — were re-read from the stack on every cell. Resolving the table
+/// once per aligner turns that into a register-resident pointer. The table and its values are
+/// untouched; `per_quality_table_is_bit_exact` still pins them.
 ///
 /// `Default` is written out rather than derived, deliberately: a derived `Default` is the
 /// one construction path that would keep compiling if this gained a field, silently
 /// zero-filling it, whereas [`Self::new`] would fail to compile and say so.
 #[derive(Debug, Clone, Copy)]
-pub struct PerQualityEmission;
+pub struct PerQualityEmission {
+    scores: &'static [BaseScores; 256],
+}
 
 impl PerQualityEmission {
-    /// Build the per-quality model. Free — the scores are a shared table.
+    /// Build the per-quality model. One [`LazyLock`] resolution; the table itself is shared.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            scores: &PER_QUALITY_LN,
+        }
     }
 }
 
@@ -212,7 +225,7 @@ impl Default for PerQualityEmission {
 impl Emission for PerQualityEmission {
     #[inline]
     fn scores_for(&self, quality: BaseQual) -> BaseScores {
-        PER_QUALITY_LN[quality.get() as usize]
+        self.scores[quality.get() as usize]
     }
 
     #[inline]

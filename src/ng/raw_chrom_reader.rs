@@ -53,6 +53,14 @@ use crate::fasta::ChromRefFetchError;
 /// `pub(crate)`-invisible here; the value is the same 64 KiB and is not tuned.
 const FILE_READ_CHUNK: usize = 64 * 1024;
 
+/// How far a requested window may lie clear of the buffered one before [`RawChromReader::fetch`]
+/// repositions instead of extending through the gap.
+///
+/// One read chunk, so the rule is "extending would have cost a whole read anyway". It is a
+/// performance knob only: repositioning and extending return identical bases, and the correctness
+/// argument for eviction (a later fetch of a dropped position re-reads it) covers this too.
+const REPOSITION_GAP: u64 = FILE_READ_CHUNK as u64;
+
 /// Pared-down `.fai` record — just the fields the reader needs.
 #[derive(Debug, Clone, Copy)]
 struct ContigFai {
@@ -285,6 +293,20 @@ impl RawChromReader {
         let want_end_exclusive = end_exclusive as u64;
         let buf_start = self.buf_start_base as u64;
 
+        // A jump clear of the buffered window by more than one read chunk: **reposition** rather
+        // than extend. Extending is the right answer for a sliding walk, where the gap is small and
+        // the intervening bases are wanted anyway; it is the wrong answer for a scattered access
+        // pattern — one shared reader serving loci tens of kb apart would read (and buffer) every
+        // base in between, growing the window to the whole contig for windows it never returns. One
+        // `lseek` costs less than a megabase of `read`.
+        if want_start >= buf_end_exclusive + REPOSITION_GAP
+            || want_end_exclusive + REPOSITION_GAP <= buf_start
+        {
+            self.buf.clear();
+            self.read_into_buffer_at(start_1based, length as usize)?;
+            return Ok(&self.buf[..length as usize]);
+        }
+
         if want_end_exclusive > buf_end_exclusive {
             let extra_bases = (want_end_exclusive - buf_end_exclusive) as usize;
             self.append_forward(extra_bases)?;
@@ -396,5 +418,96 @@ impl RawChromReader {
                 chrom_name: self.chrom_name.clone(),
                 source,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A contig whose base at every position is a function of that position, so a window read
+    /// from the wrong file offset returns *wrong bases* rather than plausible ones. A short
+    /// repeating motif would hide exactly the errors this file can make (an offset off by a
+    /// whole number of lines, or by a `REPOSITION_GAP`).
+    fn positional_bases(length: usize) -> Vec<u8> {
+        (0..length)
+            .map(|i| b"ACGT"[((i.wrapping_mul(2_654_435_761)) >> 11) & 3])
+            .collect()
+    }
+
+    /// One single-line contig plus its `.fai`, matching the shape `open_contig` parses.
+    fn build_fasta(bases: &[u8]) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fasta_path = dir.path().join("ref.fa");
+        let header = ">chr1\n";
+        let mut fa = std::fs::File::create(&fasta_path).expect("create fasta");
+        fa.write_all(header.as_bytes()).expect("header");
+        fa.write_all(bases).expect("sequence");
+        fa.write_all(b"\n").expect("newline");
+        std::fs::write(
+            dir.path().join("ref.fa.fai"),
+            format!(
+                "chr1\t{len}\t{offset}\t{len}\t{width}\n",
+                len = bases.len(),
+                offset = header.len(),
+                width = bases.len() + 1,
+            ),
+        )
+        .expect("write fai");
+        (dir, fasta_path)
+    }
+
+    /// A fetch that lands clear of the buffered window **repositions** — it re-seeks and buffers
+    /// the window it was asked for, instead of reading through the gap and holding everything in
+    /// between.
+    ///
+    /// The bases are the correctness half and the buffer length is the performance half, and both
+    /// belong in one test because the failure modes are opposite: drop the reposition branch and
+    /// `buf_len` blows past the gap (the whole contig, for a scattered walk); get the re-seek
+    /// arithmetic wrong and the bases are silently from the wrong coordinate. Both directions are
+    /// exercised, because a forward-only guard would leave the backward jump reading through the
+    /// gap from the *other* side.
+    #[test]
+    fn a_fetch_clear_of_the_window_repositions_instead_of_reading_through_the_gap() {
+        const LENGTH: usize = 400_000;
+        let bases = positional_bases(LENGTH);
+        let (_dir, path) = build_fasta(&bases);
+        let mut reader = RawChromReader::for_contig(&path, "chr1").expect("open");
+
+        // A first window, then one far past it (well over `REPOSITION_GAP`).
+        assert_eq!(reader.fetch(1, 100).unwrap(), &bases[..100]);
+        let far = 300_000usize;
+        assert_eq!(
+            reader.fetch(far as u32, 100).unwrap(),
+            &bases[far - 1..far - 1 + 100],
+            "a repositioned window must serve the bases at its own coordinate"
+        );
+        assert!(
+            reader.buf_len() < REPOSITION_GAP as usize,
+            "the reader repositioned, so it holds a window and not the {far} bases it skipped \
+             (buf_len = {})",
+            reader.buf_len()
+        );
+
+        // Backward, equally far: the same rule from the other side.
+        assert_eq!(
+            reader.fetch(1, 100).unwrap(),
+            &bases[..100],
+            "a backward reposition must also land on its own coordinate"
+        );
+        assert!(reader.buf_len() < REPOSITION_GAP as usize);
+
+        // A jump *inside* the threshold still extends the window rather than repositioning, which
+        // is what keeps a sliding walk sequential.
+        let near = 1 + 100 + 1_000;
+        assert_eq!(
+            reader.fetch(near as u32, 50).unwrap(),
+            &bases[near - 1..near - 1 + 50]
+        );
+        assert!(
+            reader.buf_len() >= near + 50 - 1,
+            "a near jump extends: the intervening bases are still resident"
+        );
     }
 }

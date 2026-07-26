@@ -57,6 +57,7 @@ use super::emission::Emission;
 use super::ssr_best_path_flat_gap::{TractReadout, TransitionCosts};
 use super::stutter::StutterModel;
 use super::{BestPathAligner, ReadBases, RepeatContext, RepeatSpan};
+use crate::ng::types::MAX_MOTIF_LEN;
 
 /// The five states a cell can be entered in — algorithm 4's, unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +81,60 @@ impl State {
     #[inline]
     const fn index(self) -> usize {
         self as usize
+    }
+
+    /// The state a 3-bit field holds. Total over the field's domain, because a packed
+    /// backpointer is read back with no other check — an out-of-range code would mean the
+    /// packing is broken, and answering `Match` there would hide it behind a plausible
+    /// traceback, so it panics instead.
+    #[inline]
+    const fn from_code(code: u16) -> Self {
+        match code {
+            0 => State::Match,
+            1 => State::Insertion,
+            2 => State::Deletion,
+            3 => State::SlipInsertion,
+            4 => State::SlipDeletion,
+            _ => panic!("backpointer field out of range — the packing is broken"),
+        }
+    }
+}
+
+/// Bits per state in a packed backpointer cell. Five states need three.
+const STATE_BITS: u32 = 3;
+
+/// The five predecessors of one cell, three bits each, in one `u16`.
+///
+/// The DP writes one of these per cell and the traceback reads at most `read_len +
+/// reference_len` of them, so the array is written orders of magnitude more often than it is
+/// read: at the measured locus dimensions it is ~10⁴ cells per read and ~10⁷ cells per deep
+/// locus. As `[State; 5]` that was five separate `strb` per cell — the record is 5 bytes, so
+/// it is never naturally aligned and the stores never merge — and a `×5` address multiply.
+/// Packed it is one `strh` at a power-of-two stride.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Backpointers(u16);
+
+// The packing's one invariant: five 3-bit fields must fit the `u16`, and every state code must
+// fit its field. A sixth state would silently truncate, so it fails the build instead.
+const _: () = assert!(STATES as u32 * STATE_BITS <= u16::BITS);
+const _: () = assert!((STATES as u16) <= 1 << STATE_BITS);
+
+impl Backpointers {
+    /// Pack the five predecessors, in state order.
+    #[inline]
+    fn new(predecessors: [State; STATES]) -> Self {
+        let mut packed = 0u16;
+        for (index, state) in predecessors.iter().enumerate() {
+            packed |= (*state as u16) << (STATE_BITS * index as u32);
+        }
+        Self(packed)
+    }
+
+    /// The predecessor recorded for entering the cell in `state`.
+    #[inline]
+    fn get(self, state: State) -> State {
+        let shift = STATE_BITS * state.index() as u32;
+        State::from_code((self.0 >> shift) & ((1 << STATE_BITS) - 1))
     }
 }
 
@@ -229,14 +284,33 @@ impl SlipCosts {
     }
 }
 
-/// Per-worker scratch: a ring of `period + 1` score rows plus the full backpointer matrix,
-/// exactly as algorithm 4 needs (a whole-unit insertion reaches `(i, j)` from `(i − period, j)`).
+/// What a reference column is worth, independent of the read — resolved once per call and read
+/// once per cell (see the `plan` block in [`SsrUnitRobustAligner::delimit`]).
+#[derive(Debug, Clone, Copy)]
+struct ColumnPlan {
+    /// The per-base gap-open cost at this column: tract-aware, and `UNREACHABLE` where the
+    /// junction guard closes it.
+    gap_open: f64,
+    /// The same, reopened for a terminal route (`terminal_gap_open.max(gap_open)`) — a read that
+    /// runs off an end must still cross the rest of the frame.
+    gap_open_terminal: f64,
+    /// Whether a gap touching this column is a tract gap.
+    in_tract: bool,
+    /// Whether a whole unit of reference bases ending at this column lies wholly in the tract —
+    /// the precondition of the whole-unit deletion route.
+    unit_deletable: bool,
+}
+
+/// Per-worker scratch: a ring of `period + 1` score rows, the full backpointer matrix (exactly as
+/// algorithm 4 needs — a whole-unit insertion reaches `(i, j)` from `(i − period, j)`), and the
+/// per-column plan.
 ///
 /// Grow-and-keep; buffers only, deciding nothing that changes a result.
 #[derive(Debug, Default)]
 pub struct UnitRobustScratch {
     rows: Vec<Vec<[f64; STATES]>>,
-    backpointers: Vec<[State; STATES]>,
+    backpointers: Vec<Backpointers>,
+    column_plan: Vec<ColumnPlan>,
 }
 
 impl UnitRobustScratch {
@@ -257,7 +331,7 @@ impl UnitRobustScratch {
         }
         let cells = (read_len + 1) * width;
         if self.backpointers.len() < cells {
-            self.backpointers.resize(cells, [State::Match; STATES]);
+            self.backpointers.resize(cells, Backpointers::default());
         }
     }
 }
@@ -395,18 +469,57 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
         // deletion on read row 0 or on the last read row — never by a threshold.
         let terminal_gap_open = self.costs.ln_gap_open();
 
-        // The `k`-th base of a whole unit inserted at tract column `column`: the motif,
-        // phase-aligned so a unit inserted at a unit boundary begins at `motif[0]`.
-        let motif_base = |column: usize, k: usize| motif[((column - left_flank_len) + k) % period];
+        // Resolve the column axis **once per read** instead of once per cell.
+        //
+        // `gap_open`, `column_in_tract` and the whole-unit-deletion window are functions of the
+        // column and the locus geometry alone — no read input — yet the cell body evaluated all
+        // three, so each was re-derived `read_len` times per column: a `ccmp`/`cset`/`fcsel` chain
+        // with four locus constants reloaded from the stack, plus an unrolled six-step compare
+        // chain for the slip window. Here they cost one pass over the axis and the cell reads one
+        // [`ColumnPlan`].
+        let plan = &mut scratch.column_plan;
+        plan.clear();
+        plan.reserve(reference_len + 1);
+        for column in 0..=reference_len {
+            let open = gap_open(column);
+            plan.push(ColumnPlan {
+                gap_open: open,
+                // The terminal routes reopen a guarded column, so both forms are wanted per cell.
+                gap_open_terminal: terminal_gap_open.max(open),
+                in_tract: column_in_tract(column),
+                // A whole unit of reference bases can only be deleted when every column it covers
+                // is a tract column — the range test the cell used to unroll per cell.
+                unit_deletable: column >= period
+                    && (column - period + 1..=column).all(column_in_tract),
+            });
+        }
 
-        let UnitRobustScratch { rows, backpointers } = scratch;
+        // The whole-unit slip emission, per read row, indexed by the motif **phase** the tract
+        // column sits at — `(column - left_flank_len) % period`, so a unit inserted at a unit
+        // boundary is scored against `motif[0]`.
+        //
+        // **Why a per-row table rather than a per-cell sum.** The sum runs over the `period` read
+        // bases ending at this row, each scored against a motif base, so it depends on the row and
+        // on the column's phase alone — and a phase takes only `period` values. Computed in the
+        // cell it was re-derived at every tract column, `tract_len / period` times more often than
+        // it can change, each time paying `period` emission lookups and a runtime `%` per unit
+        // base. Here it costs `period²` lookups per row (≤ 36) once. The `k`-ascending
+        // accumulation order is load-bearing: `f64` addition is not associative, so summing the
+        // unit's bases in any other order would move the score's low bits.
+        let mut unit_emit_by_phase = [UNREACHABLE; MAX_MOTIF_LEN];
+
+        let UnitRobustScratch {
+            rows,
+            backpointers,
+            column_plan,
+        } = scratch;
 
         // Row 0 — no read base consumed. Every deletion here is a *leading* one (the read starts
         // later in the frame), so it takes the terminal cost regardless of the guard.
         {
             let row0 = &mut rows[0];
             row0[0] = [0.0, UNREACHABLE, UNREACHABLE, UNREACHABLE, UNREACHABLE];
-            backpointers[0] = [State::Match; STATES];
+            backpointers[0] = Backpointers::new([State::Match; STATES]);
             for column in 1..=reference_len {
                 let (d, d_pred) = best_of(&[
                     (
@@ -418,23 +531,23 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
                         State::Deletion,
                     ),
                 ]);
-                let (sd, sd_pred) =
-                    if column >= period && (column - period + 1..=column).all(column_in_tract) {
-                        best_of(&[
-                            (
-                                slip.open_contraction + row0[column - period][State::Match.index()],
-                                State::Match,
-                            ),
-                            (
-                                slip.extend + row0[column - period][State::SlipDeletion.index()],
-                                State::SlipDeletion,
-                            ),
-                        ])
-                    } else {
-                        (UNREACHABLE, State::Match)
-                    };
+                let (sd, sd_pred) = if column_plan[column].unit_deletable {
+                    best_of(&[
+                        (
+                            slip.open_contraction + row0[column - period][State::Match.index()],
+                            State::Match,
+                        ),
+                        (
+                            slip.extend + row0[column - period][State::SlipDeletion.index()],
+                            State::SlipDeletion,
+                        ),
+                    ])
+                } else {
+                    (UNREACHABLE, State::Match)
+                };
                 row0[column] = [UNREACHABLE, UNREACHABLE, d, UNREACHABLE, sd];
-                backpointers[column] = [State::Match, State::Match, d_pred, State::Match, sd_pred];
+                backpointers[column] =
+                    Backpointers::new([State::Match, State::Match, d_pred, State::Match, sd_pred]);
             }
         }
 
@@ -446,6 +559,30 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
             let prev_slot = (row_index - 1) % ring_len;
             let slip_slot = row_index.checked_sub(period).map(|r| r % ring_len);
             let cur_slot = row_index % ring_len;
+
+            // Resolve the whole-unit slip emission for this row, one entry per motif phase (see
+            // `unit_emit_by_phase`). Only reachable once the row can be reached from `row - period`.
+            if let Some(unit_start) = row_index.checked_sub(period) {
+                for (phase, slot) in unit_emit_by_phase[..period].iter_mut().enumerate() {
+                    let mut sum = 0.0;
+                    // `motif_index` walks the motif from `phase`, wrapping once — both `phase` and
+                    // `k` are below `period`, so their sum is below `2 * period` and one
+                    // conditional subtraction is the whole modulo.
+                    let mut motif_index = phase;
+                    for k in 0..period {
+                        let index = unit_start + k;
+                        sum += self
+                            .emission
+                            .scores_for(read.quality_at(index))
+                            .pick(bases[index], motif[motif_index]);
+                        motif_index += 1;
+                        if motif_index == period {
+                            motif_index = 0;
+                        }
+                    }
+                    *slot = sum;
+                }
+            }
             // A deletion on the last read row is a *trailing* one — the read has run out and the
             // rest of the frame must still be crossed. That is the `FromLeft` case, not the
             // boundary slide the guard is aimed at.
@@ -471,16 +608,24 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
                 UNREACHABLE,
                 UNREACHABLE,
             ];
-            backpointers[back_row] = [
+            backpointers[back_row] = Backpointers::new([
                 State::Match,
                 ins0_pred,
                 State::Match,
                 State::Match,
                 State::Match,
-            ];
+            ]);
+
+            // The motif phase of the column about to be scored, `(column - left_flank_len) % period`
+            // carried forward instead of divided out: it advances by one per column and wraps once
+            // per unit, so the tract cells below index `unit_emit_by_phase` without a runtime `%`.
+            // Seeded at `column == 1` (where `column - left_flank_len` may be negative, hence the
+            // `+ period` before the reduction); only its values at tract columns are ever read.
+            let mut phase = (1 + period - left_flank_len % period) % period;
 
             for column in 1..=reference_len {
                 let emit = scores.pick(read_base, reference[column - 1]);
+                let plan = column_plan[column];
 
                 // Match: from the diagonal, any state (a match may follow a completed slip).
                 let (m, m_pred) = best_of(&[
@@ -509,15 +654,13 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
                     ),
                 ]);
 
-                let open = gap_open(column);
-
                 // Out-of-frame single-base insertion (a read base with no reference base). At the
                 // frame's last column this is a *trailing* overhang — the read is longer than the
                 // frame — so it takes the terminal cost, as the leading route at column 0 does.
                 let ins_open = if column == reference_len {
-                    terminal_gap_open.max(open)
+                    plan.gap_open_terminal
                 } else {
-                    open
+                    plan.gap_open
                 };
                 let (ins, ins_pred) = best_of(&[
                     (
@@ -534,9 +677,9 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
                 // Out-of-frame single-base deletion (a reference base with no read base). On the
                 // last read row the terminal route applies, so a guarded open reopens.
                 let del_open = if trailing {
-                    terminal_gap_open.max(open)
+                    plan.gap_open_terminal
                 } else {
-                    open
+                    plan.gap_open
                 };
                 let (del, del_pred) = best_of(&[
                     (
@@ -555,15 +698,8 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
                 // `i − period`, same column. Never guarded: real length variation is exactly what
                 // this route is for.
                 let (sins, sins_pred) = if let Some(slip_slot) = slip_slot {
-                    if column_in_tract(column) {
-                        let unit_emit: f64 = (0..period)
-                            .map(|k| {
-                                let idx = row_index - period + k;
-                                self.emission
-                                    .scores_for(read.quality_at(idx))
-                                    .pick(bases[idx], motif_base(column, k))
-                            })
-                            .sum();
+                    if plan.in_tract {
+                        let unit_emit = unit_emit_by_phase[phase];
                         let (score, pred) = best_of(&[
                             (
                                 slip.open_expansion + rows[slip_slot][column][State::Match.index()],
@@ -584,27 +720,31 @@ impl<E: Emission> SsrUnitRobustAligner<E> {
 
                 // Whole-unit deletion: `period` reference bases the read lacks, when the deleted
                 // unit lies wholly in the tract. No emissions — no read base is consumed.
-                let (sdel, sdel_pred) =
-                    if column >= period && (column - period + 1..=column).all(column_in_tract) {
-                        best_of(&[
-                            (
-                                slip.open_contraction
-                                    + rows[cur_slot][column - period][State::Match.index()],
-                                State::Match,
-                            ),
-                            (
-                                slip.extend
-                                    + rows[cur_slot][column - period][State::SlipDeletion.index()],
-                                State::SlipDeletion,
-                            ),
-                        ])
-                    } else {
-                        (UNREACHABLE, State::Match)
-                    };
+                let (sdel, sdel_pred) = if plan.unit_deletable {
+                    best_of(&[
+                        (
+                            slip.open_contraction
+                                + rows[cur_slot][column - period][State::Match.index()],
+                            State::Match,
+                        ),
+                        (
+                            slip.extend
+                                + rows[cur_slot][column - period][State::SlipDeletion.index()],
+                            State::SlipDeletion,
+                        ),
+                    ])
+                } else {
+                    (UNREACHABLE, State::Match)
+                };
 
                 rows[cur_slot][column] = [emit + m, insertion_emission + ins, del, sins, sdel];
                 backpointers[back_row + column] =
-                    [m_pred, ins_pred, del_pred, sins_pred, sdel_pred];
+                    Backpointers::new([m_pred, ins_pred, del_pred, sins_pred, sdel_pred]);
+
+                phase += 1;
+                if phase == period {
+                    phase = 0;
+                }
             }
         }
 
@@ -743,7 +883,7 @@ fn resolve_anchors(
 /// actually held it** — algorithm 4's walk plus the evidence counting the anchor test needs.
 fn trace_back(
     final_state: State,
-    backpointers: &[[State; STATES]],
+    backpointers: &[Backpointers],
     geometry: MatrixGeometry,
     aligned: Aligned<'_>,
 ) -> TractReadout {
@@ -772,7 +912,7 @@ fn trace_back(
     let mut j = reference_len;
     let mut state = final_state;
     while i != 0 || j != 0 {
-        let pred = backpointers[i * stride + j][state.index()];
+        let pred = backpointers[i * stride + j].get(state);
         match state {
             State::Match => {
                 let consumed = j - 1;

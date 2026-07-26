@@ -131,11 +131,27 @@ def _(Path, mo, os, pd):
         ),
     )
 
-    raw = pd.read_csv(tsv_path, sep="\t", dtype={"observed": str})
+    # A full-cohort dump is millions of rows, and every analysis below is length-based — the tract
+    # sequences are needed only to measure them. So the strings are turned into lengths and then
+    # dropped, and the repeated identifiers are held as categories; without this the frame is
+    # several gigabytes of text that is never read again.
+    raw = pd.read_csv(
+        tsv_path,
+        sep="\t",
+        dtype={
+            "observed": str,
+            "motif": str,
+            "ref_tract": str,
+            "sample": "category",
+            "contig": "category",
+            "coverage": "category",
+        },
+    )
     raw["observed"] = raw["observed"].fillna("")
-    raw["period"] = raw["motif"].str.len()
-    raw["ref_len"] = raw["ref_tract"].str.len()
-    raw["obs_len"] = raw["observed"].str.len()
+    raw["period"] = raw["motif"].str.len().astype("int16")
+    raw["ref_len"] = raw["ref_tract"].str.len().astype("int32")
+    raw["obs_len"] = raw["observed"].str.len().astype("int32")
+    raw = raw.drop(columns=["motif", "ref_tract", "observed"])
 
     meta = (
         pd.read_csv(meta_path, sep="\t")
@@ -146,7 +162,7 @@ def _(Path, mo, os, pd):
 
 
 @app.cell
-def _(MIN_LOCUS_DEPTH, pd, raw):
+def _(MIN_LOCUS_DEPTH, np, pd, raw):
     # The one derived frame everything below shares: complete reads only, each tagged with its
     # sample's modal length at that locus, and with both stutter measures.
     #
@@ -192,23 +208,35 @@ def _(MIN_LOCUS_DEPTH, pd, raw):
     # aggregated counts that is exact and cheap: a read of length L at a locus whose length counts
     # are `n` is off-mode iff L is not the argmax of `n` with one L removed. Only the reads of the
     # modal length can change the answer, and only when the mode's lead is a single read.
-    def _loo_off(group):
-        # Counts by LENGTH, pooling rows that share one — see the note above.
-        counts = group.groupby("obs_len")["reads"].sum().to_dict()
-        out = []
-        for length, reads in zip(group["obs_len"], group["reads"]):
-            rest = dict(counts)
-            rest[length] = rest[length] - 1
-            best = max(rest.items(), key=lambda kv: (kv[1], -kv[0]))
-            # `reads` reads share this length; each is scored with one copy of itself removed.
-            out.append(reads if length != best[0] else 0)
-        return pd.Series(out, index=group.index)
-
-    comp["loo_off_reads"] = (
-        comp.groupby(_locus, observed=True, group_keys=False)[["obs_len", "reads"]]
-        .apply(_loo_off)
-        .astype(int)
+    # Done with a per-locus top-two rather than a Python function per group: at full cohort scope
+    # this runs over millions of loci, where a groupby-apply would take longer than the dump did.
+    #
+    # Removing one read of length L changes only L's own count, so the winner among the *other*
+    # lengths is the locus's top length — or its runner-up, when L is the top one. A read agrees
+    # with the leave-one-out mode iff its own reduced count still beats that, ties going to the
+    # shorter length (the same rule the modal length above uses).
+    _lens = (
+        comp[[*_locus, "obs_len", "len_reads"]]
+        .drop_duplicates([*_locus, "obs_len"])
+        .sort_values([*_locus, "len_reads", "obs_len"], ascending=[True] * 4 + [False, True])
     )
+    _lens["_rank"] = _lens.groupby(_locus, observed=True).cumcount()
+    _top1 = _lens[_lens["_rank"] == 0].rename(
+        columns={"obs_len": "t1_len", "len_reads": "t1_n"}
+    )[[*_locus, "t1_len", "t1_n"]]
+    _top2 = _lens[_lens["_rank"] == 1].rename(
+        columns={"obs_len": "t2_len", "len_reads": "t2_n"}
+    )[[*_locus, "t2_len", "t2_n"]]
+    comp = comp.merge(_top1, on=_locus, how="left").merge(_top2, on=_locus, how="left")
+
+    _is_top = comp["obs_len"] == comp["t1_len"]
+    # A locus with one distinct length has no runner-up: -1 loses to any count, so its reads agree.
+    _other_n = np.where(_is_top, comp["t2_n"].fillna(-1), comp["t1_n"])
+    _other_len = np.where(_is_top, comp["t2_len"].fillna(np.inf), comp["t1_len"])
+    _mine = comp["len_reads"] - 1
+    _agrees = (_mine > _other_n) | ((_mine == _other_n) & (comp["obs_len"] < _other_len))
+    comp["loo_off_reads"] = np.where(_agrees, 0, comp["reads"]).astype(int)
+    comp = comp.drop(columns=["t1_len", "t1_n", "t2_len", "t2_n"])
 
     # Length bands against ~150 bp reads, matching the human bake-off dashboard's axis.
     LEN_EDGES = [0, 10, 15, 20, 30, 40, 60, 10**9]

@@ -165,3 +165,7 @@ harness = false
 name = "paralog_scoring_perf"
 harness = false
 
+[[bench]]
+name = "ng_ssr_delimiter_perf"
+harness = false
+
