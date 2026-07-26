@@ -61,8 +61,10 @@ fi
 shopt -s nullglob
 files=("$IN_DIR"/*.cram "$IN_DIR"/*.bam)
 if (( ${#files[@]} == 0 )); then
-    echo "no *.cram or *.bam in $IN_DIR" >&2
-    exit 1
+    # A warning, not a failure: this is normally run in a loop over every project directory, and
+    # one empty directory must not take the whole sweep down with it under `set -e`.
+    echo "note: no *.cram or *.bam in $IN_DIR — skipping" >&2
+    exit 0
 fi
 
 # One header line, emitted only when stdout is not being appended to an existing manifest.
