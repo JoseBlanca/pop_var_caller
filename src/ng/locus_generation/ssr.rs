@@ -20,7 +20,9 @@ use super::{
     SsrDetail,
 };
 use crate::bam::alignment_input::MappedRead;
+#[cfg(test)]
 use crate::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
+use crate::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use crate::ng::alignment::{
     BestPathAligner, PerQualityEmission, RepeatContext, RepeatSpan, StutterModel,
 };
@@ -1291,11 +1293,13 @@ mod tally {
 // (spec §2, arch §1, §2).
 // ---------------------------------------------------------------------
 
-/// A tract delimiter the generator can drive — either alignment-module aligner that measures a
-/// read's repeat: [algorithm 3](crate::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner)
-/// (the flat-gap port of production's `delimit_read`, kept as the byte-parity oracle and baseline)
-/// or [algorithm 4](SsrUnitSlipAligner) (the unit-slip model, the recommended default). Any
-/// [`BestPathAligner`] whose `Output` is a [`RepeatSpan`] over a [`RepeatContext`] qualifies.
+/// A tract delimiter the generator can drive — any alignment-module aligner that measures a read's
+/// repeat: [algorithm 3](crate::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner) (the
+/// flat-gap port of production's `delimit_read`, kept as the byte-parity oracle and baseline),
+/// [algorithm 4](crate::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner) (the unit-slip
+/// model), or [algorithm 4u](crate::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner) (unit-slip
+/// hardened by the delimiter bake-off — **the recommended default**). Any [`BestPathAligner`] whose
+/// `Output` is a [`RepeatSpan`] over a [`RepeatContext`] qualifies.
 ///
 /// It is a **trait alias** (a supertrait bundle with a blanket impl), the one bound the generator
 /// and [`classify::classify_read`] repeat — so the aligner is a **type parameter**, chosen per
@@ -1320,8 +1324,9 @@ impl<A> RepeatDelimiter for A where
 /// convention ([`LocusGenerator`](super::LocusGenerator); spec §2). The delimiter `A` is a **type
 /// parameter** ([`RepeatDelimiter`]) so the algorithm is chosen per generator and dispatched
 /// statically — [`with_default_aligner`](Self::with_default_aligner) builds the recommended
-/// algorithm 4 (the unit-slip aligner), while [`new`](Self::new) takes any aligner, which is how a
-/// bake-off swaps in algorithm 3 (the flat-gap port) and how the parity oracle pins it (spec §6).
+/// algorithm 4u (the unit-robust aligner — algorithm 4 hardened by the delimiter bake-off), while
+/// [`new`](Self::new) takes any aligner, which is how a bake-off swaps in algorithm 3 (the flat-gap
+/// port) and how the parity oracle pins it to unit-slip / flat-gap (spec §6).
 ///
 /// **The reference seam (the Arc gap).** Two reference handles, because they serve two needs the
 /// current [`RawRefSeq`] design keeps apart:
@@ -1367,15 +1372,22 @@ pub struct SsrGenerator<R, MF, A: RepeatDelimiter> {
     produced: bool,
 }
 
-impl<R, MF> SsrGenerator<R, MF, SsrUnitSlipAligner<PerQualityEmission>>
+impl<R, MF> SsrGenerator<R, MF, SsrUnitRobustAligner<PerQualityEmission>>
 where
     R: RefSeq + ContigTable + RawRefSeq,
     MF: FnMut() -> R,
 {
-    /// A generator with the **recommended** delimiter — algorithm 4, the unit-slip aligner over
-    /// production's [`PerQualityEmission`] table (arch §5: the more faithful, better-measured
-    /// model). The default for real use; a bake-off or the parity oracle passes a different aligner
-    /// to [`new`](Self::new).
+    /// A generator with the **recommended** delimiter — algorithm 4u, the *unit-robust* aligner over
+    /// production's [`PerQualityEmission`] table. It is algorithm 4 (unit-slip) hardened by the
+    /// delimiter bake-off with a narrow junction guard (a sequencing error near a flank/tract
+    /// boundary can no longer slide the boundary) and an evidence-based anchor test (a complete is
+    /// only reported when the flank was actually matched, else a lower-bound partial), the demotion
+    /// capped so a partial is never lost. On HG002 it removes ~4,500 fabricated exact-lengths per
+    /// chr20–22 that unit-slip reported and preserves every real partial (`ng_ssr_gain_loss`).
+    ///
+    /// The default for real use; a bake-off, or the production byte-parity oracle, passes a specific
+    /// aligner to [`new`](Self::new) — parity is checked against unit-slip / the flat-gap port, not
+    /// against this, because unit-robust deliberately departs from production's measurement.
     pub fn with_default_aligner(
         reference: R,
         make_reference: MF,
@@ -1385,7 +1397,7 @@ where
         Self::new(
             reference,
             make_reference,
-            SsrUnitSlipAligner::new(PerQualityEmission::new()),
+            SsrUnitRobustAligner::new(PerQualityEmission::new()),
             config,
             bundle_threshold,
         )
@@ -2038,9 +2050,13 @@ mod tests {
     fn ssr_generator()
     -> SsrGenerator<InMemoryRefSeq, fn() -> InMemoryRefSeq, SsrUnitSlipAligner<PerQualityEmission>>
     {
-        SsrGenerator::with_default_aligner(
+        // Pinned to unit-slip (algorithm 4), not `with_default_aligner` (now unit-robust): these
+        // structural checks assert byte-exact observation baselines established against the
+        // production-derived delimiter, so they must not move when the recommended default changes.
+        SsrGenerator::new(
             fixture_ref_bases(),
             fixture_ref_bases as fn() -> InMemoryRefSeq,
+            SsrUnitSlipAligner::new(PerQualityEmission::new()),
             SsrGeneratorConfig {
                 flank_bp: Bp(10),
                 max_reads_per_locus: None,
@@ -2172,9 +2188,10 @@ mod tests {
             .map(|i| read_named_with_length(&format!("r{i}"), 0, 30 + i * 3, 30))
             .collect();
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
-        let mut generator = SsrGenerator::with_default_aligner(
+        let mut generator = SsrGenerator::new(
             fixture_ref_bases(),
             fixture_ref_bases as fn() -> InMemoryRefSeq,
+            SsrUnitSlipAligner::new(PerQualityEmission::new()),
             SsrGeneratorConfig {
                 flank_bp: Bp(10),
                 max_reads_per_locus: Some(2),

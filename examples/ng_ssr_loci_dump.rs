@@ -27,6 +27,7 @@ use std::sync::Arc;
 use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
+use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
@@ -244,8 +245,8 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: ng_ssr_loci_dump <reference.fa> <sample.bam|cram> [contig]\n\
              dumps, per microsatellite tract, the observed tract sequences one sample's reads showed.\n\
-             delimiter: PVC_SSR_DELIMITER=unit-slip (default, algorithm 4) | flat-gap (algorithm 3, \
-             the production-parity port) — set it to compare the two."
+             delimiter: PVC_SSR_DELIMITER=unit-robust (default, algorithm 4u — the bake-off winner) | \
+             unit-slip (algorithm 4) | flat-gap (algorithm 3, the production-parity port)."
         );
         return ExitCode::from(2);
     }
@@ -255,9 +256,9 @@ fn main() -> ExitCode {
     let config = SsrGeneratorConfig::default();
 
     // The delimiter is chosen once here and monomorphised into `run_dump` — the per-read `align` in
-    // the walk is a static call, never a `dyn` one. Default: algorithm 4 (the recommended unit-slip
-    // aligner); `PVC_SSR_DELIMITER=flat-gap` selects algorithm 3, the byte-parity port, for a
-    // side-by-side comparison.
+    // the walk is a static call, never a `dyn` one. Default: algorithm 4u (the recommended
+    // unit-robust aligner, the delimiter bake-off winner); `unit-slip` is algorithm 4, `flat-gap` is
+    // algorithm 3 (the byte-parity port) — set it for a side-by-side comparison.
     let delimiter = std::env::var("PVC_SSR_DELIMITER").unwrap_or_default();
     let emission = PerQualityEmission::new();
     let report = match delimiter.as_str() {
@@ -268,11 +269,18 @@ fn main() -> ExitCode {
             SsrFlatGapAligner::new(emission),
             config,
         ),
-        _ => run_dump(
+        "unit-slip" => run_dump(
             &fasta,
             &[bam],
             contig_filter,
             SsrUnitSlipAligner::new(emission),
+            config,
+        ),
+        _ => run_dump(
+            &fasta,
+            &[bam],
+            contig_filter,
+            SsrUnitRobustAligner::new(emission),
             config,
         ),
     };
