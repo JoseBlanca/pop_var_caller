@@ -27,6 +27,8 @@
 pub mod filtering;
 pub mod input;
 pub mod left_align;
+#[cfg(test)]
+mod left_align_parity;
 
 pub use filtering::{
     BamRecordSource, CramRecordSource, NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig,

@@ -296,9 +296,22 @@ is the point. Production's own reason for raw bytes is not a design one — the 
 ([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs), module note) — and the
 sibling filter in the same fold, `F1`, *does* fold case
 ([alignment_input.rs](../../../../src/bam/alignment_input.rs) `read_exceeds_mismatch_fraction`), which
-is what marks the left-aligner's case-sensitivity as an oversight rather than an intent. **Not yet
-measured**: how much this moves on a real soft-masked reference is unquantified (see §9 — it is exactly
-what the parity fixture would expose).
+is what marks the left-aligner's case-sensitivity as an oversight rather than an intent.
+
+**Measured, 2026-07-26 — the mechanism is confirmed and the exposure is small.** The parity fixture
+(§9) demonstrates it directly: on a soft-masked reference production returns the *mapper's own CIGAR*,
+byte for byte, for every read with a shiftable indel, while ng's answer is unchanged from its
+unmasked one. But the references actually in use are almost entirely clean, so **this is a latent
+robustness fix, not an active defect**:
+
+| reference | lowercase bases | exposure |
+|---|---|---|
+| GRCh38 no-alt analysis set | **0** (full scan) | none — the GIAB results are unaffected |
+| tomato SL4.0 | **227,170** (full scan), across ch01/03/05–12 | ~0.03% of the genome, in callable chromosome sequence |
+
+So it **cannot** explain production's indel deficit, which was measured on GRCh38. (It would bite a
+run against UCSC's `hg38.fa` or a typical RepeatMasker-soft-masked plant genome, where the masked
+fraction is most of the genome rather than a rounding error.)
 
 One consequence worth naming: canonicalisation also folds non-ACGT to `N`, so an `N` in the reference
 now compares *equal* to an `N` in a read where before it did not. A gap may therefore shift across an
@@ -451,6 +464,8 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
   because read bases are uppercased at decode while the reference is not, production's left-alignment
   **does nothing on a soft-masked reference**. That is recorded here as a **known production defect**
   for the port-back; production is frozen, so ng fixes it on its own side and §9's fixture measures it.
+  **It is latent, not active** (§6): GRCh38 carries no lowercase at all and tomato only 227 kb, so it
+  explains nothing we have observed — including the indel deficit, which was measured on GRCh38.
 - **Reusing production: call it where it fits, decided case by case (owner, 2026-07-25).** ng may call
   a production function when it fits ng's need as-is — the default normalizer already does
   ([left_align_structured.rs](../../../../src/ng/alignment/left_align_structured.rs) wraps

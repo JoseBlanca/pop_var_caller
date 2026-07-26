@@ -126,7 +126,7 @@ same read and window (the *shifting* is already byte-parity-checked, so what thi
 
 ### Milestone C — parity, and the measurement
 
-**☐ C1. The uppercase parity fixture — the port anchor.**
+**✅ C1. The uppercase parity fixture — the port anchor.**
 In-process against `process_read(read, None /* no BAQ */, &mut raw_ref, &cfg)` with
 **`max_read_mismatch_fraction: None`** (ng moved `F1` to step 1; leaving it on diverges the keep-sets
 for reasons unrelated to preparation). On an **all-uppercase** reference every field of every
@@ -134,14 +134,14 @@ for reasons unrelated to preparation). On an **all-uppercase** reference every f
 [delimit_parity.rs](../../../../src/ng/alignment/delimit_parity.rs), so shipping ng code keeps no
 test-only dependency on production. *Depends:* B2. *Source:* spec §9, arch §7.
 
-**☐ C2. The soft-masked fixture — the divergence, measured.**
+**✅ C2. The soft-masked fixture — the divergence, measured.**
 The same BAM against a **lowercased** copy of the fixture FASTA. Production's left-alignment stalls
 there (it compares raw bytes against uppercased read bases); ng's does not. The test asserts the
 divergence **exists** and reports how many reads' CIGARs differ — that count is the size of the
 production defect ng is fixing, and it is the first number attached to a claim the spec marks "not yet
 measured". *Depends:* C1. *Source:* spec §6, §9, §11.
 
-**☐ C3. The `F1`-invariance assertion.**
+**✅ C3. The `F1`-invariance assertion.**
 Across the C1 fixture, assert `read_exceeds_mismatch_fraction` returns the same verdict before and
 after left-alignment. This is the check spec §5 names as what would settle its step-1/step-2 ordering
 argument, which currently rests on reasoning rather than a debug assertion that compiles out.
