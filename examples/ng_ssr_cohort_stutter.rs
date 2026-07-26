@@ -38,6 +38,7 @@
 //! (off-mode — the stutter-specific one, since a sample's own modal allele is its best available
 //! stand-in for its true genotype).
 
+use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -164,15 +165,38 @@ fn run_cohort(
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs: ContigList = info.contig_list();
 
-    let samples: Vec<SampleReads> = crams
+    // Group the inputs by the sample their header names, rather than assuming one file is one
+    // sample. Several files of a single sample is the normal case for a library sequenced across
+    // lanes — the madrid_herb1 herbarium specimen is eight — and ng models that natively: a sample
+    // is k files, and the file index is the batch label a per-batch error model would key on.
+    // Getting this wrong would not merely mislabel: it would split one library into k pseudo-
+    // samples whose stutter is correlated by construction, inflating any between-sample statistic.
+    let mut order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for path in crams {
+        // Opening one file alone just reads its header; the real per-sample open follows below.
+        let probe = SampleReads::open(
+            std::slice::from_ref(path),
+            &info,
+            ReadFilterConfig::default(),
+            true,
+        )?;
+        let name = probe.sample_name().to_string();
+        if !grouped.contains_key(&name) {
+            order.push(name.clone());
+        }
+        grouped.entry(name).or_default().push(path.clone());
+    }
+    for name in &order {
+        let paths = &grouped[name];
+        if paths.len() > 1 {
+            eprintln!("  {name}: {} files merged into one sample", paths.len());
+        }
+    }
+    let samples: Vec<SampleReads> = order
         .iter()
-        .map(|path| {
-            SampleReads::open(
-                std::slice::from_ref(path),
-                &info,
-                ReadFilterConfig::default(),
-                true,
-            )
+        .map(|name| {
+            SampleReads::open(&grouped[name], &info, ReadFilterConfig::default(), true)
         })
         .collect::<Result<_, _>>()?;
     let mut counts: Vec<SampleCounts> = samples
