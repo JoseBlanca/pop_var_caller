@@ -1251,7 +1251,16 @@ engine. Design: [doc/devel/ng/](doc/devel/ng/) (start with
 - **Open (tracked follow-ups):**
   - **`record_source.rs` submodule split** — move the `RawRecord`/`RecordSource` traits + the three noodles adapters (~264 lines) out of `filtering.rs`; a pure-move refactor.
   - `SetupError` vs `RefSeqError` (arch §6) — `new` returns `RefSeqError` while in-loop reference errors wrap `ReadFilterError::Reference`; revisit if a second setup failure mode appears.
-  - **Step 2 (read preparation, `ReadPrep`)** — the `read/` sibling; its own plan.
+  - **Step 2 (read preparation)** — the `read/` sibling; now has its own plan and block (below).
+
+#### Step 2 — read preparation (generic path only)
+- **Status:** in-flight — **Milestone A underway** (A1 committed; A2 next). Design settled and reviewed first; plan-driven per-step loop.
+- **Plan:** [read_preparation.md](doc/devel/ng/impl_plan/read_preparation.md); **Spec:** [spec](doc/devel/ng/spec/read_preparation.md); **Arch:** [arch](doc/devel/ng/arch/read_preparation.md).
+- **Code:** [src/ng/read/mod.rs](src/ng/read/mod.rs) (`ReadPreparer` trait + `ReadPrepError`), [src/ng/read/left_align.rs](src/ng/read/left_align.rs) (v1 impl, from A2).
+- **Impl reports:** [A1](doc/devel/reports/implementations/ng_read_prep_a1_2026-07-26.md) (combined impl + review + fixes per step).
+- **Spec review:** [ng_read_preparation_spec_2026-07-25.md](doc/devel/reports/reviews/ng_read_preparation_spec_2026-07-25.md) (2 Blocker / 7 Major / 6 Minor, all resolved in the spec before any code).
+- **Settled with the owner (2026-07-25/26):** read preparation is **generic-path only** because the STR path *throws the mapper's line-up away* (it re-aligns every spanning read); the signature is `prepare_read(&self, read: MappedRead, scratch) -> Result<Option<PreparedRead>, ReadPrepError>` — by value, `Result` around `Option` because a decline and a broken run are different outcomes; the reference is a **field of the impls that need one**, never an `Option<R>`; **alignments work on uppercase sequences** (production's raw-byte left-alignment does nothing on a soft-masked reference — a known production defect ng fixes and the parity fixture measures); the fetch is **conditional on the CIGAR carrying an indel** (left-alignment is the reference's only consumer here, and ng moved `F1` to step 1); one preparer + one reference accessor **per worker, never shared**.
+- **Open:** `Ok(None)` carries no reason, so the by-reason tally spec §7 wants arrives with the first decline reason (BAQ or re-align), together with a two-variant outcome; call-vs-port `prepare_passthrough` (leaning: call, port if its `qual.clone()` profiles).
 
 #### The alignment module — best-path aligners (plan 1 of 3)
 - **Status:** ✅ **MILESTONES A AND B COMPLETE, at Checkpoint B.** **⛦ THE ng STR LOCUS GENERATOR IS UNBLOCKED** — `align_read` exists, and [locus_generation_ssr.md](doc/devel/ng/impl_plan/locus_generation_ssr.md) Milestone D can proceed against `BestPathAligner`. Next in this plan: Milestone C (banding), then D (the two-penalty comparison); E is gated.

@@ -85,7 +85,7 @@ reference fetch, the CIGAR round-trip through `AlignmentNormalizer`, and the `Pr
 
 ### Milestone A — the trait, the error, the impl types (types, no logic)
 
-**☐ A1. `ReadPreparer` + `ReadPrepError` in `read/mod.rs`.**
+**✅ A1. `ReadPreparer` + `ReadPrepError` in `read/mod.rs`.**
 The trait (`type Scratch: Default`; `prepare_read(&self, read: MappedRead, scratch) -> Result<Option<PreparedRead>, ReadPrepError>`)
 and the `#[non_exhaustive] thiserror` error with its single `Reference(RefSeqError)` variant; declare
 `pub mod left_align;`. Test: a `#[cfg(test)]` stand-in impl driven **through a generic bound**, which
