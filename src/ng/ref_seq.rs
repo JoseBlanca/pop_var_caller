@@ -167,6 +167,36 @@ pub trait RefSeq {
     }
 }
 
+/// A shared reference handle serves the same bases as the reference it points at.
+///
+/// **Why this exists.** [`RawRefSeq`] and [`RefSeq`] are already `&self`-only (see
+/// [`RawRefSeq`]'s note on why), so an impl can be *shared* — but a caller that hands out one
+/// accessor per operation needs an **owned** value, and neither of this module's impls is
+/// `Clone`. `Arc<T>` is the cheapest owned handle, so these forwards let
+/// `Arc<WindowedRefSeq>` (or `Arc<ResidentRefSeq>`) stand wherever an owned `R: RefSeq` is
+/// wanted, and the reader's window — or the repository's resident contig — is then established
+/// **once per run instead of once per operation**.
+///
+/// The caller this was added for is the STR generator's `make_reference: FnMut() -> R` factory
+/// ([`SsrGenerator`](crate::ng::locus_generation::ssr::SsrGenerator)), which the per-read
+/// mismatch-fraction filter drives: a fresh `WindowedRefSeq` per query re-read the whole `.fai`
+/// and re-`open`ed the FASTA before it could serve one ~150-base window, which a profile put at
+/// 14% of a cohort run. This is the "Arc gap" that type's own documentation names.
+///
+/// `Arc<T>` rather than `Rc<T>` deliberately: it is the handle that stays usable when the
+/// per-sample fan-out lands, and it costs an atomic only on clone, never on a fetch.
+impl<T: RefSeq + ?Sized> RefSeq for std::sync::Arc<T> {
+    fn fetch_into(
+        &self,
+        contig: ContigId,
+        start_1based: u64,
+        length: u64,
+        dst: &mut Vec<u8>,
+    ) -> Result<(), RefSeqError> {
+        (**self).fetch_into(contig, start_1based, length, dst)
+    }
+}
+
 /// Raw, un-canonicalised reference bytes — the left-alignment / mismatch-fraction path,
 /// which needs the verbatim reference bytes (no `{A,C,G,T,N}` folding). A capability of
 /// impls that can serve raw bytes; an impl whose only representation is already
@@ -187,6 +217,19 @@ pub trait RawRefSeq: RefSeq {
         length: u64,
         dst: &mut Vec<u8>,
     ) -> Result<(), RefSeqError>;
+}
+
+/// Raw bytes through a shared handle — see the [`RefSeq`] impl for `Arc<T>` for the reasoning.
+impl<T: RawRefSeq + ?Sized> RawRefSeq for std::sync::Arc<T> {
+    fn fetch_raw_into(
+        &self,
+        contig: ContigId,
+        start_1based: u64,
+        length: u64,
+        dst: &mut Vec<u8>,
+    ) -> Result<(), RefSeqError> {
+        (**self).fetch_raw_into(contig, start_1based, length, dst)
+    }
 }
 
 /// A reference that knows **its own** contig table — the names and lengths, in
@@ -213,6 +256,15 @@ pub trait ContigTable {
     /// The contig table — names and lengths, in `@SQ` / `.fai` order, indexed by
     /// [`ContigId`].
     fn contigs(&self) -> &ContigList;
+}
+
+/// The table through a shared handle — see the [`RefSeq`] impl for `Arc<T>` for the reasoning.
+/// This one also removes a per-operation `ContigList` clone at the call sites that were building
+/// a fresh accessor (2,580 contig names on GRCh38).
+impl<T: ContigTable + ?Sized> ContigTable for std::sync::Arc<T> {
+    fn contigs(&self) -> &ContigList {
+        (**self).contigs()
+    }
 }
 
 /// A reference that can **release the bases a forward walk has passed**.

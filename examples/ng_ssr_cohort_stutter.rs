@@ -195,9 +195,7 @@ fn run_cohort(
     }
     let samples: Vec<SampleReads> = order
         .iter()
-        .map(|name| {
-            SampleReads::open(&grouped[name], &info, ReadFilterConfig::default(), true)
-        })
+        .map(|name| SampleReads::open(&grouped[name], &info, ReadFilterConfig::default(), true))
         .collect::<Result<_, _>>()?;
     let mut counts: Vec<SampleCounts> = samples
         .iter()
@@ -209,12 +207,17 @@ fn run_cohort(
 
     let walk_config = TypedRegionConfig::default();
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
+    // **One reference reader for the whole walk, shared** — the margin fetch and the per-query
+    // read filter both hold the same `Arc`. Building a fresh `WindowedRefSeq` per query (which is
+    // what `FnMut() -> R` invited) meant re-reading the whole `.fai` and re-`open`ing the FASTA
+    // before serving one ~150-base window: 14% of a cohort run, ~564k `open(2)`s per chromosome.
+    // The shared reader establishes its window once and slides.
+    let reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
     let mut generator = SsrGenerator::with_default_aligner(
-        WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
+        Arc::clone(&reference),
         {
-            let fasta = fasta.to_path_buf();
-            let contigs = contigs.clone();
-            move || WindowedRefSeq::new(fasta.clone(), contigs.clone())
+            let reference = Arc::clone(&reference);
+            move || Arc::clone(&reference)
         },
         SsrGeneratorConfig::default(),
         bundle_threshold,
