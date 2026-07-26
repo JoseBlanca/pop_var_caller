@@ -1,4 +1,4 @@
-//! **STR delimiter bake-off dump** — run BOTH tract delimiters over the same reference + sample and
+//! **STR delimiter bake-off dump** — run every tract delimiter over the same reference + sample and
 //! emit a tidy, per-(locus, aligner, observation) table for the period×length "shape of the data"
 //! dashboard (`ng_proposal.md` §step-3: *how much stuttering exists for different repeat sizes and
 //! lengths, and is there a difference between the aligners*).
@@ -7,12 +7,13 @@
 //! ng_ssr_aligner_bakeoff <reference.fa> <sample.bam|cram> [contig ...]
 //! ```
 //!
-//! It walks region typing **once** and feeds each `SsrSegment` to two generators — algorithm 3
-//! (`SsrFlatGapAligner`, the flat-gap production-parity port) and algorithm 4 (`SsrUnitSlipAligner`,
-//! the recommended unit-slip delimiter). Because the walk is shared, the two aligners see the
-//! *identical* locus set, so their rows join exactly on `(contig, start, end)` — the join a bake-off
-//! needs and two separate `ng_ssr_loci_dump` runs cannot guarantee. One or more trailing contig
-//! names restrict the walk; none = the whole reference.
+//! It walks region typing **once** and feeds each `SsrSegment` to three generators — algorithm 3
+//! (`SsrFlatGapAligner`, the flat-gap production-parity port), algorithm 4 (`SsrUnitSlipAligner`,
+//! the former default) and algorithm 4u (`SsrUnitRobustAligner`, algorithm 4 hardened with a narrow
+//! junction guard and an evidence-based anchor test — **ng's current default**). Because the walk is
+//! shared, all three aligners see the *identical* locus set, so their rows join exactly on
+//! `(contig, start, end)` — the join a bake-off needs and separate `ng_ssr_loci_dump` runs cannot
+//! guarantee. One or more trailing contig names restrict the walk; none = the whole reference.
 //!
 //! Output: a `#`-prefixed run-level counts header (one line per aligner), a bare TSV column line,
 //! then one row per observation. Each covered locus contributes, per aligner, one row per distinct
@@ -26,27 +27,31 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use pop_var_caller::fasta::ContigList;
 use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
-use pop_var_caller::ng::locus_generation::ssr::{RepeatDelimiter, SsrGenerator, SsrGeneratorConfig};
+use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
+use pop_var_caller::ng::locus_generation::ssr::{
+    RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
+};
 use pop_var_caller::ng::locus_generation::{
     LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
-use pop_var_caller::fasta::ContigList;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
-use pop_var_caller::ng::types::{Bp, ContigId};
+use pop_var_caller::ng::types::{Bp, ContigId, GenomeRegion};
 
-/// The two delimiters, and the tag each carries in the `aligner` column.
+/// The three delimiters, and the tag each carries in the `aligner` column.
 const FLAT_GAP: &str = "flat_gap"; // algorithm 3 — the production-parity flat-gap port
-const UNIT_SLIP: &str = "unit_slip"; // algorithm 4 — the recommended unit-slip delimiter
+const UNIT_SLIP: &str = "unit_slip"; // algorithm 4 — the former default
+const UNIT_ROBUST: &str = "unit_robust"; // algorithm 4u — algorithm 4 hardened; ng's default
 
 /// One TSV row: one distinct observation (or a synthetic no-border/capped tally) at one locus,
 /// under one aligner.
@@ -81,70 +86,19 @@ struct AlignerCounts {
 /// The whole dump: the shared locus count, per-aligner run totals, and the rows.
 #[derive(Debug, Clone, Default)]
 struct BakeoffReport {
-    /// Loci walked (one per `SsrSegment`); shared by both aligners.
+    /// Loci walked (one per `SsrSegment`); shared by every aligner.
     ssr_loci: u64,
-    flat: AlignerCounts,
-    unit: AlignerCounts,
+    /// One tally per delimiter, in the order the header lines are written.
+    counts: Vec<(&'static str, AlignerCounts)>,
     rows: Vec<Row>,
 }
 
 impl BakeoffReport {
-    /// Fold one aligner's locus into the report: emit an observation row per distinct sequence, and
-    /// synthetic `no_border` / `capped` rows when those tallies are non-zero. Zero-coverage loci
-    /// (no reads reached them at all) emit nothing.
-    fn push_locus(
-        &mut self,
-        aligner: &'static str,
-        counts: &mut AlignerCounts,
-        locus: &SampleLocusObservations,
-        segment: &SsrSegment,
-    ) {
-        let has_reads = !locus.observed_sequences.is_empty()
-            || locus.reads_without_observation > 0
-            || locus.reads_discarded_by_cap > 0;
-        if !has_reads {
-            counts.zero_coverage += 1;
-            return;
-        }
-        let depth: u32 = locus.complete_observations().map(|obs| obs.num_obs).sum();
-        let motif = match &locus.kind {
-            LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
-            _ => Vec::new(),
-        };
-        let mut push = |coverage: &'static str, observed: Vec<u8>, reads: u32| {
-            self.rows.push(Row {
-                aligner,
-                contig: segment.chrom().to_string(),
-                start: locus.region.start.get(),
-                end: locus.region.end.get(),
-                motif: motif.clone(),
-                ref_tract: locus.reference_bases.to_vec(),
-                depth,
-                coverage,
-                observed,
-                reads,
-            });
-        };
-        for obs in &locus.observed_sequences {
-            push(
-                coverage_label(obs.read_coverage),
-                obs.bases.to_vec(),
-                obs.num_obs,
-            );
-        }
-        if locus.reads_without_observation > 0 {
-            push("no_border", Vec::new(), locus.reads_without_observation);
-        }
-        if locus.reads_discarded_by_cap > 0 {
-            push("capped", Vec::new(), locus.reads_discarded_by_cap);
-        }
-    }
-
-    /// Render the dump: two `#` header lines (one per aligner), the TSV column line, then the rows.
+    /// Render the dump: one `#` header line per aligner, the TSV column line, then the rows.
     fn render(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
-        let header = |out: &mut String, tag: &str, c: &AlignerCounts| {
+        for (tag, c) in &self.counts {
             let _ = writeln!(
                 out,
                 "# aligner={tag} ssr_loci={} zero_coverage={} reads_fetched={} reads_capped={} \
@@ -157,9 +111,7 @@ impl BakeoffReport {
                 c.obs_complete,
                 c.obs_partial,
             );
-        };
-        header(&mut out, FLAT_GAP, &self.flat);
-        header(&mut out, UNIT_SLIP, &self.unit);
+        }
         out.push_str(
             "aligner\tcontig\tstart\tend\tmotif\tref_tract\tdepth\tcoverage\tobserved\treads\n",
         );
@@ -180,6 +132,57 @@ impl BakeoffReport {
             );
         }
         out
+    }
+}
+
+/// Fold one aligner's locus into `rows`: an observation row per distinct sequence, plus synthetic
+/// `no_border` / `capped` rows when those tallies are non-zero. Zero-coverage loci (no reads reached
+/// them at all) emit nothing and only bump the counter.
+fn push_locus(
+    rows: &mut Vec<Row>,
+    aligner: &'static str,
+    counts: &mut AlignerCounts,
+    locus: &SampleLocusObservations,
+    segment: &SsrSegment,
+) {
+    let has_reads = !locus.observed_sequences.is_empty()
+        || locus.reads_without_observation > 0
+        || locus.reads_discarded_by_cap > 0;
+    if !has_reads {
+        counts.zero_coverage += 1;
+        return;
+    }
+    let depth: u32 = locus.complete_observations().map(|obs| obs.num_obs).sum();
+    let motif = match &locus.kind {
+        LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
+        _ => Vec::new(),
+    };
+    let mut push = |coverage: &'static str, observed: Vec<u8>, reads: u32| {
+        rows.push(Row {
+            aligner,
+            contig: segment.chrom().to_string(),
+            start: locus.region.start.get(),
+            end: locus.region.end.get(),
+            motif: motif.clone(),
+            ref_tract: locus.reference_bases.to_vec(),
+            depth,
+            coverage,
+            observed,
+            reads,
+        });
+    };
+    for obs in &locus.observed_sequences {
+        push(
+            coverage_label(obs.read_coverage),
+            obs.bases.to_vec(),
+            obs.num_obs,
+        );
+    }
+    if locus.reads_without_observation > 0 {
+        push("no_border", Vec::new(), locus.reads_without_observation);
+    }
+    if locus.reads_discarded_by_cap > 0 {
+        push("capped", Vec::new(), locus.reads_discarded_by_cap);
     }
 }
 
@@ -218,8 +221,30 @@ fn make_generator<A: RepeatDelimiter>(
     Ok(generator)
 }
 
+/// Run one delimiter over one `SsrSegment` and append its rows — the per-aligner half of the walk,
+/// written once so adding a delimiter is one call, not another copy of the loop.
+fn dump_segment<MF, A>(
+    generator: &mut SsrGenerator<WindowedRefSeq, MF, A>,
+    aligner: &'static str,
+    counts: &mut AlignerCounts,
+    rows: &mut Vec<Row>,
+    region: GenomeRegion,
+    segment: &SsrSegment,
+    sample: &SampleReads,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    MF: FnMut() -> WindowedRefSeq,
+    A: RepeatDelimiter,
+{
+    generator.begin_segment(region);
+    while let Some(locus) = generator.next_locus(segment, sample)? {
+        push_locus(rows, aligner, counts, &locus, segment);
+    }
+    Ok(())
+}
+
 /// Walk region typing once over `fasta` + `bams` (optionally restricted to `contig_filter`, a set of
-/// contig names) and dump every `SsrSegment` through **both** delimiters, building the paired
+/// contig names) and dump every `SsrSegment` through **every** delimiter, building the paired
 /// [`BakeoffReport`].
 fn run_bakeoff(
     fasta: &Path,
@@ -248,11 +273,20 @@ fn run_bakeoff(
         fasta,
         &contigs,
         SsrUnitSlipAligner::new(emission),
+        config.clone(),
+        bundle_threshold,
+    )?;
+    let mut gen_robust = make_generator(
+        fasta,
+        &contigs,
+        SsrUnitRobustAligner::new(emission),
         config,
         bundle_threshold,
     )?;
 
     let mut report = BakeoffReport::default();
+    let (mut flat, mut unit, mut robust) =
+        <(AlignerCounts, AlignerCounts, AlignerCounts)>::default();
     for (index, entry) in contigs.entries.iter().enumerate() {
         if !contig_filter.is_empty() && !contig_filter.iter().any(|name| name == &entry.name) {
             continue;
@@ -267,18 +301,35 @@ fn run_bakeoff(
             let region = region?;
             if let RegionKind::SsrSegment(segment) = &region.kind {
                 report.ssr_loci += 1;
-                gen_flat.begin_segment(region.region);
-                while let Some(locus) = gen_flat.next_locus(segment, &sample)? {
-                    let mut counts = report.flat;
-                    report.push_locus(FLAT_GAP, &mut counts, &locus, segment);
-                    report.flat = counts;
-                }
-                gen_unit.begin_segment(region.region);
-                while let Some(locus) = gen_unit.next_locus(segment, &sample)? {
-                    let mut counts = report.unit;
-                    report.push_locus(UNIT_SLIP, &mut counts, &locus, segment);
-                    report.unit = counts;
-                }
+                let rows = &mut report.rows;
+                let region = region.region;
+                dump_segment(
+                    &mut gen_flat,
+                    FLAT_GAP,
+                    &mut flat,
+                    rows,
+                    region,
+                    segment,
+                    &sample,
+                )?;
+                dump_segment(
+                    &mut gen_unit,
+                    UNIT_SLIP,
+                    &mut unit,
+                    rows,
+                    region,
+                    segment,
+                    &sample,
+                )?;
+                dump_segment(
+                    &mut gen_robust,
+                    UNIT_ROBUST,
+                    &mut robust,
+                    rows,
+                    region,
+                    segment,
+                    &sample,
+                )?;
             }
         }
     }
@@ -289,17 +340,18 @@ fn run_bakeoff(
 
     // Run-level per-aligner totals come from the generators' own counters, so the header numbers are
     // the authoritative accounting identity, not a re-tally of the emitted rows.
-    for (counts, gen_counts) in [
-        (&mut report.flat, gen_flat.counts()),
-        (&mut report.unit, gen_unit.counts()),
+    for (tag, counts, gen_counts) in [
+        (FLAT_GAP, &mut flat, gen_flat.counts()),
+        (UNIT_SLIP, &mut unit, gen_unit.counts()),
+        (UNIT_ROBUST, &mut robust, gen_robust.counts()),
     ] {
         counts.reads_fetched = gen_counts.reads_fetched;
         counts.reads_capped = gen_counts.reads_discarded_by_cap;
         counts.obs_complete = gen_counts.observations_complete;
         counts.obs_partial = gen_counts.observations_partial;
-        counts.reads_without_observation = gen_counts.no_border_anchored
-            + gen_counts.low_quality
-            + gen_counts.window_truncated;
+        counts.reads_without_observation =
+            gen_counts.no_border_anchored + gen_counts.low_quality + gen_counts.window_truncated;
+        report.counts.push((tag, *counts));
     }
 
     Ok(report)
@@ -310,9 +362,10 @@ fn main() -> ExitCode {
     if args.len() < 3 {
         eprintln!(
             "usage: ng_ssr_aligner_bakeoff <reference.fa> <sample.bam|cram> [contig ...]\n\
-             dumps, per microsatellite tract, what BOTH STR delimiters (algorithm 3 flat-gap and \
-             algorithm 4 unit-slip) observed — the period×length bake-off input. Trailing contig \
-             names restrict the walk; none = the whole reference."
+             dumps, per microsatellite tract, what ALL THREE STR delimiters (algorithm 3 flat-gap, \
+             algorithm 4 unit-slip and algorithm 4u unit-robust, the default) observed — the \
+             period×length bake-off input. Trailing contig names restrict the walk; none = the \
+             whole reference."
         );
         return ExitCode::from(2);
     }
