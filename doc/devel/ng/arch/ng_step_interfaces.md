@@ -253,12 +253,19 @@ step but a fixed prelude, so it gets its own doc rather than a trait sketch here
 ### Step 2 — read preparation (generic path only)
 ```rust
 pub trait ReadPreparer {
-    /// Reused buffers (BAQ + alignment matrices) — allocated once per worker, never per read.
+    /// Reused buffers — the reference window now, alignment matrices later. Allocated once per
+    /// worker, never per read. `()` for an impl that needs none.
     type Scratch: Default;
-    /// Prepare one filtered read against the reference around its OWN span. No locus argument
-    /// (the generic transform is locus-independent) and no window argument — the impl HOLDS its
-    /// RawRefSeq + RefSeq accessors and fetches what it needs. None if unusable (tallied).
-    fn prepare_read(&self, read: &MappedRead, scratch: &mut Self::Scratch) -> Option<PreparedRead>;
+    /// Prepare one filtered read against the reference around its OWN span. By value, so the
+    /// read's buffers move into the PreparedRead rather than being cloned. No locus argument
+    /// (the transform is locus-independent) and NO reference argument — an impl that needs a
+    /// reference holds its own accessor.
+    /// Ok(None) = no usable observation (tallied); Err = the run is broken (a failed fetch).
+    fn prepare_read(
+        &self,
+        read: MappedRead,
+        scratch: &mut Self::Scratch,
+    ) -> Result<Option<PreparedRead>, ReadPrepError>;
 }
 ```
 *Impls to bench:* v1 is `LeftAlignPreparer` (pass-through + left-align), and a per-read re-align against
@@ -269,16 +276,19 @@ production already calls generic loci better than GATK without reassembling
 ([`../spec/read_preparation.md`](../spec/read_preparation.md) §1).
 
 **Read preparation is a *generic-path-only* step**, and that is the load-bearing correction (settled
-2026-07-25, [`../spec/read_preparation.md`](../spec/read_preparation.md) §1). It is a per-read,
-*locus-independent* transform → `PreparedRead` (production's, reused as-is), consumed by the pileup.
-The **STR path has no read preparation**: its per-read operation aligns a read *against a specific
-tract* to produce an *observation about that locus* — it needs the locus, so it is observation
-generation ([`locus_generation_ssr.md`](../spec/locus_generation_ssr.md)), not preparation, and it
-calls the repeat-aware aligner ([`alignment.md`](../spec/alignment.md) §4.2). So the trait has **no
-`type Locus`** and **no `type Prepared`** — the path-owned associated types are gone with the STR arm
-(they could not compile as a `Box<dyn ReadPreparer>` anyway). Read prep **composes** with the gatherer,
-it is not subsumed. There is **no window argument**: the preparer holds its own `RefSeq`/`RawRefSeq`
-accessors and fetches around each read's span (as step 1's `ReadFilter` does).
+2026-07-25, [`../spec/read_preparation.md`](../spec/read_preparation.md) §1). It canonicalises the
+line-up the mapper gave a read → `PreparedRead` (production's, reused as-is), consumed by the pileup.
+The **STR path has no read preparation** because it *throws the mapper's line-up away*: it re-aligns
+every spanning read against the tract ([`alignment.md`](../spec/alignment.md) §4.2), so canonicalizing
+the CIGAR first would be work nothing reads — and would only shift the slice the re-alignment is
+handed. Its per-read operation is also a different kind of thing, producing an *observation about one
+locus* rather than a read ([`locus_generation_ssr.md`](../spec/locus_generation_ssr.md)). So the trait
+has **no `type Locus`** and **no `type Prepared`** — the path-owned associated types are gone with the
+STR arm (they could not compile as a `Box<dyn ReadPreparer>` anyway). Read prep **composes** with the
+gatherer, it is not subsumed. There is **no reference argument**: an impl that needs a reference holds
+its own accessor (`RawRefSeq` in v1) and fetches around the read's span — and only for reads whose
+CIGAR carries an indel, since left-alignment is the sole consumer
+([`../spec/read_preparation.md`](../spec/read_preparation.md) §5).
 
 ### Step 3 — the typed-region generator
 

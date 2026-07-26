@@ -490,10 +490,12 @@ fn map_chrom_error(contig: ContigId, err: ChromRefFetchError) -> RefSeqError {
 /// A FASTA-backed reference that keeps only a **sub-range window** of the current contig
 /// resident, extending it on demand in either direction and shrinking it on the caller's
 /// command via [`Self::evict_before`] — the memory-bounded, any-access-within-the-window
-/// alternative to [`ResidentRefSeq`]'s whole-contig residency. Canonical-only (its buffer
-/// holds `{A,C,G,T,N}` bytes), so it does **not** implement [`RawRefSeq`]. It wraps the
-/// production `ManualEvictChromRefFetcher` (one per resident contig, rebuilt on a contig
-/// change), so its buffer / canonicalisation / eviction logic — and its bytes — are
+/// alternative to [`ResidentRefSeq`]'s whole-contig residency. **Its buffer holds raw bases**,
+/// so it serves both views: [`RawRefSeq`] hands them back verbatim and [`RefSeq`] applies
+/// `canonicalise` on the way out (raw is the buffer, canonical is the derived view — see the
+/// `current` field). It wraps [`RawChromReader`], ng's copy of the production
+/// `ManualEvictChromRefFetcher` minus the canonicalisation (one per resident contig, rebuilt on a
+/// contig change), so its buffer / eviction logic — and its canonical bytes — remain
 /// identical to the production streaming path. A `RefCell` keeps `fetch_into(&self)` while
 /// the inner fetcher mutates its buffer; `evict_before` is the inherent `&mut self`
 /// capability. `Send` but not `Sync` (per-worker ownership, like the production fetchers).
