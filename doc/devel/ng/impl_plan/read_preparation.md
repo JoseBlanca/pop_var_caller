@@ -92,7 +92,7 @@ and the `#[non_exhaustive] thiserror` error with its single `Reference(RefSeqErr
 is the only place `Scratch: Default` and the static-dispatch rule actually bite — a concrete call
 compiles either way. *Source:* arch §1.2, §2; spec §6, §7.
 
-**☐ A2. `LeftAlignPreparer` + `LeftAlignScratch` types.**
+**✅ A2. `LeftAlignPreparer` + `LeftAlignScratch` types.**
 The struct (`reference: R`, `normalizer: N`), `new`, `with_default_normalizer`, and the scratch
 holding `ref_buf: Vec<u8>`. No trait impl yet. *Depends:* A1. *Source:* arch §2.
 
@@ -101,7 +101,7 @@ holding `ref_buf: Vec<u8>`. No trait impl yet. *Depends:* A1. *Source:* arch §2
 
 ### Milestone B — the transform (the heart)
 
-**☐ B1. `cigar_has_indel` + the no-indel path.**
+**✅ B1. `cigar_has_indel` + the no-indel path.**
 The predicate (production's `is_indel` is private to `indel_norm`, so this is ng's two-liner), then
 `impl ReadPreparer for LeftAlignPreparer`: a read whose CIGAR carries no indel is built straight from
 the record — **no fetch, no scratch touched, cannot fail**. Build via `prepare_passthrough` (spec
@@ -110,7 +110,7 @@ round-trips with its CIGAR and qualities intact and every `PreparedRead` field w
 reference is *never consulted* — assert it with a reference impl that fails the test if fetched.
 *Depends:* A2. *Source:* spec §5, arch §2, §3.
 
-**☐ B2. The indel path. Own commit; do not bundle.**
+**✅ B2. The indel path.** *(Merged into the A2+B1 commit — the plan's split does not compile under `-D warnings`; see the step report §7.)*
 Fetch `[read.pos, read.pos + cigar_ref_span(cigar))` **uppercased** via `RefSeq::fetch_into` into
 `scratch.ref_buf`; **check the returned length rather than trusting it**; wrap the CIGAR in
 `Alignment { reference_offset: 0, cigar: mem::take(&mut read.cigar) }`, normalize, move it back, build.
