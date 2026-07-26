@@ -263,13 +263,40 @@ pub(crate) struct CramRegionPlan {
     region: GenomeRegion,
 }
 
+/// One CRAM container, decoded, kept for the *next* query.
+///
+/// **Why this exists.** CRAM decodes at container granularity, and a container holds thousands
+/// of records covering a wide span of the reference, so consecutive region queries land in the
+/// same container over and over. Decoding it per query costs the block decompression *and*
+/// noodles' per-slice reference MD5 verification, which hashes the slice's whole reference span
+/// on every `Slice::records` call — measured at 35% of a per-locus STR walk over a CRAM
+/// (`doc/devel/reports/reviews/perf_ng-ssr-cohort-stutter_2026-07-26.md`, H2). Holding the last
+/// container decoded through a given reader turns that per-query cost into a per-container one.
+///
+/// It travels with the pooled [`ReaderHandle`](super::open_bam::ReaderKind), so it is **per
+/// worker**: each concurrent caller holds its own reader and therefore its own container, and no
+/// lock is added to the query path. That is the shape `arch/alignment_file.md` §7 anticipated.
+///
+/// **The key is the `.crai` offset**, which identifies a container within the file. Reusing on a
+/// stale key would serve another region's reads as this region's — silently wrong depth, not a
+/// crash — so the offset comparison is the whole safety argument, and
+/// `a_stale_container_is_not_reused` pins it.
+pub(crate) struct DecodedContainer {
+    /// The `.crai` offset the records were decoded from.
+    offset: u64,
+    /// Every record of the container, in file order — *not* filtered to any region, because the
+    /// next query filters against its own.
+    records: Vec<RecordBuf>,
+}
+
 /// The reads of one region of a CRAM.
 ///
 /// CRAM decodes at **container** granularity — a container holds slices whose
 /// records are decoded together against the reference — so this walks the
-/// `.crai` for containers on the target contig, decodes each, and buffers the
-/// overlapping records. Non-overlapping ones are dropped **uncounted**, as in
-/// the BAM source, and for the same reason.
+/// `.crai` for containers on the target contig, decodes each (or reuses the one
+/// [`DecodedContainer`] this reader already holds), and buffers the overlapping
+/// records. Non-overlapping ones are dropped **uncounted**, as in the BAM
+/// source, and for the same reason.
 ///
 /// **The `.crai` walk starts from a binary search, not from entry 0.**
 /// Production rescans the index from the beginning on every call
@@ -292,9 +319,17 @@ pub(crate) struct CramRegionSource<'a> {
     /// The overlapping records of the container last decoded, drained one per
     /// `read_next` before the next container is touched.
     pending: std::vec::IntoIter<RecordBuf>,
-    /// The offset last decoded, so a container that appears once per slice is
-    /// decoded once.
+    /// The offset last decoded **in this query**, so a container that appears
+    /// once per slice is drained once. Distinct from `container`'s key: this one
+    /// exists to stop the same records being yielded twice *within* a query,
+    /// while `container` exists to stop them being *decoded* twice *across*
+    /// queries. Resetting this per query is what makes a new query re-serve a
+    /// container it already holds.
     last_decoded_offset: Option<u64>,
+    /// The container this reader last decoded, reused when the walk asks for it
+    /// again ([`DecodedContainer`]). Moved in from the pooled handle and moved
+    /// back out by [`Self::into_parts`].
+    container: Option<DecodedContainer>,
     target_reference_sequence_id: usize,
     region: GenomeRegion,
     source_file_index: usize,
@@ -338,6 +373,7 @@ impl<'a> CramRegionSource<'a> {
         repository: fasta::Repository,
         plan: CramRegionPlan,
         source_file_index: usize,
+        container: Option<DecodedContainer>,
     ) -> Self {
         Self {
             reader,
@@ -347,6 +383,7 @@ impl<'a> CramRegionSource<'a> {
             next_index_record: 0,
             pending: Vec::new().into_iter(),
             last_decoded_offset: None,
+            container,
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
             source_file_index,
@@ -354,8 +391,9 @@ impl<'a> CramRegionSource<'a> {
         }
     }
 
-    pub(crate) fn into_reader(self) -> cram::io::Reader<File> {
-        self.reader
+    /// Give the reader and the decoded container back, for the pool.
+    pub(crate) fn into_parts(self) -> (cram::io::Reader<File>, Option<DecodedContainer>) {
+        (self.reader, self.container)
     }
 
     /// Walk the `.crai` to the next container that could overlap, decode it,
@@ -397,17 +435,34 @@ impl<'a> CramRegionSource<'a> {
             }
             self.last_decoded_offset = Some(record.offset());
 
-            let Some(records) = self.decode_container_at(record.offset())? else {
-                // End of stream reached through the index — nothing further.
-                return Ok(false);
-            };
+            // Decode only if this reader is not already holding this container. The two steps are
+            // sequenced rather than written as one `match` because decoding needs `&mut self`
+            // while reading the held records needs `&self`.
+            let offset = record.offset();
+            if self
+                .container
+                .as_ref()
+                .is_none_or(|held| held.offset != offset)
+            {
+                let Some(records) = self.decode_container_at(offset)? else {
+                    // End of stream reached through the index — nothing further.
+                    return Ok(false);
+                };
+                self.container = Some(DecodedContainer { offset, records });
+            }
+            let held = self
+                .container
+                .as_ref()
+                .expect("just decoded, or already held at this offset");
 
-            let overlapping: Vec<RecordBuf> = records
-                .into_iter()
+            let overlapping: Vec<RecordBuf> = held
+                .records
+                .iter()
                 .filter(|record| {
                     record.reference_sequence_id() == Some(self.target_reference_sequence_id)
                         && overlaps(record, self.region)
                 })
+                .cloned()
                 .collect();
 
             if !overlapping.is_empty() {
@@ -569,11 +624,15 @@ pub(crate) enum RegionSource<'a> {
 }
 
 impl RegionSource<'_> {
-    /// Give the reader back, in the shape the pool stores it.
-    pub(crate) fn into_reader(self) -> super::open_bam::ReaderKind {
+    /// Give the reader back, in the shape the pool stores it — with the decoded container a CRAM
+    /// query is holding, so the next query through this reader can reuse it.
+    pub(crate) fn into_parts(self) -> (super::open_bam::ReaderKind, Option<DecodedContainer>) {
         match self {
-            Self::Bam(source) => super::open_bam::ReaderKind::Bam(source.into_reader()),
-            Self::Cram(source) => super::open_bam::ReaderKind::Cram(source.into_reader()),
+            Self::Bam(source) => (super::open_bam::ReaderKind::Bam(source.into_reader()), None),
+            Self::Cram(source) => {
+                let (reader, container) = source.into_parts();
+                (super::open_bam::ReaderKind::Cram(reader), container)
+            }
         }
     }
 }
@@ -1403,7 +1462,7 @@ mod tests {
         let plan =
             CramRegionSource::plan(&header_for_plan, &grouped, region(0, 1, 200)).expect("plan");
         let total_entries = plan.entries.len();
-        let mut source = CramRegionSource::new(reader, &parsed_header, repository, plan, 0);
+        let mut source = CramRegionSource::new(reader, &parsed_header, repository, plan, 0, None);
 
         let mut buf = NoodlesRawRecord::default();
         let mut seen = 0;
@@ -1417,6 +1476,99 @@ mod tests {
             "the walk consumed all {total_entries} entries for a 200 bp region \
              of a 400 kb contig — it decoded to the end instead of stopping"
         );
+    }
+
+    /// **The decoded-container cache must never serve a stale container's reads**
+    /// ([`DecodedContainer`]). A reader that has just decoded the container holding one region is
+    /// then asked for a region in a *different* container, and then for the first region again;
+    /// every answer must equal what a reader with a cold cache returns for that region alone.
+    ///
+    /// This is the load-bearing test for the cache, because the failure is silent: reusing on a
+    /// stale key does not crash, it reports another part of the contig's reads as this region's
+    /// depth. A cache that ignored the `.crai` offset passes every "the reads are right" test on
+    /// the *first* query and fails here on the second.
+    #[test]
+    fn a_stale_container_is_not_reused() {
+        use crate::ng::read::input::test_fixtures::multi_container_cram;
+
+        use crate::ng::read::filtering::ReadFilterConfig;
+        use crate::ng::read::input::open_bam::AlignmentFile;
+        use crate::ng::reference_info::{ReferenceSource, read_reference_info};
+
+        const CONTIG_LENGTH: usize = 400_000;
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, 30_000);
+        // `Fasta`, not `Fai`: a CRAM needs the reference *bases* to decode against, so `open`
+        // rejects a reference that cannot supply a path to them.
+        let reference = read_reference_info(ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        })
+        .expect("the fixture reference reads");
+
+        // Two regions far enough apart to be in different containers (the fixture writes ~30k
+        // records per container over 400 kb).
+        let early = region(0, 1_000, 1_200);
+        let late = region(
+            0,
+            (CONTIG_LENGTH as u64 * 3) / 4,
+            (CONTIG_LENGTH as u64 * 3) / 4 + 200,
+        );
+
+        let open = || {
+            AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
+                .expect("the fixture CRAM opens")
+        };
+
+        // What each region looks like to a reader that has never decoded anything.
+        let cold_early = positions_of(&open(), early, &reference);
+        let cold_late = positions_of(&open(), late, &reference);
+        assert!(!cold_early.is_empty(), "the early region is covered");
+        assert_ne!(
+            cold_early, cold_late,
+            "the two regions must return different reads, or the test cannot \
+             distinguish a stale cache from a correct one"
+        );
+
+        // One file, so all three queries share the pool — and therefore the cache.
+        let file = open();
+        let warm_early = positions_of(&file, early, &reference);
+        let warm_late = positions_of(&file, late, &reference);
+        let warm_early_again = positions_of(&file, early, &reference);
+
+        assert_eq!(warm_early, cold_early, "first query, cache cold");
+        assert_eq!(
+            warm_late, cold_late,
+            "the second query must decode its own container, not reuse the first's"
+        );
+        assert_eq!(
+            warm_early_again, cold_early,
+            "returning to the first region must not serve the late container's reads"
+        );
+        assert_eq!(
+            file.readers_opened(),
+            1,
+            "all three queries went through one pooled reader, so they shared one cache"
+        );
+    }
+
+    /// Every read position a region query yields, through the whole real chain (pool → source →
+    /// filter → order guard) — the shape a caller sees, so the cache is exercised where it lives.
+    fn positions_of(
+        file: &crate::ng::read::input::open_bam::AlignmentFile,
+        span: GenomeRegion,
+        reference: &crate::ng::reference_info::ReferenceInfo,
+    ) -> Vec<u64> {
+        let bases = crate::ng::ref_seq::WindowedRefSeq::new(
+            reference
+                .fasta_path
+                .clone()
+                .expect("the fixture reference is a FASTA"),
+            reference.contig_list(),
+        );
+        file.reads_in_region(span, bases)
+            .expect("the query plans")
+            .map(|read| read.expect("no fatal read error").pos)
+            .collect()
     }
 
     /// The span-based skip: a container that ends *before* the region must be
@@ -1449,7 +1601,7 @@ mod tests {
         let late = (CONTIG_LENGTH as u64 * 3) / 4;
         let plan = CramRegionSource::plan(&header_for_plan, &grouped, region(0, late, late + 200))
             .expect("plan");
-        let mut source = CramRegionSource::new(reader, &parsed_header, repository, plan, 0);
+        let mut source = CramRegionSource::new(reader, &parsed_header, repository, plan, 0, None);
 
         let mut buf = NoodlesRawRecord::default();
         let mut seen = 0;

@@ -45,7 +45,8 @@ use crate::ng::types::GenomeRegion;
 
 use super::AlignmentFileError;
 use super::region_query::{
-    BamRegionSource, CramRegionPlan, CramRegionSource, OrderVerified, RegionPlan, RegionSource,
+    BamRegionSource, CramRegionPlan, CramRegionSource, DecodedContainer, OrderVerified, RegionPlan,
+    RegionSource,
 };
 
 /// Which planner ran, and its result. Paired with the pooled reader's own
@@ -135,6 +136,10 @@ pub struct AlignmentFile {
 struct ReaderHandle {
     reader: ReaderKind,
     buffers: ReadFilterBuffers<NoodlesRawRecord>,
+    /// The CRAM container this reader last decoded, if any — pooled with the
+    /// reader so it is per worker and costs the query path no lock
+    /// ([`DecodedContainer`]). Always `None` for a BAM.
+    container: Option<DecodedContainer>,
 }
 
 /// A reader for whichever container this file is.
@@ -228,9 +233,11 @@ impl<R: RawRefSeq> Drop for RegionReads<'_, R> {
         // is why the filter has to be taken apart rather than just dropped —
         // the drops this query recorded would vanish with it.
         let (source, buffers, counts) = stream.into_inner().into_parts();
+        let (reader, container) = source.into_parts();
         self.file.return_handle(ReaderHandle {
-            reader: source.into_reader(),
+            reader,
             buffers,
+            container,
         });
         self.file.add_counts(&counts);
     }
@@ -471,7 +478,11 @@ impl AlignmentFile {
 
         let borrowed = self.borrow_reader()?;
         let handle = borrowed.take();
-        let ReaderHandle { reader, buffers } = handle;
+        let ReaderHandle {
+            reader,
+            buffers,
+            container,
+        } = handle;
 
         let source = match (reader, plan) {
             (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
@@ -486,6 +497,7 @@ impl AlignmentFile {
                         .expect("open builds a repository for every CRAM"),
                     plan,
                     self.source_file_index,
+                    container,
                 ))
             }
             // Both the reader and the plan are chosen from the same path's
@@ -604,6 +616,7 @@ impl AlignmentFile {
         Ok(ReaderHandle {
             reader,
             buffers: ReadFilterBuffers::default(),
+            container: None,
         })
     }
 
@@ -622,7 +635,7 @@ impl AlignmentFile {
 
     /// How many readers this file has opened, ever — one per concurrent caller,
     /// not one per query.
-    fn readers_opened(&self) -> usize {
+    pub(super) fn readers_opened(&self) -> usize {
         self.readers_opened.load(Ordering::Relaxed)
     }
 
