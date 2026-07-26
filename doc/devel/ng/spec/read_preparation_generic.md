@@ -6,12 +6,12 @@ dissolved. Its content — the three modes, `PreparedRead`, the `process_read` p
 parity oracle — merged into the single [`read_preparation.md`](read_preparation.md). Nothing was lost;
 this file is a redirect so older links resolve.*
 
-**Why there is only one read-preparation spec.** Read preparation is a per-read, *locus-independent*
-transform: it canonicalises a read against the reference around its own span and produces a
-`PreparedRead` that serves every locus the read overlaps. The STR per-read operation is not that — it
-aligns a read *against a specific tract* to read out an observation *about that locus*, so it is
-observation generation, not read preparation. It lives in
-[`locus_generation_ssr.md`](locus_generation_ssr.md) (the generator) and
-[`alignment.md`](alignment.md) (the repeat-aware aligner it calls).
+**Why there is only one read-preparation spec.** Read preparation canonicalises the line-up the mapper
+gave a read. The STR path throws that line-up away — it re-aligns every spanning read against the
+tract — so canonicalizing the mapper's CIGAR there would be work nothing reads. Its per-read operation
+is also a different kind of thing: it produces an observation *about one locus*, not a read. It lives
+in [`locus_generation_ssr.md`](locus_generation_ssr.md) (the generator) and
+[`alignment.md`](alignment.md) (the repeat-aware aligner it calls). See
+[`read_preparation.md`](read_preparation.md) §1.
 
 **Where each part went:** all of it → [`read_preparation.md`](read_preparation.md).
