@@ -29,9 +29,34 @@ REF=${2:-}
 SAMPLE_READS=${SAMPLE_READS:-2000}
 
 [[ -d "$IN_DIR" ]] || { echo "not a directory: $IN_DIR" >&2; exit 1; }
+command -v samtools >/dev/null || { echo "samtools not on PATH" >&2; exit 1; }
+if [[ -n "$REF" && ! -f "$REF" ]]; then
+    echo "reference not found: $REF" >&2
+    exit 1
+fi
 
 ref_args=()
 [[ -n "$REF" ]] && ref_args=(-T "$REF")
+
+# Fail loudly on the first file rather than emitting a table of "?" — an unreadable input, a
+# missing reference or a samtools that cannot resolve the CRAM's M5 all look identical in the
+# output otherwise, and the whole point of this manifest is to be trusted.
+probe_file=""
+for probe in "$IN_DIR"/*.cram "$IN_DIR"/*.bam; do
+    [[ -e "$probe" ]] || continue
+    probe_file="$probe"
+    break
+done
+if [[ -n "$probe_file" ]]; then
+    # The input directory may be read-only, so the probe's stderr goes to a temp file.
+    probe_err=$(mktemp)
+    trap 'rm -f "$probe_err"' EXIT
+    if ! samtools view -H "${ref_args[@]}" "$probe_file" > /dev/null 2>"$probe_err"; then
+        echo "cannot read a header from $probe_file:" >&2
+        cat "$probe_err" >&2
+        exit 1
+    fi
+fi
 
 shopt -s nullglob
 files=("$IN_DIR"/*.cram "$IN_DIR"/*.bam)
@@ -50,17 +75,33 @@ for f in "${files[@]}"; do
 
     # First @RG only: these are single-read-group files, and a second would mean the sample was
     # merged across libraries — which the `library` column would then misreport, so flag it.
-    rg=$(samtools view -H "${ref_args[@]}" "$f" 2>/dev/null | grep -m1 '^@RG' || true)
-    n_rg=$(samtools view -H "${ref_args[@]}" "$f" 2>/dev/null | grep -c '^@RG' || true)
+    # stderr is left to flow to the caller's log: a per-file failure must be visible, not a "?".
+    header=$(samtools view -H "${ref_args[@]}" "$f" || true)
+    rg=$(printf '%s' "$header" | grep -m1 '^@RG' || true)
+    n_rg=$(printf '%s' "$header" | grep -c '^@RG' || true)
 
     field() { printf '%s' "$rg" | tr '\t' '\n' | grep -m1 "^$1:" | cut -d: -f2- || true; }
     run=$(field ID); sm=$(field SM); lb=$(field LB); pl=$(field PL)
-    [[ "$n_rg" -gt 1 ]] && lb="${lb}+MERGED(${n_rg}RG)"
+
+    # No @RG at all is a real and consequential state, not a read error: ng's `SampleReads::open`
+    # takes the sample name from @RG SM, so such a file cannot be ingested until it is reheadered.
+    # Say so explicitly, and fall back to the filename — for a locally-produced dataset with no
+    # accession that IS the identifier.
+    if [[ "$n_rg" -eq 0 ]]; then
+        run="${base%%.*}"
+        sm="NO_RG"
+        lb="NO_RG"
+        pl="NO_RG"
+    elif [[ "$n_rg" -gt 1 ]]; then
+        lb="${lb}+MERGED(${n_rg}RG)"
+    fi
 
     # Modal read length over a sample of records, plus how many distinct lengths appear: a wide
     # spread means trimmed reads, which changes spanning behaviour as surely as a shorter read does.
     lens=$(samtools view "${ref_args[@]}" "$f" 2>/dev/null | head -n "$SAMPLE_READS" \
            | awk '{print length($10)}' | sort -n | uniq -c | sort -rn || true)
+    # Decoding records DOES need the reference (unlike the header), so an empty result here with a
+    # populated @RG above means the reference is the problem, not the file.
     mode=$(printf '%s' "$lens" | head -1 | awk '{print $2}')
     distinct=$(printf '%s' "$lens" | grep -c . || true)
     n=$(printf '%s' "$lens" | awk '{s+=$1} END {print s+0}')
