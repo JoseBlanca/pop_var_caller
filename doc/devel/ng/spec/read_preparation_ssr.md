@@ -1,12 +1,13 @@
 # ng — read preparation (STR path) — RETIRED: there is no STR read-preparation step
 
-*Retired 2026-07-25. **The STR path has no read preparation.** Read preparation is a per-read,
-*locus-independent* transform that canonicalises a read against the reference around its own span
-(left-align / BAQ / re-align → `PreparedRead`) and is reused across every locus the read overlaps — see
-[`read_preparation.md`](read_preparation.md) §1. The STR per-read operation is not that: it aligns a
-read **against a specific tract** to read out what the read shows **about that locus**, so it is
-observation generation, not preparation. What this file used to spec now lives in its true homes, and
-this redirect keeps older section links resolvable.*
+*Retired 2026-07-25. **The STR path has no read preparation.** Read preparation canonicalises the
+line-up the mapper gave a read (left-align → `PreparedRead`). This path throws that line-up away: it
+**re-aligns every spanning read** against `flank + tract + flank`, so canonicalizing the mapper's CIGAR
+first would be work whose result nothing reads — and would only shift the slice the re-alignment is
+handed. The per-read operation here is also a different kind of thing: it reads out what a read shows
+**about one locus**, an observation rather than a read. See
+[`read_preparation.md`](read_preparation.md) §1. What this file used to spec now lives in its true
+homes, and this redirect keeps older section links resolvable.*
 
 ## Where this file's content lives now
 
