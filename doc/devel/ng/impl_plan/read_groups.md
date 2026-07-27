@@ -174,12 +174,12 @@ failing anything. *Depends:* C2. *Source:* spec §9; arch §1.3.
 
 ### Milestone D — per-read-group counts
 
-**D1. Key `ReadFilterCounts` on the read group.**  ☐
+**D1. Key `ReadFilterCounts` on the read group.**  ✅
 `AlignmentFile::counts()` and `SampleReads::counts()` return per-read-group tallies rather than
 per-file ones, so a drop rate stays attributable when a file holds several read groups. Update the
 counts assertions in the existing tests. *Depends:* C3. *Source:* arch §3.2; spec §8.
 
-**D2. End-to-end fixture.**  ☐
+**D2. End-to-end fixture.**  ✅
 One integration test walking the full stack — build the table from two paths, open both samples,
 read a region from each — asserting the identifiers on the reads and the per-read-group counts.
 This is the test that would have caught any of the three silent failures at the seam rather than in
