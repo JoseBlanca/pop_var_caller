@@ -2048,6 +2048,99 @@ mod tests {
         assert_eq!(filter.counts(), expected);
     }
 
+    /// The whole-file CRAM source skips another sample's records and reports
+    /// how many, through the trait rather than into a field only it can see.
+    ///
+    /// It gets its own test because it is the one source the shared-file test
+    /// does not reach — that goes through the *region* sources — and because
+    /// the reporting half is exactly what was missing here: the counter was
+    /// incremented into a field the trait never read.
+    #[test]
+    fn the_whole_file_cram_source_skips_and_reports_another_samples_records() {
+        use crate::bam::alignment_input::build_fasta_repository;
+        use crate::pileup::per_sample::cram_files::{
+            ContigSpec, HeaderOverrides, build_cram, build_fasta,
+        };
+        use noodles_sam::alignment::record::data::field::Tag;
+        use noodles_sam::alignment::record_buf::data::field::Value;
+
+        let contigs = vec![ContigSpec {
+            name: "chr1".into(),
+            length: 100,
+        }];
+        let (_fasta_dir, fasta_path) = build_fasta(&contigs).unwrap();
+
+        let tagged = |name: &str, pos: usize, read_group: &str| {
+            let mut record = record_with_seq(name, pos, 60, Flags::empty(), b"AAAAAAAAAA");
+            record.data_mut().insert(
+                Tag::READ_GROUP,
+                Value::String(read_group.as_bytes().to_vec().into()),
+            );
+            record
+        };
+        let records = [
+            tagged("mine-1", 10, "rg1"),
+            tagged("theirs-1", 20, "rg2"),
+            tagged("mine-2", 30, "rg1"),
+            tagged("theirs-2", 40, "rg2"),
+        ];
+
+        let (_cram_dir, cram_path) = build_cram(
+            &fasta_path,
+            &contigs,
+            &HeaderOverrides {
+                read_groups: vec![
+                    ("rg1".to_string(), Some("NA12878".to_string())),
+                    ("rg2".to_string(), Some("HG002".to_string())),
+                ],
+                ..HeaderOverrides::default()
+            },
+            &records,
+        )
+        .unwrap();
+        let repository = build_fasta_repository(&fasta_path).unwrap();
+
+        let file = std::fs::File::open(&cram_path).unwrap();
+        let mut reader = cram::io::Reader::new(file);
+        let header = reader.read_header().unwrap();
+        let mut source = CramRecordSource::new(
+            reader,
+            header,
+            repository,
+            ReadGroupResolution::PerRecord(
+                vec![
+                    ("rg1".into(), RecordOwner::Mine(ReadGroupId(0))),
+                    ("rg2".into(), RecordOwner::OtherSample),
+                ]
+                .into_boxed_slice(),
+            ),
+        );
+
+        let mut buf = NoodlesRawRecord::default();
+        let mut yielded = Vec::new();
+        while source.read_next(&mut buf).unwrap() {
+            yielded.push((
+                String::from_utf8_lossy(buf.record.name().unwrap().as_ref()).into_owned(),
+                buf.read_group,
+            ));
+        }
+
+        assert_eq!(
+            yielded,
+            vec![
+                ("mine-1".to_string(), Some(ReadGroupId(0))),
+                ("mine-2".to_string(), Some(ReadGroupId(0))),
+            ],
+            "only this sample's records are yielded"
+        );
+        assert_eq!(
+            source.other_sample_records(),
+            2,
+            "and the other sample's two are reported through the trait, not \
+             merely counted somewhere"
+        );
+    }
+
     #[test]
     fn read_filter_cram_fixture_matches_hand_counted_drops() {
         use crate::bam::alignment_input::build_fasta_repository;

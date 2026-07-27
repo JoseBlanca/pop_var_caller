@@ -809,7 +809,7 @@ mod tests {
     use crate::bam::index_preflight::preflight_alignment_indexes;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference, header, indexed_bam, indexed_named_bam, matching_contigs, named_bam,
-        read_named_with_length,
+        one_read, read_named_with_length,
     };
 
     /// An indexed BAM whose one read group names `sample`.
@@ -1310,6 +1310,135 @@ mod tests {
         );
     }
 
+    // --- how an open resolves one file's records ---
+
+    /// `resolution_for` is where a file's read groups become this open's view of
+    /// them, and every per-record decision follows from what it returns. It had
+    /// been covered only sideways, through fixtures that happened to be untagged.
+    #[test]
+    fn one_own_read_group_resolves_without_consulting_any_record() {
+        use crate::ng::read::input::test_fixtures::{FixtureReadGroup, header_with_read_groups};
+
+        let (_dir, path) = named_bam(
+            &header_with_read_groups(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[FixtureReadGroup::new("rg1", Some("NA12878"))],
+            ),
+            &one_read(),
+            "only.bam",
+        );
+        let read_groups = build_read_groups(std::slice::from_ref(&path)).expect("valid");
+        let sample = &read_groups.read_groups_per_sample()[0];
+
+        let resolution = resolution_for(&path, sample, &read_groups).expect("resolves");
+
+        assert_eq!(resolution, ReadGroupResolution::Sole(ReadGroupId(0)));
+    }
+
+    /// Several read groups, all this sample's: each record's own tag decides,
+    /// and all of them are ours.
+    #[test]
+    fn several_own_read_groups_resolve_per_record_and_all_are_mine() {
+        use crate::ng::read::input::test_fixtures::{FixtureReadGroup, header_with_read_groups};
+
+        let (_dir, path) = named_bam(
+            &header_with_read_groups(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[
+                    FixtureReadGroup::new("rg1", Some("NA12878")),
+                    FixtureReadGroup::new("rg2", Some("NA12878")),
+                ],
+            ),
+            &one_read(),
+            "two.bam",
+        );
+        let read_groups = build_read_groups(std::slice::from_ref(&path)).expect("valid");
+        let sample = &read_groups.read_groups_per_sample()[0];
+
+        let resolution = resolution_for(&path, sample, &read_groups).expect("resolves");
+
+        assert_eq!(
+            resolution,
+            ReadGroupResolution::PerRecord(
+                vec![
+                    ("rg1".into(), RecordOwner::Mine(ReadGroupId(0))),
+                    ("rg2".into(), RecordOwner::Mine(ReadGroupId(1))),
+                ]
+                .into_boxed_slice()
+            )
+        );
+    }
+
+    /// A shared file: this open's read groups are `Mine`, the rest are not — and
+    /// getting that backwards would yield another sample's reads as ours,
+    /// carrying their read group.
+    #[test]
+    fn a_shared_file_resolves_only_this_samples_read_groups_as_mine() {
+        use crate::ng::read::input::test_fixtures::{FixtureReadGroup, header_with_read_groups};
+
+        let (_dir, path) = named_bam(
+            &header_with_read_groups(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[
+                    FixtureReadGroup::new("rg1", Some("NA12878")),
+                    FixtureReadGroup::new("rg2", Some("HG002")),
+                ],
+            ),
+            &one_read(),
+            "shared-resolution.bam",
+        );
+        let read_groups = build_read_groups(std::slice::from_ref(&path)).expect("valid");
+
+        for (index, expected) in [
+            (
+                0,
+                [RecordOwner::Mine(ReadGroupId(0)), RecordOwner::OtherSample],
+            ),
+            (
+                1,
+                [RecordOwner::OtherSample, RecordOwner::Mine(ReadGroupId(1))],
+            ),
+        ] {
+            let sample = &read_groups.read_groups_per_sample()[index];
+            let resolution = resolution_for(&path, sample, &read_groups).expect("resolves");
+
+            let ReadGroupResolution::PerRecord(entries) = resolution else {
+                panic!("a shared file cannot resolve to a single read group");
+            };
+            let owners: Vec<RecordOwner> = entries.iter().map(|(_, owner)| *owner).collect();
+            assert_eq!(owners, expected, "sample {}", sample.sample);
+        }
+    }
+
+    /// A file the run's table never saw. Unreachable through the ordinary path —
+    /// a file with no `@RG` fails when the table is built — but a caller
+    /// assembling an open by hand gets told, rather than a resolution that
+    /// rejects every record it later reads.
+    #[test]
+    fn a_file_absent_from_the_table_is_refused_at_open() {
+        use crate::ng::read::input::test_fixtures::{FixtureReadGroup, header_with_read_groups};
+
+        let (_dir, known) = named_bam(
+            &header_with_read_groups(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[FixtureReadGroup::new("rg1", Some("NA12878"))],
+            ),
+            &one_read(),
+            "known.bam",
+        );
+        let read_groups = build_read_groups(std::slice::from_ref(&known)).expect("valid");
+        let sample = &read_groups.read_groups_per_sample()[0];
+
+        let error = resolution_for(Path::new("/elsewhere/unknown.bam"), sample, &read_groups)
+            .expect_err("the table holds no read group for that file");
+
+        assert!(matches!(error, IngestError::NoReadGroupsForFile { .. }));
+    }
+
     /// **The capability this step adds.** One file, two samples, opened twice:
     /// each open yields only its own reads, the foreign ones are counted apart
     /// from every drop, and the two opens' reads reunited are the file.
@@ -1390,6 +1519,57 @@ mod tests {
             (first_dropped, second_dropped),
             (0, 0),
             "and counted none of them as a quality drop"
+        );
+    }
+
+    /// The same shared-file behaviour over a **CRAM**, which reaches the other
+    /// region source — and with it the delegating enum's CRAM arm, whose
+    /// forwarding of the skipped-record count was added blind.
+    #[test]
+    fn a_shared_cram_serves_each_open_only_its_own_reads() {
+        use crate::ng::read::input::test_fixtures::{
+            indexed_cram_declaring, read_named_with_length_in_read_group,
+        };
+        use crate::ng::reference_info::{ReferenceSource, read_reference_info};
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram_declaring(
+            &[
+                read_named_with_length_in_read_group("a", 0, 1, 30, "rg1"),
+                read_named_with_length_in_read_group("b", 0, 20, 30, "rg2"),
+                read_named_with_length_in_read_group("c", 0, 40, 30, "rg1"),
+            ],
+            &[("rg1", Some("NA12878")), ("rg2", Some("HG002"))],
+        );
+        let reference = read_reference_info(ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        })
+        .expect("read reference");
+
+        let read_groups = build_read_groups(std::slice::from_ref(&cram_path)).expect("two samples");
+        assert_eq!(read_groups.read_groups_per_sample().len(), 2);
+
+        let sample = &read_groups.read_groups_per_sample()[0];
+        let reads = SampleReads::open(
+            sample,
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("a shared CRAM opens for one of its samples");
+
+        let names: Vec<String> = reads
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query")
+            .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
+            .collect();
+
+        assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(
+            reads.counts()[0].other_sample,
+            1,
+            "the other sample's single read is reported through the enum's CRAM arm"
         );
     }
 
