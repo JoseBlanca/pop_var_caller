@@ -121,7 +121,7 @@ design specifies; the by-sample grouping; the collision error naming both full p
 
 ### Milestone B — open from read groups
 
-**B1. Switch `SampleReads` and `AlignmentFile` to the table.**  ☐
+**B1. Switch `SampleReads` and `AlignmentFile` to the table.**  ✅
 `SampleReads::open` takes `(&SampleReadGroups, &ReadGroups)`, enforces one sample per open over the
 read groups it was handed, builds a `ReadGroupResolution` per file and passes it to
 `AlignmentFile::open_as`, which stores it. **Temporary guard, removed in C2:** a file whose header
@@ -135,7 +135,7 @@ its hand-rolled grouping ([`:175`](../../../../examples/ng_ssr_cohort_stutter.rs
 pre-pass replaces it. Every tool asserts exactly one sample and errors otherwise, which is what it
 did before. *Depends:* A6. *Source:* arch §3.2; spec §4, §5.
 
-**B2. Delete the per-file sample machinery.**  ☐
+**B2. Delete the per-file sample machinery.**  ✅
 `sample_names()`, `SampleNames`, `AlignmentFile::sample_name()`, `agreed_sample_name`, and the
 `MultipleSampleNames` / `MissingSampleName` variants — all dead after B1. A pure deletion, so it
 lands separately and the diff is readable. *Depends:* B1. *Source:* arch §5 (the four removal rows).
