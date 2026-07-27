@@ -16,11 +16,14 @@
 //! Design: `doc/devel/ng/spec/read_groups.md` (what and why),
 //! `doc/devel/ng/arch/read_groups.md` (types and interfaces).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use noodles_sam as sam;
 
+use crate::ng::read::input::AlignmentFileError;
+use crate::ng::read::input::open_bam::read_header;
 use crate::ng::types::ReadGroupId;
 
 // ---------------------------------------------------------------------
@@ -120,18 +123,6 @@ struct DeclaredReadGroup {
 /// Several read groups are normal, and so are several *samples* among them: a
 /// file naming two samples is no longer an error here. Keeping one sample per
 /// open is a check on the open, not on the file (spec §4, §8).
-// Only this module's tests call it until `build_read_groups` does. Two things
-// keep the attribute from becoming a licence: `expect` (not `allow`) turns into
-// an error the moment the function *is* called from the library, and `not(test)`
-// scopes it to the build where it really is uncalled. Silencing it here also
-// makes it a live root, so `DeclaredReadGroup` and `owned_str` need nothing.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called only by this module's tests until build_read_groups consumes it"
-    )
-)]
 fn declared_read_groups(
     header: &sam::Header,
     path: &Path,
@@ -197,15 +188,6 @@ const SYNTHESIZED_NAME_SEPARATOR: char = ':';
 ///   falling back to `(library, id)` would split them. Falling back coarse is
 ///   safe here only because `id` survives on the record, so anything wanting the
 ///   finer split can still take it.
-// Uncalled from the library until `build_read_groups` calls it; scoped and
-// self-removing for the reason `declared_read_groups` gives above.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "called only by this module's tests until build_read_groups consumes it"
-    )
-)]
 fn into_read_group(declared: DeclaredReadGroup, file: Arc<Path>) -> ReadGroup {
     let library = match declared.library {
         Some(value) => NameWithOrigin {
@@ -278,6 +260,98 @@ fn file_name_without_extensions(file: &Path) -> String {
 /// character into a report.
 fn owned_str(raw: &[u8]) -> Box<str> {
     String::from_utf8_lossy(raw).into_owned().into_boxed_str()
+}
+
+// ---------------------------------------------------------------------
+// Building the run's table
+// ---------------------------------------------------------------------
+
+/// Read every input file's header — **headers only** — and build the run's
+/// read-group table.
+///
+/// This is not a preliminary step bolted on for an edge case: it is what decides
+/// what the samples *are*. Nothing can build a per-sample file list without
+/// reading the headers first, and doing it once here is also what keeps the
+/// identifiers unique — a file opened later for two different samples must not
+/// mint its read groups twice (spec §4, §5).
+///
+/// **Deterministic by construction.** Identifiers follow `paths` order and then
+/// header order within a file, so the same input list always yields the same
+/// identifiers. Nothing here depends on how fast a file was read, which is what
+/// lets an identifier reach a report or an output file.
+///
+/// Opens no index and reads no record. An empty `paths` yields an empty table;
+/// a file with no `@RG` is an error, not an empty contribution.
+pub fn build_read_groups(paths: &[PathBuf]) -> Result<ReadGroups, ReadGroupError> {
+    let mut read_groups: Vec<ReadGroup> = Vec::new();
+
+    for path in paths {
+        let header = read_header(path).map_err(|source| ReadGroupError::HeaderRead { source })?;
+        let file: Arc<Path> = Arc::from(path.as_path());
+        for declared in declared_read_groups(&header, path)? {
+            read_groups.push(into_read_group(declared, Arc::clone(&file)));
+        }
+    }
+
+    reject_colliding_synthesized_libraries(&read_groups)?;
+    let per_sample = group_by_sample(&read_groups);
+
+    Ok(ReadGroups {
+        read_groups,
+        per_sample,
+    })
+}
+
+/// Fail if two read groups that had no `LB` ended up with the same library name.
+///
+/// **Only synthesized names are checked.** A *declared* library repeating is
+/// ordinary and meaningful — that is one preparation sequenced across several
+/// lanes or files, which is exactly the grouping we want to keep. Only names we
+/// invented can collide by accident, and when they do the two read groups have
+/// become indistinguishable, which no downstream step could undo (spec §6).
+fn reject_colliding_synthesized_libraries(read_groups: &[ReadGroup]) -> Result<(), ReadGroupError> {
+    let mut seen: HashMap<&str, &ReadGroup> = HashMap::new();
+
+    for group in read_groups {
+        if group.library.origin != NameOrigin::Synthesized {
+            continue;
+        }
+        if let Some(first) = seen.insert(&group.library.value, group) {
+            return Err(ReadGroupError::DuplicateSynthesizedLibrary {
+                library: group.library.value.to_string(),
+                paths: (first.file.to_path_buf(), group.file.to_path_buf()),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// The same read groups, grouped by the sample they name, samples in first-seen
+/// order and each sample's read groups in identifier order.
+///
+/// A linear scan over the samples found so far rather than a map, because that
+/// *is* first-seen order — with a map the order would have to be reconstructed,
+/// and the number of samples in a run is small enough that the scan costs
+/// nothing.
+fn group_by_sample(read_groups: &[ReadGroup]) -> Vec<SampleReadGroups> {
+    let mut per_sample: Vec<SampleReadGroups> = Vec::new();
+
+    for (index, group) in read_groups.iter().enumerate() {
+        let id = ReadGroupId(u32::try_from(index).expect("a read-group table fits in u32"));
+        match per_sample
+            .iter_mut()
+            .find(|entry| entry.sample == group.sample)
+        {
+            Some(entry) => entry.read_groups.push(id),
+            None => per_sample.push(SampleReadGroups {
+                sample: group.sample.clone(),
+                read_groups: vec![id],
+            }),
+        }
+    }
+
+    per_sample
 }
 
 // ---------------------------------------------------------------------
@@ -428,6 +502,18 @@ pub enum ReadGroupError {
     DuplicateSynthesizedLibrary {
         library: String,
         paths: (PathBuf, PathBuf),
+    },
+
+    /// A file could not be opened, or its header could not be parsed.
+    ///
+    /// Wrapped rather than flattened, and the message stays short because the
+    /// source already names the file and says how it failed. It exists so that
+    /// "this input is unreadable" and "this input's read groups are wrong" stay
+    /// distinguishable: they are different problems with different fixes.
+    #[error("reading a file's read groups failed")]
+    HeaderRead {
+        #[source]
+        source: AlignmentFileError,
     },
 }
 
@@ -645,5 +731,221 @@ mod tests {
             declared.iter().map(|rg| &*rg.sample).collect::<Vec<_>>(),
             vec!["NA12878", "HG002"]
         );
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use std::error::Error as _;
+
+    use super::*;
+    use crate::ng::read::input::test_fixtures::{
+        FixtureReadGroup, header, header_with_read_groups, matching_contigs, named_bam, one_read,
+    };
+    use tempfile::TempDir;
+
+    /// A BAM on disk whose header declares `read_groups`, under a chosen file
+    /// name. The `TempDir` must be kept alive: dropping it removes the file.
+    fn file_declaring(read_groups: &[FixtureReadGroup<'_>], file_name: &str) -> (TempDir, PathBuf) {
+        let header = header_with_read_groups(Some("coordinate"), &matching_contigs(), read_groups);
+        named_bam(&header, &one_read(), file_name)
+    }
+
+    #[test]
+    fn identifiers_follow_input_file_order_then_header_order() {
+        let (_first_dir, first) = file_declaring(
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878")),
+                FixtureReadGroup::new("rg2", Some("NA12878")),
+            ],
+            "first.bam",
+        );
+        let (_second_dir, second) =
+            file_declaring(&[FixtureReadGroup::new("rg1", Some("HG002"))], "second.bam");
+
+        let table = build_read_groups(&[first, second]).expect("both headers are valid");
+
+        assert_eq!(table.len(), 3);
+        let named: Vec<(u32, &str, &str)> = table
+            .iter()
+            .map(|(id, group)| (id.get(), &*group.id, &*group.sample))
+            .collect();
+        assert_eq!(
+            named,
+            vec![
+                (0, "rg1", "NA12878"),
+                (1, "rg2", "NA12878"),
+                (2, "rg1", "HG002"),
+            ],
+            "file order first, then header order within a file"
+        );
+    }
+
+    #[test]
+    fn read_groups_are_grouped_by_the_sample_they_name() {
+        let (_first_dir, first) = file_declaring(
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878")),
+                FixtureReadGroup::new("rg2", Some("HG002")),
+            ],
+            "first.bam",
+        );
+        let (_second_dir, second) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878"))],
+            "second.bam",
+        );
+
+        let table = build_read_groups(&[first, second]).expect("both headers are valid");
+
+        let grouped: Vec<(&str, Vec<u32>)> = table
+            .read_groups_per_sample()
+            .iter()
+            .map(|entry| {
+                (
+                    &*entry.sample,
+                    entry.read_groups.iter().map(|id| id.get()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            grouped,
+            vec![("NA12878", vec![0, 2]), ("HG002", vec![1])],
+            "samples in first-seen order; one sample's read groups may span files"
+        );
+    }
+
+    /// The residual collision the file name cannot prevent: two inputs with the
+    /// same name in different directories, whose read groups agree on sample and
+    /// `@RG ID` and declare no library. They would become indistinguishable, so
+    /// this is fatal rather than papered over.
+    #[test]
+    fn two_files_with_one_name_collide_on_a_synthesized_library() {
+        let (_first_dir, first) =
+            file_declaring(&[FixtureReadGroup::new("rg1", Some("NA12878"))], "run.bam");
+        let (_second_dir, second) =
+            file_declaring(&[FixtureReadGroup::new("rg1", Some("NA12878"))], "run.bam");
+
+        let error = build_read_groups(&[first.clone(), second.clone()])
+            .expect_err("the two synthesized libraries collide");
+
+        match &error {
+            ReadGroupError::DuplicateSynthesizedLibrary { library, paths } => {
+                assert_eq!(library, "NA12878:rg1:run");
+                assert_eq!(paths, &(first, second), "both paths, in input order");
+            }
+            other => panic!("expected DuplicateSynthesizedLibrary, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("rename one input"),
+            "the message says what to do: {error}"
+        );
+    }
+
+    /// A *declared* library repeating is the thing we want to keep, not a
+    /// collision: one preparation sequenced into two files.
+    #[test]
+    fn a_declared_library_may_repeat_across_files() {
+        let (_first_dir, first) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A")],
+            "run.bam",
+        );
+        let (_second_dir, second) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A")],
+            "run.bam",
+        );
+
+        let table = build_read_groups(&[first, second]).expect("a shared declared library is fine");
+
+        assert_eq!(table.len(), 2);
+        assert_eq!(
+            table.get(ReadGroupId(0)).library.value,
+            table.get(ReadGroupId(1)).library.value
+        );
+    }
+
+    /// Identifiers are positions in the input list, so reordering the inputs
+    /// reorders them — deliberately. What must not change is *which* read groups
+    /// the table holds.
+    #[test]
+    fn reordering_the_inputs_reorders_the_identifiers_but_not_the_set() {
+        let (_first_dir, first) = file_declaring(
+            &[FixtureReadGroup::new("rg1", Some("NA12878"))],
+            "first.bam",
+        );
+        let (_second_dir, second) =
+            file_declaring(&[FixtureReadGroup::new("rg1", Some("HG002"))], "second.bam");
+
+        let forward = build_read_groups(&[first.clone(), second.clone()]).expect("valid");
+        let reversed = build_read_groups(&[second, first]).expect("valid");
+
+        assert_eq!(&*forward.get(ReadGroupId(0)).sample, "NA12878");
+        assert_eq!(&*reversed.get(ReadGroupId(0)).sample, "HG002");
+
+        let samples = |table: &ReadGroups| {
+            let mut names: Vec<String> = table
+                .iter()
+                .map(|(_, group)| group.sample.to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            samples(&forward),
+            samples(&reversed),
+            "the same read groups"
+        );
+    }
+
+    /// Building the table twice over the same list gives the same table — the
+    /// property anything printing an identifier depends on.
+    #[test]
+    fn the_same_input_list_yields_the_same_table() {
+        let (_dir, path) = file_declaring(
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A"),
+                FixtureReadGroup::new("rg2", Some("HG002")),
+            ],
+            "run.bam",
+        );
+
+        let once = build_read_groups(std::slice::from_ref(&path)).expect("valid");
+        let twice = build_read_groups(std::slice::from_ref(&path)).expect("valid");
+
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_header_that_cannot_be_read_is_its_own_failure() {
+        let missing = PathBuf::from("/nonexistent/does-not-exist.bam");
+
+        let error = build_read_groups(&[missing]).expect_err("the file is not there");
+
+        assert!(matches!(error, ReadGroupError::HeaderRead { .. }));
+        assert!(
+            error.source().is_some(),
+            "the underlying failure names the file"
+        );
+    }
+
+    #[test]
+    fn an_empty_input_list_yields_an_empty_table() {
+        let table = build_read_groups(&[]).expect("nothing to read is not a failure");
+
+        assert!(table.is_empty());
+        assert!(table.read_groups_per_sample().is_empty());
+    }
+
+    /// The per-file failures reach the caller unchanged: a file with no `@RG`
+    /// stops the whole pre-pass, because there is no partial table worth having.
+    #[test]
+    fn a_file_with_no_read_groups_stops_the_pre_pass() {
+        let (_good_dir, good) =
+            file_declaring(&[FixtureReadGroup::new("rg1", Some("NA12878"))], "good.bam");
+        let empty_header = header(Some("coordinate"), &matching_contigs(), &[]);
+        let (_bad_dir, bad) = named_bam(&empty_header, &one_read(), "bad.bam");
+
+        let error = build_read_groups(&[good, bad]).expect_err("the second file has no @RG");
+
+        assert!(matches!(error, ReadGroupError::NoReadGroups { .. }));
     }
 }

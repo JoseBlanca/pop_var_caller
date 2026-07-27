@@ -232,8 +232,21 @@ pub(crate) fn indexed_bam(header: &sam::Header, records: &[RecordBuf]) -> (TempD
 
 /// The same BAM with **no** index beside it — for the gate's index check.
 pub(crate) fn unindexed_bam(header: &sam::Header, records: &[RecordBuf]) -> (TempDir, PathBuf) {
+    named_bam(header, records, "sample.bam")
+}
+
+/// An unindexed BAM written under a chosen file name.
+///
+/// The name is a test input in its own right: a synthesized library name is
+/// built from the file's name, so two files that share one — the same name in
+/// different directories — are what makes those names collide.
+pub(crate) fn named_bam(
+    header: &sam::Header,
+    records: &[RecordBuf],
+    file_name: &str,
+) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().join("sample.bam");
+    let path = dir.path().join(file_name);
 
     let mut writer = bam::io::Writer::new(File::create(&path).expect("create bam"));
     writer.write_header(header).expect("write header");

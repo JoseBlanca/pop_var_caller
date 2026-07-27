@@ -700,7 +700,10 @@ pub(crate) fn group_crai_by_contig(
 ///
 /// The reader is opened and dropped here: the gate needs the header, and the
 /// readers a query will use come from the pool (step C1).
-fn read_header(path: &Path) -> Result<sam::Header, AlignmentFileError> {
+///
+/// `pub(crate)` for the read-group pre-pass, which reads every input's header —
+/// and only its header — before any file is opened for reading.
+pub(crate) fn read_header(path: &Path) -> Result<sam::Header, AlignmentFileError> {
     let open_error = |source: std::io::Error| AlignmentFileError::Open {
         path: path.to_path_buf(),
         source,
