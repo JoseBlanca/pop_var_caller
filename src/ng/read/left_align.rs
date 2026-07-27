@@ -16,8 +16,9 @@
 //! Design: `doc/devel/ng/spec/read_preparation.md`, `doc/devel/ng/arch/read_preparation.md`.
 
 use super::{ReadPrepError, ReadPreparer};
-use crate::bam::alignment_input::{MappedRead, cigar_ref_span};
+use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::alignment::{Alignment, AlignmentNormalizer, DefaultAlignmentNormalizer};
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::ref_seq::RefSeq;
 use crate::ng::types::ContigId;
 use crate::pileup::per_sample::baq_engine::prepare_passthrough;
@@ -128,7 +129,7 @@ impl<R: RefSeq, N: AlignmentNormalizer> LeftAlignPreparer<R, N> {
     /// leading deletion rather than moving `alignment_start` (spec §5).
     fn canonicalize(
         &self,
-        read: &mut MappedRead,
+        read: &mut AlignedRead,
         scratch: &mut LeftAlignScratch,
     ) -> Result<(), ReadPrepError> {
         let reference_span = u64::from(cigar_ref_span(&read.cigar));
@@ -193,7 +194,7 @@ impl<R: RefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N>
     /// left-alignment of the minority of reads that carry a gap (spec §5).
     fn prepare_read(
         &self,
-        mut read: MappedRead,
+        mut read: AlignedRead,
         scratch: &mut LeftAlignScratch,
     ) -> Result<Option<PreparedRead>, ReadPrepError> {
         if cigar_has_indel(&read.cigar) {
@@ -210,12 +211,12 @@ impl<R: RefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N>
 /// `bq_baq` uncapped — is production's `prepare_passthrough`, its `--no-baq` path, called rather
 /// than re-derived. That is what makes the parity fixture exact on every field this step does not
 /// itself compute (spec §9, §11).
-fn into_prepared(read: MappedRead) -> PreparedRead {
+fn into_prepared(read: AlignedRead) -> PreparedRead {
     // `ref_id` indexes the `u32` contig table, so a value that did not fit would be a corrupt
     // record rather than a legal one — the same conversion, with the same reasoning, that step 1
     // and production's own passthrough arm make.
     let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
-    prepare_passthrough(read, chrom_id)
+    prepare_passthrough(read.into_mapped_read(), chrom_id)
 }
 
 #[cfg(test)]
@@ -223,6 +224,7 @@ mod tests {
     use super::*;
     use crate::ng::alignment::left_align_repeated::RepeatedLeftAligner;
     use crate::ng::ref_seq::{InMemoryRefSeq, RefSeqError};
+    use crate::ng::types::ReadGroupId;
 
     fn reference() -> InMemoryRefSeq {
         InMemoryRefSeq::from_contigs(vec![b"ACGTACGTAC".to_vec()])
@@ -261,8 +263,8 @@ mod tests {
     }
 
     /// A read at 1-based `pos` with `cigar` over `seq`.
-    fn read_with(pos: u64, cigar: Vec<CigarOp>, seq: &[u8]) -> MappedRead {
-        MappedRead {
+    fn read_with(pos: u64, cigar: Vec<CigarOp>, seq: &[u8]) -> AlignedRead {
+        AlignedRead {
             qname: b"read1".to_vec(),
             flag: 0,
             ref_id: 0,
@@ -274,7 +276,7 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            source_file_index: 0,
+            read_group: ReadGroupId(0),
         }
     }
 

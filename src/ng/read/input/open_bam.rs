@@ -31,14 +31,16 @@ use noodles_cram as cram;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 
-use crate::bam::alignment_input::{MappedRead, build_fasta_repository};
+use crate::bam::alignment_input::build_fasta_repository;
 use crate::bam::index_preflight::{
     AlignmentFileKind, AlignmentIndex, load_alignment_index, preflight_alignment_indexes,
 };
 use crate::fasta::{ContigEntry, ContigList};
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{
-    NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterCounts,
+    NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadGroupCounts,
 };
+use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::GenomeRegion;
@@ -80,8 +82,10 @@ pub struct AlignmentFile {
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
     index: AlignmentIndex,
-    /// From `@RG SM`. The k-file agreement check belongs to `SampleReads`.
-    sample_name: String,
+    /// How this file's records are assigned to read groups. Settled at open and
+    /// never recomputed; the record sources consult it per record only when it
+    /// says they must.
+    resolution: ReadGroupResolution,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
     /// reference's. `None` where the file carries no usable `M5`.
@@ -120,9 +124,10 @@ pub struct AlignmentFile {
     /// need a lock on the hot path or an atomic per counter, so each stream
     /// keeps its own tally and folds it in here on `Drop` — one lock per query,
     /// beside the one the pool already takes.
-    counts: Mutex<ReadFilterCounts>,
-    /// Stamped onto every `MappedRead` this file yields.
-    source_file_index: usize,
+    /// One tally per read group met, in first-seen order — **never summed
+    /// across them**: a drop rate is a read group's property, and a file that
+    /// declares several would otherwise average one bad run away.
+    counts: Mutex<Vec<ReadGroupCounts>>,
 }
 
 /// One idle reader positioned past the header, **plus the scratch its next
@@ -213,7 +218,7 @@ pub struct RegionReads<'a, R: RawRefSeq> {
 }
 
 impl<R: RawRefSeq> Iterator for RegionReads<'_, R> {
-    type Item = Result<MappedRead, AlignmentFileError>;
+    type Item = Result<AlignedRead, AlignmentFileError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.stream.as_mut()?.next()
@@ -270,19 +275,7 @@ impl AlignmentFile {
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
-    ) -> Result<Self, AlignmentFileError> {
-        Self::open_as(path, reference, filter_config, build_index_if_missing, 0)
-    }
-
-    /// `open`, with the file's index within its sample — the value stamped onto
-    /// every `MappedRead` as `source_file_index`. `SampleReads` (E1) passes the
-    /// position in its list; a lone file is 0.
-    pub fn open_as(
-        path: &Path,
-        reference: &ReferenceInfo,
-        filter_config: ReadFilterConfig,
-        build_index_if_missing: bool,
-        source_file_index: usize,
+        resolution: ReadGroupResolution,
     ) -> Result<Self, AlignmentFileError> {
         let header = read_header(path)?;
 
@@ -341,29 +334,13 @@ impl AlignmentFile {
             source,
         })?;
 
-        // 4. Exactly one @RG SM.
-        let sample_name = match sample_names(&header) {
-            SampleNames::One(name) => name,
-            SampleNames::Several(names) => {
-                return Err(AlignmentFileError::MultipleSampleNames {
-                    path: path.to_path_buf(),
-                    names,
-                });
-            }
-            SampleNames::MissingTag { read_group_id } => {
-                return Err(AlignmentFileError::MissingSampleName {
-                    path: path.to_path_buf(),
-                    read_group: Some(read_group_id),
-                });
-            }
-            SampleNames::NoReadGroups => {
-                return Err(AlignmentFileError::MissingSampleName {
-                    path: path.to_path_buf(),
-                    read_group: None,
-                });
-            }
-        };
-
+        // 4. The `@RG` records were read, validated and identified before any
+        //    file was opened, by the read-group pre-pass — so there is no check
+        //    left here. What used to be checked at this point (exactly one
+        //    `@RG SM`) has moved twice over: a file may now declare several read
+        //    groups, and naming one sample is a property of the *open*, enforced
+        //    by `SampleReads` (spec §4, §8).
+        //
         // 5. A CRAM needs the reference *bases* to decode at all, so the
         //    repository is built here — once — and a reference that cannot
         //    supply one is a hard error now rather than a mystery at the first
@@ -398,7 +375,7 @@ impl AlignmentFile {
             path: Arc::from(path),
             header,
             index,
-            sample_name,
+            resolution,
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -408,14 +385,13 @@ impl AlignmentFile {
             readers_opened: AtomicUsize::new(0),
             crai_by_contig,
             reference_repository,
-            counts: Mutex::new(ReadFilterCounts::default()),
-            source_file_index,
+            counts: Mutex::new(Vec::new()),
         })
     }
 
-    /// The single sample this file's `@RG` records name.
-    pub fn sample_name(&self) -> &str {
-        &self.sample_name
+    /// How this file's records are assigned to read groups (see the field).
+    pub fn read_group_resolution(&self) -> &ReadGroupResolution {
+        &self.resolution
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -486,7 +462,7 @@ impl AlignmentFile {
 
         let source = match (reader, plan) {
             (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
-                BamRegionSource::new(reader, &self.header, plan, self.source_file_index),
+                BamRegionSource::new(reader, &self.header, plan, &self.resolution),
             ),
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
                 RegionSource::Cram(CramRegionSource::new(
@@ -496,7 +472,7 @@ impl AlignmentFile {
                         .clone()
                         .expect("open builds a repository for every CRAM"),
                     plan,
-                    self.source_file_index,
+                    &self.resolution,
                     container,
                 ))
             }
@@ -525,7 +501,7 @@ impl AlignmentFile {
     /// A stream that is never dropped — leaked, or held for the process
     /// lifetime — never contributes at all, and takes its pooled reader with
     /// it. That is inherent to returning things on `Drop`.
-    pub fn counts(&self) -> ReadFilterCounts {
+    pub fn counts(&self) -> Vec<ReadGroupCounts> {
         self.counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -564,13 +540,25 @@ impl AlignmentFile {
         })
     }
 
-    /// Fold a finished stream's tally into the file's.
-    fn add_counts(&self, counts: &ReadFilterCounts) {
+    /// Fold a finished stream's tallies into the file's, read group by read
+    /// group.
+    ///
+    /// A read group met for the first time is appended, so the file's order is
+    /// the order its read groups were first seen across every query — stable for
+    /// a given file, and not something a caller should read anything into beyond
+    /// "these are the groups this file yielded".
+    fn add_counts(&self, counts: &[ReadGroupCounts]) {
         let mut total = self
             .counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        total.add(counts);
+
+        for (read_group, stream) in counts {
+            match total.iter_mut().find(|(id, _)| id == read_group) {
+                Some((_, running)) => running.add(stream),
+                None => total.push((*read_group, stream.clone())),
+            }
+        }
     }
 
     fn return_handle(&self, handle: ReaderHandle) {
@@ -652,7 +640,7 @@ impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignmentFile")
             .field("path", &self.path)
-            .field("sample_name", &self.sample_name)
+            .field("read_groups", &self.resolution)
             .field("contigs", &self.sq_md5s.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
@@ -700,7 +688,10 @@ pub(crate) fn group_crai_by_contig(
 ///
 /// The reader is opened and dropped here: the gate needs the header, and the
 /// readers a query will use come from the pool (step C1).
-fn read_header(path: &Path) -> Result<sam::Header, AlignmentFileError> {
+///
+/// `pub(crate)` for the read-group pre-pass, which reads every input's header —
+/// and only its header — before any file is opened for reading.
+pub(crate) fn read_header(path: &Path) -> Result<sam::Header, AlignmentFileError> {
     let open_error = |source: std::io::Error| AlignmentFileError::Open {
         path: path.to_path_buf(),
         source,
@@ -824,67 +815,12 @@ fn hex_nibble(character: u8) -> Option<u8> {
     }
 }
 
-/// What the `@RG` records say the file's sample is.
-///
-/// The gate requires **exactly one** (spec §3.1, check 4), so each way of
-/// failing that is a separate variant carrying the *facts* — never a rendered
-/// message. Phrasing belongs to the caller's error type, which is also the only
-/// layer that knows the file's path; and cross-file agreement is a different
-/// check again, one layer further up, which needs the name rather than an
-/// error.
-pub(crate) enum SampleNames {
-    /// Every `@RG` carries an `SM`, and they all agree.
-    One(String),
-    /// Two or more distinct `SM` values, in first-seen order.
-    Several(Vec<String>),
-    /// An `@RG` record carries no `SM` tag.
-    MissingTag { read_group_id: String },
-    /// The file has no `@RG` records at all.
-    NoReadGroups,
-}
-
-/// Collect the distinct `@RG SM` values, in first-seen order.
-///
-/// First-seen rather than sorted, so a message lists the names the way the file
-/// does and a reader can find them.
-///
-/// **The first fault in header order is the one reported**, matching
-/// production: a file that both names two samples and has an `@RG` with no `SM`
-/// stops at whichever comes first. Both are fatal at open and both are fixed by
-/// correcting the header, so ranking them would add a rule to explain without
-/// changing what the user does about it.
-pub(crate) fn sample_names(header: &sam::Header) -> SampleNames {
-    use sam::header::record::value::map::read_group::tag::SAMPLE;
-
-    let mut distinct: Vec<String> = Vec::new();
-
-    for (read_group_id, read_group) in header.read_groups() {
-        let Some(raw) = read_group.other_fields().get(&SAMPLE) else {
-            return SampleNames::MissingTag {
-                read_group_id: String::from_utf8_lossy(read_group_id.as_ref()).into_owned(),
-            };
-        };
-        let sample = String::from_utf8_lossy(raw.as_ref()).into_owned();
-        if !distinct.contains(&sample) {
-            distinct.push(sample);
-        }
-        if distinct.len() > 1 {
-            return SampleNames::Several(distinct);
-        }
-    }
-
-    match distinct.into_iter().next() {
-        Some(name) => SampleNames::One(name),
-        None => SampleNames::NoReadGroups,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_reference, header, indexed_bam, matching_contigs,
-        one_read, read_named, unindexed_bam,
+        FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference, header, indexed_bam,
+        matching_contigs, one_read, only_tally, read_named, unindexed_bam,
     };
 
     // --- @HD SO ---
@@ -1020,89 +956,6 @@ mod tests {
                 .to_string()
                 .contains("@SQ 'chr1' has a malformed M5 tag"),
             "{error}"
-        );
-    }
-
-    // --- @RG SM ---
-
-    #[test]
-    fn one_sample_name_across_several_read_groups_is_one_name() {
-        let names = sample_names(&header(
-            Some("coordinate"),
-            &[],
-            &[("rg1", Some("NA12878")), ("rg2", Some("NA12878"))],
-        ));
-        assert!(matches!(names, SampleNames::One(name) if name == "NA12878"));
-    }
-
-    /// The single-file half of the sample check: two `@RG` records naming
-    /// different samples is a file that cannot say whose reads it holds.
-    #[test]
-    fn two_distinct_sample_names_are_reported_in_first_seen_order() {
-        let names = sample_names(&header(
-            Some("coordinate"),
-            &[],
-            &[
-                ("rg1", Some("NA12892")),
-                ("rg2", Some("NA12878")),
-                ("rg3", Some("NA12892")),
-            ],
-        ));
-        match names {
-            SampleNames::Several(names) => assert_eq!(
-                names,
-                vec!["NA12892", "NA12878"],
-                "distinct, de-duplicated, and in the order the file lists them"
-            ),
-            _ => panic!("expected two distinct names"),
-        }
-    }
-
-    #[test]
-    fn a_file_with_no_read_groups_names_no_sample() {
-        let names = sample_names(&header(Some("coordinate"), &[("chr1", 100, None)], &[]));
-        assert!(matches!(names, SampleNames::NoReadGroups));
-    }
-
-    #[test]
-    fn a_read_group_without_an_sm_tag_is_reported_by_id() {
-        let names = sample_names(&header(
-            Some("coordinate"),
-            &[],
-            &[("rg1", Some("NA12878")), ("rg2", None)],
-        ));
-        assert!(matches!(
-            names,
-            SampleNames::MissingTag { read_group_id } if read_group_id == "rg2"
-        ));
-    }
-
-    /// Two faults at once: the **first in header order** is reported, matching
-    /// production. Both orderings are pinned so the rule is the loop's stated
-    /// behaviour rather than an accident of where the checks sit.
-    #[test]
-    fn the_first_sample_fault_in_header_order_is_the_one_reported() {
-        let second_name_comes_first = sample_names(&header(
-            Some("coordinate"),
-            &[],
-            &[("rg1", Some("A")), ("rg2", Some("B")), ("rg3", None)],
-        ));
-        match second_name_comes_first {
-            SampleNames::Several(names) => assert_eq!(names, vec!["A", "B"]),
-            _ => panic!("the second distinct name appears before the untagged group"),
-        }
-
-        let missing_tag_comes_first = sample_names(&header(
-            Some("coordinate"),
-            &[],
-            &[("rg1", Some("A")), ("rg2", None), ("rg3", Some("B"))],
-        ));
-        assert!(
-            matches!(
-                missing_tag_comes_first,
-                SampleNames::MissingTag { read_group_id } if read_group_id == "rg2"
-            ),
-            "the untagged group appears before the second distinct name"
         );
     }
 
@@ -1264,8 +1117,14 @@ mod tests {
             fai: None,
         })
         .expect("read reference");
-        let file = AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
-            .expect("a matching CRAM opens");
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("a matching CRAM opens");
 
         let borrowed = file.borrow_reader().expect("borrow a CRAM reader");
         assert!(
@@ -1349,8 +1208,14 @@ mod tests {
     fn opened_over(records: &[RecordBuf]) -> (TempDir, TempDir, AlignmentFile) {
         let (reference_dir, reference) = fixture_reference(false);
         let (bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), records);
-        let file = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false)
-            .expect("the fixture matches");
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture matches");
         (reference_dir, bam_dir, file)
     }
 
@@ -1377,7 +1242,7 @@ mod tests {
             all_mismatching_read("mismatching", 40),
         ]);
 
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(whole_first_contig(), reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1386,7 +1251,7 @@ mod tests {
         assert_eq!(reads.len(), 1, "only the clean read survives");
         assert_eq!(reads[0].qname, b"clean");
 
-        let counts = file.counts();
+        let counts = only_tally(&file.counts());
         assert_eq!(
             counts.high_mismatch_fraction, 1,
             "the drop is charged to filter #8, so the whole cascade ran"
@@ -1410,14 +1275,14 @@ mod tests {
             start: crate::ng::types::Position(1),
             end: crate::ng::types::Position(35),
         };
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(region, reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
             .expect("no fatal error");
 
         assert_eq!(reads.len(), 1);
-        let counts = file.counts();
+        let counts = only_tally(&file.counts());
         assert_eq!(counts.kept, 1);
         assert_eq!(
             counts.duplicate
@@ -1449,7 +1314,7 @@ mod tests {
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
 
         for _ in 0..25 {
-            let reads: Vec<MappedRead> = file
+            let reads: Vec<AlignedRead> = file
                 .reads_in_region(whole_first_contig(), reference_bases())
                 .expect("query")
                 .collect::<Result<_, _>>()
@@ -1486,8 +1351,14 @@ mod tests {
         }
         let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &records);
 
-        let file = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false)
-            .expect("opens");
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("opens");
 
         // Truncate *after* opening, so the gate and the index are intact and
         // the fault can only appear mid-stream.
@@ -1561,7 +1432,7 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    let reads: Vec<MappedRead> = file
+                    let reads: Vec<AlignedRead> = file
                         .reads_in_region(whole_first_contig(), reference_bases())
                         .expect("query")
                         .collect::<Result<_, _>>()
@@ -1572,7 +1443,7 @@ mod tests {
         });
 
         assert_eq!(
-            file.counts().kept,
+            only_tally(&file.counts()).kept,
             8,
             "every stream folded its tally in — none lost to the race"
         );
@@ -1606,14 +1477,14 @@ mod tests {
             end: crate::ng::types::Position(40),
         };
 
-        let first: Vec<MappedRead> = file
+        let first: Vec<AlignedRead> = file
             .reads_in_region(later, reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
             .expect("the later region streams");
         assert_eq!(first.len(), 1);
 
-        let second: Vec<MappedRead> = file
+        let second: Vec<AlignedRead> = file
             .reads_in_region(earlier, reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1665,7 +1536,7 @@ mod tests {
 
         assert_eq!(file.pooled_readers(), 1, "returned on drop");
         assert_eq!(
-            file.counts().high_mismatch_fraction,
+            only_tally(&file.counts()).high_mismatch_fraction,
             1,
             "the drop seen before abandoning was banked, not lost"
         );
@@ -1724,6 +1595,7 @@ mod tests {
             &bam_reference,
             ReadFilterConfig::default(),
             false,
+            fixture_read_group(),
         )
         .expect("the BAM opens");
 
@@ -1738,6 +1610,7 @@ mod tests {
             &cram_reference,
             ReadFilterConfig::default(),
             false,
+            fixture_read_group(),
         )
         .expect("the CRAM opens");
 
@@ -1788,8 +1661,14 @@ mod tests {
         ))
         .expect("read reference");
 
-        let error = AlignmentFile::open(&cram_path, &fai_only, ReadFilterConfig::default(), false)
-            .expect_err("a CRAM needs the bases");
+        let error = AlignmentFile::open(
+            &cram_path,
+            &fai_only,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect_err("a CRAM needs the bases");
         assert!(matches!(
             error,
             AlignmentFileError::CramNeedsReferenceFasta { .. }
@@ -1806,7 +1685,7 @@ mod tests {
     fn a_bam_against_a_fai_only_reference_opens_normally() {
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
-        assert_eq!(file.sample_name(), "NA12878");
+        assert_eq!(file.read_group_resolution(), &fixture_read_group());
     }
 
     /// **The `.crai` walk, with more than one entry to walk.**
@@ -1831,8 +1710,14 @@ mod tests {
             fai: None,
         })
         .expect("read reference");
-        let file = AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
-            .expect("opens");
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("opens");
 
         let bases = || InMemoryRefSeq::from_contigs(vec![vec![b'A'; CONTIG_LENGTH]]);
         let near_the_start = GenomeRegion {
@@ -1841,7 +1726,7 @@ mod tests {
             end: crate::ng::types::Position(200),
         };
 
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(near_the_start, bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1868,7 +1753,7 @@ mod tests {
             start: crate::ng::types::Position(late_start),
             end: crate::ng::types::Position(late_start + 200),
         };
-        let late: Vec<MappedRead> = file
+        let late: Vec<AlignedRead> = file
             .reads_in_region(near_the_end, bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1918,10 +1803,16 @@ mod tests {
             &bam_header(&contigs),
             &[read_named_with_length("r", 0, 1, 30)],
         );
-        let file = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false)
-            .expect("a wrong M5 is a wildcard against a .fai-only reference");
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("a wrong M5 is a wildcard against a .fai-only reference");
 
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(whole_first_contig(), reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -2001,7 +1892,13 @@ mod tests {
         let (reference_dir, reference) = fixture_reference(reference_has_digests);
         let (bam_dir, path) = indexed_bam(header, &one_read());
         OpenedFixture {
-            file: AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false),
+            file: AlignmentFile::open(
+                &path,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+                fixture_read_group(),
+            ),
             _reference_dir: reference_dir,
             _bam_dir: bam_dir,
         }
@@ -2022,11 +1919,13 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_file_opens_and_exposes_its_sample_and_digests() {
+    fn a_matching_file_opens_and_exposes_its_read_groups_and_digests() {
         let fixture = open_fixture(&matching_contigs(), false);
         let file = fixture.file.as_ref().expect("the file matches");
 
-        assert_eq!(file.sample_name(), "NA12878");
+        // The sample is no longer the file's to know: the read-group table owns
+        // it. What the file carries is how to read its records.
+        assert_eq!(file.read_group_resolution(), &fixture_read_group());
         assert_eq!(
             file.sq_md5s().len(),
             2,
@@ -2251,73 +2150,24 @@ mod tests {
         };
         let (dir, path) = unindexed_bam(header, &records);
 
-        let opened = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false);
+        let opened = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        );
         ((reference_dir, dir), opened)
     }
 
-    /// **T12a — one file naming two samples.** The cross-file half (two files
-    /// naming different samples) is `SampleReads`' T12b.
-    #[test]
-    fn t12a_a_file_whose_read_groups_name_two_samples_is_rejected_at_open() {
-        let contigs = matching_contigs();
-        let two_samples = header(
-            Some("coordinate"),
-            &contigs,
-            &[("rg1", Some("NA12878")), ("rg2", Some("NA12892"))],
-        );
-
-        match open_fixture_with_header(&two_samples, false)
-            .file
-            .expect_err("must not open")
-        {
-            AlignmentFileError::MultipleSampleNames { names, .. } => {
-                assert_eq!(names, vec!["NA12878", "NA12892"])
-            }
-            other => panic!("expected MultipleSampleNames, got {other:?}"),
-        }
-    }
-
-    /// The gate's mapping of `SampleNames::MissingTag`, and the `Some` branch
-    /// of `MissingSampleName`'s message — the only non-trivial formatting in
-    /// the new variant, and until now exercised by nothing.
-    #[test]
-    fn a_read_group_with_no_sm_tag_is_rejected_naming_that_read_group() {
-        let contigs = matching_contigs();
-        let untagged = header(Some("coordinate"), &contigs, &[("rg1", None)]);
-
-        let error = open_fixture_with_header(&untagged, false)
-            .file
-            .expect_err("must not open");
-        match &error {
-            AlignmentFileError::MissingSampleName { read_group, .. } => {
-                assert_eq!(read_group.as_deref(), Some("rg1"))
-            }
-            other => panic!("expected MissingSampleName, got {other:?}"),
-        }
-        assert!(
-            error.to_string().contains("@RG 'rg1' has no SM tag"),
-            "{error}"
-        );
-    }
-
-    /// The other half of "exactly one sample": a file with no `@RG` at all
-    /// cannot say whose reads it holds, so the sample layer would have nothing
-    /// to agree on.
-    #[test]
-    fn a_file_naming_no_sample_is_rejected_at_open() {
-        let contigs = matching_contigs();
-        let no_read_groups = header(Some("coordinate"), &contigs, &[]);
-
-        match open_fixture_with_header(&no_read_groups, false)
-            .file
-            .expect_err("must not open")
-        {
-            AlignmentFileError::MissingSampleName { read_group, .. } => {
-                assert_eq!(read_group, None)
-            }
-            other => panic!("expected MissingSampleName, got {other:?}"),
-        }
-    }
+    // The gate's fourth check — "exactly one `@RG SM`" — and its three tests are
+    // gone. Two of the states it rejected are now rejected earlier and better,
+    // by the read-group pre-pass, which names the file *and* the remedy and
+    // tells "no `@RG` at all" apart from "an `@RG` with no `SM`" instead of
+    // folding both into one variant. The third is no longer a fault at all: a
+    // file whose read groups name two samples is ordinary input, and naming one
+    // sample is a property of the open, enforced by `SampleReads`. The
+    // replacements live in `read_groups.rs`.
 
     /// A missing index is an error, not a silent whole-file scan — and with the
     /// build flag it is repaired instead.
@@ -2336,7 +2186,14 @@ mod tests {
         let (_fresh_reference_dir, reference) = fixture_reference(false);
         let path = bam_dir.path().join("sample.bam");
         assert!(
-            AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), true).is_ok(),
+            AlignmentFile::open(
+                &path,
+                &reference,
+                ReadFilterConfig::default(),
+                true,
+                fixture_read_group(),
+            )
+            .is_ok(),
             "with build_index_if_missing the index is created next to the file"
         );
     }

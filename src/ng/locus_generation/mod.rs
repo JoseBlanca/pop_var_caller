@@ -611,8 +611,13 @@ mod tests {
             ),
             &records,
         );
-        let reads = SampleReads::open(&[bam_path], &reference, ReadFilterConfig::default(), false)
-            .expect("the fixture sample opens");
+        let reads = SampleReads::open_only_sample(
+            &[bam_path],
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("the fixture sample opens");
         (reference_dir, bam_dir, reads)
     }
 

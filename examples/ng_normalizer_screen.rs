@@ -175,7 +175,7 @@ fn main() -> ExitCode {
     };
     let contigs = reference_info.contig_list();
 
-    let sample = match SampleReads::open(
+    let sample = match SampleReads::open_only_sample(
         &read_paths,
         &reference_info,
         ReadFilterConfig::default(),

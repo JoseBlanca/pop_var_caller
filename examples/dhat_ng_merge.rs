@@ -202,8 +202,9 @@ impl Fixture {
 }
 
 fn drain(paths: &[PathBuf], reference: &ReferenceInfo) -> usize {
-    let sample = SampleReads::open(paths, reference, ReadFilterConfig::default(), false)
-        .expect("the fixture files open");
+    let sample =
+        SampleReads::open_only_sample(paths, reference, ReadFilterConfig::default(), false)
+            .expect("the fixture files open");
     let region = GenomeRegion {
         contig: ContigId(0),
         start: Position(1),

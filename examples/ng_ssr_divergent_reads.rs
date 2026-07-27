@@ -26,11 +26,11 @@ use pop_var_caller::fasta::ContigList;
 use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
+use pop_var_caller::ng::locus_generation::LocusGenerator;
 use pop_var_caller::ng::locus_generation::ReadCoverage;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
-use pop_var_caller::ng::locus_generation::LocusGenerator;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
@@ -88,8 +88,10 @@ fn make_generator<A: RepeatDelimiter>(
     aligner: A,
     config: SsrGeneratorConfig,
     bundle_threshold: Bp,
-) -> Result<SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>, Box<dyn std::error::Error>>
-{
+) -> Result<
+    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
+    Box<dyn std::error::Error>,
+> {
     Ok(SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {
@@ -134,7 +136,7 @@ fn run(
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
-    let sample = SampleReads::open(bams, &info, ReadFilterConfig::default(), true)?;
+    let sample = SampleReads::open_only_sample(bams, &info, ReadFilterConfig::default(), true)?;
 
     let walk_config = TypedRegionConfig::default();
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);

@@ -90,7 +90,15 @@ pub struct AlleleObsCount(pub u32); // reads supporting one allele
 pub struct ReadWeight(pub f64);     // a read's likelihood weight (>= 0): pooling count or partial fraction
 pub struct SampleId(pub u32);       pub struct SampleGroupId(pub u32);
 pub struct LocusId(pub u64);        pub struct AlleleId(pub u16);   // index within a locus' candidate set
+pub struct ReadGroupId(pub u32);    // index into the run's read-group table
 ```
+
+**`ReadGroupId` names the unit chemistry belongs to.** One `@RG` record — in practice one
+library preparation sequenced in one run — is what a per-chemistry error model keys on,
+since PCR stutter and per-base error are properties of the preparation and the DNA's
+condition rather than of the individual. Every read carries one. Its ids are minted in
+input-file then header order, so they are stable across runs over the same input list
+([`read_groups.md`](read_groups.md), [`../spec/read_groups.md`](../spec/read_groups.md) §4).
 
 ### Probability & quality — keep log-space explicit
 

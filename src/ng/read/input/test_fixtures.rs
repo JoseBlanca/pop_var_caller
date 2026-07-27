@@ -23,7 +23,10 @@ use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use tempfile::TempDir;
 
 use crate::bam::index_preflight::preflight_alignment_indexes;
+use crate::ng::read::filtering::ReadFilterCounts;
+use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
+use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
 /// The fixture reference: two contigs of **different lengths**, so a
@@ -31,15 +34,65 @@ use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 /// `length`.
 pub(crate) const FIXTURE_CONTIGS: [(&str, usize); 2] = [("chr1", 100), ("chr2", 200)];
 
+/// One `@RG` for a test header: its id, plus whichever tags the test is about.
+/// A `None` tag is **omitted entirely**, which is how the "no `SM`" and "no
+/// `LB`" inputs are built.
+pub(crate) struct FixtureReadGroup<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) sample: Option<&'a str>,
+    pub(crate) library: Option<&'a str>,
+    pub(crate) platform: Option<&'a str>,
+}
+
+impl<'a> FixtureReadGroup<'a> {
+    /// A read group carrying only `SM` — what a test that is about neither the
+    /// library nor the platform wants.
+    pub(crate) fn new(id: &'a str, sample: Option<&'a str>) -> Self {
+        Self {
+            id,
+            sample,
+            library: None,
+            platform: None,
+        }
+    }
+
+    pub(crate) fn with_library(mut self, library: &'a str) -> Self {
+        self.library = Some(library);
+        self
+    }
+
+    pub(crate) fn with_platform(mut self, platform: &'a str) -> Self {
+        self.platform = Some(platform);
+        self
+    }
+}
+
 /// A header builder taking `(sort order, contigs, read groups)`, so each test
 /// states only the field it is about. `None` omits the tag entirely.
+///
+/// Read groups are `(id, SM)` pairs — the shape almost every test wants. A test
+/// that is about the library or the platform builds its read groups as
+/// [`FixtureReadGroup`]s and calls [`header_with_read_groups`] instead.
 pub(crate) fn header(
     sort_order_value: Option<&str>,
     contigs: &[(&str, usize, Option<&str>)],
     read_groups: &[(&str, Option<&str>)],
 ) -> sam::Header {
+    let read_groups: Vec<FixtureReadGroup<'_>> = read_groups
+        .iter()
+        .map(|(id, sample)| FixtureReadGroup::new(id, *sample))
+        .collect();
+    header_with_read_groups(sort_order_value, contigs, &read_groups)
+}
+
+/// [`header`], with read groups that can carry `LB` and `PL` as well as `SM`.
+pub(crate) fn header_with_read_groups(
+    sort_order_value: Option<&str>,
+    contigs: &[(&str, usize, Option<&str>)],
+    read_groups: &[FixtureReadGroup<'_>],
+) -> sam::Header {
     use sam::header::record::value::map::header::tag::SORT_ORDER;
-    use sam::header::record::value::map::read_group::tag::SAMPLE;
+    use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
     use sam::header::record::value::map::reference_sequence::tag::MD5_CHECKSUM;
 
     let mut hd = Map::<sam::header::record::value::map::Header>::default();
@@ -59,13 +112,18 @@ pub(crate) fn header(
         builder = builder.add_reference_sequence(*name, sq);
     }
 
-    for (id, sample) in read_groups {
+    for read_group in read_groups {
         let mut rg = Map::<ReadGroup>::default();
-        if let Some(sample) = sample {
-            rg.other_fields_mut()
-                .insert(SAMPLE, sample.as_bytes().into());
+        for (tag, value) in [
+            (SAMPLE, read_group.sample),
+            (LIBRARY, read_group.library),
+            (PLATFORM, read_group.platform),
+        ] {
+            if let Some(value) = value {
+                rg.other_fields_mut().insert(tag, value.as_bytes().into());
+            }
         }
-        builder = builder.add_read_group(*id, rg);
+        builder = builder.add_read_group(read_group.id, rg);
     }
 
     builder.build()
@@ -75,6 +133,17 @@ pub(crate) fn header(
 /// naming `NA12878` — the shape a file has to have to get past the gate.
 pub(crate) fn bam_header(contigs: &[(&str, usize, Option<&str>)]) -> sam::Header {
     header(Some("coordinate"), contigs, &[("rg1", Some("NA12878"))])
+}
+
+/// How a fixture file's records resolve: every fixture header declares exactly
+/// one `@RG`, so every record is that one and no record's `RG` is read.
+///
+/// The identifier is `0` because a test opens one file and the run's table would
+/// have minted `0` for its only read group. A test that cares which identifier
+/// reaches a read builds the table with `build_read_groups` instead; one about
+/// per-record resolution builds a `PerRecord` resolution itself.
+pub(crate) fn fixture_read_group() -> ReadGroupResolution {
+    ReadGroupResolution::Sole(ReadGroupId(0))
 }
 
 /// [`FIXTURE_CONTIGS`] in the `@SQ` shape, with no `M5` tags.
@@ -120,6 +189,46 @@ pub(crate) fn read_named(qname: &str, reference_sequence_id: usize, start: usize
     read_named_with_length(qname, reference_sequence_id, start, 10)
 }
 
+/// A [`read_named`] record carrying the `RG:Z` tag naming the read group it
+/// belongs to.
+///
+/// Separate from [`read_named`] because tagging every fixture record would
+/// change what the existing tests are about: a file that declares one `@RG` is
+/// read without the tag being consulted at all, so an untagged record is the
+/// **normal** input, not a degenerate one.
+pub(crate) fn read_named_in_read_group(
+    qname: &str,
+    reference_sequence_id: usize,
+    start: usize,
+    read_group_id: &str,
+) -> RecordBuf {
+    read_named_with_length_in_read_group(qname, reference_sequence_id, start, 10, read_group_id)
+}
+
+/// [`read_named_in_read_group`], at a chosen length.
+///
+/// **A test that runs the real filter needs at least `DEFAULT_MIN_READ_LENGTH`
+/// (30).** The 10 bp default is below it, so a filtered stream drops such reads
+/// entirely — which looks exactly like a read-group resolution that returned
+/// nothing.
+pub(crate) fn read_named_with_length_in_read_group(
+    qname: &str,
+    reference_sequence_id: usize,
+    start: usize,
+    length: usize,
+    read_group_id: &str,
+) -> RecordBuf {
+    use sam::alignment::record::data::field::Tag;
+    use sam::alignment::record_buf::data::field::Value;
+
+    let mut record = read_named_with_length(qname, reference_sequence_id, start, length);
+    record.data_mut().insert(
+        Tag::READ_GROUP,
+        Value::String(read_group_id.as_bytes().to_vec().into()),
+    );
+    record
+}
+
 pub(crate) fn read_named_with_length(
     qname: &str,
     reference_sequence_id: usize,
@@ -146,15 +255,43 @@ pub(crate) fn read_named_with_length(
 /// Returns the `TempDir` as well as the path: bind it, or the directory is
 /// removed the moment the call returns and the handle points at nothing.
 pub(crate) fn indexed_bam(header: &sam::Header, records: &[RecordBuf]) -> (TempDir, PathBuf) {
-    let (dir, path) = unindexed_bam(header, records);
+    indexed_named_bam(header, records, "sample.bam")
+}
+
+/// [`indexed_bam`] under a chosen file name.
+///
+/// **Two fixture files opened together need different names.** A fixture header
+/// declares no `LB`, so a read group's library name is synthesized from its
+/// sample, its `@RG ID` and its file's name — and two files agreeing on all
+/// three are indistinguishable, which the read-group pre-pass rejects. Real
+/// inputs opened together differ in name for the same reason.
+pub(crate) fn indexed_named_bam(
+    header: &sam::Header,
+    records: &[RecordBuf],
+    file_name: &str,
+) -> (TempDir, PathBuf) {
+    let (dir, path) = named_bam(header, records, file_name);
     preflight_alignment_indexes(std::slice::from_ref(&path), true).expect("build index");
     (dir, path)
 }
 
 /// The same BAM with **no** index beside it — for the gate's index check.
 pub(crate) fn unindexed_bam(header: &sam::Header, records: &[RecordBuf]) -> (TempDir, PathBuf) {
+    named_bam(header, records, "sample.bam")
+}
+
+/// An unindexed BAM written under a chosen file name.
+///
+/// The name is a test input in its own right: a synthesized library name is
+/// built from the file's name, so two files that share one — the same name in
+/// different directories — are what makes those names collide.
+pub(crate) fn named_bam(
+    header: &sam::Header,
+    records: &[RecordBuf],
+    file_name: &str,
+) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("tempdir");
-    let path = dir.path().join("sample.bam");
+    let path = dir.path().join(file_name);
 
     let mut writer = bam::io::Writer::new(File::create(&path).expect("create bam"));
     writer.write_header(header).expect("write header");
@@ -186,6 +323,19 @@ pub(crate) fn unindexed_bam(header: &sam::Header, records: &[RecordBuf]) -> (Tem
 /// bitten before. The `.crai` contig walk is covered instead by a hand-built
 /// index in `region_query`'s tests, which needs no file at all.
 pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir, PathBuf) {
+    indexed_cram_declaring(records, &[("rg1", Some("NA12878"))])
+}
+
+/// [`indexed_cram`], with a chosen set of `@RG` records.
+///
+/// A CRAM declaring several read groups is what makes the CRAM sources resolve
+/// each record's own `RG` rather than take the file's only one — a path the
+/// single-`@RG` fixture cannot reach at all, and where a stamp taken from the
+/// wrong record would be silent.
+pub(crate) fn indexed_cram_declaring(
+    records: &[RecordBuf],
+    read_groups: &[(&str, Option<&str>)],
+) -> (TempDir, PathBuf, TempDir, PathBuf) {
     debug_assert!(
         records
             .iter()
@@ -206,7 +356,10 @@ pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir,
         &fasta,
         &specs,
         &HeaderOverrides {
-            read_groups: vec![("rg1".to_string(), Some("NA12878".to_string()))],
+            read_groups: read_groups
+                .iter()
+                .map(|(id, sample)| ((*id).to_string(), sample.map(str::to_string)))
+                .collect(),
             ..HeaderOverrides::default()
         },
         records,
@@ -273,4 +426,86 @@ pub(crate) fn multi_container_cram(
 /// non-empty for tests that never read it.
 pub(crate) fn one_read() -> Vec<RecordBuf> {
     vec![read_named("read-1", 0, 1)]
+}
+
+/// The fixtures test themselves, because the read-group tests that use them
+/// cannot tell "the parser ignored the tag" from "the fixture never wrote it".
+/// A silently-absent `LB` would make a "missing library" test pass for the
+/// wrong reason.
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_group_carries_every_tag_it_was_given() {
+        use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
+
+        let header = header_with_read_groups(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[FixtureReadGroup::new("rg1", Some("NA12878"))
+                .with_library("lib-A")
+                .with_platform("ILLUMINA")],
+        );
+
+        let (_, rg) = header
+            .read_groups()
+            .first()
+            .expect("the header has one read group");
+        let tag = |tag| rg.other_fields().get(&tag).map(|v| v.to_vec());
+        assert_eq!(tag(SAMPLE).as_deref(), Some(&b"NA12878"[..]));
+        assert_eq!(tag(LIBRARY).as_deref(), Some(&b"lib-A"[..]));
+        assert_eq!(tag(PLATFORM).as_deref(), Some(&b"ILLUMINA"[..]));
+    }
+
+    /// The omissions matter as much as the values: an absent tag must be absent
+    /// from the header, not present and empty.
+    #[test]
+    fn an_untagged_read_group_carries_nothing() {
+        use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
+
+        let header = header(Some("coordinate"), &matching_contigs(), &[("rg1", None)]);
+
+        let (_, rg) = header
+            .read_groups()
+            .first()
+            .expect("the header has one read group");
+        for tag in [SAMPLE, LIBRARY, PLATFORM] {
+            assert!(rg.other_fields().get(&tag).is_none(), "{tag:?} is absent");
+        }
+    }
+
+    #[test]
+    fn a_tagged_record_names_its_read_group() {
+        use sam::alignment::record::data::field::Tag;
+        use sam::alignment::record_buf::data::field::Value;
+
+        let record = read_named_in_read_group("read-1", 0, 1, "rg2");
+        assert!(matches!(
+            record.data().get(&Tag::READ_GROUP),
+            Some(Value::String(id)) if id == "rg2"
+        ));
+        assert!(
+            read_named("read-1", 0, 1)
+                .data()
+                .get(&Tag::READ_GROUP)
+                .is_none(),
+            "the untagged fixture stays untagged"
+        );
+    }
+}
+
+/// The one read group's tally, for a fixture file that declares exactly one.
+///
+/// Asserting the count rather than taking the first entry is the point: a
+/// fixture that quietly grew a second read group would otherwise have half its
+/// drops silently ignored by whatever test called this.
+pub(crate) fn only_tally(
+    counts: &[(Option<crate::ng::types::ReadGroupId>, ReadFilterCounts)],
+) -> ReadFilterCounts {
+    assert_eq!(
+        counts.len(),
+        1,
+        "this fixture is expected to meet exactly one read group"
+    );
+    counts[0].1.clone()
 }

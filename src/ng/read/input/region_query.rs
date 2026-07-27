@@ -42,9 +42,12 @@ use noodles_fasta as fasta;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
 
-use crate::bam::alignment_input::MappedRead;
 use crate::bam::index_preflight::AlignmentIndex;
-use crate::ng::read::filtering::{NoodlesRawRecord, ReadFilterError, RecordSource};
+use crate::ng::read::aligned_read::AlignedRead;
+use crate::ng::read::filtering::{
+    NoodlesRawRecord, ReadFilterError, RecordSource, resolve_read_group,
+};
+use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 
 use super::AlignmentFileError;
@@ -72,7 +75,11 @@ pub(crate) struct BamRegionSource<'a> {
     /// gate, which is what makes this a cast rather than a lookup.
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    source_file_index: usize,
+    /// Borrowed from the `AlignmentFile`, like the header: settled at open,
+    /// never rebuilt per query.
+    resolution: &'a ReadGroupResolution,
+    /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
+    other_sample_records: u64,
     /// Latched once the scan passes the region end or the chunks run out.
     done: bool,
 }
@@ -144,7 +151,7 @@ impl<'a> BamRegionSource<'a> {
         reader: bam::io::Reader<bgzf::io::Reader<File>>,
         header: &'a sam::Header,
         plan: RegionPlan,
-        source_file_index: usize,
+        resolution: &'a ReadGroupResolution,
     ) -> Self {
         Self {
             reader,
@@ -153,7 +160,8 @@ impl<'a> BamRegionSource<'a> {
             current_chunk_end: None,
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
-            source_file_index,
+            resolution,
+            other_sample_records: 0,
             done: false,
         }
     }
@@ -179,11 +187,16 @@ impl RecordSource for BamRegionSource<'_> {
         self.header
     }
 
+    fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
+    }
+
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
         if self.done {
             return Ok(false);
         }
 
+        buf.read_group = None;
         loop {
             // 1. Land inside a chunk, seeking to its start if we have just
             //    taken it.
@@ -210,7 +223,6 @@ impl RecordSource for BamRegionSource<'_> {
             }
 
             // 3. One record, into the caller's reused buffer.
-            buf.source_file_index = self.source_file_index;
             let bytes_read = self
                 .reader
                 .read_record_buf(self.header, &mut buf.record)
@@ -246,7 +258,24 @@ impl RecordSource for BamRegionSource<'_> {
                 continue;
             }
 
-            return Ok(true);
+            // Resolved here, on the record that is actually being yielded: the
+            // read group can depend on the record's own `RG` tag, so resolving
+            // before the read — or on one the loop above skipped — would
+            // attribute this read to whatever the previous record carried. It
+            // also means the records this query discards never pay the lookup.
+            match resolve_read_group(&buf.record, self.resolution)? {
+                RecordOwner::Mine(id) => {
+                    buf.read_group = Some(id);
+                    return Ok(true);
+                }
+                // Another sample's read, in a file this sample shares. Counted
+                // apart from every drop — it says nothing about how this read
+                // group behaved — and skipped before the filter sees it.
+                RecordOwner::OtherSample => {
+                    self.other_sample_records += 1;
+                    continue;
+                }
+            }
         }
     }
 }
@@ -380,7 +409,11 @@ pub(crate) struct CramRegionSource<'a> {
     container: Option<DecodedContainer>,
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    source_file_index: usize,
+    /// Borrowed from the `AlignmentFile`, like the header: settled at open,
+    /// never rebuilt per query.
+    resolution: &'a ReadGroupResolution,
+    /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
+    other_sample_records: u64,
     done: bool,
 }
 
@@ -420,7 +453,7 @@ impl<'a> CramRegionSource<'a> {
         header: &'a sam::Header,
         repository: fasta::Repository,
         plan: CramRegionPlan,
-        source_file_index: usize,
+        resolution: &'a ReadGroupResolution,
         container: Option<DecodedContainer>,
     ) -> Self {
         Self {
@@ -434,7 +467,8 @@ impl<'a> CramRegionSource<'a> {
             container,
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
-            source_file_index,
+            resolution,
+            other_sample_records: 0,
             done: false,
         }
     }
@@ -566,12 +600,16 @@ impl RecordSource for CramRegionSource<'_> {
         self.header
     }
 
+    fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
+    }
+
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
         if self.done {
             return Ok(false);
         }
 
-        buf.source_file_index = self.source_file_index;
+        buf.read_group = None;
         loop {
             if let Some(record) = self.pending.next() {
                 // CRAM decodes a whole container at once, so this *moves* an
@@ -579,7 +617,19 @@ impl RecordSource for CramRegionSource<'_> {
                 // refilling it in place — the container buffer's allocations
                 // are what get reused. Same seam, different reuse point.
                 buf.record = record;
-                return Ok(true);
+                // After the move: the read group can depend on the record's own
+                // `RG` tag, so resolving against a stale buffer would attribute
+                // each read to whatever the previous one carried.
+                match resolve_read_group(&buf.record, self.resolution)? {
+                    RecordOwner::Mine(id) => {
+                        buf.read_group = Some(id);
+                        return Ok(true);
+                    }
+                    RecordOwner::OtherSample => {
+                        self.other_sample_records += 1;
+                        continue;
+                    }
+                }
             }
 
             match self.refill() {
@@ -706,12 +756,22 @@ impl RecordSource for RegionSource<'_> {
             Self::Cram(source) => source.read_next(buf),
         }
     }
+
+    /// Forwarded, not defaulted. The trait's default is `0`, which for a
+    /// delegating wrapper is a silent wrong answer rather than an absent one:
+    /// the reads really were skipped, and the tally would simply lose them.
+    fn other_sample_records(&self) -> u64 {
+        match self {
+            Self::Bam(source) => source.other_sample_records(),
+            Self::Cram(source) => source.other_sample_records(),
+        }
+    }
 }
 
 /// Where a read sits in the genome. Sound as a cross-file comparison key only
 /// because the open gate proved this file's `ref_id`s are the reference's
 /// `ContigId`s.
-fn key_of(read: &MappedRead) -> GenomePosition {
+fn key_of(read: &AlignedRead) -> GenomePosition {
     GenomePosition {
         // PANIC-FREE: `ref_id` comes from a 32-bit field in both BAM and CRAM,
         // so it fits by construction. Checked rather than `as`-cast because a
@@ -725,9 +785,9 @@ fn key_of(read: &MappedRead) -> GenomePosition {
 
 impl<I> Iterator for OrderVerified<I>
 where
-    I: Iterator<Item = Result<MappedRead, ReadFilterError>>,
+    I: Iterator<Item = Result<AlignedRead, ReadFilterError>>,
 {
-    type Item = Result<MappedRead, AlignmentFileError>;
+    type Item = Result<AlignedRead, AlignmentFileError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -763,7 +823,7 @@ where
 }
 
 impl<I> FusedIterator for OrderVerified<I> where
-    I: Iterator<Item = Result<MappedRead, ReadFilterError>>
+    I: Iterator<Item = Result<AlignedRead, ReadFilterError>>
 {
 }
 
@@ -780,6 +840,7 @@ mod tests {
     use crate::ng::read::filtering::BamRecordSource;
     use crate::ng::read::input::open_bam::group_crai_by_contig;
     use crate::ng::read::input::test_fixtures::{bam_header, indexed_bam, read_named};
+    use crate::ng::types::ReadGroupId;
     use crate::ng::types::{ContigId, Position};
 
     /// Two contigs long enough that the reads below span **several BGZF
@@ -881,7 +942,11 @@ mod tests {
             .build_from_path(path)
             .expect("open bam");
         reader.read_header().expect("read header");
-        let mut source = BamRecordSource::new(reader, header.clone(), 0);
+        let mut source = BamRecordSource::new(
+            reader,
+            header.clone(),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
 
         let target = region.contig.get() as usize;
         let mut buf = NoodlesRawRecord::default();
@@ -914,7 +979,12 @@ mod tests {
         reader.read_header().expect("read header");
 
         let plan = BamRegionSource::plan(header, &index, region, path).expect("plan the query");
-        let mut source = BamRegionSource::new(reader, header, plan, 0);
+        let mut source = BamRegionSource::new(
+            reader,
+            header,
+            plan,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
 
         let mut buf = NoodlesRawRecord::default();
         let mut names = Vec::new();
@@ -1025,7 +1095,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(0, 1, 100_000), &path).expect("plan"),
-            0,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         let mut buf = NoodlesRawRecord::default();
@@ -1062,7 +1132,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            0,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         // Drain, then confirm the source latched `done` rather than running on.
@@ -1095,7 +1165,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            0,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
         let mut buf = NoodlesRawRecord::default();
         while source.read_next(&mut buf).expect("read") {}
@@ -1106,7 +1176,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(1, 1, 200), &path).expect("plan"),
-            0,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
         let mut seen = 0;
         while second.read_next(&mut buf).expect("read") {
@@ -1137,11 +1207,11 @@ mod tests {
     // The order guard (C3) — T4a..T4d
     // -----------------------------------------------------------------
 
-    /// A `MappedRead` at a genome position. Only `ref_id` and `pos` matter to
+    /// A `AlignedRead` at a genome position. Only `ref_id` and `pos` matter to
     /// the guard, so the rest is minimal — the guard is a pure adapter over the
     /// filtered stream and never looks at sequence or CIGAR.
-    fn read_at(qname: &str, ref_id: usize, pos: u64) -> MappedRead {
-        MappedRead {
+    fn read_at(qname: &str, ref_id: usize, pos: u64) -> AlignedRead {
+        AlignedRead {
             qname: qname.as_bytes().to_vec(),
             flag: 0,
             ref_id,
@@ -1153,7 +1223,7 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            source_file_index: 0,
+            read_group: ReadGroupId(0),
         }
     }
 
@@ -1165,12 +1235,12 @@ mod tests {
     /// non-fused inner looks like. `std::iter::from_fn` cannot model this,
     /// because it fuses itself.
     struct Resuming {
-        items: Vec<Option<Result<MappedRead, ReadFilterError>>>,
+        items: Vec<Option<Result<AlignedRead, ReadFilterError>>>,
         next_index: usize,
     }
 
     impl Iterator for Resuming {
-        type Item = Result<MappedRead, ReadFilterError>;
+        type Item = Result<AlignedRead, ReadFilterError>;
 
         fn next(&mut self) -> Option<Self::Item> {
             let item = self.items.get_mut(self.next_index)?.take();
@@ -1182,7 +1252,7 @@ mod tests {
     /// Drive the guard over a planted stream and collect what a caller would
     /// see: the read names that surfaced, and the error if one did.
     fn through_the_guard(
-        reads: Vec<MappedRead>,
+        reads: Vec<AlignedRead>,
     ) -> (Vec<String>, Option<AlignmentFileError>, usize) {
         let stream = reads.into_iter().map(Ok);
         let mut guard = OrderVerified::new(stream, planted_path());
@@ -1515,7 +1585,14 @@ mod tests {
         let plan =
             CramRegionSource::plan(&header_for_plan, &grouped, region(0, 1, 200)).expect("plan");
         let total_entries = plan.entries.len();
-        let mut source = CramRegionSource::new(reader, &parsed_header, repository, plan, 0, None);
+        let mut source = CramRegionSource::new(
+            reader,
+            &parsed_header,
+            repository,
+            plan,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            None,
+        );
 
         let mut buf = NoodlesRawRecord::default();
         let mut seen = 0;
@@ -1568,8 +1645,14 @@ mod tests {
         );
 
         let open = || {
-            AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
-                .expect("the fixture CRAM opens")
+            AlignmentFile::open(
+                &cram_path,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+                crate::ng::read::input::test_fixtures::fixture_read_group(),
+            )
+            .expect("the fixture CRAM opens")
         };
 
         // What each region looks like to a reader that has never decoded anything.
@@ -1654,7 +1737,14 @@ mod tests {
         let late = (CONTIG_LENGTH as u64 * 3) / 4;
         let plan = CramRegionSource::plan(&header_for_plan, &grouped, region(0, late, late + 200))
             .expect("plan");
-        let mut source = CramRegionSource::new(reader, &parsed_header, repository, plan, 0, None);
+        let mut source = CramRegionSource::new(
+            reader,
+            &parsed_header,
+            repository,
+            plan,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            None,
+        );
 
         let mut buf = NoodlesRawRecord::default();
         let mut seen = 0;

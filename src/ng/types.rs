@@ -159,6 +159,31 @@ impl Bp {
     }
 }
 
+/// Which read group a read came from: an index into the run's read-group table
+/// (`ReadGroups`, `src/ng/read/input/read_groups.rs`).
+///
+/// A **read group** is one SAM `@RG` record — in practice one library preparation
+/// sequenced in one run. It is the unit a per-chemistry error model keys on,
+/// because PCR stutter and per-base error are properties of the library
+/// preparation and of the DNA's condition, not of the individual the DNA came
+/// from (`doc/devel/ng/spec/read_groups.md` §1).
+///
+/// Ids are minted only when the table is built, in input-file order and then
+/// header order within a file, so the same input list always yields the same ids
+/// however the files were read (spec §4). Unconstrained — any `u32` is a legal
+/// index at the type level, and an out-of-range id is caught at lookup — so the
+/// field is public and there is no checked constructor. `u32` rather than `u64`
+/// for the reason [`Bp`] gives: an id indexes a table, it is not a position.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ReadGroupId(pub u32);
+
+impl ReadGroupId {
+    #[inline]
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// A probability held as its natural logarithm — the number stored is `ln(p)`, not
 /// `p` itself.
 ///
@@ -382,6 +407,7 @@ mod tests {
         assert_eq!(BaseQual(93).get(), 93);
         assert_eq!(Bp(150).get(), 150);
         assert_eq!(Position(1).get(), 1);
+        assert_eq!(ReadGroupId(7).get(), 7);
     }
 
     /// `LogProb` is unconstrained: any finite logarithm round-trips, and `-∞` — the
@@ -541,5 +567,20 @@ mod tests {
     fn position_zero_is_representable_and_rejected_where_it_matters() {
         assert_eq!(Position(0).get(), 0);
         assert!(region(0, 5).contains(Position(0)));
+    }
+
+    /// Read-group ids are minted in table order, so their derived `Ord` *is* that
+    /// order. Anything reporting a set of read groups can therefore sort them and
+    /// get the order the table was built in, which is the order the input files
+    /// were given.
+    #[test]
+    fn read_group_ids_sort_in_table_order() {
+        let mut ids = vec![ReadGroupId(2), ReadGroupId(0), ReadGroupId(1)];
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![ReadGroupId(0), ReadGroupId(1), ReadGroupId(2)],
+            "the derived Ord is the index order"
+        );
     }
 }

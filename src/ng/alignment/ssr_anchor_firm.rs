@@ -1108,7 +1108,10 @@ mod tests {
                 ANCHOR_MIN_MATCHES <= ANCHOR_WINDOW,
                 "a quorum larger than the window it is counted in can never be met"
             );
-            assert!(ANCHOR_MIN_MATCHES > 0, "a zero quorum is algorithm 4's test");
+            assert!(
+                ANCHOR_MIN_MATCHES > 0,
+                "a zero quorum is algorithm 4's test"
+            );
         }
     }
 

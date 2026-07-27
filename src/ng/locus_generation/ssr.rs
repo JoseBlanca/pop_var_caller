@@ -19,13 +19,13 @@ use super::{
     LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
     SsrDetail,
 };
-use crate::bam::alignment_input::MappedRead;
 #[cfg(test)]
 use crate::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use crate::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use crate::ng::alignment::{
     BestPathAligner, PerQualityEmission, RepeatContext, RepeatSpan, StutterModel,
 };
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::input::SampleReads;
 use crate::ng::ref_seq::{ContigTable, RawRefSeq, RefSeq, RefSeqError};
 use crate::ng::region_typing::segment_criteria::SsrSegment;
@@ -309,7 +309,7 @@ impl<T> Reservoir<T> {
 /// The reads kept for one locus after depth-capping, and how many were fetched — the caller
 /// records `reads_discarded_by_cap = fetched - kept.len()`.
 pub struct CappedReads {
-    pub kept: Vec<MappedRead>,
+    pub kept: Vec<AlignedRead>,
     pub fetched: u64,
 }
 
@@ -609,11 +609,11 @@ mod classify {
         widen_region,
     };
     use super::{RepeatDelimiter, SsrLocus};
-    use crate::bam::alignment_input::MappedRead;
     use crate::ng::alignment::{
         ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel,
     };
     use crate::ng::locus_generation::ReadCoverage;
+    use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::Bp;
     use std::ops::Range;
 
@@ -641,7 +641,7 @@ mod classify {
             /// (spec §3, "strand/BQ/MAPQ moments") — computed here because the tract base
             /// qualities are already sliced, a free by-product; the tally folds it into
             /// [`ObservedSequence::q_sum`](crate::ng::locus_generation::ObservedSequence). MAPQ
-            /// is carried separately, off the [`MappedRead`], in the tally. **Soft** — filled,
+            /// is carried separately, off the [`AlignedRead`], in the tally. **Soft** — filled,
             /// unconsumed today.
             q_sum: f64,
         },
@@ -659,7 +659,7 @@ mod classify {
     /// truncated. A complete tract is quality-gated; **partials are kept as lower bounds**
     /// without the gate (spec §3, the new behaviour production discards).
     pub(super) fn classify_read<A: RepeatDelimiter>(
-        read: &MappedRead,
+        read: &AlignedRead,
         locus: &SsrLocus,
         aligner: &A,
         stutter: &StutterModel,
@@ -724,7 +724,7 @@ mod classify {
     /// Align the read's `region` slice against the reference frame.
     fn delimit<A: RepeatDelimiter>(
         aligner: &A,
-        read: &MappedRead,
+        read: &AlignedRead,
         region: &Range<usize>,
         reference: &[u8],
         context: RepeatContext<'_>,
@@ -742,7 +742,7 @@ mod classify {
     /// A complete tract, if it clears the base-quality gate; else `LowQuality`. `tract` is
     /// relative to the `region` slice.
     fn complete_or_low_quality(
-        read: &MappedRead,
+        read: &AlignedRead,
         region: &Range<usize>,
         tract: &Range<u64>,
         qual_buffer: &mut Vec<u8>,
@@ -774,7 +774,7 @@ mod classify {
     /// A partial (lower-bound) observation: the tract bases the read showed, tagged with which
     /// border held and how far it reached (in read coordinates, clamped to `u16`).
     fn partial(
-        read: &MappedRead,
+        read: &AlignedRead,
         region: &Range<usize>,
         tract: &Range<u64>,
         coverage: fn(u16) -> ReadCoverage,
@@ -801,7 +801,7 @@ mod classify {
         use crate::ng::alignment::PerQualityEmission;
         use crate::ng::alignment::ssr_best_path_flat_gap::{SsrFlatGapAligner, ViterbiScratch};
         use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
-        use crate::ng::types::Position;
+        use crate::ng::types::{Position, ReadGroupId};
         use crate::pileup::walker::CigarOp;
 
         // Reference frame: 6-base flanks around a CACACA tract → "GGGGGGCACACATTTTTT".
@@ -816,8 +816,8 @@ mod classify {
             }
         }
 
-        fn read(seq: &[u8], qual_value: u8) -> MappedRead {
-            MappedRead {
+        fn read(seq: &[u8], qual_value: u8) -> AlignedRead {
+            AlignedRead {
                 qname: b"r".to_vec(),
                 flag: 0,
                 ref_id: 0,
@@ -829,11 +829,11 @@ mod classify {
                 mate_ref_id: None,
                 mate_pos: None,
                 adaptor_boundary: None,
-                source_file_index: 0,
+                read_group: ReadGroupId(0),
             }
         }
 
-        fn classify(read: &MappedRead) -> Classified {
+        fn classify(read: &AlignedRead) -> Classified {
             let aligner = SsrFlatGapAligner::new(PerQualityEmission::new());
             let stutter = StutterModel::hipstr_shipped();
             let mut scratch = ViterbiScratch::new();
@@ -957,8 +957,9 @@ mod classify {
 mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
-    use crate::bam::alignment_input::{FLAG_REVERSE_STRAND, MappedRead};
+    use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
     use crate::ng::locus_generation::{ObservedSequence, ReadCoverage};
+    use crate::ng::read::aligned_read::AlignedRead;
     use std::collections::HashMap;
 
     /// The per-locus tally the generator folds onto the `SampleLocusObservations`: the deduped
@@ -998,7 +999,7 @@ mod tally {
     /// no-observation reasons); the returned `reads_without_observation` is this locus's own
     /// total.
     pub(super) fn tally<'a>(
-        reads_and_outcomes: impl IntoIterator<Item = (&'a MappedRead, Classified)>,
+        reads_and_outcomes: impl IntoIterator<Item = (&'a AlignedRead, Classified)>,
         counts: &mut SsrGeneratorCounts,
     ) -> SsrTally {
         let mut buckets: HashMap<(Box<[u8]>, ReadCoverage), Support> = HashMap::new();
@@ -1077,12 +1078,13 @@ mod tally {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::ng::types::ReadGroupId;
         use crate::pileup::walker::CigarOp;
 
-        /// A `MappedRead` with a given strand flag and MAPQ — the only fields the tally reads
+        /// An `AlignedRead` with a given strand flag and MAPQ — the only fields the tally reads
         /// off the read; the sequence and qualities live in the `Classified` handed alongside.
-        fn read(flag: u16, mapq: u8) -> MappedRead {
-            MappedRead {
+        fn read(flag: u16, mapq: u8) -> AlignedRead {
+            AlignedRead {
                 qname: b"r".to_vec(),
                 flag,
                 ref_id: 0,
@@ -1094,7 +1096,7 @@ mod tally {
                 mate_ref_id: None,
                 mate_pos: None,
                 adaptor_boundary: None,
-                source_file_index: 0,
+                read_group: ReadGroupId(0),
             }
         }
 
@@ -1234,7 +1236,7 @@ mod tally {
         fn a_multi_read_bucket_accumulates_integer_moments_order_independently() {
             let fwd = read(0, 60);
             let rev = read(FLAG_REVERSE_STRAND, 30);
-            let moments = |outcomes: Vec<(&MappedRead, Classified)>| {
+            let moments = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
                 let obs = tally(outcomes, &mut counts).observed_sequences;
                 assert_eq!(obs.len(), 1, "all reads share one bucket");
@@ -1260,7 +1262,7 @@ mod tally {
         #[test]
         fn tally_is_order_independent() {
             let r = read(0, 60);
-            let run = |outcomes: Vec<(&MappedRead, Classified)>| {
+            let run = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
                 let result = tally(outcomes, &mut counts);
                 (result.observed_sequences, counts)
@@ -1665,6 +1667,7 @@ mod tests {
     use super::*;
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::region_typing::segment_criteria::Motif;
+    use crate::ng::types::ReadGroupId;
     use std::collections::HashSet;
 
     /// A 100-base contig `chr1` with a known repeating pattern, so a fetched span can be
@@ -1987,8 +1990,9 @@ mod tests {
             ),
             records,
         );
-        let reads = SampleReads::open(&[bam], &reference, ReadFilterConfig::default(), false)
-            .expect("the fixture sample opens");
+        let reads =
+            SampleReads::open_only_sample(&[bam], &reference, ReadFilterConfig::default(), false)
+                .expect("the fixture sample opens");
         (reference_dir, bam_dir, reads)
     }
 
@@ -2283,12 +2287,12 @@ mod tests {
     /// covered here.
     #[test]
     fn ng_complete_observations_match_frozen_production_byte_for_byte() {
-        use crate::bam::alignment_input::MappedRead;
         use crate::ng::alignment::ssr_best_path_flat_gap::{
             SsrFlatGapAligner, ViterbiScratch as NgViterbiScratch,
         };
         use crate::ng::alignment::{PerQualityEmission, StutterModel};
         use crate::ng::locus_generation::ReadCoverage;
+        use crate::ng::read::aligned_read::AlignedRead;
         use crate::pileup::walker::CigarOp;
         // Frozen production oracle (called test-only, as the reservoir parity test does; ng does not
         // depend on production at run time).
@@ -2303,8 +2307,8 @@ mod tests {
         const FRAME: &[u8] = b"GGGGGGCACACATTTTTT";
 
         /// A reference-frame read: `seq` mapped all-Match at 1-based `pos`, Q40.
-        fn mapped(seq: &[u8], pos: u64) -> MappedRead {
-            MappedRead {
+        fn mapped(seq: &[u8], pos: u64) -> AlignedRead {
+            AlignedRead {
                 qname: b"r".to_vec(),
                 flag: 0,
                 ref_id: 0,
@@ -2316,7 +2320,7 @@ mod tests {
                 mate_ref_id: None,
                 mate_pos: None,
                 adaptor_boundary: None,
-                source_file_index: 0,
+                read_group: ReadGroupId(0),
             }
         }
 

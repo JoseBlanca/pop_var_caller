@@ -43,8 +43,10 @@ use super::ReadPreparer;
 use super::left_align::LeftAlignPreparer;
 use crate::bam::alignment_input::{MappedRead, cigar_ref_span, read_exceeds_mismatch_fraction};
 use crate::fasta::{ContigEntry, ContigList};
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::ref_seq::{RefSeq, ResidentRefSeq};
 use crate::ng::types::ContigId;
+use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::read_processor::{
     RawContigRefCache, ReadOutcome, ReadProcessingConfig, process_read,
 };
@@ -135,14 +137,38 @@ fn production_prepared(
 }
 
 /// ng's answer.
+///
+/// The fixture is built as production's `MappedRead`, because the other half of
+/// this comparison is production's own path and both sides must start from one
+/// record. Converting here is the whole of the difference: ng's read is that
+/// read plus its read group, and read preparation reads none of it.
 fn ng_prepared(read: MappedRead, fasta_path: &Path, contigs: &ContigList) -> PreparedRead {
     let reference = ResidentRefSeq::new(repository(fasta_path), contigs.clone());
     let preparer = LeftAlignPreparer::with_default_normalizer(reference);
     let mut scratch = <LeftAlignPreparer<ResidentRefSeq> as ReadPreparer>::Scratch::default();
     preparer
-        .prepare_read(read, &mut scratch)
+        .prepare_read(to_aligned_read(read), &mut scratch)
         .expect("the fixture windows are all in range")
         .expect("v1 never declines a read")
+}
+
+/// The same record as ng's read type, carrying a placeholder read group that
+/// nothing on this path looks at.
+fn to_aligned_read(read: MappedRead) -> AlignedRead {
+    AlignedRead {
+        qname: read.qname,
+        flag: read.flag,
+        ref_id: read.ref_id,
+        pos: read.pos,
+        mapq: read.mapq,
+        cigar: read.cigar,
+        seq: read.seq,
+        qual: read.qual,
+        mate_ref_id: read.mate_ref_id,
+        mate_pos: read.mate_pos,
+        adaptor_boundary: read.adaptor_boundary,
+        read_group: ReadGroupId(0),
+    }
 }
 
 /// Compare every field of a `PreparedRead`, naming the one that moved.

@@ -38,7 +38,6 @@
 //! (off-mode — the stutter-specific one, since a sample's own modal allele is its best available
 //! stand-in for its true genotype).
 
-use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -51,6 +50,7 @@ use pop_var_caller::ng::locus_generation::{
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
+use pop_var_caller::ng::read::input::read_groups::build_read_groups;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
@@ -165,37 +165,43 @@ fn run_cohort(
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs: ContigList = info.contig_list();
 
-    // Group the inputs by the sample their header names, rather than assuming one file is one
+    // Group the inputs by the sample their read groups name, rather than assuming one file is one
     // sample. Several files of a single sample is the normal case for a library sequenced across
-    // lanes — the madrid_herb1 herbarium specimen is eight — and ng models that natively: a sample
-    // is k files, and the file index is the batch label a per-batch error model would key on.
-    // Getting this wrong would not merely mislabel: it would split one library into k pseudo-
-    // samples whose stutter is correlated by construction, inflating any between-sample statistic.
-    let mut order: Vec<String> = Vec::new();
-    let mut grouped: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for path in crams {
-        // Opening one file alone just reads its header; the real per-sample open follows below.
-        let probe = SampleReads::open(
-            std::slice::from_ref(path),
-            &info,
-            ReadFilterConfig::default(),
-            true,
-        )?;
-        let name = probe.sample_name().to_string();
-        if !grouped.contains_key(&name) {
-            order.push(name.clone());
-        }
-        grouped.entry(name).or_default().push(path.clone());
-    }
-    for name in &order {
-        let paths = &grouped[name];
-        if paths.len() > 1 {
-            eprintln!("  {name}: {} files merged into one sample", paths.len());
+    // lanes — the madrid_herb1 herbarium specimen is eight. Getting this wrong would not merely
+    // mislabel: it would split one library into k pseudo-samples whose stutter is correlated by
+    // construction, inflating any between-sample statistic.
+    //
+    // The read-group pre-pass does the grouping now. It reads every header once, mints an
+    // identifier per `@RG`, and hands back the read groups grouped by sample — which is what this
+    // loop used to reconstruct by opening each file on its own just to read its header.
+    let read_groups = build_read_groups(crams)?;
+    for entry in read_groups.read_groups_per_sample() {
+        let files: usize = {
+            let mut paths: Vec<&Path> = entry
+                .read_groups
+                .iter()
+                .map(|id| &*read_groups.get(*id).file)
+                .collect();
+            paths.sort();
+            paths.dedup();
+            paths.len()
+        };
+        if files > 1 {
+            eprintln!("  {}: {files} files merged into one sample", entry.sample);
         }
     }
-    let samples: Vec<SampleReads> = order
+    let samples: Vec<SampleReads> = read_groups
+        .read_groups_per_sample()
         .iter()
-        .map(|name| SampleReads::open(&grouped[name], &info, ReadFilterConfig::default(), true))
+        .map(|entry| {
+            SampleReads::open(
+                entry,
+                &read_groups,
+                &info,
+                ReadFilterConfig::default(),
+                true,
+            )
+        })
         .collect::<Result<_, _>>()?;
     let mut counts: Vec<SampleCounts> = samples
         .iter()
@@ -212,6 +218,13 @@ fn run_cohort(
     // what `FnMut() -> R` invited) meant re-reading the whole `.fai` and re-`open`ing the FASTA
     // before serving one ~150-base window: 14% of a cohort run, ~564k `open(2)`s per chromosome.
     // The shared reader establishes its window once and slides.
+    // `Arc` rather than `Rc` even though this walk is single-threaded: `RawRefSeq`
+    // is implemented for `Arc<T>` and nothing else (`ref_seq.rs`), so the generator
+    // cannot take an `Rc`. Clippy's usual remedy therefore does not apply here.
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
+    )]
     let reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
     let mut generator = SsrGenerator::with_default_aligner(
         Arc::clone(&reference),

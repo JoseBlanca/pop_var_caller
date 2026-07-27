@@ -79,10 +79,24 @@ fn continuing_right(motif: &[u8]) -> Vec<u8> {
 }
 
 fn tract(motif: &[u8], units: usize) -> Vec<u8> {
-    motif.iter().copied().cycle().take(units * motif.len()).collect()
+    motif
+        .iter()
+        .copied()
+        .cycle()
+        .take(units * motif.len())
+        .collect()
 }
 
 /// A synthetic scenario: a reference frame, a read built from a chosen allele, and the truth.
+///
+/// `period`, `ref_tract_len` and `allele` describe the case rather than drive it — they say what
+/// was built, which is what makes a scenario readable at the construction site, and the TSV keys
+/// on `family` instead. Kept deliberately: a field removed here has to be re-derived by whoever
+/// next reads the scenario list.
+#[expect(
+    dead_code,
+    reason = "period/ref_tract_len/allele describe the scenario at its construction site"
+)]
 struct Scenario {
     family: &'static str,
     period: usize,
@@ -259,7 +273,11 @@ fn flank_indel(period: usize, ref_units: usize, right_side: bool, insert: bool) 
         ref_tract_len: ref_tract.len(),
         truth_len: ref_tract.len(),
         complete: true,
-        allele: format!("{}{}", if right_side { "R" } else { "L" }, if insert { "+1" } else { "-1" }),
+        allele: format!(
+            "{}{}",
+            if right_side { "R" } else { "L" },
+            if insert { "+1" } else { "-1" }
+        ),
         frame,
         read,
     }
@@ -274,14 +292,21 @@ fn measure_read<A: RepeatDelimiter>(
     stutter: &StutterModel,
 ) -> RepeatSpan {
     let geometry = scenario.geometry();
-    let context = RepeatContext { geometry: &geometry, stutter };
+    let context = RepeatContext {
+        geometry: &geometry,
+        stutter,
+    };
     let quals = vec![40u8; read.len()];
     let bases = ReadBases::try_new(read, &quals).expect("equal length");
     let mut scratch = A::Scratch::default();
     aligner.align(bases, &scenario.frame, context, &mut scratch)
 }
 
-fn measure<A: RepeatDelimiter>(aligner: &A, scenario: &Scenario, stutter: &StutterModel) -> RepeatSpan {
+fn measure<A: RepeatDelimiter>(
+    aligner: &A,
+    scenario: &Scenario,
+    stutter: &StutterModel,
+) -> RepeatSpan {
     measure_read(aligner, scenario, &scenario.read, stutter)
 }
 
@@ -313,7 +338,9 @@ impl Rng {
 /// Copy `read`, substituting each base with probability `p` (a confident miscall — quality stays
 /// high, the stress case most able to shift a boundary). Length is unchanged, so the truth stands.
 fn mutate(read: &[u8], p: f64, rng: &mut Rng) -> Vec<u8> {
-    read.iter().map(|&b| if rng.unit() < p { rng.other_base(b) } else { b }).collect()
+    read.iter()
+        .map(|&b| if rng.unit() < p { rng.other_base(b) } else { b })
+        .collect()
 }
 
 /// Did this span correctly measure the scenario? For a complete read, the measured length must equal
@@ -328,6 +355,10 @@ fn correct(scenario: &Scenario, span: &RepeatSpan) -> bool {
 }
 
 /// A short rendering of what a delimiter returned, for the TSV.
+#[expect(
+    dead_code,
+    reason = "kept for the TSV column it was written for, which the current output omits"
+)]
 fn render(span: &RepeatSpan) -> String {
     match span {
         RepeatSpan::Between(r) => format!("len={}", r.end - r.start),
@@ -470,12 +501,12 @@ fn scenarios() -> Vec<Scenario> {
 /// anchor_firm's real partials), and `flank_indel` (a real indel in the flank must not derail the
 /// tract measurement — the risk of banning flank gaps).
 struct Card {
-    clean: f64,        // error-free complete reads, no flank indel, measured to the exact length
-    partial: f64,      // error-free long alleles correctly called a lower bound
-    partial_noise: f64,// NOISY long alleles still called a lower bound (mean over rates)
-    noise: f64,        // noisy complete reads measured to the exact length (mean over rates)
-    flank_indel: f64,  // complete reads with a 1 bp flank indel measured to the exact tract length
-    composite: f64,    // 0 if clean < 0.999; else mean of the four axes above
+    clean: f64,   // error-free complete reads, no flank indel, measured to the exact length
+    partial: f64, // error-free long alleles correctly called a lower bound
+    partial_noise: f64, // NOISY long alleles still called a lower bound (mean over rates)
+    noise: f64,   // noisy complete reads measured to the exact length (mean over rates)
+    flank_indel: f64, // complete reads with a 1 bp flank indel measured to the exact tract length
+    composite: f64, // 0 if clean < 0.999; else mean of the four axes above
 }
 
 const REPS: u32 = 200;
@@ -487,7 +518,11 @@ fn is_indel(s: &Scenario) -> bool {
 
 /// Score one delimiter. Noise seeds depend only on the scenario/rate (not the aligner), so every
 /// aligner faces the **identical** noisy reads — a paired test.
-fn evaluate<A: RepeatDelimiter>(aligner: &A, scenarios: &[Scenario], stutter: &StutterModel) -> Card {
+fn evaluate<A: RepeatDelimiter>(
+    aligner: &A,
+    scenarios: &[Scenario],
+    stutter: &StutterModel,
+) -> Card {
     let frac = |it: &mut dyn Iterator<Item = bool>| {
         let (mut ok, mut n) = (0u64, 0u64);
         for b in it {
@@ -497,14 +532,28 @@ fn evaluate<A: RepeatDelimiter>(aligner: &A, scenarios: &[Scenario], stutter: &S
         if n == 0 { 1.0 } else { ok as f64 / n as f64 }
     };
     // Pools: the "clean" baseline excludes the flank-indel family (that is its own axis).
-    let clean_pool: Vec<&Scenario> =
-        scenarios.iter().filter(|s| s.complete && !is_indel(s)).collect();
+    let clean_pool: Vec<&Scenario> = scenarios
+        .iter()
+        .filter(|s| s.complete && !is_indel(s))
+        .collect();
     let partial_pool: Vec<&Scenario> = scenarios.iter().filter(|s| !s.complete).collect();
     let indel_pool: Vec<&Scenario> = scenarios.iter().filter(|s| is_indel(s)).collect();
 
-    let clean = frac(&mut clean_pool.iter().map(|s| correct(s, &measure(aligner, s, stutter))));
-    let partial = frac(&mut partial_pool.iter().map(|s| correct(s, &measure(aligner, s, stutter))));
-    let flank_indel = frac(&mut indel_pool.iter().map(|s| correct(s, &measure(aligner, s, stutter))));
+    let clean = frac(
+        &mut clean_pool
+            .iter()
+            .map(|s| correct(s, &measure(aligner, s, stutter))),
+    );
+    let partial = frac(
+        &mut partial_pool
+            .iter()
+            .map(|s| correct(s, &measure(aligner, s, stutter))),
+    );
+    let flank_indel = frac(
+        &mut indel_pool
+            .iter()
+            .map(|s| correct(s, &measure(aligner, s, stutter))),
+    );
 
     // Noise over a pool of scenarios: mutate each read REPS times at each rate, average correctness.
     let noise_over = |pool: &[&Scenario]| -> f64 {
@@ -531,7 +580,14 @@ fn evaluate<A: RepeatDelimiter>(aligner: &A, scenarios: &[Scenario], stutter: &S
     } else {
         (partial + partial_noise + noise + flank_indel) / 4.0
     };
-    Card { clean, partial, partial_noise, noise, flank_indel, composite }
+    Card {
+        clean,
+        partial,
+        partial_noise,
+        noise,
+        flank_indel,
+        composite,
+    }
 }
 
 fn main() -> ExitCode {
@@ -555,17 +611,33 @@ fn main() -> ExitCode {
     let unit_robust = pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner::new(
         PerQualityEmission::new(),
     );
-    let anchor_robust = pop_var_caller::ng::alignment::ssr_anchor_robust::SsrAnchorRobustAligner::new(
-        PerQualityEmission::new(),
-    );
+    let anchor_robust =
+        pop_var_caller::ng::alignment::ssr_anchor_robust::SsrAnchorRobustAligner::new(
+            PerQualityEmission::new(),
+        );
     let cards: Vec<(&str, Card)> = vec![
         ("flat_gap (algo 3)", evaluate(&flat, &scen, &stutter)),
         ("unit_slip (algo 4)", evaluate(&unit, &scen, &stutter)),
-        ("anchor_firm (algo 5)", evaluate(&anchor_firm, &scen, &stutter)),
-        ("noise_robust (algo 4n)", evaluate(&noise_robust, &scen, &stutter)),
-        ("robust_indel (algo 4r)", evaluate(&robust_indel, &scen, &stutter)),
-        ("unit_robust (algo 4u)", evaluate(&unit_robust, &scen, &stutter)),
-        ("anchor_robust (algo 5r)", evaluate(&anchor_robust, &scen, &stutter)),
+        (
+            "anchor_firm (algo 5)",
+            evaluate(&anchor_firm, &scen, &stutter),
+        ),
+        (
+            "noise_robust (algo 4n)",
+            evaluate(&noise_robust, &scen, &stutter),
+        ),
+        (
+            "robust_indel (algo 4r)",
+            evaluate(&robust_indel, &scen, &stutter),
+        ),
+        (
+            "unit_robust (algo 4u)",
+            evaluate(&unit_robust, &scen, &stutter),
+        ),
+        (
+            "anchor_robust (algo 5r)",
+            evaluate(&anchor_robust, &scen, &stutter),
+        ),
     ];
 
     println!(

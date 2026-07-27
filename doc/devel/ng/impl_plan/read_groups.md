@@ -81,35 +81,35 @@ Follows [`read_input.md`](read_input.md), whose `AlignmentFile` and `SampleReads
 
 ### Milestone A — the read-group table (nothing else touched)
 
-**A1. `ReadGroupId` in `types.rs`.**  ☐
+**A1. `ReadGroupId` in `types.rs`.**  ✅
 `pub struct ReadGroupId(pub u32)` with `get()` and the standard derives, doc-commented as an index
 into the run's table. A shared-vocabulary addition, so it lands alone; add it to
 `ng_step_interfaces.md` §1. *Source:* arch §1.1.
 
-**A2. Extend the header and record fixtures.**  ☐
+**A2. Extend the header and record fixtures.**  ✅
 `header(...)` gains library and platform per read group; a `read_named_with_read_group` helper tags
 a record with `RG:Z`. Nothing consumes them yet — they are what A4 onward is tested with.
 *Depends:* A1. *Source:* arch §Test & bench shape.
 
-**A3. Scaffold `read_groups.rs`: the types and the error, no logic.**  ☐
+**A3. Scaffold `read_groups.rs`: the types and the error, no logic.**  ✅
 `ReadGroup`, `NameWithOrigin`, `NameOrigin`, `ReadGroups`, `SampleReadGroups`,
 `ReadGroupResolution`, `RecordOwner`, and `ReadGroupError` with a doc comment per variant saying
 when it fires. Declared and compiled; nothing calls them. *Depends:* A1.
 *Source:* arch §1.2, §1.3, §2.
 
-**A4. Parse one header's `@RG` records, with the two hard errors.**  ☐
+**A4. Parse one header's `@RG` records, with the two hard errors.**  ✅
 A pure function over a `sam::Header` returning this file's read groups, or `NoReadGroups` /
 `MissingSampleName` — two distinct variants with distinct remedies in the message. Unit-tested
 against header literals, the way the existing `@RG` tests are
 ([`open_bam.rs:1026`](../../../../src/ng/read/input/open_bam.rs#L1026) onward). *Depends:* A2, A3.
 *Source:* spec §6.
 
-**A5. The synthesized names.**  ☐
+**A5. The synthesized names.**  ✅
 A missing `LB` becomes sample + `@RG ID` + the file name without extensions, marked `Synthesized`; a
 missing experiment becomes the library. Tests: the composed value, the origin marker, and that a
 declared tag is passed through untouched. *Depends:* A4. *Source:* spec §6.
 
-**A6. `build_read_groups(paths)`.**  ☐
+**A6. `build_read_groups(paths)`.**  ✅
 Read every header, apply A4 and A5, assign identifiers in input-file order then header order, group
 by sample, and raise `DuplicateSynthesizedLibrary` when two files with the same name in different
 directories collide. Tests: identifiers stable across a shuffled `paths` order only in the way the
@@ -121,7 +121,7 @@ design specifies; the by-sample grouping; the collision error naming both full p
 
 ### Milestone B — open from read groups
 
-**B1. Switch `SampleReads` and `AlignmentFile` to the table.**  ☐
+**B1. Switch `SampleReads` and `AlignmentFile` to the table.**  ✅
 `SampleReads::open` takes `(&SampleReadGroups, &ReadGroups)`, enforces one sample per open over the
 read groups it was handed, builds a `ReadGroupResolution` per file and passes it to
 `AlignmentFile::open_as`, which stores it. **Temporary guard, removed in C2:** a file whose header
@@ -135,7 +135,7 @@ its hand-rolled grouping ([`:175`](../../../../examples/ng_ssr_cohort_stutter.rs
 pre-pass replaces it. Every tool asserts exactly one sample and errors otherwise, which is what it
 did before. *Depends:* A6. *Source:* arch §3.2; spec §4, §5.
 
-**B2. Delete the per-file sample machinery.**  ☐
+**B2. Delete the per-file sample machinery.**  ✅
 `sample_names()`, `SampleNames`, `AlignmentFile::sample_name()`, `agreed_sample_name`, and the
 `MultipleSampleNames` / `MissingSampleName` variants — all dead after B1. A pure deletion, so it
 lands separately and the diff is readable. *Depends:* B1. *Source:* arch §5 (the four removal rows).
@@ -145,7 +145,7 @@ lands separately and the diff is readable. *Depends:* B1. *Source:* arch §5 (th
 
 ### Milestone C — the read carries its read group
 
-**C1. `AlignedRead` and the ng decode.**  ☐ **Own commit — do not bundle.**
+**C1. `AlignedRead` and the ng decode.**  ✅ **Own commit — do not bundle.**
 `src/ng/read/aligned_read.rs`: the read type with `read_group: ReadGroupId` and without
 `source_file_index`; `RecordSourceError`; the decode copied from production's, resolving the read
 group through the `Sole` arm. `RawRecord::decode` and every ng consumer move to the new type in this
@@ -154,7 +154,7 @@ field-by-field equality against production's `MappedRead`, plus the whole existi
 whose fixtures are all single-`@RG`. A mis-copied field here produces wrong reads, not a crash.
 *Depends:* B2. *Source:* arch §1.4, §2, §3.3.
 
-**C2. The `PerRecord` arm, and lifting the several-`@RG` guard.**  ☐ **Own commit — do not bundle.**
+**C2. The `PerRecord` arm, and lifting the several-`@RG` guard.**  ✅ **Own commit — do not bundle.**
 Resolve `RG:Z` per record against the file's map; a missing or undeclared tag is fatal and names the
 read. Remove B1's temporary guard. **Oracle:** a new fixture declaring several `@RG` with known
 per-record tags, asserting each read's identifier; plus the single-`@RG` suite still byte-for-byte
@@ -162,7 +162,7 @@ unchanged, which is what proves the fast path was not disturbed. A record resolv
 group is silent — it moves a library's error-model input, nothing more. *Depends:* C1.
 *Source:* spec §7; arch §1.3, §3.3.
 
-**C3. The other-sample skip and its tally.**  ☐ **Own commit — do not bundle.**
+**C3. The other-sample skip and its tally.**  ✅ **Own commit — do not bundle.**
 `RecordOwner::OtherSample` records are not yielded and are counted apart from the drop categories.
 **Oracle:** one file declaring read groups for two samples, opened twice; each open sees only its
 own reads, the drop categories are untouched, and the two opens' reads reunited equal the file.
@@ -174,12 +174,12 @@ failing anything. *Depends:* C2. *Source:* spec §9; arch §1.3.
 
 ### Milestone D — per-read-group counts
 
-**D1. Key `ReadFilterCounts` on the read group.**  ☐
+**D1. Key `ReadFilterCounts` on the read group.**  ✅
 `AlignmentFile::counts()` and `SampleReads::counts()` return per-read-group tallies rather than
 per-file ones, so a drop rate stays attributable when a file holds several read groups. Update the
 counts assertions in the existing tests. *Depends:* C3. *Source:* arch §3.2; spec §8.
 
-**D2. End-to-end fixture.**  ☐
+**D2. End-to-end fixture.**  ✅
 One integration test walking the full stack — build the table from two paths, open both samples,
 read a region from each — asserting the identifiers on the reads and the per-read-group counts.
 This is the test that would have caught any of the three silent failures at the seam rather than in

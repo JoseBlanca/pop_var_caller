@@ -181,7 +181,7 @@ fn run_dump<A: RepeatDelimiter>(
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
 
-    let sample = SampleReads::open(bams, &info, ReadFilterConfig::default(), true)?;
+    let sample = SampleReads::open_only_sample(bams, &info, ReadFilterConfig::default(), true)?;
 
     let walk_config = TypedRegionConfig::default();
     // The generator holds its own reference (margin fetch) and a factory (the per-file read query),

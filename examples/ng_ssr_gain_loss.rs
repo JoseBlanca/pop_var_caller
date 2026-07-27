@@ -145,8 +145,10 @@ fn make_gen<A: RepeatDelimiter>(
     contigs: &ContigList,
     aligner: A,
     bundle: Bp,
-) -> Result<SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>, Box<dyn std::error::Error>>
-{
+) -> Result<
+    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
+    Box<dyn std::error::Error>,
+> {
     Ok(SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {
@@ -170,8 +172,8 @@ struct Counts {
     new_partial: u64,
     // the demotions (old=complete, new=partial), adjudicated by the oracle
     demote_total: u64,
-    demote_gain: u64,    // oracle: the read ran off — old fabricated a complete, new is right
-    demote_loss: u64,    // oracle: the read spanned — a real complete was downgraded to a bound
+    demote_gain: u64, // oracle: the read ran off — old fabricated a complete, new is right
+    demote_loss: u64, // oracle: the read spanned — a real complete was downgraded to a bound
     demote_unknown: u64, // oracle could not judge
     // shared completes: length vs the oracle's flank-to-flank truth
     shared_complete: u64,
@@ -232,11 +234,20 @@ fn fold(c: &mut Counts, old: &SegmentDelimitations, new: &SegmentDelimitations) 
     }
 }
 
-fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    fasta: &Path,
+    bam: &Path,
+    contig_filter: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
-    let sample = SampleReads::open(std::slice::from_ref(&bam.to_path_buf()), &info, ReadFilterConfig::default(), true)?;
+    let sample = SampleReads::open_only_sample(
+        std::slice::from_ref(&bam.to_path_buf()),
+        &info,
+        ReadFilterConfig::default(),
+        true,
+    )?;
     let walk_config = TypedRegionConfig::default();
     let bundle = Bp(walk_config.criteria.bundle_threshold);
     let e = PerQualityEmission::new();
@@ -249,10 +260,16 @@ fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn
             continue;
         }
         let walk_ref = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-        let mut walk = TypedRegionIterator::over_contig(walk_ref, ContigId(index as u32), walk_config.clone())?;
+        let mut walk = TypedRegionIterator::over_contig(
+            walk_ref,
+            ContigId(index as u32),
+            walk_config.clone(),
+        )?;
         for region in walk.by_ref() {
             let region = region?;
-            let RegionKind::SsrSegment(segment) = &region.kind else { continue };
+            let RegionKind::SsrSegment(segment) = &region.kind else {
+                continue;
+            };
             old.begin_segment(region.region);
             new.begin_segment(region.region);
             let o = old.delimit_segment_reads(segment, &sample)?;
@@ -264,20 +281,62 @@ fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn
         h.join()?;
     }
 
-    let pct = |a: u64, b: u64| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
+    let pct = |a: u64, b: u64| {
+        if b == 0 {
+            0.0
+        } else {
+            100.0 * a as f64 / b as f64
+        }
+    };
     println!("== unit_robust (recommended) vs unit_slip (previous best), HG002 real reads ==");
     println!("reads compared: {}", c.reads);
     println!("\nobservation classes (per read):");
-    println!("  complete:  unit_slip {:>7}   unit_robust {:>7}   ({:+})", c.old_complete, c.new_complete, c.new_complete as i64 - c.old_complete as i64);
-    println!("  partial :  unit_slip {:>7}   unit_robust {:>7}   ({:+})", c.old_partial, c.new_partial, c.new_partial as i64 - c.old_partial as i64);
+    println!(
+        "  complete:  unit_slip {:>7}   unit_robust {:>7}   ({:+})",
+        c.old_complete,
+        c.new_complete,
+        c.new_complete as i64 - c.old_complete as i64
+    );
+    println!(
+        "  partial :  unit_slip {:>7}   unit_robust {:>7}   ({:+})",
+        c.old_partial,
+        c.new_partial,
+        c.new_partial as i64 - c.old_partial as i64
+    );
 
-    println!("\nGAIN/LOSS — the {} completes unit_robust demoted to partial, judged by the flank oracle:", c.demote_total);
-    println!("  GAIN (oracle: read ran off — unit_slip fabricated a complete): {:>6}  ({:.1}%)", c.demote_gain, pct(c.demote_gain, c.demote_total));
-    println!("  LOSS (oracle: read spanned — a real complete downgraded)     : {:>6}  ({:.1}%)", c.demote_loss, pct(c.demote_loss, c.demote_total));
-    println!("  oracle could not judge (far flank not resolvable)            : {:>6}  ({:.1}%)", c.demote_unknown, pct(c.demote_unknown, c.demote_total));
+    println!(
+        "\nGAIN/LOSS — the {} completes unit_robust demoted to partial, judged by the flank oracle:",
+        c.demote_total
+    );
+    println!(
+        "  GAIN (oracle: read ran off — unit_slip fabricated a complete): {:>6}  ({:.1}%)",
+        c.demote_gain,
+        pct(c.demote_gain, c.demote_total)
+    );
+    println!(
+        "  LOSS (oracle: read spanned — a real complete downgraded)     : {:>6}  ({:.1}%)",
+        c.demote_loss,
+        pct(c.demote_loss, c.demote_total)
+    );
+    println!(
+        "  oracle could not judge (far flank not resolvable)            : {:>6}  ({:.1}%)",
+        c.demote_unknown,
+        pct(c.demote_unknown, c.demote_total)
+    );
 
-    println!("\nLENGTH ACCURACY on the {} reads BOTH call complete ({} oracle-adjudicable):", c.shared_complete, c.len_adjudicable);
-    println!("  unit_slip   length == oracle tract: {:>6}  ({:.1}%)", c.old_len_right, pct(c.old_len_right, c.len_adjudicable));
-    println!("  unit_robust length == oracle tract: {:>6}  ({:.1}%)", c.new_len_right, pct(c.new_len_right, c.len_adjudicable));
+    println!(
+        "\nLENGTH ACCURACY on the {} reads BOTH call complete ({} oracle-adjudicable):",
+        c.shared_complete, c.len_adjudicable
+    );
+    println!(
+        "  unit_slip   length == oracle tract: {:>6}  ({:.1}%)",
+        c.old_len_right,
+        pct(c.old_len_right, c.len_adjudicable)
+    );
+    println!(
+        "  unit_robust length == oracle tract: {:>6}  ({:.1}%)",
+        c.new_len_right,
+        pct(c.new_len_right, c.len_adjudicable)
+    );
     Ok(())
 }
