@@ -42,7 +42,9 @@ fn class(obs: &Option<(ReadCoverage, Vec<u8>)>) -> &'static str {
     match obs {
         None => "none",
         Some((ReadCoverage::Complete, _)) => "complete",
-        Some((ReadCoverage::PartialLeft(_), _)) | Some((ReadCoverage::PartialRight(_), _)) => "partial",
+        Some((ReadCoverage::PartialLeft(_), _)) | Some((ReadCoverage::PartialRight(_), _)) => {
+            "partial"
+        }
     }
 }
 
@@ -63,7 +65,7 @@ struct Tally {
     demote_by_band: BTreeMap<&'static str, u64>,
     partial_lost: u64, // unit=partial -> candidate=none (destroyed evidence)
     partial_kept: u64, // unit=partial -> candidate=partial
-    promotions: u64,   // candidate=complete while unit != complete (should be ~0 for a demote-only fix)
+    promotions: u64, // candidate=complete while unit != complete (should be ~0 for a demote-only fix)
 }
 
 impl Tally {
@@ -106,12 +108,16 @@ impl Tally {
             };
             println!("  {u:>8} -> {c:<8} {n:>7}{tag}");
         }
-        println!("promotions (candidate=complete, unit!=complete): {}", self.promotions);
+        println!(
+            "promotions (candidate=complete, unit!=complete): {}",
+            self.promotions
+        );
         let ptot = self.partial_kept + self.partial_lost;
         if ptot > 0 {
             println!(
                 "genuine partials preserved: {}/{} ({:.1}% kept, {:.1}% destroyed→none)",
-                self.partial_kept, ptot,
+                self.partial_kept,
+                ptot,
                 100.0 * self.partial_kept as f64 / ptot as f64,
                 100.0 * self.partial_lost as f64 / ptot as f64,
             );
@@ -121,7 +127,10 @@ impl Tally {
             let c = *self.complete_by_band.get(b).unwrap_or(&0);
             let d = *self.demote_by_band.get(b).unwrap_or(&0);
             if c > 0 {
-                println!("  {b:>7} completes={c:>7} demoted={d:>6} ({:.1}%)", 100.0 * d as f64 / c as f64);
+                println!(
+                    "  {b:>7} completes={c:>7} demoted={d:>6} ({:.1}%)",
+                    100.0 * d as f64 / c as f64
+                );
             }
         }
     }
@@ -132,8 +141,10 @@ fn make_gen<A: RepeatDelimiter>(
     contigs: &ContigList,
     aligner: A,
     bundle: Bp,
-) -> Result<SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>, Box<dyn std::error::Error>>
-{
+) -> Result<
+    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
+    Box<dyn std::error::Error>,
+> {
     Ok(SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {
@@ -150,7 +161,9 @@ fn make_gen<A: RepeatDelimiter>(
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("usage: ng_ssr_anchor_firm_validate <reference.fa> <sample.bam|cram> [contig ...]");
+        eprintln!(
+            "usage: ng_ssr_anchor_firm_validate <reference.fa> <sample.bam|cram> [contig ...]"
+        );
         return ExitCode::from(2);
     }
     let fasta = PathBuf::from(&args[1]);
@@ -165,11 +178,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    fasta: &Path,
+    bam: &Path,
+    contig_filter: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
-    let sample = SampleReads::open(std::slice::from_ref(&bam.to_path_buf()), &info, ReadFilterConfig::default(), true)?;
+    let sample = SampleReads::open(
+        std::slice::from_ref(&bam.to_path_buf()),
+        &info,
+        ReadFilterConfig::default(),
+        true,
+    )?;
 
     let walk_config = TypedRegionConfig::default();
     let bundle = Bp(walk_config.criteria.bundle_threshold);
@@ -191,10 +213,16 @@ fn run(fasta: &Path, bam: &Path, contig_filter: &[String]) -> Result<(), Box<dyn
             continue;
         }
         let walk_ref = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-        let mut walk = TypedRegionIterator::over_contig(walk_ref, ContigId(index as u32), walk_config.clone())?;
+        let mut walk = TypedRegionIterator::over_contig(
+            walk_ref,
+            ContigId(index as u32),
+            walk_config.clone(),
+        )?;
         for region in walk.by_ref() {
             let region = region?;
-            let RegionKind::SsrSegment(segment) = &region.kind else { continue };
+            let RegionKind::SsrSegment(segment) = &region.kind else {
+                continue;
+            };
             gen_unit.begin_segment(region.region);
             gen_af.begin_segment(region.region);
             gen_nr.begin_segment(region.region);

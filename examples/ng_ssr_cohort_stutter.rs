@@ -212,6 +212,13 @@ fn run_cohort(
     // what `FnMut() -> R` invited) meant re-reading the whole `.fai` and re-`open`ing the FASTA
     // before serving one ~150-base window: 14% of a cohort run, ~564k `open(2)`s per chromosome.
     // The shared reader establishes its window once and slides.
+    // `Arc` rather than `Rc` even though this walk is single-threaded: `RawRefSeq`
+    // is implemented for `Arc<T>` and nothing else (`ref_seq.rs`), so the generator
+    // cannot take an `Rc`. Clippy's usual remedy therefore does not apply here.
+    #[expect(
+        clippy::arc_with_non_send_sync,
+        reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
+    )]
     let reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
     let mut generator = SsrGenerator::with_default_aligner(
         Arc::clone(&reference),
