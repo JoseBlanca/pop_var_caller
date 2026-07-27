@@ -23,6 +23,7 @@
 
 pub mod merge;
 pub mod open_bam;
+pub mod read_groups;
 pub mod region_query;
 
 #[cfg(test)]
