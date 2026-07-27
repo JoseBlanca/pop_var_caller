@@ -130,34 +130,12 @@ pub enum AlignmentFileError {
         source: AlignmentIndexError,
     },
 
-    /// The `@RG` records name more than one sample (spec §3.1, check 4).
-    /// Agreement *across* files is not a property of one file and is checked
-    /// one layer up, as [`IngestError::SampleNameMismatch`].
-    #[error("alignment file '{path}' names more than one sample: {}", names.join(", "))]
-    MultipleSampleNames { path: PathBuf, names: Vec<String> },
-
-    /// The `@RG` records name **no** sample — either the file has none at all,
-    /// or one carries no `SM` tag (spec §3.1, check 4).
-    ///
-    /// The other half of "exactly one sample". Arch §2's variant list covered
-    /// only the *more than one* case, but a file that cannot say whose reads it
-    /// holds fails the same check for the same reason, and the sample layer
-    /// above has nothing to compare. Production rejects these files too.
-    ///
-    /// `read_group` distinguishes the two causes: `Some(id)` names the record
-    /// missing its tag, `None` means the file has no `@RG` lines.
-    #[error(
-        "alignment file '{path}' names no sample: {}",
-        match read_group {
-            Some(id) => format!("@RG '{id}' has no SM tag"),
-            None => "the file has no @RG records".to_string(),
-        }
-    )]
-    MissingSampleName {
-        path: PathBuf,
-        read_group: Option<String>,
-    },
-
+    // The two `@RG SM` variants are gone. A file that names no sample and a
+    // file that names several are both the read-group pre-pass's business now,
+    // and it reports them better: `ReadGroupError` tells "no `@RG` at all" apart
+    // from "an `@RG` with no `SM`" as separate variants with separate remedies,
+    // where the pair here folded both into one variant carrying an `Option`. A
+    // file naming *several* samples has stopped being a fault entirely.
     /// A record regressed in genome position: the file claims `SO:coordinate`
     /// and is not sorted (spec §3.2). Carries **both** keys so the message can
     /// say where the file breaks rather than only that it does.
