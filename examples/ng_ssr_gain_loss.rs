@@ -242,7 +242,7 @@ fn run(
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
-    let sample = SampleReads::open(
+    let sample = SampleReads::open_only_sample(
         std::slice::from_ref(&bam.to_path_buf()),
         &info,
         ReadFilterConfig::default(),

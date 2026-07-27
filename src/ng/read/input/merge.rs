@@ -247,7 +247,7 @@ mod tests {
     use crate::ng::read::input::open_bam::AlignmentFile;
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_reference, indexed_bam, matching_contigs,
-        read_named_with_length,
+        read_named_with_length, sole_read_group,
     };
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::GenomeRegion;
@@ -281,8 +281,15 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                AlignmentFile::open_as(path, &reference, ReadFilterConfig::default(), false, i)
-                    .expect("opens")
+                AlignmentFile::open_as(
+                    path,
+                    &reference,
+                    ReadFilterConfig::default(),
+                    false,
+                    i,
+                    sole_read_group(),
+                )
+                .expect("opens")
             })
             .collect();
 

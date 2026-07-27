@@ -1568,8 +1568,14 @@ mod tests {
         );
 
         let open = || {
-            AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
-                .expect("the fixture CRAM opens")
+            AlignmentFile::open(
+                &cram_path,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+                crate::ng::read::input::test_fixtures::sole_read_group(),
+            )
+            .expect("the fixture CRAM opens")
         };
 
         // What each region looks like to a reader that has never decoded anything.

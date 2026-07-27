@@ -31,11 +31,15 @@ pub(crate) mod test_fixtures;
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::bam::errors::AlignmentIndexError;
 use crate::ng::read::filtering::{ReadFilterConfig, ReadFilterCounts, ReadFilterError};
+use crate::ng::read::input::read_groups::{
+    ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, SampleReadGroups, build_read_groups,
+};
 use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::types::{GenomePosition, GenomeRegion};
+use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
 
 use crate::bam::alignment_input::MappedRead;
@@ -362,25 +366,41 @@ impl SampleReads {
     /// A per-file failure is wrapped with the index of the file that raised it,
     /// so a message can always name the culprit.
     pub fn open(
-        paths: &[PathBuf],
+        sample: &SampleReadGroups,
+        read_groups: &ReadGroups,
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
     ) -> Result<Self, IngestError> {
-        if paths.is_empty() {
+        if sample.read_groups.is_empty() {
             return Err(IngestError::NoFiles);
+        }
+
+        check_one_sample(sample, read_groups)?;
+
+        // The files this sample's read groups live in, each once, in the order
+        // its read groups name them — which is the order the run's input list
+        // gave, because that is the order the identifiers were minted in.
+        let mut paths: Vec<Arc<Path>> = Vec::new();
+        for id in &sample.read_groups {
+            let file = &read_groups.get(*id).file;
+            if !paths.iter().any(|seen| seen == file) {
+                paths.push(Arc::clone(file));
+            }
         }
 
         let files = paths
             .iter()
             .enumerate()
             .map(|(source_file_index, path)| {
+                let resolution = resolution_for(path, read_groups)?;
                 AlignmentFile::open_as(
                     path,
                     reference,
                     filter_config,
                     build_index_if_missing,
                     source_file_index,
+                    resolution,
                 )
                 .map_err(|source| IngestError::File {
                     source_file_index,
@@ -389,9 +409,56 @@ impl SampleReads {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let sample_name = agreed_sample_name(&files)?;
+        Ok(Self {
+            files,
+            sample_name: sample.sample.to_string(),
+        })
+    }
 
-        Ok(Self { files, sample_name })
+    /// Open the **one** sample these files hold, building the run's read-group
+    /// table on the way.
+    ///
+    /// The convenience for a single-sample tool: it takes paths, as everything
+    /// did before read groups existed, and it fails the same way if they turn
+    /// out to name more than one sample. Eight of this repo's tools want exactly
+    /// this, so the assertion lives here once rather than eight times.
+    ///
+    /// A tool that handles a cohort must not use it: it calls
+    /// [`build_read_groups`] itself and opens one `SampleReads` per entry of
+    /// [`ReadGroups::read_groups_per_sample`], which is the whole point of the
+    /// table being run-wide.
+    pub fn open_only_sample(
+        paths: &[PathBuf],
+        reference: &ReferenceInfo,
+        filter_config: ReadFilterConfig,
+        build_index_if_missing: bool,
+    ) -> Result<Self, IngestError> {
+        let read_groups = build_read_groups(paths).map_err(IngestError::ReadGroups)?;
+
+        match read_groups.read_groups_per_sample() {
+            [only] => Self::open(
+                only,
+                &read_groups,
+                reference,
+                filter_config,
+                build_index_if_missing,
+            ),
+            [] => Err(IngestError::NoFiles),
+            // Listed per **read group**, not per distinct sample: the two
+            // vectors have to stay parallel so each file is paired with what it
+            // claims, which is the only way to see which one is the stray. A
+            // file whose read groups name two samples appears twice, correctly.
+            _ => Err(IngestError::SampleNameMismatch {
+                files: read_groups
+                    .iter()
+                    .map(|(_, group)| group.file.to_path_buf())
+                    .collect(),
+                names: read_groups
+                    .iter()
+                    .map(|(_, group)| group.sample.to_string())
+                    .collect(),
+            }),
+        }
     }
 
     /// The one sample all this sample's files name.
@@ -539,36 +606,70 @@ impl<R: RawRefSeq> Iterator for SampleRegionReads<'_, R> {
 
 impl<R: RawRefSeq> std::iter::FusedIterator for SampleRegionReads<'_, R> {}
 
-/// The single sample name the files agree on, or the disagreement.
+/// Enforce the invariant that gives this type its meaning: **one open serves
+/// exactly one sample.**
 ///
-/// Each file's own `@RG SM` was validated at its open; what cannot live there,
-/// because it is not a property of a single file, is **agreement**. This guard
-/// earns its keep precisely because of the several-experiments reality: when
-/// the files are per-lane splits of one run, pulling in a foreign file is
-/// unlikely, but when they are separate experiments gathered by hand from
-/// different projects, **grabbing the wrong file is the realistic failure
-/// mode** — and the `SM` agreement is the only thing that catches it.
-fn agreed_sample_name(files: &[AlignmentFile]) -> Result<String, IngestError> {
-    let mut distinct: Vec<String> = Vec::new();
-    for file in files {
-        if !distinct.iter().any(|name| name == file.sample_name()) {
-            distinct.push(file.sample_name().to_string());
-        }
+/// A file may declare read groups for several samples, so the check is over the
+/// read groups this open was handed, not over the files they live in. A caller
+/// that took its argument from `ReadGroups::read_groups_per_sample` can never
+/// trip it — the grouping is by sample. It earns its keep for the caller that
+/// assembles an open by hand, which is how tools and tests do it, and it is what
+/// stops a foreign read group being read as part of a sample (spec §4).
+fn check_one_sample(
+    sample: &SampleReadGroups,
+    read_groups: &ReadGroups,
+) -> Result<(), IngestError> {
+    let foreign: Vec<&ReadGroup> = sample
+        .read_groups
+        .iter()
+        .map(|id| read_groups.get(*id))
+        .filter(|group| group.sample != sample.sample)
+        .collect();
+
+    if foreign.is_empty() {
+        return Ok(());
     }
 
-    // Nit: destructured rather than matched on `len()`, so there is no
-    // unreachable `expect` to reason about.
-    match distinct.as_slice() {
-        [name] => Ok(name.clone()),
-        // **Every** file is listed, not just the offenders, and the two vectors
-        // are built from the same iteration so they stay parallel: the user has
-        // to see which path claims which name to know which one is the stray.
-        _ => Err(IngestError::SampleNameMismatch {
-            files: files.iter().map(|file| file.path().to_path_buf()).collect(),
-            names: files
-                .iter()
-                .map(|file| file.sample_name().to_string())
-                .collect(),
+    // Every read group is listed, not just the offenders, and the two vectors
+    // are built from the same iteration so they stay parallel: the user has to
+    // see which file claims which name to know which one is the stray.
+    Err(IngestError::SampleNameMismatch {
+        files: sample
+            .read_groups
+            .iter()
+            .map(|id| read_groups.get(*id).file.to_path_buf())
+            .collect(),
+        names: sample
+            .read_groups
+            .iter()
+            .map(|id| read_groups.get(*id).sample.to_string())
+            .collect(),
+    })
+}
+
+/// How this open should read one file's records.
+///
+/// **Temporary shape (removed in C2).** Only a file declaring exactly one read
+/// group is accepted, so every resolution is `Sole` and no record's `RG` is ever
+/// consulted — which is exactly what the code did before this change, and is why
+/// the switch to the read-group table cannot alter a single read. Resolving a
+/// file that declares several is the next step's work, and it is kept separate
+/// because that is where reads can start being attributed to the wrong library.
+fn resolution_for(
+    path: &Path,
+    read_groups: &ReadGroups,
+) -> Result<ReadGroupResolution, IngestError> {
+    let declared: Vec<ReadGroupId> = read_groups
+        .iter()
+        .filter(|(_, group)| *group.file == *path)
+        .map(|(id, _)| id)
+        .collect();
+
+    match declared.as_slice() {
+        [id] => Ok(ReadGroupResolution::Sole(*id)),
+        _ => Err(IngestError::SeveralReadGroupsInOneFile {
+            path: path.to_path_buf(),
+            count: declared.len(),
         }),
     }
 }
@@ -599,6 +700,25 @@ pub enum IngestError {
         files: Vec<PathBuf>,
         names: Vec<String>,
     },
+
+    /// The run's read groups could not be read at all — a file with no `@RG`, an
+    /// `@RG` with no `SM`, a library-name collision, or a header that would not
+    /// parse. Raised before any file is opened.
+    #[error("reading the input files' read groups failed")]
+    ReadGroups(#[source] ReadGroupError),
+
+    /// A file declares several `@RG` records, which this step cannot yet read.
+    ///
+    /// **Temporary, removed in C2.** Resolving a record's own `RG` tag is the
+    /// next step; until it lands, accepting such a file would mean guessing
+    /// which read group each record belongs to. Refusing is what the code did
+    /// before read groups existed, so nothing regresses in the meantime.
+    #[error(
+        "alignment file '{}' declares {count} @RG records; reading a file with more \
+         than one is not implemented yet",
+        path.display()
+    )]
+    SeveralReadGroupsInOneFile { path: PathBuf, count: usize },
 
     /// `SampleReads::open` was given no files.
     ///
@@ -678,27 +798,37 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use crate::bam::index_preflight::preflight_alignment_indexes;
     use crate::ng::read::input::test_fixtures::{
-        fixture_reference, header, indexed_bam, matching_contigs, read_named_with_length,
+        fixture_reference, header, indexed_bam, indexed_named_bam, matching_contigs, named_bam,
+        read_named_with_length,
     };
 
     /// An indexed BAM whose one read group names `sample`.
-    fn bam_naming(sample: &str) -> (TempDir, PathBuf) {
-        bam_naming_with_reads(sample, 1)
+    /// A one-read BAM whose read group names `sample`, under `file_name`.
+    ///
+    /// **Every file a test opens together must have a different name.** These
+    /// fixtures declare no `LB`, so each read group's library name is
+    /// synthesized from its sample, its `@RG ID` and its file's name — and two
+    /// files sharing all three would be indistinguishable, which the pre-pass
+    /// rejects. Real inputs opened together have different names for the same
+    /// reason, so this is the fixture matching reality, not working around it.
+    fn bam_naming(sample: &str, file_name: &str) -> (TempDir, PathBuf) {
+        bam_naming_with_reads(sample, 1, file_name)
     }
 
-    fn bam_naming_with_reads(sample: &str, reads: usize) -> (TempDir, PathBuf) {
+    fn bam_naming_with_reads(sample: &str, reads: usize, file_name: &str) -> (TempDir, PathBuf) {
         let records: Vec<_> = (0..reads)
             .map(|i| read_named_with_length(&format!("r{i}"), 0, 1 + i, 30))
             .collect();
-        indexed_bam(
-            &header(
-                Some("coordinate"),
-                &matching_contigs(),
-                &[("rg1", Some(sample))],
-            ),
-            &records,
-        )
+        let header = header(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[("rg1", Some(sample))],
+        );
+        let (dir, path) = named_bam(&header, &records, file_name);
+        preflight_alignment_indexes(std::slice::from_ref(&path), true).expect("build index");
+        (dir, path)
     }
 
     /// **T12b — two files naming different samples, rejected at `open`, before
@@ -712,10 +842,10 @@ mod tests {
     #[test]
     fn t12b_files_naming_different_samples_are_rejected_at_open() {
         let (_reference_dir, reference) = fixture_reference(false);
-        let (_first_dir, first) = bam_naming("NA12878");
-        let (_second_dir, second) = bam_naming("NA12892");
+        let (_first_dir, first) = bam_naming("NA12878", "first.bam");
+        let (_second_dir, second) = bam_naming("NA12892", "second.bam");
 
-        let error = SampleReads::open(
+        let error = SampleReads::open_only_sample(
             &[first.clone(), second.clone()],
             &reference,
             ReadFilterConfig::default(),
@@ -741,10 +871,10 @@ mod tests {
     #[test]
     fn files_agreeing_on_one_sample_open_and_expose_it() {
         let (_reference_dir, reference) = fixture_reference(false);
-        let (_first_dir, first) = bam_naming("NA12878");
-        let (_second_dir, second) = bam_naming("NA12878");
+        let (_first_dir, first) = bam_naming("NA12878", "first.bam");
+        let (_second_dir, second) = bam_naming("NA12878", "second.bam");
 
-        let sample = SampleReads::open(
+        let sample = SampleReads::open_only_sample(
             &[first, second],
             &reference,
             ReadFilterConfig::default(),
@@ -762,7 +892,7 @@ mod tests {
     #[test]
     fn a_per_file_failure_names_the_file_that_raised_it() {
         let (_reference_dir, reference) = fixture_reference(false);
-        let (_good_dir, good) = bam_naming("NA12878");
+        let (_good_dir, good) = bam_naming("NA12878", "good.bam");
         let (_bad_dir, bad) = indexed_bam(
             &header(
                 Some("queryname"),
@@ -772,8 +902,13 @@ mod tests {
             &[read_named_with_length("r", 0, 1, 30)],
         );
 
-        let error = SampleReads::open(&[good, bad], &reference, ReadFilterConfig::default(), false)
-            .expect_err("the second file is not coordinate-sorted");
+        let error = SampleReads::open_only_sample(
+            &[good, bad],
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect_err("the second file is not coordinate-sorted");
 
         match error {
             IngestError::File {
@@ -794,10 +929,10 @@ mod tests {
     #[test]
     fn counts_are_reported_per_file_and_not_summed() {
         let (_reference_dir, reference) = fixture_reference(false);
-        let (_first_dir, first) = bam_naming_with_reads("NA12878", 3);
-        let (_second_dir, second) = bam_naming_with_reads("NA12878", 1);
+        let (_first_dir, first) = bam_naming_with_reads("NA12878", 3, "first.bam");
+        let (_second_dir, second) = bam_naming_with_reads("NA12878", 1, "second.bam");
 
-        let sample = SampleReads::open(
+        let sample = SampleReads::open_only_sample(
             &[first, second],
             &reference,
             ReadFilterConfig::default(),
@@ -824,11 +959,11 @@ mod tests {
     #[test]
     fn the_mismatch_lists_every_file_in_order_so_the_stray_is_identifiable() {
         let (_reference_dir, reference) = fixture_reference(false);
-        let (_a_dir, a) = bam_naming("NA12878");
-        let (_stray_dir, stray) = bam_naming("NA12892");
-        let (_b_dir, b) = bam_naming("NA12878");
+        let (_a_dir, a) = bam_naming("NA12878", "a.bam");
+        let (_stray_dir, stray) = bam_naming("NA12892", "stray.bam");
+        let (_b_dir, b) = bam_naming("NA12878", "b.bam");
 
-        let error = SampleReads::open(
+        let error = SampleReads::open_only_sample(
             &[a.clone(), stray.clone(), b.clone()],
             &reference,
             ReadFilterConfig::default(),
@@ -858,10 +993,11 @@ mod tests {
     #[test]
     fn a_single_file_sample_opens() {
         let (_reference_dir, reference) = fixture_reference(false);
-        let (_dir, only) = bam_naming("NA12878");
+        let (_dir, only) = bam_naming("NA12878", "only.bam");
 
-        let sample = SampleReads::open(&[only], &reference, ReadFilterConfig::default(), false)
-            .expect("one file is a sample");
+        let sample =
+            SampleReads::open_only_sample(&[only], &reference, ReadFilterConfig::default(), false)
+                .expect("one file is a sample");
         assert_eq!(sample.file_count(), 1);
         assert_eq!(sample.sample_name(), "NA12878");
     }
@@ -873,8 +1009,9 @@ mod tests {
     fn a_sample_with_no_files_is_rejected_as_such() {
         let (_reference_dir, reference) = fixture_reference(false);
 
-        let error = SampleReads::open(&[], &reference, ReadFilterConfig::default(), false)
-            .expect_err("no files is not a sample");
+        let error =
+            SampleReads::open_only_sample(&[], &reference, ReadFilterConfig::default(), false)
+                .expect_err("no files is not a sample");
         assert!(matches!(error, IngestError::NoFiles));
         assert!(error.to_string().contains("at least one"), "{error}");
     }
@@ -905,8 +1042,9 @@ mod tests {
 
     fn sample_over(paths: &[PathBuf]) -> (TempDir, SampleReads) {
         let (reference_dir, reference) = fixture_reference(false);
-        let sample = SampleReads::open(paths, &reference, ReadFilterConfig::default(), false)
-            .expect("opens");
+        let sample =
+            SampleReads::open_only_sample(paths, &reference, ReadFilterConfig::default(), false)
+                .expect("opens");
         (reference_dir, sample)
     }
 
@@ -937,11 +1075,13 @@ mod tests {
             read_named_with_length("r2", 0, 30, 30),
             read_named_with_length("r3", 0, 60, 30),
         ];
-        let (_only_dir, only) = indexed_bam(&bam_header(&matching_contigs()), &reads);
+        let (_only_dir, only) =
+            indexed_named_bam(&bam_header(&matching_contigs()), &reads, "only.bam");
         // Empty over contig 0: its only read is on the *second* contig.
-        let (_empty_dir, empty) = indexed_bam(
+        let (_empty_dir, empty) = indexed_named_bam(
             &bam_header(&matching_contigs()),
             &[read_named_with_length("elsewhere", 1, 1, 30)],
+            "empty.bam",
         );
 
         let (_a_dir, single) = sample_over(std::slice::from_ref(&only));
@@ -976,16 +1116,18 @@ mod tests {
     /// than provenance, and nothing proved it until the reads could be read.
     #[test]
     fn each_read_carries_the_index_of_the_file_it_came_from() {
-        let (_first_dir, first) = indexed_bam(
+        let (_first_dir, first) = indexed_named_bam(
             &bam_header(&matching_contigs()),
             &[
                 read_named_with_length("a1", 0, 1, 30),
                 read_named_with_length("a2", 0, 50, 30),
             ],
+            "first.bam",
         );
-        let (_second_dir, second) = indexed_bam(
+        let (_second_dir, second) = indexed_named_bam(
             &bam_header(&matching_contigs()),
             &[read_named_with_length("b1", 0, 25, 30)],
+            "second.bam",
         );
 
         let (_dir, sample) = sample_over(&[first, second]);
@@ -1011,8 +1153,9 @@ mod tests {
             &bam_header(&matching_contigs()),
             &[read_named_with_length("r", 0, 1, 30)],
         );
-        let sample = SampleReads::open(&[path], &reference, ReadFilterConfig::default(), false)
-            .expect("opens");
+        let sample =
+            SampleReads::open_only_sample(&[path], &reference, ReadFilterConfig::default(), false)
+                .expect("opens");
 
         // A region naming a contig the reference does not have.
         let nonexistent = GenomeRegion {

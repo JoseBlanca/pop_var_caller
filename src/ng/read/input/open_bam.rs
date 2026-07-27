@@ -39,6 +39,7 @@ use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterCounts,
 };
+use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::GenomeRegion;
@@ -80,8 +81,10 @@ pub struct AlignmentFile {
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
     index: AlignmentIndex,
-    /// From `@RG SM`. The k-file agreement check belongs to `SampleReads`.
-    sample_name: String,
+    /// How this open reads this file's records: which read group each belongs
+    /// to, and which of them are this sample's. Fixed here, at open, and read
+    /// per record from C1 onward — never recomputed.
+    resolution: ReadGroupResolution,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
     /// reference's. `None` where the file carries no usable `M5`.
@@ -270,19 +273,33 @@ impl AlignmentFile {
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
+        resolution: ReadGroupResolution,
     ) -> Result<Self, AlignmentFileError> {
-        Self::open_as(path, reference, filter_config, build_index_if_missing, 0)
+        Self::open_as(
+            path,
+            reference,
+            filter_config,
+            build_index_if_missing,
+            0,
+            resolution,
+        )
     }
 
     /// `open`, with the file's index within its sample — the value stamped onto
-    /// every `MappedRead` as `source_file_index`. `SampleReads` (E1) passes the
+    /// every `MappedRead` as `source_file_index`. `SampleReads` passes the
     /// position in its list; a lone file is 0.
+    ///
+    /// `resolution` says how this open reads this file's records: which read
+    /// group each belongs to, and which of them are this sample's at all. It is
+    /// built by `SampleReads` from the run's read-group table, **per open** —
+    /// the same file opened for two samples gets two different resolutions.
     pub fn open_as(
         path: &Path,
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
         source_file_index: usize,
+        resolution: ReadGroupResolution,
     ) -> Result<Self, AlignmentFileError> {
         let header = read_header(path)?;
 
@@ -341,29 +358,13 @@ impl AlignmentFile {
             source,
         })?;
 
-        // 4. Exactly one @RG SM.
-        let sample_name = match sample_names(&header) {
-            SampleNames::One(name) => name,
-            SampleNames::Several(names) => {
-                return Err(AlignmentFileError::MultipleSampleNames {
-                    path: path.to_path_buf(),
-                    names,
-                });
-            }
-            SampleNames::MissingTag { read_group_id } => {
-                return Err(AlignmentFileError::MissingSampleName {
-                    path: path.to_path_buf(),
-                    read_group: Some(read_group_id),
-                });
-            }
-            SampleNames::NoReadGroups => {
-                return Err(AlignmentFileError::MissingSampleName {
-                    path: path.to_path_buf(),
-                    read_group: None,
-                });
-            }
-        };
-
+        // 4. The `@RG` records were read, validated and identified before any
+        //    file was opened, by the read-group pre-pass — so there is no check
+        //    left here. What used to be checked at this point (exactly one
+        //    `@RG SM`) has moved twice over: a file may now declare several read
+        //    groups, and naming one sample is a property of the *open*, enforced
+        //    by `SampleReads` (spec §4, §8).
+        //
         // 5. A CRAM needs the reference *bases* to decode at all, so the
         //    repository is built here — once — and a reference that cannot
         //    supply one is a hard error now rather than a mystery at the first
@@ -398,7 +399,7 @@ impl AlignmentFile {
             path: Arc::from(path),
             header,
             index,
-            sample_name,
+            resolution,
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -413,9 +414,9 @@ impl AlignmentFile {
         })
     }
 
-    /// The single sample this file's `@RG` records name.
-    pub fn sample_name(&self) -> &str {
-        &self.sample_name
+    /// How this open reads this file's records (see the field).
+    pub fn read_group_resolution(&self) -> &ReadGroupResolution {
+        &self.resolution
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -652,7 +653,7 @@ impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignmentFile")
             .field("path", &self.path)
-            .field("sample_name", &self.sample_name)
+            .field("read_groups", &self.resolution)
             .field("contigs", &self.sq_md5s.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
@@ -835,6 +836,13 @@ fn hex_nibble(character: u8) -> Option<u8> {
 /// layer that knows the file's path; and cross-file agreement is a different
 /// check again, one layer further up, which needs the name rather than an
 /// error.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "replaced by the read-group pre-pass; deleted with `sample_names` in B2"
+    )
+)]
 pub(crate) enum SampleNames {
     /// Every `@RG` carries an `SM`, and they all agree.
     One(String),
@@ -856,6 +864,17 @@ pub(crate) enum SampleNames {
 /// stops at whichever comes first. Both are fatal at open and both are fixed by
 /// correcting the header, so ranking them would add a rule to explain without
 /// changing what the user does about it.
+// Dead as of B1: the read-group pre-pass reads `@RG` now, and one sample per
+// open is checked by `SampleReads`. Its own tests still exercise it, so the
+// attribute is scoped to the build where it really is uncalled. B2 deletes both
+// this and `SampleNames`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "replaced by the read-group pre-pass; deleted with its tests in B2"
+    )
+)]
 pub(crate) fn sample_names(header: &sam::Header) -> SampleNames {
     use sam::header::record::value::map::read_group::tag::SAMPLE;
 
@@ -887,7 +906,7 @@ mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_reference, header, indexed_bam, matching_contigs,
-        one_read, read_named, unindexed_bam,
+        one_read, read_named, sole_read_group, unindexed_bam,
     };
 
     // --- @HD SO ---
@@ -1267,8 +1286,14 @@ mod tests {
             fai: None,
         })
         .expect("read reference");
-        let file = AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
-            .expect("a matching CRAM opens");
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        )
+        .expect("a matching CRAM opens");
 
         let borrowed = file.borrow_reader().expect("borrow a CRAM reader");
         assert!(
@@ -1352,8 +1377,14 @@ mod tests {
     fn opened_over(records: &[RecordBuf]) -> (TempDir, TempDir, AlignmentFile) {
         let (reference_dir, reference) = fixture_reference(false);
         let (bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), records);
-        let file = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false)
-            .expect("the fixture matches");
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        )
+        .expect("the fixture matches");
         (reference_dir, bam_dir, file)
     }
 
@@ -1489,8 +1520,14 @@ mod tests {
         }
         let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &records);
 
-        let file = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false)
-            .expect("opens");
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        )
+        .expect("opens");
 
         // Truncate *after* opening, so the gate and the index are intact and
         // the fault can only appear mid-stream.
@@ -1727,6 +1764,7 @@ mod tests {
             &bam_reference,
             ReadFilterConfig::default(),
             false,
+            sole_read_group(),
         )
         .expect("the BAM opens");
 
@@ -1741,6 +1779,7 @@ mod tests {
             &cram_reference,
             ReadFilterConfig::default(),
             false,
+            sole_read_group(),
         )
         .expect("the CRAM opens");
 
@@ -1791,8 +1830,14 @@ mod tests {
         ))
         .expect("read reference");
 
-        let error = AlignmentFile::open(&cram_path, &fai_only, ReadFilterConfig::default(), false)
-            .expect_err("a CRAM needs the bases");
+        let error = AlignmentFile::open(
+            &cram_path,
+            &fai_only,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        )
+        .expect_err("a CRAM needs the bases");
         assert!(matches!(
             error,
             AlignmentFileError::CramNeedsReferenceFasta { .. }
@@ -1809,7 +1854,7 @@ mod tests {
     fn a_bam_against_a_fai_only_reference_opens_normally() {
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
-        assert_eq!(file.sample_name(), "NA12878");
+        assert_eq!(file.read_group_resolution(), &sole_read_group());
     }
 
     /// **The `.crai` walk, with more than one entry to walk.**
@@ -1834,8 +1879,14 @@ mod tests {
             fai: None,
         })
         .expect("read reference");
-        let file = AlignmentFile::open(&cram_path, &reference, ReadFilterConfig::default(), false)
-            .expect("opens");
+        let file = AlignmentFile::open(
+            &cram_path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        )
+        .expect("opens");
 
         let bases = || InMemoryRefSeq::from_contigs(vec![vec![b'A'; CONTIG_LENGTH]]);
         let near_the_start = GenomeRegion {
@@ -1921,8 +1972,14 @@ mod tests {
             &bam_header(&contigs),
             &[read_named_with_length("r", 0, 1, 30)],
         );
-        let file = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false)
-            .expect("a wrong M5 is a wildcard against a .fai-only reference");
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        )
+        .expect("a wrong M5 is a wildcard against a .fai-only reference");
 
         let reads: Vec<MappedRead> = file
             .reads_in_region(whole_first_contig(), reference_bases())
@@ -2004,7 +2061,13 @@ mod tests {
         let (reference_dir, reference) = fixture_reference(reference_has_digests);
         let (bam_dir, path) = indexed_bam(header, &one_read());
         OpenedFixture {
-            file: AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false),
+            file: AlignmentFile::open(
+                &path,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+                sole_read_group(),
+            ),
             _reference_dir: reference_dir,
             _bam_dir: bam_dir,
         }
@@ -2025,11 +2088,13 @@ mod tests {
     }
 
     #[test]
-    fn a_matching_file_opens_and_exposes_its_sample_and_digests() {
+    fn a_matching_file_opens_and_exposes_its_read_groups_and_digests() {
         let fixture = open_fixture(&matching_contigs(), false);
         let file = fixture.file.as_ref().expect("the file matches");
 
-        assert_eq!(file.sample_name(), "NA12878");
+        // The sample is no longer the file's to know: the read-group table owns
+        // it. What the file carries is how to read its records.
+        assert_eq!(file.read_group_resolution(), &sole_read_group());
         assert_eq!(
             file.sq_md5s().len(),
             2,
@@ -2254,73 +2319,24 @@ mod tests {
         };
         let (dir, path) = unindexed_bam(header, &records);
 
-        let opened = AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), false);
+        let opened = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            sole_read_group(),
+        );
         ((reference_dir, dir), opened)
     }
 
-    /// **T12a — one file naming two samples.** The cross-file half (two files
-    /// naming different samples) is `SampleReads`' T12b.
-    #[test]
-    fn t12a_a_file_whose_read_groups_name_two_samples_is_rejected_at_open() {
-        let contigs = matching_contigs();
-        let two_samples = header(
-            Some("coordinate"),
-            &contigs,
-            &[("rg1", Some("NA12878")), ("rg2", Some("NA12892"))],
-        );
-
-        match open_fixture_with_header(&two_samples, false)
-            .file
-            .expect_err("must not open")
-        {
-            AlignmentFileError::MultipleSampleNames { names, .. } => {
-                assert_eq!(names, vec!["NA12878", "NA12892"])
-            }
-            other => panic!("expected MultipleSampleNames, got {other:?}"),
-        }
-    }
-
-    /// The gate's mapping of `SampleNames::MissingTag`, and the `Some` branch
-    /// of `MissingSampleName`'s message — the only non-trivial formatting in
-    /// the new variant, and until now exercised by nothing.
-    #[test]
-    fn a_read_group_with_no_sm_tag_is_rejected_naming_that_read_group() {
-        let contigs = matching_contigs();
-        let untagged = header(Some("coordinate"), &contigs, &[("rg1", None)]);
-
-        let error = open_fixture_with_header(&untagged, false)
-            .file
-            .expect_err("must not open");
-        match &error {
-            AlignmentFileError::MissingSampleName { read_group, .. } => {
-                assert_eq!(read_group.as_deref(), Some("rg1"))
-            }
-            other => panic!("expected MissingSampleName, got {other:?}"),
-        }
-        assert!(
-            error.to_string().contains("@RG 'rg1' has no SM tag"),
-            "{error}"
-        );
-    }
-
-    /// The other half of "exactly one sample": a file with no `@RG` at all
-    /// cannot say whose reads it holds, so the sample layer would have nothing
-    /// to agree on.
-    #[test]
-    fn a_file_naming_no_sample_is_rejected_at_open() {
-        let contigs = matching_contigs();
-        let no_read_groups = header(Some("coordinate"), &contigs, &[]);
-
-        match open_fixture_with_header(&no_read_groups, false)
-            .file
-            .expect_err("must not open")
-        {
-            AlignmentFileError::MissingSampleName { read_group, .. } => {
-                assert_eq!(read_group, None)
-            }
-            other => panic!("expected MissingSampleName, got {other:?}"),
-        }
-    }
+    // The gate's fourth check — "exactly one `@RG SM`" — and its three tests are
+    // gone. Two of the states it rejected are now rejected earlier and better,
+    // by the read-group pre-pass, which names the file *and* the remedy and
+    // tells "no `@RG` at all" apart from "an `@RG` with no `SM`" instead of
+    // folding both into one variant. The third is no longer a fault at all: a
+    // file whose read groups name two samples is ordinary input, and naming one
+    // sample is a property of the open, enforced by `SampleReads`. The
+    // replacements live in `read_groups.rs`.
 
     /// A missing index is an error, not a silent whole-file scan — and with the
     /// build flag it is repaired instead.
@@ -2339,7 +2355,14 @@ mod tests {
         let (_fresh_reference_dir, reference) = fixture_reference(false);
         let path = bam_dir.path().join("sample.bam");
         assert!(
-            AlignmentFile::open(&path, &reference, ReadFilterConfig::default(), true).is_ok(),
+            AlignmentFile::open(
+                &path,
+                &reference,
+                ReadFilterConfig::default(),
+                true,
+                sole_read_group(),
+            )
+            .is_ok(),
             "with build_index_if_missing the index is created next to the file"
         );
     }

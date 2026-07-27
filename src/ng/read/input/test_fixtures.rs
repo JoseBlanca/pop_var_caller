@@ -23,7 +23,9 @@ use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use tempfile::TempDir;
 
 use crate::bam::index_preflight::preflight_alignment_indexes;
+use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
+use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
 /// The fixture reference: two contigs of **different lengths**, so a
@@ -132,6 +134,16 @@ pub(crate) fn bam_header(contigs: &[(&str, usize, Option<&str>)]) -> sam::Header
     header(Some("coordinate"), contigs, &[("rg1", Some("NA12878"))])
 }
 
+/// The resolution for a fixture file: every fixture header declares exactly one
+/// `@RG`, so every record is that read group's and no record's `RG` is read.
+///
+/// The identifier is `0` because a test opens one file and the run's table would
+/// have minted `0` for its only read group. A test that cares which identifier
+/// reaches a read builds the table with `build_read_groups` instead.
+pub(crate) fn sole_read_group() -> ReadGroupResolution {
+    ReadGroupResolution::Sole(ReadGroupId(0))
+}
+
 /// [`FIXTURE_CONTIGS`] in the `@SQ` shape, with no `M5` tags.
 pub(crate) fn matching_contigs() -> Vec<(&'static str, usize, Option<&'static str>)> {
     FIXTURE_CONTIGS
@@ -225,7 +237,22 @@ pub(crate) fn read_named_with_length(
 /// Returns the `TempDir` as well as the path: bind it, or the directory is
 /// removed the moment the call returns and the handle points at nothing.
 pub(crate) fn indexed_bam(header: &sam::Header, records: &[RecordBuf]) -> (TempDir, PathBuf) {
-    let (dir, path) = unindexed_bam(header, records);
+    indexed_named_bam(header, records, "sample.bam")
+}
+
+/// [`indexed_bam`] under a chosen file name.
+///
+/// **Two fixture files opened together need different names.** A fixture header
+/// declares no `LB`, so a read group's library name is synthesized from its
+/// sample, its `@RG ID` and its file's name — and two files agreeing on all
+/// three are indistinguishable, which the read-group pre-pass rejects. Real
+/// inputs opened together differ in name for the same reason.
+pub(crate) fn indexed_named_bam(
+    header: &sam::Header,
+    records: &[RecordBuf],
+    file_name: &str,
+) -> (TempDir, PathBuf) {
+    let (dir, path) = named_bam(header, records, file_name);
     preflight_alignment_indexes(std::slice::from_ref(&path), true).expect("build index");
     (dir, path)
 }
