@@ -36,7 +36,8 @@ use std::sync::Arc;
 use crate::bam::errors::AlignmentIndexError;
 use crate::ng::read::filtering::{ReadFilterConfig, ReadFilterCounts, ReadFilterError};
 use crate::ng::read::input::read_groups::{
-    ReadGroup, ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
+    ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, RecordOwner, SampleReadGroups,
+    build_read_groups,
 };
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
@@ -373,13 +374,13 @@ impl SampleReads {
             .iter()
             .enumerate()
             .map(|(source_file_index, path)| {
-                let read_group = read_group_for(path, read_groups)?;
+                let resolution = resolution_for(path, sample, read_groups)?;
                 AlignmentFile::open(
                     path,
                     reference,
                     filter_config,
                     build_index_if_missing,
-                    read_group,
+                    resolution,
                 )
                 .map_err(|source| IngestError::File {
                     source_file_index,
@@ -631,29 +632,57 @@ fn check_one_sample(
     })
 }
 
-/// The read group every record of one file belongs to.
+/// How this open reads one file's records.
 ///
-/// **A temporary shape.** Only a file declaring exactly one read group can be
-/// read at all, so the identifier is settled here, once, and no record's `RG` is
-/// ever consulted — which is exactly what the code did before read groups
-/// existed, and is why moving to the read-group table cannot alter a single
-/// read. Reading a file that declares several means resolving each record's own
-/// `RG`, which is kept for its own change: that is the point at which a read can
-/// start being attributed to the wrong library, and it fails silently.
-fn read_group_for(path: &Path, read_groups: &ReadGroups) -> Result<ReadGroupId, IngestError> {
-    let declared: Vec<ReadGroupId> = read_groups
+/// A file declaring one read group resolves to [`Sole`](ReadGroupResolution::Sole)
+/// and its records' `RG` tags are never read — the common case, and the one that
+/// lets a file re-headered without rewriting its records be read at all. A file
+/// declaring several resolves per record.
+///
+/// **Still refused: a file whose read groups name more than one sample.** Reading
+/// one means recognising the other sample's records in order to leave them out,
+/// which is its own change — the reads it drops are reads, and dropping the wrong
+/// ones is silent. Until then such a file is rejected rather than half-read.
+fn resolution_for(
+    path: &Path,
+    sample: &SampleReadGroups,
+    read_groups: &ReadGroups,
+) -> Result<ReadGroupResolution, IngestError> {
+    let declared: Vec<(ReadGroupId, &ReadGroup)> = read_groups
         .iter()
         .filter(|(_, group)| *group.file == *path)
-        .map(|(id, _)| id)
         .collect();
 
-    match declared.as_slice() {
-        [id] => Ok(*id),
-        _ => Err(IngestError::SeveralReadGroupsInOneFile {
+    let foreign = declared
+        .iter()
+        .filter(|(_, group)| group.sample != sample.sample)
+        .count();
+    if foreign > 0 {
+        return Err(IngestError::SeveralSamplesInOneFile {
             path: path.to_path_buf(),
-            count: declared.len(),
-        }),
+            sample: sample.sample.to_string(),
+            foreign_read_groups: foreign,
+        });
     }
+
+    Ok(match declared.as_slice() {
+        // No read groups at all cannot happen — a file with no `@RG` fails when
+        // the table is built, long before an open — but saying so beats letting
+        // it fall into the arm below, which would build an empty `PerRecord`
+        // that fails every record at read time instead of this file at open.
+        [] => {
+            return Err(IngestError::NoReadGroupsForFile {
+                path: path.to_path_buf(),
+            });
+        }
+        [(id, _)] => ReadGroupResolution::Sole(*id),
+        several => ReadGroupResolution::PerRecord(
+            several
+                .iter()
+                .map(|(id, group)| (group.id.clone(), RecordOwner::Mine(*id)))
+                .collect(),
+        ),
+    })
 }
 
 /// Sample-level failures — the layer above [`AlignmentFileError`].
@@ -689,18 +718,33 @@ pub enum IngestError {
     #[error("reading the input files' read groups failed")]
     ReadGroups(#[source] ReadGroupError),
 
-    /// A file declares several `@RG` records, which cannot be read yet.
+    /// The run's read-group table holds no read group for a file this open was
+    /// asked to read.
     ///
-    /// **Temporary.** Assigning such a file's records means reading each one's
-    /// own `RG` tag; until that lands, accepting the file would mean guessing
-    /// which read group each record belongs to. Refusing is what the code did
-    /// before read groups existed, so nothing regresses meanwhile.
+    /// Unreachable through the ordinary path: a file with no `@RG` fails when the
+    /// table is built. It exists so that a caller assembling an open by hand from
+    /// a table that never saw the file gets told, rather than getting a resolution
+    /// that rejects every record it later reads.
+    #[error("no read group in the run's table belongs to alignment file '{}'", path.display())]
+    NoReadGroupsForFile { path: PathBuf },
+
+    /// A file holds read groups belonging to a sample other than the one being
+    /// opened, which cannot be read yet.
+    ///
+    /// **Temporary.** Reading such a file means recognising the other sample's
+    /// records in order to leave them out, and dropping the wrong ones would be
+    /// silent — so until that lands the file is refused rather than half-read.
     #[error(
-        "alignment file '{}' declares {count} @RG records; reading a file with more \
-         than one is not implemented yet",
+        "alignment file '{}' holds {foreign_read_groups} read group(s) belonging to \
+         samples other than '{sample}'; reading one sample out of a shared file is \
+         not implemented yet",
         path.display()
     )]
-    SeveralReadGroupsInOneFile { path: PathBuf, count: usize },
+    SeveralSamplesInOneFile {
+        path: PathBuf,
+        sample: String,
+        foreign_read_groups: usize,
+    },
 
     /// `SampleReads::open` was given no files.
     ///
@@ -1090,6 +1134,255 @@ mod tests {
             "the arms are indistinguishable to the caller"
         );
         assert_eq!(drain(&single).len(), 3);
+    }
+
+    /// **The capability this step adds.** A file declaring several read groups
+    /// is read, and each record goes to the read group its own `RG` tag names —
+    /// which is the first point in the pipeline where a read can be attributed
+    /// to the wrong library, and doing so would be silent.
+    #[test]
+    fn a_file_with_several_read_groups_resolves_each_record_by_its_tag() {
+        use crate::ng::read::input::test_fixtures::{
+            FixtureReadGroup, header_with_read_groups, indexed_named_bam,
+            read_named_with_length_in_read_group,
+        };
+
+        let (_reference_dir, reference) = fixture_reference(false);
+        let header = header_with_read_groups(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A"),
+                FixtureReadGroup::new("rg2", Some("NA12878")).with_library("lib-B"),
+            ],
+        );
+        let (_dir, path) = indexed_named_bam(
+            &header,
+            &[
+                read_named_with_length_in_read_group("a", 0, 1, 30, "rg1"),
+                read_named_with_length_in_read_group("b", 0, 20, 30, "rg2"),
+                read_named_with_length_in_read_group("c", 0, 40, 30, "rg1"),
+            ],
+            "two-groups.bam",
+        );
+
+        let read_groups = build_read_groups(std::slice::from_ref(&path)).expect("one sample");
+        let [sample] = read_groups.read_groups_per_sample() else {
+            panic!("both read groups name NA12878, so there is one sample");
+        };
+        let reads = SampleReads::open(
+            sample,
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("a file with two read groups of one sample opens");
+
+        let observed: Vec<(String, u32)> = reads
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query")
+            .map(|read| {
+                let read = read.expect("every record resolves");
+                (
+                    String::from_utf8_lossy(&read.qname).into_owned(),
+                    read.read_group.get(),
+                )
+            })
+            .collect();
+
+        // rg1 was declared first, so the table minted it 0 and rg2 got 1.
+        assert_eq!(
+            observed,
+            vec![
+                ("a".to_string(), 0),
+                ("b".to_string(), 1),
+                ("c".to_string(), 0),
+            ],
+            "each read carries the group its own tag names, not the file's first"
+        );
+    }
+
+    /// An untagged record in such a file cannot be assigned to either candidate.
+    /// Guessing would put a read in the wrong library, so it ends the run.
+    #[test]
+    fn an_untagged_record_in_a_multi_group_file_is_fatal() {
+        use crate::ng::read::input::test_fixtures::{
+            FixtureReadGroup, header_with_read_groups, indexed_named_bam,
+            read_named_with_length_in_read_group,
+        };
+
+        let (_reference_dir, reference) = fixture_reference(false);
+        let header = header_with_read_groups(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878")),
+                FixtureReadGroup::new("rg2", Some("NA12878")),
+            ],
+        );
+        let (_dir, path) = indexed_named_bam(
+            &header,
+            &[
+                read_named_with_length_in_read_group("tagged", 0, 1, 30, "rg1"),
+                read_named_with_length("untagged", 0, 20, 30),
+            ],
+            "mixed.bam",
+        );
+
+        let read_groups = build_read_groups(std::slice::from_ref(&path)).expect("one sample");
+        let [sample] = read_groups.read_groups_per_sample() else {
+            panic!("one sample");
+        };
+        let reads = SampleReads::open(
+            sample,
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("opens");
+
+        let outcome: Vec<_> = reads
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query")
+            .collect();
+
+        let error = outcome
+            .iter()
+            .find_map(|read| read.as_ref().err())
+            .expect("the untagged record is fatal");
+        // The name is in the innermost cause, so walk the chain rather than
+        // rendering only the top, which says just "read filtering failed".
+        let mut message = error.to_string();
+        let mut cause: Option<&dyn std::error::Error> = std::error::Error::source(error);
+        while let Some(source) = cause {
+            message.push_str(&format!(": {source}"));
+            cause = std::error::Error::source(source);
+        }
+        assert!(
+            message.contains("untagged"),
+            "the message names the read: {message}"
+        );
+    }
+
+    /// The same, over a **CRAM**. Its sources decode a whole container and move
+    /// records out of it rather than refilling a buffer in place, so the point at
+    /// which a record's read group can be resolved is a different one — and every
+    /// other test of these sources passes a single read group, where resolving
+    /// early and resolving late are indistinguishable.
+    #[test]
+    fn a_cram_with_several_read_groups_resolves_each_record_by_its_tag() {
+        use crate::ng::read::input::test_fixtures::{
+            indexed_cram_declaring, read_named_with_length_in_read_group,
+        };
+        use crate::ng::reference_info::{ReferenceSource, read_reference_info};
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram_declaring(
+            &[
+                read_named_with_length_in_read_group("a", 0, 1, 30, "rg1"),
+                read_named_with_length_in_read_group("b", 0, 20, 30, "rg2"),
+                read_named_with_length_in_read_group("c", 0, 40, 30, "rg1"),
+            ],
+            &[("rg1", Some("NA12878")), ("rg2", Some("NA12878"))],
+        );
+        let reference = read_reference_info(ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        })
+        .expect("read reference");
+
+        let read_groups = build_read_groups(std::slice::from_ref(&cram_path)).expect("one sample");
+        let [sample] = read_groups.read_groups_per_sample() else {
+            panic!("both read groups name NA12878");
+        };
+        let reads = SampleReads::open(
+            sample,
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("opens");
+
+        let observed: Vec<(String, u32)> = reads
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query")
+            .map(|read| {
+                let read = read.expect("every record resolves");
+                (
+                    String::from_utf8_lossy(&read.qname).into_owned(),
+                    read.read_group.get(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            observed,
+            vec![
+                ("a".to_string(), 0),
+                ("b".to_string(), 1),
+                ("c".to_string(), 0),
+            ],
+            "a CRAM record carries the group its own tag names"
+        );
+    }
+
+    /// A file holding another sample's read groups is refused, rather than
+    /// half-read. Nothing yet recognises the foreign records in order to leave
+    /// them out, and yielding them as this sample's would be silent — they would
+    /// arrive carrying the other sample's read group.
+    #[test]
+    fn a_file_shared_between_samples_is_refused() {
+        use crate::ng::read::input::test_fixtures::{
+            FixtureReadGroup, header_with_read_groups, indexed_named_bam,
+            read_named_with_length_in_read_group,
+        };
+
+        let (_reference_dir, reference) = fixture_reference(false);
+        let header = header_with_read_groups(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878")),
+                FixtureReadGroup::new("rg2", Some("HG002")),
+            ],
+        );
+        let (_dir, path) = indexed_named_bam(
+            &header,
+            &[read_named_with_length_in_read_group("a", 0, 1, 30, "rg1")],
+            "shared.bam",
+        );
+
+        let read_groups =
+            build_read_groups(std::slice::from_ref(&path)).expect("the table is fine");
+        let samples = read_groups.read_groups_per_sample();
+        assert_eq!(samples.len(), 2, "the file holds two samples");
+
+        let error = SampleReads::open(
+            &samples[0],
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect_err("reading one sample out of a shared file is refused");
+
+        match &error {
+            IngestError::SeveralSamplesInOneFile {
+                sample,
+                foreign_read_groups,
+                ..
+            } => {
+                assert_eq!(sample, "NA12878");
+                assert_eq!(*foreign_read_groups, 1);
+            }
+            other => panic!("expected SeveralSamplesInOneFile, got {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("HG002") || error.to_string().contains("shared.bam"),
+            "the message identifies the file: {error}"
+        );
     }
 
     /// A read must carry the read group it came from. It is load-bearing rather

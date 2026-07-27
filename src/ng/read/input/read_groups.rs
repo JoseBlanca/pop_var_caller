@@ -444,6 +444,50 @@ pub enum ReadGroupResolution {
     PerRecord(Box<[(Box<str>, RecordOwner)]>),
 }
 
+impl ReadGroupResolution {
+    /// Which read group a record belongs to, given the `RG` tag it carries (or
+    /// does not).
+    ///
+    /// Pure, and takes the tag's bytes rather than a record, so the decision can
+    /// be tested on its own — it is the point at which a read starts being
+    /// attributed to a library, and a wrong answer here is silent.
+    ///
+    /// The `Sole` arm ignores `tag` entirely, which is the whole reason a file
+    /// re-headered without rewriting its records can be read at all.
+    pub fn owner_of(&self, tag: Option<&[u8]>) -> Result<RecordOwner, UnresolvedReadGroup> {
+        match self {
+            Self::Sole(id) => Ok(RecordOwner::Mine(*id)),
+            Self::PerRecord(declared) => {
+                let Some(tag) = tag else {
+                    return Err(UnresolvedReadGroup::NoReadGroupTag);
+                };
+                declared
+                    .iter()
+                    .find(|(name, _)| name.as_bytes() == tag)
+                    .map(|(_, owner)| *owner)
+                    .ok_or_else(|| UnresolvedReadGroup::UndeclaredReadGroup {
+                        named: String::from_utf8_lossy(tag).into_owned(),
+                    })
+            }
+        }
+    }
+}
+
+/// Why a record could not be assigned to a read group.
+///
+/// Only reachable in a file declaring several: with one, every record belongs to
+/// it whatever its tag says. Both are fatal — with several candidates there is no
+/// way to assign the record, and guessing would attribute a read to the wrong
+/// library, which nothing downstream could detect.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum UnresolvedReadGroup {
+    #[error("the record carries no RG tag, and its file declares several read groups")]
+    NoReadGroupTag,
+    #[error("the record names read group '{named}', which its file's header does not declare")]
+    UndeclaredReadGroup { named: String },
+}
+
 /// What a declared read group means to *this* open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordOwner {
@@ -730,6 +774,96 @@ mod tests {
         assert_eq!(
             declared.iter().map(|rg| &*rg.sample).collect::<Vec<_>>(),
             vec!["NA12878", "HG002"]
+        );
+    }
+
+    // --- resolving one record's read group ---
+
+    fn per_record() -> ReadGroupResolution {
+        ReadGroupResolution::PerRecord(
+            vec![
+                ("rg1".into(), RecordOwner::Mine(ReadGroupId(4))),
+                ("rg2".into(), RecordOwner::Mine(ReadGroupId(5))),
+            ]
+            .into_boxed_slice(),
+        )
+    }
+
+    /// The universal path: one declared read group, and the tag is never
+    /// consulted — which is what lets a file re-headered without rewriting its
+    /// records be read at all.
+    #[test]
+    fn a_sole_read_group_claims_every_record_whatever_its_tag_says() {
+        let sole = ReadGroupResolution::Sole(ReadGroupId(9));
+
+        for tag in [None, Some(&b"rg1"[..]), Some(&b"nonsense"[..])] {
+            assert_eq!(
+                sole.owner_of(tag),
+                Ok(RecordOwner::Mine(ReadGroupId(9))),
+                "the tag is not read"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tagged_record_resolves_to_the_read_group_it_names() {
+        assert_eq!(
+            per_record().owner_of(Some(b"rg1")),
+            Ok(RecordOwner::Mine(ReadGroupId(4)))
+        );
+        assert_eq!(
+            per_record().owner_of(Some(b"rg2")),
+            Ok(RecordOwner::Mine(ReadGroupId(5))),
+            "not merely the first entry"
+        );
+    }
+
+    /// With several candidates there is no way to assign an untagged record, and
+    /// guessing would attribute a read to the wrong library — which nothing
+    /// downstream could detect.
+    #[test]
+    fn an_untagged_record_is_unresolvable_when_several_are_declared() {
+        assert_eq!(
+            per_record().owner_of(None),
+            Err(UnresolvedReadGroup::NoReadGroupTag)
+        );
+    }
+
+    #[test]
+    fn a_record_naming_an_undeclared_read_group_is_unresolvable() {
+        let error = per_record()
+            .owner_of(Some(b"rg7"))
+            .expect_err("rg7 is not declared");
+
+        assert_eq!(
+            error,
+            UnresolvedReadGroup::UndeclaredReadGroup {
+                named: "rg7".to_string()
+            }
+        );
+        assert!(
+            error.to_string().contains("rg7"),
+            "the message names it: {error}"
+        );
+    }
+
+    /// A read group of another sample resolves — it is declared, after all — but
+    /// resolves to *not ours*. Skipping it is a separate change; what matters
+    /// here is that it is distinguishable from our own rather than silently
+    /// counted as one.
+    #[test]
+    fn a_read_group_belonging_to_another_sample_resolves_as_not_ours() {
+        let shared = ReadGroupResolution::PerRecord(
+            vec![
+                ("mine".into(), RecordOwner::Mine(ReadGroupId(1))),
+                ("theirs".into(), RecordOwner::OtherSample),
+            ]
+            .into_boxed_slice(),
+        );
+
+        assert_eq!(
+            shared.owner_of(Some(b"theirs")),
+            Ok(RecordOwner::OtherSample)
         );
     }
 }

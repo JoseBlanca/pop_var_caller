@@ -23,6 +23,7 @@ use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use tempfile::TempDir;
 
 use crate::bam::index_preflight::preflight_alignment_indexes;
+use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
 use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
@@ -133,14 +134,15 @@ pub(crate) fn bam_header(contigs: &[(&str, usize, Option<&str>)]) -> sam::Header
     header(Some("coordinate"), contigs, &[("rg1", Some("NA12878"))])
 }
 
-/// The read group a fixture file's records belong to.
+/// How a fixture file's records resolve: every fixture header declares exactly
+/// one `@RG`, so every record is that one and no record's `RG` is read.
 ///
-/// Every fixture header declares exactly one `@RG`, and the identifier is `0`
-/// because a test opens one file and the run's table would have minted `0` for
-/// its only read group. A test that cares which identifier reaches a read builds
-/// the table with `build_read_groups` instead.
-pub(crate) fn fixture_read_group() -> ReadGroupId {
-    ReadGroupId(0)
+/// The identifier is `0` because a test opens one file and the run's table would
+/// have minted `0` for its only read group. A test that cares which identifier
+/// reaches a read builds the table with `build_read_groups` instead; one about
+/// per-record resolution builds a `PerRecord` resolution itself.
+pub(crate) fn fixture_read_group() -> ReadGroupResolution {
+    ReadGroupResolution::Sole(ReadGroupId(0))
 }
 
 /// [`FIXTURE_CONTIGS`] in the `@SQ` shape, with no `M5` tags.
@@ -199,10 +201,26 @@ pub(crate) fn read_named_in_read_group(
     start: usize,
     read_group_id: &str,
 ) -> RecordBuf {
+    read_named_with_length_in_read_group(qname, reference_sequence_id, start, 10, read_group_id)
+}
+
+/// [`read_named_in_read_group`], at a chosen length.
+///
+/// **A test that runs the real filter needs at least `DEFAULT_MIN_READ_LENGTH`
+/// (30).** The 10 bp default is below it, so a filtered stream drops such reads
+/// entirely — which looks exactly like a read-group resolution that returned
+/// nothing.
+pub(crate) fn read_named_with_length_in_read_group(
+    qname: &str,
+    reference_sequence_id: usize,
+    start: usize,
+    length: usize,
+    read_group_id: &str,
+) -> RecordBuf {
     use sam::alignment::record::data::field::Tag;
     use sam::alignment::record_buf::data::field::Value;
 
-    let mut record = read_named(qname, reference_sequence_id, start);
+    let mut record = read_named_with_length(qname, reference_sequence_id, start, length);
     record.data_mut().insert(
         Tag::READ_GROUP,
         Value::String(read_group_id.as_bytes().to_vec().into()),
@@ -304,6 +322,19 @@ pub(crate) fn named_bam(
 /// bitten before. The `.crai` contig walk is covered instead by a hand-built
 /// index in `region_query`'s tests, which needs no file at all.
 pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir, PathBuf) {
+    indexed_cram_declaring(records, &[("rg1", Some("NA12878"))])
+}
+
+/// [`indexed_cram`], with a chosen set of `@RG` records.
+///
+/// A CRAM declaring several read groups is what makes the CRAM sources resolve
+/// each record's own `RG` rather than take the file's only one — a path the
+/// single-`@RG` fixture cannot reach at all, and where a stamp taken from the
+/// wrong record would be silent.
+pub(crate) fn indexed_cram_declaring(
+    records: &[RecordBuf],
+    read_groups: &[(&str, Option<&str>)],
+) -> (TempDir, PathBuf, TempDir, PathBuf) {
     debug_assert!(
         records
             .iter()
@@ -324,7 +355,10 @@ pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir,
         &fasta,
         &specs,
         &HeaderOverrides {
-            read_groups: vec![("rg1".to_string(), Some("NA12878".to_string()))],
+            read_groups: read_groups
+                .iter()
+                .map(|(id, sample)| ((*id).to_string(), sample.map(str::to_string)))
+                .collect(),
             ..HeaderOverrides::default()
         },
         records,

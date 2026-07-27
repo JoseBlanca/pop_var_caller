@@ -44,8 +44,11 @@ use noodles_sam::alignment::RecordBuf;
 
 use crate::bam::index_preflight::AlignmentIndex;
 use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::filtering::{NoodlesRawRecord, ReadFilterError, RecordSource};
-use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
+use crate::ng::read::filtering::{
+    NoodlesRawRecord, ReadFilterError, RecordSource, resolve_read_group,
+};
+use crate::ng::read::input::read_groups::ReadGroupResolution;
+use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 
 use super::AlignmentFileError;
 
@@ -72,7 +75,9 @@ pub(crate) struct BamRegionSource<'a> {
     /// gate, which is what makes this a cast rather than a lookup.
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    read_group: ReadGroupId,
+    /// Borrowed from the `AlignmentFile`, like the header: settled at open,
+    /// never rebuilt per query.
+    resolution: &'a ReadGroupResolution,
     /// Latched once the scan passes the region end or the chunks run out.
     done: bool,
 }
@@ -144,7 +149,7 @@ impl<'a> BamRegionSource<'a> {
         reader: bam::io::Reader<bgzf::io::Reader<File>>,
         header: &'a sam::Header,
         plan: RegionPlan,
-        read_group: ReadGroupId,
+        resolution: &'a ReadGroupResolution,
     ) -> Self {
         Self {
             reader,
@@ -153,7 +158,7 @@ impl<'a> BamRegionSource<'a> {
             current_chunk_end: None,
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
-            read_group,
+            resolution,
             done: false,
         }
     }
@@ -184,6 +189,7 @@ impl RecordSource for BamRegionSource<'_> {
             return Ok(false);
         }
 
+        buf.read_group = None;
         loop {
             // 1. Land inside a chunk, seeking to its start if we have just
             //    taken it.
@@ -210,7 +216,6 @@ impl RecordSource for BamRegionSource<'_> {
             }
 
             // 3. One record, into the caller's reused buffer.
-            buf.read_group = Some(self.read_group);
             let bytes_read = self
                 .reader
                 .read_record_buf(self.header, &mut buf.record)
@@ -246,6 +251,12 @@ impl RecordSource for BamRegionSource<'_> {
                 continue;
             }
 
+            // Resolved here, on the record that is actually being yielded: the
+            // read group can depend on the record's own `RG` tag, so resolving
+            // before the read — or on one the loop above skipped — would
+            // attribute this read to whatever the previous record carried. It
+            // also means the records this query discards never pay the lookup.
+            buf.read_group = Some(resolve_read_group(&buf.record, self.resolution)?);
             return Ok(true);
         }
     }
@@ -380,7 +391,9 @@ pub(crate) struct CramRegionSource<'a> {
     container: Option<DecodedContainer>,
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    read_group: ReadGroupId,
+    /// Borrowed from the `AlignmentFile`, like the header: settled at open,
+    /// never rebuilt per query.
+    resolution: &'a ReadGroupResolution,
     done: bool,
 }
 
@@ -420,7 +433,7 @@ impl<'a> CramRegionSource<'a> {
         header: &'a sam::Header,
         repository: fasta::Repository,
         plan: CramRegionPlan,
-        read_group: ReadGroupId,
+        resolution: &'a ReadGroupResolution,
         container: Option<DecodedContainer>,
     ) -> Self {
         Self {
@@ -434,7 +447,7 @@ impl<'a> CramRegionSource<'a> {
             container,
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
-            read_group,
+            resolution,
             done: false,
         }
     }
@@ -571,7 +584,7 @@ impl RecordSource for CramRegionSource<'_> {
             return Ok(false);
         }
 
-        buf.read_group = Some(self.read_group);
+        buf.read_group = None;
         loop {
             if let Some(record) = self.pending.next() {
                 // CRAM decodes a whole container at once, so this *moves* an
@@ -579,6 +592,10 @@ impl RecordSource for CramRegionSource<'_> {
                 // refilling it in place — the container buffer's allocations
                 // are what get reused. Same seam, different reuse point.
                 buf.record = record;
+                // After the move: the read group can depend on the record's own
+                // `RG` tag, so resolving against a stale buffer would attribute
+                // each read to whatever the previous one carried.
+                buf.read_group = Some(resolve_read_group(&buf.record, self.resolution)?);
                 return Ok(true);
             }
 
@@ -780,6 +797,7 @@ mod tests {
     use crate::ng::read::filtering::BamRecordSource;
     use crate::ng::read::input::open_bam::group_crai_by_contig;
     use crate::ng::read::input::test_fixtures::{bam_header, indexed_bam, read_named};
+    use crate::ng::types::ReadGroupId;
     use crate::ng::types::{ContigId, Position};
 
     /// Two contigs long enough that the reads below span **several BGZF
@@ -881,7 +899,11 @@ mod tests {
             .build_from_path(path)
             .expect("open bam");
         reader.read_header().expect("read header");
-        let mut source = BamRecordSource::new(reader, header.clone(), ReadGroupId(0));
+        let mut source = BamRecordSource::new(
+            reader,
+            header.clone(),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
 
         let target = region.contig.get() as usize;
         let mut buf = NoodlesRawRecord::default();
@@ -914,7 +936,12 @@ mod tests {
         reader.read_header().expect("read header");
 
         let plan = BamRegionSource::plan(header, &index, region, path).expect("plan the query");
-        let mut source = BamRegionSource::new(reader, header, plan, ReadGroupId(0));
+        let mut source = BamRegionSource::new(
+            reader,
+            header,
+            plan,
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
 
         let mut buf = NoodlesRawRecord::default();
         let mut names = Vec::new();
@@ -1025,7 +1052,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(0, 1, 100_000), &path).expect("plan"),
-            ReadGroupId(0),
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         let mut buf = NoodlesRawRecord::default();
@@ -1062,7 +1089,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            ReadGroupId(0),
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         // Drain, then confirm the source latched `done` rather than running on.
@@ -1095,7 +1122,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            ReadGroupId(0),
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
         let mut buf = NoodlesRawRecord::default();
         while source.read_next(&mut buf).expect("read") {}
@@ -1106,7 +1133,7 @@ mod tests {
             reader,
             &header,
             BamRegionSource::plan(&header, &index, region(1, 1, 200), &path).expect("plan"),
-            ReadGroupId(0),
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
         let mut seen = 0;
         while second.read_next(&mut buf).expect("read") {
@@ -1520,7 +1547,7 @@ mod tests {
             &parsed_header,
             repository,
             plan,
-            ReadGroupId(0),
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
             None,
         );
 
@@ -1672,7 +1699,7 @@ mod tests {
             &parsed_header,
             repository,
             plan,
-            ReadGroupId(0),
+            &ReadGroupResolution::Sole(ReadGroupId(0)),
             None,
         );
 

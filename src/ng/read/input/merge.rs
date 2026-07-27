@@ -245,6 +245,7 @@ mod tests {
     use super::*;
     use crate::ng::read::filtering::ReadFilterConfig;
     use crate::ng::read::input::open_bam::AlignmentFile;
+    use crate::ng::read::input::read_groups::ReadGroupResolution;
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_reference, indexed_bam, matching_contigs,
         read_named_with_length,
@@ -290,7 +291,7 @@ mod tests {
                     // Each fixture file gets its own read group, which is what
                     // lets the merged stream say which file a read came from —
                     // the property this test is about.
-                    ReadGroupId(i as u32),
+                    ReadGroupResolution::Sole(ReadGroupId(i as u32)),
                 )
                 .expect("opens")
             })

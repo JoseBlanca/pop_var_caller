@@ -27,6 +27,7 @@ use crate::bam::alignment_input::{
     FLAG_UNMAPPED, cigar_is_bad, cigar_ref_span, read_exceeds_mismatch_fraction,
 };
 use crate::ng::read::aligned_read::{AlignedRead, decode_record};
+use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::ref_seq::{RawRefSeq, RefSeqError};
 use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction, ReadGroupId};
 use noodles_bam as bam;
@@ -359,6 +360,75 @@ pub trait RecordSource {
     fn read_next(&mut self, buf: &mut Self::Record) -> io::Result<bool>;
 }
 
+/// The read group one filled record belongs to, or a fatal error naming it.
+///
+/// **The `Sole` arm returns before touching the record**, which is not merely an
+/// optimisation. A file declaring one read group is read without its records'
+/// `RG` tags being consulted at all — that is what lets a file re-headered
+/// without rewriting its records be read, and it means a malformed tag in such a
+/// file cannot end a run over a value nothing needs. It is also the universal
+/// path: every record would otherwise pay a linear scan of its auxiliary fields,
+/// since noodles' `Data::get` is a find, not a map lookup.
+///
+/// It runs where the record is filled rather than at decode because the answer is
+/// needed before anything can be attributed to a library.
+///
+/// Errors name the read. Nothing above this point can: the failure travels up as
+/// a source failure and then a filter failure, and neither knows which record was
+/// being read.
+pub(crate) fn resolve_read_group(
+    record: &RecordBuf,
+    resolution: &ReadGroupResolution,
+) -> io::Result<ReadGroupId> {
+    use noodles_sam::alignment::record::data::field::Tag;
+    use noodles_sam::alignment::record_buf::data::field::Value;
+
+    // Before the tag is read, not after: see the note above.
+    if let ReadGroupResolution::Sole(id) = resolution {
+        return Ok(*id);
+    }
+
+    let tag = match record.data().get(&Tag::READ_GROUP) {
+        Some(Value::String(name)) => Some(name.as_ref()),
+        // A non-string `RG` is a malformed record, not an absent tag; reading it
+        // as absent would report a broken file as a missing tag.
+        Some(_) => {
+            return Err(unreadable_record(
+                record,
+                "has an RG tag that is not a string",
+            ));
+        }
+        None => None,
+    };
+
+    match resolution.owner_of(tag) {
+        Ok(RecordOwner::Mine(id)) => Ok(id),
+        // Not reachable while a file shared between samples is refused at open —
+        // but an error rather than a panic, because that guard is a policy one
+        // layer away rather than a property of this function's inputs, and a
+        // panic here would be armed silently by a change to either.
+        Ok(RecordOwner::OtherSample) => Err(unreadable_record(
+            record,
+            "belongs to another sample, which cannot be read out of a shared file yet",
+        )),
+        Err(unresolved) => Err(unreadable_record(record, &unresolved.to_string())),
+    }
+}
+
+/// A fatal per-record error that names the record it is about.
+///
+/// Records need not be named, and an unnamed one is exactly the sort that turns
+/// up in a malformed file — so it says so rather than rendering an empty pair of
+/// quotes and leaving the reader to guess whether the name was blank or the
+/// message was broken.
+fn unreadable_record(record: &RecordBuf, problem: &str) -> io::Error {
+    let name = match record.name() {
+        Some(name) => format!("read '{}'", String::from_utf8_lossy(name.as_ref())),
+        None => "an unnamed read".to_string(),
+    };
+    io::Error::new(io::ErrorKind::InvalidData, format!("{name} {problem}"))
+}
+
 /// An ng-owned adapter viewing a noodles [`RecordBuf`] as a [`RawRecord`]. The
 /// production `RecordSource` refills the inner `record` in place;
 /// [`RawRecord::flag`]/[`RawRecord::mapq`] are cheap field reads on the undecoded
@@ -381,8 +451,15 @@ pub struct NoodlesRawRecord {
     /// The reused undecoded record buffer.
     pub(crate) record: RecordBuf,
     /// The read group this record belongs to, stamped onto the decoded
-    /// [`AlignedRead`]. Set by the source on **every** `read_next`, before the
-    /// record is filled; `None` only on a buffer no source has touched yet.
+    /// [`AlignedRead`].
+    ///
+    /// **Cleared when the buffer is handed out and set again after each record
+    /// is filled** — in that order, and it matters. The buffer is reused, so a
+    /// source that failed to stamp would otherwise leave the *previous*
+    /// record's group in place and attribute this read to it, silently. Clearing
+    /// first turns that into a refusal at [`RawRecord::decode`], which is what
+    /// the `Option` is for; without it the guard only ever caught a missed stamp
+    /// on the very first record.
     pub(crate) read_group: Option<ReadGroupId>,
 }
 
@@ -443,16 +520,20 @@ pub struct BamRecordSource<R> {
     reader: bam::io::Reader<R>,
     /// BAM record decode ignores the header, but `read_record_buf` requires it.
     header: sam::Header,
-    read_group: ReadGroupId,
+    resolution: ReadGroupResolution,
 }
 
 impl<R> BamRecordSource<R> {
     /// Wrap an already-opened BAM reader whose header has already been read.
-    pub fn new(reader: bam::io::Reader<R>, header: sam::Header, read_group: ReadGroupId) -> Self {
+    pub fn new(
+        reader: bam::io::Reader<R>,
+        header: sam::Header,
+        resolution: ReadGroupResolution,
+    ) -> Self {
         Self {
             reader,
             header,
-            read_group,
+            resolution,
         }
     }
 }
@@ -465,11 +546,17 @@ impl<R: io::Read> RecordSource for BamRecordSource<R> {
     }
 
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
-        // Stamp the file tag before the read; the reader refills `buf.record` in
-        // place (reusing its allocations).
-        buf.read_group = Some(self.read_group);
+        buf.read_group = None;
+        // The reader refills `buf.record` in place (reusing its allocations).
         let bytes_read = self.reader.read_record_buf(&self.header, &mut buf.record)?;
-        Ok(bytes_read != 0)
+        if bytes_read == 0 {
+            return Ok(false);
+        }
+        // **After** the read, never before: the read group can depend on the
+        // record's own `RG` tag, so resolving against a stale buffer would
+        // attribute each read to whatever the *previous* one carried.
+        buf.read_group = Some(resolve_read_group(&buf.record, &self.resolution)?);
+        Ok(true)
     }
 }
 
@@ -493,7 +580,7 @@ pub struct CramRecordSource<R> {
     reader: cram::io::Reader<R>,
     header: sam::Header,
     reference_sequence_repository: fasta::Repository,
-    read_group: ReadGroupId,
+    resolution: ReadGroupResolution,
     /// The reused container buffer — its allocations are recycled across reads.
     container: cram::io::reader::Container,
     /// The current container's decoded records, yielded one per read.
@@ -524,13 +611,13 @@ impl<R> CramRecordSource<R> {
         reader: cram::io::Reader<R>,
         header: sam::Header,
         reference_sequence_repository: fasta::Repository,
-        read_group: ReadGroupId,
+        resolution: ReadGroupResolution,
     ) -> Self {
         Self {
             reader,
             header,
             reference_sequence_repository,
-            read_group,
+            resolution,
             container: cram::io::reader::Container::default(),
             buffered_records: Vec::new().into_iter(),
             exhausted: false,
@@ -578,10 +665,12 @@ impl<R: io::Read> RecordSource for CramRecordSource<R> {
     }
 
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
-        buf.read_group = Some(self.read_group);
+        buf.read_group = None;
         loop {
             if let Some(record) = self.buffered_records.next() {
                 buf.record = record;
+                // After the move, for the reason the BAM source gives.
+                buf.read_group = Some(resolve_read_group(&buf.record, &self.resolution)?);
                 return Ok(true);
             }
             if self.exhausted {
@@ -1517,7 +1606,11 @@ mod tests {
 
         let mut reader = bam::io::Reader::new(&bytes[..]);
         let read_header = reader.read_header().expect("read header");
-        let mut source = BamRecordSource::new(reader, read_header, ReadGroupId(3));
+        let mut source = BamRecordSource::new(
+            reader,
+            read_header,
+            ReadGroupResolution::Sole(ReadGroupId(3)),
+        );
 
         let mut buf = NoodlesRawRecord::default();
 
@@ -1553,7 +1646,11 @@ mod tests {
 
         let mut reader = bam::io::Reader::new(&bytes[..]);
         let read_header = reader.read_header().expect("read header");
-        let mut source = BamRecordSource::new(reader, read_header, ReadGroupId(0));
+        let mut source = BamRecordSource::new(
+            reader,
+            read_header,
+            ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
         let mut buf = NoodlesRawRecord::default();
 
         assert!(source.read_next(&mut buf).unwrap());
@@ -1614,7 +1711,12 @@ mod tests {
         let file = std::fs::File::open(&cram_path).unwrap();
         let mut reader = cram::io::Reader::new(file);
         let header = reader.read_header().unwrap();
-        let mut source = CramRecordSource::new(reader, header, repository, ReadGroupId(5));
+        let mut source = CramRecordSource::new(
+            reader,
+            header,
+            repository,
+            ReadGroupResolution::Sole(ReadGroupId(5)),
+        );
         let mut buf = NoodlesRawRecord::default();
 
         // Record 1 — pre-decode reads through the container-buffered source, then decode.
@@ -1690,7 +1792,12 @@ mod tests {
         // Ours: a plain reader (no baked-in repository), repo passed explicitly.
         let mut reader = cram::io::Reader::new(std::fs::File::open(&cram_path).unwrap());
         let header = reader.read_header().unwrap();
-        let mut source = CramRecordSource::new(reader, header, repository, ReadGroupId(0));
+        let mut source = CramRecordSource::new(
+            reader,
+            header,
+            repository,
+            ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
         let mut buf = NoodlesRawRecord::default();
         let mut actual: Vec<RecordBuf> = Vec::new();
         while source.read_next(&mut buf).unwrap() {
@@ -1824,7 +1931,11 @@ mod tests {
 
         let mut reader = bam::io::Reader::new(&bytes[..]);
         let read_header = reader.read_header().unwrap();
-        let source = BamRecordSource::new(reader, read_header, ReadGroupId(0));
+        let source = BamRecordSource::new(
+            reader,
+            read_header,
+            ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
         let mut filter =
             ReadFilter::new(source, fixture_reference(), ReadFilterConfig::default()).unwrap();
 
@@ -1852,7 +1963,12 @@ mod tests {
 
         let mut reader = cram::io::Reader::new(std::fs::File::open(&cram_path).unwrap());
         let header = reader.read_header().unwrap();
-        let source = CramRecordSource::new(reader, header, repository, ReadGroupId(0));
+        let source = CramRecordSource::new(
+            reader,
+            header,
+            repository,
+            ReadGroupResolution::Sole(ReadGroupId(0)),
+        );
         let mut filter =
             ReadFilter::new(source, fixture_reference(), ReadFilterConfig::default()).unwrap();
 

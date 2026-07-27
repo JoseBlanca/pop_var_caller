@@ -40,9 +40,10 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterCounts,
 };
+use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::types::{GenomeRegion, ReadGroupId};
+use crate::ng::types::GenomeRegion;
 
 use super::AlignmentFileError;
 use super::region_query::{
@@ -81,9 +82,10 @@ pub struct AlignmentFile {
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
     index: AlignmentIndex,
-    /// The read group every record of this file belongs to, stamped onto each
-    /// read. Settled at open and never recomputed.
-    read_group: ReadGroupId,
+    /// How this file's records are assigned to read groups. Settled at open and
+    /// never recomputed; the record sources consult it per record only when it
+    /// says they must.
+    resolution: ReadGroupResolution,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
     /// reference's. `None` where the file carries no usable `M5`.
@@ -270,7 +272,7 @@ impl AlignmentFile {
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
-        read_group: ReadGroupId,
+        resolution: ReadGroupResolution,
     ) -> Result<Self, AlignmentFileError> {
         let header = read_header(path)?;
 
@@ -370,7 +372,7 @@ impl AlignmentFile {
             path: Arc::from(path),
             header,
             index,
-            read_group,
+            resolution,
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -384,9 +386,9 @@ impl AlignmentFile {
         })
     }
 
-    /// The read group every record of this file belongs to (see the field).
-    pub fn read_group(&self) -> ReadGroupId {
-        self.read_group
+    /// How this file's records are assigned to read groups (see the field).
+    pub fn read_group_resolution(&self) -> &ReadGroupResolution {
+        &self.resolution
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -457,7 +459,7 @@ impl AlignmentFile {
 
         let source = match (reader, plan) {
             (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
-                BamRegionSource::new(reader, &self.header, plan, self.read_group),
+                BamRegionSource::new(reader, &self.header, plan, &self.resolution),
             ),
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
                 RegionSource::Cram(CramRegionSource::new(
@@ -467,7 +469,7 @@ impl AlignmentFile {
                         .clone()
                         .expect("open builds a repository for every CRAM"),
                     plan,
-                    self.read_group,
+                    &self.resolution,
                     container,
                 ))
             }
@@ -623,7 +625,7 @@ impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignmentFile")
             .field("path", &self.path)
-            .field("read_group", &self.read_group)
+            .field("read_groups", &self.resolution)
             .field("contigs", &self.sq_md5s.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
@@ -1668,7 +1670,7 @@ mod tests {
     fn a_bam_against_a_fai_only_reference_opens_normally() {
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
-        assert_eq!(file.read_group(), fixture_read_group());
+        assert_eq!(file.read_group_resolution(), &fixture_read_group());
     }
 
     /// **The `.crai` walk, with more than one entry to walk.**
@@ -1908,7 +1910,7 @@ mod tests {
 
         // The sample is no longer the file's to know: the read-group table owns
         // it. What the file carries is how to read its records.
-        assert_eq!(file.read_group(), fixture_read_group());
+        assert_eq!(file.read_group_resolution(), &fixture_read_group());
         assert_eq!(
             file.sq_md5s().len(),
             2,
