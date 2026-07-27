@@ -38,6 +38,10 @@ by document kind:
   - [`sample_reads.md`](spec/sample_reads.md) — **the sample**: k files (usually several
     experiments) merged into one coordinate-ordered stream, with the cross-file checks. Stands
     on `alignment_file.md`.
+  - [`read_groups.md`](spec/read_groups.md) — **the read group** (`@RG`) as a first-class object:
+    parsed once, identified run-wide, stamped on every read. Makes the library visible to the error
+    model, which fits per-base error and stutter per chemistry — a property of the library prep, not
+    of the individual. Changes decisions in `alignment_file.md` and `sample_reads.md`.
   - [`locus_generation.md`](spec/locus_generation.md) — the shared shape of locus generation:
     typed regions → **a sample's loci** (`SampleLocusObservations`), the `LocusGenerator` contract,
     the dispatcher. Joins the typed-region walk to read ingestion; ships only the `NoLoci` generator.
@@ -68,6 +72,9 @@ by document kind:
     companion to `spec/alignment_file.md`.
   - [`sample_reads.md`](arch/sample_reads.md) — `SampleReads`, the argmin merge and its
     per-read budget; seeds the shared `GenomePosition`. Companion to `spec/sample_reads.md`.
+  - [`read_groups.md`](arch/read_groups.md) — `ReadGroup`/`ReadGroups`, the run-wide `ReadGroupId`,
+    the per-open `ReadGroupResolution`, and ng's own `AlignedRead`; companion to
+    `spec/read_groups.md`.
   - [`locus_generation.md`](arch/locus_generation.md) — the shared locus-generation types &
     interfaces (`SampleLocusObservations`, `ObservedSequence`, `LocusGenerator<S>`, the dispatcher,
     `NoLoci`); companion to `spec/locus_generation.md`.
@@ -82,6 +89,9 @@ by document kind:
   - [`read_input.md`](impl_plan/read_input.md) — step 1's input edge (`read/input/`): the
     validate-on-open gate, the BAM/CRAM region queries, the order guard, and the k-file
     merge. Covers both `alignment_file` and `sample_reads`.
+  - [`read_groups.md`](impl_plan/read_groups.md) — the read-group table, opening from it, the
+    ng-owned `AlignedRead` that carries the identifier, and per-read-group counts. Modifies
+    `read_input.md`'s `AlignmentFile`/`SampleReads`.
   - [`typed_regions.md`](impl_plan/typed_regions.md) — step 3: the catalog rebase/knobs,
     the windowed substrate, and the `region_typing.rs` walk (resident → windowed).
   - [`typed_regions_cli.md`](impl_plan/typed_regions_cli.md) — the `pop_var_caller_exp` /
