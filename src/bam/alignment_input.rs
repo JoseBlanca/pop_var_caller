@@ -1102,7 +1102,9 @@ pub(crate) fn read_exceeds_mismatch_fraction(
     fraction > threshold
 }
 
-fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<CigarOp> {
+/// `pub(crate)` for ng's own decode, which reuses this rather than copying the
+/// CIGAR translation (`src/ng/read/aligned_read.rs`).
+pub(crate) fn cigar_to_ops(cigar: &sam::alignment::record_buf::Cigar) -> Vec<CigarOp> {
     use sam::alignment::record::cigar::op::Kind;
     cigar
         .as_ref()

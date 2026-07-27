@@ -1,6 +1,6 @@
 //! Read-level pipeline stages — turning a decoded alignment record into locus
 //! evidence. Two steps share this module because they share the same reference
-//! accessor and read filtering's output (`MappedRead`) is read preparation's
+//! accessor and read filtering's output (`AlignedRead`) is read preparation's
 //! input:
 //!
 //! - **step 1 — [`filtering`]** — the fixed whole-read keep/drop prelude. A
@@ -24,18 +24,19 @@
 //! [`filtering`] — its region readers are the `RecordSource` the filter
 //! consumes — so it belongs beside it (`module_layout.md` principle 1, note b).
 
+pub mod aligned_read;
 pub mod filtering;
 pub mod input;
 pub mod left_align;
 #[cfg(test)]
 mod left_align_parity;
 
+pub use aligned_read::AlignedRead;
 pub use filtering::{
     BamRecordSource, CramRecordSource, NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig,
     ReadFilterCounts, ReadFilterError, RecordSource,
 };
 
-use crate::bam::alignment_input::MappedRead;
 use crate::ng::ref_seq::RefSeqError;
 use crate::pileup::walker::PreparedRead;
 
@@ -111,7 +112,7 @@ pub trait ReadPreparer {
     /// than reusing `scratch` — is a defect, not a slow path.
     fn prepare_read(
         &self,
-        read: MappedRead,
+        read: AlignedRead,
         scratch: &mut Self::Scratch,
     ) -> Result<Option<PreparedRead>, ReadPrepError>;
 }
@@ -119,13 +120,13 @@ pub trait ReadPreparer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::types::ContigId;
+    use crate::ng::types::{ContigId, ReadGroupId};
     use crate::pileup::per_sample::baq_engine::prepare_passthrough;
     use crate::pileup::walker::CigarOp;
 
     /// A minimal mapped read: 4 matched bases at position 10 on contig 0.
-    fn mapped_read() -> MappedRead {
-        MappedRead {
+    fn mapped_read() -> AlignedRead {
+        AlignedRead {
             qname: b"read1".to_vec(),
             flag: 0,
             ref_id: 0,
@@ -137,7 +138,7 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            source_file_index: 0,
+            read_group: ReadGroupId(0),
         }
     }
 
@@ -147,10 +148,10 @@ mod tests {
         type Scratch = ();
         fn prepare_read(
             &self,
-            read: MappedRead,
+            read: AlignedRead,
             _scratch: &mut (),
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
-            Ok(Some(prepare_passthrough(read, 0)))
+            Ok(Some(prepare_passthrough(read.into_mapped_read(), 0)))
         }
     }
 
@@ -161,7 +162,7 @@ mod tests {
         type Scratch = ();
         fn prepare_read(
             &self,
-            _read: MappedRead,
+            _read: AlignedRead,
             _scratch: &mut (),
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
             Ok(None)
@@ -175,7 +176,7 @@ mod tests {
         type Scratch = ();
         fn prepare_read(
             &self,
-            _read: MappedRead,
+            _read: AlignedRead,
             _scratch: &mut (),
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
             Err(ReadPrepError::Reference(RefSeqError::UnknownContig(
@@ -198,13 +199,13 @@ mod tests {
         type Scratch = CountingScratch;
         fn prepare_read(
             &self,
-            read: MappedRead,
+            read: AlignedRead,
             scratch: &mut CountingScratch,
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
             scratch.calls += 1;
             scratch.buffer.clear();
             scratch.buffer.extend_from_slice(&read.seq);
-            Ok(Some(prepare_passthrough(read, 0)))
+            Ok(Some(prepare_passthrough(read.into_mapped_read(), 0)))
         }
     }
 
@@ -215,7 +216,7 @@ mod tests {
     /// contract are load-bearing — drop either and this helper stops compiling.
     fn prepare_pair<P: ReadPreparer>(
         preparer: &P,
-        reads: [MappedRead; 2],
+        reads: [AlignedRead; 2],
     ) -> Result<Vec<Option<PreparedRead>>, ReadPrepError> {
         let mut scratch = P::Scratch::default();
         reads

@@ -31,18 +31,18 @@ use noodles_cram as cram;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 
-use crate::bam::alignment_input::{MappedRead, build_fasta_repository};
+use crate::bam::alignment_input::build_fasta_repository;
 use crate::bam::index_preflight::{
     AlignmentFileKind, AlignmentIndex, load_alignment_index, preflight_alignment_indexes,
 };
 use crate::fasta::{ContigEntry, ContigList};
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterCounts,
 };
-use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::types::GenomeRegion;
+use crate::ng::types::{GenomeRegion, ReadGroupId};
 
 use super::AlignmentFileError;
 use super::region_query::{
@@ -81,10 +81,9 @@ pub struct AlignmentFile {
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
     index: AlignmentIndex,
-    /// How this open reads this file's records: which read group each belongs
-    /// to, and which of them are this sample's. Fixed here, at open, and read
-    /// per record from C1 onward — never recomputed.
-    resolution: ReadGroupResolution,
+    /// The read group every record of this file belongs to, stamped onto each
+    /// read. Settled at open and never recomputed.
+    read_group: ReadGroupId,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
     /// reference's. `None` where the file carries no usable `M5`.
@@ -124,8 +123,6 @@ pub struct AlignmentFile {
     /// keeps its own tally and folds it in here on `Drop` — one lock per query,
     /// beside the one the pool already takes.
     counts: Mutex<ReadFilterCounts>,
-    /// Stamped onto every `MappedRead` this file yields.
-    source_file_index: usize,
 }
 
 /// One idle reader positioned past the header, **plus the scratch its next
@@ -216,7 +213,7 @@ pub struct RegionReads<'a, R: RawRefSeq> {
 }
 
 impl<R: RawRefSeq> Iterator for RegionReads<'_, R> {
-    type Item = Result<MappedRead, AlignmentFileError>;
+    type Item = Result<AlignedRead, AlignmentFileError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.stream.as_mut()?.next()
@@ -273,33 +270,7 @@ impl AlignmentFile {
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
-        resolution: ReadGroupResolution,
-    ) -> Result<Self, AlignmentFileError> {
-        Self::open_as(
-            path,
-            reference,
-            filter_config,
-            build_index_if_missing,
-            0,
-            resolution,
-        )
-    }
-
-    /// `open`, with the file's index within its sample — the value stamped onto
-    /// every `MappedRead` as `source_file_index`. `SampleReads` passes the
-    /// position in its list; a lone file is 0.
-    ///
-    /// `resolution` says how this open reads this file's records: which read
-    /// group each belongs to, and which of them are this sample's at all. It is
-    /// built by `SampleReads` from the run's read-group table, **per open** —
-    /// the same file opened for two samples gets two different resolutions.
-    pub fn open_as(
-        path: &Path,
-        reference: &ReferenceInfo,
-        filter_config: ReadFilterConfig,
-        build_index_if_missing: bool,
-        source_file_index: usize,
-        resolution: ReadGroupResolution,
+        read_group: ReadGroupId,
     ) -> Result<Self, AlignmentFileError> {
         let header = read_header(path)?;
 
@@ -399,7 +370,7 @@ impl AlignmentFile {
             path: Arc::from(path),
             header,
             index,
-            resolution,
+            read_group,
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -410,13 +381,12 @@ impl AlignmentFile {
             crai_by_contig,
             reference_repository,
             counts: Mutex::new(ReadFilterCounts::default()),
-            source_file_index,
         })
     }
 
-    /// How this open reads this file's records (see the field).
-    pub fn read_group_resolution(&self) -> &ReadGroupResolution {
-        &self.resolution
+    /// The read group every record of this file belongs to (see the field).
+    pub fn read_group(&self) -> ReadGroupId {
+        self.read_group
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -487,7 +457,7 @@ impl AlignmentFile {
 
         let source = match (reader, plan) {
             (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
-                BamRegionSource::new(reader, &self.header, plan, self.source_file_index),
+                BamRegionSource::new(reader, &self.header, plan, self.read_group),
             ),
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
                 RegionSource::Cram(CramRegionSource::new(
@@ -497,7 +467,7 @@ impl AlignmentFile {
                         .clone()
                         .expect("open builds a repository for every CRAM"),
                     plan,
-                    self.source_file_index,
+                    self.read_group,
                     container,
                 ))
             }
@@ -653,7 +623,7 @@ impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AlignmentFile")
             .field("path", &self.path)
-            .field("read_groups", &self.resolution)
+            .field("read_group", &self.read_group)
             .field("contigs", &self.sq_md5s.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
@@ -832,8 +802,8 @@ fn hex_nibble(character: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_reference, header, indexed_bam, matching_contigs,
-        one_read, read_named, sole_read_group, unindexed_bam,
+        FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference, header, indexed_bam,
+        matching_contigs, one_read, read_named, unindexed_bam,
     };
 
     // --- @HD SO ---
@@ -1135,7 +1105,7 @@ mod tests {
             &reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("a matching CRAM opens");
 
@@ -1226,7 +1196,7 @@ mod tests {
             &reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("the fixture matches");
         (reference_dir, bam_dir, file)
@@ -1255,7 +1225,7 @@ mod tests {
             all_mismatching_read("mismatching", 40),
         ]);
 
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(whole_first_contig(), reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1288,7 +1258,7 @@ mod tests {
             start: crate::ng::types::Position(1),
             end: crate::ng::types::Position(35),
         };
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(region, reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1327,7 +1297,7 @@ mod tests {
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
 
         for _ in 0..25 {
-            let reads: Vec<MappedRead> = file
+            let reads: Vec<AlignedRead> = file
                 .reads_in_region(whole_first_contig(), reference_bases())
                 .expect("query")
                 .collect::<Result<_, _>>()
@@ -1369,7 +1339,7 @@ mod tests {
             &reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("opens");
 
@@ -1445,7 +1415,7 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    let reads: Vec<MappedRead> = file
+                    let reads: Vec<AlignedRead> = file
                         .reads_in_region(whole_first_contig(), reference_bases())
                         .expect("query")
                         .collect::<Result<_, _>>()
@@ -1490,14 +1460,14 @@ mod tests {
             end: crate::ng::types::Position(40),
         };
 
-        let first: Vec<MappedRead> = file
+        let first: Vec<AlignedRead> = file
             .reads_in_region(later, reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
             .expect("the later region streams");
         assert_eq!(first.len(), 1);
 
-        let second: Vec<MappedRead> = file
+        let second: Vec<AlignedRead> = file
             .reads_in_region(earlier, reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1608,7 +1578,7 @@ mod tests {
             &bam_reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("the BAM opens");
 
@@ -1623,7 +1593,7 @@ mod tests {
             &cram_reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("the CRAM opens");
 
@@ -1679,7 +1649,7 @@ mod tests {
             &fai_only,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect_err("a CRAM needs the bases");
         assert!(matches!(
@@ -1698,7 +1668,7 @@ mod tests {
     fn a_bam_against_a_fai_only_reference_opens_normally() {
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
-        assert_eq!(file.read_group_resolution(), &sole_read_group());
+        assert_eq!(file.read_group(), fixture_read_group());
     }
 
     /// **The `.crai` walk, with more than one entry to walk.**
@@ -1728,7 +1698,7 @@ mod tests {
             &reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("opens");
 
@@ -1739,7 +1709,7 @@ mod tests {
             end: crate::ng::types::Position(200),
         };
 
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(near_the_start, bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1766,7 +1736,7 @@ mod tests {
             start: crate::ng::types::Position(late_start),
             end: crate::ng::types::Position(late_start + 200),
         };
-        let late: Vec<MappedRead> = file
+        let late: Vec<AlignedRead> = file
             .reads_in_region(near_the_end, bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1821,11 +1791,11 @@ mod tests {
             &reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         )
         .expect("a wrong M5 is a wildcard against a .fai-only reference");
 
-        let reads: Vec<MappedRead> = file
+        let reads: Vec<AlignedRead> = file
             .reads_in_region(whole_first_contig(), reference_bases())
             .expect("query")
             .collect::<Result<_, _>>()
@@ -1910,7 +1880,7 @@ mod tests {
                 &reference,
                 ReadFilterConfig::default(),
                 false,
-                sole_read_group(),
+                fixture_read_group(),
             ),
             _reference_dir: reference_dir,
             _bam_dir: bam_dir,
@@ -1938,7 +1908,7 @@ mod tests {
 
         // The sample is no longer the file's to know: the read-group table owns
         // it. What the file carries is how to read its records.
-        assert_eq!(file.read_group_resolution(), &sole_read_group());
+        assert_eq!(file.read_group(), fixture_read_group());
         assert_eq!(
             file.sq_md5s().len(),
             2,
@@ -2168,7 +2138,7 @@ mod tests {
             &reference,
             ReadFilterConfig::default(),
             false,
-            sole_read_group(),
+            fixture_read_group(),
         );
         ((reference_dir, dir), opened)
     }
@@ -2204,7 +2174,7 @@ mod tests {
                 &reference,
                 ReadFilterConfig::default(),
                 true,
-                sole_read_group(),
+                fixture_read_group(),
             )
             .is_ok(),
             "with build_index_if_missing the index is created next to the file"

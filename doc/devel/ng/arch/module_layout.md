@@ -31,6 +31,12 @@ src/ng/
 │
 │   # one module per pipeline step — each owns its trait + its swappable impls + tests
 ├── read/             – steps 1+2, one read-handling module (see principle 1, note):
+│                        · aligned_read.rs – AlignedRead: ng's decoded read, and the decode
+│                          that builds it. Beside its producer rather than in types.rs,
+│                          the way production keeps MappedRead beside its own reader and
+│                          ng keeps SampleLocusObservations in locus_generation/: it is
+│                          filtering's output, not free-floating vocabulary. Carries the
+│                          read group (../spec/read_groups.md §8)
 │                        · filtering.rs – step 1: the fixed filtering prelude (a single
 │                          file — no bake-off; wraps the bam/alignment_input filters)
 │                        · mod.rs + left_align_baq.rs – step 2 (GENERIC PATH ONLY): the

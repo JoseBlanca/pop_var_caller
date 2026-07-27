@@ -9,9 +9,12 @@
 //!
 //! Read filtering is a **port** of the production filter stack in
 //! [`crate::bam::alignment_input`]: it reuses that module's pure predicates
-//! (`read_exceeds_mismatch_fraction`, `cigar_is_bad`), its `FLAG_*` /
-//! `DEFAULT_*` constants, and its `RecordBuf → MappedRead` decode path as-is,
-//! and supplies only its own driver and config.
+//! (`read_exceeds_mismatch_fraction`, `cigar_is_bad`) and its `FLAG_*` /
+//! `DEFAULT_*` constants, and supplies only its own driver and config. The
+//! `RecordBuf` → read decode is **no longer** production's: ng needs the read to
+//! carry its read group, so it owns [`AlignedRead`] and the assembly that builds
+//! it ([`crate::ng::read::aligned_read`]), while still calling production's
+//! `compute_adaptor_boundary` and `cigar_to_ops` rather than reproducing them.
 //!
 //! The whole step is here: the step-1-local types, the two-phase `verdict_*`
 //! cascade, the `RawRecord`/`RecordSource` seam with the noodles BAM/CRAM
@@ -21,11 +24,11 @@
 use crate::bam::alignment_input::{
     DEFAULT_MAX_READ_MISMATCH_FRACTION, DEFAULT_MIN_MAPQ, DEFAULT_MIN_READ_LENGTH,
     DEFAULT_MISMATCH_BQ_FLOOR, FLAG_DUPLICATE, FLAG_QC_FAIL, FLAG_SECONDARY, FLAG_SUPPLEMENTARY,
-    FLAG_UNMAPPED, MappedRead, cigar_is_bad, cigar_ref_span, read_exceeds_mismatch_fraction,
-    record_buf_to_mapped_read,
+    FLAG_UNMAPPED, cigar_is_bad, cigar_ref_span, read_exceeds_mismatch_fraction,
 };
+use crate::ng::read::aligned_read::{AlignedRead, decode_record};
 use crate::ng::ref_seq::{RawRefSeq, RefSeqError};
-use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction};
+use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction, ReadGroupId};
 use noodles_bam as bam;
 use noodles_cram as cram;
 use noodles_fasta as fasta;
@@ -190,7 +193,7 @@ impl ReadFilterCounts {
 /// `mapq` is already resolved: SAM's "unavailable" (`0xFF`) is mapped to
 /// `MapQual(0)` by the record source (Milestone C), so a non-zero `min_mapq`
 /// drops it — matching production. `flag` is the raw SAM bitfield
-/// (`MappedRead.flag`), tested against the reused `FLAG_*` constants.
+/// (`AlignedRead.flag`), tested against the reused `FLAG_*` constants.
 fn verdict_pre_decode(flag: u16, mapq: MapQual, config: &ReadFilterConfig) -> FilterVerdict {
     // 1. Duplicate — a PCR/optical copy of another molecule (toggle).
     if config.drop_duplicate && (flag & FLAG_DUPLICATE) != 0 {
@@ -222,7 +225,7 @@ fn verdict_pre_decode(flag: u16, mapq: MapQual, config: &ReadFilterConfig) -> Fi
 }
 
 /// Phase two of the cascade — the decode-dependent filters, run on a decoded
-/// [`MappedRead`] only after it clears phase one. Evaluated **cheapest-first**:
+/// [`AlignedRead`] only after it clears phase one. Evaluated **cheapest-first**:
 ///
 /// 1. **#7 too-short** — one length compare, no reference.
 /// 2. **#9 bad-CIGAR** — a pure CIGAR scan, no reference.
@@ -251,7 +254,7 @@ fn verdict_pre_decode(flag: u16, mapq: MapQual, config: &ReadFilterConfig) -> Fi
 /// it, like a truncated file, as corrupt input to fail loudly on rather than
 /// filter around (spec §7).
 fn verdict_post_decode(
-    read: &MappedRead,
+    read: &AlignedRead,
     reference: &impl RawRefSeq,
     config: &ReadFilterConfig,
     ref_buf: &mut Vec<u8>,
@@ -312,26 +315,25 @@ fn verdict_post_decode(
 /// cascade (#1–#6) run *before* the record is decoded. [`Self::flag`] and
 /// [`Self::mapq`] are cheap field reads on the still-packed record; [`Self::decode`]
 /// is the expensive phase (base/quality decode + adaptor-boundary annotation →
-/// [`MappedRead`]), run only on the reads that clear the pre-decode gate. It
+/// [`AlignedRead`]), run only on the reads that clear the pre-decode gate. It
 /// borrows `&self`, not `self`, so the underlying buffer stays reusable for the
 /// next read.
 pub trait RawRecord {
-    /// The SAM flag bitfield — the same `u16` [`MappedRead::flag`] carries; read
+    /// The SAM flag bitfield — the same `u16` [`AlignedRead::flag`] carries; read
     /// by filters #1, #3–#6.
     fn flag(&self) -> u16;
     /// The SAM mapping quality; filter #2. "Unavailable" (SAM `0xFF`) resolves to
     /// [`MapQual`]`(0)`, matching production, so any non-zero minimum drops it.
     fn mapq(&self) -> MapQual;
-    /// Decode the record into an owned [`MappedRead`] (filters #7–#9 read the
-    /// result). Fallible because the reused decode path
-    /// ([`record_buf_to_mapped_read`]) is: a record reaching here has passed the
-    /// pre-decode cascade (so it is mapped), but a corrupt record — the unmapped
+    /// Decode the record into an owned [`AlignedRead`] (filters #7–#9 read the
+    /// result). Fallible because the decode is: a record reaching here has passed
+    /// the pre-decode cascade (so it is mapped), but a corrupt record — the unmapped
     /// flag clear yet no position — surfaces here as an `Err` that, like the #8
     /// fetch and `RecordSource::read_next`, is **fatal to the run** rather than a
     /// per-read drop or a panic (spec §7). (The spec's illustrative signature
     /// showed this infallible; it is fallible in practice because the reused
     /// production decoder is.)
-    fn decode(&self) -> io::Result<MappedRead>;
+    fn decode(&self) -> io::Result<AlignedRead>;
 }
 
 /// The filter's input: fills a caller-owned buffer with the next record, reusing
@@ -360,26 +362,45 @@ pub trait RecordSource {
 /// An ng-owned adapter viewing a noodles [`RecordBuf`] as a [`RawRecord`]. The
 /// production `RecordSource` refills the inner `record` in place;
 /// [`RawRecord::flag`]/[`RawRecord::mapq`] are cheap field reads on the undecoded
-/// record, and [`RawRecord::decode`] runs the reused
-/// [`record_buf_to_mapped_read`] path (which itself reuses
-/// `compute_adaptor_boundary`). `source_file_index` is the per-file tag stamped
-/// onto the decoded [`MappedRead`]; the source sets it before each read.
+/// record, and [`RawRecord::decode`] runs ng's own
+/// [`decode_record`](crate::ng::read::aligned_read) (which still calls
+/// production's `compute_adaptor_boundary` and `cigar_to_ops`). `read_group` is
+/// the read group the decoded read is attributed to; the source sets it before
+/// each read.
 ///
 /// ng-owned by design (spec §7, decision a): the dependency points ng → existing
 /// code, so production never learns about ng.
 ///
 /// Both fields are `pub(crate)` internal state, not a caller-set surface:
-/// `source_file_index` is (re)stamped by the source on every [`RecordSource::read_next`],
+/// `read_group` is (re)stamped by the source on every [`RecordSource::read_next`],
 /// and `record` is refilled in place — a caller-written value would just be
 /// overwritten. No `Clone`: the whole point is to reuse one buffer, and cloning
 /// would deep-copy the `RecordBuf` it exists to avoid copying.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NoodlesRawRecord {
     /// The reused undecoded record buffer.
     pub(crate) record: RecordBuf,
-    /// The 0-based index of the file this record came from (stamped onto the
-    /// decoded [`MappedRead`]).
-    pub(crate) source_file_index: usize,
+    /// The read group this record belongs to, stamped onto the decoded
+    /// [`AlignedRead`]. Set by the source on **every** `read_next`, before the
+    /// record is filled; `None` only on a buffer no source has touched yet.
+    pub(crate) read_group: Option<ReadGroupId>,
+}
+
+/// Hand-written rather than derived, because a fresh buffer has **no** read
+/// group and must not pretend to one.
+///
+/// `ReadGroupId(0)` would be the obvious filler and is the trap: zero is not a
+/// sentinel, it is the first identifier the run's table mints, so a source that
+/// failed to stamp would attribute every read to a real library — silently, and
+/// on exactly the grouping the error model is fitted per. `None` makes that a
+/// loud failure at the one place that reads the field.
+impl Default for NoodlesRawRecord {
+    fn default() -> Self {
+        Self {
+            record: RecordBuf::default(),
+            read_group: None,
+        }
+    }
 }
 
 impl RawRecord for NoodlesRawRecord {
@@ -393,8 +414,17 @@ impl RawRecord for NoodlesRawRecord {
         MapQual(self.record.mapping_quality().map(u8::from).unwrap_or(0))
     }
 
-    fn decode(&self) -> io::Result<MappedRead> {
-        record_buf_to_mapped_read(&self.record, self.source_file_index)
+    fn decode(&self) -> io::Result<AlignedRead> {
+        // A buffer reaching decode without a read group means a `RecordSource`
+        // skipped its stamp. Refusing is the point: the alternative is a read
+        // silently attributed to whichever library the filler happened to name.
+        let read_group = self.read_group.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a record reached decode with no read group: its source did not stamp one",
+            )
+        })?;
+        decode_record(&self.record, read_group)
     }
 }
 
@@ -413,16 +443,16 @@ pub struct BamRecordSource<R> {
     reader: bam::io::Reader<R>,
     /// BAM record decode ignores the header, but `read_record_buf` requires it.
     header: sam::Header,
-    source_file_index: usize,
+    read_group: ReadGroupId,
 }
 
 impl<R> BamRecordSource<R> {
     /// Wrap an already-opened BAM reader whose header has already been read.
-    pub fn new(reader: bam::io::Reader<R>, header: sam::Header, source_file_index: usize) -> Self {
+    pub fn new(reader: bam::io::Reader<R>, header: sam::Header, read_group: ReadGroupId) -> Self {
         Self {
             reader,
             header,
-            source_file_index,
+            read_group,
         }
     }
 }
@@ -437,7 +467,7 @@ impl<R: io::Read> RecordSource for BamRecordSource<R> {
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
         // Stamp the file tag before the read; the reader refills `buf.record` in
         // place (reusing its allocations).
-        buf.source_file_index = self.source_file_index;
+        buf.read_group = Some(self.read_group);
         let bytes_read = self.reader.read_record_buf(&self.header, &mut buf.record)?;
         Ok(bytes_read != 0)
     }
@@ -463,7 +493,7 @@ pub struct CramRecordSource<R> {
     reader: cram::io::Reader<R>,
     header: sam::Header,
     reference_sequence_repository: fasta::Repository,
-    source_file_index: usize,
+    read_group: ReadGroupId,
     /// The reused container buffer — its allocations are recycled across reads.
     container: cram::io::reader::Container,
     /// The current container's decoded records, yielded one per read.
@@ -494,13 +524,13 @@ impl<R> CramRecordSource<R> {
         reader: cram::io::Reader<R>,
         header: sam::Header,
         reference_sequence_repository: fasta::Repository,
-        source_file_index: usize,
+        read_group: ReadGroupId,
     ) -> Self {
         Self {
             reader,
             header,
             reference_sequence_repository,
-            source_file_index,
+            read_group,
             container: cram::io::reader::Container::default(),
             buffered_records: Vec::new().into_iter(),
             exhausted: false,
@@ -548,7 +578,7 @@ impl<R: io::Read> RecordSource for CramRecordSource<R> {
     }
 
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
-        buf.source_file_index = self.source_file_index;
+        buf.read_group = Some(self.read_group);
         loop {
             if let Some(record) = self.buffered_records.next() {
                 buf.record = record;
@@ -598,13 +628,13 @@ pub enum ReadFilterError {
 }
 
 /// Filters one sample's reads, lazily, as an
-/// `Iterator<Item = Result<MappedRead, ReadFilterError>>`. Each `next()` reads
+/// `Iterator<Item = Result<AlignedRead, ReadFilterError>>`. Each `next()` reads
 /// the next record into the single reused buffer, runs the pre-decode cascade
 /// (#1–#6) on its flag/MAPQ, decodes only on survival, runs the decode-dependent
 /// cascade (#7, #9, #8), tallies every drop, and returns the first read that
-/// passes as `Ok(read)`. A read dropped pre-decode builds no `MappedRead` at all.
+/// passes as `Ok(read)`. A read dropped pre-decode builds no `AlignedRead` at all.
 ///
-/// **The item is a `Result`** (unlike the spec's original `Item = MappedRead`,
+/// **The item is a `Result`** (unlike the spec's original `Item = AlignedRead`,
 /// revised so a fatal error cannot be silently lost): a fatal condition yields
 /// `Some(Err(_))` once and then `None`, so `for read in &mut filter { let read =
 /// read?; … }` surfaces it with no separate bookkeeping. This matches the noodles
@@ -781,14 +811,14 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
 
     /// Mark the iterator finished and yield a fatal error. Shared by the three
     /// fatal arms of `next()`.
-    fn fail(&mut self, error: ReadFilterError) -> Option<Result<MappedRead, ReadFilterError>> {
+    fn fail(&mut self, error: ReadFilterError) -> Option<Result<AlignedRead, ReadFilterError>> {
         self.done = true;
         Some(Err(error))
     }
 }
 
 impl<S: RecordSource, R: RawRefSeq> Iterator for ReadFilter<S, R> {
-    type Item = Result<MappedRead, ReadFilterError>;
+    type Item = Result<AlignedRead, ReadFilterError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // Fused: once a clean EOF or a fatal error has been reported, stay stopped.
@@ -1020,8 +1050,8 @@ mod tests {
 
     /// Build a mapped read at contig 0, pos 1, with the given decoded sequence,
     /// per-base qualities, and CIGAR. Flag/MAPQ are already-passed values.
-    fn mapped(seq: &[u8], qual: &[u8], cigar: Vec<CigarOp>) -> MappedRead {
-        MappedRead {
+    fn mapped(seq: &[u8], qual: &[u8], cigar: Vec<CigarOp>) -> AlignedRead {
+        AlignedRead {
             qname: b"read".to_vec(),
             flag: FLAG_PAIRED,
             ref_id: 0,
@@ -1033,7 +1063,7 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            source_file_index: 0,
+            read_group: ReadGroupId(0),
         }
     }
 
@@ -1057,7 +1087,7 @@ mod tests {
     }
 
     fn post(
-        read: &MappedRead,
+        read: &AlignedRead,
         reference: &impl RawRefSeq,
         config: &ReadFilterConfig,
     ) -> FilterVerdict {
@@ -1248,13 +1278,13 @@ mod tests {
     use noodles_sam::header::record::value::map::ReferenceSequence;
     use std::num::NonZero;
 
-    /// A trivial in-memory `RawRecord`: it carries a whole `MappedRead` and reads
+    /// A trivial in-memory `RawRecord`: it carries a whole `AlignedRead` and reads
     /// its `flag`/`mapq` back off it, so the cascade can be driven with no BAM.
     /// `decode_fails` makes `decode` return an error (to exercise the fatal
     /// decode-error path).
     #[derive(Clone)]
     struct FakeRecord {
-        read: MappedRead,
+        read: AlignedRead,
         decode_fails: bool,
     }
 
@@ -1274,7 +1304,7 @@ mod tests {
         fn mapq(&self) -> MapQual {
             MapQual(self.read.mapq)
         }
-        fn decode(&self) -> io::Result<MappedRead> {
+        fn decode(&self) -> io::Result<AlignedRead> {
             if self.decode_fails {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -1428,18 +1458,18 @@ mod tests {
         let record = bam_record("r1", 0, 5, 4, 42, Flags::from(FLAG_DUPLICATE));
         let raw = NoodlesRawRecord {
             record,
-            source_file_index: 7,
+            read_group: Some(ReadGroupId(7)),
         };
         // Cheap pre-decode reads.
         assert_eq!(raw.flag(), FLAG_DUPLICATE);
         assert_eq!(raw.mapq(), MapQual(42));
-        // Decode produces the MappedRead the cascade's phase two consumes.
+        // Decode produces the AlignedRead the cascade's phase two consumes.
         let read = raw.decode().unwrap();
         assert_eq!(read.ref_id, 0);
         assert_eq!(read.pos, 5);
         assert_eq!(read.mapq, 42);
         assert_eq!(read.seq, b"AAAA");
-        assert_eq!(read.source_file_index, 7);
+        assert_eq!(read.read_group, ReadGroupId(7));
     }
 
     #[test]
@@ -1455,7 +1485,7 @@ mod tests {
             .build();
         let raw = NoodlesRawRecord {
             record,
-            source_file_index: 0,
+            read_group: Some(ReadGroupId(0)),
         };
         assert_eq!(raw.mapq(), MapQual(0));
     }
@@ -1487,7 +1517,7 @@ mod tests {
 
         let mut reader = bam::io::Reader::new(&bytes[..]);
         let read_header = reader.read_header().expect("read header");
-        let mut source = BamRecordSource::new(reader, read_header, 3);
+        let mut source = BamRecordSource::new(reader, read_header, ReadGroupId(3));
 
         let mut buf = NoodlesRawRecord::default();
 
@@ -1498,7 +1528,7 @@ mod tests {
         let read = buf.decode().unwrap();
         assert_eq!(read.pos, 10);
         assert_eq!(read.seq.len(), 30);
-        assert_eq!(read.source_file_index, 3);
+        assert_eq!(read.read_group, ReadGroupId(3));
 
         // Record 2 — the reused buffer is refilled in place.
         assert!(source.read_next(&mut buf).unwrap());
@@ -1523,7 +1553,7 @@ mod tests {
 
         let mut reader = bam::io::Reader::new(&bytes[..]);
         let read_header = reader.read_header().expect("read header");
-        let mut source = BamRecordSource::new(reader, read_header, 0);
+        let mut source = BamRecordSource::new(reader, read_header, ReadGroupId(0));
         let mut buf = NoodlesRawRecord::default();
 
         assert!(source.read_next(&mut buf).unwrap());
@@ -1584,7 +1614,7 @@ mod tests {
         let file = std::fs::File::open(&cram_path).unwrap();
         let mut reader = cram::io::Reader::new(file);
         let header = reader.read_header().unwrap();
-        let mut source = CramRecordSource::new(reader, header, repository, 5);
+        let mut source = CramRecordSource::new(reader, header, repository, ReadGroupId(5));
         let mut buf = NoodlesRawRecord::default();
 
         // Record 1 — pre-decode reads through the container-buffered source, then decode.
@@ -1597,7 +1627,7 @@ mod tests {
             read.seq, r1_seq,
             "the non-reference bases decode back exactly"
         );
-        assert_eq!(read.source_file_index, 5);
+        assert_eq!(read.read_group, ReadGroupId(5));
 
         // Record 2.
         assert!(source.read_next(&mut buf).unwrap());
@@ -1660,7 +1690,7 @@ mod tests {
         // Ours: a plain reader (no baked-in repository), repo passed explicitly.
         let mut reader = cram::io::Reader::new(std::fs::File::open(&cram_path).unwrap());
         let header = reader.read_header().unwrap();
-        let mut source = CramRecordSource::new(reader, header, repository, 0);
+        let mut source = CramRecordSource::new(reader, header, repository, ReadGroupId(0));
         let mut buf = NoodlesRawRecord::default();
         let mut actual: Vec<RecordBuf> = Vec::new();
         while source.read_next(&mut buf).unwrap() {
@@ -1794,11 +1824,11 @@ mod tests {
 
         let mut reader = bam::io::Reader::new(&bytes[..]);
         let read_header = reader.read_header().unwrap();
-        let source = BamRecordSource::new(reader, read_header, 0);
+        let source = BamRecordSource::new(reader, read_header, ReadGroupId(0));
         let mut filter =
             ReadFilter::new(source, fixture_reference(), ReadFilterConfig::default()).unwrap();
 
-        let kept: Vec<MappedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
+        let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2, "exactly the two clean reads survive");
         assert_eq!(*filter.counts(), expected);
     }
@@ -1822,11 +1852,11 @@ mod tests {
 
         let mut reader = cram::io::Reader::new(std::fs::File::open(&cram_path).unwrap());
         let header = reader.read_header().unwrap();
-        let source = CramRecordSource::new(reader, header, repository, 0);
+        let source = CramRecordSource::new(reader, header, repository, ReadGroupId(0));
         let mut filter =
             ReadFilter::new(source, fixture_reference(), ReadFilterConfig::default()).unwrap();
 
-        let kept: Vec<MappedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
+        let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2);
         assert_eq!(*filter.counts(), expected);
     }
@@ -1933,7 +1963,7 @@ mod tests {
         let source = FakeSource::new(vec![unmapped, clean], one_contig_header());
         let mut filter =
             ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
-        let kept: Vec<MappedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
+        let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 1, "only the clean read survives");
         assert_eq!(filter.counts().unmapped, 1);
         assert_eq!(filter.counts().kept, 1);
@@ -2002,7 +2032,7 @@ mod tests {
             ReadFilterConfig::default(),
         )
         .unwrap();
-        let probed_reads: Vec<MappedRead> = (&mut probed).collect::<Result<_, _>>().unwrap();
+        let probed_reads: Vec<AlignedRead> = (&mut probed).collect::<Result<_, _>>().unwrap();
 
         let mut probe_free = ReadFilter::with_validated_contigs(
             FakeSource::new(records, one_contig_header()),
@@ -2010,7 +2040,7 @@ mod tests {
             ReadFilterConfig::default(),
             ReadFilterBuffers::default(),
         );
-        let probe_free_reads: Vec<MappedRead> =
+        let probe_free_reads: Vec<AlignedRead> =
             (&mut probe_free).collect::<Result<_, _>>().unwrap();
 
         assert_eq!(probe_free_reads.len(), 2, "the two clean reads survive");
@@ -2079,7 +2109,7 @@ mod tests {
             ReadFilterConfig::default(),
             ReadFilterBuffers::default(),
         );
-        let kept: Vec<MappedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
+        let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2);
 
         let (_source, buffers, counts) = filter.into_parts();

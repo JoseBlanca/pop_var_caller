@@ -23,7 +23,6 @@ use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use tempfile::TempDir;
 
 use crate::bam::index_preflight::preflight_alignment_indexes;
-use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
 use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
@@ -134,14 +133,14 @@ pub(crate) fn bam_header(contigs: &[(&str, usize, Option<&str>)]) -> sam::Header
     header(Some("coordinate"), contigs, &[("rg1", Some("NA12878"))])
 }
 
-/// The resolution for a fixture file: every fixture header declares exactly one
-/// `@RG`, so every record is that read group's and no record's `RG` is read.
+/// The read group a fixture file's records belong to.
 ///
-/// The identifier is `0` because a test opens one file and the run's table would
-/// have minted `0` for its only read group. A test that cares which identifier
-/// reaches a read builds the table with `build_read_groups` instead.
-pub(crate) fn sole_read_group() -> ReadGroupResolution {
-    ReadGroupResolution::Sole(ReadGroupId(0))
+/// Every fixture header declares exactly one `@RG`, and the identifier is `0`
+/// because a test opens one file and the run's table would have minted `0` for
+/// its only read group. A test that cares which identifier reaches a read builds
+/// the table with `build_read_groups` instead.
+pub(crate) fn fixture_read_group() -> ReadGroupId {
+    ReadGroupId(0)
 }
 
 /// [`FIXTURE_CONTIGS`] in the `@SQ` shape, with no `M5` tags.

@@ -36,13 +36,13 @@ use std::sync::Arc;
 use crate::bam::errors::AlignmentIndexError;
 use crate::ng::read::filtering::{ReadFilterConfig, ReadFilterCounts, ReadFilterError};
 use crate::ng::read::input::read_groups::{
-    ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, SampleReadGroups, build_read_groups,
+    ReadGroup, ReadGroupError, ReadGroups, SampleReadGroups, build_read_groups,
 };
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
 
-use crate::bam::alignment_input::MappedRead;
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::ref_seq::RawRefSeq;
 
 use merge::MergedRegionReads;
@@ -335,14 +335,16 @@ impl SampleReads {
     /// Open every file, validating each, then check they all name one sample.
     /// Both happen before any read flows.
     ///
-    /// Each file is opened with its position in `paths` as its
-    /// `source_file_index`, so every read it yields carries the tag — which is
-    /// **downstream-meaningful, not just provenance**: because the usual reason
-    /// for several files is several experiments, the file index is the sample's
-    /// *batch* label, the grouping a per-batch error model keys on.
+    /// Every read a file yields carries its **read group**, which is
+    /// **downstream-meaningful, not just provenance**: a read group is one
+    /// library preparation, and that is the grouping a per-chemistry error model
+    /// keys on, because PCR stutter and per-base error are properties of the
+    /// preparation rather than of the individual. This is where that tag is
+    /// settled — a positional file index, which is what reads used to carry,
+    /// could not answer it, since a sample's files need not be one library each.
     ///
-    /// A per-file failure is wrapped with the index of the file that raised it,
-    /// so a message can always name the culprit.
+    /// A per-file failure is wrapped with the position of the file that raised
+    /// it, so a message can always name the culprit.
     pub fn open(
         sample: &SampleReadGroups,
         read_groups: &ReadGroups,
@@ -371,14 +373,13 @@ impl SampleReads {
             .iter()
             .enumerate()
             .map(|(source_file_index, path)| {
-                let resolution = resolution_for(path, read_groups)?;
-                AlignmentFile::open_as(
+                let read_group = read_group_for(path, read_groups)?;
+                AlignmentFile::open(
                     path,
                     reference,
                     filter_config,
                     build_index_if_missing,
-                    source_file_index,
-                    resolution,
+                    read_group,
                 )
                 .map_err(|source| IngestError::File {
                     source_file_index,
@@ -444,7 +445,12 @@ impl SampleReads {
         &self.sample_name
     }
 
-    /// How many files this sample has. Parallel to `MappedRead::source_file_index`.
+    /// How many files this sample has — and the index space of [`counts()`](Self::counts).
+    ///
+    /// **Not** the space a read's `read_group` lives in: that identifier is
+    /// run-wide, so it indexes the whole run's read-group table, not this
+    /// sample's files. The two coincide only when a run holds one single-file
+    /// sample, which is true of most fixtures and of nothing else.
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
@@ -565,7 +571,7 @@ pub enum SampleRegionReads<'a, R: RawRefSeq> {
 }
 
 impl<R: RawRefSeq> Iterator for SampleRegionReads<'_, R> {
-    type Item = Result<MappedRead, IngestError>;
+    type Item = Result<AlignedRead, IngestError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -625,18 +631,16 @@ fn check_one_sample(
     })
 }
 
-/// How this open should read one file's records.
+/// The read group every record of one file belongs to.
 ///
-/// **Temporary shape (removed in C2).** Only a file declaring exactly one read
-/// group is accepted, so every resolution is `Sole` and no record's `RG` is ever
-/// consulted — which is exactly what the code did before this change, and is why
-/// the switch to the read-group table cannot alter a single read. Resolving a
-/// file that declares several is the next step's work, and it is kept separate
-/// because that is where reads can start being attributed to the wrong library.
-fn resolution_for(
-    path: &Path,
-    read_groups: &ReadGroups,
-) -> Result<ReadGroupResolution, IngestError> {
+/// **A temporary shape.** Only a file declaring exactly one read group can be
+/// read at all, so the identifier is settled here, once, and no record's `RG` is
+/// ever consulted — which is exactly what the code did before read groups
+/// existed, and is why moving to the read-group table cannot alter a single
+/// read. Reading a file that declares several means resolving each record's own
+/// `RG`, which is kept for its own change: that is the point at which a read can
+/// start being attributed to the wrong library, and it fails silently.
+fn read_group_for(path: &Path, read_groups: &ReadGroups) -> Result<ReadGroupId, IngestError> {
     let declared: Vec<ReadGroupId> = read_groups
         .iter()
         .filter(|(_, group)| *group.file == *path)
@@ -644,7 +648,7 @@ fn resolution_for(
         .collect();
 
     match declared.as_slice() {
-        [id] => Ok(ReadGroupResolution::Sole(*id)),
+        [id] => Ok(*id),
         _ => Err(IngestError::SeveralReadGroupsInOneFile {
             path: path.to_path_buf(),
             count: declared.len(),
@@ -685,12 +689,12 @@ pub enum IngestError {
     #[error("reading the input files' read groups failed")]
     ReadGroups(#[source] ReadGroupError),
 
-    /// A file declares several `@RG` records, which this step cannot yet read.
+    /// A file declares several `@RG` records, which cannot be read yet.
     ///
-    /// **Temporary, removed in C2.** Resolving a record's own `RG` tag is the
-    /// next step; until it lands, accepting such a file would mean guessing
+    /// **Temporary.** Assigning such a file's records means reading each one's
+    /// own `RG` tag; until that lands, accepting the file would mean guessing
     /// which read group each record belongs to. Refusing is what the code did
-    /// before read groups existed, so nothing regresses in the meantime.
+    /// before read groups existed, so nothing regresses meanwhile.
     #[error(
         "alignment file '{}' declares {count} @RG records; reading a file with more \
          than one is not implemented yet",
@@ -1034,7 +1038,7 @@ mod tests {
                 let read = item.expect("no fatal error");
                 (
                     String::from_utf8_lossy(&read.qname).into_owned(),
-                    read.source_file_index,
+                    read.read_group.get() as usize,
                 )
             })
             .collect()
@@ -1088,12 +1092,16 @@ mod tests {
         assert_eq!(drain(&single).len(), 3);
     }
 
-    /// **Carried from E1**: a read from file `i` must carry
-    /// `source_file_index == i`. The tag is the sample's *batch* label — the
-    /// grouping a per-batch error model keys on — so it is load-bearing rather
-    /// than provenance, and nothing proved it until the reads could be read.
+    /// A read must carry the read group it came from. It is load-bearing rather
+    /// than provenance — a read group is one library preparation, the grouping a
+    /// per-chemistry error model keys on — and nothing proved it reached the
+    /// reads until the reads could be read.
+    ///
+    /// The fixtures make each file its own read group, so "which read group" and
+    /// "which file" coincide here. They do not in general: the identifier is
+    /// run-wide, and one file can hold several read groups.
     #[test]
-    fn each_read_carries_the_index_of_the_file_it_came_from() {
+    fn each_read_carries_the_read_group_it_came_from() {
         let (_first_dir, first) = indexed_named_bam(
             &bam_header(&matching_contigs()),
             &[

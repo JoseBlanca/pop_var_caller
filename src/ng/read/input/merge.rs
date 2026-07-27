@@ -16,7 +16,7 @@
 //! - **Compare keys, not reads.** The head keys live in an array *beside* the
 //!   head slots, refreshed only when a head is refilled, so the argmin scans a
 //!   few contiguous integers instead of chasing a pointer into each read.
-//! - **Move each read exactly once, and never clone it.** A `MappedRead` owns
+//! - **Move each read exactly once, and never clone it.** A `AlignedRead` owns
 //!   its sequence, qualities and CIGAR — it is the big object in this pipeline.
 //!   A `clone()` in this loop is a defect, not a slow path, and no correctness
 //!   test would catch it, which is why the budget gets its own benchmark (T14).
@@ -35,7 +35,7 @@
 
 use std::iter::FusedIterator;
 
-use crate::bam::alignment_input::MappedRead;
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{ContigId, GenomePosition, Position};
 
@@ -47,16 +47,16 @@ use super::open_bam::RegionReads;
 /// **Keys are held beside the heads, not read through them.** `keys[i]` mirrors
 /// `heads[i]` and is refreshed only when that head is refilled, so each step
 /// scans a small contiguous array of `GenomePosition`s in cache rather than
-/// dereferencing k `MappedRead`s. That is spec §3.2's per-read budget expressed
+/// dereferencing k `AlignedRead`s. That is spec §3.2's per-read budget expressed
 /// in the layout rather than in a comment.
 ///
 /// Deliberately **not** built on `Peekable`: `peek()` hands out a
-/// `&Result<MappedRead, _>` and the emit path then moves out of the peek slot,
+/// `&Result<AlignedRead, _>` and the emit path then moves out of the peek slot,
 /// which is easy to write and quietly does the work twice.
 pub struct MergedRegionReads<'a, R: RawRefSeq> {
     streams: Vec<RegionReads<'a, R>>,
     /// `None` = that stream is exhausted.
-    heads: Vec<Option<MappedRead>>,
+    heads: Vec<Option<AlignedRead>>,
     /// `keys[i]` is `heads[i]`'s key; `None` in lockstep.
     keys: Vec<Option<GenomePosition>>,
     /// Cleared once every head has been primed.
@@ -166,7 +166,7 @@ impl<'a, R: RawRefSeq> MergedRegionReads<'a, R> {
         None
     }
 
-    fn fail(&mut self, error: IngestError) -> Option<Result<MappedRead, IngestError>> {
+    fn fail(&mut self, error: IngestError) -> Option<Result<AlignedRead, IngestError>> {
         self.done = true;
         Some(Err(error))
     }
@@ -175,7 +175,7 @@ impl<'a, R: RawRefSeq> MergedRegionReads<'a, R> {
 /// A read's position. Sound as a *cross-file* key only because every file's
 /// open gate proved its `ref_id`s are the reference's `ContigId`s — without
 /// that, contig indices from different files would not be comparable at all.
-fn key_of(read: &MappedRead) -> GenomePosition {
+fn key_of(read: &AlignedRead) -> GenomePosition {
     GenomePosition {
         // PANIC-FREE: `ref_id` comes from a 32-bit field in both BAM and CRAM.
         contig: ContigId(u32::try_from(read.ref_id).expect("ref_id fits u32")),
@@ -184,7 +184,7 @@ fn key_of(read: &MappedRead) -> GenomePosition {
 }
 
 impl<R: RawRefSeq> Iterator for MergedRegionReads<'_, R> {
-    type Item = Result<MappedRead, IngestError>;
+    type Item = Result<AlignedRead, IngestError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -216,7 +216,7 @@ impl<R: RawRefSeq> Iterator for MergedRegionReads<'_, R> {
         }
 
         // One move per read: `take` hands the read out and empties the slot,
-        // which is then refilled from its own stream. No clone — a `MappedRead`
+        // which is then refilled from its own stream. No clone — a `AlignedRead`
         // owns its sequence, qualities and CIGAR, and cloning one here would be
         // a defect rather than a slow path.
         let read = self.heads[winner].take().expect("the winner has a head");
@@ -247,10 +247,11 @@ mod tests {
     use crate::ng::read::input::open_bam::AlignmentFile;
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_reference, indexed_bam, matching_contigs,
-        read_named_with_length, sole_read_group,
+        read_named_with_length,
     };
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::GenomeRegion;
+    use crate::ng::types::ReadGroupId;
 
     fn reference_bases() -> InMemoryRefSeq {
         InMemoryRefSeq::from_contigs(
@@ -281,13 +282,15 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                AlignmentFile::open_as(
+                AlignmentFile::open(
                     path,
                     &reference,
                     ReadFilterConfig::default(),
                     false,
-                    i,
-                    sole_read_group(),
+                    // Each fixture file gets its own read group, which is what
+                    // lets the merged stream say which file a read came from —
+                    // the property this test is about.
+                    ReadGroupId(i as u32),
                 )
                 .expect("opens")
             })
@@ -306,7 +309,7 @@ mod tests {
                 item.map(|read| {
                     (
                         String::from_utf8_lossy(&read.qname).into_owned(),
-                        read.source_file_index,
+                        read.read_group.get() as usize,
                     )
                 })
             })
