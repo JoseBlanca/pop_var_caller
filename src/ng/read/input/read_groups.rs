@@ -173,6 +173,105 @@ fn declared_read_groups(
     Ok(declared)
 }
 
+// ---------------------------------------------------------------------
+// Filling in the names a file did not declare
+// ---------------------------------------------------------------------
+
+/// Separates the parts of a synthesized library name. Distinct enough to read
+/// back — `NA12878:rg1:SRR1` — and rare enough inside accessions and specimen
+/// names that the parts stay legible.
+const SYNTHESIZED_NAME_SEPARATOR: char = ':';
+
+/// One declared `@RG` record, completed into a [`ReadGroup`]: whatever the file
+/// left out is filled in here, and marked as ours.
+///
+/// The two fallbacks differ in what they protect against, so they are not
+/// symmetric (spec §6):
+///
+/// - a missing **library** gets a name built from the sample, the `@RG ID` and
+///   the file's name, because those three are what distinguishes one undeclared
+///   read group from another;
+/// - a missing **experiment** becomes the library, coarser rather than finer.
+///   Several read groups legitimately share one declared library — that is a
+///   library sequenced across lanes, one preparation, one experiment — and
+///   falling back to `(library, id)` would split them. Falling back coarse is
+///   safe here only because `id` survives on the record, so anything wanting the
+///   finer split can still take it.
+// Uncalled from the library until `build_read_groups` calls it; scoped and
+// self-removing for the reason `declared_read_groups` gives above.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called only by this module's tests until build_read_groups consumes it"
+    )
+)]
+fn into_read_group(declared: DeclaredReadGroup, file: Arc<Path>) -> ReadGroup {
+    let library = match declared.library {
+        Some(value) => NameWithOrigin {
+            value,
+            origin: NameOrigin::Declared,
+        },
+        None => NameWithOrigin {
+            value: synthesized_library(&declared.sample, &declared.id, &file),
+            origin: NameOrigin::Synthesized,
+        },
+    };
+
+    // Always synthesized: no experiment tag is read yet (spec §13). The origin
+    // describes *this* name, so it is `Synthesized` even when the library it
+    // copies was declared — we chose to call the experiment that, the file
+    // did not.
+    let experiment = NameWithOrigin {
+        value: library.value.clone(),
+        origin: NameOrigin::Synthesized,
+    };
+
+    ReadGroup {
+        file,
+        id: declared.id,
+        sample: declared.sample,
+        library,
+        experiment,
+        platform: declared.platform,
+    }
+}
+
+/// A library name for a read group whose file declared none.
+///
+/// All three parts are needed. Without the file's name, two files that each
+/// declare `ID:1` for the same sample would be given the same library and
+/// silently fused; with it, the name is unique as long as no two input files
+/// share a name, since `@RG ID` is unique within a file. Two files that *do*
+/// share a name is the residual case, and it is a hard error raised where the
+/// files meet, not papered over here (spec §6).
+fn synthesized_library(sample: &str, read_group_id: &str, file: &Path) -> Box<str> {
+    let stem = file_name_without_extensions(file);
+    format!(
+        "{sample}{sep}{read_group_id}{sep}{stem}",
+        sep = SYNTHESIZED_NAME_SEPARATOR
+    )
+    .into_boxed_str()
+}
+
+/// The file's name with every extension removed: `SRR1.p1.cram` → `SRR1`.
+///
+/// Cut at the **first** dot rather than the last, because alignment files
+/// routinely carry compound suffixes (`.p1.cram`, `.sorted.bam`) and it is the
+/// part before the first dot that is the accession or specimen name a reader
+/// recognises. Falls back to the whole file name, and then to the whole path,
+/// rather than yielding an empty string for a dotfile or a path with no final
+/// component — an empty part would make two names collide that are not the same.
+fn file_name_without_extensions(file: &Path) -> String {
+    let Some(name) = file.file_name().map(|name| name.to_string_lossy()) else {
+        return file.to_string_lossy().into_owned();
+    };
+    match name.split_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_owned(),
+        _ => name.into_owned(),
+    }
+}
+
 /// A header tag's bytes as an owned string. Lossy, deliberately: a header tag
 /// with invalid UTF-8 is a broken header, but it is a *label*, and refusing to
 /// read the file over it would be a worse outcome than carrying the replacement
@@ -428,6 +527,105 @@ mod tests {
             }
             other => panic!("expected MissingSampleName, got {other:?}"),
         }
+    }
+
+    // --- filling in the names a file did not declare (A5) ---
+
+    fn declared(id: &str, sample: &str, library: Option<&str>) -> DeclaredReadGroup {
+        DeclaredReadGroup {
+            id: id.into(),
+            sample: sample.into(),
+            library: library.map(Into::into),
+            platform: None,
+        }
+    }
+
+    fn file() -> Arc<Path> {
+        Arc::from(path().as_path())
+    }
+
+    #[test]
+    fn a_declared_library_is_carried_verbatim_and_marked_declared() {
+        let group = into_read_group(declared("rg1", "NA12878", Some("lib-A")), file());
+
+        assert_eq!(&*group.library.value, "lib-A");
+        assert_eq!(group.library.origin, NameOrigin::Declared);
+    }
+
+    #[test]
+    fn a_missing_library_is_built_from_sample_read_group_and_file_name() {
+        let group = into_read_group(declared("rg1", "NA12878", None), file());
+
+        assert_eq!(&*group.library.value, "NA12878:rg1:SRR1");
+        assert_eq!(group.library.origin, NameOrigin::Synthesized);
+    }
+
+    /// Every extension goes, not just the last: `.p1.cram` is one compound
+    /// suffix, and the accession before the first dot is what a reader knows the
+    /// file by.
+    #[test]
+    fn the_file_name_loses_every_extension() {
+        assert_eq!(
+            file_name_without_extensions(Path::new("/data/SRR1.p1.cram")),
+            "SRR1"
+        );
+        assert_eq!(
+            file_name_without_extensions(Path::new("/data/HG002.sorted.bam")),
+            "HG002"
+        );
+        assert_eq!(
+            file_name_without_extensions(Path::new("/data/plain")),
+            "plain"
+        );
+    }
+
+    /// A dotfile has no part before its first dot. Falling back to the whole
+    /// name matters: an empty part would make two names collide that are not the
+    /// same read group at all.
+    #[test]
+    fn a_name_with_no_stem_falls_back_to_the_whole_name() {
+        assert_eq!(
+            file_name_without_extensions(Path::new("/data/.hidden.bam")),
+            ".hidden.bam"
+        );
+    }
+
+    /// The lanes of one preparation: several read groups, one declared library.
+    /// They must stay one library — and one experiment — because that is what
+    /// they are.
+    #[test]
+    fn read_groups_sharing_a_declared_library_share_one_library_and_experiment() {
+        let lane_one = into_read_group(declared("rg1", "NA12878", Some("lib-A")), file());
+        let lane_two = into_read_group(declared("rg2", "NA12878", Some("lib-A")), file());
+
+        assert_eq!(lane_one.library.value, lane_two.library.value);
+        assert_eq!(lane_one.experiment.value, lane_two.experiment.value);
+        assert_ne!(lane_one.id, lane_two.id, "the finer split is still there");
+    }
+
+    /// Within one file the `@RG ID` is what separates undeclared libraries, so
+    /// two of them cannot be fused.
+    #[test]
+    fn two_undeclared_libraries_in_one_file_get_different_names() {
+        let first = into_read_group(declared("rg1", "NA12878", None), file());
+        let second = into_read_group(declared("rg2", "NA12878", None), file());
+
+        assert_ne!(first.library.value, second.library.value);
+    }
+
+    /// The experiment is always ours, even when it copies a declared library:
+    /// the origin describes this name, not the one it was taken from.
+    #[test]
+    fn the_experiment_falls_back_to_the_library_and_says_it_is_synthesized() {
+        let group = into_read_group(declared("rg1", "NA12878", Some("lib-A")), file());
+
+        assert_eq!(group.experiment.value, group.library.value);
+        assert_eq!(group.experiment.origin, NameOrigin::Synthesized);
+        assert_eq!(
+            group.library.origin,
+            NameOrigin::Declared,
+            "copying it does not make the library ours"
+        );
     }
 
     /// The behaviour change of spec §8: a file whose read groups name two
