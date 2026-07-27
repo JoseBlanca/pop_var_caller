@@ -145,7 +145,7 @@ lands separately and the diff is readable. *Depends:* B1. *Source:* arch §5 (th
 
 ### Milestone C — the read carries its read group
 
-**C1. `AlignedRead` and the ng decode.**  ☐ **Own commit — do not bundle.**
+**C1. `AlignedRead` and the ng decode.**  ✅ **Own commit — do not bundle.**
 `src/ng/read/aligned_read.rs`: the read type with `read_group: ReadGroupId` and without
 `source_file_index`; `RecordSourceError`; the decode copied from production's, resolving the read
 group through the `Sole` arm. `RawRecord::decode` and every ng consumer move to the new type in this
@@ -154,7 +154,7 @@ field-by-field equality against production's `MappedRead`, plus the whole existi
 whose fixtures are all single-`@RG`. A mis-copied field here produces wrong reads, not a crash.
 *Depends:* B2. *Source:* arch §1.4, §2, §3.3.
 
-**C2. The `PerRecord` arm, and lifting the several-`@RG` guard.**  ☐ **Own commit — do not bundle.**
+**C2. The `PerRecord` arm, and lifting the several-`@RG` guard.**  ✅ **Own commit — do not bundle.**
 Resolve `RG:Z` per record against the file's map; a missing or undeclared tag is fatal and names the
 read. Remove B1's temporary guard. **Oracle:** a new fixture declaring several `@RG` with known
 per-record tags, asserting each read's identifier; plus the single-`@RG` suite still byte-for-byte
@@ -162,7 +162,7 @@ unchanged, which is what proves the fast path was not disturbed. A record resolv
 group is silent — it moves a library's error-model input, nothing more. *Depends:* C1.
 *Source:* spec §7; arch §1.3, §3.3.
 
-**C3. The other-sample skip and its tally.**  ☐ **Own commit — do not bundle.**
+**C3. The other-sample skip and its tally.**  ✅ **Own commit — do not bundle.**
 `RecordOwner::OtherSample` records are not yielded and are counted apart from the drop categories.
 **Oracle:** one file declaring read groups for two samples, opened twice; each open sees only its
 own reads, the drop categories are untouched, and the two opens' reads reunited equal the file.
