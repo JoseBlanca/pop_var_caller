@@ -31,15 +31,65 @@ use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 /// `length`.
 pub(crate) const FIXTURE_CONTIGS: [(&str, usize); 2] = [("chr1", 100), ("chr2", 200)];
 
+/// One `@RG` for a test header: its id, plus whichever tags the test is about.
+/// A `None` tag is **omitted entirely**, which is how the "no `SM`" and "no
+/// `LB`" inputs are built.
+pub(crate) struct FixtureReadGroup<'a> {
+    pub(crate) id: &'a str,
+    pub(crate) sample: Option<&'a str>,
+    pub(crate) library: Option<&'a str>,
+    pub(crate) platform: Option<&'a str>,
+}
+
+impl<'a> FixtureReadGroup<'a> {
+    /// A read group carrying only `SM` — what a test that is about neither the
+    /// library nor the platform wants.
+    pub(crate) fn new(id: &'a str, sample: Option<&'a str>) -> Self {
+        Self {
+            id,
+            sample,
+            library: None,
+            platform: None,
+        }
+    }
+
+    pub(crate) fn with_library(mut self, library: &'a str) -> Self {
+        self.library = Some(library);
+        self
+    }
+
+    pub(crate) fn with_platform(mut self, platform: &'a str) -> Self {
+        self.platform = Some(platform);
+        self
+    }
+}
+
 /// A header builder taking `(sort order, contigs, read groups)`, so each test
 /// states only the field it is about. `None` omits the tag entirely.
+///
+/// Read groups are `(id, SM)` pairs — the shape almost every test wants. A test
+/// that is about the library or the platform builds its read groups as
+/// [`FixtureReadGroup`]s and calls [`header_with_read_groups`] instead.
 pub(crate) fn header(
     sort_order_value: Option<&str>,
     contigs: &[(&str, usize, Option<&str>)],
     read_groups: &[(&str, Option<&str>)],
 ) -> sam::Header {
+    let read_groups: Vec<FixtureReadGroup<'_>> = read_groups
+        .iter()
+        .map(|(id, sample)| FixtureReadGroup::new(id, *sample))
+        .collect();
+    header_with_read_groups(sort_order_value, contigs, &read_groups)
+}
+
+/// [`header`], with read groups that can carry `LB` and `PL` as well as `SM`.
+pub(crate) fn header_with_read_groups(
+    sort_order_value: Option<&str>,
+    contigs: &[(&str, usize, Option<&str>)],
+    read_groups: &[FixtureReadGroup<'_>],
+) -> sam::Header {
     use sam::header::record::value::map::header::tag::SORT_ORDER;
-    use sam::header::record::value::map::read_group::tag::SAMPLE;
+    use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
     use sam::header::record::value::map::reference_sequence::tag::MD5_CHECKSUM;
 
     let mut hd = Map::<sam::header::record::value::map::Header>::default();
@@ -59,13 +109,18 @@ pub(crate) fn header(
         builder = builder.add_reference_sequence(*name, sq);
     }
 
-    for (id, sample) in read_groups {
+    for read_group in read_groups {
         let mut rg = Map::<ReadGroup>::default();
-        if let Some(sample) = sample {
-            rg.other_fields_mut()
-                .insert(SAMPLE, sample.as_bytes().into());
+        for (tag, value) in [
+            (SAMPLE, read_group.sample),
+            (LIBRARY, read_group.library),
+            (PLATFORM, read_group.platform),
+        ] {
+            if let Some(value) = value {
+                rg.other_fields_mut().insert(tag, value.as_bytes().into());
+            }
         }
-        builder = builder.add_read_group(*id, rg);
+        builder = builder.add_read_group(read_group.id, rg);
     }
 
     builder.build()
@@ -118,6 +173,30 @@ pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, ReferenceInfo) 
 /// to compare two independently-produced streams.
 pub(crate) fn read_named(qname: &str, reference_sequence_id: usize, start: usize) -> RecordBuf {
     read_named_with_length(qname, reference_sequence_id, start, 10)
+}
+
+/// A [`read_named`] record carrying the `RG:Z` tag naming the read group it
+/// belongs to.
+///
+/// Separate from [`read_named`] because tagging every fixture record would
+/// change what the existing tests are about: a file that declares one `@RG` is
+/// read without the tag being consulted at all, so an untagged record is the
+/// **normal** input, not a degenerate one.
+pub(crate) fn read_named_in_read_group(
+    qname: &str,
+    reference_sequence_id: usize,
+    start: usize,
+    read_group_id: &str,
+) -> RecordBuf {
+    use sam::alignment::record::data::field::Tag;
+    use sam::alignment::record_buf::data::field::Value;
+
+    let mut record = read_named(qname, reference_sequence_id, start);
+    record.data_mut().insert(
+        Tag::READ_GROUP,
+        Value::String(read_group_id.as_bytes().to_vec().into()),
+    );
+    record
 }
 
 pub(crate) fn read_named_with_length(
@@ -273,4 +352,70 @@ pub(crate) fn multi_container_cram(
 /// non-empty for tests that never read it.
 pub(crate) fn one_read() -> Vec<RecordBuf> {
     vec![read_named("read-1", 0, 1)]
+}
+
+/// The fixtures test themselves, because the read-group tests that use them
+/// cannot tell "the parser ignored the tag" from "the fixture never wrote it".
+/// A silently-absent `LB` would make a "missing library" test pass for the
+/// wrong reason.
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_group_carries_every_tag_it_was_given() {
+        use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
+
+        let header = header_with_read_groups(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[FixtureReadGroup::new("rg1", Some("NA12878"))
+                .with_library("lib-A")
+                .with_platform("ILLUMINA")],
+        );
+
+        let (_, rg) = header
+            .read_groups()
+            .first()
+            .expect("the header has one read group");
+        let tag = |tag| rg.other_fields().get(&tag).map(|v| v.to_vec());
+        assert_eq!(tag(SAMPLE).as_deref(), Some(&b"NA12878"[..]));
+        assert_eq!(tag(LIBRARY).as_deref(), Some(&b"lib-A"[..]));
+        assert_eq!(tag(PLATFORM).as_deref(), Some(&b"ILLUMINA"[..]));
+    }
+
+    /// The omissions matter as much as the values: an absent tag must be absent
+    /// from the header, not present and empty.
+    #[test]
+    fn an_untagged_read_group_carries_nothing() {
+        use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
+
+        let header = header(Some("coordinate"), &matching_contigs(), &[("rg1", None)]);
+
+        let (_, rg) = header
+            .read_groups()
+            .first()
+            .expect("the header has one read group");
+        for tag in [SAMPLE, LIBRARY, PLATFORM] {
+            assert!(rg.other_fields().get(&tag).is_none(), "{tag:?} is absent");
+        }
+    }
+
+    #[test]
+    fn a_tagged_record_names_its_read_group() {
+        use sam::alignment::record::data::field::Tag;
+        use sam::alignment::record_buf::data::field::Value;
+
+        let record = read_named_in_read_group("read-1", 0, 1, "rg2");
+        assert!(matches!(
+            record.data().get(&Tag::READ_GROUP),
+            Some(Value::String(id)) if id == "rg2"
+        ));
+        assert!(
+            read_named("read-1", 0, 1)
+                .data()
+                .get(&Tag::READ_GROUP)
+                .is_none(),
+            "the untagged fixture stays untagged"
+        );
+    }
 }
