@@ -81,35 +81,35 @@ Follows [`read_input.md`](read_input.md), whose `AlignmentFile` and `SampleReads
 
 ### Milestone A — the read-group table (nothing else touched)
 
-**A1. `ReadGroupId` in `types.rs`.**  ☐
+**A1. `ReadGroupId` in `types.rs`.**  ✅
 `pub struct ReadGroupId(pub u32)` with `get()` and the standard derives, doc-commented as an index
 into the run's table. A shared-vocabulary addition, so it lands alone; add it to
 `ng_step_interfaces.md` §1. *Source:* arch §1.1.
 
-**A2. Extend the header and record fixtures.**  ☐
+**A2. Extend the header and record fixtures.**  ✅
 `header(...)` gains library and platform per read group; a `read_named_with_read_group` helper tags
 a record with `RG:Z`. Nothing consumes them yet — they are what A4 onward is tested with.
 *Depends:* A1. *Source:* arch §Test & bench shape.
 
-**A3. Scaffold `read_groups.rs`: the types and the error, no logic.**  ☐
+**A3. Scaffold `read_groups.rs`: the types and the error, no logic.**  ✅
 `ReadGroup`, `NameWithOrigin`, `NameOrigin`, `ReadGroups`, `SampleReadGroups`,
 `ReadGroupResolution`, `RecordOwner`, and `ReadGroupError` with a doc comment per variant saying
 when it fires. Declared and compiled; nothing calls them. *Depends:* A1.
 *Source:* arch §1.2, §1.3, §2.
 
-**A4. Parse one header's `@RG` records, with the two hard errors.**  ☐
+**A4. Parse one header's `@RG` records, with the two hard errors.**  ✅
 A pure function over a `sam::Header` returning this file's read groups, or `NoReadGroups` /
 `MissingSampleName` — two distinct variants with distinct remedies in the message. Unit-tested
 against header literals, the way the existing `@RG` tests are
 ([`open_bam.rs:1026`](../../../../src/ng/read/input/open_bam.rs#L1026) onward). *Depends:* A2, A3.
 *Source:* spec §6.
 
-**A5. The synthesized names.**  ☐
+**A5. The synthesized names.**  ✅
 A missing `LB` becomes sample + `@RG ID` + the file name without extensions, marked `Synthesized`; a
 missing experiment becomes the library. Tests: the composed value, the origin marker, and that a
 declared tag is passed through untouched. *Depends:* A4. *Source:* spec §6.
 
-**A6. `build_read_groups(paths)`.**  ☐
+**A6. `build_read_groups(paths)`.**  ✅
 Read every header, apply A4 and A5, assign identifiers in input-file order then header order, group
 by sample, and raise `DuplicateSynthesizedLibrary` when two files with the same name in different
 directories collide. Tests: identifiers stable across a shuffled `paths` order only in the way the
