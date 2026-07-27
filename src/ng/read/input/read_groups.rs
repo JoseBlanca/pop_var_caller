@@ -19,6 +19,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use noodles_sam as sam;
+
 use crate::ng::types::ReadGroupId;
 
 // ---------------------------------------------------------------------
@@ -80,6 +82,103 @@ pub enum NameOrigin {
     Declared,
     /// Absent from the file, so this module built one (spec §6).
     Synthesized,
+}
+
+// ---------------------------------------------------------------------
+// Reading one file's header
+// ---------------------------------------------------------------------
+
+/// What one `@RG` record actually said, before any missing name is filled in.
+///
+/// Private and intermediate, because reading a header (what the file *says*) and
+/// filling in the names it left out are separate jobs — and only the second one
+/// needs to know the file's name.
+///
+/// **No experiment tag is read.** `SRX` is not a tag the SAM specification
+/// defines, so which one to look for is still open (spec §13); until it closes,
+/// every experiment name is synthesized from the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeclaredReadGroup {
+    id: Box<str>,
+    sample: Box<str>,
+    library: Option<Box<str>>,
+    platform: Option<Box<str>>,
+}
+
+/// Every `@RG` record of one file, as its header declares them.
+///
+/// Both hard errors live here because both are properties of a single header
+/// (spec §6). `path` is carried only so a message can name the file — a user who
+/// hits either of these has to go and re-header something, and the path is what
+/// tells them which.
+///
+/// **The first fault in header order is the one reported**, the rule the code
+/// this replaces already followed: both are fatal and both are fixed by
+/// correcting the header, so ranking them would add a rule to explain without
+/// changing what the user does about it.
+///
+/// Several read groups are normal, and so are several *samples* among them: a
+/// file naming two samples is no longer an error here. Keeping one sample per
+/// open is a check on the open, not on the file (spec §4, §8).
+// Only this module's tests call it until `build_read_groups` does. Two things
+// keep the attribute from becoming a licence: `expect` (not `allow`) turns into
+// an error the moment the function *is* called from the library, and `not(test)`
+// scopes it to the build where it really is uncalled. Silencing it here also
+// makes it a live root, so `DeclaredReadGroup` and `owned_str` need nothing.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called only by this module's tests until build_read_groups consumes it"
+    )
+)]
+fn declared_read_groups(
+    header: &sam::Header,
+    path: &Path,
+) -> Result<Vec<DeclaredReadGroup>, ReadGroupError> {
+    use sam::header::record::value::map::read_group::tag::{LIBRARY, PLATFORM, SAMPLE};
+
+    if header.read_groups().is_empty() {
+        return Err(ReadGroupError::NoReadGroups {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let mut declared = Vec::with_capacity(header.read_groups().len());
+
+    for (raw_id, read_group) in header.read_groups() {
+        let id = String::from_utf8_lossy(raw_id.as_ref()).into_owned();
+        let tag = |tag| {
+            read_group
+                .other_fields()
+                .get(&tag)
+                .map(|raw| owned_str(raw.as_ref()))
+        };
+
+        let Some(sample) = tag(SAMPLE) else {
+            return Err(ReadGroupError::MissingSampleName {
+                path: path.to_path_buf(),
+                read_group_id: id,
+            });
+        };
+
+        declared.push(DeclaredReadGroup {
+            id: id.into_boxed_str(),
+            sample,
+            library: tag(LIBRARY),
+            platform: tag(PLATFORM),
+        });
+    }
+
+    Ok(declared)
+}
+
+/// A header tag's bytes as an owned string. Lossy, deliberately: a header tag
+/// with invalid UTF-8 is a broken header, but it is a *label*, and refusing to
+/// read the file over it would be a worse outcome than carrying the replacement
+/// character into a report.
+fn owned_str(raw: &[u8]) -> Box<str> {
+    String::from_utf8_lossy(raw).into_owned().into_boxed_str()
 }
 
 // ---------------------------------------------------------------------
@@ -231,4 +330,122 @@ pub enum ReadGroupError {
         library: String,
         paths: (PathBuf, PathBuf),
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ng::read::input::test_fixtures::{
+        FixtureReadGroup, header, header_with_read_groups, matching_contigs,
+    };
+
+    fn path() -> PathBuf {
+        PathBuf::from("/data/project/SRR1.cram")
+    }
+
+    // --- reading one header's @RG records (A4) ---
+
+    #[test]
+    fn every_read_group_is_returned_in_header_order_with_its_tags() {
+        let header = header_with_read_groups(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[
+                FixtureReadGroup::new("rg1", Some("NA12878"))
+                    .with_library("lib-A")
+                    .with_platform("ILLUMINA"),
+                FixtureReadGroup::new("rg2", Some("NA12878")).with_library("lib-B"),
+            ],
+        );
+
+        let declared = declared_read_groups(&header, &path()).expect("both read groups are valid");
+
+        assert_eq!(declared.len(), 2);
+        assert_eq!(&*declared[0].id, "rg1", "header order, not sorted");
+        assert_eq!(&*declared[0].sample, "NA12878");
+        assert_eq!(declared[0].library.as_deref(), Some("lib-A"));
+        assert_eq!(declared[0].platform.as_deref(), Some("ILLUMINA"));
+        assert_eq!(&*declared[1].id, "rg2");
+        assert_eq!(declared[1].library.as_deref(), Some("lib-B"));
+        assert_eq!(
+            declared[1].platform, None,
+            "an absent tag is absent, not empty"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_read_groups_is_rejected_naming_the_file() {
+        let header = header(Some("coordinate"), &matching_contigs(), &[]);
+
+        let error = declared_read_groups(&header, &path()).expect_err("no @RG is fatal");
+
+        assert!(matches!(error, ReadGroupError::NoReadGroups { .. }));
+        let message = error.to_string();
+        assert!(
+            message.contains("/data/project/SRR1.cram"),
+            "the message names the file: {message}"
+        );
+        assert!(
+            message.contains("addreplacerg"),
+            "the message says what to do about it: {message}"
+        );
+    }
+
+    #[test]
+    fn a_read_group_without_a_sample_is_rejected_naming_that_read_group() {
+        let header = header(Some("coordinate"), &matching_contigs(), &[("rg1", None)]);
+
+        let error = declared_read_groups(&header, &path()).expect_err("no SM is fatal");
+
+        match &error {
+            ReadGroupError::MissingSampleName { read_group_id, .. } => {
+                assert_eq!(read_group_id, "rg1")
+            }
+            other => panic!("expected MissingSampleName, got {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(
+            message.contains("@RG 'rg1'") && message.contains("/data/project/SRR1.cram"),
+            "the message names both the read group and the file: {message}"
+        );
+    }
+
+    /// **The first fault in header order wins.** A valid read group ahead of the
+    /// offender does not shield it, and a later valid one does not rescue it.
+    #[test]
+    fn the_missing_sample_is_reported_for_whichever_read_group_lacks_it() {
+        let second_is_bad = header(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[("rg1", Some("NA12878")), ("rg2", None)],
+        );
+
+        let error = declared_read_groups(&second_is_bad, &path()).expect_err("rg2 has no SM");
+
+        match error {
+            ReadGroupError::MissingSampleName { read_group_id, .. } => {
+                assert_eq!(read_group_id, "rg2", "the offender, not the first record")
+            }
+            other => panic!("expected MissingSampleName, got {other:?}"),
+        }
+    }
+
+    /// The behaviour change of spec §8: a file whose read groups name two
+    /// samples used to be rejected at open. It is now an ordinary input — one
+    /// sample per *open* is a separate check, made where the open is.
+    #[test]
+    fn a_file_naming_two_samples_is_read_without_complaint() {
+        let two_samples = header(
+            Some("coordinate"),
+            &matching_contigs(),
+            &[("rg1", Some("NA12878")), ("rg2", Some("HG002"))],
+        );
+
+        let declared = declared_read_groups(&two_samples, &path()).expect("no longer an error");
+
+        assert_eq!(
+            declared.iter().map(|rg| &*rg.sample).collect::<Vec<_>>(),
+            vec!["NA12878", "HG002"]
+        );
+    }
 }
