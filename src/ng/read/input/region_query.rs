@@ -47,7 +47,7 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilterError, RecordSource, resolve_read_group,
 };
-use crate::ng::read::input::read_groups::ReadGroupResolution;
+use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
 
 use super::AlignmentFileError;
@@ -78,6 +78,8 @@ pub(crate) struct BamRegionSource<'a> {
     /// Borrowed from the `AlignmentFile`, like the header: settled at open,
     /// never rebuilt per query.
     resolution: &'a ReadGroupResolution,
+    /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
+    other_sample_records: u64,
     /// Latched once the scan passes the region end or the chunks run out.
     done: bool,
 }
@@ -159,6 +161,7 @@ impl<'a> BamRegionSource<'a> {
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
             resolution,
+            other_sample_records: 0,
             done: false,
         }
     }
@@ -182,6 +185,10 @@ impl RecordSource for BamRegionSource<'_> {
 
     fn header(&self) -> &sam::Header {
         self.header
+    }
+
+    fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
     }
 
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
@@ -256,8 +263,19 @@ impl RecordSource for BamRegionSource<'_> {
             // before the read — or on one the loop above skipped — would
             // attribute this read to whatever the previous record carried. It
             // also means the records this query discards never pay the lookup.
-            buf.read_group = Some(resolve_read_group(&buf.record, self.resolution)?);
-            return Ok(true);
+            match resolve_read_group(&buf.record, self.resolution)? {
+                RecordOwner::Mine(id) => {
+                    buf.read_group = Some(id);
+                    return Ok(true);
+                }
+                // Another sample's read, in a file this sample shares. Counted
+                // apart from every drop — it says nothing about how this read
+                // group behaved — and skipped before the filter sees it.
+                RecordOwner::OtherSample => {
+                    self.other_sample_records += 1;
+                    continue;
+                }
+            }
         }
     }
 }
@@ -394,6 +412,8 @@ pub(crate) struct CramRegionSource<'a> {
     /// Borrowed from the `AlignmentFile`, like the header: settled at open,
     /// never rebuilt per query.
     resolution: &'a ReadGroupResolution,
+    /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
+    other_sample_records: u64,
     done: bool,
 }
 
@@ -448,6 +468,7 @@ impl<'a> CramRegionSource<'a> {
             target_reference_sequence_id: plan.target_reference_sequence_id,
             region: plan.region,
             resolution,
+            other_sample_records: 0,
             done: false,
         }
     }
@@ -579,6 +600,10 @@ impl RecordSource for CramRegionSource<'_> {
         self.header
     }
 
+    fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
+    }
+
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
         if self.done {
             return Ok(false);
@@ -595,8 +620,16 @@ impl RecordSource for CramRegionSource<'_> {
                 // After the move: the read group can depend on the record's own
                 // `RG` tag, so resolving against a stale buffer would attribute
                 // each read to whatever the previous one carried.
-                buf.read_group = Some(resolve_read_group(&buf.record, self.resolution)?);
-                return Ok(true);
+                match resolve_read_group(&buf.record, self.resolution)? {
+                    RecordOwner::Mine(id) => {
+                        buf.read_group = Some(id);
+                        return Ok(true);
+                    }
+                    RecordOwner::OtherSample => {
+                        self.other_sample_records += 1;
+                        continue;
+                    }
+                }
             }
 
             match self.refill() {
@@ -721,6 +754,16 @@ impl RecordSource for RegionSource<'_> {
         match self {
             Self::Bam(source) => source.read_next(buf),
             Self::Cram(source) => source.read_next(buf),
+        }
+    }
+
+    /// Forwarded, not defaulted. The trait's default is `0`, which for a
+    /// delegating wrapper is a silent wrong answer rather than an absent one:
+    /// the reads really were skipped, and the tally would simply lose them.
+    fn other_sample_records(&self) -> u64 {
+        match self {
+            Self::Bam(source) => source.other_sample_records(),
+            Self::Cram(source) => source.other_sample_records(),
         }
     }
 }

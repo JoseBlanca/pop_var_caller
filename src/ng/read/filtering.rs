@@ -129,6 +129,15 @@ pub struct ReadFilterCounts {
     pub too_short: u64,
     pub high_mismatch_fraction: u64,
     pub bad_cigar: u64,
+    /// Records skipped because they belong to **another sample** — a file's read
+    /// groups need not all be this open's.
+    ///
+    /// **Not a drop, and deliberately outside every other counter here.** The
+    /// rest of this struct answers "how did this read group behave?", and a read
+    /// belonging to someone else says nothing about that: counting it as a drop
+    /// would make a shared file look like a low-quality one. It is kept so the
+    /// records a source saw still add up.
+    pub other_sample: u64,
 }
 
 impl ReadFilterCounts {
@@ -151,6 +160,7 @@ impl ReadFilterCounts {
             too_short,
             high_mismatch_fraction,
             bad_cigar,
+            other_sample,
         } = other;
 
         self.kept += kept;
@@ -163,6 +173,44 @@ impl ReadFilterCounts {
         self.too_short += too_short;
         self.high_mismatch_fraction += high_mismatch_fraction;
         self.bad_cigar += bad_cigar;
+        self.other_sample += other_sample;
+    }
+
+    /// This tally plus the counters the **source** owns rather than the filter.
+    ///
+    /// Written out field by field rather than with `..self`, for the reason
+    /// [`Self::add`] is: a counter added to this struct later must be routed here
+    /// explicitly or this stops compiling. Field-update syntax would silently
+    /// carry a new counter through from the filter's copy, which is the wrong
+    /// side for anything the source owns.
+    pub(crate) fn with_source_counts<S: RecordSource>(&self, source: &S) -> Self {
+        let Self {
+            kept,
+            duplicate,
+            low_mapq,
+            supplementary,
+            secondary,
+            unmapped,
+            qc_fail,
+            too_short,
+            high_mismatch_fraction,
+            bad_cigar,
+            other_sample: _,
+        } = *self;
+
+        Self {
+            kept,
+            duplicate,
+            low_mapq,
+            supplementary,
+            secondary,
+            unmapped,
+            qc_fail,
+            too_short,
+            high_mismatch_fraction,
+            bad_cigar,
+            other_sample: source.other_sample_records(),
+        }
     }
 
     /// Tally one drop against its counter. The exhaustive `match` is the guard for
@@ -358,6 +406,24 @@ pub trait RecordSource {
     /// filled; `Ok(false)` = end of input, after which `buf` holds an unspecified
     /// (stale) record the caller must not read; `Err` is fatal to the run.
     fn read_next(&mut self, buf: &mut Self::Record) -> io::Result<bool>;
+
+    /// How many records this source skipped because they belong to another
+    /// sample.
+    ///
+    /// Read when the stream is taken apart and folded into the tally beside the
+    /// drops — **as its own counter, never as one of them** (see
+    /// [`ReadFilterCounts::other_sample`]).
+    ///
+    /// **Required, with no default, deliberately.** A default returning `0`
+    /// would be the obvious convenience and is a trap: a source that skips
+    /// records and forgets to override it reports a *wrong* number rather than
+    /// an absent one, and the records vanish from the accounting with nothing
+    /// failing. That is not hypothetical — it happened twice while this was
+    /// being written, once to a delegating wrapper that inherited the default
+    /// and once to a source that incremented a counter nothing could read. A
+    /// source with nothing to skip returns `0` and says why; every other one is
+    /// a compile error until it answers.
+    fn other_sample_records(&self) -> u64;
 }
 
 /// The read group one filled record belongs to, or a fatal error naming it.
@@ -379,13 +445,13 @@ pub trait RecordSource {
 pub(crate) fn resolve_read_group(
     record: &RecordBuf,
     resolution: &ReadGroupResolution,
-) -> io::Result<ReadGroupId> {
+) -> io::Result<RecordOwner> {
     use noodles_sam::alignment::record::data::field::Tag;
     use noodles_sam::alignment::record_buf::data::field::Value;
 
     // Before the tag is read, not after: see the note above.
     if let ReadGroupResolution::Sole(id) = resolution {
-        return Ok(*id);
+        return Ok(RecordOwner::Mine(*id));
     }
 
     let tag = match record.data().get(&Tag::READ_GROUP) {
@@ -401,18 +467,9 @@ pub(crate) fn resolve_read_group(
         None => None,
     };
 
-    match resolution.owner_of(tag) {
-        Ok(RecordOwner::Mine(id)) => Ok(id),
-        // Not reachable while a file shared between samples is refused at open —
-        // but an error rather than a panic, because that guard is a policy one
-        // layer away rather than a property of this function's inputs, and a
-        // panic here would be armed silently by a change to either.
-        Ok(RecordOwner::OtherSample) => Err(unreadable_record(
-            record,
-            "belongs to another sample, which cannot be read out of a shared file yet",
-        )),
-        Err(unresolved) => Err(unreadable_record(record, &unresolved.to_string())),
-    }
+    resolution
+        .owner_of(tag)
+        .map_err(|unresolved| unreadable_record(record, &unresolved.to_string()))
 }
 
 /// A fatal per-record error that names the record it is about.
@@ -518,6 +575,8 @@ impl RawRecord for NoodlesRawRecord {
 /// has its own sibling source, [`CramRecordSource`], below.
 pub struct BamRecordSource<R> {
     reader: bam::io::Reader<R>,
+    /// Records skipped as another sample's — see [`RecordSource::other_sample_records`].
+    other_sample_records: u64,
     /// BAM record decode ignores the header, but `read_record_buf` requires it.
     header: sam::Header,
     resolution: ReadGroupResolution,
@@ -534,6 +593,7 @@ impl<R> BamRecordSource<R> {
             reader,
             header,
             resolution,
+            other_sample_records: 0,
         }
     }
 }
@@ -545,18 +605,32 @@ impl<R: io::Read> RecordSource for BamRecordSource<R> {
         &self.header
     }
 
+    fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
+    }
+
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
-        buf.read_group = None;
-        // The reader refills `buf.record` in place (reusing its allocations).
-        let bytes_read = self.reader.read_record_buf(&self.header, &mut buf.record)?;
-        if bytes_read == 0 {
-            return Ok(false);
+        loop {
+            buf.read_group = None;
+            // The reader refills `buf.record` in place (reusing its allocations).
+            let bytes_read = self.reader.read_record_buf(&self.header, &mut buf.record)?;
+            if bytes_read == 0 {
+                return Ok(false);
+            }
+            // **After** the read, never before: the read group can depend on the
+            // record's own `RG` tag, so resolving against a stale buffer would
+            // attribute each read to whatever the *previous* one carried.
+            match resolve_read_group(&buf.record, &self.resolution)? {
+                RecordOwner::Mine(id) => {
+                    buf.read_group = Some(id);
+                    return Ok(true);
+                }
+                // Another sample's read, in a file this sample shares. Skipped
+                // before the filter sees it and counted apart from every drop:
+                // it says nothing about how this read group behaved.
+                RecordOwner::OtherSample => self.other_sample_records += 1,
+            }
         }
-        // **After** the read, never before: the read group can depend on the
-        // record's own `RG` tag, so resolving against a stale buffer would
-        // attribute each read to whatever the *previous* one carried.
-        buf.read_group = Some(resolve_read_group(&buf.record, &self.resolution)?);
-        Ok(true)
     }
 }
 
@@ -581,6 +655,8 @@ pub struct CramRecordSource<R> {
     header: sam::Header,
     reference_sequence_repository: fasta::Repository,
     resolution: ReadGroupResolution,
+    /// Records skipped as another sample's — see [`RecordSource::other_sample_records`].
+    other_sample_records: u64,
     /// The reused container buffer — its allocations are recycled across reads.
     container: cram::io::reader::Container,
     /// The current container's decoded records, yielded one per read.
@@ -618,6 +694,7 @@ impl<R> CramRecordSource<R> {
             header,
             reference_sequence_repository,
             resolution,
+            other_sample_records: 0,
             container: cram::io::reader::Container::default(),
             buffered_records: Vec::new().into_iter(),
             exhausted: false,
@@ -664,14 +741,26 @@ impl<R: io::Read> RecordSource for CramRecordSource<R> {
         &self.header
     }
 
+    fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
+    }
+
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
         buf.read_group = None;
         loop {
             if let Some(record) = self.buffered_records.next() {
                 buf.record = record;
                 // After the move, for the reason the BAM source gives.
-                buf.read_group = Some(resolve_read_group(&buf.record, &self.resolution)?);
-                return Ok(true);
+                match resolve_read_group(&buf.record, &self.resolution)? {
+                    RecordOwner::Mine(id) => {
+                        buf.read_group = Some(id);
+                        return Ok(true);
+                    }
+                    RecordOwner::OtherSample => {
+                        self.other_sample_records += 1;
+                        continue;
+                    }
+                }
             }
             if self.exhausted {
                 return Ok(false);
@@ -883,6 +972,9 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
             ref_buf,
             done: _,
         } = self;
+        // Folded here rather than left on the source, which the caller drops:
+        // it is part of what this query saw, and after the move it is gone.
+        let counts = counts.with_source_counts(&source);
         (
             source,
             ReadFilterBuffers {
@@ -894,8 +986,12 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     }
 
     /// The running tally — current counts, final once iteration is exhausted.
-    pub fn counts(&self) -> &ReadFilterCounts {
-        &self.counts
+    /// The running tally, including what the source skipped as another sample's.
+    ///
+    /// That skip happens below this filter — a foreign record is never yielded
+    /// to it — so the count is read off the source rather than accumulated here.
+    pub fn counts(&self) -> ReadFilterCounts {
+        self.counts.with_source_counts(&self.source)
     }
 
     /// Mark the iterator finished and yield a fatal error. Shared by the three
@@ -1002,6 +1098,7 @@ mod tests {
                 too_short: 0,
                 high_mismatch_fraction: 0,
                 bad_cigar: 0,
+                other_sample: 0,
             }
         );
     }
@@ -1424,6 +1521,12 @@ mod tests {
 
     impl RecordSource for FakeSource {
         type Record = FakeRecord;
+        /// Nothing to skip: this fake carries no read-group resolution, so it
+        /// can never meet another sample's record.
+        fn other_sample_records(&self) -> u64 {
+            0
+        }
+
         fn header(&self) -> &sam::Header {
             &self.header
         }
@@ -1914,6 +2017,7 @@ mod tests {
             too_short: 1,
             high_mismatch_fraction: 1,
             bad_cigar: 1,
+            other_sample: 0,
         };
         (records, expected)
     }
@@ -1941,7 +2045,7 @@ mod tests {
 
         let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2, "exactly the two clean reads survive");
-        assert_eq!(*filter.counts(), expected);
+        assert_eq!(filter.counts(), expected);
     }
 
     #[test]
@@ -1974,7 +2078,7 @@ mod tests {
 
         let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2);
-        assert_eq!(*filter.counts(), expected);
+        assert_eq!(filter.counts(), expected);
     }
 
     #[test]
@@ -2006,6 +2110,12 @@ mod tests {
 
     impl RecordSource for ErroringSource {
         type Record = FakeRecord;
+        /// Nothing to skip: this fake carries no read-group resolution, so it
+        /// can never meet another sample's record.
+        fn other_sample_records(&self) -> u64 {
+            0
+        }
+
         fn header(&self) -> &sam::Header {
             &self.header
         }
@@ -2091,7 +2201,7 @@ mod tests {
         let mut filter =
             ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
         assert!(filter.next().is_none());
-        assert_eq!(*filter.counts(), ReadFilterCounts::default());
+        assert_eq!(filter.counts(), ReadFilterCounts::default());
     }
 
     #[test]
@@ -2165,8 +2275,8 @@ mod tests {
             "same reads, in the same order"
         );
         assert_eq!(
-            *probe_free.counts(),
-            *probed.counts(),
+            probe_free.counts(),
+            probed.counts(),
             "and every drop charged to the same reason"
         );
     }

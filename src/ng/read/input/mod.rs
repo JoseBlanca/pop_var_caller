@@ -639,10 +639,11 @@ fn check_one_sample(
 /// lets a file re-headered without rewriting its records be read at all. A file
 /// declaring several resolves per record.
 ///
-/// **Still refused: a file whose read groups name more than one sample.** Reading
-/// one means recognising the other sample's records in order to leave them out,
-/// which is its own change — the reads it drops are reads, and dropping the wrong
-/// ones is silent. Until then such a file is rejected rather than half-read.
+/// A file whose read groups name **several samples** resolves too: this open's
+/// read groups become [`Mine`](RecordOwner::Mine) and the rest
+/// [`OtherSample`](RecordOwner::OtherSample), and the record sources leave the
+/// foreign records out — counted apart from every drop, because a read belonging
+/// to someone else says nothing about how this read group behaved.
 fn resolution_for(
     path: &Path,
     sample: &SampleReadGroups,
@@ -652,18 +653,6 @@ fn resolution_for(
         .iter()
         .filter(|(_, group)| *group.file == *path)
         .collect();
-
-    let foreign = declared
-        .iter()
-        .filter(|(_, group)| group.sample != sample.sample)
-        .count();
-    if foreign > 0 {
-        return Err(IngestError::SeveralSamplesInOneFile {
-            path: path.to_path_buf(),
-            sample: sample.sample.to_string(),
-            foreign_read_groups: foreign,
-        });
-    }
 
     Ok(match declared.as_slice() {
         // No read groups at all cannot happen — a file with no `@RG` fails when
@@ -675,11 +664,22 @@ fn resolution_for(
                 path: path.to_path_buf(),
             });
         }
-        [(id, _)] => ReadGroupResolution::Sole(*id),
+        // One declared read group and it is this sample's: the records' own tags
+        // need never be read. A lone *foreign* read group cannot reach here —
+        // the file would hold no read group of this sample, so this open would
+        // not have been given it.
+        [(id, group)] if group.sample == sample.sample => ReadGroupResolution::Sole(*id),
         several => ReadGroupResolution::PerRecord(
             several
                 .iter()
-                .map(|(id, group)| (group.id.clone(), RecordOwner::Mine(*id)))
+                .map(|(id, group)| {
+                    let owner = if group.sample == sample.sample {
+                        RecordOwner::Mine(*id)
+                    } else {
+                        RecordOwner::OtherSample
+                    };
+                    (group.id.clone(), owner)
+                })
                 .collect(),
         ),
     })
@@ -727,24 +727,6 @@ pub enum IngestError {
     /// that rejects every record it later reads.
     #[error("no read group in the run's table belongs to alignment file '{}'", path.display())]
     NoReadGroupsForFile { path: PathBuf },
-
-    /// A file holds read groups belonging to a sample other than the one being
-    /// opened, which cannot be read yet.
-    ///
-    /// **Temporary.** Reading such a file means recognising the other sample's
-    /// records in order to leave them out, and dropping the wrong ones would be
-    /// silent — so until that lands the file is refused rather than half-read.
-    #[error(
-        "alignment file '{}' holds {foreign_read_groups} read group(s) belonging to \
-         samples other than '{sample}'; reading one sample out of a shared file is \
-         not implemented yet",
-        path.display()
-    )]
-    SeveralSamplesInOneFile {
-        path: PathBuf,
-        sample: String,
-        foreign_read_groups: usize,
-    },
 
     /// `SampleReads::open` was given no files.
     ///
@@ -1328,12 +1310,15 @@ mod tests {
         );
     }
 
-    /// A file holding another sample's read groups is refused, rather than
-    /// half-read. Nothing yet recognises the foreign records in order to leave
-    /// them out, and yielding them as this sample's would be silent — they would
-    /// arrive carrying the other sample's read group.
+    /// **The capability this step adds.** One file, two samples, opened twice:
+    /// each open yields only its own reads, the foreign ones are counted apart
+    /// from every drop, and the two opens' reads reunited are the file.
+    ///
+    /// Counting a foreign read as a drop is the failure this guards: it would
+    /// make a shared file look like a low-quality one, and a drop rate is what a
+    /// per-read-group diagnostic is *for*.
     #[test]
-    fn a_file_shared_between_samples_is_refused() {
+    fn a_file_shared_between_samples_serves_each_open_only_its_own_reads() {
         use crate::ng::read::input::test_fixtures::{
             FixtureReadGroup, header_with_read_groups, indexed_named_bam,
             read_named_with_length_in_read_group,
@@ -1350,38 +1335,61 @@ mod tests {
         );
         let (_dir, path) = indexed_named_bam(
             &header,
-            &[read_named_with_length_in_read_group("a", 0, 1, 30, "rg1")],
+            &[
+                read_named_with_length_in_read_group("a", 0, 1, 30, "rg1"),
+                read_named_with_length_in_read_group("b", 0, 20, 30, "rg2"),
+                read_named_with_length_in_read_group("c", 0, 40, 30, "rg1"),
+                read_named_with_length_in_read_group("d", 0, 60, 30, "rg2"),
+            ],
             "shared.bam",
         );
 
-        let read_groups =
-            build_read_groups(std::slice::from_ref(&path)).expect("the table is fine");
-        let samples = read_groups.read_groups_per_sample();
-        assert_eq!(samples.len(), 2, "the file holds two samples");
+        let read_groups = build_read_groups(std::slice::from_ref(&path)).expect("two samples");
+        assert_eq!(read_groups.read_groups_per_sample().len(), 2);
 
-        let error = SampleReads::open(
-            &samples[0],
-            &read_groups,
-            &reference,
-            ReadFilterConfig::default(),
-            false,
-        )
-        .expect_err("reading one sample out of a shared file is refused");
-
-        match &error {
-            IngestError::SeveralSamplesInOneFile {
+        let read_names_of = |index: usize| -> (Vec<String>, u64, u64) {
+            let sample = &read_groups.read_groups_per_sample()[index];
+            let reads = SampleReads::open(
                 sample,
-                foreign_read_groups,
-                ..
-            } => {
-                assert_eq!(sample, "NA12878");
-                assert_eq!(*foreign_read_groups, 1);
-            }
-            other => panic!("expected SeveralSamplesInOneFile, got {other:?}"),
-        }
-        assert!(
-            error.to_string().contains("HG002") || error.to_string().contains("shared.bam"),
-            "the message identifies the file: {error}"
+                &read_groups,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+            )
+            .expect("a shared file opens for each of its samples");
+
+            let names: Vec<String> = reads
+                .reads_in_region(whole_first_contig(), reference_bases)
+                .expect("query")
+                .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
+                .collect();
+            let counts = &reads.counts()[0];
+            let dropped = counts.duplicate
+                + counts.low_mapq
+                + counts.supplementary
+                + counts.secondary
+                + counts.unmapped
+                + counts.qc_fail
+                + counts.too_short
+                + counts.high_mismatch_fraction
+                + counts.bad_cigar;
+            (names, counts.other_sample, dropped)
+        };
+
+        let (first, first_foreign, first_dropped) = read_names_of(0);
+        let (second, second_foreign, second_dropped) = read_names_of(1);
+
+        assert_eq!(first, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(second, vec!["b".to_string(), "d".to_string()]);
+        assert_eq!(
+            (first_foreign, second_foreign),
+            (2, 2),
+            "each open skipped the other sample's two reads"
+        );
+        assert_eq!(
+            (first_dropped, second_dropped),
+            (0, 0),
+            "and counted none of them as a quality drop"
         );
     }
 
