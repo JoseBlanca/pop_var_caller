@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::bam::errors::AlignmentIndexError;
-use crate::ng::read::filtering::{ReadFilterConfig, ReadFilterCounts, ReadFilterError};
+use crate::ng::read::filtering::{ReadFilterConfig, ReadFilterError, ReadGroupCounts};
 use crate::ng::read::input::read_groups::{
     ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, RecordOwner, SampleReadGroups,
     build_read_groups,
@@ -456,15 +456,30 @@ impl SampleReads {
         self.files.len()
     }
 
-    /// Each file's step-1 tally, indexed to match `source_file_index` — **never
-    /// summed**.
+    /// This sample's step-1 tallies, **one per read group** and never summed.
     ///
-    /// Drop rates are a per-experiment property: one bad run shows up as a
-    /// single file with an anomalous MAPQ or mismatch drop rate, and summing
-    /// erases exactly that signal. A caller that wants a total can add them up;
-    /// this refuses to decide that for them.
-    pub fn counts(&self) -> Vec<ReadFilterCounts> {
-        self.files.iter().map(AlignmentFile::counts).collect()
+    /// A drop rate is a *read group's* property, not a file's: one bad run shows
+    /// up as one read group with an anomalous MAPQ or mismatch rate, and both
+    /// summing across read groups and reporting per file would average that
+    /// away — the second because a file may declare several. A caller that wants
+    /// a total adds them up; this refuses to decide that for them.
+    ///
+    /// A read group appears here only if this sample's reads met it, so a group
+    /// whose every record was filtered out before the tally saw it is absent
+    /// rather than zero. `None` keys the records whose source never stamped a
+    /// read group, which [`RawRecord::decode`](crate::ng::read::filtering::RawRecord)
+    /// refuses — they are counted apart rather than charged to an arbitrary group.
+    pub fn counts(&self) -> Vec<ReadGroupCounts> {
+        let mut counts: Vec<ReadGroupCounts> = Vec::new();
+        for file in &self.files {
+            for (read_group, file_counts) in file.counts() {
+                match counts.iter_mut().find(|(id, _)| *id == read_group) {
+                    Some((_, running)) => running.add(&file_counts),
+                    None => counts.push((read_group, file_counts)),
+                }
+            }
+        }
+        counts
     }
 
     /// Every read of the sample overlapping `region`, coordinate-ordered
@@ -809,7 +824,7 @@ mod tests {
     use crate::bam::index_preflight::preflight_alignment_indexes;
     use crate::ng::read::input::test_fixtures::{
         fixture_reference, header, indexed_bam, indexed_named_bam, matching_contigs, named_bam,
-        one_read, read_named_with_length,
+        one_read, only_tally, read_named_with_length,
     };
 
     /// An indexed BAM whose one read group names `sample`.
@@ -826,8 +841,13 @@ mod tests {
     }
 
     fn bam_naming_with_reads(sample: &str, reads: usize, file_name: &str) -> (TempDir, PathBuf) {
+        // Read names carry the file's, because two files of one sample opened
+        // together must not repeat a name at a position: that is the
+        // same-file-twice check, and it fires on identical `(qname, flag,
+        // position)` across files whether or not the files really are the same.
+        let stem = file_name.split('.').next().unwrap_or(file_name);
         let records: Vec<_> = (0..reads)
-            .map(|i| read_named_with_length(&format!("r{i}"), 0, 1 + i, 30))
+            .map(|i| read_named_with_length(&format!("{stem}-r{i}"), 0, 1 + i, 30))
             .collect();
         let header = header(
             Some("coordinate"),
@@ -935,7 +955,7 @@ mod tests {
     /// the summed total k times — which is precisely the shape spec §3.3 argues
     /// against.
     #[test]
-    fn counts_are_reported_per_file_and_not_summed() {
+    fn counts_are_reported_per_read_group_and_not_summed() {
         let (_reference_dir, reference) = fixture_reference(false);
         let (_first_dir, first) = bam_naming_with_reads("NA12878", 3, "first.bam");
         let (_second_dir, second) = bam_naming_with_reads("NA12878", 1, "second.bam");
@@ -948,11 +968,36 @@ mod tests {
         )
         .expect("opens");
 
-        // Nothing has been read yet, so both tallies start empty — the counts
-        // are per *query*, folded in as each stream ends.
+        // A read group appears only once this sample's reads have met it. The
+        // tallies are per *query*, folded in as each stream ends, so before any
+        // read there is nothing to report — not two zeroed tallies.
+        assert!(sample.counts().is_empty(), "no read group has been met yet");
+
+        let read = |sample: &SampleReads| {
+            sample
+                .reads_in_region(whole_first_contig(), reference_bases)
+                .expect("query")
+                .for_each(|read| {
+                    read.expect("resolves");
+                });
+        };
+        read(&sample);
+
+        // Each fixture file declares its own `@RG`, so the run's table minted
+        // two identifiers and the reads split between them — 3 and 1, never
+        // summed to 4. Summing is what erases one bad run among several.
         let counts = sample.counts();
-        assert_eq!(counts.len(), 2, "one tally per file");
-        assert!(counts.iter().all(|tally| tally.kept == 0));
+        assert_eq!(counts.len(), 2, "one tally per read group met");
+        let kept: Vec<u64> = counts.iter().map(|(_, tally)| tally.kept).collect();
+        assert_eq!(kept, vec![3, 1]);
+        assert_eq!(
+            counts
+                .iter()
+                .map(|(id, _)| id.expect("stamped").get())
+                .collect::<Vec<_>>(),
+            vec![0, 1],
+            "keyed by the run-wide identifier, not by the file's position"
+        );
 
         assert_eq!(
             sample.assembly_inputs().count(),
@@ -1492,7 +1537,8 @@ mod tests {
                 .expect("query")
                 .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
                 .collect();
-            let counts = &reads.counts()[0];
+            let all = reads.counts();
+            let counts = &only_tally(&all);
             let dropped = counts.duplicate
                 + counts.low_mapq
                 + counts.supplementary
@@ -1567,7 +1613,7 @@ mod tests {
 
         assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
         assert_eq!(
-            reads.counts()[0].other_sample,
+            only_tally(&reads.counts()).other_sample,
             1,
             "the other sample's single read is reported through the enum's CRAM arm"
         );

@@ -23,6 +23,7 @@ use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use tempfile::TempDir;
 
 use crate::bam::index_preflight::preflight_alignment_indexes;
+use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
 use crate::ng::types::ReadGroupId;
@@ -491,4 +492,20 @@ mod tests {
             "the untagged fixture stays untagged"
         );
     }
+}
+
+/// The one read group's tally, for a fixture file that declares exactly one.
+///
+/// Asserting the count rather than taking the first entry is the point: a
+/// fixture that quietly grew a second read group would otherwise have half its
+/// drops silently ignored by whatever test called this.
+pub(crate) fn only_tally(
+    counts: &[(Option<crate::ng::types::ReadGroupId>, ReadFilterCounts)],
+) -> ReadFilterCounts {
+    assert_eq!(
+        counts.len(),
+        1,
+        "this fixture is expected to meet exactly one read group"
+    );
+    counts[0].1.clone()
 }

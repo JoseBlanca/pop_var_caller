@@ -38,7 +38,7 @@ use crate::bam::index_preflight::{
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{
-    NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterCounts,
+    NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadGroupCounts,
 };
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::ref_seq::RawRefSeq;
@@ -124,7 +124,10 @@ pub struct AlignmentFile {
     /// need a lock on the hot path or an atomic per counter, so each stream
     /// keeps its own tally and folds it in here on `Drop` — one lock per query,
     /// beside the one the pool already takes.
-    counts: Mutex<ReadFilterCounts>,
+    /// One tally per read group met, in first-seen order — **never summed
+    /// across them**: a drop rate is a read group's property, and a file that
+    /// declares several would otherwise average one bad run away.
+    counts: Mutex<Vec<ReadGroupCounts>>,
 }
 
 /// One idle reader positioned past the header, **plus the scratch its next
@@ -382,7 +385,7 @@ impl AlignmentFile {
             readers_opened: AtomicUsize::new(0),
             crai_by_contig,
             reference_repository,
-            counts: Mutex::new(ReadFilterCounts::default()),
+            counts: Mutex::new(Vec::new()),
         })
     }
 
@@ -498,7 +501,7 @@ impl AlignmentFile {
     /// A stream that is never dropped — leaked, or held for the process
     /// lifetime — never contributes at all, and takes its pooled reader with
     /// it. That is inherent to returning things on `Drop`.
-    pub fn counts(&self) -> ReadFilterCounts {
+    pub fn counts(&self) -> Vec<ReadGroupCounts> {
         self.counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -537,13 +540,25 @@ impl AlignmentFile {
         })
     }
 
-    /// Fold a finished stream's tally into the file's.
-    fn add_counts(&self, counts: &ReadFilterCounts) {
+    /// Fold a finished stream's tallies into the file's, read group by read
+    /// group.
+    ///
+    /// A read group met for the first time is appended, so the file's order is
+    /// the order its read groups were first seen across every query — stable for
+    /// a given file, and not something a caller should read anything into beyond
+    /// "these are the groups this file yielded".
+    fn add_counts(&self, counts: &[ReadGroupCounts]) {
         let mut total = self
             .counts
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        total.add(counts);
+
+        for (read_group, stream) in counts {
+            match total.iter_mut().find(|(id, _)| id == read_group) {
+                Some((_, running)) => running.add(stream),
+                None => total.push((*read_group, stream.clone())),
+            }
+        }
     }
 
     fn return_handle(&self, handle: ReaderHandle) {
@@ -805,7 +820,7 @@ mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference, header, indexed_bam,
-        matching_contigs, one_read, read_named, unindexed_bam,
+        matching_contigs, one_read, only_tally, read_named, unindexed_bam,
     };
 
     // --- @HD SO ---
@@ -1236,7 +1251,7 @@ mod tests {
         assert_eq!(reads.len(), 1, "only the clean read survives");
         assert_eq!(reads[0].qname, b"clean");
 
-        let counts = file.counts();
+        let counts = only_tally(&file.counts());
         assert_eq!(
             counts.high_mismatch_fraction, 1,
             "the drop is charged to filter #8, so the whole cascade ran"
@@ -1267,7 +1282,7 @@ mod tests {
             .expect("no fatal error");
 
         assert_eq!(reads.len(), 1);
-        let counts = file.counts();
+        let counts = only_tally(&file.counts());
         assert_eq!(counts.kept, 1);
         assert_eq!(
             counts.duplicate
@@ -1428,7 +1443,7 @@ mod tests {
         });
 
         assert_eq!(
-            file.counts().kept,
+            only_tally(&file.counts()).kept,
             8,
             "every stream folded its tally in — none lost to the race"
         );
@@ -1521,7 +1536,7 @@ mod tests {
 
         assert_eq!(file.pooled_readers(), 1, "returned on drop");
         assert_eq!(
-            file.counts().high_mismatch_fraction,
+            only_tally(&file.counts()).high_mismatch_fraction,
             1,
             "the drop seen before abandoning was banked, not lost"
         );

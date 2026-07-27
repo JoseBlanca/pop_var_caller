@@ -176,43 +176,6 @@ impl ReadFilterCounts {
         self.other_sample += other_sample;
     }
 
-    /// This tally plus the counters the **source** owns rather than the filter.
-    ///
-    /// Written out field by field rather than with `..self`, for the reason
-    /// [`Self::add`] is: a counter added to this struct later must be routed here
-    /// explicitly or this stops compiling. Field-update syntax would silently
-    /// carry a new counter through from the filter's copy, which is the wrong
-    /// side for anything the source owns.
-    pub(crate) fn with_source_counts<S: RecordSource>(&self, source: &S) -> Self {
-        let Self {
-            kept,
-            duplicate,
-            low_mapq,
-            supplementary,
-            secondary,
-            unmapped,
-            qc_fail,
-            too_short,
-            high_mismatch_fraction,
-            bad_cigar,
-            other_sample: _,
-        } = *self;
-
-        Self {
-            kept,
-            duplicate,
-            low_mapq,
-            supplementary,
-            secondary,
-            unmapped,
-            qc_fail,
-            too_short,
-            high_mismatch_fraction,
-            bad_cigar,
-            other_sample: source.other_sample_records(),
-        }
-    }
-
     /// Tally one drop against its counter. The exhaustive `match` is the guard for
     /// the documented `DropReason` ↔ `ReadFilterCounts` 1:1 mapping: adding a
     /// `DropReason` variant without a counter here is a compile error, so the two
@@ -383,6 +346,14 @@ pub trait RawRecord {
     /// showed this infallible; it is fallible in practice because the reused
     /// production decoder is.)
     fn decode(&self) -> io::Result<AlignedRead>;
+    /// Which read group this record belongs to, once its source has resolved it.
+    ///
+    /// Read by the tally, not by any filter — a drop has to be charged to the
+    /// read group it came from, and the pre-decode filters run before any
+    /// `AlignedRead` exists to carry it. `None` means the source has not stamped
+    /// the buffer, which [`Self::decode`] refuses; the tally charges it to no
+    /// read group rather than to an arbitrary one.
+    fn read_group(&self) -> Option<ReadGroupId>;
 }
 
 /// The filter's input: fills a caller-owned buffer with the next record, reusing
@@ -546,6 +517,10 @@ impl RawRecord for NoodlesRawRecord {
         // `map(u8::from).unwrap_or(0)`: SAM `0xFF` (unavailable) decodes to `None`
         // → treated as MAPQ 0, matching production `classify_pre_decode`.
         MapQual(self.record.mapping_quality().map(u8::from).unwrap_or(0))
+    }
+
+    fn read_group(&self) -> Option<ReadGroupId> {
+        self.read_group
     }
 
     fn decode(&self) -> io::Result<AlignedRead> {
@@ -829,13 +804,28 @@ pub struct ReadFilter<S: RecordSource, R> {
     /// Raw reference bytes for filter #8; see `ref_seq.md`.
     reference: R,
     config: ReadFilterConfig,
-    counts: ReadFilterCounts,
+    /// One tally per read group met, in first-seen order.
+    ///
+    /// A `Vec` scanned linearly rather than a map: a file declares a handful of
+    /// read groups, and the scan is a few integer compares on a path that has
+    /// just decoded a record. Per read group rather than per *file* because a
+    /// drop rate is a read group's property — one bad run shows up as one read
+    /// group with an anomalous MAPQ or mismatch rate, and a per-file tally over
+    /// a file that holds several would average that away.
+    counts: Vec<ReadGroupCounts>,
     /// Reused scratch for #8's reference fetch (touched only when #8 runs).
     ref_buf: Vec<u8>,
     /// Set on clean end of input or after a fatal error is yielded; makes the
     /// iterator fused (subsequent `next()`s return `None`).
     done: bool,
 }
+
+/// One read group's step-1 tally, keyed by the read group it belongs to.
+///
+/// `None` keys the records whose source never stamped a read group — which
+/// [`RawRecord::decode`] refuses, so they are counted apart rather than charged
+/// to an arbitrary group.
+pub type ReadGroupCounts = (Option<ReadGroupId>, ReadFilterCounts);
 
 /// The two buffers a [`ReadFilter`] pass reuses: the record buffer it refills
 /// per read, and the scratch filter #8 fetches reference bases into.
@@ -936,7 +926,7 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
             record_buf: buffers.record_buf,
             reference,
             config,
-            counts: ReadFilterCounts::default(),
+            counts: Vec::new(),
             ref_buf: buffers.ref_buf,
             done: false,
         }
@@ -956,7 +946,7 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     /// the filter as an `Option` and `take()`s it there. Without that, the
     /// buffers *and* the query's counts are lost on exactly the paths that are
     /// easiest to forget — an early drop and the error path.
-    pub(crate) fn into_parts(self) -> (S, ReadFilterBuffers<S::Record>, ReadFilterCounts) {
+    pub(crate) fn into_parts(self) -> (S, ReadFilterBuffers<S::Record>, Vec<ReadGroupCounts>) {
         // Destructured exhaustively, with no `..`: this function's whole job is
         // to hand back everything that was lent, so a field added to
         // `ReadFilter` later must be routed here explicitly or this stops
@@ -973,8 +963,21 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
             done: _,
         } = self;
         // Folded here rather than left on the source, which the caller drops:
-        // it is part of what this query saw, and after the move it is gone.
-        let counts = counts.with_source_counts(&source);
+        // it is part of what this query saw, and after the move it is gone. It
+        // belongs to no one read group, so it rides on the first entry — or on
+        // an entry of its own when every record was another sample's and the
+        // filter met none.
+        let mut counts = counts;
+        match counts.first_mut() {
+            Some((_, first)) => first.other_sample = source.other_sample_records(),
+            None => counts.push((
+                None,
+                ReadFilterCounts {
+                    other_sample: source.other_sample_records(),
+                    ..ReadFilterCounts::default()
+                },
+            )),
+        }
         (
             source,
             ReadFilterBuffers {
@@ -985,13 +988,49 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
         )
     }
 
-    /// The running tally — current counts, final once iteration is exhausted.
-    /// The running tally, including what the source skipped as another sample's.
+    /// The tally of the read group the buffered record belongs to, created on
+    /// first sight.
     ///
-    /// That skip happens below this filter — a foreign record is never yielded
-    /// to it — so the count is read off the source rather than accumulated here.
-    pub fn counts(&self) -> ReadFilterCounts {
-        self.counts.with_source_counts(&self.source)
+    /// Keyed on the buffer rather than passed in, because the pre-decode filters
+    /// drop a record before anything owns it — the buffer is the only thing that
+    /// knows, and it knows because its source resolved the read group before
+    /// handing it over.
+    fn tally_for_current_record(&mut self) -> &mut ReadFilterCounts {
+        let read_group = self.record_buf.read_group();
+        let index = match self.counts.iter().position(|(id, _)| *id == read_group) {
+            Some(index) => index,
+            None => {
+                self.counts.push((read_group, ReadFilterCounts::default()));
+                self.counts.len() - 1
+            }
+        };
+        &mut self.counts[index].1
+    }
+
+    /// One tally per read group this pass met, in first-seen order, plus what
+    /// the source skipped as another sample's.
+    ///
+    /// **Never summed here.** A drop rate is a read group's property: one bad
+    /// run is one read group with an anomalous rate, and adding them up erases
+    /// exactly that. A caller wanting a total adds them itself.
+    ///
+    /// The skipped-record count belongs to no single read group — a foreign
+    /// record is never yielded to this filter, and its own group is not one of
+    /// these — so it is reported once, against the first entry.
+    pub fn counts(&self) -> Vec<ReadGroupCounts> {
+        let mut counts = self.counts.clone();
+        match counts.first_mut() {
+            Some((_, first)) => first.other_sample = self.source.other_sample_records(),
+            // Every record was another sample's, so the filter met none at all.
+            None => counts.push((
+                None,
+                ReadFilterCounts {
+                    other_sample: self.source.other_sample_records(),
+                    ..ReadFilterCounts::default()
+                },
+            )),
+        }
+        counts
     }
 
     /// Mark the iterator finished and yield a fatal error. Shared by the three
@@ -1025,7 +1064,7 @@ impl<S: RecordSource, R: RawRefSeq> Iterator for ReadFilter<S, R> {
             match verdict_pre_decode(self.record_buf.flag(), self.record_buf.mapq(), &self.config) {
                 FilterVerdict::Keep => {}
                 FilterVerdict::Drop(reason) => {
-                    self.counts.record_drop(reason);
+                    self.tally_for_current_record().record_drop(reason);
                     continue;
                 }
             }
@@ -1039,11 +1078,11 @@ impl<S: RecordSource, R: RawRefSeq> Iterator for ReadFilter<S, R> {
             // Phase two — length / CIGAR / mismatch, on the decoded read.
             match verdict_post_decode(&read, &self.reference, &self.config, &mut self.ref_buf) {
                 Ok(FilterVerdict::Keep) => {
-                    self.counts.kept += 1;
+                    self.tally_for_current_record().kept += 1;
                     return Some(Ok(read));
                 }
                 Ok(FilterVerdict::Drop(reason)) => {
-                    self.counts.record_drop(reason);
+                    self.tally_for_current_record().record_drop(reason);
                     continue;
                 }
                 Err(error) => return self.fail(ReadFilterError::Reference(error)),
@@ -1483,7 +1522,29 @@ mod tests {
         }
     }
 
+    /// The single read group's tally, for a fixture that has exactly one.
+    ///
+    /// Every fixture here declares one read group (or none at all, for the fake
+    /// sources), so a pass produces one entry. Asserting that rather than taking
+    /// the first is the point: a fixture that quietly grew a second read group
+    /// would otherwise have half its drops silently ignored by these tests.
+    fn only_tally<S: RecordSource, R: RawRefSeq>(filter: &ReadFilter<S, R>) -> ReadFilterCounts {
+        let counts = filter.counts();
+        assert_eq!(
+            counts.len(),
+            1,
+            "this fixture is expected to meet exactly one read group"
+        );
+        counts[0].1.clone()
+    }
+
     impl RawRecord for FakeRecord {
+        /// Unstamped: this fake has no source that resolves read groups, so its
+        /// drops are charged to no read group — which is what `None` keys.
+        fn read_group(&self) -> Option<ReadGroupId> {
+            None
+        }
+
         fn flag(&self) -> u16 {
             self.read.flag
         }
@@ -2045,7 +2106,7 @@ mod tests {
 
         let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2, "exactly the two clean reads survive");
-        assert_eq!(filter.counts(), expected);
+        assert_eq!(only_tally(&filter), expected);
     }
 
     /// The whole-file CRAM source skips another sample's records and reports
@@ -2171,7 +2232,7 @@ mod tests {
 
         let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 2);
-        assert_eq!(filter.counts(), expected);
+        assert_eq!(only_tally(&filter), expected);
     }
 
     #[test]
@@ -2284,8 +2345,8 @@ mod tests {
             ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
         let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 1, "only the clean read survives");
-        assert_eq!(filter.counts().unmapped, 1);
-        assert_eq!(filter.counts().kept, 1);
+        assert_eq!(only_tally(&filter).unmapped, 1);
+        assert_eq!(only_tally(&filter).kept, 1);
     }
 
     #[test]
@@ -2294,7 +2355,7 @@ mod tests {
         let mut filter =
             ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
         assert!(filter.next().is_none());
-        assert_eq!(filter.counts(), ReadFilterCounts::default());
+        assert_eq!(only_tally(&filter), ReadFilterCounts::default());
     }
 
     #[test]
@@ -2311,10 +2372,10 @@ mod tests {
         let mut filter =
             ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
         assert!(matches!(filter.next(), Some(Ok(_))));
-        assert_eq!(filter.counts().duplicate, 1);
-        assert_eq!(filter.counts().kept, 1);
+        assert_eq!(only_tally(&filter).duplicate, 1);
+        assert_eq!(only_tally(&filter).kept, 1);
         assert!(filter.next().is_none());
-        assert_eq!(filter.counts().kept, 1);
+        assert_eq!(only_tally(&filter).kept, 1);
     }
 
     fn one_contig_200_header() -> sam::Header {
@@ -2368,8 +2429,8 @@ mod tests {
             "same reads, in the same order"
         );
         assert_eq!(
-            probe_free.counts(),
-            probed.counts(),
+            only_tally(&probe_free),
+            only_tally(&probed),
             "and every drop charged to the same reason"
         );
     }
@@ -2413,7 +2474,7 @@ mod tests {
             ReadFilterConfig::default(),
             ReadFilterBuffers::default(),
         );
-        assert_eq!(filter.counts().kept, 0);
+        assert_eq!(only_tally(&filter).kept, 0);
     }
 
     /// The buffers must come back *with their allocations*, since reusing them
@@ -2433,6 +2494,8 @@ mod tests {
 
         let (_source, buffers, counts) = filter.into_parts();
 
+        assert_eq!(counts.len(), 1, "one read group in this fixture");
+        let counts = counts[0].1.clone();
         assert_eq!(counts.kept, 2, "the tally survives the hand-off");
         assert_eq!(counts.duplicate, 1);
         assert!(
