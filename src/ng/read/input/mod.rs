@@ -1619,6 +1619,177 @@ mod tests {
         );
     }
 
+    /// **The whole stack, on the shape none of the narrower tests has.** Two
+    /// files and two samples at once, where one sample spans both files and the
+    /// other lives inside a file it shares — so every seam this work touched is
+    /// crossed in one pass: the table built from several paths, an open that
+    /// merges two files, another that reads one sample out of a shared file,
+    /// per-record resolution, the foreign-record skip, and the tally keyed by
+    /// read group.
+    ///
+    /// It lives here rather than in `tests/` because the fixtures that write a
+    /// BAM and its index are `pub(crate)`; making them public to host one test
+    /// would widen the crate's surface for a test's convenience.
+    ///
+    /// Each of the three silent failures this milestone hit would fail here:
+    /// resolving against a stale buffer (reads carry a neighbour's group),
+    /// losing a skipped record from the tally (`other_sample` short), and
+    /// charging a foreign read to a drop counter (`kept + drops` disagree).
+    #[test]
+    fn the_whole_stack_over_two_files_and_two_samples() {
+        use crate::ng::read::input::test_fixtures::{
+            FixtureReadGroup, header_with_read_groups, indexed_named_bam,
+            read_named_with_length_in_read_group,
+        };
+
+        let (_reference_dir, reference) = fixture_reference(false);
+
+        // File one is shared: NA12878's rg1 and HG002's rg2.
+        let (_first_dir, first) = indexed_named_bam(
+            &header_with_read_groups(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[
+                    FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-A"),
+                    FixtureReadGroup::new("rg2", Some("HG002")).with_library("lib-B"),
+                ],
+            ),
+            &[
+                read_named_with_length_in_read_group("shared-a", 0, 1, 30, "rg1"),
+                read_named_with_length_in_read_group("shared-b", 0, 20, 30, "rg2"),
+                read_named_with_length_in_read_group("shared-c", 0, 40, 30, "rg1"),
+            ],
+            "first.bam",
+        );
+        // File two is NA12878's alone — a second library of the same individual,
+        // which is the case the whole design exists for.
+        let (_second_dir, second) = indexed_named_bam(
+            &header_with_read_groups(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[FixtureReadGroup::new("rg1", Some("NA12878")).with_library("lib-C")],
+            ),
+            &[read_named_with_length_in_read_group(
+                "second-a", 0, 10, 30, "rg1",
+            )],
+            "second.bam",
+        );
+
+        let read_groups =
+            build_read_groups(&[first.clone(), second.clone()]).expect("both headers are valid");
+
+        // Three read groups over two files, two samples, three libraries — and
+        // the identifiers follow the input order, not the samples'.
+        assert_eq!(read_groups.len(), 3);
+        assert_eq!(
+            read_groups
+                .iter()
+                .map(|(id, group)| (id.get(), &*group.sample, &*group.library.value))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "NA12878", "lib-A"),
+                (1, "HG002", "lib-B"),
+                (2, "NA12878", "lib-C"),
+            ]
+        );
+
+        let by_sample = read_groups.read_groups_per_sample();
+        assert_eq!(
+            by_sample
+                .iter()
+                .map(|entry| (&*entry.sample, entry.read_groups.len()))
+                .collect::<Vec<_>>(),
+            vec![("NA12878", 2), ("HG002", 1)],
+            "one sample spans two files; the other is inside a file it shares"
+        );
+
+        let drain = |index: usize| -> (Vec<String>, Vec<(u32, u64)>, u64) {
+            let sample = &by_sample[index];
+            let reads = SampleReads::open(
+                sample,
+                &read_groups,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+            )
+            .expect("opens");
+
+            let names: Vec<String> = reads
+                .reads_in_region(whole_first_contig(), reference_bases)
+                .expect("query")
+                .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
+                .collect();
+
+            let counts = reads.counts();
+            let kept: Vec<(u32, u64)> = counts
+                .iter()
+                .filter_map(|(id, tally)| Some((id.as_ref()?.get(), tally.kept)))
+                .collect();
+            let foreign = counts.iter().map(|(_, tally)| tally.other_sample).sum();
+            (names, kept, foreign)
+        };
+
+        let (first_names, first_kept, first_foreign) = drain(0);
+        let (second_names, second_kept, second_foreign) = drain(1);
+
+        // NA12878's reads come from both files, merged in coordinate order.
+        assert_eq!(
+            first_names,
+            vec![
+                "shared-a".to_string(),
+                "second-a".to_string(),
+                "shared-c".to_string(),
+            ],
+        );
+        assert_eq!(
+            first_kept,
+            vec![(0, 2), (2, 1)],
+            "two libraries, tallied apart — never summed to one count of three"
+        );
+        assert_eq!(first_foreign, 1, "HG002's read, skipped in the shared file");
+
+        assert_eq!(second_names, vec!["shared-b".to_string()]);
+        assert_eq!(second_kept, vec![(1, 1)]);
+        assert_eq!(
+            second_foreign, 2,
+            "NA12878's two reads in the shared file, skipped"
+        );
+
+        // Nothing was charged to a drop counter: every record either belonged to
+        // the open or was skipped as another sample's.
+        for sample in by_sample {
+            let reads = SampleReads::open(
+                sample,
+                &read_groups,
+                &reference,
+                ReadFilterConfig::default(),
+                false,
+            )
+            .expect("opens");
+            reads
+                .reads_in_region(whole_first_contig(), reference_bases)
+                .expect("query")
+                .for_each(|read| {
+                    read.expect("resolves");
+                });
+            for (_, tally) in reads.counts() {
+                assert_eq!(
+                    tally.duplicate
+                        + tally.low_mapq
+                        + tally.supplementary
+                        + tally.secondary
+                        + tally.unmapped
+                        + tally.qc_fail
+                        + tally.too_short
+                        + tally.high_mismatch_fraction
+                        + tally.bad_cigar,
+                    0,
+                    "a foreign read is never a quality drop"
+                );
+            }
+        }
+    }
+
     /// A read must carry the read group it came from. It is load-bearing rather
     /// than provenance — a read group is one library preparation, the grouping a
     /// per-chemistry error model keys on — and nothing proved it reached the
