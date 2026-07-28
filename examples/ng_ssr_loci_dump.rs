@@ -446,8 +446,15 @@ mod tests {
             read(&contig, "c1", 21, 54),
             read(&contig, "c2", 21, 54),
             read(&contig, "c3", 21, 54),
-            // Anchors tract1's left flank, runs off inside the tract (21..60) → partial:left.
+            // Anchors tract1's left flank, runs off inside the tract (21..60) → partial:left,
+            // reaching 20 of the tract's 24 positions.
             read(&contig, "pl", 21, 40),
+            // The same, stopping earlier (21..52) → partial:left reaching 12. **Its reach is what
+            // makes this fixture able to catch a left/right mix-up at all**: with only the
+            // symmetric `pl`/`pr` pair below, the two partial rows carry identical bases and
+            // counts, so swapping the sides merely exchanges their labels and the dump does not
+            // move. A partial whose reach no other partial shares breaks that symmetry.
+            read(&contig, "pl2", 21, 32),
             // Begins inside tract1, anchors its right flank (45..74) → partial:right.
             read(&contig, "pr", 45, 30),
         ];
@@ -455,8 +462,8 @@ mod tests {
         (dir, fasta, bam)
     }
 
-    /// The same six reads, split across **two read groups** of one sample: the four completes go
-    /// 3-to-`rg0` / 1-to-`rg1`, and one partial to each group.
+    /// The same seven reads, split across **two read groups** of one sample: the four completes
+    /// go 3-to-`rg0` / 1-to-`rg1`, the two left partials to `rg0` and the right partial to `rg1`.
     ///
     /// Deliberately the *same reads* as [`fixture`], so the two dumps are comparable row for row
     /// and "the split sums back" is a statement about the same evidence rather than about two
@@ -474,6 +481,7 @@ mod tests {
             in_read_group(read(&contig, "c2", 21, 54), "rg0"),
             in_read_group(read(&contig, "c3", 21, 54), "rg1"),
             in_read_group(read(&contig, "pl", 21, 40), "rg0"),
+            in_read_group(read(&contig, "pl2", 21, 32), "rg0"),
             in_read_group(read(&contig, "pr", 45, 30), "rg1"),
         ];
         write_bam_with_read_groups(&bam, contig.len(), &reads, &["rg0", "rg1"]);
@@ -558,9 +566,10 @@ mod tests {
                 + report.reads_without_observation,
             "every fetched read is accounted for (spec §9.2)"
         );
-        // tract1's six reads land as four complete + two partial observations; tract2 gets none.
+        // tract1's seven reads land as four complete + three partial observations; tract2 gets
+        // none.
         assert_eq!(report.obs_complete, 4);
-        assert_eq!(report.obs_partial, 2);
+        assert_eq!(report.obs_partial, 3);
         assert_eq!(report.reads_without_observation, 0);
         assert_eq!(report.reads_capped, 0);
     }
@@ -579,7 +588,7 @@ mod tests {
             lines[0],
             "# ssr_loci=2 zero_coverage=1 reads_capped=0 reads_without_observation=0"
         );
-        assert_eq!(lines[1], "# obs_complete=4 obs_partial=2");
+        assert_eq!(lines[1], "# obs_complete=4 obs_partial=3");
         assert_eq!(
             lines[2],
             "contig\tstart\tend\tmotif\tref_tract\tdepth\tread_coverage\tobserved\treads"
@@ -699,26 +708,21 @@ mod tests {
         assert!(cap_below.reads_capped > 0, "the cap discarded reads");
     }
 
-    /// **A recorded limit of this fixture, found while reshaping `ReadCoverage` (B1).**
+    /// **The fixture can tell a left partial from a right one** — which it could not until `pl2`
+    /// was added, and the reason is worth keeping.
     ///
-    /// The fixture's two partial reads are *symmetric* — `pl` and `pr` witness the same 20 tract
-    /// positions, so their rows carry identical `bases` and identical `reads`, differing only in
-    /// the `read_coverage` label. Sorting puts the left-flush run first either way, so **swapping
-    /// left for right at the mint site leaves this dump byte-identical** (checked: the swap was
-    /// applied and the output did not move). No assertion over this fixture can catch that.
+    /// With only the symmetric `pl`/`pr` pair, both partial rows carried identical `bases` and
+    /// identical `reads`, differing solely in the label; sorting put the left-flush run first
+    /// either way, so **swapping left for right at the mint site left the dump byte-identical**
+    /// (checked, during B1, by applying the swap). The acceptance anchor was blind to the one
+    /// property the `ReadCoverage` reshape most affects.
     ///
-    /// The property is not uncovered — `classify`'s
-    /// `a_read_running_off_the_right_is_a_left_partial` and
-    /// `a_read_running_off_the_left_is_a_right_partial` both fail under the same swap, and they
-    /// assert `offset_in_locus` directly. But the dump is the *acceptance* anchor, so the gap is
-    /// stated here rather than left to be rediscovered: making it discriminating needs partials of
-    /// **different reach**, which changes the row set and so belongs with the fixture rebaseline
-    /// B2 already schedules.
-    ///
-    /// This test pins the symmetry itself, so that if the fixture is ever made asymmetric the note
-    /// above stops being true loudly rather than silently.
+    /// `pl2` breaks the symmetry by reaching a *different* number of tract positions, so the two
+    /// left-flush rows carry bases no right-flush row shares and a swap moves the output. This
+    /// test states the property the fixture must keep: **no two partial rows are
+    /// interchangeable.**
     #[test]
-    fn the_fixtures_two_partials_are_symmetric_and_so_cannot_catch_a_side_swap() {
+    fn the_fixtures_partials_are_asymmetric_and_so_can_catch_a_side_swap() {
         let (_dir, fasta, bam) = fixture();
         let report = dump(&fasta, &bam, SsrGeneratorConfig::default());
         let partials: Vec<&ObservationRow> = report
@@ -727,15 +731,25 @@ mod tests {
             .filter(|row| row.read_coverage.starts_with("partial"))
             .collect();
 
-        assert_eq!(partials.len(), 2, "one partial from each side");
-        assert_eq!(
-            partials[0].observed, partials[1].observed,
-            "the two partials witness the same bases — the symmetry that blinds this fixture"
-        );
-        assert_eq!(partials[0].reads, partials[1].reads);
-        assert_ne!(
-            partials[0].read_coverage, partials[1].read_coverage,
-            "…and differ only in the label, which is what a swap would exchange"
+        assert_eq!(partials.len(), 3, "two left partials and one right");
+        let left: Vec<&&ObservationRow> = partials
+            .iter()
+            .filter(|row| row.read_coverage == "partial:left")
+            .collect();
+        let right: Vec<&&ObservationRow> = partials
+            .iter()
+            .filter(|row| row.read_coverage == "partial:right")
+            .collect();
+        assert_eq!(left.len(), 2);
+        assert_eq!(right.len(), 1);
+
+        // The discriminating property: swapping the sides would have to move some row's bases
+        // between the two labels, and that is only invisible if every left row has a right
+        // counterpart with the same bases. Assert no such pairing exists.
+        assert!(
+            left.iter()
+                .any(|l| right.iter().all(|r| r.observed != l.observed)),
+            "at least one partial's bases must be unique to its side, or a side swap is invisible"
         );
     }
 
@@ -765,12 +779,12 @@ mod tests {
 
         assert_eq!(
             single.rows.len(),
-            3,
-            "one complete row and the two partials, ungrouped"
+            4,
+            "one complete row and the three partials, ungrouped"
         );
         assert_eq!(
             split.rows.len(),
-            4,
+            5,
             "the complete allele splits in two; the partials were one read each already"
         );
 
