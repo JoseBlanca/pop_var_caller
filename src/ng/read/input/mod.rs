@@ -391,7 +391,6 @@ impl SampleReads {
                     build_index_if_missing,
                     resolution,
                 )
-                .map(Arc::new)
                 .map_err(|source| IngestError::File {
                     source_file_index,
                     source,

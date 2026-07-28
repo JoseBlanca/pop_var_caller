@@ -294,7 +294,6 @@ mod tests {
                     // the property this test is about.
                     ReadGroupResolution::Sole(ReadGroupId(i as u32)),
                 )
-                .map(Arc::new)
                 .expect("opens")
             })
             .collect();

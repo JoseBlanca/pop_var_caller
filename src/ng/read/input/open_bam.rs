@@ -297,13 +297,21 @@ impl AlignmentFile {
     ///
     /// With `build_index_if_missing`, an absent index is built next to the file
     /// rather than rejected; that is a caller policy, not this module's.
+    ///
+    /// **Hands back an `Arc`, because that is the only shape the type is
+    /// useful in.** Querying takes `self: &Arc<Self>`
+    /// ([`reads_in_region`](Self::reads_in_region)), so a bare `AlignmentFile`
+    /// could be asked for its path, its digests and its tallies and nothing
+    /// else. Putting the share in the constructor states that invariant once,
+    /// where a caller cannot skip it, instead of leaving every call site to
+    /// wrap the result itself.
     pub fn open(
         path: &Path,
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
         resolution: ReadGroupResolution,
-    ) -> Result<Self, AlignmentFileError> {
+    ) -> Result<Arc<Self>, AlignmentFileError> {
         let header = read_header(path)?;
 
         // 1. @HD SO.
@@ -398,7 +406,7 @@ impl AlignmentFile {
         // reference's, so position i really is `ContigId(i)`.
         let sq_md5s = file_contigs.entries.iter().map(|entry| entry.md5).collect();
 
-        Ok(Self {
+        Ok(Arc::new(Self {
             path: Arc::from(path),
             header: Arc::new(header),
             index,
@@ -413,7 +421,7 @@ impl AlignmentFile {
             crai_by_contig,
             reference_repository,
             counts: Mutex::new(Vec::new()),
-        })
+        }))
     }
 
     /// How this file's records are assigned to read groups (see the field).
@@ -1284,7 +1292,6 @@ mod tests {
             false,
             fixture_read_group(),
         )
-        .map(Arc::new)
         .expect("the fixture matches");
         (reference_dir, bam_dir, file)
     }
@@ -1428,7 +1435,6 @@ mod tests {
             false,
             fixture_read_group(),
         )
-        .map(Arc::new)
         .expect("opens");
 
         // Truncate *after* opening, so the gate and the index are intact and
@@ -1712,7 +1718,6 @@ mod tests {
             false,
             fixture_read_group(),
         )
-        .map(Arc::new)
         .expect("the BAM opens");
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&records);
@@ -1728,7 +1733,6 @@ mod tests {
             false,
             fixture_read_group(),
         )
-        .map(Arc::new)
         .expect("the CRAM opens");
 
         let regions = [
@@ -1834,7 +1838,6 @@ mod tests {
             false,
             fixture_read_group(),
         )
-        .map(Arc::new)
         .expect("opens");
 
         let bases = || InMemoryRefSeq::from_contigs(vec![vec![b'A'; CONTIG_LENGTH]]);
@@ -1928,7 +1931,6 @@ mod tests {
             false,
             fixture_read_group(),
         )
-        .map(Arc::new)
         .expect("a wrong M5 is a wildcard against a .fai-only reference");
 
         let reads: Vec<AlignedRead> = file
@@ -2017,8 +2019,7 @@ mod tests {
                 ReadFilterConfig::default(),
                 false,
                 fixture_read_group(),
-            )
-            .map(Arc::new),
+            ),
             _reference_dir: reference_dir,
             _bam_dir: bam_dir,
         }
@@ -2260,7 +2261,7 @@ mod tests {
         header: &sam::Header,
     ) -> (
         (TempDir, TempDir),
-        Result<AlignmentFile, AlignmentFileError>,
+        Result<Arc<AlignmentFile>, AlignmentFileError>,
     ) {
         let (reference_dir, reference) = fixture_reference(false);
         let records = if header.reference_sequences().is_empty() {

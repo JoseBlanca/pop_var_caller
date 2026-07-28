@@ -1660,7 +1660,6 @@ mod tests {
                 false,
                 crate::ng::read::input::test_fixtures::fixture_read_group(),
             )
-            .map(Arc::new)
             .expect("the fixture CRAM opens")
         };
 
