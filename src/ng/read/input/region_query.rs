@@ -64,7 +64,7 @@ use super::AlignmentFileError;
 /// Owns its reader rather than borrowing one, so the whole chain can be built
 /// by value and the reader handed back to the pool when the stream ends
 /// ([`Self::into_reader`]).
-pub(crate) struct BamRegionSource<'a> {
+pub(crate) struct BamRegionSource {
     reader: bam::io::Reader<bgzf::io::Reader<File>>,
     /// Shared with the `AlignmentFile`: parsed once, never per query, and
     /// **owned** rather than borrowed so this source does not tie the stream it
@@ -77,9 +77,9 @@ pub(crate) struct BamRegionSource<'a> {
     /// gate, which is what makes this a cast rather than a lookup.
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    /// Borrowed from the `AlignmentFile`, like the header: settled at open,
-    /// never rebuilt per query.
-    resolution: &'a ReadGroupResolution,
+    /// Shared with the `AlignmentFile`, like the header: settled at open, never
+    /// rebuilt per query, and owned so this source carries no lifetime.
+    resolution: Arc<ReadGroupResolution>,
     /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
     other_sample_records: u64,
     /// Latched once the scan passes the region end or the chunks run out.
@@ -99,7 +99,7 @@ pub(crate) struct RegionPlan {
     region: GenomeRegion,
 }
 
-impl<'a> BamRegionSource<'a> {
+impl BamRegionSource {
     /// Resolve the region and query the index for its chunks.
     ///
     /// The index query happens here, once per region — an in-memory lookup on
@@ -153,7 +153,7 @@ impl<'a> BamRegionSource<'a> {
         reader: bam::io::Reader<bgzf::io::Reader<File>>,
         header: Arc<sam::Header>,
         plan: RegionPlan,
-        resolution: &'a ReadGroupResolution,
+        resolution: Arc<ReadGroupResolution>,
     ) -> Self {
         Self {
             reader,
@@ -182,7 +182,7 @@ fn interval_of(region: GenomeRegion) -> Option<noodles_core::region::Interval> {
     Some((start..=end).into())
 }
 
-impl RecordSource for BamRegionSource<'_> {
+impl RecordSource for BamRegionSource {
     type Record = NoodlesRawRecord;
 
     fn header(&self) -> &sam::Header {
@@ -265,7 +265,7 @@ impl RecordSource for BamRegionSource<'_> {
             // before the read — or on one the loop above skipped — would
             // attribute this read to whatever the previous record carried. It
             // also means the records this query discards never pay the lookup.
-            match resolve_read_group(&buf.record, self.resolution)? {
+            match resolve_read_group(&buf.record, &self.resolution)? {
                 RecordOwner::Mine(id) => {
                     buf.read_group = Some(id);
                     return Ok(true);
@@ -385,7 +385,7 @@ impl Footprint {
 /// `(reference_sequence_id, alignment_start)`, so the contig's first entry is
 /// one binary search away, and the forward walk from there is bounded by the
 /// container-level early stop below (spec §3.3).
-pub(crate) struct CramRegionSource<'a> {
+pub(crate) struct CramRegionSource {
     reader: cram::io::Reader<File>,
     /// Shared with the `AlignmentFile`, for the reason its BAM sibling's is
     /// ([`BamRegionSource`]): owned, so the stream this serves outlives the
@@ -416,13 +416,13 @@ pub(crate) struct CramRegionSource<'a> {
     region: GenomeRegion,
     /// Borrowed from the `AlignmentFile`, like the header: settled at open,
     /// never rebuilt per query.
-    resolution: &'a ReadGroupResolution,
+    resolution: Arc<ReadGroupResolution>,
     /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
     other_sample_records: u64,
     done: bool,
 }
 
-impl<'a> CramRegionSource<'a> {
+impl CramRegionSource {
     /// Pick out the target contig's `.crai` entries. **O(1)** — the grouping
     /// was done once, at open (`open_bam::group_crai_by_contig`, which also
     /// explains why this is not a binary search).
@@ -458,7 +458,7 @@ impl<'a> CramRegionSource<'a> {
         header: Arc<sam::Header>,
         repository: fasta::Repository,
         plan: CramRegionPlan,
-        resolution: &'a ReadGroupResolution,
+        resolution: Arc<ReadGroupResolution>,
         container: Option<DecodedContainer>,
     ) -> Self {
         Self {
@@ -598,7 +598,7 @@ impl<'a> CramRegionSource<'a> {
     }
 }
 
-impl RecordSource for CramRegionSource<'_> {
+impl RecordSource for CramRegionSource {
     type Record = NoodlesRawRecord;
 
     fn header(&self) -> &sam::Header {
@@ -625,7 +625,7 @@ impl RecordSource for CramRegionSource<'_> {
                 // After the move: the read group can depend on the record's own
                 // `RG` tag, so resolving against a stale buffer would attribute
                 // each read to whatever the previous one carried.
-                match resolve_read_group(&buf.record, self.resolution)? {
+                match resolve_read_group(&buf.record, &self.resolution)? {
                     RecordOwner::Mine(id) => {
                         buf.read_group = Some(id);
                         return Ok(true);
@@ -726,12 +726,12 @@ impl<I> OrderVerified<I> {
 /// two containers for one idea, so this is an enum rather than a trait — and it
 /// is what lets everything above the source be written once, generic over
 /// neither format nor container (`arch/alignment_file.md` §4).
-pub(crate) enum RegionSource<'a> {
-    Bam(BamRegionSource<'a>),
-    Cram(CramRegionSource<'a>),
+pub(crate) enum RegionSource {
+    Bam(BamRegionSource),
+    Cram(CramRegionSource),
 }
 
-impl RegionSource<'_> {
+impl RegionSource {
     /// Give the reader back, in the shape the pool stores it — with the decoded container a CRAM
     /// query is holding, so the next query through this reader can reuse it.
     pub(crate) fn into_parts(self) -> (super::open_bam::ReaderKind, Option<DecodedContainer>) {
@@ -745,7 +745,7 @@ impl RegionSource<'_> {
     }
 }
 
-impl RecordSource for RegionSource<'_> {
+impl RecordSource for RegionSource {
     type Record = NoodlesRawRecord;
 
     fn header(&self) -> &sam::Header {
@@ -991,7 +991,7 @@ mod tests {
             reader,
             Arc::clone(header),
             plan,
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
         );
 
         let mut buf = NoodlesRawRecord::default();
@@ -1103,7 +1103,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100_000), &path).expect("plan"),
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
         );
 
         let mut buf = NoodlesRawRecord::default();
@@ -1140,7 +1140,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
         );
 
         // Drain, then confirm the source latched `done` rather than running on.
@@ -1173,7 +1173,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
         );
         let mut buf = NoodlesRawRecord::default();
         while source.read_next(&mut buf).expect("read") {}
@@ -1184,7 +1184,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(1, 1, 200), &path).expect("plan"),
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
         );
         let mut seen = 0;
         while second.read_next(&mut buf).expect("read") {
@@ -1598,7 +1598,7 @@ mod tests {
             Arc::new(parsed_header),
             repository,
             plan,
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
             None,
         );
 
@@ -1660,6 +1660,7 @@ mod tests {
                 false,
                 crate::ng::read::input::test_fixtures::fixture_read_group(),
             )
+            .map(Arc::new)
             .expect("the fixture CRAM opens")
         };
 
@@ -1698,7 +1699,7 @@ mod tests {
     /// Every read position a region query yields, through the whole real chain (pool → source →
     /// filter → order guard) — the shape a caller sees, so the cache is exercised where it lives.
     fn positions_of(
-        file: &crate::ng::read::input::open_bam::AlignmentFile,
+        file: &Arc<crate::ng::read::input::open_bam::AlignmentFile>,
         span: GenomeRegion,
         reference: &crate::ng::reference_info::ReferenceInfo,
     ) -> Vec<u64> {
@@ -1750,7 +1751,7 @@ mod tests {
             Arc::new(parsed_header),
             repository,
             plan,
-            &ReadGroupResolution::Sole(ReadGroupId(0)),
+            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
             None,
         );
 

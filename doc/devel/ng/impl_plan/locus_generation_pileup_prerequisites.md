@@ -63,7 +63,7 @@ The obstacle: `reads_in_region` returns `SampleRegionReads<'_, R>`, and `LocusGe
 `&SampleReads` per call with no lifetime parameter, so a generator cannot hold the stream between
 `next_locus` calls (arch §2.2). Three borrows have to go.
 
-- ☐ **A1 — `Arc<sam::Header>`.** `AlignmentFile` holds its header behind an `Arc` and hands clones
+- ✅ **A1 — `Arc<sam::Header>`.** `AlignmentFile` holds its header behind an `Arc` and hands clones
   out; `BamRegionSource` / `CramRegionSource` hold `Arc<sam::Header>` instead of `&'a sam::Header`.
   An independent `Arc`, **not** a reference into an `Arc`'d file — that is what keeps nothing
   self-referential. *Depends:* —. *Source:* arch §2.2.

@@ -327,7 +327,13 @@ pub fn check_assembly(
 /// Not `Clone` — it owns k files, each owning a reader pool.
 #[derive(Debug)]
 pub struct SampleReads {
-    files: Vec<AlignmentFile>,
+    /// `Arc` because a region stream **owns** the file it reads through: it has
+    /// to hand the pooled reader back on `Drop`, and the generic locus
+    /// generator holds one region's stream across many `next_locus` calls while
+    /// it is lent `&SampleReads` per call (arch `locus_generation_pileup.md`
+    /// §2.2). One pool per file either way — the `Arc` is shared, not cloned
+    /// deeply.
+    files: Vec<Arc<AlignmentFile>>,
     /// The one name all k files agree on.
     sample_name: String,
 }
@@ -382,6 +388,7 @@ impl SampleReads {
                     build_index_if_missing,
                     resolution,
                 )
+                .map(Arc::new)
                 .map_err(|source| IngestError::File {
                     source_file_index,
                     source,
@@ -489,6 +496,14 @@ impl SampleReads {
     /// per-file pools make concurrent queries possible without a signature
     /// change.
     ///
+    /// **The stream it returns does not borrow `self`.** Each per-file chain
+    /// holds an `Arc<AlignmentFile>`, so the caller may keep the stream after
+    /// this borrow ends — which is what lets a resumable locus generator hold
+    /// one region's reads across many `next_locus` calls while being lent
+    /// `&SampleReads` per call (arch `locus_generation_pileup.md` §2.2). The
+    /// stream still keeps the files alive, so its reads and its pooled readers
+    /// stay valid.
+    ///
     /// **`make_reference` is a factory, not an accessor and not a `Clone`
     /// bound** — arch §7 left this as an impl-time confirmation, and the impls
     /// settle it. `RawRefSeq` implementations are *stateful readers*:
@@ -509,7 +524,7 @@ impl SampleReads {
         &self,
         region: GenomeRegion,
         mut make_reference: F,
-    ) -> Result<SampleRegionReads<'_, R>, IngestError>
+    ) -> Result<SampleRegionReads<R>, IngestError>
     where
         R: RawRefSeq,
         F: FnMut() -> R,
@@ -580,13 +595,13 @@ impl SampleReads {
     reason = "built once per query, iterated per read; boxing would move the \
               cost to the hot path"
 )]
-pub enum SampleRegionReads<'a, R: RawRefSeq> {
+pub enum SampleRegionReads<R: RawRefSeq> {
     /// One file: the per-file chain, verbatim. No merge exists.
-    Single(open_bam::RegionReads<'a, R>),
-    Merged(merge::MergedRegionReads<'a, R>),
+    Single(open_bam::RegionReads<R>),
+    Merged(merge::MergedRegionReads<R>),
 }
 
-impl<R: RawRefSeq> Iterator for SampleRegionReads<'_, R> {
+impl<R: RawRefSeq> Iterator for SampleRegionReads<R> {
     type Item = Result<AlignedRead, IngestError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -604,7 +619,7 @@ impl<R: RawRefSeq> Iterator for SampleRegionReads<'_, R> {
     }
 }
 
-impl<R: RawRefSeq> std::iter::FusedIterator for SampleRegionReads<'_, R> {}
+impl<R: RawRefSeq> std::iter::FusedIterator for SampleRegionReads<R> {}
 
 /// Enforce the invariant that gives this type its meaning: **one open serves
 /// exactly one sample.**

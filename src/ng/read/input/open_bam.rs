@@ -93,7 +93,12 @@ pub struct AlignmentFile {
     /// How this file's records are assigned to read groups. Settled at open and
     /// never recomputed; the record sources consult it per record only when it
     /// says they must.
-    resolution: ReadGroupResolution,
+    ///
+    /// `Arc` for the reason the header is: a region source **owns** what it
+    /// consults, so the stream it serves does not borrow this file. Cloning the
+    /// value instead would allocate a `PerRecord` table per query — a per-query
+    /// cost on a path that runs ~10⁶ times.
+    resolution: Arc<ReadGroupResolution>,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
     /// reference's. `None` where the file carries no usable `M5`.
@@ -220,12 +225,20 @@ impl Drop for BorrowedReader<'_> {
 /// when a caller abandons the stream half-way**, along with this query's drop
 /// tally. An `Option` because `drop` gets `&mut self` and has to move the
 /// stream out to unwrap it.
-pub struct RegionReads<'a, R: RawRefSeq> {
-    file: &'a AlignmentFile,
-    stream: Option<OrderVerified<ReadFilter<RegionSource<'a>, R>>>,
+///
+/// **It owns its file, and carries no lifetime.** A borrow would tie the stream
+/// to the `&AlignmentFile` the query was made through, and the generic locus
+/// generator has to hold one region's stream across many `next_locus` calls
+/// while `LocusGenerator` lends it `&SampleReads` per call — *resumable +
+/// borrowed stream + no lifetime on `Self`* is not expressible, so the borrow
+/// is what gives (arch `locus_generation_pileup.md` §2.2). The pool lives on
+/// the `AlignmentFile`, so sharing it by `Arc` keeps one pool per file.
+pub struct RegionReads<R: RawRefSeq> {
+    file: Arc<AlignmentFile>,
+    stream: Option<OrderVerified<ReadFilter<RegionSource, R>>>,
 }
 
-impl<R: RawRefSeq> Iterator for RegionReads<'_, R> {
+impl<R: RawRefSeq> Iterator for RegionReads<R> {
     type Item = Result<AlignedRead, AlignmentFileError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -233,9 +246,9 @@ impl<R: RawRefSeq> Iterator for RegionReads<'_, R> {
     }
 }
 
-impl<R: RawRefSeq> std::iter::FusedIterator for RegionReads<'_, R> {}
+impl<R: RawRefSeq> std::iter::FusedIterator for RegionReads<R> {}
 
-impl<R: RawRefSeq> Drop for RegionReads<'_, R> {
+impl<R: RawRefSeq> Drop for RegionReads<R> {
     fn drop(&mut self) {
         let Some(stream) = self.stream.take() else {
             return;
@@ -383,7 +396,7 @@ impl AlignmentFile {
             path: Arc::from(path),
             header: Arc::new(header),
             index,
-            resolution,
+            resolution: Arc::new(resolution),
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -418,10 +431,18 @@ impl AlignmentFile {
     /// *complete* product of this module: the sample layer either uses it as-is
     /// or merges k of them, and this module is indifferent to which.
     ///
-    /// Takes **`&self`**, not `&mut self` — the load-bearing signature choice
-    /// (spec §3.3). A reader comes from the internal pool and the returned
-    /// iterator gives it back on `Drop`, so N threads may query one file
-    /// concurrently without touching a single call site.
+    /// Takes a **shared** receiver, not `&mut self` — the load-bearing
+    /// signature choice (spec §3.3). A reader comes from the internal pool and
+    /// the returned iterator gives it back on `Drop`, so N threads may query
+    /// one file concurrently without touching a single call site.
+    ///
+    /// **`&Arc<Self>` rather than `&self`**, because the stream outlives the
+    /// call: it must keep the file alive to hand its reader back on `Drop`, and
+    /// a borrow would put the caller's lifetime on the returned type (arch
+    /// `locus_generation_pileup.md` §2.2, and [`RegionReads`]). One atomic
+    /// increment per query, against a query that then decodes thousands of
+    /// records. The cost of the narrowing is that a bare `&AlignmentFile` can
+    /// no longer query — deliberate: whoever queries shares ownership.
     ///
     /// `reference` is the caller's own accessor, passed **per query** rather
     /// than stored: `RawRefSeq` impls are stateful readers, so one shared
@@ -434,10 +455,10 @@ impl AlignmentFile {
     /// paying that probe per query would mean ~10⁶ × the contig count in
     /// reference fetches.
     pub fn reads_in_region<R: RawRefSeq>(
-        &self,
+        self: &Arc<Self>,
         region: GenomeRegion,
         reference: R,
-    ) -> Result<RegionReads<'_, R>, AlignmentFileError> {
+    ) -> Result<RegionReads<R>, AlignmentFileError> {
         // **Everything fallible happens first**, before a reader leaves the
         // pool: the format check, resolving the region, and querying the index
         // all touch no reader, so any of them failing costs nothing to recover
@@ -469,9 +490,14 @@ impl AlignmentFile {
         } = handle;
 
         let source = match (reader, plan) {
-            (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
-                BamRegionSource::new(reader, Arc::clone(&self.header), plan, &self.resolution),
-            ),
+            (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => {
+                RegionSource::Bam(BamRegionSource::new(
+                    reader,
+                    Arc::clone(&self.header),
+                    plan,
+                    Arc::clone(&self.resolution),
+                ))
+            }
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
                 RegionSource::Cram(CramRegionSource::new(
                     reader,
@@ -480,7 +506,7 @@ impl AlignmentFile {
                         .clone()
                         .expect("open builds a repository for every CRAM"),
                     plan,
-                    &self.resolution,
+                    Arc::clone(&self.resolution),
                     container,
                 ))
             }
@@ -493,7 +519,7 @@ impl AlignmentFile {
             ReadFilter::with_validated_contigs(source, reference, self.filter_config, buffers);
 
         Ok(RegionReads {
-            file: self,
+            file: Arc::clone(self),
             stream: Some(OrderVerified::new(filter, Arc::clone(&self.path))),
         })
     }
@@ -1213,7 +1239,10 @@ mod tests {
         record
     }
 
-    fn opened_over(records: &[RecordBuf]) -> (TempDir, TempDir, AlignmentFile) {
+    /// The file comes back behind an `Arc` because that is what querying one
+    /// now takes: a region stream shares ownership of the file it reads
+    /// through, so it can hand the pooled reader back on `Drop`.
+    fn opened_over(records: &[RecordBuf]) -> (TempDir, TempDir, Arc<AlignmentFile>) {
         let (reference_dir, reference) = fixture_reference(false);
         let (bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), records);
         let file = AlignmentFile::open(
@@ -1223,6 +1252,7 @@ mod tests {
             false,
             fixture_read_group(),
         )
+        .map(Arc::new)
         .expect("the fixture matches");
         (reference_dir, bam_dir, file)
     }
@@ -1366,6 +1396,7 @@ mod tests {
             false,
             fixture_read_group(),
         )
+        .map(Arc::new)
         .expect("opens");
 
         // Truncate *after* opening, so the gate and the index are intact and
@@ -1425,7 +1456,7 @@ mod tests {
     #[test]
     fn a_region_stream_is_send_so_threads_can_share_one_file() {
         fn assert_send<T: Send>() {}
-        assert_send::<RegionReads<'_, InMemoryRefSeq>>();
+        assert_send::<RegionReads<InMemoryRefSeq>>();
         assert_send::<&AlignmentFile>();
     }
 
@@ -1575,7 +1606,7 @@ mod tests {
         records
     }
 
-    fn names_from(file: &AlignmentFile, region: GenomeRegion) -> Vec<String> {
+    fn names_from(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
         file.reads_in_region(region, reference_bases())
             .expect("query")
             .map(|read| String::from_utf8_lossy(&read.expect("no fatal error").qname).into_owned())
@@ -1605,6 +1636,7 @@ mod tests {
             false,
             fixture_read_group(),
         )
+        .map(Arc::new)
         .expect("the BAM opens");
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&records);
@@ -1620,6 +1652,7 @@ mod tests {
             false,
             fixture_read_group(),
         )
+        .map(Arc::new)
         .expect("the CRAM opens");
 
         let regions = [
@@ -1725,6 +1758,7 @@ mod tests {
             false,
             fixture_read_group(),
         )
+        .map(Arc::new)
         .expect("opens");
 
         let bases = || InMemoryRefSeq::from_contigs(vec![vec![b'A'; CONTIG_LENGTH]]);
@@ -1818,6 +1852,7 @@ mod tests {
             false,
             fixture_read_group(),
         )
+        .map(Arc::new)
         .expect("a wrong M5 is a wildcard against a .fai-only reference");
 
         let reads: Vec<AlignedRead> = file
@@ -1881,7 +1916,7 @@ mod tests {
     /// already parsed in memory), but the first test that actually *queries*
     /// the file would fail somewhere far from the cause.
     struct OpenedFixture {
-        file: Result<AlignmentFile, AlignmentFileError>,
+        file: Result<Arc<AlignmentFile>, AlignmentFileError>,
         _reference_dir: TempDir,
         _bam_dir: TempDir,
     }
@@ -1906,7 +1941,8 @@ mod tests {
                 ReadFilterConfig::default(),
                 false,
                 fixture_read_group(),
-            ),
+            )
+            .map(Arc::new),
             _reference_dir: reference_dir,
             _bam_dir: bam_dir,
         }
