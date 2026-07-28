@@ -136,7 +136,33 @@ read groups: the same six reads dealt across two groups give the row split and t
    ride on, and the plan's "one rebaseline, not four" principle did not apply. The fixture change is
    better isolated than buried.
 
-## 7. Open
+## 7. Review, and what it changed
+
+Reviewed over the whole milestone diff:
+[ng_locus_generation_pileup_prereq_b_2026-07-28.md](../reviews/ng_locus_generation_pileup_prereq_b_2026-07-28.md)
+— 4 category agents over 6 checklists, **1 Blocker / 8 Major**, verdict Request-changes. All applied
+in `934ea0f`; the suite went 2495 → 2503.
+
+**Six of the nine were "a test that cannot fail"**, and two of those were mine:
+
+- **The Blocker:** `placed_left`'s anchor was pinned by nothing. Replacing `segment.start()` with
+  `locus.margin_start.get()` — a whole flank too far left — left the entire suite green. §4 above
+  listed the operator test as covering `placed_left`; it covered the operator and not the
+  coordinate.
+- **I weakened an existing test.** `partial_reach_beyond_locus_is_clamped`'s two halves construct the
+  *same value* after the reshape, so it ran one case twice while its doc still claimed "on both
+  ends".
+- **And §6's collapse note understated the change.** It is not only that a saturating right-flush run
+  is *labelled* left; it **shares a bucket key** with a left-flush run of the same bases and the two
+  merge into one row. Now tested and fully documented on `from_right`.
+
+Plus: `is_flush_left`/`is_flush_right` had no test at all (both `Complete` arms are unreachable from
+every call site); the read-group tie-break's determinism test passed 6 runs in 10 with the tie-break
+deleted; `num_obs_along_locus` had no interior-run case — the very case the reshape exists to
+represent; and the migration traded four exhaustive matches for guard chains ending in `_`, so the
+compiler could no longer force those sites to be revisited.
+
+## 8. Open
 
 - The reshape's one recorded consequence: **a run covering the whole locus is flush with both
   borders**, so a right-anchored read whose reach reaches the locus length is not distinguishable
