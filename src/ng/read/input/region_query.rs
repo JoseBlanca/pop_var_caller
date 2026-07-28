@@ -414,8 +414,8 @@ pub(crate) struct CramRegionSource {
     container: Option<DecodedContainer>,
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    /// Borrowed from the `AlignmentFile`, like the header: settled at open,
-    /// never rebuilt per query.
+    /// Shared with the `AlignmentFile`, like the header: settled at open, never
+    /// rebuilt per query, and owned so this source carries no lifetime.
     resolution: Arc<ReadGroupResolution>,
     /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
     other_sample_records: u64,

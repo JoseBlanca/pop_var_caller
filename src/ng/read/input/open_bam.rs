@@ -69,8 +69,14 @@ enum QueryPlan {
 ///
 /// The parsed index is owned here and lives for the whole run: a region query
 /// is an in-memory lookup plus a seek, never a file open or an index parse
-/// (spec §3.3). Not `Clone` — it owns an index and a reader pool; sharing is
-/// by reference.
+/// (spec §3.3). Not `Clone` — it owns an index and a reader pool, and two
+/// copies would be two pools and two tallies over one file.
+///
+/// **Sharing is by `Arc`, not by reference.** Querying takes
+/// `self: &Arc<Self>` ([`reads_in_region`](Self::reads_in_region)): the stream
+/// a query returns outlives the call and has to keep the file alive to hand
+/// its pooled reader back, so a bare `&AlignmentFile` can read the file's
+/// metadata but cannot ask it for reads.
 pub struct AlignmentFile {
     /// `Arc` so the per-query order guard can hold it for its error message
     /// without an allocation per query.
@@ -535,6 +541,13 @@ impl AlignmentFile {
     /// A stream that is never dropped — leaked, or held for the process
     /// lifetime — never contributes at all, and takes its pooled reader with
     /// it. That is inherent to returning things on `Drop`.
+    ///
+    /// **And a stream that outlives every *other* handle on its file
+    /// contributes where nobody can look.** Since the stream owns an
+    /// `Arc<AlignmentFile>` of its own, its `Drop` folds the tally into a file
+    /// that is then freed in the same breath — the count is not lost so much as
+    /// unobservable. Keep the `SampleReads`, or an `Arc` of your own, alive at
+    /// least as long as the streams whose counts you mean to read.
     pub fn counts(&self) -> Vec<ReadGroupCounts> {
         self.counts
             .lock()
@@ -672,10 +685,29 @@ impl AlignmentFile {
 /// than dumping a parsed index.
 impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively so a field that is added, removed or
+        // retyped is a compile error *here* rather than a silent omission from
+        // the output. What is printed is a deliberate subset — the `_` bindings
+        // are the ones deliberately left out — and only an explicit list can
+        // say which is which.
+        let Self {
+            path,
+            header: _,
+            index: _,
+            resolution,
+            sq_md5s,
+            filter_config: _,
+            readers: _,
+            readers_opened: _,
+            crai_by_contig: _,
+            reference_repository: _,
+            counts: _,
+        } = self;
+
         f.debug_struct("AlignmentFile")
-            .field("path", &self.path)
-            .field("read_groups", &self.resolution)
-            .field("contigs", &self.sq_md5s.len())
+            .field("path", path)
+            .field("read_groups", resolution)
+            .field("contigs", &sq_md5s.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
     }
@@ -1578,6 +1610,50 @@ mod tests {
             only_tally(&file.counts()).high_mismatch_fraction,
             1,
             "the drop seen before abandoning was banked, not lost"
+        );
+    }
+
+    /// **The `Arc` is load-bearing past the borrow check.** A stream that
+    /// outlives every other handle on its file still reads, still returns its
+    /// reader, and still folds its tally in.
+    ///
+    /// Asserted here rather than at the `SampleReads` level, and that is the
+    /// whole point: a tally folded into a file nobody can reach is
+    /// indistinguishable from one that was never folded at all, so the property
+    /// only becomes falsifiable through a **second handle** kept on purpose.
+    /// The sibling test in `mod.rs` that drops the sample first is a
+    /// compile-time anchor and cannot see this — gutting `RegionReads::drop`
+    /// leaves it green.
+    #[test]
+    fn a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally() {
+        let (_reference_dir, _bam_dir, file) = opened_over(&[
+            all_mismatching_read("bad", 1),
+            read_named_with_length("good", 0, 40, 30),
+        ]);
+        let watcher = Arc::clone(&file);
+
+        let stream = file
+            .reads_in_region(whole_first_contig(), reference_bases())
+            .expect("query");
+        drop(file);
+        assert_eq!(
+            Arc::strong_count(&watcher),
+            2,
+            "the stream must hold an owning handle of its own, not a borrow"
+        );
+
+        let reads: Vec<AlignedRead> = stream.collect::<Result<_, _>>().expect("no fatal error");
+        assert_eq!(reads.len(), 1, "the all-mismatching read is filtered out");
+
+        assert_eq!(
+            watcher.pooled_readers(),
+            1,
+            "the reader went back to the file the stream kept alive"
+        );
+        assert_eq!(
+            only_tally(&watcher.counts()).high_mismatch_fraction,
+            1,
+            "and the tally was folded into that same file, not into a dead copy"
         );
     }
 

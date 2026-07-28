@@ -324,7 +324,10 @@ pub fn check_assembly(
 /// reader logic**: opening, validating, seeking and filtering are
 /// [`AlignmentFile`](open_bam::AlignmentFile)'s.
 ///
-/// Not `Clone` — it owns k files, each owning a reader pool.
+/// Not `Clone` — cloning it would hand out two views onto one set of reader
+/// pools and one set of tallies. The files themselves are shared by `Arc`, so
+/// the `Vec` no longer refuses a `Clone` derive on its own: the rule is a
+/// decision now, not a compile error.
 #[derive(Debug)]
 pub struct SampleReads {
     /// `Arc` because a region stream **owns** the file it reads through: it has
@@ -503,6 +506,14 @@ impl SampleReads {
     /// `&SampleReads` per call (arch `locus_generation_pileup.md` §2.2). The
     /// stream still keeps the files alive, so its reads and its pooled readers
     /// stay valid.
+    ///
+    /// **One consequence to know before relying on it: a stream that outlives
+    /// this `SampleReads` loses its tally to observation.** The reads are still
+    /// right and the reader still goes back, but the only handle left on the
+    /// file is the stream's own, so what its `Drop` folds in can no longer be
+    /// read through [`counts`](Self::counts) — see
+    /// [`AlignmentFile::counts`](open_bam::AlignmentFile::counts). A caller that
+    /// reports drop rates must drop its streams before the sample.
     ///
     /// **`make_reference` is a factory, not an accessor and not a `Clone`
     /// bound** — arch §7 left this as an impl-time confirmation, and the impls
@@ -1116,10 +1127,13 @@ mod tests {
         (reference_dir, sample)
     }
 
-    fn drain(sample: &SampleReads) -> Vec<(String, usize)> {
-        sample
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query")
+    /// `(qname, read group)` per read of a stream — shared by `drain` and by
+    /// the detached-stream tests, so "the same reads" means literally the same
+    /// code path on both sides of their comparison.
+    fn collect_reads(
+        stream: impl Iterator<Item = Result<AlignedRead, IngestError>>,
+    ) -> Vec<(String, usize)> {
+        stream
             .map(|item| {
                 let read = item.expect("no fatal error");
                 (
@@ -1128,6 +1142,14 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn drain(sample: &SampleReads) -> Vec<(String, usize)> {
+        collect_reads(
+            sample
+                .reads_in_region(whole_first_contig(), reference_bases)
+                .expect("query"),
+        )
     }
 
     /// **T11 — the caller cannot tell the arms apart.**
@@ -1188,11 +1210,13 @@ mod tests {
     /// the stream still borrowed (`cannot move out of sample because it is
     /// borrowed`).
     ///
-    /// The `Arc` is load-bearing beyond the borrow check, and this test reaches
-    /// that too — not while reading, since the source owns the file handle it
-    /// reads through, but at the *end*, where `RegionReads::drop` hands the
-    /// pooled reader back and folds its tally into the file. That file has to
-    /// still exist after the sample that opened it is gone.
+    /// **What this test does not do is fail at run time**, and saying so is the
+    /// honest version: once it compiles, safe Rust makes `after == expected`
+    /// unfalsifiable. Gutting `RegionReads::drop` would leave it green. The
+    /// run-time half of the `Arc`'s job — that the reader still goes back and
+    /// the tally still lands — needs a second handle to be observable at all,
+    /// and is asserted in
+    /// `open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`.
     ///
     /// The reads are compared against a control drain rather than merely
     /// counted, because "the stream survives" and "the stream survives and
@@ -1223,35 +1247,78 @@ mod tests {
         // is gone before the first read is pulled.
         drop(sample);
 
-        let after: Vec<(String, usize)> = stream
-            .map(|item| {
-                let read = item.expect("no fatal error");
-                (
-                    String::from_utf8_lossy(&read.qname).into_owned(),
-                    read.read_group.get() as usize,
-                )
-            })
-            .collect();
-
         assert_eq!(
-            after, expected,
+            collect_reads(stream),
+            expected,
             "a stream that outlived its sample must still yield the same reads"
         );
     }
 
+    /// **The k-file arm of the same property**, which is the production shape:
+    /// a sample is usually several experiment files, so `Merged` — not
+    /// `Single` — is what a generator will normally be holding.
+    ///
+    /// Worth its own test because `MergedRegionReads` holds k streams, hence k
+    /// pooled readers and k tallies, past the sample's death; the interleave
+    /// has to survive that, not merely compile.
+    #[test]
+    fn a_merged_region_stream_outlives_the_sample_reads_it_was_made_from() {
+        let (_first_dir, first) = indexed_named_bam(
+            &bam_header(&matching_contigs()),
+            &[
+                read_named_with_length("a1", 0, 1, 30),
+                read_named_with_length("a2", 0, 40, 30),
+            ],
+            "merged_outlives_a.bam",
+        );
+        let (_second_dir, second) = indexed_named_bam(
+            &bam_header(&matching_contigs()),
+            &[
+                read_named_with_length("b1", 0, 20, 30),
+                read_named_with_length("b2", 0, 60, 30),
+            ],
+            "merged_outlives_b.bam",
+        );
+
+        let (_reference_dir, sample) = sample_over(&[first, second]);
+        let expected = drain(&sample);
+        assert_eq!(
+            expected.len(),
+            4,
+            "the fixture must carry both files' reads"
+        );
+
+        let stream = sample
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query");
+        assert!(
+            matches!(stream, SampleRegionReads::Merged(_)),
+            "two files must take the merge, or this tests the wrong arm"
+        );
+
+        drop(sample);
+
+        assert_eq!(
+            collect_reads(stream),
+            expected,
+            "a merged stream that outlived its sample must still interleave the same reads"
+        );
+    }
+
     /// The same property in the shape that needs it: a **lifetime-free struct**
-    /// holding one region's stream across several calls, each lent
-    /// `&SampleReads` separately.
+    /// holding one region's stream across several calls.
     ///
     /// That is `LocusGenerator::next_locus(&mut self, segment, reads:
     /// &SampleReads)` in miniature — the contract that cannot carry a lifetime
     /// (arch `locus_generation_pileup.md` §2.2) — and the generic locus
     /// generator yields many loci per segment, so it must hold the stream
-    /// between calls. Written as a compile-time anchor: with a borrowed stream
-    /// the `Generator` struct below needs a lifetime parameter and the test
-    /// does not build.
+    /// between calls. A **compile-time anchor**: with a borrowed stream the
+    /// `Generator` struct below needs a lifetime parameter and the test does not
+    /// build. Named for what the body proves, since the run-time assertion
+    /// repeats `drain`; the property that a *second* query cannot disturb a held
+    /// stream is next door, where it is falsifiable.
     #[test]
-    fn a_held_region_stream_can_be_resumed_across_separate_borrows() {
+    fn a_region_stream_can_be_stored_in_a_struct_without_a_lifetime() {
         struct Generator {
             stream: Option<SampleRegionReads<InMemoryRefSeq>>,
         }
@@ -1268,6 +1335,10 @@ mod tests {
 
             /// `next_locus`: lent the sample again, but pulls from the stream
             /// it is already holding.
+            ///
+            /// `_reads` is unused **on purpose** — it stands in for
+            /// `next_locus`'s per-call lend, and it is the parameter whose
+            /// presence, not whose use, is the point. Do not "clean it up".
             fn next_qname(&mut self, _reads: &SampleReads) -> Option<String> {
                 let read = self.stream.as_mut()?.next()?.expect("no fatal error");
                 Some(String::from_utf8_lossy(&read.qname).into_owned())
@@ -1299,6 +1370,82 @@ mod tests {
             vec!["r1".to_string(), "r2".to_string(), "r3".to_string()],
             "a held stream must resume where the previous call left it"
         );
+    }
+
+    /// **A held stream and a fresh query are independent** — the run-time half
+    /// of the resumable shape, and unlike the compile-time anchors above this
+    /// one can actually fail.
+    ///
+    /// It is exactly what a generator does when it opens a new region while
+    /// still holding the previous one, and it falsifies two real mistakes: a
+    /// pool that hands out a reader still on loan, and any sharing of a cursor
+    /// or scratch buffer between two live queries on one file. The threaded
+    /// case is covered at the file level
+    /// (`concurrent_region_queries_each_get_a_reader_and_bank_every_tally`);
+    /// this is the single-threaded interleaving Milestone A enables.
+    #[test]
+    fn a_second_query_does_not_disturb_a_stream_already_held() {
+        let reads = [
+            read_named_with_length("r1", 0, 1, 30),
+            read_named_with_length("r2", 0, 30, 30),
+            read_named_with_length("r3", 0, 60, 30),
+        ];
+        let (_bam_dir, path) = indexed_named_bam(
+            &bam_header(&matching_contigs()),
+            &reads,
+            "two_live_streams.bam",
+        );
+        let (_reference_dir, sample) = sample_over(std::slice::from_ref(&path));
+
+        let name = |item: Option<Result<AlignedRead, IngestError>>| {
+            item.map(|read| {
+                String::from_utf8_lossy(&read.expect("no fatal error").qname).into_owned()
+            })
+        };
+
+        let mut held = sample
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query");
+        assert_eq!(name(held.next()).as_deref(), Some("r1"));
+
+        // A whole second query, opened and drained while the first is parked.
+        let second = collect_reads(
+            sample
+                .reads_in_region(whole_first_contig(), reference_bases)
+                .expect("a second query while the first is held"),
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|(qname, _)| qname.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r1", "r2", "r3"],
+            "the second stream is a full scan of its own"
+        );
+
+        assert_eq!(
+            name(held.next()).as_deref(),
+            Some("r2"),
+            "the held stream resumed where it was, undisturbed"
+        );
+        assert_eq!(name(held.next()).as_deref(), Some("r3"));
+        assert!(held.next().is_none());
+    }
+
+    /// The stream a generator stores has to be able to cross a thread boundary
+    /// — **the merged arm included**, since that is the k-file production
+    /// shape and the one a worker pool would move.
+    ///
+    /// `open_bam`'s sibling assertion covers the per-file `RegionReads`; these
+    /// are the two types losing their lifetime is what made storable, so this
+    /// is the moment the anchor starts to matter for them. An `Rc` or a
+    /// non-`Sync` field creeping into the merge would otherwise surface at the
+    /// first parallel call site, a milestone or two away.
+    #[test]
+    fn a_sample_region_stream_is_send_in_both_arms() {
+        fn assert_send<T: Send>() {}
+        assert_send::<SampleRegionReads<InMemoryRefSeq>>();
+        assert_send::<merge::MergedRegionReads<InMemoryRefSeq>>();
     }
 
     /// **The capability this step adds.** A file declaring several read groups

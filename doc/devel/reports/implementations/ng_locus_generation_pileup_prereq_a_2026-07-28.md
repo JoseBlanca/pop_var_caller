@@ -89,7 +89,8 @@ PROJECT_STATUS *Standing project-wide items*: `cargo test --all-targets --all-fe
 
 ## 6. Deviations from the plan
 
-Both minor, both recorded rather than escalated.
+All three minor, all recorded rather than escalated. *(The third was added after the review, which
+found it: the first draft of this section listed two.)*
 
 1. **`BorrowedReader` keeps its borrow.** The plan lists it alongside `RegionReads` as becoming
    `Arc<AlignmentFile>`. It does not need to: it is created and `take()`n inside `reads_in_region`
@@ -101,9 +102,50 @@ Both minor, both recorded rather than escalated.
    cost is a real API narrowing — a bare `&AlignmentFile` can no longer query — which is documented
    on the method and absorbed by the test helpers (`opened_over` and `OpenedFixture.file` now hand
    out `Arc<AlignmentFile>`).
+3. **`RegionSource` does not hold an `Arc<AlignmentFile>` either.** Plan A2 names it beside
+   `BorrowedReader` and `RegionReads`; it carries the header and resolution `Arc`s instead, which
+   serves the same end — no lifetime — while keeping `region_query.rs` ignorant of `AlignmentFile`,
+   as its unit tests require (they build both sources from a bare header and a bare resolution).
+   The cost is two atomic increments per query that reaching through the file would have saved.
 
-## 7. Open
+## 7. Review, and what it changed
 
-- Nothing for Milestone A. Milestone B (the four shared locus-type changes) is next, and B1 — the
-  `ReadCoverage` reshape — is a silent-failure step that gets its own commit with the STR dump green
-  before and after.
+Reviewed the same day over the whole milestone diff:
+[ng_locus_generation_pileup_prereq_a_2026-07-28.md](../reviews/ng_locus_generation_pileup_prereq_a_2026-07-28.md)
+— 6 categories, **0 Blockers, 1 Major, 11 Minor**, verdict Approve-with-changes.
+
+**The Major was mine and it was a real one.** §4's claim above — that the outlives test "reaches"
+the drop path — was false: after `drop(sample)` nothing can observe the tally, so gutting
+`RegionReads::drop` left the test green. Fixed by asserting the property where it is observable, at
+the `AlignmentFile` level through a deliberately retained second handle, and **mutation-verified**:
+with `RegionReads::drop`'s body discarded, `a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`
+fails while both detached tests stay green — exactly the review's claim. Six more findings applied
+(three stale doc comments, the `Merged` arm, the interleaved-queries property, the `Send` anchor,
+an exhaustive destructure in the manual `Debug`, a de-duplicated test helper). Suite 2489 → 2493.
+
+## 8. Open — three owner decisions for Checkpoint A
+
+None blocks Milestone B; all three are recorded rather than decided, because each reaches past this
+step's remit.
+
+1. **Should `AlignmentFile::open` return `Arc<Self>`?** Ten call sites now chain `.map(Arc::new)`,
+   so the `Arc`-ness is an invariant of using the type enforced ten times by convention rather than
+   once by the constructor. Changing a `pub` constructor's signature is beyond the plan's ask.
+2. **Should the share move inside `ReadGroupResolution`** — `PerRecord(Arc<[…]>)` instead of
+   `Arc<ReadGroupResolution>`? It would drop the wrapper from three fields and both source
+   constructors, since `Sole(ReadGroupId)` is `Copy`-sized. It changes a shipped type's shape.
+3. **`SPEC-FOLLOWUP(alignment_file §3.3, sample_reads)` — owner to fold in.** The change
+   invalidated two specs' signatures: `spec/alignment_file.md:379` still gives
+   `reads_in_region(&self) -> Result<RegionReads<'_>, …>` and `:389` re-argues the `&self` receiver
+   as load-bearing (the *shared, not `&mut`* half of that argument is unchanged; the receiver is now
+   `&Arc<Self>` because the stream outlives the call), and `spec/sample_reads.md:180` still returns
+   `SampleRegionReads<'_>`. This run does not edit design docs.
+
+**And one hazard for plan 3, found by the review and worth carrying:**
+`SampleLocusObservationsIterator` ([locus_generation/mod.rs:485](../../../../src/ng/locus_generation/mod.rs#L485))
+declares `reads: SampleReads` **before** `generators`, and Rust drops fields in declaration order —
+so once a generator holds a region stream, the sample dies first and that stream's step-1 tally
+becomes unobservable at drop. Latent today; live the moment Milestone A's capability is used.
+
+Milestone B is next, and B1 — the `ReadCoverage` reshape — is a silent-failure step that gets its
+own commit with the STR dump green before and after.
