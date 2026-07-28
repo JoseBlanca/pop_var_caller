@@ -63,7 +63,7 @@ than reaches in (spec §3).
   through from `AlignedRead`. Keep it **not** `#[non_exhaustive]`, for production's stated reason —
   a new field should break every construction site. *Depends:* —. *Source:* spec §6, arch *Module
   home*.
-- ☐ **A2 — the seven files, verbatim.** Copy into `src/ng/locus_generation/pileup/`, renaming
+- ✅ **A2 — the seven files, verbatim.** Copy into `src/ng/locus_generation/pileup/`, renaming
   `driver.rs` → `genome_walk.rs` (the only one of the seven named for a role rather than for what it
   owns). The **only** edits permitted: the module paths, and `PreparedRead` resolving to ng's. Still
   emits `PileupRecord`. Their inline `#[cfg(test)]` modules come along — including `decompose`'s

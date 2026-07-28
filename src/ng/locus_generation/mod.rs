@@ -14,6 +14,7 @@
 //! `ssr.rs` (STR), `pileup/` (generic). See `doc/devel/ng/spec/locus_generation.md`
 //! (design) and `doc/devel/ng/arch/locus_generation.md` (types & interfaces).
 
+pub mod pileup;
 pub mod ssr;
 
 use crate::ng::read::input::{IngestError, SampleReads};
