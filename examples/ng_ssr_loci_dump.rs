@@ -100,6 +100,9 @@ impl DumpReport {
             self.zero_coverage += 1;
         }
         let depth: u32 = locus.complete_observations().map(|obs| obs.num_obs).sum();
+        // The locus length in positions — what turns a run's offset into "flush left" or
+        // "flush right", now that the side is derived rather than tagged.
+        let locus_len = locus.region.len().min(u16::MAX as u64) as u16;
         let motif = match &locus.kind {
             LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
             _ => Vec::new(),
@@ -112,7 +115,7 @@ impl DumpReport {
                 motif: motif.clone(),
                 ref_tract: locus.reference_bases.to_vec(),
                 depth,
-                read_coverage: coverage_label(obs.read_coverage),
+                read_coverage: coverage_label(obs.read_coverage, locus_len),
                 observed: obs.bases.to_vec(),
                 reads: obs.num_obs,
             });
@@ -157,11 +160,16 @@ impl DumpReport {
 }
 
 /// The tag a read-coverage carries in the `read_coverage` column.
-fn coverage_label(coverage: ReadCoverage) -> &'static str {
+fn coverage_label(coverage: ReadCoverage, locus_len: u16) -> &'static str {
+    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
+    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
+    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
+    // so it never appears here, but naming it keeps the label honest for the generic path.
     match coverage {
         ReadCoverage::Complete => "complete",
-        ReadCoverage::PartialLeft(_) => "partial:left",
-        ReadCoverage::PartialRight(_) => "partial:right",
+        _ if coverage.is_flush_left() => "partial:left",
+        _ if coverage.is_flush_right(locus_len) => "partial:right",
+        _ => "partial:interior",
     }
 }
 
@@ -635,5 +643,45 @@ mod tests {
             "a cap below the depth changes the output"
         );
         assert!(cap_below.reads_capped > 0, "the cap discarded reads");
+    }
+
+    /// **A recorded limit of this fixture, found while reshaping `ReadCoverage` (B1).**
+    ///
+    /// The fixture's two partial reads are *symmetric* — `pl` and `pr` witness the same 20 tract
+    /// positions, so their rows carry identical `bases` and identical `reads`, differing only in
+    /// the `read_coverage` label. Sorting puts the left-flush run first either way, so **swapping
+    /// left for right at the mint site leaves this dump byte-identical** (checked: the swap was
+    /// applied and the output did not move). No assertion over this fixture can catch that.
+    ///
+    /// The property is not uncovered — `classify`'s
+    /// `a_read_running_off_the_right_is_a_left_partial` and
+    /// `a_read_running_off_the_left_is_a_right_partial` both fail under the same swap, and they
+    /// assert `offset_in_locus` directly. But the dump is the *acceptance* anchor, so the gap is
+    /// stated here rather than left to be rediscovered: making it discriminating needs partials of
+    /// **different reach**, which changes the row set and so belongs with the fixture rebaseline
+    /// B2 already schedules.
+    ///
+    /// This test pins the symmetry itself, so that if the fixture is ever made asymmetric the note
+    /// above stops being true loudly rather than silently.
+    #[test]
+    fn the_fixtures_two_partials_are_symmetric_and_so_cannot_catch_a_side_swap() {
+        let (_dir, fasta, bam) = fixture();
+        let report = dump(&fasta, &bam, SsrGeneratorConfig::default());
+        let partials: Vec<&ObservationRow> = report
+            .rows
+            .iter()
+            .filter(|row| row.read_coverage.starts_with("partial"))
+            .collect();
+
+        assert_eq!(partials.len(), 2, "one partial from each side");
+        assert_eq!(
+            partials[0].observed, partials[1].observed,
+            "the two partials witness the same bases — the symmetry that blinds this fixture"
+        );
+        assert_eq!(partials[0].reads, partials[1].reads);
+        assert_ne!(
+            partials[0].read_coverage, partials[1].read_coverage,
+            "…and differ only in the label, which is what a swap would exchange"
+        );
     }
 }

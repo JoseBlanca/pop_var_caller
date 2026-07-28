@@ -57,9 +57,8 @@ impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
     /// A [`Complete`](ReadCoverage::Complete) observation counts its `num_obs` at every
-    /// position; a [`PartialLeft(n)`](ReadCoverage::PartialLeft) at the leftmost `n`, a
-    /// [`PartialRight(n)`](ReadCoverage::PartialRight) at the rightmost `n`. The returned
-    /// vector has exactly `region.len()` entries.
+    /// position; an [`Observed`](ReadCoverage::Observed) run counts it over the stretch
+    /// it witnessed. The returned vector has exactly `region.len()` entries.
     ///
     /// This is *observation* depth and only exact per locus: it omits reads that
     /// covered the tract but anchored no border (they are in
@@ -79,8 +78,16 @@ impl SampleLocusObservations {
             // input; a bad extent is caught at the producer, not here.
             let (from, to) = match obs.read_coverage {
                 ReadCoverage::Complete => (0, len),
-                ReadCoverage::PartialLeft(n) => (0, (n as usize).min(len)),
-                ReadCoverage::PartialRight(n) => (len - (n as usize).min(len), len),
+                ReadCoverage::Observed {
+                    offset_in_locus,
+                    positions_covered,
+                } => {
+                    let from = (offset_in_locus as usize).min(len);
+                    (
+                        from,
+                        from.saturating_add(positions_covered as usize).min(len),
+                    )
+                }
             };
             for slot in &mut depth[from..to] {
                 *slot = slot.saturating_add(obs.num_obs);
@@ -114,8 +121,8 @@ pub struct ObservedSequence {
     /// The observed bases — allele content, in **read** coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the
-    /// identity**: a [`Complete`](ReadCoverage::Complete) and a
-    /// [`PartialLeft`](ReadCoverage::PartialLeft) of the same `bases` are different
+    /// identity**: a [`Complete`](ReadCoverage::Complete) and an
+    /// [`Observed`](ReadCoverage::Observed) run of the same `bases` are different
     /// evidence and stay separate entries (spec §3).
     pub read_coverage: ReadCoverage,
     /// How many reads showed this sequence. The whole support on the STR path, and the
@@ -138,20 +145,95 @@ pub struct ObservedSequence {
 
 /// How much of a locus a single read spanned — **one read's span, not depth**.
 ///
-/// `Complete` means the read reached **both** borders of the locus; a partial ran off
-/// its own end partway, carrying how many of the locus's positions it reached from
-/// that border, in **locus** coordinates (spec §3). A partial is a *censored*
-/// observation: the sequence is at least this long, but not how long.
+/// `Complete` means the read reached **both** borders of the locus; anything else is
+/// the one **run** of locus positions the read actually witnessed, in **locus**
+/// coordinates (spec §3). A partial run is a *censored* observation: the sequence is
+/// at least this long, but not how long.
+///
+/// **One `Observed` run replaces the earlier `PartialLeft`/`PartialRight` pair
+/// (owner, 2026-07-28).** Two side-tagged variants cannot describe what a read
+/// witnesses once the *events*, not the alignment span, define it: a read can be blind
+/// in the **middle** of a footprint (an interior `N`, a ref-skip) or blind at either
+/// end, and a widened record can be wider than the read on both sides. Prefix-versus-
+/// suffix survives as a derivation — [`is_flush_left`](Self::is_flush_left) /
+/// [`is_flush_right`](Self::is_flush_right) — so the STR path's "a prefix and a suffix
+/// are different constraints" is preserved, not lost. `Complete` is kept rather than
+/// folded in: it is the overwhelmingly common case and it keeps
+/// [`complete_observations`](SampleLocusObservations::complete_observations) a cheap
+/// equality instead of arithmetic against the footprint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReadCoverage {
     /// The read reached both borders of the locus.
     Complete,
-    /// The read was flush with the left border and ran off its right end after
-    /// covering the leftmost `n` positions of the locus.
-    PartialLeft(u16),
-    /// The read was flush with the right border and ran off its left end after
-    /// covering the rightmost `n` positions of the locus.
-    PartialRight(u16),
+    /// The stretch the read did witness, in **locus positions** — the axis `bases` is
+    /// not on (that is allele content, in read coordinates).
+    Observed {
+        /// Locus positions between the locus's left border and the first one
+        /// witnessed. `0` = flush with the left border, i.e. a prefix constraint.
+        offset_in_locus: u16,
+        /// How many locus positions were witnessed, running from `offset_in_locus`.
+        positions_covered: u16,
+    },
+}
+
+impl ReadCoverage {
+    /// A run flush with the locus's **left** border, `positions_covered` long — the
+    /// old `PartialLeft(n)`.
+    ///
+    /// `locus_len` clamps the run into the locus. It is needed because a producer's
+    /// reach can be measured in *read* bases, which diverge from locus positions under
+    /// stutter; a run must never claim positions the locus does not have.
+    pub fn from_left(positions_covered: u16, locus_len: u16) -> Self {
+        Self::Observed {
+            offset_in_locus: 0,
+            positions_covered: positions_covered.min(locus_len),
+        }
+    }
+
+    /// A run flush with the locus's **right** border, `positions_covered` long — the
+    /// old `PartialRight(n)`.
+    ///
+    /// Clamped first, then the offset derived, so the subtraction cannot underflow:
+    /// computing `locus_len - positions_covered` on an over-long reach would wrap to a
+    /// huge offset, or — with a saturating subtraction — silently relabel a
+    /// right-anchored read as a left-anchored one.
+    ///
+    /// **One consequence of the encoding, recorded rather than hidden:** a run that
+    /// covers the whole locus is flush with *both* borders, so a right-anchored read
+    /// whose reach reaches or exceeds the locus length is no longer distinguishable
+    /// from a left-anchored one. That is inherent — they are the same run — and it is
+    /// the correct reading: a read that witnessed every position is not constrained
+    /// from either side.
+    pub fn from_right(positions_covered: u16, locus_len: u16) -> Self {
+        let covered = positions_covered.min(locus_len);
+        Self::Observed {
+            offset_in_locus: locus_len - covered,
+            positions_covered: covered,
+        }
+    }
+
+    /// Whether the run starts at the locus's left border — a **prefix** constraint on
+    /// the allele. Always true of `Complete`.
+    pub fn is_flush_left(&self) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Observed {
+                offset_in_locus, ..
+            } => *offset_in_locus == 0,
+        }
+    }
+
+    /// Whether the run ends at the locus's right border — a **suffix** constraint.
+    /// Always true of `Complete`.
+    pub fn is_flush_right(&self, locus_len: u16) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Observed {
+                offset_in_locus,
+                positions_covered,
+            } => offset_in_locus.saturating_add(*positions_covered) >= locus_len,
+        }
+    }
 }
 
 /// The kind of locus, plus whatever that kind adds to the shared evidence fields.
@@ -1130,7 +1212,7 @@ mod tests {
             chain_ids: Vec::new(),
         };
         let partial = ObservedSequence {
-            read_coverage: ReadCoverage::PartialLeft(6),
+            read_coverage: ReadCoverage::from_left(6, 6),
             ..complete.clone()
         };
         assert_ne!(complete, partial);
@@ -1138,18 +1220,18 @@ mod tests {
     }
 
     /// Depth derives correctly from read-coverage (spec §13.5): the vector has
-    /// `region.len()` entries; a `Complete` raises every position, a `PartialLeft(n)`
-    /// only the leftmost `n`, a `PartialRight(n)` only the rightmost `n`. A 10-position
-    /// locus with one complete (×3), one left-partial reaching 4 (×2), one right-partial
-    /// reaching 3 (×5).
+    /// `region.len()` entries; a `Complete` raises every position, a left-flush run of
+    /// `n` only the leftmost `n`, a right-flush run of `n` only the rightmost `n`. A
+    /// 10-position locus with one complete (×3), one left-partial reaching 4 (×2), one
+    /// right-partial reaching 3 (×5).
     #[test]
     fn depth_derives_from_read_coverage() {
         let l = locus(
             region(1, 10),
             vec![
                 obs(b"AAAAAAAAAA", ReadCoverage::Complete, 3),
-                obs(b"AAAA", ReadCoverage::PartialLeft(4), 2),
-                obs(b"AAA", ReadCoverage::PartialRight(3), 5),
+                obs(b"AAAA", ReadCoverage::from_left(4, 10), 2),
+                obs(b"AAA", ReadCoverage::from_right(3, 10), 5),
             ],
         );
         // positions:            1  2  3  4  5  6  7  8  9 10
@@ -1190,13 +1272,13 @@ mod tests {
     fn partial_reach_beyond_locus_is_clamped() {
         let left = locus(
             region(1, 3),
-            vec![obs(b"AAA", ReadCoverage::PartialLeft(9), 4)],
+            vec![obs(b"AAA", ReadCoverage::from_left(9, 3), 4)],
         );
         assert_eq!(left.num_obs_along_locus(), vec![4, 4, 4]);
 
         let right = locus(
             region(1, 3),
-            vec![obs(b"AAA", ReadCoverage::PartialRight(9), 4)],
+            vec![obs(b"AAA", ReadCoverage::from_right(9, 3), 4)],
         );
         assert_eq!(right.num_obs_along_locus(), vec![4, 4, 4]);
     }
@@ -1209,9 +1291,9 @@ mod tests {
             region(1, 6),
             vec![
                 obs(b"ATATAT", ReadCoverage::Complete, 4),
-                obs(b"ATATAT", ReadCoverage::PartialLeft(6), 2),
+                obs(b"ATATAT", ReadCoverage::from_left(6, 6), 2),
                 obs(b"ATGTAT", ReadCoverage::Complete, 3),
-                obs(b"ATAT", ReadCoverage::PartialRight(4), 1),
+                obs(b"ATAT", ReadCoverage::from_right(4, 6), 1),
             ],
         );
         // Both completes, and only the completes — a partial is never scored as exact.

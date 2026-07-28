@@ -710,10 +710,10 @@ mod classify {
                 complete_or_low_quality(read, &region, &tract, qual_buffer)
             }
             RepeatSpan::FromLeft(tract) => {
-                partial(read, &region, &tract, ReadCoverage::PartialLeft)
+                partial(read, &region, &tract, AnchoredBorder::Left, locus)
             }
             RepeatSpan::FromRight(tract) => {
-                partial(read, &region, &tract, ReadCoverage::PartialRight)
+                partial(read, &region, &tract, AnchoredBorder::Right, locus)
             }
             RepeatSpan::Unanchored => {
                 Classified::NoObservation(NoObservationReason::NoBorderAnchored)
@@ -771,25 +771,43 @@ mod classify {
         quals.iter().map(|&q| -(q as f64) * LN10_OVER_10).sum()
     }
 
-    /// A partial (lower-bound) observation: the tract bases the read showed, tagged with which
-    /// border held and how far it reached (in read coordinates, clamped to `u16`).
+    /// Which border of the tract a partial read held — the half of `RepeatSpan`'s answer that
+    /// decides where the witnessed run sits inside the locus.
+    ///
+    /// A plain marker, **not** a `ReadCoverage` constructor passed by value: since the reshape
+    /// (spec §6) the run is a struct variant, which cannot be used as a function, and building it
+    /// needs the locus length as well as the reach.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AnchoredBorder {
+        Left,
+        Right,
+    }
+
+    /// A partial (lower-bound) observation: the tract bases the read showed, as the run of locus
+    /// positions it witnessed, anchored at whichever border held.
     fn partial(
         read: &AlignedRead,
         region: &Range<usize>,
         tract: &Range<u64>,
-        coverage: fn(u16) -> ReadCoverage,
+        border: AnchoredBorder,
+        locus: &SsrLocus,
     ) -> Classified {
         let region_seq = &read.seq[region.clone()];
         let region_qual = &read.qual[region.clone()];
         let tract = to_usize(tract);
-        // `reach` is the observed tract length in **read** coordinates. `ReadCoverage`'s reach
-        // is nominally in locus positions, which diverge from read bases under stutter; the
-        // approximation is bounded because `num_obs_along_locus` clamps the reach to the locus
-        // length (a long partial correctly saturates to full coverage).
+        // `reach` is the observed tract length in **read** coordinates, which diverge from locus
+        // positions under stutter — an expanded allele reaches further in read bases than the
+        // reference tract has positions. `ReadCoverage`'s constructors clamp it to the locus, so
+        // the stored run never claims positions the locus does not have (a long partial correctly
+        // saturates to full coverage).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
+        let locus_len = locus.segment.tract_len().min(u16::MAX as u64) as u16;
         Classified::Observed {
             bases: region_seq[tract.clone()].into(),
-            coverage: coverage(reach),
+            coverage: match border {
+                AnchoredBorder::Left => ReadCoverage::from_left(reach, locus_len),
+                AnchoredBorder::Right => ReadCoverage::from_right(reach, locus_len),
+            },
             // Partials are kept without the quality gate (spec §3), but still carry the BQ moment.
             q_sum: ln_p_err_sum(&region_qual[tract]),
         }
@@ -886,19 +904,29 @@ mod classify {
             match classified {
                 Classified::Observed {
                     bases,
-                    coverage: ReadCoverage::PartialLeft(reach),
+                    coverage:
+                        ReadCoverage::Observed {
+                            offset_in_locus,
+                            positions_covered,
+                        },
                     ..
                 } => {
                     assert_eq!(&*bases, b"CACA");
-                    assert_eq!(reach, 4);
+                    // Flush with the left border: the run starts at locus position 0.
+                    assert_eq!(offset_in_locus, 0);
+                    assert_eq!(positions_covered, 4);
                 }
                 other => panic!("expected a left partial, got {other:?}"),
             }
         }
 
         /// A read that anchors the right flank but begins inside the tract is a partial
-        /// (right) — the mirror of the left case, which a `PartialLeft`/`PartialRight` swap
-        /// would fail.
+        /// (right) — the mirror of the left case, which a left/right swap would fail.
+        ///
+        /// **The offset is the assertion that matters here.** Since the reshape the side is not
+        /// a variant but a derivation from where the run sits, so `offset_in_locus == 2` on a
+        /// 6-base tract is what says "flush with the right border" — and it is the one number a
+        /// mint that forgot the locus length could not produce.
         #[test]
         fn a_read_running_off_the_left_is_a_right_partial() {
             // 4 tract bases + full right flank, mapped at the tract's 3rd base (0-based 8).
@@ -907,11 +935,18 @@ mod classify {
             match classify(&read) {
                 Classified::Observed {
                     bases,
-                    coverage: ReadCoverage::PartialRight(reach),
+                    coverage:
+                        ReadCoverage::Observed {
+                            offset_in_locus,
+                            positions_covered,
+                        },
                     ..
                 } => {
                     assert_eq!(&*bases, b"CACA");
-                    assert_eq!(reach, 4);
+                    // The tract is "CACACA" — 6 positions — so a 4-position run flush with the
+                    // right border starts at 2.
+                    assert_eq!(offset_in_locus, 6 - 4);
+                    assert_eq!(positions_covered, 4);
                 }
                 other => panic!("expected a right partial, got {other:?}"),
             }
@@ -1013,9 +1048,7 @@ mod tally {
                 } => {
                     match coverage {
                         ReadCoverage::Complete => counts.observations_complete += 1,
-                        ReadCoverage::PartialLeft(_) | ReadCoverage::PartialRight(_) => {
-                            counts.observations_partial += 1
-                        }
+                        ReadCoverage::Observed { .. } => counts.observations_partial += 1,
                     }
                     let support = buckets.entry((bases, coverage)).or_default();
                     support.num_obs += 1;
@@ -1065,13 +1098,22 @@ mod tally {
     }
 
     /// A total order over `ReadCoverage` (which is not `Ord`) for a deterministic tie-break when
-    /// two observations share bases: complete first, then left partials, then right partials,
-    /// each ordered by reach.
-    fn coverage_order(coverage: ReadCoverage) -> (u8, u16) {
+    /// two observations share bases: complete first, then partial runs by where they sit in the
+    /// locus and how far they run.
+    ///
+    /// **This reproduces the pre-reshape order** — complete, then left partials, then right
+    /// partials — without naming a side: a left-flush run has `offset_in_locus == 0` and so sorts
+    /// ahead of every right-flush one, whose offset is `locus_len - covered`. The old key's
+    /// third component was the reach, and it never separated anything on this path (a row's
+    /// `bases` are the run, so equal bases already imply equal reach); ordering by offset then
+    /// length keeps a total order without relying on that.
+    fn coverage_order(coverage: ReadCoverage) -> (u8, u16, u16) {
         match coverage {
-            ReadCoverage::Complete => (0, 0),
-            ReadCoverage::PartialLeft(n) => (1, n),
-            ReadCoverage::PartialRight(n) => (2, n),
+            ReadCoverage::Complete => (0, 0, 0),
+            ReadCoverage::Observed {
+                offset_in_locus,
+                positions_covered,
+            } => (1, offset_in_locus, positions_covered),
         }
     }
 
@@ -1108,7 +1150,7 @@ mod tally {
             }
         }
 
-        /// A `Complete` and a `PartialLeft` of the **same** bases are different evidence, so they
+        /// A `Complete` and a partial run of the **same** bases are different evidence, so they
         /// stay as two separate rows (spec §3) — the property the `(bases, read_coverage)` dedup
         /// key rests on.
         #[test]
@@ -1118,7 +1160,7 @@ mod tally {
                 (&fwd, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
                 (
                     &fwd,
-                    observed(b"CACACA", ReadCoverage::PartialLeft(6), -1.0),
+                    observed(b"CACACA", ReadCoverage::from_left(6, 6), -1.0),
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
@@ -1134,8 +1176,8 @@ mod tally {
         fn two_identical_partials_merge_into_one_count() {
             let fwd = read(0, 60);
             let outcomes = vec![
-                (&fwd, observed(b"CACA", ReadCoverage::PartialLeft(4), -1.0)),
-                (&fwd, observed(b"CACA", ReadCoverage::PartialLeft(4), -1.0)),
+                (&fwd, observed(b"CACA", ReadCoverage::from_left(4, 6), -1.0)),
+                (&fwd, observed(b"CACA", ReadCoverage::from_left(4, 6), -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, &mut counts);
@@ -1205,9 +1247,9 @@ mod tally {
             let r = read(0, 60);
             let outcomes = vec![
                 (&r, observed(b"GG", ReadCoverage::Complete, -1.0)),
-                (&r, observed(b"AA", ReadCoverage::PartialRight(2), -1.0)),
+                (&r, observed(b"AA", ReadCoverage::from_right(2, 6), -1.0)),
                 (&r, observed(b"AA", ReadCoverage::Complete, -1.0)),
-                (&r, observed(b"AA", ReadCoverage::PartialLeft(2), -1.0)),
+                (&r, observed(b"AA", ReadCoverage::from_left(2, 6), -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, &mut counts);
@@ -1220,8 +1262,8 @@ mod tally {
                 order,
                 vec![
                     (b"AA".as_ref(), ReadCoverage::Complete),
-                    (b"AA".as_ref(), ReadCoverage::PartialLeft(2)),
-                    (b"AA".as_ref(), ReadCoverage::PartialRight(2)),
+                    (b"AA".as_ref(), ReadCoverage::from_left(2, 6)),
+                    (b"AA".as_ref(), ReadCoverage::from_right(2, 6)),
                     (b"GG".as_ref(), ReadCoverage::Complete),
                 ]
             );

@@ -113,7 +113,10 @@ fn write_locus<W: Write>(
     };
 
     for obs in &locus.observed_sequences {
-        let label = coverage_label(obs.read_coverage);
+        let label = coverage_label(
+            obs.read_coverage,
+            locus.region.len().min(u16::MAX as u64) as u16,
+        );
         match obs.read_coverage {
             ReadCoverage::Complete => {
                 counts.obs_complete += 1;
@@ -143,11 +146,16 @@ fn write_locus<W: Write>(
 }
 
 /// The tag a read-coverage carries in the `coverage` column.
-fn coverage_label(coverage: ReadCoverage) -> &'static str {
+fn coverage_label(coverage: ReadCoverage, locus_len: u16) -> &'static str {
+    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
+    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
+    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
+    // so it never appears here, but naming it keeps the label honest for the generic path.
     match coverage {
         ReadCoverage::Complete => "complete",
-        ReadCoverage::PartialLeft(_) => "partial_left",
-        ReadCoverage::PartialRight(_) => "partial_right",
+        _ if coverage.is_flush_left() => "partial_left",
+        _ if coverage.is_flush_right(locus_len) => "partial_right",
+        _ => "partial:interior",
     }
 }
 
