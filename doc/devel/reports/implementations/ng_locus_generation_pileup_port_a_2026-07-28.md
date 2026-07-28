@@ -43,8 +43,9 @@ copied suite" in A4 means, which §5 answers with numbers rather than with the p
 
 ### A2 — the seven files, verbatim (`8b6307d`)
 
-5,495 lines into [src/ng/locus_generation/pileup/](../../../../src/ng/locus_generation/pileup/),
-`driver.rs` landing as `genome_walk.rs`. Still emitting production's `PileupRecord`.
+5,495 source lines into [src/ng/locus_generation/pileup/](../../../../src/ng/locus_generation/pileup/)
+— 5,503 landed, the difference being the seam lines below — with `driver.rs` landing as
+`genome_walk.rs`. Still emitting production's `PileupRecord`.
 
 The copies reach their shared vocabulary through `super::`, and **leaving those paths alone is what
 keeps the transcription verbatim**. ng's new `pileup/mod.rs` therefore stands in for production's
@@ -53,11 +54,21 @@ keeps the transcription verbatim**. ng's new `pileup/mod.rs` therefore stands in
 from production, **by name rather than by literal**, so there is one source of truth until ng
 deliberately diverges.
 
-Edits inside the copies, and this is the whole list (§6.1, §6.2):
+**The complete seam-edit record is `pileup/copy_fidelity.rs`**, which compares all eight copies
+against their originals textually, in the tree, on every `cargo test`. That is the authority; the
+prose below is a summary of it, and an earlier draft of this section claimed to be a closed list and
+was not — it omitted the four `use crate::ng::types::ReadGroupId;` imports those fixture lines
+require, `open_record.rs`'s `MockFasta` repoint, `tests.rs`'s doc block, and the import reorder
+described in §5. The edits fall in three classes, and the test sanctions exactly those three:
 
-- `cigar_cursor.rs`'s test module reaches ng's `decompose` oracle rather than production's, which is
-  in a private module and does not resolve from here.
-- four `#[cfg(test)]` fixture builders name the new `read_group` field.
+- **two module-path repoints** — `cigar_cursor.rs`'s test module reaches ng's `decompose` oracle
+  rather than production's (which is in a private module and does not resolve from here), and
+  `open_record.rs` takes `MockFasta` from ng's copied suite. Matched *by presence, not by position*,
+  because repointing a path changes where rustfmt sorts it.
+- **28 `read_group: ReadGroupId(0),` lines** in `#[cfg(test)]` fixture literals, plus the five
+  imports they require.
+- **one module doc note**, at the head of `tests.rs`. ng may only *append* to production's header;
+  the fidelity test asserts production's own header survives verbatim.
 
 ### A3 — the reference shim (`6e44051`)
 
@@ -87,15 +98,10 @@ computes on either; the walker's `WalkerError::Fasta { chrom_id, .. }` carries t
 is repointed from production's test module to this one — the fixtures are identical today and will
 not be after plan 3.
 
-**Strip the 24 `read_group:` lines and this file is byte-identical to production's**, which is
-checked mechanically rather than claimed:
-
-```
-$ diff <(grep -v "read_group: ReadGroupId(0)," src/ng/locus_generation/pileup/tests.rs) \
-       src/pileup/walker/tests.rs
-```
-
-is empty but for the module doc-comment note.
+**Strip the 24 `read_group:` lines, the import they require and the module doc note, and this file
+is identical to production's** — checked by `pileup/copy_fidelity.rs` on every `cargo test`, not by
+a one-shot `diff` into a scratch directory. (The hand-run `diff` quoted in an earlier draft of this
+section left *two* hunks, not one: the doc block and the `ReadGroupId` import.)
 
 ## 4. Tests added
 
@@ -107,7 +113,7 @@ was added covers only the two pieces that are ng's rather than production's.
 | `the_conversion_from_productions_read_moves_every_field` | the destructure makes `from_production` exhaustive; only this makes it *correct*. Every field gets a distinct value, because `chrom_id` and `alignment_start` are both `u32` and swapping them would compile. |
 | `every_production_mate_role_maps_to_its_counterpart` | a conversion that collapsed two roles would silently disable the mate-overlap tie-break rather than fail. |
 | `the_read_group_rides_through_both_paths` (left_align.rs) | the whole point of ng owning the read type. Driven on **both** arms — the indel arm rewrites the CIGAR first — with a non-zero id, since `ReadGroupId(0)` is also what a defaulted field reads as. |
-| the five `length()` / `MateRole` tests | the transcription of the one function in `prepared_read.rs` that computes anything, including that the `seq`/`bq_baq` check runs *before* the CIGAR check (the walker's message differs between them). |
+| the six `length()` / `MateRole` tests | the transcription of the one function in `prepared_read.rs` that computes anything, including that the `seq`/`bq_baq` check runs *before* the CIGAR check (the walker's message differs between them). |
 | `the_shim_canonicalises_what_it_serves` + four siblings | §3's A3 — the shim's claim, its 1-based contract, and each error arm landing in its own variant. |
 
 ## 5. Validation — and what "the copied suite" actually is
@@ -125,21 +131,27 @@ So Milestone A's gate reads: **113 inherited tests (44 + 69) pass unmodified aga
 debug build, 114 counting the release-only sibling**, and the 44-test end-to-end suite is identical
 to production's name for name.
 
-Run in the container (`./scripts/dev.sh`), per commit:
+Run in the container (`./scripts/dev.sh`):
 
-- `cargo fmt --all -- --check` — exit 0.
+- `cargo fmt --all -- --check` — exit 0 **at `8fdba95` and at the milestone's head**. It was *not*
+  green at `8b6307d` (A2), which landed `cigar_cursor.rs` with its test-module imports out of
+  rustfmt order; A3's `cargo fmt` corrected it, and A3's commit message does not mention touching a
+  copied file. Found by the review, verified by checking A2's version of that file back into the
+  tree and re-running. The reorder is now a recorded, tested divergence (§3), and it is what
+  `copy_fidelity.rs` caught on its very first run.
 - `cargo clippy --all-targets --all-features -- -D warnings` — no diagnostics. *(Which is why
   `driver.rs:647`'s `#[allow(clippy::ptr_arg)]` had to survive the copy; it did, being inside the
   verbatim text.)*
-- `cargo test --all-targets --all-features` — **2631 passed / 0 failed / 4 ignored**
-  (2504 → 2513 → 2582 → 2587 → 2631).
-- `cargo test --release --lib ng::locus_generation::pileup` — 118 passed, covering the
+- `cargo test --all-targets --all-features` — **2641 passed / 0 failed / 4 ignored** after the
+  review fixes (2504 → 2513 → 2582 → 2587 → 2631 → 2641).
+- `cargo test --release --lib ng::locus_generation::pileup` — 118 passed at A4, covering the
   release-only half of the `cfg` pair.
 
 Two standard commands are excepted by hand, red independently of this work and tracked under
 PROJECT_STATUS *Standing project-wide items*: the `--all-targets` run panics in
-`benches/psp_writer_perf.rs:386` (the panic above is that one, and the test totals quoted are from
-the same run), and `cargo doc --no-deps` fails on 11 unresolved intra-doc links.
+`benches/psp_writer_perf.rs:386` (the test totals quoted are from that same run, whose every other
+target is green), and `cargo doc --no-deps` — **not re-run here**, known-red on 11 unresolved
+intra-doc links.
 
 ## 6. Deviations from the plan
 
@@ -162,14 +174,88 @@ Four, all minor, none reaching past the step.
    exercise production's code and would prove nothing about the transcription. The arch inventory
    names the seven copies, `mod.rs` and `parity.rs`, and is silent on the suite. Copying it is
    additive and is what makes the gate a gate.
-4. **`mod shim_tests`, not `mod tests`, for A3's tests.** The copied suite takes the `tests` name, so
-   the two suites stay comparable module for module.
+4. **`mod ref_seq_fetcher_tests`, not `mod tests`, for A3's tests.** The copied suite takes the
+   `tests` name, so the two suites stay comparable module for module. *(Landed as `shim_tests` and
+   renamed to name its subject when the review pointed at the crate's `mod baq_tests` precedent.)*
+5. **`copy_fidelity.rs` is a ninth file the arch inventory does not list either.** Added after the
+   review: it is ng's own, not a copy, and it is what turns "verbatim" from a claim into a test.
+   It cannot live inside `tests.rs`, because `tests.rs` is one of the files it checks.
 
-## 7. Review
+## 7. Review, and what it changed
 
-Pending — one `rust-code-review` fan-out over the milestone diff, the working pattern on this plan.
+Reviewed the same day over the whole milestone diff:
+[ng_locus_generation_pileup_port_a_2026-07-28.md](../reviews/ng_locus_generation_pileup_port_a_2026-07-28.md)
+— 9 categories, **0 Blockers, 3 Majors, 19 Minors**, verdict Approve-with-changes. The copied files
+were scoped out for *content* and checked for *fidelity*; four categories confirmed independently
+that no unsanctioned edit had reached them.
 
-## 8. What Checkpoint A hands to Milestone B
+**All three Majors were the seams being weaker than their own documentation**, which is this
+branch's recurring pattern:
+
+- **M1 — `assert_same_prepared_read` claimed a field addition would force it to be updated, and did
+  not.** Twelve independent `assert_eq!`s, no destructure, no `PartialEq` behind them — while
+  `from_production` *does* destructure, so a new field would have been carried into ng's type and
+  then silently escaped the thing the module calls "the port anchor". Both sides now destructure
+  exhaustively with no `..`, and `read_group` is ignored **by name**.
+- **M2 — the shim was never driven through the walker it exists to feed.** Every test called
+  `RefSeqFetcher::fetch` directly, so the 113 inherited tests proved the walk only over `MockFasta`.
+  `a_walk_over_the_shim_matches_the_same_walk_over_the_mock_reference` now runs the same reads
+  through both fetchers, with a deletion so `widen`'s `fetch(chrom_id, old_end, extra_len)` — an
+  *exclusive* end passed as a *1-based* start — is on the path. **Mutation-verified:** a `+ 1` on
+  the shim's start fails 6 of 10 tests, serving one base short fails 5.
+- **M3 — the verbatim property had no check that survived the branch.** The only evidence was a
+  `diff` into a gitignored scratch directory. `pileup/copy_fidelity.rs` now compares all eight pairs
+  textually on every `cargo test`, sanctioning exactly three classes of divergence and failing with
+  a message that names the production original and says the file must not be edited.
+  **It found a real divergence on its first run** — A2's `cigar_cursor.rs` import order, silently
+  corrected by A3's `cargo fmt` and recorded nowhere (§5). **Mutation-verified:** five mutations,
+  five failures — a reworded comment, a reworded doc comment, a rewritten repoint, two reordered
+  production lines, and a deleted blank line. A sixth mutation *passed* and correctly so: it moved
+  an ng-*added* line, whose position is not part of the copy.
+
+Sixteen more findings applied, the substantive ones being: the `super::` vocabulary demoted from
+`pub` to `pub(crate)` (it was minting public ng-flavoured aliases for frozen production types);
+`RefSeqFetcher` narrowed to `pub(crate)` with a `pub(crate)` field, matching arch §1.3, its inert
+`Copy` dropped and its `R: RefSeq` bound moved to the impl; **two overstated
+compile-time-enforcement claims corrected** (`From<MateRole>` and `to_chrom_ref_fetch_error` each
+check only the *matched* side — the `MateRole` one is now true in both directions via a
+`#[cfg(test)]` reverse conversion, the other is a wording fix because an into-mapping owes no
+coverage); `MateRole`'s predicates made exhaustive `match`es, since this is the enum ng owns *in
+order to extend*; `length()` pinned against production's own method over every op class; the
+`RefSeqError::Io` arm and the `narrow` saturation given the tests they lacked; and
+`PLACEHOLDER_READ_GROUP` named, because `ReadGroupId(0)` is the run's *first* read group and reads
+identically to a defaulted field. Suite 2631 → **2641**.
+
+Three findings are **not** applied and are Checkpoint A questions instead (§8): the per-file copy
+banners, the "46 tests" in the plan and the spec, and the arch doc's file inventory.
+
+## 8. Checkpoint A — four questions for the owner
+
+Each reaches past the step, which is why none was decided in code.
+
+1. **Should the seven copies carry a "this is a copy, do not edit" banner?** The review's M3 asked
+   for one per file. It is declined *for now*, with the reason: it widens the plan's sanctioned edit
+   set (A2 permits module paths and `PreparedRead`, nothing else), and it costs the byte-identity of
+   `genome_walk.rs` and `errors.rs`, which are currently identical to their originals at `diff` exit
+   0 — the cheapest fidelity statement available. `copy_fidelity.rs` addresses the same worry more
+   strongly, since it fails the build rather than asking to be read. But the worry is real: a
+   maintainer arriving from a grep hit or a stack trace sees nothing. **Owner's call**, and if yes,
+   the fidelity test's sanctioned set grows by one class.
+2. **The plan and the spec still say "46 tests"** — plan `:50`, `:75`, `:114`; spec `:1050`,
+   `:1054`. The real numbers are 44 end-to-end + 69 inline (§5). This skill does not edit design
+   documents, so A4 is ticked against a criterion this milestone disproved and the correction lives
+   only here.
+3. **The arch doc's *Module home* inventory** names `parity.rs` (correctly absent — it is B1's) but
+   omits `tests.rs` and now `copy_fidelity.rs`, and specifies a private `RefSeqFetcher` where the
+   code shipped `pub` (now narrowed to match). Two files to add, one line to adjust.
+4. **Should `RefSeqFetcher` be renamed, and should it move to its own file?** The review found the
+   name was **deliberately retired** in this codebase for a different concept
+   (`fasta/fetcher.rs:20-23`, a 2026-05-23 review), and that the name does not say which way the
+   adapter runs. Separately, `pileup/mod.rs` is now the one file that both stands in for
+   production's `walker/mod.rs` and holds ng-original code. Arch §1.3 names the type and puts it in
+   `mod.rs`, so neither was changed.
+
+## 9. What Checkpoint A hands to Milestone B
 
 - **`walker::tests` really is reachable**, and B1's fixture plan rests on it: ng's copy is
   `pub(crate)` under `#[cfg(test)]`, and `open_record.rs` already imports `MockFasta` across the

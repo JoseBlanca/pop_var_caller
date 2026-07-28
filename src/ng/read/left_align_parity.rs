@@ -39,15 +39,15 @@ use std::path::{Path, PathBuf};
 use noodles_fasta as fasta;
 use tempfile::TempDir;
 
+use super::PLACEHOLDER_READ_GROUP;
 use super::ReadPreparer;
 use super::left_align::LeftAlignPreparer;
 use crate::bam::alignment_input::{MappedRead, cigar_ref_span, read_exceeds_mismatch_fraction};
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::prepared_read::PreparedRead;
+use crate::ng::read::prepared_read::{MateRole, PreparedRead};
 use crate::ng::ref_seq::{RefSeq, ResidentRefSeq};
 use crate::ng::types::ContigId;
-use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::read_processor::{
     RawContigRefCache, ReadOutcome, ReadProcessingConfig, process_read,
 };
@@ -171,7 +171,7 @@ fn to_aligned_read(read: MappedRead) -> AlignedRead {
         mate_ref_id: read.mate_ref_id,
         mate_pos: read.mate_pos,
         adaptor_boundary: read.adaptor_boundary,
-        read_group: ReadGroupId(0),
+        read_group: PLACEHOLDER_READ_GROUP,
     }
 }
 
@@ -179,48 +179,81 @@ fn to_aligned_read(read: MappedRead) -> AlignedRead {
 ///
 /// `PreparedRead` derives no `PartialEq`, and writing one here would be worse than this: an
 /// equality that silently ignored a field it did not know about is exactly the failure a parity
-/// test exists to catch. Listing the fields means a field added to production forces this to be
-/// updated rather than passing vacuously.
+/// test exists to catch. The two sides are now **different types** — ng owns its prepared read so
+/// it can carry the read group (`locus_generation_pileup.md` §6) — which makes a field-by-field
+/// comparison the only one available as well as the one wanted.
 ///
-/// The two sides are now **different types** — ng owns its prepared read so it can carry the read
-/// group (`locus_generation_pileup.md` §6) — which makes a field-by-field comparison the only one
-/// available as well as the one wanted. `read_group` is deliberately absent below: it is the one
-/// field with no production counterpart, and it is checked in `left_align.rs` instead.
+/// **Both sides are destructured exhaustively, with no `..`, and that is the point.** An earlier
+/// version read the fields off `ours.<field>` / `production.<field>` and claimed in this very
+/// comment that "a field added to production forces this to be updated" — it did not: a thirteenth
+/// field would have left this compiling and passing, uncompared, while `from_production`'s own
+/// destructure quietly carried it into ng's type. The destructure is what makes the claim true,
+/// and it is the same construct `from_production` already uses.
+///
+/// `read_group` is bound and ignored by name: it is the one field with no production counterpart,
+/// and it is checked in `left_align.rs` instead.
 #[track_caller]
 fn assert_same_prepared_read(
     ours: &PreparedRead,
     production: &crate::pileup::walker::PreparedRead,
     context: &str,
 ) {
-    assert_eq!(ours.chrom_id, production.chrom_id, "chrom_id [{context}]");
+    let PreparedRead {
+        chrom_id,
+        alignment_start,
+        alignment_end,
+        cigar,
+        seq,
+        bq_baq,
+        mq_log_err,
+        mapq,
+        is_reverse_strand,
+        qname,
+        mate_role,
+        adaptor_boundary,
+        read_group: _,
+    } = ours;
+    let crate::pileup::walker::PreparedRead {
+        chrom_id: their_chrom_id,
+        alignment_start: their_alignment_start,
+        alignment_end: their_alignment_end,
+        cigar: their_cigar,
+        seq: their_seq,
+        bq_baq: their_bq_baq,
+        mq_log_err: their_mq_log_err,
+        mapq: their_mapq,
+        is_reverse_strand: their_is_reverse_strand,
+        qname: their_qname,
+        mate_role: their_mate_role,
+        adaptor_boundary: their_adaptor_boundary,
+    } = production;
+
+    assert_eq!(chrom_id, their_chrom_id, "chrom_id [{context}]");
     assert_eq!(
-        ours.alignment_start, production.alignment_start,
+        alignment_start, their_alignment_start,
         "alignment_start [{context}]"
     );
     assert_eq!(
-        ours.alignment_end, production.alignment_end,
+        alignment_end, their_alignment_end,
         "alignment_end [{context}]"
     );
-    assert_eq!(ours.cigar, production.cigar, "cigar [{context}]");
-    assert_eq!(ours.seq, production.seq, "seq [{context}]");
-    assert_eq!(ours.bq_baq, production.bq_baq, "bq_baq [{context}]");
+    assert_eq!(cigar, their_cigar, "cigar [{context}]");
+    assert_eq!(seq, their_seq, "seq [{context}]");
+    assert_eq!(bq_baq, their_bq_baq, "bq_baq [{context}]");
+    assert_eq!(mq_log_err, their_mq_log_err, "mq_log_err [{context}]");
+    assert_eq!(mapq, their_mapq, "mapq [{context}]");
     assert_eq!(
-        ours.mq_log_err, production.mq_log_err,
-        "mq_log_err [{context}]"
-    );
-    assert_eq!(ours.mapq, production.mapq, "mapq [{context}]");
-    assert_eq!(
-        ours.is_reverse_strand, production.is_reverse_strand,
+        is_reverse_strand, their_is_reverse_strand,
         "is_reverse_strand [{context}]"
     );
-    assert_eq!(ours.qname, production.qname, "qname [{context}]");
+    assert_eq!(qname, their_qname, "qname [{context}]");
     assert_eq!(
-        ours.mate_role,
-        production.mate_role.into(),
+        *mate_role,
+        MateRole::from_production(*their_mate_role),
         "mate_role [{context}]"
     );
     assert_eq!(
-        ours.adaptor_boundary, production.adaptor_boundary,
+        adaptor_boundary, their_adaptor_boundary,
         "adaptor_boundary [{context}]"
     );
 }
@@ -360,6 +393,22 @@ fn ng_matches_production_on_an_uppercase_reference() {
             .expect("production keeps every fixture read with F1 disabled");
         assert_same_prepared_read(&ours, &theirs, case);
     }
+
+    // `mate_role` is the one field the comparison above cannot pin on its own: ng's read was
+    // *built* by `from_production`, so both sides of that assertion pass through the same
+    // conversion and a `From` collapsing two roles would make them equally wrong. Assert the one
+    // non-`Solo` fixture against the role itself, so the conversion is not the only thing standing
+    // between the two sides. (`prepared_read.rs` covers the conversion exhaustively; this keeps
+    // *this* file from depending on that one silently.)
+    let (_, paired) = fixture_reads()
+        .into_iter()
+        .find(|(_, read)| read.qname == b"paired")
+        .expect("the paired fixture");
+    assert_eq!(
+        ng_prepared(paired, &fasta_path, &contigs).mate_role,
+        MateRole::SecondOfPair,
+        "flag 0x1 | 0x80 is the last segment of the template",
+    );
 }
 
 /// **The fixture would prove nothing if left-alignment never fired on it.** Byte-parity between two

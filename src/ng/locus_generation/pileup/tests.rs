@@ -17,6 +17,10 @@
 //! It dies with plan 3, when ng's walker starts emitting
 //! `SampleLocusObservations` and its behaviour deliberately diverges; §12
 //! classifies each test three ways for that moment.
+//!
+//! `copy_fidelity.rs`'s `the_eight_copies_are_still_productions` is what keeps
+//! "verbatim" a checked property rather than a claim in a doc comment — and it checks
+//! this file too, which is why it is not in it.
 
 use std::sync::Arc;
 

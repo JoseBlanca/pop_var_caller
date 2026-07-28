@@ -24,7 +24,14 @@
 use std::sync::Arc;
 
 use crate::ng::types::ReadGroupId;
+// Production's, reused rather than re-minted — the same call, for the same reason, as
+// `ng::alignment`'s (see its "# Reusing production's `CigarOp`"). The import path
+// misleads: `CigarOp` is crate-wide CIGAR vocabulary that happens to live in the walker.
 use crate::pileup::walker::CigarOp;
+// Aliased, so "ours" and "production's" read at a glance instead of being carried by a
+// four-segment path at every one of the dozen sites below.
+use crate::pileup::walker::MateRole as ProductionMateRole;
+use crate::pileup::walker::PreparedRead as ProductionPreparedRead;
 
 // ---------------------------------------------------------------------
 // MateRole
@@ -55,27 +62,66 @@ pub enum MateRole {
 impl MateRole {
     /// True for both `FirstOfPair` and `SecondOfPair` — i.e. SAM
     /// flag `0x1` is set.
+    ///
+    /// An exhaustive `match` where production writes `!matches!`: **this enum is ng's
+    /// to extend and production's is frozen**, so a fourth variant here must be
+    /// classified deliberately rather than defaulted into "paired". Behaviour on the
+    /// three current variants is production's exactly, which
+    /// `the_mate_role_predicates_are_productions` pins.
     pub fn is_paired(self) -> bool {
-        !matches!(self, MateRole::Solo)
+        match self {
+            MateRole::Solo => false,
+            MateRole::FirstOfPair | MateRole::SecondOfPair => true,
+        }
     }
 
     /// True only for `FirstOfPair`. Used by mate-overlap tie-breaks
     /// on equal-BQ positions; on `Solo` and `SecondOfPair` it is
     /// false.
+    ///
+    /// Exhaustive for the reason [`is_paired`](Self::is_paired) gives — and this is the
+    /// predicate with teeth: it is the deterministic tie-break on equal-BQ mate-overlap
+    /// positions, so a variant defaulted to `false` here is a silently wrong tie-break.
     pub fn is_first_of_pair(self) -> bool {
-        matches!(self, MateRole::FirstOfPair)
+        match self {
+            MateRole::FirstOfPair => true,
+            MateRole::Solo | MateRole::SecondOfPair => false,
+        }
     }
-}
 
-impl From<crate::pileup::walker::MateRole> for MateRole {
-    /// The same role, on ng's copy of the enum. Written as an exhaustive
-    /// `match` rather than a cast so a variant added on either side stops
-    /// compiling instead of being silently mapped to a neighbour.
-    fn from(role: crate::pileup::walker::MateRole) -> Self {
+    /// The same role, on ng's copy of the enum.
+    ///
+    /// Written as an exhaustive `match` rather than a cast, so a variant added to
+    /// **production's** enum stops this compiling instead of being silently mapped to a
+    /// neighbour. *That is the only direction the compiler checks here:* a variant added
+    /// to **ng's** would simply be unreachable from any production read, in silence —
+    /// [`to_production`](Self::to_production) is the `#[cfg(test)]` witness that closes
+    /// it.
+    ///
+    /// An inherent `pub(crate)` function rather than a `From` impl, matching its
+    /// neighbour [`PreparedRead::from_production`]: trait impls carry no visibility, so a
+    /// `From` would publish an ng→production coupling that nothing outside the crate can
+    /// use.
+    pub(crate) fn from_production(role: ProductionMateRole) -> Self {
         match role {
-            crate::pileup::walker::MateRole::Solo => MateRole::Solo,
-            crate::pileup::walker::MateRole::FirstOfPair => MateRole::FirstOfPair,
-            crate::pileup::walker::MateRole::SecondOfPair => MateRole::SecondOfPair,
+            ProductionMateRole::Solo => MateRole::Solo,
+            ProductionMateRole::FirstOfPair => MateRole::FirstOfPair,
+            ProductionMateRole::SecondOfPair => MateRole::SecondOfPair,
+        }
+    }
+
+    /// The reverse direction, **`#[cfg(test)]` only**: nothing needs it at run time.
+    ///
+    /// It exists so that an exhaustive `match` over *ng's* enum also has to be updated
+    /// when ng's enum grows — which is what makes
+    /// [`from_production`](Self::from_production)'s claim true in both directions instead
+    /// of half-true.
+    #[cfg(test)]
+    pub(crate) fn to_production(self) -> ProductionMateRole {
+        match self {
+            MateRole::Solo => ProductionMateRole::Solo,
+            MateRole::FirstOfPair => ProductionMateRole::FirstOfPair,
+            MateRole::SecondOfPair => ProductionMateRole::SecondOfPair,
         }
     }
 }
@@ -93,14 +139,22 @@ impl From<crate::pileup::walker::MateRole> for MateRole {
 /// 0–93 (`bq_baq`). `qname` is shared as `Arc<str>` so cheap clones
 /// can sit in the `pending_mates` map alongside the `ActiveRead`
 /// without the bytes being duplicated.
-// `#[non_exhaustive]` is deliberately NOT applied to `PreparedRead`,
-// for production's own stated reason, which ng inherits along with the
-// type: PreparedRead is the input contract: callers must populate it
-// with concrete bytes per the field-level docs, and adding a new field
-// should force every caller (test, bench, production constructor)
-// to update its literal explicitly. `#[non_exhaustive]` would push
-// callers toward `..Default::default()`, which is exactly the
-// silent-absorb hazard the refactor-safety rule guards against.
+///
+/// # Construction: every field, every time
+///
+/// Deliberately **not** `#[non_exhaustive]`, and deliberately **without a `Default`
+/// impl** — production's own stated reason, which ng inherits along with the type.
+/// `PreparedRead` is the input contract: callers populate it with concrete bytes per the
+/// field-level docs, and adding a new field *should* force every caller (test, bench,
+/// constructor) to update its literal explicitly. `#[non_exhaustive]` would push callers
+/// toward `..Default::default()`, which is exactly the silent-absorb hazard the
+/// refactor-safety rule guards against — and a `Default` impl would hand them that
+/// escape hatch directly. The 28 `read_group` lines this port added to the copied
+/// fixtures are that decision working.
+///
+/// *(Production states the same reason in a `//` comment, which rustdoc drops. It is a
+/// doc comment here because a caller meeting a compile error on a new field should be
+/// able to read that the error is the point.)*
 #[derive(Debug, Clone)]
 pub struct PreparedRead {
     /// Index into the merged `ContigList`.
@@ -150,7 +204,7 @@ pub struct PreparedRead {
     /// base at `ref_pos <= adaptor_boundary` was sequenced through
     /// the 5′ end into the near adaptor. The cursor's Match-emit
     /// sites apply this test direction-aware. See finding `G1` in
-    /// `ia/reviews/pileup_gatk_comparison_2026-05-08.md`.
+    /// `doc/devel/reports/reviews/pileup_gatk_comparison_2026-05-08.md`.
     ///
     /// # Default
     /// `None` *disables the G1 adaptor filter* for this read: no
@@ -159,7 +213,7 @@ pub struct PreparedRead {
     /// geometry — a false-positive filter would drop real
     /// evidence. Callers that need strict filtering must compute
     /// and set a boundary themselves. Mi17 in
-    /// `ia/reviews/pileup_2026-05-11.md`.
+    /// `doc/devel/reports/reviews/pileup_2026-05-11.md`.
     pub adaptor_boundary: Option<u32>,
     /// Which read group this read came from — **the field production's type
     /// does not have, and the reason ng owns this one.**
@@ -202,7 +256,7 @@ impl PreparedRead {
     /// returned. On failure a typed [`ReadLengthError`] reports
     /// which invariant broke.
     ///
-    /// M21 in `ia/reviews/pileup_2026-05-09.md`. The cigar cursor
+    /// M21 in `doc/devel/reports/reviews/pileup_2026-05-09.md`. The cigar cursor
     /// and `decompose` both index `seq[..]` / `bq_baq[..]` using
     /// offsets derived from the CIGAR; a mismatch would otherwise
     /// panic with `slice index out of bounds` and kill the run on
@@ -251,11 +305,8 @@ impl PreparedRead {
     /// this compiling instead of being silently dropped on the way into ng's —
     /// the same reason `AlignedRead::into_mapped_read` destructures on the way
     /// out.
-    pub(crate) fn from_production(
-        read: crate::pileup::walker::PreparedRead,
-        read_group: ReadGroupId,
-    ) -> Self {
-        let crate::pileup::walker::PreparedRead {
+    pub(crate) fn from_production(read: ProductionPreparedRead, read_group: ReadGroupId) -> Self {
+        let ProductionPreparedRead {
             chrom_id,
             alignment_start,
             alignment_end,
@@ -281,7 +332,7 @@ impl PreparedRead {
             mapq,
             is_reverse_strand,
             qname,
-            mate_role: mate_role.into(),
+            mate_role: MateRole::from_production(mate_role),
             adaptor_boundary,
             read_group,
         }
@@ -291,6 +342,7 @@ impl PreparedRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::read::PLACEHOLDER_READ_GROUP;
 
     /// A read whose three length representations agree: 4 matched bases, 4
     /// qualities, a CIGAR consuming 4.
@@ -308,13 +360,25 @@ mod tests {
             qname: Arc::from("read1"),
             mate_role: MateRole::Solo,
             adaptor_boundary: None,
-            read_group: ReadGroupId(0),
+            read_group: PLACEHOLDER_READ_GROUP,
         }
     }
 
     #[test]
     fn a_consistent_read_reports_its_length() {
         assert_eq!(consistent_read().length(), Ok(4));
+    }
+
+    /// The degenerate read: no ops, no bases, no qualities. All three
+    /// representations agree on zero, so it is a length and not an error — the
+    /// `0`/empty boundary the other cases skip past.
+    #[test]
+    fn a_read_with_no_bases_reports_a_length_of_zero() {
+        let mut read = consistent_read();
+        read.cigar = Vec::new();
+        read.seq = Vec::new();
+        read.bq_baq = Vec::new();
+        assert_eq!(read.length(), Ok(0));
     }
 
     /// Only the read-consuming ops count: a deletion and a skip add reference
@@ -398,19 +462,98 @@ mod tests {
     /// Each production role maps to its own counterpart — not to a neighbour.
     /// A conversion that collapsed two roles would silently disable the
     /// mate-overlap tie-break rather than fail.
+    ///
+    /// Both directions, because the two catch different mistakes: `from_production`'s
+    /// `match` is what the compiler checks when *production* grows a variant, and
+    /// `to_production` is what it checks when *ng* does. Asserting the round trip on top
+    /// is what rules out a pair of conversions that are each exhaustive and disagree.
     #[test]
     fn every_production_mate_role_maps_to_its_counterpart() {
+        for (theirs, ours) in [
+            (ProductionMateRole::Solo, MateRole::Solo),
+            (ProductionMateRole::FirstOfPair, MateRole::FirstOfPair),
+            (ProductionMateRole::SecondOfPair, MateRole::SecondOfPair),
+        ] {
+            assert_eq!(MateRole::from_production(theirs), ours);
+            assert_eq!(ours.to_production(), theirs);
+        }
+    }
+
+    /// **The transcription, checked against its original.** `length()` was copied out of
+    /// production's `walker/mod.rs` by hand — the one thing in this milestone that was,
+    /// everything else being a byte copy — and the tests above pin ng against ng. This
+    /// pins ng against production, over every op class and both failure modes, so a slip
+    /// in the op classification or in the order of the two checks fails here rather than
+    /// surviving as a silent divergence.
+    ///
+    /// The two `ReadLengthError` types are distinct but structurally identical, so the
+    /// comparison goes through `Debug`.
+    #[test]
+    fn length_agrees_with_productions_on_every_op_mix() {
+        // (cigar, seq_len) — the last two rows are the two failure modes.
+        let cases: Vec<(Vec<CigarOp>, usize)> = vec![
+            (vec![], 0),
+            (vec![CigarOp::Match(4)], 4),
+            (vec![CigarOp::Deletion(4)], 0),
+            (vec![CigarOp::Skip(4), CigarOp::Match(2)], 2),
+            (
+                vec![
+                    CigarOp::HardClip(3),
+                    CigarOp::SoftClip(2),
+                    CigarOp::Match(1),
+                ],
+                3,
+            ),
+            (vec![CigarOp::Padding(2), CigarOp::Insertion(3)], 3),
+            (vec![CigarOp::SeqMatch(2), CigarOp::SeqMismatch(2)], 4),
+            (vec![CigarOp::Match(4)], 5),
+        ];
+        for (cigar, seq_len) in cases {
+            let production = ProductionPreparedRead {
+                chrom_id: 0,
+                alignment_start: 1,
+                alignment_end: 1,
+                cigar: cigar.clone(),
+                seq: vec![b'A'; seq_len],
+                bq_baq: vec![30; seq_len],
+                mq_log_err: -6.0,
+                mapq: 60,
+                is_reverse_strand: false,
+                qname: Arc::from("read1"),
+                mate_role: ProductionMateRole::Solo,
+                adaptor_boundary: None,
+            };
+            let ours = PreparedRead::from_production(production.clone(), ReadGroupId(1));
+            assert_eq!(
+                ours.length().map_err(|error| format!("{error:?}")),
+                production.length().map_err(|error| format!("{error:?}")),
+                "cigar {cigar:?} against {seq_len} bases",
+            );
+        }
+    }
+
+    /// The `seq`/`bq_baq` check runs before the CIGAR check on **both** sides — the one
+    /// ordering the table above cannot see, since it never breaks two invariants at once.
+    #[test]
+    fn the_check_order_agrees_with_productions_when_both_invariants_break() {
+        let production = ProductionPreparedRead {
+            chrom_id: 0,
+            alignment_start: 1,
+            alignment_end: 1,
+            cigar: vec![CigarOp::Match(9)],
+            seq: b"ACGT".to_vec(),
+            bq_baq: vec![30, 30],
+            mq_log_err: -6.0,
+            mapq: 60,
+            is_reverse_strand: false,
+            qname: Arc::from("read1"),
+            mate_role: ProductionMateRole::Solo,
+            adaptor_boundary: None,
+        };
+        let ours = PreparedRead::from_production(production.clone(), ReadGroupId(1));
         assert_eq!(
-            MateRole::from(crate::pileup::walker::MateRole::Solo),
-            MateRole::Solo
-        );
-        assert_eq!(
-            MateRole::from(crate::pileup::walker::MateRole::FirstOfPair),
-            MateRole::FirstOfPair
-        );
-        assert_eq!(
-            MateRole::from(crate::pileup::walker::MateRole::SecondOfPair),
-            MateRole::SecondOfPair
+            ours.length().map_err(|error| format!("{error:?}")),
+            production.length().map_err(|error| format!("{error:?}")),
         );
     }
 
@@ -421,7 +564,7 @@ mod tests {
     /// swapping them would compile.
     #[test]
     fn the_conversion_from_productions_read_moves_every_field() {
-        let production = crate::pileup::walker::PreparedRead {
+        let production = ProductionPreparedRead {
             chrom_id: 2,
             alignment_start: 101,
             alignment_end: 140,
@@ -432,7 +575,7 @@ mod tests {
             mapq: 37,
             is_reverse_strand: true,
             qname: Arc::from("frag/1"),
-            mate_role: crate::pileup::walker::MateRole::SecondOfPair,
+            mate_role: ProductionMateRole::SecondOfPair,
             adaptor_boundary: Some(137),
         };
 
