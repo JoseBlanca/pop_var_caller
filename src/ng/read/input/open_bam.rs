@@ -77,7 +77,15 @@ pub struct AlignmentFile {
     path: Arc<Path>,
     /// Kept for the region query, which resolves a contig to a `ref_id` and
     /// hands the header to the record source. Read from C2 onwards.
-    header: sam::Header,
+    ///
+    /// `Arc` so a region source can **own** its header rather than borrow this
+    /// one: a borrowed header ties the returned stream to the file's lifetime,
+    /// and a resumable generator has to hold that stream across calls
+    /// (`doc/devel/ng/arch/locus_generation_pileup.md` §2.2). An independent
+    /// `Arc`, cloned out per query — *not* a reference into an `Arc`'d file,
+    /// which is what would make the source self-referential. Parsed once at
+    /// open either way; the clone is one atomic increment per query.
+    header: Arc<sam::Header>,
     /// Parsed once, at open — never re-read per query (spec §3.3). Queried from
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
@@ -373,7 +381,7 @@ impl AlignmentFile {
 
         Ok(Self {
             path: Arc::from(path),
-            header,
+            header: Arc::new(header),
             index,
             resolution,
             sq_md5s,
@@ -462,12 +470,12 @@ impl AlignmentFile {
 
         let source = match (reader, plan) {
             (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
-                BamRegionSource::new(reader, &self.header, plan, &self.resolution),
+                BamRegionSource::new(reader, Arc::clone(&self.header), plan, &self.resolution),
             ),
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
                 RegionSource::Cram(CramRegionSource::new(
                     reader,
-                    &self.header,
+                    Arc::clone(&self.header),
                     self.reference_repository
                         .clone()
                         .expect("open builds a repository for every CRAM"),

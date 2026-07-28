@@ -66,8 +66,10 @@ use super::AlignmentFileError;
 /// ([`Self::into_reader`]).
 pub(crate) struct BamRegionSource<'a> {
     reader: bam::io::Reader<bgzf::io::Reader<File>>,
-    /// Borrowed from the `AlignmentFile`: parsed once, never per query.
-    header: &'a sam::Header,
+    /// Shared with the `AlignmentFile`: parsed once, never per query, and
+    /// **owned** rather than borrowed so this source does not tie the stream it
+    /// serves to the file's lifetime (arch `locus_generation_pileup.md` §2.2).
+    header: Arc<sam::Header>,
     chunks: std::vec::IntoIter<Chunk>,
     /// Where the chunk being scanned ends, or `None` to take the next chunk.
     current_chunk_end: Option<bgzf::VirtualPosition>,
@@ -149,7 +151,7 @@ impl<'a> BamRegionSource<'a> {
     /// to call after the pooled handle has been taken.
     pub(crate) fn new(
         reader: bam::io::Reader<bgzf::io::Reader<File>>,
-        header: &'a sam::Header,
+        header: Arc<sam::Header>,
         plan: RegionPlan,
         resolution: &'a ReadGroupResolution,
     ) -> Self {
@@ -184,7 +186,7 @@ impl RecordSource for BamRegionSource<'_> {
     type Record = NoodlesRawRecord;
 
     fn header(&self) -> &sam::Header {
-        self.header
+        &self.header
     }
 
     fn other_sample_records(&self) -> u64 {
@@ -225,7 +227,7 @@ impl RecordSource for BamRegionSource<'_> {
             // 3. One record, into the caller's reused buffer.
             let bytes_read = self
                 .reader
-                .read_record_buf(self.header, &mut buf.record)
+                .read_record_buf(&self.header, &mut buf.record)
                 .inspect_err(|_| self.done = true)?;
             if bytes_read == 0 {
                 // End of file inside a chunk — try the next one.
@@ -385,7 +387,10 @@ impl Footprint {
 /// container-level early stop below (spec §3.3).
 pub(crate) struct CramRegionSource<'a> {
     reader: cram::io::Reader<File>,
-    header: &'a sam::Header,
+    /// Shared with the `AlignmentFile`, for the reason its BAM sibling's is
+    /// ([`BamRegionSource`]): owned, so the stream this serves outlives the
+    /// borrow that built it.
+    header: Arc<sam::Header>,
     /// The reference bases slice decoding consults. Cheap to clone — it is
     /// internally shared — and cloned per decode, as noodles requires.
     repository: fasta::Repository,
@@ -450,7 +455,7 @@ impl<'a> CramRegionSource<'a> {
     /// pooled handle has been taken.
     pub(crate) fn new(
         reader: cram::io::Reader<File>,
-        header: &'a sam::Header,
+        header: Arc<sam::Header>,
         repository: fasta::Repository,
         plan: CramRegionPlan,
         resolution: &'a ReadGroupResolution,
@@ -581,12 +586,12 @@ impl<'a> CramRegionSource<'a> {
             let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
             for record in slice.records(
                 self.repository.clone(),
-                self.header,
+                &self.header,
                 &compression_header,
                 &core_data_src,
                 &external_data_srcs,
             )? {
-                records.push(RecordBuf::try_from_alignment_record(self.header, &record)?);
+                records.push(RecordBuf::try_from_alignment_record(&self.header, &record)?);
             }
         }
         Ok(Some(records))
@@ -597,7 +602,7 @@ impl RecordSource for CramRegionSource<'_> {
     type Record = NoodlesRawRecord;
 
     fn header(&self) -> &sam::Header {
-        self.header
+        &self.header
     }
 
     fn other_sample_records(&self) -> u64 {
@@ -911,10 +916,13 @@ mod tests {
             .build()
     }
 
-    fn fixture() -> (TempDir, std::path::PathBuf, sam::Header) {
+    /// The header comes back behind an `Arc` because that is what a region
+    /// source now takes — the same shape `AlignmentFile` hands out. It still
+    /// derefs to `&sam::Header` wherever a plan or the oracle wants one.
+    fn fixture() -> (TempDir, std::path::PathBuf, Arc<sam::Header>) {
         let header = bam_header(&contig_specs());
         let (dir, path) = indexed_bam(&header, &spread_of_reads());
-        (dir, path, header)
+        (dir, path, Arc::new(header))
     }
 
     fn region(contig: u32, start: u64, end: u64) -> GenomeRegion {
@@ -971,7 +979,7 @@ mod tests {
     }
 
     /// The same question through the **indexed** path.
-    fn reads_by_index(path: &Path, header: &sam::Header, region: GenomeRegion) -> Vec<String> {
+    fn reads_by_index(path: &Path, header: &Arc<sam::Header>, region: GenomeRegion) -> Vec<String> {
         let index = load_alignment_index(path).expect("load index");
         let mut reader = bam::io::reader::Builder
             .build_from_path(path)
@@ -981,7 +989,7 @@ mod tests {
         let plan = BamRegionSource::plan(header, &index, region, path).expect("plan the query");
         let mut source = BamRegionSource::new(
             reader,
-            header,
+            Arc::clone(header),
             plan,
             &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
@@ -1093,7 +1101,7 @@ mod tests {
 
         let mut source = BamRegionSource::new(
             reader,
-            &header,
+            Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100_000), &path).expect("plan"),
             &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
@@ -1130,7 +1138,7 @@ mod tests {
 
         let mut source = BamRegionSource::new(
             reader,
-            &header,
+            Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
             &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
@@ -1163,7 +1171,7 @@ mod tests {
 
         let mut source = BamRegionSource::new(
             reader,
-            &header,
+            Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
             &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
@@ -1174,7 +1182,7 @@ mod tests {
         let reader = source.into_reader();
         let mut second = BamRegionSource::new(
             reader,
-            &header,
+            Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(1, 1, 200), &path).expect("plan"),
             &ReadGroupResolution::Sole(ReadGroupId(0)),
         );
@@ -1587,7 +1595,7 @@ mod tests {
         let total_entries = plan.entries.len();
         let mut source = CramRegionSource::new(
             reader,
-            &parsed_header,
+            Arc::new(parsed_header),
             repository,
             plan,
             &ReadGroupResolution::Sole(ReadGroupId(0)),
@@ -1739,7 +1747,7 @@ mod tests {
             .expect("plan");
         let mut source = CramRegionSource::new(
             reader,
-            &parsed_header,
+            Arc::new(parsed_header),
             repository,
             plan,
             &ReadGroupResolution::Sole(ReadGroupId(0)),
