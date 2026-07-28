@@ -93,12 +93,12 @@ Four changes to types both generators fill. B1 is representational; B2 changes S
   *Oracle:* the STR dump before and after must be **equivalent modulo the encoding** —
   `PartialLeft(n)` ⇔ `Observed { 0, n }`, `PartialRight(n)` ⇔ `Observed { len - n, n }` — with row
   counts and every support field byte-identical. *Depends:* —. *Source:* spec §6, §10.1.
-- ☐ **B2 — `ObservedSequence` gains `read_group: ReadGroupId` and `placed_left: u32`.** The STR
+- ✅ **B2 — `ObservedSequence` gains `read_group: ReadGroupId` and `placed_left: u32`.** The STR
   generator fills both; its rows now split by group, which is the rebaseline. `placed_start` is
   **not** added. *Oracle:* on a single-read-group fixture the STR dump is byte-identical to B1's; on
   a multi-group fixture rows split and their `num_obs` sum to the single-group totals. *Depends:*
   B1. *Source:* spec §6, §10.2, §10.3.
-- ☐ **B3 — the doc fold-ins.** [`locus_generation.md`](../spec/locus_generation.md) §3 and
+- ✅ **B3 — the doc fold-ins.** [`locus_generation.md`](../spec/locus_generation.md) §3 and
   [`../arch/locus_generation.md`](../arch/locus_generation.md) §1 carry the type: record the new
   `ReadCoverage`, the two new fields, and the `reads_without_observation` caveat (its wording is
   broader than the generic path fills). Also [`read_preparation.md`](../spec/read_preparation.md) §3

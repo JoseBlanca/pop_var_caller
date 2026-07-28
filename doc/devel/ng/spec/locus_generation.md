@@ -121,6 +121,8 @@ pub struct SampleLocusObservations {
     /// *coverage that said nothing* are different states, and only one means "look at the
     /// mapping". The per-reason breakdown is the generator's to report; that they existed
     /// belongs to the locus.
+    ///
+    /// **Read as an honest lower bound, not a total** — see the caveat below the block.
     pub reads_without_observation: u32,
     /// Reads a depth cap discarded. **Non-zero means the support counts are a subsample,
     /// not the depth** — a model reading a capped count as true depth is being misled.
@@ -163,9 +165,12 @@ pub struct ObservedSequence {
     /// The observed bases — allele content, in read coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned — the whole thing, or only
-    /// part (below). **Part of the identity**: a `Complete` `ATAT` and a `PartialLeft(4)`
+    /// part (below). **Part of the identity**: a `Complete` `ATAT` and an `Observed` run of
     /// `ATAT` are different evidence and stay separate entries.
     pub read_coverage: ReadCoverage,
+    /// Which read group (one `@RG`, i.e. one lane) these reads came from. **Part of the
+    /// identity**, so an allele supported from several groups is several rows.
+    pub read_group: ReadGroupId,
     /// How many reads showed this sequence. The whole support on the STR path, and the one
     /// field every model on both paths reduces to.
     pub num_obs: u32,
@@ -178,28 +183,27 @@ pub struct ObservedSequence {
     /// variance from these.
     pub mapq_sum: u32,
     pub mapq_sum_sq: u64,
-    // Read-position-bias fields (production's `placed_left` / `placed_start`) are NOT here:
-    // they are anchor-relative — meaningful on the generic path, degenerate on a tract — so the
-    // pileup generator adds them when it is specced (§11), rather than the shared type carrying
-    // generic-only fields nothing fills in v1.
+    /// How many supporting reads started strictly left of the locus's anchor — freebayes'
+    /// `placedLeft`, the read-position-bias term production subtracts from QUAL. Its sibling
+    /// `placed_start` is NOT carried: no model consumes it, and it is re-derivable.
+    pub placed_left: u32,
     /// Phase-chain ids of the reads folded here — what lets a later step chain observations
     /// at neighbouring loci into a haplotype.
     pub chain_ids: Vec<ChainId>,
 }
 
 /// How much of the locus a single read spanned. `Complete` = it reached **both** borders;
-/// the partials = it ran off its own end partway, carrying how many of the locus's positions
-/// it reached from that border. (One read's span of the locus — not depth.)
+/// otherwise the one run of locus positions it actually witnessed. (One read's span of the
+/// locus — not depth.)
 pub enum ReadCoverage {
     Complete,
-    PartialLeft(u16),
-    PartialRight(u16),
+    Observed { offset_in_locus: u16, positions_covered: u16 },
 }
 
 impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**. A
-    /// `Complete` observation counts its `num_obs` at every position; a `PartialLeft(n)` at
-    /// the leftmost `n`, a `PartialRight(n)` at the rightmost `n`. Length is `region.len()`.
+    /// `Complete` observation counts its `num_obs` at every position; an `Observed` run
+    /// counts it over the stretch it witnessed. Length is `region.len()`.
     pub fn num_obs_along_locus(&self) -> Vec<u32>;
 
     /// The observations a likelihood may score directly — the `Complete` ones. A partial is
@@ -239,11 +243,62 @@ reached both borders of a tract or ran off its own end partway answers two quest
 *Censoring:* a partial observation is a **lower bound**, the sequence at least this long, and a
 likelihood scoring it as complete would read a long allele as short — `complete_observations()` is the
 guard (step 7 owns the censored term, [locus_generation_ssr.md](locus_generation_ssr.md)). *Depth:*
-summing each observation's covered positions — a `Complete` at every position, a `PartialLeft(n)` at
-the leftmost `n` — gives `num_obs_along_locus()`, with nothing stored. The `u16` is that covered extent
-in **locus** coordinates, a separate axis from `bases` (the allele, in **read** coordinates); both are
-needed. On STR the two facts coincide cleanly because tracts do not overlap and a partial read is one
+summing each observation's covered positions — a `Complete` at every position, an `Observed` run over
+the stretch it witnessed — gives `num_obs_along_locus()`, with nothing stored. The run is in **locus**
+coordinates, a separate axis from `bases` (the allele, in **read** coordinates); both are needed. On STR the two facts coincide cleanly because tracts do not overlap and a partial read is one
 physical event.
+
+> **Fold-in, 2026-07-28 — one `Observed` run, not a `PartialLeft`/`PartialRight` pair.** Two
+> side-tagged variants cannot describe what a read witnesses once the **events**, not the alignment
+> span, define it: a read can be blind in the *middle* of a footprint (an interior `N`, a ref-skip)
+> or blind at either end, and a widened record can be wider than the read on both sides.
+> Prefix-versus-suffix survives as a **derivation** — `offset_in_locus == 0` is flush left,
+> `offset_in_locus + positions_covered == region.len()` is flush right — so "a prefix and a suffix
+> are different constraints" is preserved, not lost. `Complete` is kept: the common case, and it
+> keeps `complete_observations()` an equality test. **A non-contiguous witness yields no observation
+> at all** and is counted in `reads_without_observation`, which is what gives that counter a real
+> population on the generic path. Landed as the generic locus generator's prerequisite B1
+> ([spec](locus_generation_pileup.md) §6, [plan](../impl_plan/locus_generation_pileup_prerequisites.md)).
+>
+> *One consequence, recorded rather than hidden:* a run covering the whole locus is flush with
+> **both** borders, so a right-anchored read whose reach reaches the locus length is no longer
+> distinguishable from a left-anchored one. Inherent — they are the same run — and the correct
+> reading: a read that witnessed every position is unconstrained from either side.
+
+> **Fold-in, 2026-07-28 — `reads_without_observation` is an honest lower bound.** The wording above
+> ("reads that covered this locus and produced no observation at all") is broader than the generic
+> path fills. Its per-locus counter is "reads *considered* for this record, minus reads that folded
+> into it", and it misses one class by construction: a read silent over the **whole** footprint —
+> fully adaptor-masked, or all `N` — is never a contributor at any position, so it is never
+> considered. That class is not lost; it is tallied run-level, in
+> `PileupGeneratorCounts::reads_silent_over_footprint`. Counting it per locus would need a membership
+> test against reads that overlap the footprint but have already left the active set, which is not
+> worth paying for a number nothing yet reads. **Read the per-locus value as the subset it is**
+> ([locus_generation_pileup.md](locus_generation_pileup.md) §6, §11).
+
+> **Fold-in, 2026-07-28 — `observed_sequences` is a table of *cells*, not of sequences.** The
+> identity is now `(bases, read_coverage, read_group)`. **A consumer that wants per-allele totals
+> must aggregate over coverage *and* group**, and one that treats each entry as an allele will count
+> the same allele several times. The aggregation is exact: every support field is additive, and the
+> merged cells share their `bases` and `read_coverage` by construction. Two fields arrived together
+> (prerequisite B2):
+>
+> - **`read_group: ReadGroupId`**, at `@RG` grain — the finest available, so library and experiment
+>   stay a downstream fold rather than this step's guess. Carried because a per-chemistry model needs
+>   the allele × group cross **with its quality moments**; a per-group count beside one merged
+>   observation gives the first and loses the second. The near-term consumer is the STR path, whose
+>   stutter level and per-base `ε` are already fit per sample group — off groups it currently has to
+>   *infer* ("data-driven soft clusters") because the evidence did not carry the real one. Free where
+>   a sample has one read group, which is most of them; where it has several, the rows multiply by
+>   the groups covering the locus, accepted as the price of not deciding for the consumer.
+> - **`placed_left: u32`** — the read-position-bias count `vcf/qual_refine.rs` turns into the penalty
+>   production subtracts from QUAL, so dropping it would forfeit QUAL parity. **`placed_start` is
+>   deliberately not carried**: no model consumes it, and it is a pure function of the read's start
+>   against the anchor, so a later consumer re-derives it without changing the fold.
+>
+> The paragraph in the type block above that said the bias fields are "NOT here… the pileup generator
+> adds them when it is specced" is superseded: `placed_left` is on the shared type, which is where
+> `finalise` can put it ([locus_generation_pileup.md](locus_generation_pileup.md) §6).
 
 **`num_obs_along_locus()` is *observation* depth, and only exact per locus.** Two caveats the paralog
 filter (§11) must handle, not this step:
@@ -670,7 +725,7 @@ output. The STR generator's own test is in its spec.
 4. **Order is preserved.** Emitted loci are in coordinate order across a multi-region, multi-kind
    fixture, including where one region yields several loci.
 5. **Depth derives correctly from read-coverage.** `num_obs_along_locus()` yields `region.len()`
-   values; a `Complete` observation raises every position, a `PartialLeft(n)` only the leftmost `n` —
+   values; a `Complete` observation raises every position, a left-flush run of `n` only the leftmost `n` —
    checked on a fixture mixing complete and partial observations, so §3's read-coverage-to-depth rule
    is exercised.
 6. **A partial and a complete of the same bases stay distinct.** Two observations with identical
