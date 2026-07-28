@@ -686,9 +686,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::pileup::walker::CigarOp;
     use crate::ng::locus_generation::pileup::decompose::decompose;
     use crate::ng::types::ReadGroupId;
+    use crate::pileup::walker::CigarOp;
 
     fn make_read(
         cigar: Vec<CigarOp>,
