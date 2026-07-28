@@ -612,7 +612,7 @@ mod classify {
     use crate::ng::alignment::{
         ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel,
     };
-    use crate::ng::locus_generation::ReadCoverage;
+    use crate::ng::locus_generation::{LocusLen, ReadCoverage};
     use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::Bp;
     use std::ops::Range;
@@ -801,7 +801,7 @@ mod classify {
         // the stored run never claims positions the locus does not have (a long partial correctly
         // saturates to full coverage).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
-        let locus_len = locus.segment.tract_len().min(u16::MAX as u64) as u16;
+        let locus_len = LocusLen::from_positions(locus.segment.tract_len());
         Classified::Observed {
             bases: region_seq[tract.clone()].into(),
             coverage: match border {
@@ -1142,6 +1142,7 @@ mod tally {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::ng::locus_generation::LocusLen;
         use crate::ng::types::ReadGroupId;
         use crate::pileup::walker::CigarOp;
 
@@ -1268,7 +1269,7 @@ mod tally {
         /// Pinned here so it is a decision on the record rather than a surprise in a dump.
         #[test]
         fn an_expanded_allele_merges_the_two_sides_into_one_row() {
-            let locus_len = 6;
+            let locus_len = LocusLen::from_positions(6);
             let left = ReadCoverage::from_left(9, locus_len);
             let right = ReadCoverage::from_right(9, locus_len);
             assert_eq!(
@@ -1333,7 +1334,11 @@ mod tally {
                 (&fwd, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
                 (
                     &fwd,
-                    observed(b"CACACA", ReadCoverage::from_left(6, 6), -1.0),
+                    observed(
+                        b"CACACA",
+                        ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+                        -1.0,
+                    ),
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
@@ -1349,8 +1354,22 @@ mod tally {
         fn two_identical_partials_merge_into_one_count() {
             let fwd = read(0, 60);
             let outcomes = vec![
-                (&fwd, observed(b"CACA", ReadCoverage::from_left(4, 6), -1.0)),
-                (&fwd, observed(b"CACA", ReadCoverage::from_left(4, 6), -1.0)),
+                (
+                    &fwd,
+                    observed(
+                        b"CACA",
+                        ReadCoverage::from_left(4, LocusLen::from_positions(6)),
+                        -1.0,
+                    ),
+                ),
+                (
+                    &fwd,
+                    observed(
+                        b"CACA",
+                        ReadCoverage::from_left(4, LocusLen::from_positions(6)),
+                        -1.0,
+                    ),
+                ),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
@@ -1420,9 +1439,23 @@ mod tally {
             let r = read(0, 60);
             let outcomes = vec![
                 (&r, observed(b"GG", ReadCoverage::Complete, -1.0)),
-                (&r, observed(b"AA", ReadCoverage::from_right(2, 6), -1.0)),
+                (
+                    &r,
+                    observed(
+                        b"AA",
+                        ReadCoverage::from_right(2, LocusLen::from_positions(6)),
+                        -1.0,
+                    ),
+                ),
                 (&r, observed(b"AA", ReadCoverage::Complete, -1.0)),
-                (&r, observed(b"AA", ReadCoverage::from_left(2, 6), -1.0)),
+                (
+                    &r,
+                    observed(
+                        b"AA",
+                        ReadCoverage::from_left(2, LocusLen::from_positions(6)),
+                        -1.0,
+                    ),
+                ),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
@@ -1435,8 +1468,14 @@ mod tally {
                 order,
                 vec![
                     (b"AA".as_ref(), ReadCoverage::Complete),
-                    (b"AA".as_ref(), ReadCoverage::from_left(2, 6)),
-                    (b"AA".as_ref(), ReadCoverage::from_right(2, 6)),
+                    (
+                        b"AA".as_ref(),
+                        ReadCoverage::from_left(2, LocusLen::from_positions(6))
+                    ),
+                    (
+                        b"AA".as_ref(),
+                        ReadCoverage::from_right(2, LocusLen::from_positions(6))
+                    ),
                     (b"GG".as_ref(), ReadCoverage::Complete),
                 ]
             );
@@ -1884,6 +1923,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::locus_generation::LocusLen;
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::region_typing::segment_criteria::Motif;
     use crate::ng::types::ReadGroupId;
@@ -2481,6 +2521,35 @@ mod tests {
             placed_left, 0,
             "strictly left, so the read starting *on* the anchor does not count — this is what \
              separates `placed_left` from the `placed_start` ng deliberately does not carry"
+        );
+    }
+
+    /// **The length the mint clamps against is the length the emitted locus reports.**
+    ///
+    /// They come from different expressions — the mint uses `segment.tract_len()`, because it runs
+    /// per read before the locus exists, while every consumer asks the locus
+    /// (`SampleLocusObservations::locus_len`, over `region`). They agree by construction, since the
+    /// region *is* `segment.start()..=segment.end()`, but nothing said so and a divergence would be
+    /// silent: a run clamped against one length and tested for flushness against another reports
+    /// the wrong side.
+    #[test]
+    fn the_mints_locus_length_is_the_emitted_regions() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let records = vec![read_named_with_length("r0", 0, 30, 30)];
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = ssr_generator();
+        let segment = tract(40, 49);
+
+        generator.begin_segment(span(40, 49));
+        let locus = generator
+            .next_locus(&segment, &reads)
+            .expect("no fetch error")
+            .expect("one locus");
+
+        assert_eq!(
+            locus.locus_len(),
+            LocusLen::from_positions(segment.tract_len()),
+            "the consumer's length and the mint's are the same quantity"
         );
     }
 

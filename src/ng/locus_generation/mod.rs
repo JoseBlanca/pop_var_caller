@@ -96,6 +96,17 @@ impl SampleLocusObservations {
         depth
     }
 
+    /// This locus's length, for the [`ReadCoverage`] predicates that need it.
+    ///
+    /// **The one source a consumer should use.** The mint derives the same quantity from
+    /// the segment it is building the locus from, before the locus exists; every reader
+    /// afterwards should ask the locus rather than re-deriving from `region`, so the two
+    /// cannot drift apart unnoticed. That they agree is pinned by
+    /// `ssr::tests::the_mints_locus_length_is_the_emitted_regions`.
+    pub fn locus_len(&self) -> LocusLen {
+        LocusLen::of_region(self.region)
+    }
+
     /// The observations a likelihood may score directly — the
     /// [`Complete`](ReadCoverage::Complete) ones.
     ///
@@ -206,6 +217,43 @@ pub enum ReadCoverage {
     },
 }
 
+/// A locus's length in reference positions — the axis a [`ReadCoverage`] run lives on.
+///
+/// **A newtype because the alternative is silently wrong.** Every constructor and
+/// predicate on `ReadCoverage` takes a covered extent *and* a locus length, both counts
+/// of locus positions and both formerly `u16` — so `from_left(10, 4)` and
+/// `from_left(4, 10)` each compiled, and the clamping the constructors do for their own
+/// good would then hide the transposition rather than surface it. Two `u16`s in a row
+/// with no way to tell them apart is exactly the shape that produces a wrong depth and
+/// no panic.
+///
+/// It also gives the saturating cast **one** home. The count arrives as a `u64` (a
+/// region length, a tract length) and has to be narrowed; doing that at each call site
+/// spread the same `.min(u16::MAX as u64) as u16` across the mint and every dump tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LocusLen(u16);
+
+impl LocusLen {
+    /// From a count of reference positions, saturating at `u16::MAX`.
+    ///
+    /// Saturation rather than an error: a locus longer than 65,535 positions cannot be
+    /// described by a run either, and the clamp keeps the derivation total. A tract that
+    /// long is a satellite, which the caller does not handle.
+    pub fn from_positions(positions: u64) -> Self {
+        Self(positions.min(u16::MAX as u64) as u16)
+    }
+
+    /// The length of `region` — the canonical source once a locus exists, and what
+    /// [`SampleLocusObservations::locus_len`] returns.
+    pub fn of_region(region: GenomeRegion) -> Self {
+        Self::from_positions(region.len())
+    }
+
+    pub fn get(self) -> u16 {
+        self.0
+    }
+}
+
 impl ReadCoverage {
     /// A run flush with the locus's **left** border, `positions_covered` long — the
     /// old `PartialLeft(n)`.
@@ -213,10 +261,10 @@ impl ReadCoverage {
     /// `locus_len` clamps the run into the locus. It is needed because a producer's
     /// reach can be measured in *read* bases, which diverge from locus positions under
     /// stutter; a run must never claim positions the locus does not have.
-    pub fn from_left(positions_covered: u16, locus_len: u16) -> Self {
+    pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Self {
         Self::Observed {
             offset_in_locus: 0,
-            positions_covered: positions_covered.min(locus_len),
+            positions_covered: positions_covered.min(locus_len.get()),
         }
     }
 
@@ -247,10 +295,10 @@ impl ReadCoverage {
     /// the pre-reshape answer, and the plan's stated equivalence
     /// `PartialRight(n) ⇔ Observed { len - n, n }` stops holding at `n = len`. Pinned by
     /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
-    pub fn from_right(positions_covered: u16, locus_len: u16) -> Self {
-        let covered = positions_covered.min(locus_len);
+    pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Self {
+        let covered = positions_covered.min(locus_len.get());
         Self::Observed {
-            offset_in_locus: locus_len - covered,
+            offset_in_locus: locus_len.get() - covered,
             positions_covered: covered,
         }
     }
@@ -268,13 +316,13 @@ impl ReadCoverage {
 
     /// Whether the run ends at the locus's right border — a **suffix** constraint.
     /// Always true of `Complete`.
-    pub fn is_flush_right(&self, locus_len: u16) -> bool {
+    pub fn is_flush_right(&self, locus_len: LocusLen) -> bool {
         match self {
             Self::Complete => true,
             Self::Observed {
                 offset_in_locus,
                 positions_covered,
-            } => offset_in_locus.saturating_add(*positions_covered) >= locus_len,
+            } => offset_in_locus.saturating_add(*positions_covered) >= locus_len.get(),
         }
     }
 }
@@ -1261,7 +1309,7 @@ mod tests {
             chain_ids: Vec::new(),
         };
         let partial = ObservedSequence {
-            read_coverage: ReadCoverage::from_left(6, 6),
+            read_coverage: ReadCoverage::from_left(6, LocusLen::from_positions(6)),
             ..complete.clone()
         };
         assert_ne!(complete, partial);
@@ -1279,8 +1327,16 @@ mod tests {
             region(1, 10),
             vec![
                 obs(b"AAAAAAAAAA", ReadCoverage::Complete, 3),
-                obs(b"AAAA", ReadCoverage::from_left(4, 10), 2),
-                obs(b"AAA", ReadCoverage::from_right(3, 10), 5),
+                obs(
+                    b"AAAA",
+                    ReadCoverage::from_left(4, LocusLen::from_positions(10)),
+                    2,
+                ),
+                obs(
+                    b"AAA",
+                    ReadCoverage::from_right(3, LocusLen::from_positions(10)),
+                    5,
+                ),
             ],
         );
         // positions:            1  2  3  4  5  6  7  8  9 10
@@ -1328,7 +1384,11 @@ mod tests {
     fn a_run_reaching_beyond_the_locus_is_clamped() {
         let clamped = locus(
             region(1, 3),
-            vec![obs(b"AAA", ReadCoverage::from_left(9, 3), 4)],
+            vec![obs(
+                b"AAA",
+                ReadCoverage::from_left(9, LocusLen::from_positions(3)),
+                4,
+            )],
         );
         assert_eq!(clamped.num_obs_along_locus(), vec![4, 4, 4]);
     }
@@ -1343,14 +1403,14 @@ mod tests {
     #[test]
     fn from_right_places_the_run_against_the_right_border() {
         assert_eq!(
-            ReadCoverage::from_left(4, 10),
+            ReadCoverage::from_left(4, LocusLen::from_positions(10)),
             ReadCoverage::Observed {
                 offset_in_locus: 0,
                 positions_covered: 4
             }
         );
         assert_eq!(
-            ReadCoverage::from_right(4, 10),
+            ReadCoverage::from_right(4, LocusLen::from_positions(10)),
             ReadCoverage::Observed {
                 offset_in_locus: 6,
                 positions_covered: 4
@@ -1370,15 +1430,15 @@ mod tests {
     #[test]
     fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
         assert_eq!(
-            ReadCoverage::from_left(9, 3),
+            ReadCoverage::from_left(9, LocusLen::from_positions(3)),
             ReadCoverage::Observed {
                 offset_in_locus: 0,
                 positions_covered: 3
             }
         );
         assert_eq!(
-            ReadCoverage::from_right(9, 3),
-            ReadCoverage::from_left(9, 3)
+            ReadCoverage::from_right(9, LocusLen::from_positions(3)),
+            ReadCoverage::from_left(9, LocusLen::from_positions(3))
         );
     }
 
@@ -1391,15 +1451,18 @@ mod tests {
     #[test]
     fn flushness_is_derived_from_where_the_run_sits() {
         assert!(ReadCoverage::Complete.is_flush_left());
-        assert!(ReadCoverage::Complete.is_flush_right(10));
+        assert!(ReadCoverage::Complete.is_flush_right(LocusLen::from_positions(10)));
 
-        let left = ReadCoverage::from_left(4, 10);
+        let left = ReadCoverage::from_left(4, LocusLen::from_positions(10));
         assert!(left.is_flush_left(), "a prefix constraint");
-        assert!(!left.is_flush_right(10));
+        assert!(!left.is_flush_right(LocusLen::from_positions(10)));
 
-        let right = ReadCoverage::from_right(4, 10);
+        let right = ReadCoverage::from_right(4, LocusLen::from_positions(10));
         assert!(!right.is_flush_left());
-        assert!(right.is_flush_right(10), "a suffix constraint");
+        assert!(
+            right.is_flush_right(LocusLen::from_positions(10)),
+            "a suffix constraint"
+        );
 
         // An interior run — flush with neither border. The STR path cannot mint one, but the
         // predicates are shared and the generic path will.
@@ -1408,7 +1471,7 @@ mod tests {
             positions_covered: 4,
         };
         assert!(!interior.is_flush_left());
-        assert!(!interior.is_flush_right(10));
+        assert!(!interior.is_flush_right(LocusLen::from_positions(10)));
     }
 
     /// Depth over an **interior** run — flush with neither border. This is the case the
@@ -1441,9 +1504,17 @@ mod tests {
             region(1, 6),
             vec![
                 obs(b"ATATAT", ReadCoverage::Complete, 4),
-                obs(b"ATATAT", ReadCoverage::from_left(6, 6), 2),
+                obs(
+                    b"ATATAT",
+                    ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+                    2,
+                ),
                 obs(b"ATGTAT", ReadCoverage::Complete, 3),
-                obs(b"ATAT", ReadCoverage::from_right(4, 6), 1),
+                obs(
+                    b"ATAT",
+                    ReadCoverage::from_right(4, LocusLen::from_positions(6)),
+                    1,
+                ),
             ],
         );
         // Both completes, and only the completes — a partial is never scored as exact.

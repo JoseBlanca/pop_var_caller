@@ -32,7 +32,7 @@ use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -102,7 +102,7 @@ impl DumpReport {
         let depth: u32 = locus.complete_observations().map(|obs| obs.num_obs).sum();
         // The locus length in positions — what turns a run's offset into "flush left" or
         // "flush right", now that the side is derived rather than tagged.
-        let locus_len = locus.region.len().min(u16::MAX as u64) as u16;
+        let locus_len = locus.locus_len();
         let motif = match &locus.kind {
             LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
             _ => Vec::new(),
@@ -160,7 +160,7 @@ impl DumpReport {
 }
 
 /// The tag a read-coverage carries in the `read_coverage` column.
-fn coverage_label(coverage: ReadCoverage, locus_len: u16) -> &'static str {
+fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
     // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),

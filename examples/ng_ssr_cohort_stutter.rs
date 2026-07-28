@@ -54,7 +54,7 @@ use std::sync::Arc;
 use pop_var_caller::fasta::ContigList;
 use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -121,10 +121,7 @@ fn write_locus<W: Write>(
     };
 
     for obs in &locus.observed_sequences {
-        let label = coverage_label(
-            obs.read_coverage,
-            locus.region.len().min(u16::MAX as u64) as u16,
-        );
+        let label = coverage_label(obs.read_coverage, locus.locus_len());
         match obs.read_coverage {
             ReadCoverage::Complete => {
                 counts.obs_complete += 1;
@@ -154,7 +151,7 @@ fn write_locus<W: Write>(
 }
 
 /// The tag a read-coverage carries in the `coverage` column.
-fn coverage_label(coverage: ReadCoverage, locus_len: u16) -> &'static str {
+fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
     // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
