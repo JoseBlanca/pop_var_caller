@@ -72,7 +72,7 @@ than reaches in (spec §3).
 - ✅ **A3 — the reference shim.** `RefSeqFetcher<R: RefSeq>` implementing `MultiChromRefFetcher`.
   Semantically empty: both contracts are canonical uppercase `{A,C,G,T,N}`, verified in the
   implementation and not just the doc. *Depends:* A2. *Source:* arch §1.3.
-- ☐ **A4 — the copied suite is green.** All 46 inherited tests pass **unmodified**. Anything needing
+- ✅ **A4 — the copied suite is green.** All 46 inherited tests pass **unmodified**. Anything needing
   a touch here is a transcription error, not a design change — spec §12 is explicit that this is the
   gate. *Depends:* A3. *Source:* spec §12.
 

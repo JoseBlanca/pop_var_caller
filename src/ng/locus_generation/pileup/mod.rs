@@ -54,6 +54,13 @@ mod errors;
 mod genome_walk;
 mod open_record;
 
+/// Production's own end-to-end suite, copied verbatim and run against the copy —
+/// Milestone A's gate (spec §12). `pub(crate)` exactly as production's is, so its
+/// `MockFasta` / `snp_read` / `paired_snp_reads` fixtures are reachable from the
+/// parity harness.
+#[cfg(test)]
+pub(crate) mod tests;
+
 // The vocabulary the copied files resolve through `super::`. Production's own
 // `walker/mod.rs` declares exactly these names around exactly these modules.
 pub use crate::ng::read::prepared_read::{MateRole, PreparedRead, ReadLengthError};
