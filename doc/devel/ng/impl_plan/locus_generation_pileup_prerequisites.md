@@ -85,7 +85,7 @@ The obstacle: `reads_in_region` returns `SampleRegionReads<'_, R>`, and `LocusGe
 
 Four changes to types both generators fill. B1 is representational; B2 changes STR output.
 
-- ☐ **B1 — `ReadCoverage` → `Complete` + `Observed { offset_in_locus, positions_covered }`.**
+- ✅ **B1 — `ReadCoverage` → `Complete` + `Observed { offset_in_locus, positions_covered }`.**
   **Own commit, do not bundle** — a coverage encoding that is subtly wrong is a wrong depth, not a
   panic. Covers: the enum; `num_obs_along_locus`'s arm; the STR generator's four minting sites (two
   of which pass the variant **as a function value**, so that helper is restructured, not retyped),

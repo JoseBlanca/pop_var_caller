@@ -20,7 +20,7 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion, TypedRegionError};
-use crate::ng::types::GenomeRegion;
+use crate::ng::types::{GenomeRegion, ReadGroupId};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -114,8 +114,15 @@ impl SampleLocusObservations {
 /// The fields between `num_obs` and `chain_ids` are the per-read moments the SNP
 /// filters read (strand bias, base-quality error, the MAPQ multi-mapper test); an STR
 /// model reduces to `num_obs` alone. Modelled on production's per-allele shape
-/// (`AlleleObservation` + `AlleleSupportStats`), minus the anchor-relative
-/// read-position-bias fields, which are the generic path's (spec §3).
+/// (`AlleleObservation` + `AlleleSupportStats`), minus `placed_start`, which no model
+/// consumes (spec §6).
+///
+/// **This is a table of cells, not a table of sequences.** The identity is
+/// `(bases, read_coverage, read_group)` — three axes, not one — so a consumer that
+/// wants per-allele totals must aggregate over coverage *and* group, and one that
+/// treats each entry as an allele will count the same allele several times. The
+/// aggregation is exact: every support field is additive, and the merged cells share
+/// their `bases` and `read_coverage` by construction (spec §6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObservedSequence {
     /// The observed bases — allele content, in **read** coordinates.
@@ -125,6 +132,20 @@ pub struct ObservedSequence {
     /// [`Observed`](ReadCoverage::Observed) run of the same `bases` are different
     /// evidence and stay separate entries (spec §3).
     pub read_coverage: ReadCoverage,
+    /// Which read group — one `@RG`, i.e. one lane — these reads came from. **Part of
+    /// the identity**, so an allele supported from several groups is several rows.
+    ///
+    /// Carried because a per-chemistry model needs the allele × group cross **with its
+    /// quality moments**: a per-group count beside one merged observation gives the
+    /// first and loses the second. The near-term consumer is the STR path, whose
+    /// stutter level and per-base `ε` are already fit per sample group — off groups it
+    /// currently has to *infer* ("data-driven soft clusters") because the evidence did
+    /// not carry the real one. The read group is it (spec §6).
+    ///
+    /// At the **finest** grain available, deliberately: library and experiment stay a
+    /// downstream fold, so picking a grain remains the modeller's decision and not this
+    /// step's guess. Free where a sample has one read group, which is most of them.
+    pub read_group: ReadGroupId,
     /// How many reads showed this sequence. The whole support on the STR path, and the
     /// one field every model on both paths reduces to.
     pub num_obs: u32,
@@ -138,6 +159,15 @@ pub struct ObservedSequence {
     pub mapq_sum: u32,
     /// Σ MAPQ² over the supporting reads (see `mapq_sum`).
     pub mapq_sum_sq: u64,
+    /// How many supporting reads started **strictly left** of the locus's anchor —
+    /// freebayes' `placedLeft`, and the read-position-bias term production subtracts
+    /// from QUAL (`vcf/qual_refine.rs`).
+    ///
+    /// Carried because dropping it would forfeit the ability to reproduce production's
+    /// QUAL, which outranks tidiness. Its sibling `placed_start` is **not** carried: no
+    /// model consumes it, and it is a pure function of the read's start against the
+    /// anchor, so a later consumer can re-derive it without changing the fold (spec §6).
+    pub placed_left: u32,
     /// Phase-chain ids of the reads folded here — what lets a later step chain
     /// observations at neighbouring loci into a haplotype.
     pub chain_ids: Vec<ChainId>,
@@ -660,7 +690,7 @@ impl<T> std::iter::FusedIterator for SampleLocusObservationsIterator<T> where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::types::{ContigId, Position};
+    use crate::ng::types::{ContigId, Position, ReadGroupId};
 
     fn region(start: u64, end: u64) -> GenomeRegion {
         GenomeRegion {
@@ -676,11 +706,13 @@ mod tests {
         ObservedSequence {
             bases: Box::from(bases),
             read_coverage,
+            read_group: ReadGroupId(0),
             num_obs,
             num_fwd: 0,
             q_sum: 0.0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
+            placed_left: 0,
             chain_ids: Vec::new(),
         }
     }
@@ -1155,11 +1187,13 @@ mod tests {
             observed_sequences: vec![ObservedSequence {
                 bases: Box::from(&b"T"[..]),
                 read_coverage: ReadCoverage::Complete,
+                read_group: ReadGroupId(0),
                 num_obs: 9,
                 num_fwd: 5,
                 q_sum: -12.0,
                 mapq_sum: 540,
                 mapq_sum_sq: 32_400,
+                placed_left: 3,
                 chain_ids: vec![1, 2],
             }],
             reads_without_observation: 0,
@@ -1204,11 +1238,13 @@ mod tests {
         let complete = ObservedSequence {
             bases: Box::from(&b"ATATAT"[..]),
             read_coverage: ReadCoverage::Complete,
+            read_group: ReadGroupId(0),
             num_obs: 1,
             num_fwd: 1,
             q_sum: 0.0,
             mapq_sum: 60,
             mapq_sum_sq: 3_600,
+            placed_left: 0,
             chain_ids: Vec::new(),
         };
         let partial = ObservedSequence {
