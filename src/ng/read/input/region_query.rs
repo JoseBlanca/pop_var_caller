@@ -77,9 +77,12 @@ pub(crate) struct BamRegionSource {
     /// gate, which is what makes this a cast rather than a lookup.
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    /// Shared with the `AlignmentFile`, like the header: settled at open, never
-    /// rebuilt per query, and owned so this source carries no lifetime.
-    resolution: Arc<ReadGroupResolution>,
+    /// A copy of the `AlignmentFile`'s, settled at open and never rebuilt per
+    /// query. Held by value, not behind an `Arc`: cloning one is a tag and a
+    /// `u32` for the common single-read-group file, and one atomic increment
+    /// otherwise (`ReadGroupResolution`). Owned, so this source carries no
+    /// lifetime.
+    resolution: ReadGroupResolution,
     /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
     other_sample_records: u64,
     /// Latched once the scan passes the region end or the chunks run out.
@@ -153,7 +156,7 @@ impl BamRegionSource {
         reader: bam::io::Reader<bgzf::io::Reader<File>>,
         header: Arc<sam::Header>,
         plan: RegionPlan,
-        resolution: Arc<ReadGroupResolution>,
+        resolution: ReadGroupResolution,
     ) -> Self {
         Self {
             reader,
@@ -414,9 +417,12 @@ pub(crate) struct CramRegionSource {
     container: Option<DecodedContainer>,
     target_reference_sequence_id: usize,
     region: GenomeRegion,
-    /// Shared with the `AlignmentFile`, like the header: settled at open, never
-    /// rebuilt per query, and owned so this source carries no lifetime.
-    resolution: Arc<ReadGroupResolution>,
+    /// A copy of the `AlignmentFile`'s, settled at open and never rebuilt per
+    /// query. Held by value, not behind an `Arc`: cloning one is a tag and a
+    /// `u32` for the common single-read-group file, and one atomic increment
+    /// otherwise (`ReadGroupResolution`). Owned, so this source carries no
+    /// lifetime.
+    resolution: ReadGroupResolution,
     /// Records skipped as another sample's — see `RecordSource::other_sample_records`.
     other_sample_records: u64,
     done: bool,
@@ -458,7 +464,7 @@ impl CramRegionSource {
         header: Arc<sam::Header>,
         repository: fasta::Repository,
         plan: CramRegionPlan,
-        resolution: Arc<ReadGroupResolution>,
+        resolution: ReadGroupResolution,
         container: Option<DecodedContainer>,
     ) -> Self {
         Self {
@@ -991,7 +997,7 @@ mod tests {
             reader,
             Arc::clone(header),
             plan,
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         let mut buf = NoodlesRawRecord::default();
@@ -1103,7 +1109,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100_000), &path).expect("plan"),
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         let mut buf = NoodlesRawRecord::default();
@@ -1140,7 +1146,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
         );
 
         // Drain, then confirm the source latched `done` rather than running on.
@@ -1173,7 +1179,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(0, 1, 100), &path).expect("plan"),
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
         );
         let mut buf = NoodlesRawRecord::default();
         while source.read_next(&mut buf).expect("read") {}
@@ -1184,7 +1190,7 @@ mod tests {
             reader,
             Arc::clone(&header),
             BamRegionSource::plan(&header, &index, region(1, 1, 200), &path).expect("plan"),
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
         );
         let mut seen = 0;
         while second.read_next(&mut buf).expect("read") {
@@ -1598,7 +1604,7 @@ mod tests {
             Arc::new(parsed_header),
             repository,
             plan,
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
             None,
         );
 
@@ -1750,7 +1756,7 @@ mod tests {
             Arc::new(parsed_header),
             repository,
             plan,
-            Arc::new(ReadGroupResolution::Sole(ReadGroupId(0))),
+            ReadGroupResolution::Sole(ReadGroupId(0)),
             None,
         );
 

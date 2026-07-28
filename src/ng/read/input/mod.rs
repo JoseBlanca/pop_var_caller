@@ -1695,7 +1695,7 @@ mod tests {
                     ("rg1".into(), RecordOwner::Mine(ReadGroupId(0))),
                     ("rg2".into(), RecordOwner::Mine(ReadGroupId(1))),
                 ]
-                .into_boxed_slice()
+                .into()
             )
         );
     }

@@ -100,11 +100,13 @@ pub struct AlignmentFile {
     /// never recomputed; the record sources consult it per record only when it
     /// says they must.
     ///
-    /// `Arc` for the reason the header is: a region source **owns** what it
-    /// consults, so the stream it serves does not borrow this file. Cloning the
-    /// value instead would allocate a `PerRecord` table per query — a per-query
-    /// cost on a path that runs ~10⁶ times.
-    resolution: Arc<ReadGroupResolution>,
+    /// A region source **owns** what it consults, so the stream it serves does
+    /// not borrow this file — but the sharing lives inside
+    /// [`ReadGroupResolution`] rather than around it, so this field is a plain
+    /// value and a per-query copy costs no atomic at all in the common
+    /// single-read-group case. The header, which has no such cheap-clone form,
+    /// is the one that needs an `Arc` of its own.
+    resolution: ReadGroupResolution,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
     /// reference's. `None` where the file carries no usable `M5`.
@@ -410,7 +412,7 @@ impl AlignmentFile {
             path: Arc::from(path),
             header: Arc::new(header),
             index,
-            resolution: Arc::new(resolution),
+            resolution,
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -509,7 +511,7 @@ impl AlignmentFile {
                     reader,
                     Arc::clone(&self.header),
                     plan,
-                    Arc::clone(&self.resolution),
+                    self.resolution.clone(),
                 ))
             }
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
@@ -520,7 +522,7 @@ impl AlignmentFile {
                         .clone()
                         .expect("open builds a repository for every CRAM"),
                     plan,
-                    Arc::clone(&self.resolution),
+                    self.resolution.clone(),
                     container,
                 ))
             }
