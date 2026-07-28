@@ -69,13 +69,19 @@ impl SampleLocusObservations {
         let len = self.region.len() as usize;
         let mut depth = vec![0u32; len];
         for obs in &self.observed_sequences {
-            // A partial's covered extent cannot exceed the locus length — that is a
-            // producer invariant, enforced where `ReadCoverage` is minted (the STR
-            // generator). Here we *clamp* rather than `debug_assert`: this is a
-            // consumer-side derivation run over whole cohorts, and a debug-only guard
-            // compiles out of the release build this repo actually runs (a trap it has
-            // recorded hitting twice). Clamping keeps the derivation panic-free on any
-            // input; a bad extent is caught at the producer, not here.
+            // **This clamp is the guard, not a second one.** An earlier comment here
+            // called the bound "a producer invariant, enforced where `ReadCoverage` is
+            // minted", which overstated it twice over: `Observed`'s fields are public, so
+            // a run need not have come from `from_left`/`from_right` at all; and even one
+            // that did was clamped against *some* `LocusLen`, which nothing ties to the
+            // locus it ends up on. `ReadCoverage` cannot know its own locus, so the
+            // invariant is not expressible on the type — it can only be checked here,
+            // against the region actually in hand.
+            //
+            // Clamping rather than `debug_assert`: this is a consumer-side derivation run
+            // over whole cohorts, and a debug-only guard compiles out of the release build
+            // this repo actually runs (a trap it has recorded hitting twice). Clamping
+            // keeps the derivation total on any input.
             let (from, to) = match obs.read_coverage {
                 ReadCoverage::Complete => (0, len),
                 ReadCoverage::Observed {
@@ -208,6 +214,20 @@ pub enum ReadCoverage {
     Complete,
     /// The stretch the read did witness, in **locus positions** — the axis `bases` is
     /// not on (that is allele content, in read coordinates).
+    ///
+    /// **The fields are public, and the clamping in [`from_left`](Self::from_left) /
+    /// [`from_right`](Self::from_right) is therefore a convention rather than a type
+    /// invariant.** Left that way deliberately (2026-07-28): private fields would prove
+    /// only that a run had been clamped against *some* [`LocusLen`], and nothing ties
+    /// that length to the locus the run is finally attached to — `ReadCoverage` cannot
+    /// know its own locus. So the real check has to live where the region is in hand,
+    /// which is `num_obs_along_locus`, and it does.
+    ///
+    /// Revisit when the **generic** path mints its first run: it needs runs flush with
+    /// neither border (a read blind in the middle of a footprint), which neither
+    /// constructor expresses, so the full constructor set — and with it the case for
+    /// sealing the variant — is only knowable then. Building it now would be designing
+    /// against one producer and guessing at the second.
     Observed {
         /// Locus positions between the locus's left border and the first one
         /// witnessed. `0` = flush with the left border, i.e. a prefix constraint.

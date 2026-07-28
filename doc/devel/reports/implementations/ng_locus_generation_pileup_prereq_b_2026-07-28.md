@@ -162,7 +162,36 @@ deleted; `num_obs_along_locus` had no interior-run case — the very case the re
 represent; and the migration traded four exhaustive matches for guard chains ending in `_`, so the
 compiler could no longer force those sites to be revisited.
 
-## 8. Open
+## 8. Checkpoint B — the four decisions
+
+Raised by the review, put to the owner, resolved 2026-07-28.
+
+1. **Seal `ReadCoverage::Observed` behind private fields? — No, and not merely deferred.**
+   (Owner: no opinion, implementer's call.) Private fields would prove only that a run had been
+   clamped against *some* `LocusLen`; nothing ties that length to the locus the run is finally
+   attached to, because `ReadCoverage` cannot know its own locus. The real check therefore has to
+   live where the region is in hand — `num_obs_along_locus` — and it does. The comment there
+   claiming the bound was "a producer invariant, enforced at the mint" was **overstated on both
+   counts** and is corrected. **Revisit when the generic path mints its first run:** it needs runs
+   flush with neither border, which neither constructor expresses, so the full constructor set — and
+   with it the case for sealing — is only knowable then. Recorded on the variant.
+2. **A `LocusLen` newtype? — Yes** (`e2d6ebd`). Three review categories converged: the constructors
+   and predicates took two same-typed `u16`s, so `from_left(10, 4)` and `from_left(4, 10)` both
+   compiled and the clamping *hid* the transposition. The newtype also gives the saturating narrowing
+   one home, and `SampleLocusObservations::locus_len()` closes the second half of the finding — the
+   mint derived its length from `segment.tract_len()` while every dump derived it from
+   `region.len()`, equal by construction and documented nowhere. Pinned by
+   `the_mints_locus_length_is_the_emitted_regions`. The migration was compiler-driven: every error
+   after the signature change was a call site passing a bare integer.
+3. **Prevent the expanded-allele merge, or keep the expansion magnitude? — No.** (Owner: *"leave
+   this as it is right now. No need to change something that we are not using right now."*)
+   Preventing the merge means restoring a side tag, i.e. the encoding the spec rejected. Keeping the
+   magnitude would mean a new field whose only consumer is hypothetical. The behaviour is tested and
+   documented; §7 states what it costs.
+4. **A read-group column on the two dashboard dumps? — Owner will do it later.** Documented at the
+   top of each in the meantime, since a row is now a cell and neither dump can tell cells apart.
+
+## 9. Open
 
 - The reshape's one recorded consequence: **a run covering the whole locus is flush with both
   borders**, so a right-anchored read whose reach reaches the locus length is not distinguishable
