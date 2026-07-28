@@ -228,12 +228,25 @@ impl ReadCoverage {
     /// huge offset, or — with a saturating subtraction — silently relabel a
     /// right-anchored read as a left-anchored one.
     ///
-    /// **One consequence of the encoding, recorded rather than hidden:** a run that
-    /// covers the whole locus is flush with *both* borders, so a right-anchored read
-    /// whose reach reaches or exceeds the locus length is no longer distinguishable
-    /// from a left-anchored one. That is inherent — they are the same run — and it is
-    /// the correct reading: a read that witnessed every position is not constrained
-    /// from either side.
+    /// **One consequence of the encoding, and it reaches further than labelling.** A run
+    /// that covers the whole locus is flush with *both* borders, so once
+    /// `positions_covered >= locus_len` this returns exactly what
+    /// [`from_left`](Self::from_left) would. Three things follow, and the third is a
+    /// behaviour change:
+    ///
+    /// 1. the run is reported as flush left by [`is_flush_left`](Self::is_flush_left);
+    /// 2. every label derived from flushness calls it a *left* partial;
+    /// 3. **it shares a bucket key with a left-flush run of the same bases, so the two
+    ///    merge into one row** — where `PartialLeft(n)` and `PartialRight(n)` kept them
+    ///    apart.
+    ///
+    /// That is reachable on the STR path, where the reach is measured in *read* bases:
+    /// an allele longer than the reference tract gives a reach past the locus length.
+    /// It is arguably the right answer — identical constraints are one cell, and a read
+    /// that witnessed every position is constrained from neither side — but it is not
+    /// the pre-reshape answer, and the plan's stated equivalence
+    /// `PartialRight(n) ⇔ Observed { len - n, n }` stops holding at `n = len`. Pinned by
+    /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
     pub fn from_right(positions_covered: u16, locus_len: u16) -> Self {
         let covered = positions_covered.min(locus_len);
         Self::Observed {
@@ -1301,22 +1314,123 @@ mod tests {
         );
     }
 
-    /// A partial claiming to reach further than the locus is long is clamped, not an
-    /// out-of-bounds index — the defensive guard, on **both** ends. The right arm's
-    /// clamp is what keeps `len - n` from underflowing, so it is exercised too.
+    /// A run claiming to reach further than the locus is long is clamped, not an
+    /// out-of-bounds index — the consumer-side guard, which also survives an *unclamped*
+    /// producer: an unclamped `locus_len - positions_covered` wraps to a huge offset, and
+    /// this test still yields a bounded window rather than panicking.
+    ///
+    /// **It runs one case, not two.** Before the reshape `PartialLeft(9)` and
+    /// `PartialRight(9)` on a 3-position locus were distinct values and exercised two arms;
+    /// they now denote the same run, which is what
+    /// `from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus` states
+    /// directly. The doc used to claim "both ends" and no longer does.
     #[test]
-    fn partial_reach_beyond_locus_is_clamped() {
-        let left = locus(
+    fn a_run_reaching_beyond_the_locus_is_clamped() {
+        let clamped = locus(
             region(1, 3),
             vec![obs(b"AAA", ReadCoverage::from_left(9, 3), 4)],
         );
-        assert_eq!(left.num_obs_along_locus(), vec![4, 4, 4]);
+        assert_eq!(clamped.num_obs_along_locus(), vec![4, 4, 4]);
+    }
 
-        let right = locus(
-            region(1, 3),
-            vec![obs(b"AAA", ReadCoverage::from_right(9, 3), 4)],
+    /// **The constructors place the run against their own border**, and the offset is
+    /// derived from the *clamped* reach, never the raw one.
+    ///
+    /// The right case is the one that matters: `from_right(4, 10)` must start at 6. Deriving
+    /// the offset before clamping would wrap on an over-long reach, and a saturating
+    /// subtraction would quietly relabel a right-anchored read as left-anchored — the
+    /// silent-depth failure this step was flagged for.
+    #[test]
+    fn from_right_places_the_run_against_the_right_border() {
+        assert_eq!(
+            ReadCoverage::from_left(4, 10),
+            ReadCoverage::Observed {
+                offset_in_locus: 0,
+                positions_covered: 4
+            }
         );
-        assert_eq!(right.num_obs_along_locus(), vec![4, 4, 4]);
+        assert_eq!(
+            ReadCoverage::from_right(4, 10),
+            ReadCoverage::Observed {
+                offset_in_locus: 6,
+                positions_covered: 4
+            }
+        );
+    }
+
+    /// **Once the reach covers the whole locus the two constructors agree** — a read that
+    /// witnessed every position is constrained from neither border, so there is one run and
+    /// not two.
+    ///
+    /// Stated as a test because it is a real behaviour change, not a curiosity: on the STR
+    /// path an expanded allele can give a reach longer than the reference tract, and a
+    /// left-anchored and a right-anchored read of the *same bases* then land in the **same
+    /// tally cell** and merge into one row — where `PartialLeft(n)` and `PartialRight(n)`
+    /// kept them apart. See `ssr::tally::tests::an_expanded_allele_merges_the_two_sides`.
+    #[test]
+    fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
+        assert_eq!(
+            ReadCoverage::from_left(9, 3),
+            ReadCoverage::Observed {
+                offset_in_locus: 0,
+                positions_covered: 3
+            }
+        );
+        assert_eq!(
+            ReadCoverage::from_right(9, 3),
+            ReadCoverage::from_left(9, 3)
+        );
+    }
+
+    /// The flushness predicates — the **entire** surviving representation of
+    /// prefix-versus-suffix, since the reshape dropped the side-tagged variants.
+    ///
+    /// Both `Complete` arms are asserted here because no call site reaches them: every
+    /// `coverage_label` matches `Complete` first, so inverting either arm to `false` would
+    /// otherwise change nothing anywhere in the tree.
+    #[test]
+    fn flushness_is_derived_from_where_the_run_sits() {
+        assert!(ReadCoverage::Complete.is_flush_left());
+        assert!(ReadCoverage::Complete.is_flush_right(10));
+
+        let left = ReadCoverage::from_left(4, 10);
+        assert!(left.is_flush_left(), "a prefix constraint");
+        assert!(!left.is_flush_right(10));
+
+        let right = ReadCoverage::from_right(4, 10);
+        assert!(!right.is_flush_left());
+        assert!(right.is_flush_right(10), "a suffix constraint");
+
+        // An interior run — flush with neither border. The STR path cannot mint one, but the
+        // predicates are shared and the generic path will.
+        let interior = ReadCoverage::Observed {
+            offset_in_locus: 3,
+            positions_covered: 4,
+        };
+        assert!(!interior.is_flush_left());
+        assert!(!interior.is_flush_right(10));
+    }
+
+    /// Depth over an **interior** run — flush with neither border. This is the case the
+    /// reshape exists to represent (a read blind in the middle of a footprint: an interior
+    /// `N`, a ref-skip), and the only one where a wrong window neither panics nor clamps, so
+    /// it is also the only one where an off-by-one in the arm is purely silent.
+    #[test]
+    fn depth_over_an_interior_run_raises_only_the_witnessed_stretch() {
+        let l = locus(
+            region(1, 10),
+            vec![obs(
+                b"AAAA",
+                ReadCoverage::Observed {
+                    offset_in_locus: 3,
+                    positions_covered: 4,
+                },
+                7,
+            )],
+        );
+        // positions: 1  2  3  4  5  6  7  8  9 10
+        //            .  .  .  7  7  7  7  .  .  .
+        assert_eq!(l.num_obs_along_locus(), vec![0, 0, 0, 7, 7, 7, 7, 0, 0, 0]);
     }
 
     /// `complete_observations()` yields only the complete entries — the guard that a

@@ -165,11 +165,18 @@ fn coverage_label(coverage: ReadCoverage, locus_len: u16) -> &'static str {
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
     // so it never appears here, but naming it keeps the label honest for the generic path.
+    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
+    // compile error here. The guard form is what this migration used and it is exactly what
+    // let the compiler stop forcing these sites to be revisited.
     match coverage {
         ReadCoverage::Complete => "complete",
-        _ if coverage.is_flush_left() => "partial:left",
-        _ if coverage.is_flush_right(locus_len) => "partial:right",
-        _ => "partial:interior",
+        run @ ReadCoverage::Observed { .. } => {
+            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
+                (true, _) => "partial:left",
+                (false, true) => "partial:right",
+                (false, false) => "partial:interior",
+            }
+        }
     }
 }
 
@@ -611,7 +618,7 @@ mod tests {
     }
 
     /// Partial observations exist — which proves the relevance gate admitted the partially-covering
-    /// reads (a spanning-only gate would have dropped them, spec §9.4). One left, one right, on
+    /// reads (a spanning-only gate would have dropped them, spec §9.4). Two left and one right, on
     /// their own rows, tagged and distinct from the complete rows.
     #[test]
     fn partial_observations_are_present_and_tagged() {
@@ -755,7 +762,7 @@ mod tests {
 
     /// **B2's oracle: the read group splits rows, and the split sums back.**
     ///
-    /// The same six reads as [`fixture`], dealt across two read groups of one sample. The
+    /// The same seven reads as [`fixture`], dealt across two read groups of one sample. The
     /// complete allele was seen by three `rg0` reads and one `rg1` read, so it becomes **two
     /// rows** carrying 3 and 1 — where the single-group dump has one row of 4. Summing the group
     /// axis away must recover the single-group dump exactly, which is what makes the finer grain

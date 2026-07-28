@@ -253,7 +253,7 @@ physical event.
 > span, define it: a read can be blind in the *middle* of a footprint (an interior `N`, a ref-skip)
 > or blind at either end, and a widened record can be wider than the read on both sides.
 > Prefix-versus-suffix survives as a **derivation** — `offset_in_locus == 0` is flush left,
-> `offset_in_locus + positions_covered == region.len()` is flush right — so "a prefix and a suffix
+> `offset_in_locus + positions_covered >= region.len()` is flush right — so "a prefix and a suffix
 > are different constraints" is preserved, not lost. `Complete` is kept: the common case, and it
 > keeps `complete_observations()` an equality test. **A non-contiguous witness yields no observation
 > at all** and is counted in `reads_without_observation`, which is what gives that counter a real

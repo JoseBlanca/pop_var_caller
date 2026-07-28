@@ -1,6 +1,14 @@
 //! **Per-sample STR stutter dump** — walk region typing once and delimit every sample's reads at
 //! the *same* microsatellite tracts, emitting one tidy row per (sample, locus, observation).
 //!
+//! **⚠ Since 2026-07-28 a row is one `(bases, read_coverage, read_group)` CELL, not one allele.**
+//! `ObservedSequence` gained the read group as part of its identity, so on a sample declaring
+//! several `@RG`s one allele becomes several rows — and **this dump has no read-group column**, so
+//! those rows are indistinguishable in the output and the per-row counters below count cells
+//! rather than alleles. Single-read-group samples are unaffected, which is every fixture here so
+//! far. Adding the column is an open question at Checkpoint B: it would change an artifact the
+//! marimo dashboards parse, so it is not done silently.
+//!
 //! ```text
 //! ng_ssr_cohort_stutter [--contigs a,b] [--regions r.bed] <reference.fa> <sample.cram> [sample ...]
 //! ```
@@ -151,11 +159,18 @@ fn coverage_label(coverage: ReadCoverage, locus_len: u16) -> &'static str {
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
     // so it never appears here, but naming it keeps the label honest for the generic path.
+    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
+    // compile error here. The guard form is what this migration used and it is exactly what
+    // let the compiler stop forcing these sites to be revisited.
     match coverage {
         ReadCoverage::Complete => "complete",
-        _ if coverage.is_flush_left() => "partial_left",
-        _ if coverage.is_flush_right(locus_len) => "partial_right",
-        _ => "partial:interior",
+        run @ ReadCoverage::Observed { .. } => {
+            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
+                (true, _) => "partial_left",
+                (false, true) => "partial_right",
+                (false, false) => "partial:interior",
+            }
+        }
     }
 }
 

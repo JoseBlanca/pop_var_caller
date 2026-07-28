@@ -1215,6 +1215,87 @@ mod tally {
             );
         }
 
+        /// **The group tie-break is asserted on the sort key, not on a lucky fold order.**
+        ///
+        /// The obvious form of this test — fold two groups and check the row order — rides on
+        /// `HashMap` iteration, which is seeded per process: with the `then_with` deleted it
+        /// passes roughly six runs in ten, so the regression it exists to catch would reach a
+        /// green CI most of the time. Enough cells that a wrong order cannot be a coin flip is
+        /// the fix: six groups over two alleles, whose sorted order is fully determined.
+        #[test]
+        fn rows_sort_by_group_within_an_allele_deterministically() {
+            let reads: Vec<AlignedRead> = (0..6).map(|g| read_in_group(g, 10)).collect();
+            let mut outcomes = Vec::new();
+            for (i, r) in reads.iter().enumerate() {
+                // Alternate the alleles so group order and fold order disagree.
+                let bases: &[u8] = if i % 2 == 0 { b"AA" } else { b"CC" };
+                outcomes.push((r, observed(bases, ReadCoverage::Complete, -1.0)));
+            }
+            let mut counts = SsrGeneratorCounts::default();
+            let rows = tally(outcomes, 10, &mut counts).observed_sequences;
+
+            let order: Vec<(&[u8], u32)> = rows
+                .iter()
+                .map(|row| (row.bases.as_ref(), row.read_group.get()))
+                .collect();
+            assert_eq!(
+                order,
+                vec![
+                    (b"AA".as_ref(), 0),
+                    (b"AA".as_ref(), 2),
+                    (b"AA".as_ref(), 4),
+                    (b"CC".as_ref(), 1),
+                    (b"CC".as_ref(), 3),
+                    (b"CC".as_ref(), 5),
+                ],
+                "bases first, then read group — ascending, and never fold order"
+            );
+        }
+
+        /// **An expanded allele merges the two sides into one row, and that is a real
+        /// behaviour change the reshape brought.**
+        ///
+        /// `reach` is measured in *read* bases; on an allele longer than the reference tract it
+        /// exceeds the locus length, so `from_left` and `from_right` both clamp to the whole
+        /// locus and produce the **same run**. Two reads anchored at opposite borders with the
+        /// same bases then share a bucket key and merge — where `PartialLeft(n)` and
+        /// `PartialRight(n)` kept them as two rows.
+        ///
+        /// It is arguably the right answer (identical constraints are one cell) but it is not
+        /// the pre-reshape answer, it is invisible on any fixture whose reads are exact
+        /// reference slices, and the plan's stated equivalence
+        /// `PartialRight(n) ⇔ Observed { len - n, n }` silently stops holding at `n = len`.
+        /// Pinned here so it is a decision on the record rather than a surprise in a dump.
+        #[test]
+        fn an_expanded_allele_merges_the_two_sides_into_one_row() {
+            let locus_len = 6;
+            let left = ReadCoverage::from_left(9, locus_len);
+            let right = ReadCoverage::from_right(9, locus_len);
+            assert_eq!(
+                left, right,
+                "the two sides denote the same run once saturated"
+            );
+
+            let r = read(0, 60);
+            let outcomes = vec![
+                (&r, observed(b"CACACACACA", left, -1.0)),
+                (&r, observed(b"CACACACACA", right, -1.0)),
+            ];
+            let mut counts = SsrGeneratorCounts::default();
+            let rows = tally(outcomes, 1, &mut counts).observed_sequences;
+
+            assert_eq!(
+                rows.len(),
+                1,
+                "one row, not two — the sides are indistinguishable once the run saturates"
+            );
+            assert_eq!(rows[0].num_obs, 2, "and both reads support it");
+            assert_eq!(
+                counts.observations_partial, 2,
+                "the run-level per-read tally is unaffected: two reads, two partials"
+            );
+        }
+
         /// `placed_left` counts supporting reads that began **strictly left** of the locus
         /// anchor — production's own rule (`alignment_start < rec_pos`), not `<=`.
         ///
@@ -1243,7 +1324,7 @@ mod tally {
         }
 
         /// A `Complete` and a partial run of the **same** bases are different evidence, so they
-        /// stay as two separate rows (spec §3) — the property the `(bases, read_coverage)` dedup
+        /// stay as two separate rows (spec §3) — the property the `(bases, read_coverage, read_group)` dedup
         /// key rests on.
         #[test]
         fn a_complete_and_a_partial_of_the_same_bases_stay_separate() {
@@ -2318,6 +2399,89 @@ mod tests {
             "every fetched read is either an observation or a no-observation"
         );
         assert_eq!(locus.reads_discarded_by_cap, 0, "no cap");
+    }
+
+    /// **`placed_left` is counted against the tract anchor, and this is the only test that says
+    /// which coordinate that is.**
+    ///
+    /// The fold itself (`tally`) is handed `locus_start` as a bare `u64`, and its unit test
+    /// supplies that argument itself — so the unit test pins the comparison (`<`, not `<=`) and
+    /// nothing about *which* coordinate the generator passes. A 0-based/1-based slip, or the
+    /// margin start, or a widened region's start would all be silent: `placed_left` is a QUAL
+    /// bias term, so a wrong anchor is a wrong QUAL on every call with no panic.
+    ///
+    /// The fixture separates the two plausible anchors. The tract is `[40, 49]` and `flank_bp`
+    /// is 10, so the margin starts at 30 — and the reads start at 30, 33, 36 and 39, every one
+    /// of them **left of the tract anchor** and **not left of the margin anchor**. So the
+    /// correct anchor counts them all and the margin anchor counts none.
+    #[test]
+    fn placed_left_is_counted_against_the_tract_anchor_not_the_margin() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let records: Vec<_> = (0..4)
+            .map(|i| read_named_with_length(&format!("r{i}"), 0, 30 + i * 3, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = ssr_generator();
+        let segment = tract(40, 49);
+
+        generator.begin_segment(span(40, 49));
+        let locus = generator
+            .next_locus(&segment, &reads)
+            .expect("no fetch error")
+            .expect("one locus");
+
+        let supporting: u32 = locus.observed_sequences.iter().map(|obs| obs.num_obs).sum();
+        let placed_left: u32 = locus
+            .observed_sequences
+            .iter()
+            .map(|obs| obs.placed_left)
+            .sum();
+
+        assert!(
+            supporting > 0,
+            "the fixture must produce observations, or this test cannot discriminate"
+        );
+        assert_eq!(
+            placed_left, supporting,
+            "every supporting read started left of the tract anchor at 40; counting against \
+             the margin start (30) would give 0"
+        );
+    }
+
+    /// The mirror, so the anchor is pinned from **both** sides: reads starting at or after the
+    /// tract anchor contribute nothing to `placed_left`. Together with the test above this
+    /// brackets the anchor — one case fails if it is too far left, the other if it is too far
+    /// right.
+    #[test]
+    fn a_read_starting_on_the_tract_anchor_is_not_placed_left() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        // Starting exactly on the anchor (40) and after it (43) — 30 bp each, so they still
+        // cover the tract and clear the min-length filter.
+        let records: Vec<_> = [40u64, 43]
+            .iter()
+            .enumerate()
+            .map(|(i, start)| read_named_with_length(&format!("r{i}"), 0, *start as usize, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = ssr_generator();
+        let segment = tract(40, 49);
+
+        generator.begin_segment(span(40, 49));
+        let locus = generator
+            .next_locus(&segment, &reads)
+            .expect("no fetch error")
+            .expect("one locus");
+
+        let placed_left: u32 = locus
+            .observed_sequences
+            .iter()
+            .map(|obs| obs.placed_left)
+            .sum();
+        assert_eq!(
+            placed_left, 0,
+            "strictly left, so the read starting *on* the anchor does not count — this is what \
+             separates `placed_left` from the `placed_start` ng deliberately does not carry"
+        );
     }
 
     /// The cap wires through `next_locus`: with `max_reads_per_locus = 2` over four overlapping
