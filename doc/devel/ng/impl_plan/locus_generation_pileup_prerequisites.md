@@ -67,12 +67,12 @@ The obstacle: `reads_in_region` returns `SampleRegionReads<'_, R>`, and `LocusGe
   out; `BamRegionSource` / `CramRegionSource` hold `Arc<sam::Header>` instead of `&'a sam::Header`.
   An independent `Arc`, **not** a reference into an `Arc`'d file — that is what keeps nothing
   self-referential. *Depends:* —. *Source:* arch §2.2.
-- ☐ **A2 — `Arc<AlignmentFile>`, and the third borrow.** `SampleReads.files: Vec<Arc<AlignmentFile>>`;
+- ✅ **A2 — `Arc<AlignmentFile>`, and the third borrow.** `SampleReads.files: Vec<Arc<AlignmentFile>>`;
   `BorrowedReader` / `RegionReads` / `RegionSource` hold `Arc<AlignmentFile>`; and
   **`resolution: &'a ReadGroupResolution` becomes owned or `Arc`'d** — it arrived with the
   read-group merge and is the borrow the arch's first draft missed. `reads_in_region` then returns a
   stream with no lifetime. *Depends:* A1. *Source:* arch §2.2, §4 P1.
-- ☐ **A3 — prove nothing moved.** The BAM/CRAM parity oracle and the whole read-input suite pass
+- ✅ **A3 — prove nothing moved.** The BAM/CRAM parity oracle and the whole read-input suite pass
   unchanged; add one test that a returned stream **outlives** the `&SampleReads` borrow that made
   it, which is the property the generator needs and the only new one. *Depends:* A2. *Source:*
   arch §4 P1.

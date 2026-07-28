@@ -1178,6 +1178,129 @@ mod tests {
         assert_eq!(drain(&single).len(), 3);
     }
 
+    /// **A3 — the stream outlives the borrow that made it, and the sample too.**
+    ///
+    /// The one property Milestone A adds. `reads_in_region` still takes
+    /// `&self`, so the borrow ends when the call returns; what changed is that
+    /// the returned stream carries no lifetime, holding an `Arc` per file
+    /// instead. Dropping the `SampleReads` before a single read has been pulled
+    /// is the sharpest statement of that: **it would not compile at all** if
+    /// the stream still borrowed (`cannot move out of sample because it is
+    /// borrowed`).
+    ///
+    /// The `Arc` is load-bearing beyond the borrow check, and this test reaches
+    /// that too — not while reading, since the source owns the file handle it
+    /// reads through, but at the *end*, where `RegionReads::drop` hands the
+    /// pooled reader back and folds its tally into the file. That file has to
+    /// still exist after the sample that opened it is gone.
+    ///
+    /// The reads are compared against a control drain rather than merely
+    /// counted, because "the stream survives" and "the stream survives and
+    /// still yields the right reads" are different claims and only the second
+    /// one is worth anything.
+    #[test]
+    fn a_region_stream_outlives_the_sample_reads_it_was_made_from() {
+        let reads = [
+            read_named_with_length("r1", 0, 1, 30),
+            read_named_with_length("r2", 0, 30, 30),
+            read_named_with_length("r3", 0, 60, 30),
+        ];
+        let (_bam_dir, path) = indexed_named_bam(
+            &bam_header(&matching_contigs()),
+            &reads,
+            "outlives_the_borrow.bam",
+        );
+
+        let (_reference_dir, sample) = sample_over(std::slice::from_ref(&path));
+        let expected = drain(&sample);
+        assert_eq!(expected.len(), 3, "the fixture must actually carry reads");
+
+        let stream = sample
+            .reads_in_region(whole_first_contig(), reference_bases)
+            .expect("query");
+
+        // The load-bearing line: the sample — and with it the `Vec` of files —
+        // is gone before the first read is pulled.
+        drop(sample);
+
+        let after: Vec<(String, usize)> = stream
+            .map(|item| {
+                let read = item.expect("no fatal error");
+                (
+                    String::from_utf8_lossy(&read.qname).into_owned(),
+                    read.read_group.get() as usize,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            after, expected,
+            "a stream that outlived its sample must still yield the same reads"
+        );
+    }
+
+    /// The same property in the shape that needs it: a **lifetime-free struct**
+    /// holding one region's stream across several calls, each lent
+    /// `&SampleReads` separately.
+    ///
+    /// That is `LocusGenerator::next_locus(&mut self, segment, reads:
+    /// &SampleReads)` in miniature — the contract that cannot carry a lifetime
+    /// (arch `locus_generation_pileup.md` §2.2) — and the generic locus
+    /// generator yields many loci per segment, so it must hold the stream
+    /// between calls. Written as a compile-time anchor: with a borrowed stream
+    /// the `Generator` struct below needs a lifetime parameter and the test
+    /// does not build.
+    #[test]
+    fn a_held_region_stream_can_be_resumed_across_separate_borrows() {
+        struct Generator {
+            stream: Option<SampleRegionReads<InMemoryRefSeq>>,
+        }
+
+        impl Generator {
+            /// `begin_segment`: opens the query, keeps the stream.
+            fn begin(&mut self, reads: &SampleReads, region: GenomeRegion) {
+                self.stream = Some(
+                    reads
+                        .reads_in_region(region, reference_bases)
+                        .expect("query"),
+                );
+            }
+
+            /// `next_locus`: lent the sample again, but pulls from the stream
+            /// it is already holding.
+            fn next_qname(&mut self, _reads: &SampleReads) -> Option<String> {
+                let read = self.stream.as_mut()?.next()?.expect("no fatal error");
+                Some(String::from_utf8_lossy(&read.qname).into_owned())
+            }
+        }
+
+        let reads = [
+            read_named_with_length("r1", 0, 1, 30),
+            read_named_with_length("r2", 0, 30, 30),
+            read_named_with_length("r3", 0, 60, 30),
+        ];
+        let (_bam_dir, path) = indexed_named_bam(
+            &bam_header(&matching_contigs()),
+            &reads,
+            "held_across_calls.bam",
+        );
+        let (_reference_dir, sample) = sample_over(std::slice::from_ref(&path));
+
+        let mut generator = Generator { stream: None };
+        generator.begin(&sample, whole_first_contig());
+
+        let mut qnames = Vec::new();
+        while let Some(qname) = generator.next_qname(&sample) {
+            qnames.push(qname);
+        }
+
+        assert_eq!(
+            qnames,
+            vec!["r1".to_string(), "r2".to_string(), "r3".to_string()],
+            "a held stream must resume where the previous call left it"
+        );
+    }
+
     /// **The capability this step adds.** A file declaring several read groups
     /// is read, and each record goes to the read group its own `RG` tag names —
     /// which is the first point in the pipeline where a read can be attributed
