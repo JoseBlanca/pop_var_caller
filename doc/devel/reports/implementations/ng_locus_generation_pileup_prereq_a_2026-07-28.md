@@ -123,29 +123,40 @@ fails while both detached tests stay green — exactly the review's claim. Six m
 (three stale doc comments, the `Merged` arm, the interleaved-queries property, the `Send` anchor,
 an exhaustive destructure in the manual `Debug`, a de-duplicated test helper). Suite 2489 → 2493.
 
-## 8. Open — three owner decisions for Checkpoint A
+## 8. Checkpoint A — the three decisions, and what the owner chose
 
-None blocks Milestone B; all three are recorded rather than decided, because each reaches past this
-step's remit.
+All three were raised at the checkpoint rather than decided in code, because each reached past the
+step's remit. **The owner took all three (2026-07-28)**, and each landed as its own commit.
 
-1. **Should `AlignmentFile::open` return `Arc<Self>`?** Ten call sites now chain `.map(Arc::new)`,
-   so the `Arc`-ness is an invariant of using the type enforced ten times by convention rather than
-   once by the constructor. Changing a `pub` constructor's signature is beyond the plan's ask.
-2. **Should the share move inside `ReadGroupResolution`** — `PerRecord(Arc<[…]>)` instead of
-   `Arc<ReadGroupResolution>`? It would drop the wrapper from three fields and both source
-   constructors, since `Sole(ReadGroupId)` is `Copy`-sized. It changes a shipped type's shape.
-3. **`SPEC-FOLLOWUP(alignment_file §3.3, sample_reads)` — owner to fold in.** The change
-   invalidated two specs' signatures: `spec/alignment_file.md:379` still gives
-   `reads_in_region(&self) -> Result<RegionReads<'_>, …>` and `:389` re-argues the `&self` receiver
-   as load-bearing (the *shared, not `&mut`* half of that argument is unchanged; the receiver is now
-   `&Arc<Self>` because the stream outlives the call), and `spec/sample_reads.md:180` still returns
-   `SampleRegionReads<'_>`. This run does not edit design docs.
+1. **`AlignmentFile::open` returns `Arc<Self>`** — *"you can change to pub, no problem"*. The
+   `Arc`-ness was an invariant of *using* the type that ten call sites each had to remember by
+   chaining `.map(Arc::new)`; stating it once in the constructor makes it un-skippable and deletes
+   all ten. The four call sites that only inspect the error are unaffected, and no `Arc` is
+   allocated on the failure path.
+2. **The share moved inside `ReadGroupResolution`, and the wrapper is gone** — *"I don't like the
+   idea of an `Arc` in a struct that will have millions of objects, you might consider modifying the
+   type."* Right, and it was the sharper reading of the finding: a region source is built **per
+   query**, ~10⁶ times a run, so `Arc<ReadGroupResolution>` charged a pointer chase and an atomic
+   pair to every one of them — including the overwhelmingly common `Sole` case, where there is
+   nothing to share at all. `PerRecord(Box<[…]>)` became `PerRecord(Arc<[…]>)` (settled at open,
+   read but never written), which makes the enum cheap to clone by value; `AlignmentFile.resolution`
+   and both region sources now hold it **directly, with no wrapper**.
+   `Arc<sam::Header>` stays, and the contrast is the justification: it is noodles' type, not ours to
+   reshape, and it has no cheap-clone form — which is the case an `Arc` is actually for.
+3. **The two spec fold-ins landed** — *"you can edit the docs, in this case."*
+   [`spec/alignment_file.md`](../../ng/spec/alignment_file.md) §3.4 now gives the `&Arc<Self>`
+   receiver and the `Arc<AlignmentFile>` return, with a dated fold-in note preserving the original
+   *shared, not `&mut`* argument (which is unchanged) and adding why the receiver is now shared
+   **ownership**; [`spec/sample_reads.md`](../../ng/spec/sample_reads.md) §3.4 records that only the
+   *returned type* stopped borrowing, plus the tally caveat a caller has to know.
 
-**And one hazard for plan 3, found by the review and worth carrying:**
-`SampleLocusObservationsIterator` ([locus_generation/mod.rs:485](../../../../src/ng/locus_generation/mod.rs#L485))
+**And the hazard for plan 3 is now a marker in the code**, at the owner's instruction:
+`SampleLocusObservationsIterator` ([locus_generation/mod.rs](../../../../src/ng/locus_generation/mod.rs))
 declares `reads: SampleReads` **before** `generators`, and Rust drops fields in declaration order —
 so once a generator holds a region stream, the sample dies first and that stream's step-1 tally
-becomes unobservable at drop. Latent today; live the moment Milestone A's capability is used.
+becomes unobservable at drop. A `FIXME(pileup-generator)` on the field states the mechanism, the two
+cheap fixes, the test shape it needs, and **that the comment is to be deleted once it is fixed**.
+Latent today; live the moment Milestone A's capability is used.
 
 Milestone B is next, and B1 — the `ReadCoverage` reshape — is a silent-failure step that gets its
 own commit with the STR dump green before and after.

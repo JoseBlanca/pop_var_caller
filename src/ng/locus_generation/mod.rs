@@ -484,6 +484,30 @@ impl GeneratorSet {
 /// per-run swap lives in its trait-object slots, not in a type parameter.
 pub struct SampleLocusObservationsIterator<T> {
     regions: T,
+    // FIXME(pileup-generator): the field order below loses a step-1 tally as
+    // soon as a generator holds a read stream across `next_locus` calls —
+    // which is exactly what the generic (pileup) locus generator is being
+    // built to do. **Delete this comment once it is fixed.**
+    //
+    // Since 2026-07-28 a region stream owns its files by `Arc` rather than
+    // borrowing them (`read/input/`, the generic generator's Milestone A), so
+    // it may outlive the `SampleReads` that made it. Rust drops fields in
+    // declaration order, so `reads` dies here *before* `generators` — and any
+    // stream a generator is still holding then folds its drop tally into an
+    // `AlignmentFile` that only that stream owns, and which is freed in the
+    // same breath. The reads already emitted are unaffected and the pooled
+    // reader still goes back; what is lost is the ability to *read* that
+    // query's tally through `SampleReads::counts`, so the failure is a silent
+    // under-report of drop rates, not a crash.
+    //
+    // Two fixes, both cheap, and the choice belongs with whoever writes the
+    // generic generator: declare `generators` before `reads` so the streams
+    // drop first, or have the generator drop its held stream at the end of
+    // each segment. Whichever is taken, it wants a test that keeps a second
+    // `Arc` and asserts the tally landed — see
+    // `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`
+    // for the shape, since a tally folded into an unreachable file is
+    // indistinguishable from one never folded at all.
     reads: SampleReads,
     generators: GeneratorSet,
     /// Latched on clean exhaustion or a fatal error — the fused contract.

@@ -252,8 +252,16 @@ recorded here rather than written.
 
 - **M1** — fixed in the fixes commit; mutation-verified.
 - **M2, M6, M7, M8, M9, M11** — fixed in the fixes commit.
-- **M3, M4, M5** — deferred to Checkpoint A; they are owner decisions (§4), recorded in
-  PROJECT_STATUS *Open*.
-- **M10** and the §7 items — pre-existing or later plans'; recorded, not touched.
+- **M3, M4, M5** — raised at Checkpoint A and **all three taken by the owner (2026-07-28)**, each
+  its own commit. M4: `open` returns `Arc<Self>`, deleting ten `.map(Arc::new)`. M5: taken in the
+  sharper form the owner asked for — *"an `Arc` in a struct that will have millions of objects"* —
+  so `PerRecord(Box<[…]>)` became `PerRecord(Arc<[…]>)` and the `Arc<ReadGroupResolution>` **wrapper
+  is gone from all three fields**, which also removes the atomic pair from the common `Sole` case
+  that had nothing to share. M3: both spec fold-ins landed, as dated notes that preserve the
+  original arguments rather than overwrite them.
+- **M1's out-of-scope half** — the `SampleLocusObservationsIterator` drop-order hazard is now a
+  `FIXME(pileup-generator)` on the offending field, stating the mechanism, the two cheap fixes, the
+  test shape it needs, and that the comment is to be deleted once it is fixed.
+- **M10** and the remaining §7 items — pre-existing or later plans'; recorded, not touched.
 
 Per-category audit trail: `tmp/review_2026-07-28_ng-owned-region-stream/` (gitignored).

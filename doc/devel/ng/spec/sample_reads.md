@@ -177,7 +177,7 @@ One type per sample, built once, then queried per region:
 
 ```
 SampleReads::open(files, reference_info, filter_config, index_policy) -> Result<SampleReads, IngestError>
-SampleReads::reads_in_region(&self, contig, start, end) -> Result<SampleRegionReads<'_>, IngestError>
+SampleReads::reads_in_region(&self, contig, start, end) -> Result<SampleRegionReads, IngestError>
      where SampleRegionReads: Iterator<Item = Result<MappedRead, IngestError>>   // ordered
 SampleReads::counts() -> &[ReadFilterCounts]     // per file, §3.3
 SampleReads::sq_md5s() -> &[&[Option<Md5>]]      // per file, forwarded for the deferred check below
@@ -186,6 +186,17 @@ SampleReads::sq_md5s() -> &[&[Option<Md5>]]      // per file, forwarded for the 
 `open` opens each file through `AlignmentFile::open` (which validates it), then checks the k files agree
 on one sample name (§3.1). `reads_in_region` asks each `AlignmentFile` for its region chain and — **only
 when there is more than one file** — wraps them in the merge.
+
+> **Fold-in, 2026-07-28 — `reads_in_region` still takes `&self`; only the *returned type* stopped
+> borrowing.** `SampleRegionReads` carries no lifetime: each per-file chain holds an
+> `Arc<AlignmentFile>`, so a caller may keep the stream after the borrow that made it has ended.
+> That is what lets a resumable locus generator hold one region's reads across many `next_locus`
+> calls while being lent `&SampleReads` per call ([`alignment_file.md`](alignment_file.md) §3.4,
+> [arch](../arch/locus_generation_pileup.md) §2.2). **One consequence a caller must know:** a stream
+> that outlives its `SampleReads` still yields the right reads and still returns its pooled reader,
+> but the only handle left on the file is the stream's own — so the tally its `Drop` folds in can no
+> longer be read through `counts()`. A caller that reports drop rates must drop its streams before
+> the sample.
 
 **The deferred assembly check is forwarded, not performed here.** Each file's `@SQ M5` tags are
 captured at its open and cross-checked against the reference's true per-contig digests once the caller
