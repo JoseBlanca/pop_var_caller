@@ -44,13 +44,14 @@ use super::left_align::LeftAlignPreparer;
 use crate::bam::alignment_input::{MappedRead, cigar_ref_span, read_exceeds_mismatch_fraction};
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::aligned_read::AlignedRead;
+use crate::ng::read::prepared_read::PreparedRead;
 use crate::ng::ref_seq::{RefSeq, ResidentRefSeq};
 use crate::ng::types::ContigId;
 use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::read_processor::{
     RawContigRefCache, ReadOutcome, ReadProcessingConfig, process_read,
 };
-use crate::pileup::walker::{CigarOp, PreparedRead};
+use crate::pileup::walker::CigarOp;
 
 /// One contig of a fixture reference: its name and its bases, verbatim.
 struct FixtureContig {
@@ -122,7 +123,7 @@ fn production_prepared(
     read: MappedRead,
     fasta_path: &Path,
     contigs: &ContigList,
-) -> Option<PreparedRead> {
+) -> Option<crate::pileup::walker::PreparedRead> {
     let mut raw_ref = RawContigRefCache::new(repository(fasta_path), contigs.clone());
     let config = ReadProcessingConfig {
         // Disabled deliberately: ng runs the mismatch-fraction filter in step 1, so leaving it on
@@ -152,8 +153,11 @@ fn ng_prepared(read: MappedRead, fasta_path: &Path, contigs: &ContigList) -> Pre
         .expect("v1 never declines a read")
 }
 
-/// The same record as ng's read type, carrying a placeholder read group that
-/// nothing on this path looks at.
+/// The same record as ng's read type, carrying a placeholder read group.
+///
+/// Preparation never *reads* the group — it only carries it through to ng's prepared read, which
+/// is checked in `left_align.rs`. Production has no counterpart for it, so it plays no part in
+/// the comparison below.
 fn to_aligned_read(read: MappedRead) -> AlignedRead {
     AlignedRead {
         qname: read.qname,
@@ -177,8 +181,17 @@ fn to_aligned_read(read: MappedRead) -> AlignedRead {
 /// equality that silently ignored a field it did not know about is exactly the failure a parity
 /// test exists to catch. Listing the fields means a field added to production forces this to be
 /// updated rather than passing vacuously.
+///
+/// The two sides are now **different types** — ng owns its prepared read so it can carry the read
+/// group (`locus_generation_pileup.md` §6) — which makes a field-by-field comparison the only one
+/// available as well as the one wanted. `read_group` is deliberately absent below: it is the one
+/// field with no production counterpart, and it is checked in `left_align.rs` instead.
 #[track_caller]
-fn assert_same_prepared_read(ours: &PreparedRead, production: &PreparedRead, context: &str) {
+fn assert_same_prepared_read(
+    ours: &PreparedRead,
+    production: &crate::pileup::walker::PreparedRead,
+    context: &str,
+) {
     assert_eq!(ours.chrom_id, production.chrom_id, "chrom_id [{context}]");
     assert_eq!(
         ours.alignment_start, production.alignment_start,
@@ -202,7 +215,8 @@ fn assert_same_prepared_read(ours: &PreparedRead, production: &PreparedRead, con
     );
     assert_eq!(ours.qname, production.qname, "qname [{context}]");
     assert_eq!(
-        ours.mate_role, production.mate_role,
+        ours.mate_role,
+        production.mate_role.into(),
         "mate_role [{context}]"
     );
     assert_eq!(

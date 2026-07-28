@@ -57,7 +57,7 @@ than reaches in (spec §3).
 
 ## Milestone A — the copy
 
-- ☐ **A1 — ng's `PreparedRead`.** `src/ng/read/prepared_read.rs`: `PreparedRead`, `MateRole`,
+- ✅ **A1 — ng's `PreparedRead`.** `src/ng/read/prepared_read.rs`: `PreparedRead`, `MateRole`,
   `ReadLengthError`, copied from `pileup/walker/mod.rs` and extended with
   `read_group: ReadGroupId`. `ReadPreparer` returns this type; `LeftAlignPreparer` threads the group
   through from `AlignedRead`. Keep it **not** `#[non_exhaustive]`, for production's stated reason —

@@ -30,15 +30,16 @@ pub mod input;
 pub mod left_align;
 #[cfg(test)]
 mod left_align_parity;
+pub mod prepared_read;
 
 pub use aligned_read::AlignedRead;
 pub use filtering::{
     BamRecordSource, CramRecordSource, NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig,
     ReadFilterCounts, ReadFilterError, RecordSource,
 };
+pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
 use crate::ng::ref_seq::RefSeqError;
-use crate::pileup::walker::PreparedRead;
 
 /// A fatal, run-level failure from read preparation. **Never a per-read verdict:** a read
 /// that yields no usable observation is `Ok(None)`, and the run continues (spec §7).
@@ -142,6 +143,14 @@ mod tests {
         }
     }
 
+    /// Production's `--no-baq` build, re-attached to ng's read type. The wiring is
+    /// production's; the read group is what ng adds — see
+    /// [`PreparedRead::from_production`](prepared_read::PreparedRead::from_production).
+    fn passthrough(read: AlignedRead) -> PreparedRead {
+        let read_group = read.read_group;
+        PreparedRead::from_production(prepare_passthrough(read.into_mapped_read(), 0), read_group)
+    }
+
     /// Prepares every read, by handing the whole build to production's `--no-baq` path.
     struct AlwaysPrepares;
     impl ReadPreparer for AlwaysPrepares {
@@ -151,7 +160,7 @@ mod tests {
             read: AlignedRead,
             _scratch: &mut (),
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
-            Ok(Some(prepare_passthrough(read.into_mapped_read(), 0)))
+            Ok(Some(passthrough(read)))
         }
     }
 
@@ -205,7 +214,7 @@ mod tests {
             scratch.calls += 1;
             scratch.buffer.clear();
             scratch.buffer.extend_from_slice(&read.seq);
-            Ok(Some(prepare_passthrough(read.into_mapped_read(), 0)))
+            Ok(Some(passthrough(read)))
         }
     }
 
