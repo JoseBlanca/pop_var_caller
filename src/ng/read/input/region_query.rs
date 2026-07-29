@@ -35,12 +35,15 @@ use std::sync::Arc;
 
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
+use noodles_core::Position as RecordPosition;
 use noodles_cram as cram;
 use noodles_csi::BinningIndex;
 use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
+use noodles_sam::alignment::record::cigar::Op;
+use noodles_sam::alignment::record::{Flags, MappingQuality};
 
 use crate::bam::index_preflight::AlignmentIndex;
 use crate::ng::read::aligned_read::AlignedRead;
@@ -315,22 +318,198 @@ pub(crate) struct CramRegionPlan {
 /// stale key would serve another region's reads as this region's — silently wrong depth, not a
 /// crash — so the offset comparison is the whole safety argument, and
 /// `a_stale_container_is_not_reused` pins it.
+/// ## Why it is stored packed rather than as records
+///
+/// A container is ~10⁴ records, and a `RecordBuf` per record was ~680 bytes across seven separate
+/// allocations — against ~270 bytes of read that anything actually consumes (name, sequence,
+/// qualities, CIGAR). The other 60% was `Vec` headers, capacity slack and per-allocation
+/// overhead, ~72,000 allocations per open file, resident for the whole run.
+///
+/// So the bytes go into two flat buffers, [`payload`](Self::payload) and
+/// [`cigar_ops`](Self::cigar_ops), and each record becomes a fixed-size [`RecordIndex`] naming
+/// its slices of them. A query materialises a `RecordBuf` **only for the records it actually
+/// serves**, straight into the caller's reused buffer — which is also how the per-query
+/// `record.clone()` this replaces disappeared, so the query path now allocates nothing per read.
 pub(crate) struct DecodedContainer {
     /// The `.crai` offset the records were decoded from.
     offset: u64,
-    /// Every record of the container, in file order — *not* filtered to any region, because the
-    /// next query filters against its own.
-    records: Vec<RecordBuf>,
-    /// Each record's reference footprint, resolved **once per decode**: one entry per `records`
-    /// entry, in the same order.
+    /// One entry per record of the container, in file order — *not* filtered to any region,
+    /// because the next query filters against its own.
+    index: Vec<RecordIndex>,
+    /// Every record's name, sequence and quality scores, back to back. Sliced by the offsets in
+    /// [`RecordIndex`]; meaningless on its own.
+    payload: Vec<u8>,
+    /// Every record's CIGAR operations, back to back. Separate from [`payload`](Self::payload)
+    /// because an `Op` is not a byte and packing it into one would mean encoding and decoding it.
+    cigar_ops: Vec<Op>,
+}
+
+/// Where one record's bytes are, and every scalar field of it that anything reads.
+///
+/// Fixed size, so the whole index is one allocation. The scalars are the noodles types rather
+/// than raw integers: they are all `Copy`, so nothing is gained by unpacking them, and keeping
+/// them means [`DecodedContainer::fill`] hands them back without conversion.
+#[derive(Clone, Copy)]
+struct RecordIndex {
+    /// Where the record sits on the reference — the only thing a query needs before deciding
+    /// whether to serve it at all.
     ///
     /// A record's footprint cannot change after it is decoded, but the region it is asked about
     /// changes with every query — and a container is re-filtered on every query that reuses it
     /// (one per locus, so ~5,500 per sample per chromosome on the STR path against a container of
     /// ~10⁴ records). Recomputing it there meant a fresh CIGAR walk per record per query, which a
-    /// sampling profile put at 9.4% of a cohort run. Resolving it here trades that for 12 bytes a
-    /// record.
-    footprints: Vec<Footprint>,
+    /// sampling profile put at 9.4% of a cohort run.
+    footprint: Footprint,
+    /// Which read group this record belongs to, resolved **once per decode**.
+    ///
+    /// The read group is the *only* thing anything reads out of a record's auxiliary tags
+    /// (`resolve_read_group`, and `AlignedRead` carries no tag field), so resolving it while the
+    /// tags are in hand is what lets them be dropped — 6.2 MiB per open file, measured, the
+    /// single largest item in what an open file cost. Keeping a whole tag map to reach one field
+    /// of it was the waste.
+    owner: RecordOwner,
+    flags: Flags,
+    mapping_quality: Option<MappingQuality>,
+    reference_sequence_id: Option<usize>,
+    alignment_start: Option<RecordPosition>,
+    mate_reference_sequence_id: Option<usize>,
+    mate_alignment_start: Option<RecordPosition>,
+    template_length: i32,
+    /// `None` for a record with no name at all, which is not the same as an empty one.
+    name: Option<Span>,
+    sequence: Span,
+    quality_scores: Span,
+    /// Indexes [`DecodedContainer::cigar_ops`]; the others index `payload`.
+    cigar: Span,
+}
+
+/// A half-open range into one of the container's flat buffers, in elements.
+///
+/// `u32` rather than `usize`: a container is bounded by the CRAM writer's records-per-slice
+/// (10,000 in every file this project has met), so neither buffer approaches 4 GiB, and halving
+/// the index's width matters more than the headroom does.
+#[derive(Clone, Copy)]
+struct Span {
+    start: u32,
+    end: u32,
+}
+
+impl Span {
+    /// **Refuses rather than wraps.** A container whose payload passed 4 GiB would silently
+    /// truncate these offsets and hand back another record's bytes — wrong reads, not a crash.
+    /// No CRAM this project has met comes within three orders of magnitude of it (10,000 records
+    /// a container, ~270 bytes a record), but the spec's record count is a 32-bit field, so the
+    /// bound is the index's and has to be checked rather than assumed.
+    fn new(start: usize, end: usize) -> io::Result<Self> {
+        match (u32::try_from(start), u32::try_from(end)) {
+            (Ok(start), Ok(end)) => Ok(Self { start, end }),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a CRAM container holds more than 4 GiB of read data, which this reader's \
+                 per-container index cannot address",
+            )),
+        }
+    }
+
+    fn range(self) -> std::ops::Range<usize> {
+        self.start as usize..self.end as usize
+    }
+}
+
+impl DecodedContainer {
+    /// Append one decoded record: its bytes move into the flat
+    /// buffers and its scalars into the index, and the `RecordBuf` itself is dropped by the
+    /// caller.
+    ///
+    /// The transient `RecordBuf` is still built — noodles' conversion has no field-selective
+    /// form, so the allocations happen either way. What changes is that they do not *survive*:
+    /// the churn is unchanged, the residency is not.
+    fn push(&mut self, record: &RecordBuf, owner: RecordOwner) -> io::Result<()> {
+        let name = record
+            .name()
+            .map(|name| self.append_bytes(AsRef::<[u8]>::as_ref(name)))
+            .transpose()?;
+        let sequence = self.append_bytes(record.sequence().as_ref())?;
+        let quality_scores = self.append_bytes(record.quality_scores().as_ref())?;
+        let cigar_start = self.cigar_ops.len();
+        self.cigar_ops.extend_from_slice(record.cigar().as_ref());
+        let cigar = Span::new(cigar_start, self.cigar_ops.len())?;
+
+        self.index.push(RecordIndex {
+            footprint: Footprint::of(record),
+            owner,
+            flags: record.flags(),
+            mapping_quality: record.mapping_quality(),
+            reference_sequence_id: record.reference_sequence_id(),
+            alignment_start: record.alignment_start(),
+            mate_reference_sequence_id: record.mate_reference_sequence_id(),
+            mate_alignment_start: record.mate_alignment_start(),
+            template_length: record.template_length(),
+            name,
+            sequence,
+            quality_scores,
+            cigar,
+        });
+        Ok(())
+    }
+
+    /// Give back every byte the buffers over-reserved while growing.
+    fn shrink_to_fit(&mut self) {
+        self.index.shrink_to_fit();
+        self.payload.shrink_to_fit();
+        self.cigar_ops.shrink_to_fit();
+    }
+
+    fn append_bytes(&mut self, bytes: &[u8]) -> io::Result<Span> {
+        let start = self.payload.len();
+        self.payload.extend_from_slice(bytes);
+        Span::new(start, self.payload.len())
+    }
+
+    /// Rebuild record `i` **into `out`**, reusing its allocations.
+    ///
+    /// Every owned field is cleared and refilled rather than replaced, so a stream that serves a
+    /// million reads through one buffer allocates for the longest read it meets and nothing
+    /// after — the same buffer-reuse property the BAM path gets from noodles'
+    /// `read_record_buf`, which the CRAM path used to give up by moving whole records in.
+    fn fill(&self, i: usize, out: &mut RecordBuf) {
+        let entry = &self.index[i];
+
+        *out.flags_mut() = entry.flags;
+        *out.reference_sequence_id_mut() = entry.reference_sequence_id;
+        *out.alignment_start_mut() = entry.alignment_start;
+        *out.mapping_quality_mut() = entry.mapping_quality;
+        *out.mate_reference_sequence_id_mut() = entry.mate_reference_sequence_id;
+        *out.mate_alignment_start_mut() = entry.mate_alignment_start;
+        *out.template_length_mut() = entry.template_length;
+
+        match entry.name {
+            Some(span) => {
+                let name = out.name_mut().get_or_insert_with(Default::default);
+                name.clear();
+                name.extend_from_slice(&self.payload[span.range()]);
+            }
+            None => *out.name_mut() = None,
+        }
+
+        let sequence = out.sequence_mut().as_mut();
+        sequence.clear();
+        sequence.extend_from_slice(&self.payload[entry.sequence.range()]);
+
+        let quality_scores = out.quality_scores_mut().as_mut();
+        quality_scores.clear();
+        quality_scores.extend_from_slice(&self.payload[entry.quality_scores.range()]);
+
+        let cigar = out.cigar_mut().as_mut();
+        cigar.clear();
+        cigar.extend_from_slice(&self.cigar_ops[entry.cigar.range()]);
+
+        // The container carries no auxiliary tags — they are dropped at decode, once the read
+        // group has been resolved from them. Cleared rather than assumed empty because the buffer
+        // is the caller's and outlives any one record: if it ever reached here carrying another
+        // record's tags, those tags would silently become this record's.
+        out.data_mut().clear();
+    }
 }
 
 /// One record's reference footprint — what [`overlaps`] needs and all it needs.
@@ -401,9 +580,10 @@ pub(crate) struct CramRegionSource {
     entries: Arc<[cram::crai::Record]>,
     /// Cursor into [`Self::entries`].
     next_index_record: usize,
-    /// The overlapping records of the container last decoded, drained one per
-    /// `read_next` before the next container is touched.
-    pending: std::vec::IntoIter<RecordBuf>,
+    /// Indices into [`Self::container`] of the records overlapping this query, drained one per
+    /// `read_next` before the next container is touched. Indices rather than records: the bytes
+    /// stay in the container until a record is actually served.
+    pending: std::vec::IntoIter<u32>,
     /// The offset last decoded **in this query**, so a container that appears
     /// once per slice is drained once. Distinct from `container`'s key: this one
     /// exists to stop the same records being yielded twice *within* a query,
@@ -537,30 +717,29 @@ impl CramRegionSource {
                 .as_ref()
                 .is_none_or(|held| held.offset != offset)
             {
-                let Some(records) = self.decode_container_at(offset)? else {
+                let Some(container) = self.decode_container_at(offset)? else {
                     // End of stream reached through the index — nothing further.
                     return Ok(false);
                 };
-                let footprints = records.iter().map(Footprint::of).collect();
-                self.container = Some(DecodedContainer {
-                    offset,
-                    records,
-                    footprints,
-                });
+                self.container = Some(container);
             }
             let held = self
                 .container
                 .as_ref()
                 .expect("just decoded, or already held at this offset");
 
-            let overlapping: Vec<RecordBuf> = held
-                .footprints
+            // Indices, not records: the bytes stay in the container and only the records this
+            // query actually serves are ever rebuilt, one at a time, into the caller's buffer.
+            let overlapping: Vec<u32> = held
+                .index
                 .iter()
-                .zip(&held.records)
-                .filter(|(footprint, _)| {
-                    footprint.overlaps(self.target_reference_sequence_id, self.region)
+                .enumerate()
+                .filter(|(_, entry)| {
+                    entry
+                        .footprint
+                        .overlaps(self.target_reference_sequence_id, self.region)
                 })
-                .map(|(_, record)| record.clone())
+                .map(|(i, _)| i as u32)
                 .collect();
 
             if !overlapping.is_empty() {
@@ -572,9 +751,10 @@ impl CramRegionSource {
         }
     }
 
-    /// Seek to a container and decode every slice into owned records.
-    /// `Ok(None)` at end of stream (`read_container` reads 0 — the EOF marker).
-    fn decode_container_at(&mut self, offset: u64) -> io::Result<Option<Vec<RecordBuf>>> {
+    /// Seek to a container and decode every slice into owned records, each paired with the read
+    /// group it belongs to. `Ok(None)` at end of stream (`read_container` reads 0 — the EOF
+    /// marker).
+    fn decode_container_at(&mut self, offset: u64) -> io::Result<Option<DecodedContainer>> {
         self.reader.seek(SeekFrom::Start(offset))?;
 
         let mut container = cram::io::reader::Container::default();
@@ -582,13 +762,36 @@ impl CramRegionSource {
             return Ok(None);
         }
 
+        // **The auxiliary tags do not survive this function.** A `RecordBuf` owns every
+        // `@RG`/`MD`/`NM`/… field the record carried, and this container is held for the life of
+        // the file — so those fields would be resident for the whole run, once per open file.
+        // Measured on the tomato cohort they are 6.2 MiB of the 12.7 MiB an open file costs: the
+        // single largest item (`examples/dhat_ng_open_files.rs`).
+        //
+        // Nothing in ng reads a tag except `resolve_read_group`, and only the `RG` one.
+        // `AlignedRead`, the only thing a record ever becomes, carries no tag field, so no other
+        // consumer can be reading one. Resolving the read group **here**, while the tags are
+        // still in hand, is therefore what lets every tag be dropped — on both arms, not just on
+        // the single-read-group one.
+        //
+        // **One behaviour change, and it is only visible on a malformed file.** A record whose
+        // `RG` is unreadable used to fail when that record was *served*; it now fails when its
+        // container is decoded, which can be earlier and can involve records outside the queried
+        // region. The condition was already fatal either way (`ReadGroupResolution::PerRecord`) —
+        // this reaches it sooner. `a_cram_with_several_read_groups_resolves_each_record_by_its_tag`
+        // (`input/mod.rs`) covers the well-formed path through here.
         let compression_header = container.compression_header()?;
-        let mut records = Vec::new();
+        let mut decoded = DecodedContainer {
+            offset,
+            index: Vec::new(),
+            payload: Vec::new(),
+            cigar_ops: Vec::new(),
+        };
         for slice in container.slices() {
             let slice = slice?;
-            // The decoded block data and the borrowed records live only within
-            // this block; converting to owned `RecordBuf`s here keeps the
-            // result independent of those borrows.
+            // The decoded block data and the borrowed records live only within this block;
+            // copying each record's bytes into the container's own buffers here keeps the result
+            // independent of those borrows.
             let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
             for record in slice.records(
                 self.repository.clone(),
@@ -597,10 +800,19 @@ impl CramRegionSource {
                 &core_data_src,
                 &external_data_srcs,
             )? {
-                records.push(RecordBuf::try_from_alignment_record(&self.header, &record)?);
+                let record = RecordBuf::try_from_alignment_record(&self.header, &record)?;
+                let owner = resolve_read_group(&record, &self.resolution)?;
+                decoded.push(&record, owner)?;
             }
         }
-        Ok(Some(records))
+
+        // The three buffers grew by doubling, so each can be holding up to twice what it needs —
+        // and this container is then resident for the life of the file. Measured, the slack was
+        // 1.6 MiB of 5.4 MiB per open file, so paying one copy per container to drop it is
+        // strongly worth it: a container is decoded once and read from thousands of times.
+        decoded.shrink_to_fit();
+
+        Ok(Some(decoded))
     }
 }
 
@@ -622,17 +834,20 @@ impl RecordSource for CramRegionSource {
 
         buf.read_group = None;
         loop {
-            if let Some(record) = self.pending.next() {
-                // CRAM decodes a whole container at once, so this *moves* an
-                // already-decoded record into the caller's buffer rather than
-                // refilling it in place — the container buffer's allocations
-                // are what get reused. Same seam, different reuse point.
-                buf.record = record;
-                // After the move: the read group can depend on the record's own
-                // `RG` tag, so resolving against a stale buffer would attribute
-                // each read to whatever the previous one carried.
-                match resolve_read_group(&buf.record, &self.resolution)? {
+            if let Some(index) = self.pending.next() {
+                let held = self
+                    .container
+                    .as_ref()
+                    .expect("pending indices only exist while their container is held");
+                // The read group was resolved at decode, while the record still carried its `RG`
+                // tag — which is what lets the tags be dropped (see `decode_container_at`).
+                // Copied out before the record is rebuilt so the borrow ends here.
+                let owner = held.index[index as usize].owner;
+                match owner {
                     RecordOwner::Mine(id) => {
+                        // Rebuilt into the caller's buffer rather than moved in, so the buffer's
+                        // allocations are reused across the whole stream (`DecodedContainer::fill`).
+                        held.fill(index as usize, &mut buf.record);
                         buf.read_group = Some(id);
                         return Ok(true);
                     }
@@ -1643,11 +1858,13 @@ mod tests {
         let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, 30_000);
         // `Fasta`, not `Fai`: a CRAM needs the reference *bases* to decode against, so `open`
         // rejects a reference that cannot supply a path to them.
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("the fixture reference reads");
+        let reference = crate::ng::read::input::reference::OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("the fixture reference reads"),
+        );
 
         // Two regions far enough apart to be in different containers (the fixture writes ~30k
         // records per container over 400 kb).
@@ -1670,8 +1887,8 @@ mod tests {
         };
 
         // What each region looks like to a reader that has never decoded anything.
-        let cold_early = positions_of(&open(), early, &reference);
-        let cold_late = positions_of(&open(), late, &reference);
+        let cold_early = positions_of(&open(), early, reference.info());
+        let cold_late = positions_of(&open(), late, reference.info());
         assert!(!cold_early.is_empty(), "the early region is covered");
         assert_ne!(
             cold_early, cold_late,
@@ -1681,9 +1898,9 @@ mod tests {
 
         // One file, so all three queries share the pool — and therefore the cache.
         let file = open();
-        let warm_early = positions_of(&file, early, &reference);
-        let warm_late = positions_of(&file, late, &reference);
-        let warm_early_again = positions_of(&file, early, &reference);
+        let warm_early = positions_of(&file, early, reference.info());
+        let warm_late = positions_of(&file, late, reference.info());
+        let warm_early_again = positions_of(&file, early, reference.info());
 
         assert_eq!(warm_early, cold_early, "first query, cache cold");
         assert_eq!(

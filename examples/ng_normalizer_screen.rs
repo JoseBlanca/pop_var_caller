@@ -37,6 +37,7 @@ use pop_var_caller::ng::alignment::left_align_structured::{
 use pop_var_caller::ng::alignment::{Alignment, AlignmentNormalizer};
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
+use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
 use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info};
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
@@ -174,10 +175,12 @@ fn main() -> ExitCode {
         }
     };
     let contigs = reference_info.contig_list();
+    // One reference for every file this run opens, and so one copy of the bases.
+    let reference = OpenReference::from(reference_info);
 
     let sample = match SampleReads::open_only_sample(
         &read_paths,
-        &reference_info,
+        &reference,
         ReadFilterConfig::default(),
         false,
     ) {

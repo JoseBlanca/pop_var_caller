@@ -25,7 +25,8 @@ use tempfile::TempDir;
 use crate::bam::index_preflight::preflight_alignment_indexes;
 use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
+use crate::ng::read::input::reference::OpenReference;
+use crate::ng::reference_info::{ReferenceSource, read_reference_info};
 use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
@@ -154,13 +155,19 @@ pub(crate) fn matching_contigs() -> Vec<(&'static str, usize, Option<&'static st
         .collect()
 }
 
-/// A `ReferenceInfo` over [`FIXTURE_CONTIGS`].
+/// An [`OpenReference`] over [`FIXTURE_CONTIGS`] — the shape every open takes.
+///
+/// Hands back the run-scoped handle rather than the bare [`ReferenceInfo`]
+/// because that is what a caller really holds: one reference, shared by every
+/// file it opens. A test that wants the description alone asks it for
+/// [`info()`](OpenReference::info).
 ///
 /// `with_digests` picks the arm: the `Fasta` arm reads the genome and carries
 /// real per-contig MD5s, while the `Fai` arm cannot, so its digests are `None`
 /// and the MD5 half of reconciliation is a no-op. Tests that care about the
-/// digest comparison need both.
-pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, ReferenceInfo) {
+/// digest comparison need both. The `Fai` arm also carries no `fasta_path`, so
+/// it has no bases either — a CRAM cannot be opened against it.
+pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, OpenReference) {
     let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
         .iter()
         .map(|(name, length)| ContigSpec {
@@ -178,7 +185,10 @@ pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, ReferenceInfo) 
     } else {
         ReferenceSource::Fai(crate::ng::reference_info::sibling_fai_path(&fasta))
     };
-    (dir, read_reference_info(source).expect("read reference"))
+    (
+        dir,
+        OpenReference::from(read_reference_info(source).expect("read reference")),
+    )
 }
 
 /// A 10 bp perfectly-matching read at `start` on `reference_sequence_id`.
