@@ -128,10 +128,7 @@ fn is_complete(o: &Option<(ReadCoverage, Vec<u8>)>) -> bool {
     matches!(o, Some((ReadCoverage::Complete, _)))
 }
 fn is_partial(o: &Option<(ReadCoverage, Vec<u8>)>) -> bool {
-    matches!(
-        o,
-        Some((ReadCoverage::PartialLeft(_), _)) | Some((ReadCoverage::PartialRight(_), _))
-    )
+    matches!(o, Some((ReadCoverage::Observed { .. }, _)))
 }
 fn measured_len(o: &Option<(ReadCoverage, Vec<u8>)>) -> Option<usize> {
     match o {

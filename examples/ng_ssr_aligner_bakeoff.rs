@@ -3,6 +3,14 @@
 //! dashboard (`ng_proposal.md` §step-3: *how much stuttering exists for different repeat sizes and
 //! lengths, and is there a difference between the aligners*).
 //!
+//! **⚠ Since 2026-07-28 a row is one `(bases, read_coverage, read_group)` CELL, not one allele.**
+//! `ObservedSequence` gained the read group as part of its identity, so on a sample declaring
+//! several `@RG`s one allele becomes several rows — and **this dump has no read-group column**, so
+//! those rows are indistinguishable in the output and the per-row counters count cells rather than
+//! alleles. Single-read-group samples are unaffected, which is every fixture here so far. Adding
+//! the column is an open question at Checkpoint B: it would change an artifact the marimo
+//! dashboards parse, so it is not done silently.
+//!
 //! ```text
 //! ng_ssr_aligner_bakeoff <reference.fa> <sample.bam|cram> [contig ...]
 //! ```
@@ -36,7 +44,7 @@ use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -173,7 +181,7 @@ fn push_locus(
     };
     for obs in &locus.observed_sequences {
         push(
-            coverage_label(obs.read_coverage),
+            coverage_label(obs.read_coverage, locus.locus_len()),
             obs.bases.to_vec(),
             obs.num_obs,
         );
@@ -187,11 +195,23 @@ fn push_locus(
 }
 
 /// The tag a read-coverage carries in the `coverage` column.
-fn coverage_label(coverage: ReadCoverage) -> &'static str {
+fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
+    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
+    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
+    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
+    // so it never appears here, but naming it keeps the label honest for the generic path.
+    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
+    // compile error here. The guard form is what this migration used and it is exactly what
+    // let the compiler stop forcing these sites to be revisited.
     match coverage {
         ReadCoverage::Complete => "complete",
-        ReadCoverage::PartialLeft(_) => "partial_left",
-        ReadCoverage::PartialRight(_) => "partial_right",
+        run @ ReadCoverage::Observed { .. } => {
+            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
+                (true, _) => "partial_left",
+                (false, true) => "partial_right",
+                (false, false) => "partial:interior",
+            }
+        }
     }
 }
 

@@ -429,6 +429,15 @@ pub struct SampleReadGroups {
 /// belongs to, and whether it belongs to the sample this open serves. This
 /// answers both. It is built per open, not per file, because the second question
 /// is about the sample (spec §7, §9).
+///
+/// **Cloning is cheap, deliberately.** A region source takes a copy per query
+/// and there are ~10⁶ queries in a run, so the sharing lives *inside* the one
+/// variant that owns anything — `PerRecord`'s table, behind an `Arc` — rather
+/// than around the whole enum. `Sole` is then a tag and a `u32`, which is the
+/// overwhelmingly common case and costs no atomic at all; `PerRecord` costs one
+/// increment. Wrapping the enum instead would have put a pointer chase and an
+/// atomic on every query including the `Sole` ones, and an `Arc` in a struct
+/// built a million times is worth avoiding (owner, 2026-07-28).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadGroupResolution {
     /// The header declares exactly one read group, so every record is that one
@@ -441,7 +450,11 @@ pub enum ReadGroupResolution {
     /// with no `RG`, or naming none of these, is fatal: with several candidates
     /// there is no way to assign it, and guessing would attribute a read to the
     /// wrong library.
-    PerRecord(Box<[(Box<str>, RecordOwner)]>),
+    ///
+    /// `Arc<[_]>` rather than `Box<[_]>`: the table is settled at open and read
+    /// but never written, and this is what makes a per-query clone one atomic
+    /// increment instead of an allocation (see the type's doc).
+    PerRecord(Arc<[(Box<str>, RecordOwner)]>),
 }
 
 impl ReadGroupResolution {
@@ -785,7 +798,7 @@ mod tests {
                 ("rg1".into(), RecordOwner::Mine(ReadGroupId(4))),
                 ("rg2".into(), RecordOwner::Mine(ReadGroupId(5))),
             ]
-            .into_boxed_slice(),
+            .into(),
         )
     }
 
@@ -858,7 +871,7 @@ mod tests {
                 ("mine".into(), RecordOwner::Mine(ReadGroupId(1))),
                 ("theirs".into(), RecordOwner::OtherSample),
             ]
-            .into_boxed_slice(),
+            .into(),
         );
 
         assert_eq!(

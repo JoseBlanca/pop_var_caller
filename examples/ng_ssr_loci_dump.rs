@@ -32,7 +32,7 @@ use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -100,6 +100,9 @@ impl DumpReport {
             self.zero_coverage += 1;
         }
         let depth: u32 = locus.complete_observations().map(|obs| obs.num_obs).sum();
+        // The locus length in positions — what turns a run's offset into "flush left" or
+        // "flush right", now that the side is derived rather than tagged.
+        let locus_len = locus.locus_len();
         let motif = match &locus.kind {
             LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
             _ => Vec::new(),
@@ -112,7 +115,7 @@ impl DumpReport {
                 motif: motif.clone(),
                 ref_tract: locus.reference_bases.to_vec(),
                 depth,
-                read_coverage: coverage_label(obs.read_coverage),
+                read_coverage: coverage_label(obs.read_coverage, locus_len),
                 observed: obs.bases.to_vec(),
                 reads: obs.num_obs,
             });
@@ -157,11 +160,23 @@ impl DumpReport {
 }
 
 /// The tag a read-coverage carries in the `read_coverage` column.
-fn coverage_label(coverage: ReadCoverage) -> &'static str {
+fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
+    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
+    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
+    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
+    // so it never appears here, but naming it keeps the label honest for the generic path.
+    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
+    // compile error here. The guard form is what this migration used and it is exactly what
+    // let the compiler stop forcing these sites to be revisited.
     match coverage {
         ReadCoverage::Complete => "complete",
-        ReadCoverage::PartialLeft(_) => "partial:left",
-        ReadCoverage::PartialRight(_) => "partial:right",
+        run @ ReadCoverage::Observed { .. } => {
+            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
+                (true, _) => "partial:left",
+                (false, true) => "partial:right",
+                (false, false) => "partial:interior",
+            }
+        }
     }
 }
 
@@ -358,8 +373,35 @@ mod tests {
         writeln!(file).unwrap();
     }
 
-    /// Write a coordinate-sorted single-contig BAM (`@RG SM`, no `@SQ M5`) holding `reads`.
+    /// Stamp a record with an `RG` tag, so a multi-read-group file can say which group each
+    /// record belongs to (a file declaring several resolves **per record**).
+    fn in_read_group(
+        mut record: noodles_sam::alignment::RecordBuf,
+        read_group: &str,
+    ) -> noodles_sam::alignment::RecordBuf {
+        use noodles_sam::alignment::record::data::field::Tag;
+        use noodles_sam::alignment::record_buf::data::field::Value;
+        record.data_mut().insert(
+            Tag::READ_GROUP,
+            Value::String(read_group.as_bytes().to_vec().into()),
+        );
+        record
+    }
+
+    /// Write a coordinate-sorted single-contig BAM (`@RG SM`, no `@SQ M5`) holding `reads`,
+    /// declaring one read group.
     fn write_bam(path: &Path, contig_len: usize, reads: &[noodles_sam::alignment::RecordBuf]) {
+        write_bam_with_read_groups(path, contig_len, reads, &["rg0"]);
+    }
+
+    /// The same, declaring `read_groups` — all naming **one sample**, since a `SampleReads` open
+    /// serves exactly one. With several declared, each record's own `RG` names which.
+    fn write_bam_with_read_groups(
+        path: &Path,
+        contig_len: usize,
+        reads: &[noodles_sam::alignment::RecordBuf],
+        read_groups: &[&str],
+    ) {
         use bstr::BString;
         use noodles_bam as bam;
         use noodles_sam as sam;
@@ -375,14 +417,16 @@ mod tests {
         hd.other_fields_mut()
             .insert(SORT_ORDER, BString::from("coordinate"));
         let sq = Map::<ReferenceSequence>::new(NonZero::new(contig_len).unwrap());
-        let mut rg = Map::<ReadGroup>::default();
-        rg.other_fields_mut()
-            .insert(SAMPLE, BString::from("sample0"));
-        let header = sam::Header::builder()
+        let mut builder = sam::Header::builder()
             .set_header(hd)
-            .add_reference_sequence(b"chr1".to_vec(), sq)
-            .add_read_group(b"rg0".to_vec(), rg)
-            .build();
+            .add_reference_sequence(b"chr1".to_vec(), sq);
+        for name in read_groups {
+            let mut rg = Map::<ReadGroup>::default();
+            rg.other_fields_mut()
+                .insert(SAMPLE, BString::from("sample0"));
+            builder = builder.add_read_group(name.as_bytes().to_vec(), rg);
+        }
+        let header = builder.build();
 
         let mut writer = bam::io::Writer::new(File::create(path).unwrap());
         writer.write_header(&header).unwrap();
@@ -409,12 +453,45 @@ mod tests {
             read(&contig, "c1", 21, 54),
             read(&contig, "c2", 21, 54),
             read(&contig, "c3", 21, 54),
-            // Anchors tract1's left flank, runs off inside the tract (21..60) → partial:left.
+            // Anchors tract1's left flank, runs off inside the tract (21..60) → partial:left,
+            // reaching 20 of the tract's 24 positions.
             read(&contig, "pl", 21, 40),
+            // The same, stopping earlier (21..52) → partial:left reaching 12. **Its reach is what
+            // makes this fixture able to catch a left/right mix-up at all**: with only the
+            // symmetric `pl`/`pr` pair below, the two partial rows carry identical bases and
+            // counts, so swapping the sides merely exchanges their labels and the dump does not
+            // move. A partial whose reach no other partial shares breaks that symmetry.
+            read(&contig, "pl2", 21, 32),
             // Begins inside tract1, anchors its right flank (45..74) → partial:right.
             read(&contig, "pr", 45, 30),
         ];
         write_bam(&bam, contig.len(), &reads);
+        (dir, fasta, bam)
+    }
+
+    /// The same seven reads, split across **two read groups** of one sample: the four completes
+    /// go 3-to-`rg0` / 1-to-`rg1`, the two left partials to `rg0` and the right partial to `rg1`.
+    ///
+    /// Deliberately the *same reads* as [`fixture`], so the two dumps are comparable row for row
+    /// and "the split sums back" is a statement about the same evidence rather than about two
+    /// different fixtures.
+    fn two_read_group_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let contig = contig();
+        let dir = TempDir::new().unwrap();
+        let fasta = dir.path().join("ref.fa");
+        let bam = dir.path().join("sample.bam");
+        write_fasta(&fasta, &contig);
+
+        let reads = vec![
+            in_read_group(read(&contig, "c0", 21, 54), "rg0"),
+            in_read_group(read(&contig, "c1", 21, 54), "rg0"),
+            in_read_group(read(&contig, "c2", 21, 54), "rg0"),
+            in_read_group(read(&contig, "c3", 21, 54), "rg1"),
+            in_read_group(read(&contig, "pl", 21, 40), "rg0"),
+            in_read_group(read(&contig, "pl2", 21, 32), "rg0"),
+            in_read_group(read(&contig, "pr", 45, 30), "rg1"),
+        ];
+        write_bam_with_read_groups(&bam, contig.len(), &reads, &["rg0", "rg1"]);
         (dir, fasta, bam)
     }
 
@@ -496,9 +573,10 @@ mod tests {
                 + report.reads_without_observation,
             "every fetched read is accounted for (spec §9.2)"
         );
-        // tract1's six reads land as four complete + two partial observations; tract2 gets none.
+        // tract1's seven reads land as four complete + three partial observations; tract2 gets
+        // none.
         assert_eq!(report.obs_complete, 4);
-        assert_eq!(report.obs_partial, 2);
+        assert_eq!(report.obs_partial, 3);
         assert_eq!(report.reads_without_observation, 0);
         assert_eq!(report.reads_capped, 0);
     }
@@ -517,7 +595,7 @@ mod tests {
             lines[0],
             "# ssr_loci=2 zero_coverage=1 reads_capped=0 reads_without_observation=0"
         );
-        assert_eq!(lines[1], "# obs_complete=4 obs_partial=2");
+        assert_eq!(lines[1], "# obs_complete=4 obs_partial=3");
         assert_eq!(
             lines[2],
             "contig\tstart\tend\tmotif\tref_tract\tdepth\tread_coverage\tobserved\treads"
@@ -540,7 +618,7 @@ mod tests {
     }
 
     /// Partial observations exist — which proves the relevance gate admitted the partially-covering
-    /// reads (a spanning-only gate would have dropped them, spec §9.4). One left, one right, on
+    /// reads (a spanning-only gate would have dropped them, spec §9.4). Two left and one right, on
     /// their own rows, tagged and distinct from the complete rows.
     #[test]
     fn partial_observations_are_present_and_tagged() {
@@ -635,5 +713,128 @@ mod tests {
             "a cap below the depth changes the output"
         );
         assert!(cap_below.reads_capped > 0, "the cap discarded reads");
+    }
+
+    /// **The fixture can tell a left partial from a right one** — which it could not until `pl2`
+    /// was added, and the reason is worth keeping.
+    ///
+    /// With only the symmetric `pl`/`pr` pair, both partial rows carried identical `bases` and
+    /// identical `reads`, differing solely in the label; sorting put the left-flush run first
+    /// either way, so **swapping left for right at the mint site left the dump byte-identical**
+    /// (checked, during B1, by applying the swap). The acceptance anchor was blind to the one
+    /// property the `ReadCoverage` reshape most affects.
+    ///
+    /// `pl2` breaks the symmetry by reaching a *different* number of tract positions, so the two
+    /// left-flush rows carry bases no right-flush row shares and a swap moves the output. This
+    /// test states the property the fixture must keep: **no two partial rows are
+    /// interchangeable.**
+    #[test]
+    fn the_fixtures_partials_are_asymmetric_and_so_can_catch_a_side_swap() {
+        let (_dir, fasta, bam) = fixture();
+        let report = dump(&fasta, &bam, SsrGeneratorConfig::default());
+        let partials: Vec<&ObservationRow> = report
+            .rows
+            .iter()
+            .filter(|row| row.read_coverage.starts_with("partial"))
+            .collect();
+
+        assert_eq!(partials.len(), 3, "two left partials and one right");
+        let left: Vec<&&ObservationRow> = partials
+            .iter()
+            .filter(|row| row.read_coverage == "partial:left")
+            .collect();
+        let right: Vec<&&ObservationRow> = partials
+            .iter()
+            .filter(|row| row.read_coverage == "partial:right")
+            .collect();
+        assert_eq!(left.len(), 2);
+        assert_eq!(right.len(), 1);
+
+        // The discriminating property: swapping the sides would have to move some row's bases
+        // between the two labels, and that is only invisible if every left row has a right
+        // counterpart with the same bases. Assert no such pairing exists.
+        assert!(
+            left.iter()
+                .any(|l| right.iter().all(|r| r.observed != l.observed)),
+            "at least one partial's bases must be unique to its side, or a side swap is invisible"
+        );
+    }
+
+    /// **B2's oracle: the read group splits rows, and the split sums back.**
+    ///
+    /// The same seven reads as [`fixture`], dealt across two read groups of one sample. The
+    /// complete allele was seen by three `rg0` reads and one `rg1` read, so it becomes **two
+    /// rows** carrying 3 and 1 — where the single-group dump has one row of 4. Summing the group
+    /// axis away must recover the single-group dump exactly, which is what makes the finer grain
+    /// safe rather than merely conservative (spec §6).
+    ///
+    /// The row *count* rising is the half that proves the field is computed rather than
+    /// defaulted: with `read_group` constant these reads would merge back into one row.
+    #[test]
+    fn two_read_groups_split_the_rows_and_the_counts_sum_back() {
+        let (_single_dir, single_fasta, single_bam) = fixture();
+        let single = dump(&single_fasta, &single_bam, SsrGeneratorConfig::default());
+
+        let (_split_dir, split_fasta, split_bam) = two_read_group_fixture();
+        let split = dump(&split_fasta, &split_bam, SsrGeneratorConfig::default());
+
+        // The run-level totals are per read, not per row, so they cannot move: the same six
+        // reads produced the same four complete and two partial observations.
+        assert_eq!(single.obs_complete, split.obs_complete);
+        assert_eq!(single.obs_partial, split.obs_partial);
+        assert_eq!(single.reads_fetched, split.reads_fetched);
+
+        assert_eq!(
+            single.rows.len(),
+            4,
+            "one complete row and the three partials, ungrouped"
+        );
+        assert_eq!(
+            split.rows.len(),
+            5,
+            "the complete allele splits in two; the partials were one read each already"
+        );
+
+        // Fold the group axis away and the two dumps must agree row for row.
+        let collapse = |rows: &[ObservationRow]| {
+            let mut totals: Vec<(Vec<u8>, &'static str, u32)> = Vec::new();
+            for row in rows {
+                match totals
+                    .iter_mut()
+                    .find(|(bases, cov, _)| bases == &row.observed && *cov == row.read_coverage)
+                {
+                    Some((_, _, reads)) => *reads += row.reads,
+                    None => totals.push((row.observed.clone(), row.read_coverage, row.reads)),
+                }
+            }
+            totals
+        };
+        assert_eq!(
+            collapse(&split.rows),
+            collapse(&single.rows),
+            "collapsing the group axis recovers the single-group dump exactly"
+        );
+    }
+
+    /// **A one-read-group fixture is unchanged by the field**, which is what "free at one read
+    /// group" has to mean in practice: the row count is identical to a run that ignored the group
+    /// entirely, and the rendered text does not move.
+    ///
+    /// Guards the direction the split could go wrong cheaply — splitting rows on a sample that
+    /// has nothing to split.
+    #[test]
+    fn a_single_read_group_fixture_is_unchanged_by_the_group_axis() {
+        let (_dir, fasta, bam) = fixture();
+        let report = dump(&fasta, &bam, SsrGeneratorConfig::default());
+        let distinct_cells: std::collections::HashSet<(Vec<u8>, &str)> = report
+            .rows
+            .iter()
+            .map(|row| (row.observed.clone(), row.read_coverage))
+            .collect();
+        assert_eq!(
+            report.rows.len(),
+            distinct_cells.len(),
+            "with one read group no (bases, coverage) cell may appear twice"
+        );
     }
 }

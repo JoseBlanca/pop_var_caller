@@ -373,10 +373,10 @@ built now** — the container cache recovers most of the CRAM cost and BAM seeks
 ### 3.4 The entry point
 
 ```
-AlignmentFile::open(path, reference_info, filter_config, index_policy) -> Result<AlignmentFile, AlignmentFileError>
+AlignmentFile::open(path, reference_info, filter_config, index_policy) -> Result<Arc<AlignmentFile>, AlignmentFileError>
 AlignmentFile::sample_name() -> &str                       // from @RG SM, §3.1 check 4
 AlignmentFile::sq_md5s() -> &[Option<Md5>]                 // @SQ M5 tags, by ContigId, §3.1
-AlignmentFile::reads_in_region(&self, contig, start, end) -> Result<RegionReads<'_>, AlignmentFileError>
+AlignmentFile::reads_in_region(self: &Arc<Self>, contig, start, end) -> Result<RegionReads, AlignmentFileError>
      where RegionReads: Iterator<Item = Result<MappedRead, AlignmentFileError>>   // ordered, filtered
 
 // the deferred assembly check — a pure comparison the caller runs after joining
@@ -386,10 +386,24 @@ check_assembly(observed: &[Option<Md5>], verified: &ReferenceInfo) -> Result<Ass
 ```
 
 `open` runs the whole gate (§3.1) and leaves a handle owning the reader and the parsed index;
-`reads_in_region` builds the region source → filter → order-verify chain (§3.2). **It takes `&self`,
-not `&mut self`** — the load-bearing signature choice (§3.3): a handle comes from the internal pool,
-and the returned iterator returns it on `Drop`. That is what will let N threads query one
-`AlignmentFile` concurrently without touching a single call site. `check_assembly` is a
+`reads_in_region` builds the region source → filter → order-verify chain (§3.2). **It takes a
+*shared* receiver, not `&mut self`** — the load-bearing signature choice (§3.3): a handle comes from
+the internal pool, and the returned iterator returns it on `Drop`. That is what will let N threads
+query one `AlignmentFile` concurrently without touching a single call site.
+
+> **Fold-in, 2026-07-28 — the receiver is `&Arc<Self>`, and the returned stream carries no
+> lifetime.** The `&mut`-versus-shared argument above is unchanged; what changed is that the stream
+> **outlives the call**, so it has to keep the file alive to hand its pooled reader back. A borrow
+> would put the caller's lifetime on the returned type, and `LocusGenerator::next_locus` lends
+> `&SampleReads` per call while carrying no lifetime itself — *resumable + borrowed stream + no
+> lifetime on `Self`* is not expressible, so the borrow is what gives. `open` therefore hands back
+> an `Arc` too, since a bare handle can no longer query. The cost is a real narrowing: a
+> `&AlignmentFile` can read the file's metadata but cannot ask it for reads. Landed with the generic
+> locus generator's prerequisites, Milestone A
+> ([plan](../impl_plan/locus_generation_pileup_prerequisites.md),
+> [arch](../arch/locus_generation_pileup.md) §2.2).
+
+`check_assembly` is a
 free function, not a method: it must be callable once the file handles are long gone, and keeping it
 pure makes it trivially testable. The `ReadFilter`
 needs a reference accessor for #8 — the same `RawRefSeq` the rest of ng uses. (Exact ownership — one

@@ -48,10 +48,16 @@ type Measurement = Option<(&'static str, Vec<u8>)>;
 
 fn measurement(obs: &Option<(ReadCoverage, Vec<u8>)>) -> Measurement {
     obs.as_ref().map(|(cov, bases)| {
+        // The side is a derivation since the reshape: a run flush with the left border is a
+        // prefix. On this path a partial always anchors one border, so "not flush left" is
+        // exactly "flush right" and the locus length is not needed to tell them apart — an
+        // interior run would be mislabelled here, but the STR generator cannot mint one.
+        //
+        // Destructured rather than guarded on `_`, so a future variant is a compile error.
         let class = match cov {
             ReadCoverage::Complete => "complete",
-            ReadCoverage::PartialLeft(_) => "partialL",
-            ReadCoverage::PartialRight(_) => "partialR",
+            run @ ReadCoverage::Observed { .. } if run.is_flush_left() => "partialL",
+            ReadCoverage::Observed { .. } => "partialR",
         };
         (class, bases.clone())
     })

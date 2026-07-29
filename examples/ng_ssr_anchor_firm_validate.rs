@@ -42,9 +42,7 @@ fn class(obs: &Option<(ReadCoverage, Vec<u8>)>) -> &'static str {
     match obs {
         None => "none",
         Some((ReadCoverage::Complete, _)) => "complete",
-        Some((ReadCoverage::PartialLeft(_), _)) | Some((ReadCoverage::PartialRight(_), _)) => {
-            "partial"
-        }
+        Some((ReadCoverage::Observed { .. }, _)) => "partial",
     }
 }
 

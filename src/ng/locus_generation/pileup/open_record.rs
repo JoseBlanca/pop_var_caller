@@ -1042,7 +1042,7 @@ pub(super) struct ReadContribution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pileup::walker::tests::MockFasta;
+    use crate::ng::locus_generation::pileup::tests::MockFasta;
 
     fn fa(s: &str) -> MockFasta {
         MockFasta::new(s)

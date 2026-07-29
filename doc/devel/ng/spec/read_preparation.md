@@ -96,6 +96,31 @@ transform's output, field for field, exactly as step 1 reuses `MappedRead`. Copi
 production, **not redefined** — the types are production's raw integers, not ng's newtypes, which is
 what "reuse" means here:
 
+> **⚠ Fold-in, 2026-07-28 — this decision is REVERSED: ng owns its own `PreparedRead`.** The section
+> below still describes production's type accurately and is worth reading as the field inventory,
+> but "reuse as-is" no longer holds.
+>
+> **Why.** A read's library membership is a property of the read, like its MAPQ or its strand, and a
+> per-library error model cannot be added later from a tally that merged the libraries together — so
+> the prepared read has to carry `read_group: ReadGroupId`. Production's `PreparedRead` has no such
+> field, and **production is frozen**, so the group would die at the preparation boundary. An earlier
+> draft proposed adding the field to production's type (preceded by relocating `ReadGroupId` to a
+> crate-visible home); that is **withdrawn**. ng copies the type into `src/ng/read/` and extends it
+> there, which edits production zero times and makes the *next* field free — ng's read type will
+> change again (BAQ if it returns, the re-align mode), and each of those would otherwise have been a
+> fresh edit to frozen code.
+>
+> **What it costs and does not cost.** The copy is not an extra cost on top of copying the walker, it
+> is what makes copying the walker the right call: every module that looked reusable
+> (`cigar_cursor`, `decompose`, `active_read_set`, `chain_id_allocator`) names `PreparedRead` in its
+> signatures, so an ng-owned read type reaches all of them whatever else is decided. The preparer
+> threads the group through from `AlignedRead`, which already carries it.
+>
+> *Unchanged by this:* `PreparedRead`'s home inside `pileup/walker/` is a recorded misplacement —
+> preparation produces it, the pileup only consumes it — deferred to the port-back. ng copying the
+> type neither pays that debt nor worsens it. Source:
+> [locus_generation_pileup.md](locus_generation_pileup.md) §3, §6, §10.
+
 ```rust
 pub struct PreparedRead {
     pub chrom_id: u32,                    // index into the merged ContigList
@@ -404,7 +429,7 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
 | the per-read prep fold | `process_read` ([read_processor.rs](../../../../src/pileup/per_sample/read_processor.rs)) | model for `LeftAlignPreparer` — its **F3 stage only** (G2/F1 are step-1 filters; BAQ is deferred, §10) |
 | building the `PreparedRead` | `prepare_passthrough` (the `--no-baq` path, [baq_engine.rs](../../../../src/pileup/per_sample/baq_engine.rs)) | **`pub`, and it does all of it** — `alignment_end`, `mate_role`, `qname`, `mq_log_err`, adaptor boundary, and the raw-`qual`→`bq_baq` copy. Whether v1 *calls* it or ports it is **open** (§11) |
 | ↳ its inner wiring | `mapped_to_prepared` ([baq_engine.rs](../../../../src/pileup/per_sample/baq_engine.rs)) | **private** — not callable from ng; reachable only through `prepare_passthrough` above |
-| the prepared read | `PreparedRead` ([pileup/walker/mod.rs](../../../../src/pileup/walker/mod.rs)) | **reuse as-is** (§3); misplaced inside `pileup/walker/`, recorded not acted on |
+| the prepared read | `PreparedRead` ([pileup/walker/mod.rs](../../../../src/pileup/walker/mod.rs)) | **copy into `src/ng/read/` and extend with `read_group`** — reversed 2026-07-28 (§3 fold-in); production is frozen and the group must survive the preparation boundary. Its misplacement inside `pileup/walker/` is unchanged and still deferred to the port-back |
 | the re-align aligner | general/affine best-path aligner ([`alignment.md`](alignment.md) §4.1) | **not built — gated** (algorithm 2, `alignment_best_path.md` Milestone E); its trigger is open too (§4) |
 | reference | `RefSeq` — the canonical (uppercased) view ([ref_seq.md](ref_seq.md)) | reuse as-is. **Not** production's raw view: ng uppercases so masking cannot change an alignment (§6). One view, where production carries two |
 
@@ -449,7 +474,7 @@ CIGAR, and the raw qualities copied through uncapped. Three things to know befor
   returns `Ok(None)` (§7). The toggle design is recorded for if BAQ returns (§10).
 - **The re-align mode is gated** — its affine aligner (algorithm 2) is unbuilt and its trigger is open
   (§4). Not out of scope; simply not v1.
-- **Reuse production's `PreparedRead`; the reference is held, not passed; dispatch is static.** (§3, §6.)
+- **~~Reuse production's `PreparedRead`~~ — REVERSED 2026-07-28: ng owns its own copy, extended with `read_group`** (§3 fold-in). The rest stands: the reference is held, not passed; dispatch is static. (§3, §6.)
 - **The signature (2026-07-25):** `prepare_read(&self, read: MappedRead, scratch) -> Result<Option<PreparedRead>, ReadPrepError>`.
   By value; `Result` around `Option` because a decline and a broken run are different outcomes; the
   reference held per impl rather than an `Option<R>` on one type. Rationale and the alternatives beaten

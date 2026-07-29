@@ -5,15 +5,24 @@
 //! read-filtering module ([`read`]); the tandem-repeat scanner primitive
 //! ([`tandem_repeat`], a shared sequence primitive — types-and-scaffold stage);
 //! step 3's typed-region generator ([`region_typing`] — Milestone A, the
-//! segment-criteria port); and the read-alignment module ([`alignment`] — a
-//! folder of competing aligners, not a pipeline step).
+//! segment-criteria port); the read-alignment module ([`alignment`] — a
+//! folder of competing aligners, not a pipeline step); and step 4's locus
+//! generation ([`locus_generation`] — the shared locus type and contract, the STR
+//! generator, and the generic one's copied pileup walk).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
-//! `src/ssr/` or `src/regions.rs`, and it does not depend on trf-mod. Where ng
-//! needs a production behaviour in a different shape, it **copies the code and
-//! changes its own version** (owner, 2026-07-16); reuse is for what costs
-//! production nothing. Winning steps are ported back only after the experiments
-//! ng exists to run have decided something.
+//! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
+//! `src/pileup/`, `src/psp/`, `src/var_calling/` or `src/vcf/` — and it does not
+//! depend on trf-mod. Where ng needs a production behaviour in a different shape, it
+//! **copies the code and changes its own version** (owner, 2026-07-16); reuse is for
+//! what costs production nothing. Winning steps are ported back only after the
+//! experiments ng exists to run have decided something.
+//!
+//! **The heaviest instance of that rule so far is
+//! [`locus_generation::pileup`]** — a verbatim copy of `src/pileup/walker/`
+//! (~5,500 lines), kept *provably* identical to its source so that ng's later,
+//! deliberate divergences can be told apart from transcription slips. It is checked
+//! textually, not asserted: `pileup/copy_fidelity.rs`.
 
 #[cfg(test)]
 mod scanner_parity;

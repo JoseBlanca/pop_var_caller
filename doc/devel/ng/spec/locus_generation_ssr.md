@@ -148,6 +148,23 @@ and a suffix are different constraints (`read_preparation_ssr.md` §3) — and t
 it reached, which drives the derived depth. **This answers `read_preparation_ssr.md` §6**, which left
 the carrying of partial observations to this spec.
 
+> **Fold-in, 2026-07-28 — the two side-tagged variants are gone; the dedup key gained a third
+> axis.** `ReadCoverage` is now `Complete` + one `Observed { offset_in_locus, positions_covered }`
+> run, and prefix-versus-suffix is a **derivation** (`offset_in_locus == 0` is flush left) rather
+> than a variant — the paragraph above is otherwise unchanged, since the *constraint* it describes
+> is exactly what the run still expresses. The key is now
+> `(bases, read_coverage, read_group)`: an allele seen from two read groups is two rows, and
+> **this path's rows therefore split on any multi-read-group sample**.
+>
+> *One case where the answer genuinely changed:* the STR mint measures its reach in **read** bases,
+> so an allele longer than the reference tract gives a reach past the locus length; the run then
+> saturates to the whole locus and a left-anchored and a right-anchored read of the same bases
+> **merge into one row**, where `PartialLeft(n)` and `PartialRight(n)` kept them apart. Recorded
+> rather than fixed — identical constraints arguably *are* one cell — and pinned by
+> `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
+> Source: [locus_generation_pileup.md](locus_generation_pileup.md) §6,
+> [the prerequisites plan](../impl_plan/locus_generation_pileup_prerequisites.md) Milestone B.
+
 **We store the observed sequence, not a repeat count.** Two alleles of the same length can differ by
 an interior substitution — an interrupted repeat — and a count cannot tell them apart.
 

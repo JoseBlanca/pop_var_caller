@@ -30,15 +30,28 @@ pub mod input;
 pub mod left_align;
 #[cfg(test)]
 mod left_align_parity;
+pub mod prepared_read;
 
 pub use aligned_read::AlignedRead;
 pub use filtering::{
     BamRecordSource, CramRecordSource, NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig,
     ReadFilterCounts, ReadFilterError, RecordSource,
 };
+pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
 use crate::ng::ref_seq::RefSeqError;
-use crate::pileup::walker::PreparedRead;
+
+/// The read group a fixture uses when the group plays no part in what it checks.
+///
+/// **Not a sentinel.** `ReadGroupId(0)` is the *first* id the run's table mints
+/// ([`ReadGroupId`](crate::ng::types::ReadGroupId)), so it is indistinguishable from a real group —
+/// the crate already recorded this trap once, on `NoodlesRawRecord::default`
+/// ([filtering.rs](filtering)). Naming it is what keeps a future assertion from passing whether the
+/// group was threaded through or silently defaulted. A test that actually asserts *on* the group
+/// must use a distinctive id, as [`left_align`]'s `the_read_group_rides_through_both_paths` does.
+#[cfg(test)]
+pub(crate) const PLACEHOLDER_READ_GROUP: crate::ng::types::ReadGroupId =
+    crate::ng::types::ReadGroupId(0);
 
 /// A fatal, run-level failure from read preparation. **Never a per-read verdict:** a read
 /// that yields no usable observation is `Ok(None)`, and the run continues (spec §7).
@@ -120,7 +133,7 @@ pub trait ReadPreparer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::types::{ContigId, ReadGroupId};
+    use crate::ng::types::ContigId;
     use crate::pileup::per_sample::baq_engine::prepare_passthrough;
     use crate::pileup::walker::CigarOp;
 
@@ -138,8 +151,24 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            read_group: ReadGroupId(0),
+            read_group: PLACEHOLDER_READ_GROUP,
         }
+    }
+
+    /// Production's `--no-baq` build, re-attached to ng's read type. The wiring is
+    /// production's; the read group is what ng adds — see
+    /// [`PreparedRead::from_production`](prepared_read::PreparedRead::from_production).
+    ///
+    /// `chrom_id` is derived from `ref_id` exactly as the shipping path does
+    /// ([`left_align::into_prepared`]) rather than passed as a literal `0`: a fixture with a
+    /// non-zero `ref_id` would otherwise be silently prepared against contig 0.
+    fn prepare_via_passthrough(read: AlignedRead) -> PreparedRead {
+        let read_group = read.read_group;
+        let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
+        PreparedRead::from_production(
+            prepare_passthrough(read.into_mapped_read(), chrom_id),
+            read_group,
+        )
     }
 
     /// Prepares every read, by handing the whole build to production's `--no-baq` path.
@@ -151,7 +180,7 @@ mod tests {
             read: AlignedRead,
             _scratch: &mut (),
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
-            Ok(Some(prepare_passthrough(read.into_mapped_read(), 0)))
+            Ok(Some(prepare_via_passthrough(read)))
         }
     }
 
@@ -205,7 +234,7 @@ mod tests {
             scratch.calls += 1;
             scratch.buffer.clear();
             scratch.buffer.extend_from_slice(&read.seq);
-            Ok(Some(prepare_passthrough(read.into_mapped_read(), 0)))
+            Ok(Some(prepare_via_passthrough(read)))
         }
     }
 

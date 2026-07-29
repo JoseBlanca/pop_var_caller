@@ -69,9 +69,12 @@ pub struct ObservedSequence {
     /// The observed bases — allele content, in **read** coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the identity**: a
-    /// `Complete` and a `PartialLeft` of the same bases are different evidence and stay
+    /// `Complete` and an `Observed` run of the same bases are different evidence and stay
     /// separate entries (spec §3).
     pub read_coverage: ReadCoverage,
+    /// Which read group (one `@RG`) these reads came from. **Part of the identity**, so an
+    /// allele supported from several groups is several rows (spec §3, fold-in below).
+    pub read_group: ReadGroupId,
     /// How many reads showed this sequence — the whole support on the STR path.
     pub num_obs: u32,
     /// Forward-strand reads (strand bias).
@@ -81,28 +84,39 @@ pub struct ObservedSequence {
     /// Σ MAPQ and Σ MAPQ² — the multi-mapper Welch's-t filter recovers mean and variance.
     pub mapq_sum: u32,
     pub mapq_sum_sq: u64,
+    /// Supporting reads that began strictly left of the locus anchor — the QUAL
+    /// read-position-bias term. `placed_start` is **not** carried (spec §3, fold-in below).
+    pub placed_left: u32,
     /// Phase-chain ids of the reads folded here — what lets a later step chain observations
-    /// into a haplotype. Read-position-bias fields (`placed_left`/`placed_start`) are
-    /// **not** here: anchor-relative, degenerate on a tract, so the pileup generator adds
-    /// them (spec §3, §11).
+    /// into a haplotype.
     pub chain_ids: Vec<ChainId>,
 }
 
 /// How much of the locus a single read spanned — **one read's span, not depth**.
-/// `Complete` = it reached both borders; a partial ran off its own end partway, carrying
-/// how many of the locus's positions it reached from that border, in **locus** coordinates
-/// (spec §3).
+/// `Complete` = it reached both borders; otherwise the one run of locus positions it
+/// actually witnessed, in **locus** coordinates (spec §3).
 pub enum ReadCoverage {
     Complete,
-    PartialLeft(u16),
-    PartialRight(u16),
+    Observed { offset_in_locus: u16, positions_covered: u16 },
+}
+
+impl ReadCoverage {
+    /// Constructors that clamp the reach into the locus, then derive the offset — the order
+    /// matters, since a right-flush run built from an over-long reach would otherwise wrap.
+    pub fn from_left(positions_covered: u16, locus_len: u16) -> Self;
+    pub fn from_right(positions_covered: u16, locus_len: u16) -> Self;
+
+    /// Prefix / suffix as **derivations**, which is what replaces the side-tagged variants.
+    pub fn is_flush_left(&self) -> bool;
+    pub fn is_flush_right(&self, locus_len: u16) -> bool;
 }
 
 impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**. A
-    /// `Complete` counts at every position, a `PartialLeft(n)` at the leftmost `n`. Length
-    /// = `region.len()`. This is *observation* depth and only exact per locus; the paralog
-    /// filter owns the covering-but-unobserved and overlapping-loci caveats (spec §3, §11).
+    /// `Complete` counts at every position, an `Observed` run over the stretch it
+    /// witnessed. Length = `region.len()`. This is *observation* depth and only exact per
+    /// locus; the paralog filter owns the covering-but-unobserved and overlapping-loci
+    /// caveats (spec §3, §11).
     pub fn num_obs_along_locus(&self) -> Vec<u32>;
 
     /// The observations a likelihood may score directly — the `Complete` ones. A partial is
@@ -295,7 +309,7 @@ alongside them.
 | `RegionKind` / `TypedRegion` (dispatch input) | [region_typing/mod.rs:170](../../../../src/ng/region_typing/mod.rs#L170), [:146](../../../../src/ng/region_typing/mod.rs#L146) | consume as-is; the `match` is exhaustive over its four variants (`SsrSegment`/`SsrBundle`/`Generic`/`Satellite`) |
 | iterator + counts shape | `TypedRegionIterator` [region_typing/mod.rs:789](../../../../src/ng/region_typing/mod.rs#L789), `TypedRegionCounts` [:269](../../../../src/ng/region_typing/mod.rs#L269) | mirror — same lazy `Item = Result<_,_>`, same `counts()` accessor |
 | `GenomeRegion` / `Position` / `ContigId` | [types.rs:77](../../../../src/ng/types.rs#L77), [:32](../../../../src/ng/types.rs#L32), [:11](../../../../src/ng/types.rs#L11) | reuse as-is (1-based inclusive, `u64`); `region.len()` derives `num_obs_along_locus()`'s length |
-| `ObservedSequence` | `AlleleObservation` [pileup_record.rs:138](../../../../src/pileup_record.rs#L138) + `AlleleSupportStats` [:44](../../../../src/pileup_record.rs#L44) | **model** — the moments (`num_obs`/`q_sum`/`fwd`/`mapq_sum`/`mapq_sum_sq`) map field-for-field; ng drops `placed_left`/`placed_start` to the pileup generator and adds `read_coverage` |
+| `ObservedSequence` | `AlleleObservation` [pileup_record.rs:138](../../../../src/pileup_record.rs#L138) + `AlleleSupportStats` [:44](../../../../src/pileup_record.rs#L44) | **model** — the moments (`num_obs`/`q_sum`/`fwd`/`mapq_sum`/`mapq_sum_sq`) map field-for-field; ng keeps `placed_left`, drops `placed_start` (no model consumes it, and it is re-derivable), and adds `read_coverage` + `read_group` |
 | `ChainId` | [pileup_record.rs:30](../../../../src/pileup_record.rs#L30) (`type ChainId = u64`) | reuse as-is; production's REF-chain-id drop (§8 there) is the memory lesson §6 records |
 | `CohortLocus` composing `SampleLocusObservations` | `CohortPileupRecord.per_sample: Vec<Option<PileupRecord>>` [var_calling/types.rs:39](../../../../src/var_calling/types.rs#L39) | **model for the cohort type** — not this step; the merge groups by overlap (spec §3, §11) |
 | `SampleReads` (read access) | [read/input/mod.rs:345](../../../../src/ng/read/input/mod.rs#L345), `reads_in_region` [:440](../../../../src/ng/read/input/mod.rs#L440) | reuse as-is; §8 there is this step's feedback (per-query `Arc` accessor) — read on `main`, not this worktree |

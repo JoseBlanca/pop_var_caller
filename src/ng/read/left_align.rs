@@ -1,5 +1,9 @@
-//! Step 2's v1 implementation — **pass-through + left-alignment**, producing production's
-//! `PreparedRead`.
+//! Step 2's v1 implementation — **pass-through + left-alignment**, producing ng's
+//! [`PreparedRead`].
+//!
+//! The read it hands back is production's `prepare_passthrough` output plus the read group —
+//! ng owns the type precisely because production's has nowhere to put that field
+//! (`doc/devel/ng/spec/locus_generation_pileup.md` §6).
 //!
 //! A read whose CIGAR carries no indel is built straight from the record: nothing to shift, no
 //! reference fetched, no buffer touched. A read that does carry one has its indels rewritten into
@@ -19,10 +23,11 @@ use super::{ReadPrepError, ReadPreparer};
 use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::alignment::{Alignment, AlignmentNormalizer, DefaultAlignmentNormalizer};
 use crate::ng::read::aligned_read::AlignedRead;
+use crate::ng::read::prepared_read::PreparedRead;
 use crate::ng::ref_seq::RefSeq;
 use crate::ng::types::ContigId;
 use crate::pileup::per_sample::baq_engine::prepare_passthrough;
-use crate::pileup::walker::{CigarOp, PreparedRead};
+use crate::pileup::walker::CigarOp;
 
 /// Whether this line-up carries anything left-alignment could move.
 ///
@@ -211,18 +216,29 @@ impl<R: RefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N>
 /// `bq_baq` uncapped — is production's `prepare_passthrough`, its `--no-baq` path, called rather
 /// than re-derived. That is what makes the parity fixture exact on every field this step does not
 /// itself compute (spec §9, §11).
+///
+/// **The read group is threaded through here**, because production's type cannot carry it: the
+/// group is read off the `AlignedRead` before the conversion drops it, and re-attached on the way
+/// into ng's own [`PreparedRead`] (`locus_generation_pileup.md` §6). Preparation reads none of it —
+/// it only makes sure the pileup walk downstream still has it.
 fn into_prepared(read: AlignedRead) -> PreparedRead {
     // `ref_id` indexes the `u32` contig table, so a value that did not fit would be a corrupt
     // record rather than a legal one — the same conversion, with the same reasoning, that step 1
     // and production's own passthrough arm make.
     let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
-    prepare_passthrough(read.into_mapped_read(), chrom_id)
+    // Read before the conversion, which is where production's type loses it.
+    let read_group = read.read_group;
+    PreparedRead::from_production(
+        prepare_passthrough(read.into_mapped_read(), chrom_id),
+        read_group,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ng::alignment::left_align_repeated::RepeatedLeftAligner;
+    use crate::ng::read::PLACEHOLDER_READ_GROUP;
     use crate::ng::ref_seq::{InMemoryRefSeq, RefSeqError};
     use crate::ng::types::ReadGroupId;
 
@@ -276,7 +292,7 @@ mod tests {
             mate_ref_id: None,
             mate_pos: None,
             adaptor_boundary: None,
-            read_group: ReadGroupId(0),
+            read_group: PLACEHOLDER_READ_GROUP,
         }
     }
 
@@ -426,6 +442,74 @@ mod tests {
             outcome,
             Err(ReadPrepError::Reference(RefSeqError::UnknownContig(_)))
         ));
+    }
+
+    /// **The read group survives preparation — on both paths.**
+    ///
+    /// This is the whole point of ng owning the read type: production's `prepare_passthrough`
+    /// drops the group, so a preparer that simply returned its output would leave the pileup with
+    /// nothing to key an observation's group cell on. Both arms are driven because they build the
+    /// read through different code — the indel arm rewrites the CIGAR first — and **two different
+    /// non-zero ids** are used: a non-zero id rules out a defaulted field (`ReadGroupId(0)` reads
+    /// the same either way), and two different ones additionally rule out a preparer that latched
+    /// the first group it saw.
+    #[test]
+    fn the_read_group_rides_through_both_paths() {
+        let preparer =
+            LeftAlignPreparer::with_default_normalizer(InMemoryRefSeq::from_contigs(vec![
+                b"TAAAAG".to_vec(),
+            ]));
+        let mut scratch = LeftAlignScratch::default();
+
+        let mut no_indel = read_with(1, vec![CigarOp::Match(5)], b"TAAAA");
+        no_indel.read_group = ReadGroupId(7);
+        let prepared = preparer
+            .prepare_read(no_indel, &mut scratch)
+            .expect("in range")
+            .expect("prepared");
+        assert_eq!(prepared.read_group, ReadGroupId(7), "pass-through path");
+
+        let mut with_indel = read_with(
+            1,
+            vec![CigarOp::Match(4), CigarOp::Deletion(1), CigarOp::Match(1)],
+            b"TAAAG",
+        );
+        with_indel.read_group = ReadGroupId(9);
+        let prepared = preparer
+            .prepare_read(with_indel, &mut scratch)
+            .expect("in range")
+            .expect("prepared");
+        assert_eq!(
+            prepared.cigar,
+            vec![CigarOp::Match(1), CigarOp::Deletion(1), CigarOp::Match(4)],
+            "the fixture must actually take the canonicalize arm"
+        );
+        assert_eq!(prepared.read_group, ReadGroupId(9), "canonicalize path");
+    }
+
+    /// Each read keeps **its own** group across one preparer and one scratch.
+    ///
+    /// The scratch is where a latching bug would be introduced — it is the one piece of state that
+    /// survives between reads — and a fixture using one id twice cannot see it. Distinct non-zero
+    /// ids, compared as a sequence, so a preparer that stamped the first group it saw on every
+    /// subsequent read fails here.
+    #[test]
+    fn two_reads_from_different_groups_keep_their_own() {
+        let preparer = LeftAlignPreparer::with_default_normalizer(reference());
+        let mut scratch = LeftAlignScratch::default();
+        let groups: Vec<ReadGroupId> = [ReadGroupId(3), ReadGroupId(11)]
+            .into_iter()
+            .map(|group| {
+                let mut read = read_with(1, vec![CigarOp::Match(4)], b"ACGT");
+                read.read_group = group;
+                preparer
+                    .prepare_read(read, &mut scratch)
+                    .expect("no fetch")
+                    .expect("prepared")
+                    .read_group
+            })
+            .collect();
+        assert_eq!(groups, vec![ReadGroupId(3), ReadGroupId(11)]);
     }
 
     /// A read that consumes no reference has nothing to align against. Production skips `F3`

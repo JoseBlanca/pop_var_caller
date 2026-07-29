@@ -2173,7 +2173,7 @@ mod tests {
                     ("rg1".into(), RecordOwner::Mine(ReadGroupId(0))),
                     ("rg2".into(), RecordOwner::OtherSample),
                 ]
-                .into_boxed_slice(),
+                .into(),
             ),
         );
 

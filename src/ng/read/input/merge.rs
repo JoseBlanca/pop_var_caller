@@ -53,8 +53,8 @@ use super::open_bam::RegionReads;
 /// Deliberately **not** built on `Peekable`: `peek()` hands out a
 /// `&Result<AlignedRead, _>` and the emit path then moves out of the peek slot,
 /// which is easy to write and quietly does the work twice.
-pub struct MergedRegionReads<'a, R: RawRefSeq> {
-    streams: Vec<RegionReads<'a, R>>,
+pub struct MergedRegionReads<R: RawRefSeq> {
+    streams: Vec<RegionReads<R>>,
     /// `None` = that stream is exhausted.
     heads: Vec<Option<AlignedRead>>,
     /// `keys[i]` is `heads[i]`'s key; `None` in lockstep.
@@ -72,8 +72,8 @@ pub struct MergedRegionReads<'a, R: RawRefSeq> {
     done: bool,
 }
 
-impl<'a, R: RawRefSeq> MergedRegionReads<'a, R> {
-    pub(crate) fn new(streams: Vec<RegionReads<'a, R>>) -> Self {
+impl<R: RawRefSeq> MergedRegionReads<R> {
+    pub(crate) fn new(streams: Vec<RegionReads<R>>) -> Self {
         let k = streams.len();
         Self {
             streams,
@@ -183,7 +183,7 @@ fn key_of(read: &AlignedRead) -> GenomePosition {
     }
 }
 
-impl<R: RawRefSeq> Iterator for MergedRegionReads<'_, R> {
+impl<R: RawRefSeq> Iterator for MergedRegionReads<R> {
     type Item = Result<AlignedRead, IngestError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -233,11 +233,12 @@ impl<R: RawRefSeq> Iterator for MergedRegionReads<'_, R> {
     }
 }
 
-impl<R: RawRefSeq> FusedIterator for MergedRegionReads<'_, R> {}
+impl<R: RawRefSeq> FusedIterator for MergedRegionReads<R> {}
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     use noodles_sam::alignment::RecordBuf;
     use tempfile::TempDir;
@@ -279,7 +280,7 @@ mod tests {
     /// whole first contig, returning `(qname, source_file_index)` per read.
     fn merged(paths: &[PathBuf]) -> Result<Vec<(String, usize)>, IngestError> {
         let (_reference_dir, reference) = fixture_reference(false);
-        let files: Vec<AlignmentFile> = paths
+        let files: Vec<Arc<AlignmentFile>> = paths
             .iter()
             .enumerate()
             .map(|(i, path)| {

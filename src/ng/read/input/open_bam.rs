@@ -69,15 +69,29 @@ enum QueryPlan {
 ///
 /// The parsed index is owned here and lives for the whole run: a region query
 /// is an in-memory lookup plus a seek, never a file open or an index parse
-/// (spec §3.3). Not `Clone` — it owns an index and a reader pool; sharing is
-/// by reference.
+/// (spec §3.3). Not `Clone` — it owns an index and a reader pool, and two
+/// copies would be two pools and two tallies over one file.
+///
+/// **Sharing is by `Arc`, not by reference.** Querying takes
+/// `self: &Arc<Self>` ([`reads_in_region`](Self::reads_in_region)): the stream
+/// a query returns outlives the call and has to keep the file alive to hand
+/// its pooled reader back, so a bare `&AlignmentFile` can read the file's
+/// metadata but cannot ask it for reads.
 pub struct AlignmentFile {
     /// `Arc` so the per-query order guard can hold it for its error message
     /// without an allocation per query.
     path: Arc<Path>,
     /// Kept for the region query, which resolves a contig to a `ref_id` and
     /// hands the header to the record source. Read from C2 onwards.
-    header: sam::Header,
+    ///
+    /// `Arc` so a region source can **own** its header rather than borrow this
+    /// one: a borrowed header ties the returned stream to the file's lifetime,
+    /// and a resumable generator has to hold that stream across calls
+    /// (`doc/devel/ng/arch/locus_generation_pileup.md` §2.2). An independent
+    /// `Arc`, cloned out per query — *not* a reference into an `Arc`'d file,
+    /// which is what would make the source self-referential. Parsed once at
+    /// open either way; the clone is one atomic increment per query.
+    header: Arc<sam::Header>,
     /// Parsed once, at open — never re-read per query (spec §3.3). Queried from
     /// C2 onwards, which is the guarantee the whole per-query cost model rests
     /// on: a query is an in-memory lookup plus a seek.
@@ -85,6 +99,13 @@ pub struct AlignmentFile {
     /// How this file's records are assigned to read groups. Settled at open and
     /// never recomputed; the record sources consult it per record only when it
     /// says they must.
+    ///
+    /// A region source **owns** what it consults, so the stream it serves does
+    /// not borrow this file — but the sharing lives inside
+    /// [`ReadGroupResolution`] rather than around it, so this field is a plain
+    /// value and a per-query copy costs no atomic at all in the common
+    /// single-read-group case. The header, which has no such cheap-clone form,
+    /// is the one that needs an `Arc` of its own.
     resolution: ReadGroupResolution,
     /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
     /// because the gate just proved this file's `@SQ` order *is* the
@@ -212,12 +233,20 @@ impl Drop for BorrowedReader<'_> {
 /// when a caller abandons the stream half-way**, along with this query's drop
 /// tally. An `Option` because `drop` gets `&mut self` and has to move the
 /// stream out to unwrap it.
-pub struct RegionReads<'a, R: RawRefSeq> {
-    file: &'a AlignmentFile,
-    stream: Option<OrderVerified<ReadFilter<RegionSource<'a>, R>>>,
+///
+/// **It owns its file, and carries no lifetime.** A borrow would tie the stream
+/// to the `&AlignmentFile` the query was made through, and the generic locus
+/// generator has to hold one region's stream across many `next_locus` calls
+/// while `LocusGenerator` lends it `&SampleReads` per call — *resumable +
+/// borrowed stream + no lifetime on `Self`* is not expressible, so the borrow
+/// is what gives (arch `locus_generation_pileup.md` §2.2). The pool lives on
+/// the `AlignmentFile`, so sharing it by `Arc` keeps one pool per file.
+pub struct RegionReads<R: RawRefSeq> {
+    file: Arc<AlignmentFile>,
+    stream: Option<OrderVerified<ReadFilter<RegionSource, R>>>,
 }
 
-impl<R: RawRefSeq> Iterator for RegionReads<'_, R> {
+impl<R: RawRefSeq> Iterator for RegionReads<R> {
     type Item = Result<AlignedRead, AlignmentFileError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -225,9 +254,9 @@ impl<R: RawRefSeq> Iterator for RegionReads<'_, R> {
     }
 }
 
-impl<R: RawRefSeq> std::iter::FusedIterator for RegionReads<'_, R> {}
+impl<R: RawRefSeq> std::iter::FusedIterator for RegionReads<R> {}
 
-impl<R: RawRefSeq> Drop for RegionReads<'_, R> {
+impl<R: RawRefSeq> Drop for RegionReads<R> {
     fn drop(&mut self) {
         let Some(stream) = self.stream.take() else {
             return;
@@ -270,13 +299,21 @@ impl AlignmentFile {
     ///
     /// With `build_index_if_missing`, an absent index is built next to the file
     /// rather than rejected; that is a caller policy, not this module's.
+    ///
+    /// **Hands back an `Arc`, because that is the only shape the type is
+    /// useful in.** Querying takes `self: &Arc<Self>`
+    /// ([`reads_in_region`](Self::reads_in_region)), so a bare `AlignmentFile`
+    /// could be asked for its path, its digests and its tallies and nothing
+    /// else. Putting the share in the constructor states that invariant once,
+    /// where a caller cannot skip it, instead of leaving every call site to
+    /// wrap the result itself.
     pub fn open(
         path: &Path,
         reference: &ReferenceInfo,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
         resolution: ReadGroupResolution,
-    ) -> Result<Self, AlignmentFileError> {
+    ) -> Result<Arc<Self>, AlignmentFileError> {
         let header = read_header(path)?;
 
         // 1. @HD SO.
@@ -371,9 +408,9 @@ impl AlignmentFile {
         // reference's, so position i really is `ContigId(i)`.
         let sq_md5s = file_contigs.entries.iter().map(|entry| entry.md5).collect();
 
-        Ok(Self {
+        Ok(Arc::new(Self {
             path: Arc::from(path),
-            header,
+            header: Arc::new(header),
             index,
             resolution,
             sq_md5s,
@@ -386,7 +423,7 @@ impl AlignmentFile {
             crai_by_contig,
             reference_repository,
             counts: Mutex::new(Vec::new()),
-        })
+        }))
     }
 
     /// How this file's records are assigned to read groups (see the field).
@@ -410,10 +447,18 @@ impl AlignmentFile {
     /// *complete* product of this module: the sample layer either uses it as-is
     /// or merges k of them, and this module is indifferent to which.
     ///
-    /// Takes **`&self`**, not `&mut self` — the load-bearing signature choice
-    /// (spec §3.3). A reader comes from the internal pool and the returned
-    /// iterator gives it back on `Drop`, so N threads may query one file
-    /// concurrently without touching a single call site.
+    /// Takes a **shared** receiver, not `&mut self` — the load-bearing
+    /// signature choice (spec §3.3). A reader comes from the internal pool and
+    /// the returned iterator gives it back on `Drop`, so N threads may query
+    /// one file concurrently without touching a single call site.
+    ///
+    /// **`&Arc<Self>` rather than `&self`**, because the stream outlives the
+    /// call: it must keep the file alive to hand its reader back on `Drop`, and
+    /// a borrow would put the caller's lifetime on the returned type (arch
+    /// `locus_generation_pileup.md` §2.2, and [`RegionReads`]). One atomic
+    /// increment per query, against a query that then decodes thousands of
+    /// records. The cost of the narrowing is that a bare `&AlignmentFile` can
+    /// no longer query — deliberate: whoever queries shares ownership.
     ///
     /// `reference` is the caller's own accessor, passed **per query** rather
     /// than stored: `RawRefSeq` impls are stateful readers, so one shared
@@ -426,10 +471,10 @@ impl AlignmentFile {
     /// paying that probe per query would mean ~10⁶ × the contig count in
     /// reference fetches.
     pub fn reads_in_region<R: RawRefSeq>(
-        &self,
+        self: &Arc<Self>,
         region: GenomeRegion,
         reference: R,
-    ) -> Result<RegionReads<'_, R>, AlignmentFileError> {
+    ) -> Result<RegionReads<R>, AlignmentFileError> {
         // **Everything fallible happens first**, before a reader leaves the
         // pool: the format check, resolving the region, and querying the index
         // all touch no reader, so any of them failing costs nothing to recover
@@ -461,18 +506,23 @@ impl AlignmentFile {
         } = handle;
 
         let source = match (reader, plan) {
-            (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => RegionSource::Bam(
-                BamRegionSource::new(reader, &self.header, plan, &self.resolution),
-            ),
+            (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => {
+                RegionSource::Bam(BamRegionSource::new(
+                    reader,
+                    Arc::clone(&self.header),
+                    plan,
+                    self.resolution.clone(),
+                ))
+            }
             (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
                 RegionSource::Cram(CramRegionSource::new(
                     reader,
-                    &self.header,
+                    Arc::clone(&self.header),
                     self.reference_repository
                         .clone()
                         .expect("open builds a repository for every CRAM"),
                     plan,
-                    &self.resolution,
+                    self.resolution.clone(),
                     container,
                 ))
             }
@@ -485,7 +535,7 @@ impl AlignmentFile {
             ReadFilter::with_validated_contigs(source, reference, self.filter_config, buffers);
 
         Ok(RegionReads {
-            file: self,
+            file: Arc::clone(self),
             stream: Some(OrderVerified::new(filter, Arc::clone(&self.path))),
         })
     }
@@ -501,6 +551,13 @@ impl AlignmentFile {
     /// A stream that is never dropped — leaked, or held for the process
     /// lifetime — never contributes at all, and takes its pooled reader with
     /// it. That is inherent to returning things on `Drop`.
+    ///
+    /// **And a stream that outlives every *other* handle on its file
+    /// contributes where nobody can look.** Since the stream owns an
+    /// `Arc<AlignmentFile>` of its own, its `Drop` folds the tally into a file
+    /// that is then freed in the same breath — the count is not lost so much as
+    /// unobservable. Keep the `SampleReads`, or an `Arc` of your own, alive at
+    /// least as long as the streams whose counts you mean to read.
     pub fn counts(&self) -> Vec<ReadGroupCounts> {
         self.counts
             .lock()
@@ -638,10 +695,29 @@ impl AlignmentFile {
 /// than dumping a parsed index.
 impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Destructured exhaustively so a field that is added, removed or
+        // retyped is a compile error *here* rather than a silent omission from
+        // the output. What is printed is a deliberate subset — the `_` bindings
+        // are the ones deliberately left out — and only an explicit list can
+        // say which is which.
+        let Self {
+            path,
+            header: _,
+            index: _,
+            resolution,
+            sq_md5s,
+            filter_config: _,
+            readers: _,
+            readers_opened: _,
+            crai_by_contig: _,
+            reference_repository: _,
+            counts: _,
+        } = self;
+
         f.debug_struct("AlignmentFile")
-            .field("path", &self.path)
-            .field("read_groups", &self.resolution)
-            .field("contigs", &self.sq_md5s.len())
+            .field("path", path)
+            .field("read_groups", resolution)
+            .field("contigs", &sq_md5s.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
     }
@@ -1205,7 +1281,10 @@ mod tests {
         record
     }
 
-    fn opened_over(records: &[RecordBuf]) -> (TempDir, TempDir, AlignmentFile) {
+    /// The file comes back behind an `Arc` because that is what querying one
+    /// now takes: a region stream shares ownership of the file it reads
+    /// through, so it can hand the pooled reader back on `Drop`.
+    fn opened_over(records: &[RecordBuf]) -> (TempDir, TempDir, Arc<AlignmentFile>) {
         let (reference_dir, reference) = fixture_reference(false);
         let (bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), records);
         let file = AlignmentFile::open(
@@ -1417,7 +1496,7 @@ mod tests {
     #[test]
     fn a_region_stream_is_send_so_threads_can_share_one_file() {
         fn assert_send<T: Send>() {}
-        assert_send::<RegionReads<'_, InMemoryRefSeq>>();
+        assert_send::<RegionReads<InMemoryRefSeq>>();
         assert_send::<&AlignmentFile>();
     }
 
@@ -1542,6 +1621,50 @@ mod tests {
         );
     }
 
+    /// **The `Arc` is load-bearing past the borrow check.** A stream that
+    /// outlives every other handle on its file still reads, still returns its
+    /// reader, and still folds its tally in.
+    ///
+    /// Asserted here rather than at the `SampleReads` level, and that is the
+    /// whole point: a tally folded into a file nobody can reach is
+    /// indistinguishable from one that was never folded at all, so the property
+    /// only becomes falsifiable through a **second handle** kept on purpose.
+    /// The sibling test in `mod.rs` that drops the sample first is a
+    /// compile-time anchor and cannot see this — gutting `RegionReads::drop`
+    /// leaves it green.
+    #[test]
+    fn a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally() {
+        let (_reference_dir, _bam_dir, file) = opened_over(&[
+            all_mismatching_read("bad", 1),
+            read_named_with_length("good", 0, 40, 30),
+        ]);
+        let watcher = Arc::clone(&file);
+
+        let stream = file
+            .reads_in_region(whole_first_contig(), reference_bases())
+            .expect("query");
+        drop(file);
+        assert_eq!(
+            Arc::strong_count(&watcher),
+            2,
+            "the stream must hold an owning handle of its own, not a borrow"
+        );
+
+        let reads: Vec<AlignedRead> = stream.collect::<Result<_, _>>().expect("no fatal error");
+        assert_eq!(reads.len(), 1, "the all-mismatching read is filtered out");
+
+        assert_eq!(
+            watcher.pooled_readers(),
+            1,
+            "the reader went back to the file the stream kept alive"
+        );
+        assert_eq!(
+            only_tally(&watcher.counts()).high_mismatch_fraction,
+            1,
+            "and the tally was folded into that same file, not into a dead copy"
+        );
+    }
+
     // -----------------------------------------------------------------
     // BAM/CRAM parity (C5) — T8
     // -----------------------------------------------------------------
@@ -1567,7 +1690,7 @@ mod tests {
         records
     }
 
-    fn names_from(file: &AlignmentFile, region: GenomeRegion) -> Vec<String> {
+    fn names_from(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
         file.reads_in_region(region, reference_bases())
             .expect("query")
             .map(|read| String::from_utf8_lossy(&read.expect("no fatal error").qname).into_owned())
@@ -1873,7 +1996,7 @@ mod tests {
     /// already parsed in memory), but the first test that actually *queries*
     /// the file would fail somewhere far from the cause.
     struct OpenedFixture {
-        file: Result<AlignmentFile, AlignmentFileError>,
+        file: Result<Arc<AlignmentFile>, AlignmentFileError>,
         _reference_dir: TempDir,
         _bam_dir: TempDir,
     }
@@ -2140,7 +2263,7 @@ mod tests {
         header: &sam::Header,
     ) -> (
         (TempDir, TempDir),
-        Result<AlignmentFile, AlignmentFileError>,
+        Result<Arc<AlignmentFile>, AlignmentFileError>,
     ) {
         let (reference_dir, reference) = fixture_reference(false);
         let records = if header.reference_sequences().is_empty() {
