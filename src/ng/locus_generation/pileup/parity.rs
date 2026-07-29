@@ -43,6 +43,22 @@
 //! so a differential that compared only the summary would have passed it. The records
 //! caught it.
 //!
+//! # Run at scale — B3, 2026-07-29. **Zero divergences everywhere.**
+//!
+//! | run | scale | result |
+//! |---|---|---|
+//! | synthetic, release, `PVC_PARITY_CASES=5000` | 20,000 cases | **968,852 records, 0 divergences** |
+//! | synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **469,069 records, 0 divergences**; 457 cases (4.6%) panicked — in *both* walkers |
+//! | GIAB HG002 10×, `chr1:1000000-1400000` | targeted TR bundle | **4,600 records, 0 divergences** |
+//! | GIAB HG002 300×, `chr1:100000000-120000000` | 20 Mb | **137,591 records, 0 divergences** |
+//! | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:3406886-3506886` | 100 kb | **96,260 records, 0 divergences** |
+//! | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:13806669-15092603` | 1.3 Mb | **198,673 records, 0 divergences** |
+//!
+//! 437,124 records of real sequencing data across two organisms, a BAM and a CRAM, 10× and
+//! 300×; 1.4 M more synthetic. The debug row is the one that says something the others
+//! cannot: at scale the two walkers agree not only on outputs but on **which inputs reach
+//! production's reachable `debug_assert!`** — 457 cases, both walkers, every time.
+//!
 //! # This harness dies in plan 3, by design
 //!
 //! Plan 3 makes the two walkers differ on purpose — the no-fill haplotype builder,
@@ -441,6 +457,52 @@ const SUMMARY_FIELDS: [&str; 8] = [
     "column_depth_truncations",
 ];
 
+/// Assert the two walks agree, and return whether they agreed *by both panicking*.
+///
+/// Shared by the synthetic differential and the real-data one, so the two cannot drift
+/// into asserting different things about the same claim.
+#[track_caller]
+fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> bool {
+    assert_eq!(
+        ours.records.len(),
+        theirs.records.len(),
+        "{where_}: ng emitted {} stream items, production {}",
+        ours.records.len(),
+        theirs.records.len(),
+    );
+    for (position, (ours, theirs)) in ours.records.iter().zip(theirs.records.iter()).enumerate() {
+        assert_eq!(ours, theirs, "{where_}: stream item {position} diverged");
+    }
+
+    // A verbatim copy must panic verbatim: the two must agree on *which* inputs reach
+    // production's reachable `debug_assert!`, not merely on the outputs of the inputs
+    // that do not.
+    assert_eq!(
+        ours.panicked, theirs.panicked,
+        "{where_}: ng panicked={} but production panicked={}",
+        ours.panicked, theirs.panicked,
+    );
+    if ours.panicked {
+        return true;
+    }
+
+    let (ours, theirs) = (
+        ours.summary
+            .expect("a walk that did not panic has a summary"),
+        theirs
+            .summary
+            .expect("a walk that did not panic has a summary"),
+    );
+    for (field, (ours, theirs)) in ours.iter().zip(theirs.iter()).enumerate() {
+        assert_eq!(
+            ours, theirs,
+            "{where_}: RunSummary::{} diverged",
+            SUMMARY_FIELDS[field],
+        );
+    }
+    false
+}
+
 /// Cases per seed. Small enough to stay a unit test, large enough that every one of the
 /// five behaviours B2 mutates fires many times over — which
 /// `the_generator_exercises_what_the_port_can_break` asserts rather than assumes.
@@ -483,47 +545,9 @@ fn ng_walks_identically_to_production() {
 
             let theirs = production_walk(&case);
             let ours = ng_walk(&case);
-
-            assert_eq!(
-                ours.records.len(),
-                theirs.records.len(),
-                "{where_}: ng emitted {} stream items, production {}",
-                ours.records.len(),
-                theirs.records.len(),
-            );
-            for (position, (ours, theirs)) in
-                ours.records.iter().zip(theirs.records.iter()).enumerate()
-            {
-                assert_eq!(ours, theirs, "{where_}: stream item {position} diverged");
-            }
             compared_records += ours.records.len();
-
-            // A verbatim copy must panic verbatim: the two must agree on *which* inputs
-            // reach production's reachable `debug_assert!`, not merely on the outputs of
-            // the inputs that do not.
-            assert_eq!(
-                ours.panicked, theirs.panicked,
-                "{where_}: ng panicked={} but production panicked={}",
-                ours.panicked, theirs.panicked,
-            );
-            if ours.panicked {
+            if assert_same_walk(&where_, &ours, &theirs) {
                 panicking_cases += 1;
-                continue;
-            }
-
-            let (ours, theirs) = (
-                ours.summary
-                    .expect("a walk that did not panic has a summary"),
-                theirs
-                    .summary
-                    .expect("a walk that did not panic has a summary"),
-            );
-            for (field, (ours, theirs)) in ours.iter().zip(theirs.iter()).enumerate() {
-                assert_eq!(
-                    ours, theirs,
-                    "{where_}: RunSummary::{} diverged",
-                    SUMMARY_FIELDS[field],
-                );
             }
         }
     }
@@ -757,4 +781,204 @@ fn the_generator_exercises_what_the_port_can_break() {
         errors * 20 < multi_allele_records.max(1),
         "the generator is producing too many walker errors ({errors}) to be testing the fold"
     );
+}
+
+// ---------------------------------------------------------------------
+// B3 — the differential at scale, on real reads
+// ---------------------------------------------------------------------
+
+/// **The differential on real alignments** — GIAB HG002 and a tomato CRAM (spec §13.1).
+///
+/// `#[ignore]`d, because it needs data that is not in the tree: the bundles live in the
+/// main repo under `benchmarks/`, and the container mounts `$HOME/genomes` for the
+/// references. Driven by environment, so the same test serves both organisms:
+///
+/// ```text
+/// PVC_PARITY_FASTA=$HOME/genomes/h_sapiens/gca_grch38/GCA_….fna \
+/// PVC_PARITY_READS=…/benchmarks/ssr_hg002/bam/10x/HG002_TR_v1.0.1_Tier_10x.bam \
+/// PVC_PARITY_REGION=chr1:1000000-1200000 \
+///   cargo test --release --lib ng_walks_identically_to_production_on_real_reads \
+///     -- --ignored --nocapture
+/// ```
+///
+/// **`--release` is not an optimisation here, it is the point.** Real paired-end data hits
+/// production's reachable `debug_assert!` (see
+/// `both_walkers_panic_on_a_deletion_anchored_before_its_record`) constantly — overlapping
+/// mates carrying deletions are ordinary — so a debug build would abort the walk early and
+/// measure almost nothing. Release is also where the walker actually runs.
+///
+/// # What it compares, and why one fetcher
+///
+/// Reads are ingested through ng's own step 1 and prepared **once** by ng's
+/// `LeftAlignPreparer`; production's stream is that same stream converted down through
+/// `PreparedRead::into_production`. Preparing twice would compare two different inputs.
+/// A single `RefSeqFetcher` is lent to both walkers for the same reason: identical bytes
+/// by construction, so any divergence is the walk's.
+#[test]
+#[ignore = "needs a real BAM/CRAM and reference; see the doc comment for the invocation"]
+fn ng_walks_identically_to_production_on_real_reads() {
+    use std::path::PathBuf;
+
+    use super::RefSeqFetcher;
+    use crate::ng::read::ReadFilterConfig;
+    use crate::ng::read::input::SampleReads;
+    use crate::ng::read::left_align::LeftAlignPreparer;
+    use crate::ng::read::{ReadPreparer, prepared_read::PreparedRead as NgPreparedRead};
+    use crate::ng::ref_seq::WindowedRefSeq;
+    use crate::ng::reference_info::{ReferenceInfoCache, read_reference_verifying_or_creating_fai};
+    use crate::ng::types::{ContigId, GenomeRegion, Position};
+    use std::sync::Arc as StdArc;
+
+    let Ok(fasta) = std::env::var("PVC_PARITY_FASTA") else {
+        panic!("set PVC_PARITY_FASTA to a reference FASTA with a sibling .fai");
+    };
+    let Ok(reads_path) = std::env::var("PVC_PARITY_READS") else {
+        panic!("set PVC_PARITY_READS to a coordinate-sorted, indexed BAM or CRAM");
+    };
+    let fasta = PathBuf::from(fasta);
+
+    // The convenience path, for two reasons: it sets `ReferenceInfo.fasta_path`, without
+    // which a CRAM cannot be opened at all (this test serves the tomato CRAMs as well as
+    // the HG002 BAMs), and with a `.fai` already present it verifies in the **background**
+    // rather than making a 3 GB whole-genome pass before the first read is decoded.
+    let cache = StdArc::new(ReferenceInfoCache::new());
+    let (reference_info, verification) =
+        read_reference_verifying_or_creating_fai(&cache, fasta.clone())
+            .expect("the reference is readable and has (or can derive) a .fai");
+    let contigs = reference_info.contig_list();
+
+    // `name:start-end`, 1-based inclusive — the same convention `GenomeRegion` uses, so
+    // the string a user types and the region the walk covers are the same numbers.
+    // Defaults to the first 200 kb of the first contig, which is enough to be a real
+    // measurement and small enough to hold two prepared read streams in memory.
+    let region_spec = std::env::var("PVC_PARITY_REGION").unwrap_or_default();
+    let region = if region_spec.is_empty() {
+        let first = &contigs.entries[0];
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(first.length.min(200_000)),
+        }
+    } else {
+        let (name, span) = region_spec
+            .split_once(':')
+            .expect("PVC_PARITY_REGION looks like chr1:1000000-1200000");
+        let (start, end) = span
+            .split_once('-')
+            .expect("PVC_PARITY_REGION looks like chr1:1000000-1200000");
+        let index = contigs
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("the reference has no contig named {name}"));
+        GenomeRegion {
+            contig: ContigId(index as u32),
+            start: Position(start.parse().expect("a 1-based start")),
+            end: Position(end.parse().expect("an inclusive end")),
+        }
+    };
+
+    let sample = SampleReads::open_only_sample(
+        &[PathBuf::from(&reads_path)],
+        &reference_info,
+        ReadFilterConfig::default(),
+        true,
+    )
+    .expect("the alignment file opens against this reference");
+
+    let stream = sample
+        .reads_in_region(region, || {
+            WindowedRefSeq::new(fasta.clone(), contigs.clone())
+        })
+        .expect("the region query opens");
+
+    // Prepared **once**. The preparer holds its own accessor, separate from the ones the
+    // query factory mints — read preparation's rule.
+    let preparer = LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::new(
+        fasta.clone(),
+        contigs.clone(),
+    ));
+    let mut scratch = <LeftAlignPreparer<WindowedRefSeq> as ReadPreparer>::Scratch::default();
+
+    let mut ng_reads: Vec<NgPreparedRead> = Vec::new();
+    for item in stream {
+        let read = item.expect("the read stream is readable");
+        if let Some(prepared) = preparer
+            .prepare_read(read, &mut scratch)
+            .expect("preparation does not fail on a well-formed reference")
+        {
+            ng_reads.push(prepared);
+        }
+    }
+    assert!(
+        !ng_reads.is_empty(),
+        "no reads in {region:?} of {reads_path} — the region is empty, so this run would \
+         prove nothing"
+    );
+    let production_reads: Vec<ProductionPreparedRead> = ng_reads
+        .iter()
+        .cloned()
+        .map(NgPreparedRead::into_production)
+        .collect();
+
+    // One fetcher, lent to both walks: identical bytes by construction.
+    let fetcher = RefSeqFetcher(WindowedRefSeq::new(fasta.clone(), contigs.clone()));
+    let config = WalkerConfig::default();
+
+    let mut theirs = Vec::new();
+    let mut their_summary = None;
+    let their_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut walker = production_run(production_reads, &fetcher, &config);
+        for item in &mut walker {
+            theirs.push(item.map_err(|error| error.to_string()));
+        }
+        their_summary = Some(summary_array!(walker.summary()));
+    }))
+    .is_err();
+
+    let mut ours = Vec::new();
+    let mut our_summary = None;
+    let our_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut walker = super::run(ng_reads, &fetcher, &config);
+        for item in &mut walker {
+            ours.push(item.map_err(|error| error.to_string()));
+        }
+        our_summary = Some(summary_array!(walker.summary()));
+    }))
+    .is_err();
+
+    let reads = production_reads_len(&theirs);
+    let where_ = format!("{reads_path} {region:?}");
+    let panicked = assert_same_walk(
+        &where_,
+        &WalkOutcome {
+            records: ours,
+            summary: our_summary,
+            panicked: our_panic,
+        },
+        &WalkOutcome {
+            records: theirs,
+            summary: their_summary,
+            panicked: their_panic,
+        },
+    );
+    assert!(
+        !panicked,
+        "{where_}: both walkers panicked, which agrees but measures nothing — re-run with \
+         --release, where production's debug_assert! is compiled out"
+    );
+    // Joined at the end rather than dropped: a `.fai` that does not describe this FASTA
+    // would mean the two walks agreed about the wrong bases, which is a green run that
+    // proves nothing.
+    if let Some(handle) = verification {
+        handle
+            .join()
+            .expect("the .fai beside the reference describes it");
+    }
+    eprintln!("real-data differential: {where_} — {reads} records compared, zero divergences");
+}
+
+/// The number of stream items, named so the message above reads as what it is.
+fn production_reads_len(records: &[Result<PileupRecord, String>]) -> usize {
+    records.len()
 }

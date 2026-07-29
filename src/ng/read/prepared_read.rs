@@ -111,6 +111,8 @@ impl MateRole {
     }
 
     /// The reverse direction, **`#[cfg(test)]` only**: nothing needs it at run time.
+    /// See also [`PreparedRead::into_production`], which the walker parity harness needs
+    /// for the same reason — to hand one prepared stream to both walkers.
     ///
     /// It exists so that an exhaustive `match` over *ng's* enum also has to be updated
     /// when ng's enum grows — which is what makes
@@ -335,6 +337,55 @@ impl PreparedRead {
             mate_role: MateRole::from_production(mate_role),
             adaptor_boundary,
             read_group,
+        }
+    }
+
+    /// ng's prepared read as production's, **dropping the read group** — the one field
+    /// production has nowhere to put.
+    ///
+    /// `#[cfg(test)]`, and it exists for exactly one caller: the walker parity harness,
+    /// which must hand **one** prepared stream to both walkers. Preparing twice would
+    /// compare two different inputs and call the result parity. Reads are prepared once,
+    /// by ng's preparer, and converted down here.
+    ///
+    /// Destructured for the reason `from_production` is: a field added to ng's type must
+    /// stop this compiling, so that whoever adds it decides whether it has a production
+    /// counterpart rather than discovering later that the parity harness quietly stopped
+    /// carrying it.
+    #[cfg(test)]
+    pub(crate) fn into_production(self) -> ProductionPreparedRead {
+        let Self {
+            chrom_id,
+            alignment_start,
+            alignment_end,
+            cigar,
+            seq,
+            bq_baq,
+            mq_log_err,
+            mapq,
+            is_reverse_strand,
+            qname,
+            mate_role,
+            adaptor_boundary,
+            // Production's type has no counterpart; this is the whole reason ng owns its
+            // own read. The walk does not read it, which is what makes dropping it safe
+            // *here* and only here.
+            read_group: _,
+        } = self;
+
+        ProductionPreparedRead {
+            chrom_id,
+            alignment_start,
+            alignment_end,
+            cigar,
+            seq,
+            bq_baq,
+            mq_log_err,
+            mapq,
+            is_reverse_strand,
+            qname,
+            mate_role: mate_role.to_production(),
+            adaptor_boundary,
         }
     }
 }

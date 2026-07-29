@@ -96,7 +96,7 @@ than reaches in (spec §3).
   depth cap. A fixture that cannot fail is worth nothing, and this is where that is established —
   the fixture is fixed here and reused for the rest of the port. *Depends:* B1. *Source:* spec §12,
   §13.1.
-- ☐ **B3 — at scale.** Run the differential on GIAB HG002 and a tomato CRAM under the
+- ✅ **B3 — at scale.** Run the differential on GIAB HG002 and a tomato CRAM under the
   `PVC_PARITY_CASES` convention. Zero divergences, or the port is not done. *Depends:* B2.
   *Source:* spec §13.1.
 
