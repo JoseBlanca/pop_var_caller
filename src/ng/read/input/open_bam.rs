@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex};
 use noodles_bam as bam;
 use noodles_bgzf as bgzf;
 use noodles_cram as cram;
-use noodles_fasta as fasta;
 use noodles_sam as sam;
 
 use crate::bam::index_preflight::{
@@ -40,7 +39,7 @@ use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadGroupCounts,
 };
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::reference::{ReferenceBasesError, RunReference};
+use crate::ng::read::input::reference::{OpenReference, ReferenceBasesError};
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::GenomeRegion;
 
@@ -133,17 +132,17 @@ pub struct AlignmentFile {
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
     crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
-    /// The reference bases CRAM slice decoding consults — **the run's one
-    /// repository**, taken from [`RunReference`] at open, not built here.
+    /// **The run's reference**, held so each query can ask it for the bases
+    /// narrowed to that query's contig — not a repository of this file's own.
     ///
-    /// A handle, not a copy: `fasta::Repository` is an `Arc` inside, so every
-    /// file in a run points at the same whole-contig cache. That is what keeps
-    /// a cohort's resident reference at `genome` rather than `files × genome`
-    /// (see `reference.rs`, and the note at the open site).
+    /// A handle, not a copy: it is an `Arc` inside, so every file in a run
+    /// points at one cache of bases. That is what keeps a cohort's resident
+    /// reference at one contig rather than `files × genome` (see
+    /// `reference.rs`, and the note at the open site).
     ///
     /// `None` for a BAM, which stores its own sequences and needs no
     /// reference to decode.
-    reference_repository: Option<fasta::Repository>,
+    reference: Option<OpenReference>,
     /// This file's step-1 tally, summed as each region stream ends.
     ///
     /// The `&self` API's answer to `counts()`: a per-read running total would
@@ -314,7 +313,7 @@ impl AlignmentFile {
     /// wrap the result itself.
     pub fn open(
         path: &Path,
-        reference: &RunReference,
+        reference: &OpenReference,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
         resolution: ReadGroupResolution,
@@ -384,26 +383,30 @@ impl AlignmentFile {
         //    by `SampleReads` (spec §4, §8).
         //
         // 5. A CRAM needs the reference *bases* to decode at all, so the
-        //    repository is taken here — from the **run's** `RunReference`, not
+        //    repository is taken here — from the **run's** `OpenReference`, not
         //    built per file — and a reference that cannot supply one is a hard
         //    error now rather than a mystery at the first query.
         //
-        //    Asking `RunReference` rather than building here is the whole of
+        //    Asking `OpenReference` rather than building here is the whole of
         //    the memory fix. A `fasta::Repository` memoises whole contigs and
         //    never evicts, so a per-file repository costs `files × genome`:
         //    measured at ~752 MiB per open file against the 746 MiB tomato
         //    reference, which is a 51-sample cohort dying at 38 GiB. Sharing
-        //    the run's one repository makes that `genome`, once. The type
-        //    builds it lazily on this first call, so a BAM-only run still
-        //    never touches the FASTA.
+        //    the run's one makes that one contig, once (`reference.rs`).
+        //
+        //    Nothing is *read* here — this only opens the FASTA and proves it
+        //    can be, so "this CRAM has no bases to decode against" is a fault
+        //    at open rather than a mystery at the first query. The bases
+        //    themselves arrive per contig, at query time. A BAM never asks, so
+        //    a BAM-only run still never touches the FASTA.
         let crai_by_contig = match &index {
             AlignmentIndex::Crai(crai) => group_crai_by_contig(crai, file_contigs.entries.len()),
             _ => Vec::new(),
         };
 
-        let reference_repository = match AlignmentFileKind::from_path(path) {
+        let file_reference = match AlignmentFileKind::from_path(path) {
             Some(AlignmentFileKind::Cram) => {
-                Some(reference.bases().map_err(|source| match source {
+                reference.bases().map_err(|source| match source {
                     ReferenceBasesError::NoFasta => AlignmentFileError::CramNeedsReferenceFasta {
                         path: path.to_path_buf(),
                     },
@@ -411,7 +414,8 @@ impl AlignmentFile {
                         path: fasta,
                         source: std::io::Error::other(source),
                     },
-                })?)
+                })?;
+                Some(reference.clone())
             }
             _ => None,
         };
@@ -433,7 +437,7 @@ impl AlignmentFile {
             readers: Mutex::new(Vec::new()),
             readers_opened: AtomicUsize::new(0),
             crai_by_contig,
-            reference_repository,
+            reference: file_reference,
             counts: Mutex::new(Vec::new()),
         }))
     }
@@ -530,9 +534,14 @@ impl AlignmentFile {
                 RegionSource::Cram(CramRegionSource::new(
                     reader,
                     Arc::clone(&self.header),
-                    self.reference_repository
-                        .clone()
-                        .expect("open builds a repository for every CRAM"),
+                    // Narrowed to this query's contig: asking here, rather
+                    // than holding a repository of our own, is what lets the
+                    // run drop the previous chromosome's bases when the walk
+                    // moves on (`reference.rs`).
+                    self.reference
+                        .as_ref()
+                        .and_then(|reference| reference.bases_for_contig(region.contig))
+                        .expect("open opened the bases for every CRAM"),
                     plan,
                     self.resolution.clone(),
                     container,
@@ -722,7 +731,7 @@ impl std::fmt::Debug for AlignmentFile {
             readers: _,
             readers_opened: _,
             crai_by_contig: _,
-            reference_repository: _,
+            reference: _,
             counts: _,
         } = self;
 
@@ -1200,7 +1209,7 @@ mod tests {
 
         // The `Fasta` arm, because a CRAM can only be decoded against the
         // bases — see `a_cram_against_a_fai_only_reference_is_refused_at_open`.
-        let reference = RunReference::from(
+        let reference = OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
                 fai: None,
@@ -1737,7 +1746,7 @@ mod tests {
         .expect("the BAM opens");
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&records);
-        let cram_reference = RunReference::from(
+        let cram_reference = OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
                 fai: None,
@@ -1795,7 +1804,7 @@ mod tests {
     fn a_cram_against_a_fai_only_reference_is_refused_at_open() {
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());
 
-        let fai_only = RunReference::from(
+        let fai_only = OpenReference::from(
             read_reference_info(ReferenceSource::Fai(
                 crate::ng::reference_info::sibling_fai_path(&fasta),
             ))
@@ -1846,7 +1855,7 @@ mod tests {
         const READS: usize = 30_000;
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, READS);
-        let reference = RunReference::from(
+        let reference = OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
                 fai: None,

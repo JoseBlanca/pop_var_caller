@@ -25,7 +25,7 @@ use tempfile::TempDir;
 use crate::bam::index_preflight::preflight_alignment_indexes;
 use crate::ng::read::filtering::ReadFilterCounts;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::reference::RunReference;
+use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::{ReferenceSource, read_reference_info};
 use crate::ng::types::ReadGroupId;
 use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
@@ -155,19 +155,19 @@ pub(crate) fn matching_contigs() -> Vec<(&'static str, usize, Option<&'static st
         .collect()
 }
 
-/// A [`RunReference`] over [`FIXTURE_CONTIGS`] — the shape every open takes.
+/// An [`OpenReference`] over [`FIXTURE_CONTIGS`] — the shape every open takes.
 ///
 /// Hands back the run-scoped handle rather than the bare [`ReferenceInfo`]
 /// because that is what a caller really holds: one reference, shared by every
 /// file it opens. A test that wants the description alone asks it for
-/// [`info()`](RunReference::info).
+/// [`info()`](OpenReference::info).
 ///
 /// `with_digests` picks the arm: the `Fasta` arm reads the genome and carries
 /// real per-contig MD5s, while the `Fai` arm cannot, so its digests are `None`
 /// and the MD5 half of reconciliation is a no-op. Tests that care about the
 /// digest comparison need both. The `Fai` arm also carries no `fasta_path`, so
 /// it has no bases either — a CRAM cannot be opened against it.
-pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, RunReference) {
+pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, OpenReference) {
     let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
         .iter()
         .map(|(name, length)| ContigSpec {
@@ -187,7 +187,7 @@ pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, RunReference) {
     };
     (
         dir,
-        RunReference::from(read_reference_info(source).expect("read reference")),
+        OpenReference::from(read_reference_info(source).expect("read reference")),
     )
 }
 

@@ -36,7 +36,7 @@ use pop_var_caller::ng::locus_generation::{
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::reference::RunReference;
+use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
@@ -197,7 +197,7 @@ fn run_dump<A: RepeatDelimiter>(
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
     // One reference for every file this run opens — and so one copy of the bases.
-    let reference = RunReference::new(info);
+    let reference = OpenReference::new(info);
 
     let sample =
         SampleReads::open_only_sample(bams, &reference, ReadFilterConfig::default(), true)?;

@@ -40,7 +40,7 @@ use crate::ng::read::input::read_groups::{
     ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, RecordOwner, SampleReadGroups,
     build_read_groups,
 };
-use crate::ng::read::input::reference::RunReference;
+use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
@@ -360,13 +360,13 @@ impl SampleReads {
     ///
     /// **`reference` is the run's, not this sample's**, and that is what makes
     /// a cohort affordable: a CRAM decodes against the reference bases, and
-    /// [`RunReference`] holds the one copy of them that every sample's every
+    /// [`OpenReference`] holds the one copy of them that every sample's every
     /// file shares (`reference.rs`). A per-sample reference would put the whole
     /// genome in memory once per sample.
     pub fn open(
         sample: &SampleReadGroups,
         read_groups: &ReadGroups,
-        reference: &RunReference,
+        reference: &OpenReference,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
     ) -> Result<Self, IngestError> {
@@ -426,7 +426,7 @@ impl SampleReads {
     /// table being run-wide.
     pub fn open_only_sample(
         paths: &[PathBuf],
-        reference: &RunReference,
+        reference: &OpenReference,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
     ) -> Result<Self, IngestError> {
@@ -1605,7 +1605,7 @@ mod tests {
             ],
             &[("rg1", Some("NA12878")), ("rg2", Some("NA12878"))],
         );
-        let reference = RunReference::from(
+        let reference = OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
                 fai: None,
@@ -1880,7 +1880,7 @@ mod tests {
             ],
             &[("rg1", Some("NA12878")), ("rg2", Some("HG002"))],
         );
-        let reference = RunReference::from(
+        let reference = OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
                 fai: None,

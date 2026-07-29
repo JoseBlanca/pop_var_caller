@@ -1643,7 +1643,7 @@ mod tests {
         let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, 30_000);
         // `Fasta`, not `Fai`: a CRAM needs the reference *bases* to decode against, so `open`
         // rejects a reference that cannot supply a path to them.
-        let reference = crate::ng::read::input::reference::RunReference::from(
+        let reference = crate::ng::read::input::reference::OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
                 fai: None,

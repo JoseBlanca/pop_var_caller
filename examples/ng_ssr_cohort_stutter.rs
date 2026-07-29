@@ -59,7 +59,7 @@ use pop_var_caller::ng::locus_generation::{
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;
-use pop_var_caller::ng::read::input::reference::RunReference;
+use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
@@ -190,8 +190,8 @@ fn run_cohort(
     // per-file repository this replaces cost ~752 MiB of resident tomato
     // genome per open CRAM — 51 samples asked for 38 GiB against a 16 GB cap
     // and were OOM-killed at ~80 s. Handing every `SampleReads::open` the same
-    // `RunReference` makes that one genome, once.
-    let reference = RunReference::new(info);
+    // `OpenReference` makes that one genome, once.
+    let reference = OpenReference::new(info);
 
     // Group the inputs by the sample their read groups name, rather than assuming one file is one
     // sample. Several files of a single sample is the normal case for a library sequenced across

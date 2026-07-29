@@ -1,4 +1,4 @@
-//! [`RunReference`] — the reference every file in a run is opened against,
+//! [`OpenReference`] — the reference every file in a run is opened against,
 //! **including the one shared copy of its bases**.
 //!
 //! The read-input layer needs two different things from a reference. It needs
@@ -7,6 +7,14 @@
 //! needs the *bases*, because a CRAM stores its reads as differences from the
 //! reference and cannot be decoded without them.
 //!
+//! **"Open" is the difference between the two, and it is the same "open" as
+//! [`AlignmentFile::open`](super::open_bam::AlignmentFile::open)**: a
+//! `ReferenceInfo` merely *describes* a reference — names, lengths, digests, a
+//! path — while an `OpenReference` can be *read from*. It holds the FASTA open
+//! and hands out sequence. Holding the two together is not tidiness: they must
+//! be the same reference, and separate arguments could be mismatched, which
+//! would decode every read against the wrong bases with nothing to catch it.
+//!
 //! The bases are the expensive half, and they are expensive in a way that is
 //! easy to miss: noodles' [`fasta::Repository`] is a whole-contig memoising
 //! cache with **no eviction**, so every contig a decode touches stays resident
@@ -14,10 +22,11 @@
 //! `files × genome`, which for a 51-sample tomato cohort is ~38 GiB and an
 //! OOM kill. One repository per *run* costs `genome`, once — the reference is
 //! the same for every file by construction, since the `@SQ` gate has just
-//! proved it.
+//! proved it — and bounding *that* to the contig in hand is the second half,
+//! below.
 //!
 //! That is what this type exists to make true by construction: a caller holds
-//! one `RunReference` for the whole run and hands it to every
+//! one `OpenReference` for the whole run and hands it to every
 //! [`AlignmentFile::open`](super::open_bam::AlignmentFile::open), so there is
 //! no per-file arm in which a second repository could be built. The
 //! repository is built **lazily**, on the first CRAM open, so a BAM-only run
@@ -27,28 +36,43 @@
 //! one, so a clone is a pointer bump onto *the same* cache rather than a second
 //! one.
 //!
-//! ## What this deliberately does not do yet
+//! ## One contig resident, not the whole genome
 //!
-//! One repository still holds every contig it has touched — 746 MiB for tomato,
-//! ~3 GiB for a human reference, more for a polyploid crop. `Repository::clear`
-//! exists, and production's own pileup loop already calls it on contig
-//! transition to keep exactly one contig resident
-//! (`bam::alignment_input::build_fasta_repository`); a cohort walk is
-//! region-outer and sample-inner, so every file is on the same contig at the
-//! same time and that policy would cap the resident bases at the largest single
-//! contig (~87 MiB for tomato) instead of the whole genome. That is a second,
-//! independent factor of ~8.6 on this reference — and it is what
-//! [`WindowedRefSeq`](crate::ng::ref_seq::WindowedRefSeq)'s `evict_before`
-//! already does for the *walk's* view of the bases.
+//! Holding the *genome* was never required either — that too was ours, not
+//! noodles'. What noodles needs at any moment is the contig of the slice it is
+//! decoding: `get_slice_reference_sequence` asks the repository for one contig
+//! by name and holds it for that slice. Everything beyond that is cache policy,
+//! and the policy of an unevicted `Repository` is "keep every contig ever
+//! touched", which over a genome-wide walk is the whole genome.
 //!
-//! It is not done here because eviction needs a signal this layer does not
-//! have: only the caller knows when the walk has left a contig for good, and
-//! clearing early just re-reads. Adding it means giving `RunReference` an
-//! evict-on-transition entry point and a caller that calls it — a change to the
-//! walk's contract, not to this type alone. Worth doing when a reference is
-//! big enough for `genome` to be the problem; for tomato, `files × genome` was.
+//! So [`bases_for_contig`](OpenReference::bases_for_contig) clears the cache
+//! when the run moves to a new contig, keeping one chromosome resident instead
+//! of all of them — 86.6 MiB rather than 746 MiB for tomato, and ~238 MiB
+//! rather than ~3 GiB for a human reference. Production's pileup loop already
+//! does exactly this (`bam::alignment_input::build_fasta_repository`), and it is
+//! what [`WindowedRefSeq`](crate::ng::ref_seq::WindowedRefSeq)'s `evict_before`
+//! does for the walk's own view of the bases.
+//!
+//! **It costs no extra reading in an ordered walk.** A contig is cleared only
+//! when a query for a *different* contig arrives, so a walk that goes chr1 →
+//! chr2 → … reads each contig exactly once, as it did with no eviction at all.
+//! A cohort walk is region-outer and sample-inner, so all k files are on the
+//! same contig at the same time and the transition happens once per contig for
+//! the whole cohort, not once per file.
+//!
+//! **The assumption that buys it is contig-ordered access**, which every caller
+//! in this tree makes. A caller that alternates between contigs — a
+//! *contig-parallel* walk is the realistic one — would clear a chromosome its
+//! neighbour is still working through and re-read it, over and over. Such a
+//! caller must build its reference with
+//! [`unbounded`](OpenReference::unbounded), and will want a k-slot policy (one
+//! repository per worker contig) rather than this one; the shape is a map of
+//! contig → `Repository` in place of the single `OnceLock` here. In-flight
+//! decodes are never *broken* by a clear, only slowed: noodles holds each
+//! contig by `Arc` for as long as it is decoding against it.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use noodles_fasta as fasta;
@@ -56,6 +80,7 @@ use noodles_fasta as fasta;
 use crate::bam::alignment_input::build_fasta_repository;
 use crate::bam::errors::AlignmentInputError;
 use crate::ng::reference_info::ReferenceInfo;
+use crate::ng::types::ContigId;
 
 /// Why a run's reference could not supply the bases a CRAM needs to decode.
 ///
@@ -88,7 +113,7 @@ pub enum ReferenceBasesError {
 /// shares — it does not copy the cache — so passing it by value is as cheap as
 /// passing it by reference.
 #[derive(Clone)]
-pub struct RunReference {
+pub struct OpenReference {
     inner: Arc<Inner>,
 }
 
@@ -103,16 +128,51 @@ struct Inner {
     /// [`ReferenceInfoCache`](crate::ng::reference_info::ReferenceInfoCache)
     /// states for its own reads.
     bases: OnceLock<fasta::Repository>,
+    /// Which contig the cached bases are for, or [`NO_CONTIG`] before the first
+    /// query — the state behind the one-contig bound (module docs).
+    ///
+    /// An atomic rather than a lock because it is read on every region query
+    /// and the update is a single compare: two threads that both observe a
+    /// transition both clear, which is idempotent and needs no mutual
+    /// exclusion.
+    resident_contig: AtomicU32,
+    /// Whether to clear on contig transition at all. `false` restores
+    /// keep-everything for a caller whose access is not contig-ordered
+    /// ([`unbounded`](OpenReference::unbounded)).
+    bound_to_one_contig: bool,
 }
 
-impl RunReference {
+/// `resident_contig` before any query has narrowed the cache. Not a legal
+/// [`ContigId`] in any reference this project can read — a contig table that
+/// large would need 4 billion entries.
+const NO_CONTIG: u32 = u32::MAX;
+
+impl OpenReference {
     /// Wrap a run's reference description. Nothing is read here; the bases are
-    /// opened on first use.
+    /// opened on first use, and only one contig of them is kept resident
+    /// (module docs).
     pub fn new(info: Arc<ReferenceInfo>) -> Self {
+        Self::with_bound(info, true)
+    }
+
+    /// [`new`](Self::new), but keeping **every** contig the run touches.
+    ///
+    /// For a caller whose queries are not contig-ordered — a contig-parallel
+    /// walk — where the one-contig bound would clear a chromosome another
+    /// worker is still reading and re-read it repeatedly. Costs the whole
+    /// genome resident, which is the price of that access pattern until a
+    /// k-slot policy exists (module docs).
+    pub fn unbounded(info: Arc<ReferenceInfo>) -> Self {
+        Self::with_bound(info, false)
+    }
+
+    fn with_bound(info: Arc<ReferenceInfo>, bound_to_one_contig: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
                 info,
                 bases: OnceLock::new(),
+                resident_contig: AtomicU32::new(NO_CONTIG),
+                bound_to_one_contig,
             }),
         }
     }
@@ -165,6 +225,32 @@ impl RunReference {
         Ok(self.inner.bases.get_or_init(|| built).clone())
     }
 
+    /// The run's repository, holding **this contig's** bases and no other's.
+    ///
+    /// Called per region query. When the contig differs from the last query's,
+    /// the cache is cleared first, so the resident bases are one chromosome
+    /// rather than every chromosome the walk has passed (module docs). A query
+    /// for the contig already resident does nothing but hand back the handle.
+    ///
+    /// `None` if the bases were never opened — a BAM-only file, which never
+    /// asks. Infallible otherwise: `open` already proved they open, and the
+    /// result is memoised.
+    pub(crate) fn bases_for_contig(&self, contig: ContigId) -> Option<fasta::Repository> {
+        let repository = self.inner.bases.get()?;
+        if self.inner.bound_to_one_contig {
+            // `swap`, not load-then-store: two threads observing the same
+            // transition both clear, which is harmless, but neither may miss it.
+            let previous = self.inner.resident_contig.swap(contig.0, Ordering::Relaxed);
+            if previous != contig.0 {
+                // Drops this repository's *cache entries* only. A decode still
+                // running against the outgoing contig holds it by `Arc` and is
+                // unaffected — it simply keeps the bases alive a little longer.
+                repository.clear();
+            }
+        }
+        Some(repository.clone())
+    }
+
     /// Whether the bases have been opened yet — the observable form of "one
     /// repository per run", which `every_caller_gets_one_repository` asserts
     /// directly.
@@ -174,9 +260,9 @@ impl RunReference {
     }
 }
 
-impl std::fmt::Debug for RunReference {
+impl std::fmt::Debug for OpenReference {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RunReference")
+        f.debug_struct("OpenReference")
             .field("contigs", &self.inner.info.contigs.len())
             .field("fasta_path", &self.inner.info.fasta_path)
             .field("bases_opened", &self.inner.bases.get().is_some())
@@ -184,7 +270,7 @@ impl std::fmt::Debug for RunReference {
     }
 }
 
-impl From<ReferenceInfo> for RunReference {
+impl From<ReferenceInfo> for OpenReference {
     fn from(info: ReferenceInfo) -> Self {
         Self::new(Arc::new(info))
     }
@@ -204,7 +290,7 @@ mod tests {
             contigs: Vec::new(),
             fasta_path: None,
         };
-        let reference = RunReference::from(info);
+        let reference = OpenReference::from(info);
         assert!(matches!(
             reference.bases(),
             Err(ReferenceBasesError::NoFasta)
@@ -239,5 +325,50 @@ mod tests {
         let cloned = reference.clone();
         assert!(cloned.bases_opened());
         assert_eq!(cloned.bases().expect("shared").len(), 1);
+    }
+
+    /// **The one-contig bound.** Moving to a new contig drops the previous
+    /// one's bases; staying on a contig keeps them. Both halves matter: the
+    /// first is the memory saving, the second is what makes it free — without
+    /// it every query would re-read the chromosome.
+    #[test]
+    fn moving_to_a_new_contig_drops_the_previous_contig_s_bases() {
+        let (_dir, reference) = fixture_reference(true);
+        reference.bases().expect("the fixture has a FASTA");
+
+        let first = reference
+            .bases_for_contig(ContigId(0))
+            .expect("the bases are open");
+        first.get(b"chr1").expect("chr1 is in the fixture").unwrap();
+        first.get(b"chr2").expect("chr2 is in the fixture").unwrap();
+        assert_eq!(first.len(), 2, "both fetched, both cached");
+
+        // Still chr1: nothing is dropped, so a second query costs no re-read.
+        let same = reference
+            .bases_for_contig(ContigId(0))
+            .expect("the bases are open");
+        assert_eq!(same.len(), 2);
+
+        // On to chr2 — and chr1's 90 Mb equivalent goes with it.
+        let next = reference
+            .bases_for_contig(ContigId(1))
+            .expect("the bases are open");
+        assert_eq!(next.len(), 0, "the cache was cleared at the transition");
+    }
+
+    /// `unbounded` is the escape hatch for a caller whose queries are not
+    /// contig-ordered: it never clears, whatever contig it is asked for.
+    #[test]
+    fn an_unbounded_reference_keeps_every_contig() {
+        let (_dir, bounded) = fixture_reference(true);
+        let reference = OpenReference::unbounded(Arc::new(bounded.info().clone()));
+
+        let bases = reference.bases().expect("the fixture has a FASTA");
+        bases.get(b"chr1").expect("chr1 is in the fixture").unwrap();
+
+        let after_transition = reference
+            .bases_for_contig(ContigId(1))
+            .expect("the bases are open");
+        assert_eq!(after_transition.len(), 1, "nothing is ever dropped");
     }
 }
