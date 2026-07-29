@@ -328,7 +328,7 @@ struct WalkerState {
     /// Reusable per-step buffer for the read ids the column-depth cap removed. Hoisted for
     /// the same reason as `contributors_buf`: this runs once per covered reference base,
     /// and a truncated column is rare, so the buffer is usually empty and never grows.
-    truncated_ids_buf: Vec<u32>,
+    truncated_read_ids_buf: Vec<u32>,
     /// Reusable per-step buffer for `close_aged_records`'s drained
     /// records. Paired with `OpenPileupRecordTable::closing_keys_buf`;
     /// together they remove the two per-walker-step `Vec` allocations
@@ -353,7 +353,7 @@ impl WalkerState {
             summary: RunSummary::default(),
             config,
             contributors_buf: Vec::new(),
-            truncated_ids_buf: Vec::new(),
+            truncated_read_ids_buf: Vec::new(),
             drained_buf: Vec::new(),
         }
     }
@@ -485,9 +485,9 @@ impl WalkerState {
         // invisible to every record it would have reached. They are candidates rather than
         // a count — see `OpenPileupRecord::reads_discarded_by_cap`.
         let cap = column_depth_cap(contributors, &self.config);
-        self.truncated_ids_buf.clear();
+        self.truncated_read_ids_buf.clear();
         if contributors.len() > cap {
-            self.truncated_ids_buf
+            self.truncated_read_ids_buf
                 .extend(contributors[cap..].iter().map(|contrib| contrib.read_id));
             contributors.truncate(cap);
             self.summary.column_depth_truncations += 1;
@@ -504,7 +504,7 @@ impl WalkerState {
             walker_pos,
             self.chrom_id,
             contributors,
-            &self.truncated_ids_buf,
+            &self.truncated_read_ids_buf,
             &self.active_reads,
             reference,
         )?;
@@ -527,13 +527,14 @@ impl WalkerState {
         // we drain the hoisted buffer rather than `into_iter()`ing
         // it; the backing `Vec` stays allocated and reusable.
         for open in self.drained_buf.drain(..) {
-            // The witness tally is resolved at `finalise` and dropped here, and both
-            // halves are deliberate (A4). **Resolved there** because coverage is a
-            // read's extent measured against the record's *final* footprint, which
-            // only `finalise` knows and no later caller can reconstruct — the reads
-            // may have expired. **Dropped here** because this walker still emits
-            // production's `PileupRecord`, which has nowhere to carry it; B2 changes
-            // the emitted type and the tally becomes the rows.
+            // The witness tally is resolved at `finalise` and dropped here. **Resolved
+            // there** because coverage is a read's extent measured against the record's
+            // *final* footprint, which only `finalise` knows and no later caller can
+            // reconstruct — the reads may have expired. **Dropped here** because the two
+            // counts it carries that the locus needs are already *on* the locus
+            // (`reads_without_observation`, `reads_discarded_by_cap`); what remains is the
+            // complete/partial split, which nothing outside this module reads yet and which
+            // exists to pin `coverage_of` against the real walk.
             let (record, _witness) = open.finalise();
             out.push_back(record);
             self.summary.records_emitted += 1;
@@ -972,12 +973,17 @@ mod tests {
             .collect();
 
         assert!(!loci.is_empty(), "the fixture must emit loci");
-        let discarded: u32 = loci.iter().map(|locus| locus.reads_discarded_by_cap).sum();
-        assert!(
-            discarded > 0,
-            "six reads at a cap of two truncates four of them, and none folded anywhere — \
-             the walk is not handing the cap's read ids down to the fold: {loci:?}"
-        );
+        // **The count, per locus — not `> 0` summed.** Summing and asserting non-zero
+        // survives an off-by-one in the slice the walk collects (`contributors[cap + 1..]`
+        // reports three where there are four and still passes), which leaves the very
+        // number B3 exists to get right unpinned on every record that left the walker.
+        for locus in &loci {
+            assert_eq!(
+                locus.reads_discarded_by_cap, 4,
+                "six reads at a cap of two truncates four, and none of them folded \
+                 anywhere: {locus:?}"
+            );
+        }
         for locus in &loci {
             let folded: u32 = locus
                 .observed_sequences

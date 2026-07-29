@@ -164,9 +164,9 @@ pub fn drive_walker_with_config(
     let mut walker = run(reads, &ref_fetcher, config);
     // B2 changed what the walk emits; these inherited tests are the walk's regression
     // floor and are adapted through one projection rather than 67 hand-edits — see
-    // `super::as_pileup_record` for what it can and cannot reproduce.
+    // `super::to_pileup_record` for what it can and cannot reproduce.
     let records: Vec<crate::pileup_record::PileupRecord> = (&mut walker)
-        .map(|r| super::as_pileup_record(&r.expect("walker yielded error")))
+        .map(|r| super::to_pileup_record(&r.expect("walker yielded error")))
         .collect();
     let summary = walker.summary();
     (records, summary)
@@ -495,10 +495,16 @@ fn placed_left_is_per_record() {
     let rec3 = records.iter().find(|r| r.pos == 3).unwrap();
     assert_eq!(rec3.alleles[0].support.num_obs, 2);
     assert_eq!(rec3.alleles[0].support.placed_left, 1);
+    // **A real check, not arithmetic on the two lines above it.** The first version of
+    // this substitution asserted `num_obs - placed_left == 1` right after asserting
+    // `num_obs == 2` and `placed_left == 1`, which is true by construction whatever the
+    // walk did — the "test that cannot fail" pattern, introduced while removing a genuine
+    // assertion. What the deleted `placed_start` half actually pinned is that the counter
+    // is **per record**: r1 starts left of *this* record's anchor and not of the one at 1.
+    let rec1 = records.iter().find(|r| r.pos == 1).unwrap();
     assert_eq!(
-        rec3.alleles[0].support.num_obs - rec3.alleles[0].support.placed_left,
-        1,
-        "the other read started exactly on the anchor"
+        rec1.alleles[0].support.placed_left, 0,
+        "at the record anchored on r1's own start, nothing is placed left of it"
     );
 }
 

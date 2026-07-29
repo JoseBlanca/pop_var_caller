@@ -355,7 +355,7 @@ mod tests {
         // `alleles[0]` and there are three alleles" is a statement about production's
         // shape. The **comparison below stays on ng's own type**, which is what the two
         // walks actually produce.
-        let projected: Vec<_> = records.iter().map(super::super::as_pileup_record).collect();
+        let projected: Vec<_> = records.iter().map(super::super::to_pileup_record).collect();
         let widened = projected
             .iter()
             .find(|record| record.alleles[0].seq.len() > 1)

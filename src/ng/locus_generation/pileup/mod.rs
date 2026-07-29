@@ -6,7 +6,7 @@
 //! on a frozen type (`doc/devel/ng/spec/locus_generation_pileup.md` §3,
 //! `doc/devel/ng/arch/locus_generation_pileup.md` *Module home*).
 //!
-//! # Eight files were transcribed; five are still verbatim
+//! # Eight files were transcribed; four are still verbatim
 //!
 //! [`genome_walk`], [`open_record`], [`cigar_cursor`], [`decompose`],
 //! [`active_read_set`], [`chain_id_allocator`] and [`errors`] — plus `tests.rs`,
@@ -22,16 +22,19 @@
 //! changes from `copy_fidelity.rs`'s checked set and says so in that file's own
 //! header, so the guard keeps protecting what is still a copy instead of being
 //! switched off wholesale at the first change. A0 released [`genome_walk`],
-//! [`open_record`] and [`errors`] — the reference adaptor's removal; the other
-//! five are still guarded.
+//! [`open_record`] and [`errors`] — the reference adaptor's removal — and B2 released
+//! `tests.rs`, whose assertions had to move to ng's own locus type (spec §12). **Four are
+//! still guarded**, and `copy_fidelity.rs`'s release table is the list that stays true.
 //!
 //! What the copy was proven to *compute* is the stage-1 differential
 //! (`parity.rs`); what it is proven to *be* is `copy_fidelity.rs`. The two are
 //! different claims. Both are named as files rather than linked: they are
 //! `#[cfg(test)]` modules, so an intra-doc link to them breaks `cargo doc`.
 //!
-//! The copies still emit production's [`PileupRecord`](crate::pileup_record::PileupRecord),
-//! not ng's `SampleLocusObservations`. That changes in Milestone B.
+//! **The walk emits ng's own [`SampleLocusObservations`](crate::ng::locus_generation::SampleLocusObservations)
+//! from B2 on**, not production's `PileupRecord`. The inherited suite reaches it through
+//! `to_pileup_record`, a test-only projection whose losses are listed on it. (Named, not
+//! linked: it is `#[cfg(test)]`, and an intra-doc link to one breaks `cargo doc`.)
 //!
 //! **One file is renamed on the way in: `driver.rs` → [`genome_walk`]** — it is
 //! the only one of the seven named for a *role* rather than for what it owns,
@@ -166,12 +169,18 @@ pub use genome_walk::{PileupWalker, RunSummary, run};
 /// - **Chain ids follow ng's per-read rule**, so a read that agreed with the reference over
 ///   everything it witnessed carries none even where production would have given it one.
 ///
+/// - **Three locus-level fields are dropped whole**, having no `PileupRecord` counterpart:
+///   `region.end` (only the start survives, as `pos` — so nothing projected through this can
+///   see the footprint's extent), `reads_without_observation` and `reads_discarded_by_cap`.
+///   The first is why `the_emitted_region_covers_the_footprint_inclusively` asserts on ng's
+///   own type; the other two are asserted on theirs.
+///
 /// Rows that split by coverage or read group are **merged back together** here. That is the
 /// point: the inherited suite tests the *walk* — which reads folded where, with what
 /// evidence — not the shape of the emitted type, which has its own tests (`observation_rows`)
 /// and the differential.
 #[cfg(test)]
-pub(crate) fn as_pileup_record(
+pub(crate) fn to_pileup_record(
     locus: &crate::ng::locus_generation::SampleLocusObservations,
 ) -> crate::pileup_record::PileupRecord {
     use crate::pileup_record::{AlleleObservation, AlleleSupportStats};
@@ -185,14 +194,32 @@ pub(crate) fn as_pileup_record(
         chain_ids: Vec::new(),
     });
     for observation in &locus.observed_sequences {
+        // **Exhaustively destructured, because this is the direction that loses.**
+        // `finalise`'s own destructure catches a field added to ng's stats going *in*;
+        // nothing caught it never coming *out* until this did — a field added to
+        // `ObservedSequence` was silently dropped here and the whole suite stayed green,
+        // which is the `placed_start` failure mode one type down, on the type most likely
+        // to gain fields. The two the projection deliberately discards are named.
+        let crate::ng::locus_generation::ObservedSequence {
+            bases,
+            read_coverage: _,
+            read_group: _,
+            num_obs,
+            num_fwd,
+            q_sum,
+            mapq_sum,
+            mapq_sum_sq,
+            placed_left,
+            chain_ids,
+        } = observation;
         let index = match alleles
             .iter()
-            .position(|allele| allele.seq.as_slice() == observation.bases.as_ref())
+            .position(|allele| allele.seq.as_slice() == bases.as_ref())
         {
             Some(index) => index,
             None => {
                 alleles.push(AlleleObservation {
-                    seq: observation.bases.to_vec(),
+                    seq: bases.to_vec(),
                     support: AlleleSupportStats::default(),
                     chain_ids: Vec::new(),
                 });
@@ -200,15 +227,13 @@ pub(crate) fn as_pileup_record(
             }
         };
         let support = &mut alleles[index].support;
-        support.num_obs += observation.num_obs;
-        support.q_sum += observation.q_sum;
-        support.fwd += observation.num_fwd;
-        support.placed_left += observation.placed_left;
-        support.mapq_sum += observation.mapq_sum;
-        support.mapq_sum_sq += observation.mapq_sum_sq;
-        alleles[index]
-            .chain_ids
-            .extend_from_slice(&observation.chain_ids);
+        support.num_obs += num_obs;
+        support.q_sum += q_sum;
+        support.fwd += num_fwd;
+        support.placed_left += placed_left;
+        support.mapq_sum += mapq_sum;
+        support.mapq_sum_sq += mapq_sum_sq;
+        alleles[index].chain_ids.extend_from_slice(chain_ids);
     }
     for allele in &mut alleles {
         allele.chain_ids.sort_unstable();

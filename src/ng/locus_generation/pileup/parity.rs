@@ -893,7 +893,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// `render_ng_error`). The renderer is a **parameter** rather than a `Debug` bound, so
 /// which side is being rendered is a fact at the call site and neither side can quietly
 /// fall back to a bound the other does not satisfy.
-fn drive<W, E>(
+fn drive_production<W, E>(
     mut walker: W,
     render_error: impl Fn(&E) -> String,
     summary_of: impl FnOnce(&W) -> SummaryCounters,
@@ -918,8 +918,8 @@ where
     }
 }
 
-/// The same as [`drive`], for a walker that yields ng's own locus type — each record laid
-/// back out as a [`PileupRecord`] by [`as_pileup_record`](super::as_pileup_record) so the
+/// The same as [`drive_production`], for a walker that yields ng's own locus type — each record laid
+/// back out as a [`PileupRecord`] by [`to_pileup_record`](super::to_pileup_record) so the
 /// two streams stay comparable. Separate rather than generic over the item type: the
 /// projection is the thing worth seeing at the call site.
 fn drive_ng<W, E>(
@@ -935,7 +935,7 @@ where
     let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for item in &mut walker {
             records.push(
-                item.map(|locus| super::as_pileup_record(&locus))
+                item.map(|locus| super::to_pileup_record(&locus))
                     .map_err(|error| render_error(&error)),
             );
         }
@@ -953,7 +953,7 @@ where
 /// Production's answer.
 fn production_walk(case: &Case) -> WalkOutcome {
     let fasta = case.fasta();
-    drive(
+    drive_production(
         production_run(case.reads.clone(), &fasta, &case.config),
         render_production_error,
         |walker| production_counters(walker.summary()),
@@ -979,10 +979,10 @@ fn ng_walk(case: &Case) -> WalkOutcome {
         .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
         .collect();
     // **ng emits `SampleLocusObservations` from B2 on; the differential still compares
-    // `PileupRecord`s.** Laid back out through `as_pileup_record` rather than projecting
+    // `PileupRecord`s.** Laid back out through `to_pileup_record` rather than projecting
     // production forward, which is D1's job and needs the five divergence classes named
     // first. What the projection cannot carry is listed on it, and the two that matter here
-    // are named in `total_support` (`placed_start`, no longer computed at all) and in
+    // are named in `record_evidence` (`placed_start`, no longer computed at all) and in
     // `classify_record` (chain ids, now dropped per read).
     drive_ng(super::run(reads, fasta, &case.config), render_ng_error, {
         |walker| ng_counters(walker.summary())
@@ -1233,7 +1233,7 @@ struct RecordEvidence {
     q_sum_rounded: i64,
 }
 
-fn total_support(record: &PileupRecord) -> RecordEvidence {
+fn record_evidence(record: &PileupRecord) -> RecordEvidence {
     let mut totals = RecordEvidence {
         num_obs: 0,
         fwd: 0,
@@ -1268,7 +1268,7 @@ fn total_support(record: &PileupRecord) -> RecordEvidence {
 }
 
 /// Every chain id a record carries, sorted and deduplicated — the *other* half of "no
-/// evidence moved", and the half [`total_support`] cannot see because chain ids are a set
+/// evidence moved", and the half [`record_evidence`] cannot see because chain ids are a set
 /// per bucket rather than a scalar.
 ///
 /// **Equality here is the wrong test, and the fixture proved it.** Requiring the two sets to
@@ -1343,7 +1343,7 @@ fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreemen
     // an id production dropped into its REF bucket; it may never *lose* one.
     let ng_ids = record_chain_ids(ours);
     if ours.alleles[0].seq == theirs.alleles[0].seq
-        && total_support(ours) == total_support(theirs)
+        && record_evidence(ours) == record_evidence(theirs)
         && record_chain_ids(theirs)
             .iter()
             .all(|id| ng_ids.binary_search(id).is_ok())
@@ -1355,6 +1355,10 @@ fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreemen
 
 /// Set in the child process by the determinism test below, to select its other half.
 const DETERMINISM_CHILD_VAR: &str = "PVC_DETERMINISM_CHILD";
+
+/// Set alongside it, so an inherited child marker cannot silently disarm the test — see the
+/// guard in the test body.
+const DETERMINISM_PARENT_VAR: &str = "PVC_DETERMINISM_PARENT";
 
 /// The name the determinism test spawns itself under. A `const` beside the test rather
 /// than a literal at the call site, because a rename that missed one of the two would make
@@ -1369,6 +1373,12 @@ const DETERMINISM_TEST_PATH: &str =
 /// what the generator emits, and the projection merges rows back together, which is exactly
 /// the axis a hash-order bug would show up on.
 fn determinism_digest() -> String {
+    determinism_digest_with(|_| {})
+}
+
+/// The same, with a hook that perturbs each case's reads — used only by the positive
+/// control, which needs the digest to be shown *sensitive* rather than merely stable.
+fn determinism_digest_with(perturb: impl Fn(&mut Vec<PreparedRead>)) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut rng = SplitMix64(0xD37E_2E1D);
@@ -1383,6 +1393,8 @@ fn determinism_digest() -> String {
             .cloned()
             .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
             .collect();
+        let mut reads = reads;
+        perturb(&mut reads);
         for item in super::run(reads, fasta, &case.config) {
             match item {
                 Ok(locus) => {
@@ -1419,7 +1431,12 @@ fn determinism_digest() -> String {
 /// two assertions together say: the seed really did change, and the output really did not.
 #[test]
 fn ng_emits_the_same_bytes_in_a_second_process() {
-    if std::env::var(DETERMINISM_CHILD_VAR).is_ok() {
+    // **A child marker inherited from the environment would make this run take the child
+    // branch and assert nothing, while still reporting `ok`.** The parent sets the variable
+    // itself, so seeing it here at top level means it came from outside — which is a broken
+    // invocation, not a child.
+    if std::env::var(DETERMINISM_CHILD_VAR).is_ok() && std::env::var(DETERMINISM_PARENT_VAR).is_ok()
+    {
         println!("DIGEST {}", determinism_digest());
         println!(
             "CANARY {:016x}",
@@ -1433,6 +1450,7 @@ fn ng_emits_the_same_bytes_in_a_second_process() {
         let output = std::process::Command::new(&exe)
             .args(["--exact", DETERMINISM_TEST_PATH, "--nocapture"])
             .env(DETERMINISM_CHILD_VAR, "1")
+            .env(DETERMINISM_PARENT_VAR, "1")
             .output()
             .expect("the child test binary runs");
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1477,6 +1495,37 @@ fn ng_emits_the_same_bytes_in_a_second_process() {
         "the same reads, reference and config emitted different bytes in two processes — \
          something in the emission depends on the per-process hash seed, which spec §7 \
          forbids outright"
+    );
+}
+
+/// **The positive control for the test above** — without it, a digest that stopped hashing
+/// the loci would compare equal across processes for a reason that has nothing to do with
+/// the walk, and a real hash-order bug could sit underneath it undetected.
+///
+/// `records > 1000` does not cover this: it counts loci, not sensitivity. Nor does removing
+/// a read — that changes the record *count*, so a digest hashing nothing but the count still
+/// moves and the control passes while proving nothing. (Checked: it does.) The perturbation
+/// has to change **what the records say** while leaving which records exist alone, so this
+/// one rewrites every read's MAPQ: same loci, same bases, different `mapq_sum`.
+#[test]
+fn the_determinism_digest_responds_to_the_evidence() {
+    let full = determinism_digest();
+    let remapped = determinism_digest_with(|reads| {
+        for read in reads.iter_mut() {
+            read.mapq = read.mapq.wrapping_add(7).max(1);
+        }
+    });
+    assert_ne!(
+        full, remapped,
+        "every read's MAPQ changed and the digest did not, so it is not a function of what \
+         the walk emitted — `ng_emits_the_same_bytes_in_a_second_process` would compare two \
+         constants and pass whatever the walk did"
+    );
+    assert_eq!(
+        full.split(':').next(),
+        remapped.split(':').next(),
+        "MAPQ must not change which records exist, or this control is testing the record \
+         count rather than the evidence"
     );
 }
 
@@ -2449,7 +2498,7 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
 
     // Driven one after the other, not interleaved, so the shared reader's `RefCell` is
     // never borrowed by both walks at once.
-    let theirs = drive(
+    let theirs = drive_production(
         production_run(production_reads, reference.clone(), &config),
         render_production_error,
         |walker| production_counters(walker.summary()),

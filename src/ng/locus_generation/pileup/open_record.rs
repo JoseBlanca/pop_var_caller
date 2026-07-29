@@ -80,16 +80,14 @@ pub(super) struct RefSpan {
 /// cheap to reverse: both counters are pure functions of the read's start against
 /// the record's anchor (spec §6, arch §3).
 ///
-/// # It is still emitted, for now, and that is deliberate
+/// # `placed_start` is gone, and this is where it went
 ///
-/// [`OpenPileupRecord::finalise`] still returns production's [`PileupRecord`],
-/// which has the field — so until Milestone B changes the output type, the value
-/// is **reconstructed at that boundary** from a per-read flag on
-/// [`FoldedReadState`], exactly and by definition. That is what keeps the stage-1
-/// differential comparing every field of every record through Milestone A, which
-/// is the oracle A2 and A3 are checked against; dropping the number here instead
-/// would have blinded that oracle, and broken one inherited test inside the still
-/// verbatim `tests.rs`, four steps before either needed to move.
+/// It was reconstructed at the `PileupRecord` boundary through Milestone A, from a per-read
+/// flag on [`FoldedReadState`], so the stage-1 differential could keep comparing every field
+/// of every record while A2–A5 changed the fold underneath it. **B2 removed that boundary**
+/// and both went with it. `parity.rs` now zeroes the field on *both* sides and names the
+/// removal where it does so, which is what keeps a deliberate absence distinguishable from
+/// the oversight the Milestone A review found.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct AlleleSupportStats {
     /// Number of supporting reads for this allele in this record.
@@ -457,67 +455,6 @@ impl OpenPileupRecord {
         self.pos.saturating_add(self.ref_span())
     }
 
-    /// Convert into a finalised `PileupRecord`. Per-bucket
-    /// `chain_ids` are projected from `folded_reads` here rather
-    /// than carried on each `OpenAllele`: a re-fold subtracts the
-    /// read's scalar contribution from the old bucket and adds it
-    /// to the new one, but the old bucket would retain the read's
-    /// chain id unless the walker explicitly tracked it. Deriving
-    /// the chain id set from `folded_reads` at finalise removes
-    /// that drift surface entirely.
-    ///
-    /// Chain ids are **not** emitted for a read that agreed with the reference across
-    /// everything it witnessed — see [`read_agreed_with_reference`](Self::read_agreed_with_reference).
-    ///
-    /// **`placed_start` is gone with this conversion, as A1 said it would be.** ng's stats
-    /// never carried it; the `PileupRecord` boundary did, reconstructed from a per-read
-    /// flag, and that boundary is what this step removes. No model consumes it, and it is a
-    /// pure function of the read's start against the anchor, so a later consumer can
-    /// re-derive it without changing the fold (spec §6).
-    /// (continued) **Coverage is resolved here too, and here is the only place it
-    /// can be** (A4). A read's `witnessed` extent is absolute; what it means —
-    /// complete witness or one short run — is relative to a footprint that grows
-    /// until the record closes. Resolving at fold time would answer against a
-    /// footprint the record may still outgrow, and no re-fold would come back to
-    /// correct it, because the read may have expired in between (spec §4).
-    /// Re-derive this record's rows **per read**, keyed on the full
-    /// [`ObservationKey`] (B1).
-    ///
-    /// # Why per read, when the buckets already hold the totals
-    ///
-    /// Because two of the three parts of a row's identity are facts about a *read*, not
-    /// about a bucket. A bucket knows its bases; it does not know that one of its reads
-    /// witnessed the whole footprint while another saw four positions of sixteen, nor that
-    /// they came from different lanes. Reading rows off the bucket totals can therefore
-    /// only ever produce the merged answer — which is exactly the answer spec §6 says is
-    /// not good enough.
-    ///
-    /// **With one read group and every read a complete witness the result is identical to
-    /// the bucket totals**, row for row and sum for sum, because every read in a bucket
-    /// then shares one key. That is what "free at one read group" has to mean, and it is
-    /// what keeps the stage-1 differential green across this step.
-    ///
-    /// # Reads are taken in `read_id` order, and that is not tidiness
-    ///
-    /// `folded_reads` is an `AHashMap` whose iteration order is seeded per process, and
-    /// `q_sum` is an `f64` sum. Accumulating in hash order would make the last bits of
-    /// every quality total depend on the seed — the same output differing run to run,
-    /// which spec §7 forbids outright. The bucket totals this replaces were accumulated in
-    /// *walk* order and had the property for free; re-deriving is what puts it at risk.
-    ///
-    /// **This line is the determinism guarantee, not `finalise`'s row sort.** Pinned by
-    /// `parity::ng_emits_the_same_bytes_in_a_second_process`, which walks the same input in
-    /// two processes and compares: delete this sort and it fails; delete the row sort and it
-    /// stays green. Row order inherits determinism from here, and no test inside a single
-    /// process can see any of it, because `ahash` seeds once per process.
-    ///
-    /// *Cost, recorded rather than discovered:* this adds a `Vec<u32>` and a sort per
-    /// emitted record, on a path that runs once per covered reference base, and a reviewer
-    /// has already measured `finalise` as this milestone's largest single cost component.
-    /// It is left simple here deliberately — B2 rewrites this function's output and D3
-    /// measures throughput, so the cheap variants (reuse the bucket total when a bucket
-    /// does not split; lend a scratch buffer from the table) are worth choosing *after* a
-    /// number, not before one.
     /// Whether this read **agreed with the reference across everything it witnessed** — the
     /// per-read form of production's `allele_index == 0` chain-id rule (spec §6).
     ///
@@ -545,6 +482,34 @@ impl OpenPileupRecord {
         self.alleles[state.allele_index].seq == reference[first..past_last]
     }
 
+    /// Re-derive this record's rows **per read**, keyed on the full [`ObservationKey`].
+    ///
+    /// # Why per read, when the buckets already hold the totals
+    ///
+    /// Two of the three parts of a row's identity are facts about a *read*, not a bucket. A
+    /// bucket knows its bases; it does not know that one of its reads witnessed the whole
+    /// footprint while another saw one position of fourteen, nor that they came from
+    /// different lanes. Reading rows off the bucket totals can only ever produce the merged
+    /// answer, which spec §6 says is not good enough.
+    ///
+    /// With one read group and every read a complete witness the result **is** the bucket
+    /// totals, row for row and sum for sum, because every read in a bucket then shares one
+    /// key. That is what "free at one read group" means, and it is what keeps the stage-1
+    /// differential green across B1.
+    ///
+    /// # Reads are taken in `read_id` order, and **that line is the determinism guarantee**
+    ///
+    /// `folded_reads` is an `AHashMap` whose iteration order is seeded per process, and
+    /// `q_sum` is an `f64` sum, so accumulating in hash order would make the last bits of
+    /// every quality total depend on the seed — the same input emitting different bytes run
+    /// to run, which spec §7 forbids. The bucket totals this replaces had the property for
+    /// free, from being accumulated in walk order; re-deriving is what puts it at risk, and
+    /// `ids.sort_unstable()` below is what restores it.
+    ///
+    /// Pinned by `parity::ng_emits_the_same_bytes_in_a_second_process`, which walks the same
+    /// input in two processes: delete that sort and it fails; delete `finalise`'s *row* sort
+    /// and it stays green. No test inside one process can see any of this, because `ahash`
+    /// seeds once per process.
     fn observation_rows(&self, record_end_exclusive: u32) -> Vec<ObservationRow> {
         let mut ids: Vec<u32> = self.folded_reads.keys().copied().collect();
         ids.sort_unstable();
@@ -557,17 +522,31 @@ impl OpenPileupRecord {
                 .folded_reads
                 .get(&read_id)
                 .expect("the id came from this record's own fold state");
-            let key = ObservationKey {
-                bases: self.alleles[state.allele_index].seq.clone(),
-                read_coverage: coverage_of(state.witnessed, self.pos, record_end_exclusive),
-                read_group: state.read_group,
-            };
+            // The identity is compared **borrowed** and the bases cloned only when a row is
+            // genuinely new. Cloning into the key first and letting `find` compare owned
+            // values costs one allocation *per read* where the rows need one *per row* — the
+            // only cost in this function that scales with depth, and measured at 2.2 % of
+            // the milestone's 15.1 %. (The `Vec<u32>` and its sort are another 2.2 % and
+            // stay: they are the determinism guarantee. The linear `find` itself measured
+            // 0 %, and hash-keying the rows measured *worse*.)
+            let bases = self.alleles[state.allele_index].seq.as_slice();
+            let read_coverage = coverage_of(state.witnessed, self.pos, record_end_exclusive);
+            let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
-            let row = match rows.iter_mut().find(|row| row.key == key) {
-                Some(row) => row,
+            let existing = rows.iter().position(|row| {
+                row.key.bases == bases
+                    && row.key.read_coverage == read_coverage
+                    && row.key.read_group == read_group
+            });
+            let row = match existing {
+                Some(index) => &mut rows[index],
                 None => {
                     rows.push(ObservationRow {
-                        key,
+                        key: ObservationKey {
+                            bases: bases.to_vec(),
+                            read_coverage,
+                            read_group,
+                        },
                         support: AlleleSupportStats::default(),
                         chain_ids: Vec::new(),
                     });
@@ -587,6 +566,25 @@ impl OpenPileupRecord {
         rows
     }
 
+    /// Convert into the finished locus ng emits: the region, the reference bytes under it,
+    /// one [`ObservedSequence`] per row, and the two per-record counters.
+    ///
+    /// **Coverage is resolved here, and here is the only place it can be.** A read's
+    /// `witnessed` extent is absolute; what it *means* — complete witness, or one run short
+    /// of it — is relative to a footprint that grows until the record closes. Resolving at
+    /// fold time would answer against a footprint the record may still outgrow, and no
+    /// re-fold would come back to correct it, because the read may have expired in between
+    /// (spec §4).
+    ///
+    /// Chain ids are emitted per row and **absent for a read that agreed with the reference
+    /// across everything it witnessed** — see
+    /// [`read_agreed_with_reference`](Self::read_agreed_with_reference) for why production's
+    /// positional rule does not survive rows that split.
+    ///
+    /// `placed_start` is **gone**, as A1 said it would be: ng's stats never carried it, the
+    /// `PileupRecord` boundary did, and this step removed that boundary. Nothing consumes
+    /// it, and it is a pure function of the read's start against the anchor, so a later
+    /// consumer re-derives it without changing the fold (spec §6).
     pub fn finalise(self) -> (SampleLocusObservations, RecordWitness) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
@@ -601,10 +599,21 @@ impl OpenPileupRecord {
             // of this footprint may have folded at another, and a read that folds does so
             // with its whole window — so only the ones still absent from `folded_reads` at
             // the end were actually discarded (spec §6).
+            //
+            // **And absent for the cap's reason, not for A5's.** "Not in `folded_reads`"
+            // has two causes: the cap kept the read out, or it folded and then lost its row
+            // when its witness turned out non-contiguous. Counting the second here reports
+            // one read in *both* `reads_without_observation` and `reads_discarded_by_cap`,
+            // which double-counts it and tells a model the support is a subsample when the
+            // truth is that a read said nothing usable. Measured at 240 records in ~506,000
+            // before this exclusion.
             reads_discarded_by_cap: self
                 .reads_discarded_by_cap
                 .iter()
-                .filter(|read_id| !self.folded_reads.contains_key(read_id))
+                .filter(|read_id| {
+                    !self.folded_reads.contains_key(read_id)
+                        && !self.reads_without_observation.contains(read_id)
+                })
                 .count() as u32,
         };
         // **The rows come from the reads, not from the bucket totals** (B1). See
@@ -2463,7 +2472,7 @@ mod tests {
         // Laid back out as `PileupRecord`s — this is one of the inherited-shape
         // assertions B2 adapts through the projection rather than by hand.
         let records: Vec<_> = run(reads, MockFasta::new(contig), &WalkerConfig::default())
-            .map(|record| super::super::as_pileup_record(&record.expect("the walk succeeds")))
+            .map(|record| super::super::to_pileup_record(&record.expect("the walk succeeds")))
             .collect();
         let widened = records
             .iter()
@@ -3227,6 +3236,157 @@ mod tests {
         }
     }
 
+    /// **Reads that share a row identity are merged into one row** — the half of B1 the
+    /// three fixtures above do not test, and the half the differential is structurally
+    /// blind to.
+    ///
+    /// `to_pileup_record` merges rows back together by bases before the two walkers are
+    /// compared, so an `observation_rows` that emitted one row per read — every
+    /// `num_obs == 1` — projected to exactly the same `PileupRecord` and left the whole
+    /// suite green, at 20,000 soak cases as well. The projection undoes precisely the
+    /// defect. So the merge has to be asserted here, on ng's own type, or not at all.
+    #[test]
+    fn rows_merge_the_reads_that_share_an_identity() {
+        let reference = fa(WIDEN_CONTIG);
+        // Three reads, same lane, same single mismatched base, all complete witnesses of a
+        // one-base record: one identity, three reads.
+        let (active, _ids) = admitted(
+            (0..3)
+                .map(|index| {
+                    plain_read(
+                        &format!("same{index}"),
+                        5,
+                        5,
+                        vec![CigarOp::Match(1)],
+                        b"T".to_vec(),
+                    )
+                })
+                .collect(),
+        );
+        let mut open = OpenPileupRecordTable::new();
+        let contributors = contributors_at(&active, 5);
+        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference)
+            .expect("the fixture walks cleanly");
+
+        let record = open.records.remove(&5).expect("the record at 5");
+        let rows = record.observation_rows(record.footprint_end_exclusive());
+        let alt: Vec<_> = rows.iter().filter(|row| row.key.bases == b"T").collect();
+        assert_eq!(
+            alt.len(),
+            1,
+            "three reads with one identity are one row, not three: {rows:?}"
+        );
+        assert_eq!(
+            alt[0].support.num_obs, 3,
+            "and the row carries all three, which is what a row *is*"
+        );
+        assert_eq!(
+            alt[0].chain_ids.len(),
+            3,
+            "each read keeps its own identity inside the row it shares"
+        );
+    }
+
+    /// **The emitted region covers exactly the record's footprint, inclusive of both ends.**
+    ///
+    /// Unpinned by anything before this: `to_pileup_record` carries the contig and the start
+    /// and **discards the end**, so the 44 inherited tests and the whole differential are
+    /// blind to it — dropping the `saturating_sub(1)`, or replacing the end with
+    /// `Position(0)`, left the entire library green. `region.len()` is what sizes
+    /// `num_obs_along_locus`'s depth vector and what defines flush-right, so a wrong end is
+    /// a wrong depth profile everywhere downstream.
+    #[test]
+    fn the_emitted_region_covers_the_footprint_inclusively() {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(vec![plain_read(
+            "solo",
+            5,
+            5,
+            vec![CigarOp::Match(1)],
+            b"A".to_vec(),
+        )]);
+        let mut open = OpenPileupRecordTable::new();
+        let contributors = contributors_at(&active, 5);
+        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("walks");
+        let (one_base, _) = open.records.remove(&5).expect("the record at 5").finalise();
+        assert_eq!(one_base.region.start.get(), 5);
+        assert_eq!(
+            one_base.region.end.get(),
+            5,
+            "a one-base record starts and ends on the same position — `GenomeRegion` is \
+             inclusive of both ends (spec §6)"
+        );
+        assert_eq!(one_base.region.len(), 1);
+        assert_eq!(
+            one_base.region.len() as usize,
+            one_base.reference_bases.len(),
+            "the region and the reference bytes describe the same stretch"
+        );
+
+        let (widened, _) = {
+            let (mut open, _active) = widened_record();
+            open.records.remove(&5).expect("the record at 5").finalise()
+        };
+        assert_eq!(
+            (widened.region.start.get(), widened.region.end.get()),
+            (5, 20),
+            "the widened record runs 5..=20"
+        );
+        assert_eq!(widened.region.len(), 16);
+        assert_eq!(
+            widened.region.len() as usize,
+            widened.reference_bases.len(),
+            "and its reference bytes are the same sixteen"
+        );
+    }
+
+    /// **A read that departed from the reference keeps its chain id even on a partial row,
+    /// and one that agreed carries none even when its row is not the REF row** — the
+    /// per-read rule B2 replaced production's positional one with.
+    ///
+    /// Asserted nowhere before this, and the reason is structural rather than a missing
+    /// fixture: replacing the whole rule with production's `allele_index == 0` left 158/158
+    /// green at 10,000 cases, and so did making every partial row lose its ids. The
+    /// differential compares chain ids by equality only on the complete-reads fixture, where
+    /// the two rules coincide by construction, and the census that does see partial rows
+    /// never looks at ids at all.
+    ///
+    /// `shortie` matched positions 5..=7 and stopped, so its row is a *partial* one whose
+    /// bases equal the reference over what it saw — production would give it an id, and ng
+    /// must not. `deleter` witnessed the whole footprint through a deletion, so its bases
+    /// are not the reference and it keeps its id.
+    #[test]
+    fn only_the_reads_that_departed_from_the_reference_carry_a_chain_id() {
+        let (open, active) = same_bases_different_coverage();
+        let record = open.records.get(&7).expect("the record at 7");
+        let rows = record.observation_rows(record.footprint_end_exclusive());
+
+        // The shortie agreed with the reference across its one witnessed position; the
+        // deleter's fourteen-position witness emits a single base that is not those
+        // fourteen reference bytes.
+        let shortie_row = rows
+            .iter()
+            .find(|row| matches!(row.key.read_coverage, ReadCoverage::Observed { .. }))
+            .expect("the shortie's partial row");
+        let deleter_row = rows
+            .iter()
+            .find(|row| row.key.read_coverage == ReadCoverage::Complete && row.key.bases == b"G")
+            .expect("the deleter's complete row");
+        assert_eq!(
+            shortie_row.chain_ids,
+            Vec::new(),
+            "the shortie agreed with the reference across everything it witnessed, so it \
+             carries no id — production's positional rule would have given it one, because \
+             its partial row is not `alleles[0]`"
+        );
+        assert_eq!(
+            deleter_row.chain_ids.len(),
+            1,
+            "the deleter deleted thirteen reference bases, so it departed and keeps its id"
+        );
+        let _ = read_id_of(&active, "deleter");
+    }
+
     // -----------------------------------------------------------------
     // B3 — reads a depth cap discarded, per record.
     // -----------------------------------------------------------------
@@ -3311,6 +3471,62 @@ mod tests {
             "and the locus reports it, which is what a model reads to know the counts are a \
              subsample"
         );
+    }
+
+    /// **A read that folded and then lost its row to a hole is not counted twice.**
+    ///
+    /// "Absent from `folded_reads`" has two causes — the cap kept the read out, or its
+    /// witness turned out non-contiguous and A5's path removed it — and counting the second
+    /// here reported one read in *both* `reads_without_observation` and
+    /// `reads_discarded_by_cap`. Measured at 240 records in ~506,000 before the exclusion.
+    /// The two counters mean different things to a model: one says the support is a
+    /// subsample of the depth, the other says a read covered the locus and said nothing
+    /// usable.
+    #[test]
+    fn a_read_that_lost_its_row_to_a_hole_is_not_also_counted_as_capped() {
+        let reference = fa(WIDEN_CONTIG);
+        // `holey` matches 5..=9 with an `N` at 7, so it folds at 5 and then yields no
+        // observation — A5's path. It is *also* named to the cap, which the walk would do
+        // if the column were over depth.
+        let (active, _ids) = admitted(vec![
+            plain_read("holey", 5, 9, vec![CigarOp::Match(5)], b"ACNTA".to_vec()),
+            plain_read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(16)],
+                vec![b'A'; 17],
+            ),
+        ]);
+        let holey_id = read_id_of(&active, "holey");
+        let mut open = OpenPileupRecordTable::new();
+        for pos in [5u32, 6, 8, 9] {
+            let contributors = contributors_at(&active, pos);
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                std::slice::from_ref(&holey_id),
+                &active,
+                &reference,
+            )
+            .expect("the fixture walks cleanly");
+        }
+
+        let record = open.records.remove(&5).expect("the record at 5");
+        let (locus, witness) = record.finalise();
+        assert_eq!(
+            witness.reads_without_observation, 1,
+            "the hole at 7 is why `holey` has no row"
+        );
+        assert_eq!(
+            witness.reads_discarded_by_cap, 0,
+            "and it must not *also* be reported as discarded by the cap — one read, one \
+             reason, or a model reads the support as a subsample when it is not"
+        );
+        assert_eq!(locus.reads_without_observation, 1);
+        assert_eq!(locus.reads_discarded_by_cap, 0);
     }
 
     /// **A read the cap removed at one position but not another is *not* discarded** — the

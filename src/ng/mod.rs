@@ -27,7 +27,7 @@
 //! **Those divergences have now begun**, so "a verbatim copy" is no longer true of the
 //! directory as a whole: three files have been released from the guard and changed on
 //! purpose — the walker no longer fabricates the reference bases a read did not witness
-//! — and five remain verbatim and guarded. `copy_fidelity.rs` names which are which, and
+//! — and four remain verbatim and guarded. `copy_fidelity.rs` names which are which, and
 //! is the only thing that stays true as the balance shifts.
 
 #[cfg(test)]
