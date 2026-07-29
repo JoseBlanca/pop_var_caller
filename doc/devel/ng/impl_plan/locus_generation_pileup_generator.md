@@ -214,7 +214,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   `ActiveReadsExhausted`. **Snapshot its counters at `begin_segment` and fold the delta**: `reset()`
   preserves them and `RunSummary` takes them by *assignment*, so summing per-region summaries would
   triangular-sum `chain_allocations` and `mate_lookup_evictions`. *Depends:* C2. *Source:* spec §8.
-- ☐ **C4 — wire it in.** `impl LocusGenerator<()> for PileupGenerator`; fill `GeneratorSet`'s
+- ✅ **C4 — wire it in.** `impl LocusGenerator<()> for PileupGenerator`; fill `GeneratorSet`'s
   `generic` slot, replacing `Unfilled(NotImplemented)`. `LocusGenerationError` gains a `Walker`
   variant. *Depends:* C3. *Source:* arch §2.1, spec §7.
 

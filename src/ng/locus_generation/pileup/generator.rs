@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ng::locus_generation::{LocusGenerationError, SampleLocusObservations};
+use crate::ng::locus_generation::{LocusGenerationError, LocusGenerator, SampleLocusObservations};
 use crate::ng::read::input::{SampleReads, SampleRegionReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
 use crate::ng::ref_seq::RawRefSeq;
@@ -641,6 +641,34 @@ where
             region,
             chain_ids_at_open,
         })
+    }
+}
+
+/// The generic path's slot in the dispatcher, filled (C4).
+///
+/// The segment payload is `()` because `RegionKind::Generic` carries none — a
+/// generic region is its geometry and nothing else, and the region reaches the
+/// generator through [`begin_segment`](LocusGenerator::begin_segment) alone.
+///
+/// Both methods delegate to the inherent ones of the same name, which is what
+/// the tests in this module drive: an inherent method wins name resolution
+/// against a trait method, so `generator.next_locus(&reads)` is the two-argument
+/// one below and never a mis-resolved trait call.
+impl<R: RawRefSeq, MakeReference, P: ReadPreparer> LocusGenerator<()>
+    for PileupGenerator<R, MakeReference, P>
+where
+    MakeReference: FnMut() -> R,
+{
+    fn begin_segment(&mut self, region: GenomeRegion) {
+        PileupGenerator::begin_segment(self, region);
+    }
+
+    fn next_locus(
+        &mut self,
+        _segment: &(),
+        reads: &SampleReads,
+    ) -> Result<Option<SampleLocusObservations>, LocusGenerationError> {
+        PileupGenerator::next_locus(self, reads)
     }
 }
 
@@ -1274,6 +1302,67 @@ mod tests {
                 .next_locus(&reads)
                 .expect("no segment is not a failure")
                 .is_none()
+        );
+    }
+
+    // --- C4: wired into the dispatcher --------------------------------------
+
+    /// **End to end through the public surface**: a filled `Generic` slot, a
+    /// typed-region stream, and the loci come out of
+    /// `SampleLocusObservationsIterator` with the shared tally agreeing.
+    ///
+    /// The satellite region is in the fixture because the tally has to keep
+    /// telling the two kinds of nothing apart (spec §5): it is `OutOfScope`
+    /// permanently, while the STR and bundle slots stay `NotImplemented` — and
+    /// the generic slot, which was one of those until this step, is now neither.
+    #[test]
+    fn a_filled_generic_slot_mints_loci_through_the_public_iterator() {
+        use crate::ng::locus_generation::{
+            GeneratorSet, GeneratorSlot, SampleLocusObservationsIterator, UnhandledReason,
+        };
+        use crate::ng::region_typing::{RegionKind, TypedRegion};
+
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+        let generators = GeneratorSet::new(
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+            GeneratorSlot::Generator(Box::new(generator)),
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        );
+        let typed = vec![
+            Ok(TypedRegion {
+                region: region(0, 1, 50),
+                kind: RegionKind::Generic,
+            }),
+            Ok(TypedRegion {
+                region: region(0, 51, 100),
+                kind: RegionKind::Satellite,
+            }),
+        ];
+
+        let mut stream = SampleLocusObservationsIterator::new(typed.into_iter(), reads, generators);
+        let mut loci = Vec::new();
+        for locus in &mut stream {
+            loci.push(locus.expect("the walk succeeds"));
+        }
+
+        assert_eq!(
+            anchors(&loci),
+            (10..40).collect::<Vec<u64>>(),
+            "the generic region's covered positions, and only those"
+        );
+        let counts = stream.counts();
+        assert_eq!(counts.regions_in, 2);
+        assert_eq!(counts.regions_handled, 1, "the generic region is handled");
+        assert_eq!(counts.loci_emitted, 30);
+        assert_eq!(
+            counts.unhandled_out_of_scope, 1,
+            "the satellite stays permanently out of scope"
+        );
+        assert_eq!(
+            counts.unhandled_not_implemented, 0,
+            "nothing is unimplemented in this fixture — the generic slot is filled"
         );
     }
 
