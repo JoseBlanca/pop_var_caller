@@ -83,7 +83,7 @@ than reaches in (spec §3).
 
 ## Milestone B — the differential, and proving it can fail
 
-- ☐ **B1 — the stage-1 harness.** `pileup/parity.rs`, `#[cfg(test)]`, in the `delimit_parity` /
+- ✅ **B1 — the stage-1 harness.** `pileup/parity.rs`, `#[cfg(test)]`, in the `delimit_parity` /
   `left_align_parity` shape: build one `Vec<PreparedRead>`, drive
   `crate::pileup::walker::run` and ng's `run` with the same `WalkerConfig` and the same fetcher, and
   assert the two `Result<PileupRecord, WalkerError>` streams are equal element for element, plus

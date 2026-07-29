@@ -91,6 +91,12 @@ pub(crate) mod tests;
 #[cfg(test)]
 mod copy_fidelity;
 
+/// **ng's, not a copy** — the stage-1 differential: the two walkers compute the
+/// same thing, over one read stream (spec §3, §13.1). `copy_fidelity` says the
+/// copy *is* production's; this says it *does* what production's does.
+#[cfg(test)]
+mod parity;
+
 // The vocabulary the copied files resolve through `super::`. Production's own
 // `walker/mod.rs` declares the same names, around the same modules bar one: its
 // `pub(crate) mod indel_norm` is not copied, because none of the seven reaches it —
