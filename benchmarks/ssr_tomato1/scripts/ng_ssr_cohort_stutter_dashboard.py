@@ -720,6 +720,88 @@ def _(DUP_CMAP, INK, Normalize, meta, mo, np, per_sample, plt):
 
 
 @app.cell
+def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
+    # SECTION 5 — the shape of the stutter, which is what a read model actually needs. Two claims
+    # the STR model rests on are testable here: that slippage moves the tract by WHOLE motif units,
+    # and that the step distribution decays geometrically from ±1.
+    def shape_figure():
+        off = comp[comp["off_mode"] != 0].copy()
+        off["whole_unit"] = off["off_mode"] % off["period"] == 0
+        wu = off[off["whole_unit"]].copy()
+        wu["units"] = (wu["off_mode"] // wu["period"]).astype(int)
+
+        periods = [p for p in sorted(off["period"].unique()) if p <= 6]
+        fig, axes = plt.subplots(2, 3, figsize=(13, 6.2), sharex=True)
+        steps = list(range(-4, 0)) + list(range(1, 5))
+        for ax, period in zip(axes.flat, periods):
+            g = wu[wu["units"].isin(steps) & (wu["period"] == period)]
+            tot = g["reads"].sum()
+            if tot <= 0:
+                ax.axis("off")
+                continue
+            frac = [g.loc[g["units"] == u, "reads"].sum() / tot for u in steps]
+            # Blue for contractions, orange for expansions — the same sign convention the rest of
+            # this work uses, so a reader never has to re-learn which way is which.
+            colours = ["#2a78d6" if u < 0 else "#eb6834" for u in steps]
+            ax.bar(range(len(steps)), frac, color=colours, width=0.74)
+            whole = off[off["period"] == period]
+            w_frac = (
+                whole.loc[whole["whole_unit"], "reads"].sum() / whole["reads"].sum()
+                if whole["reads"].sum()
+                else float("nan")
+            )
+            note = " (1.0 by construction)" if period == 1 else ""
+            ax.set_title(
+                f"{PERIOD_NAME.get(period, period)} ({period} bp) — "
+                f"{w_frac:.0%} whole-unit{note}",
+                fontsize=9.5,
+            )
+            ax.set_xticks(range(len(steps)))
+            ax.set_xticklabels([f"{u:+d}" for u in steps], fontsize=8)
+            ax.grid(True, axis="y", alpha=0.25)
+            ax.set_axisbelow(True)
+            ax.text(
+                0.02, 0.93, f"n={int(tot):,}", transform=ax.transAxes, fontsize=7.5, color=INK,
+                va="top",
+            )
+        for ax in axes.flat[len(periods) :]:
+            ax.axis("off")
+        for ax in axes[:, 0]:
+            ax.set_ylabel("fraction of whole-unit\noff-mode reads")
+        fig.supxlabel("step, in whole motif units (− = contraction)", y=-0.01)
+        fig.suptitle(
+            "The stutter kernel: whole-unit steps around the sample's own allele",
+            fontweight="bold",
+        )
+        fig.tight_layout()
+        return fig
+
+    mo.vstack(
+        [
+            mo.md(
+                "## 5 · Is stutter whole-unit, and what shape is it?\n"
+                "The read model prices slippage in **whole motif units** and the stutter kernel is "
+                "a geometric over that step, so both are assumptions worth testing rather than "
+                "asserting. A read whose length difference is *not* a multiple of the period is "
+                "not slippage at all — it is an indel, an interruption, or a mis-delimited tract. "
+                "Each panel's title gives the whole-unit share; **period 1 is 1.0 by construction**, "
+                "since every integer is a multiple of one, so it carries no evidence either way."
+            ),
+            shape_figure(),
+            mo.md(
+                "Read the bars as the kernel itself. Two things they show: the step distribution "
+                "falls away sharply from ±1, which is the geometric the model assumes; and it is "
+                "**asymmetric**, contractions outnumbering expansions by more and more as the "
+                "period grows. That asymmetry is not an artefact of what we can see — a censoring "
+                "explanation (long alleles being harder to span) would make it *grow* with tract "
+                "length, and it does not: it is already there at the shortest tracts."
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
 def _(comp, meta_path, mo, tsv_path):
     mo.md(
         f"""
