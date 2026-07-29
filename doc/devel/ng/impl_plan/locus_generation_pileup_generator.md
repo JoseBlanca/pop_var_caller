@@ -133,9 +133,17 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 
 ## Milestone B — the ng-shaped output
 
-- ☐ **B1 — the bucket key.** `ReadContribution` carries the read group; the key becomes
+- ✅ **B1 — the bucket key.** `ReadContribution` carries the read group; the key becomes
   `(bases, read_coverage, read_group)`. With one read group the row count must be unchanged — that
   is what "free at one read group" has to mean. *Depends:* A5. *Source:* spec §6.
+
+  *Implemented as the row identity realised at `finalise`, not as a fold-time bucket key* —
+  `read_coverage` is only knowable against the final footprint (A4), and arch §1.2 puts the
+  bucketing at `finalise` for exactly that reason. So the fold keys buckets on bases alone, and
+  `observation_rows` re-derives rows **per read**. The step keeps emitting `PileupRecord`, projecting
+  the rows back onto the positional allele list, so the stage-1 differential still proves the
+  re-derivation faithful — the same "keep the oracle alive across the risky change" that put A0
+  first. B2 deletes the projection.
 - ☐ **B2 — `finalise` returns `SampleLocusObservations`.** Rows are re-derived from `folded_reads`
   (per-read), not from per-bucket totals — coverage and group are per-read facts. **Sort by
   `(bases, read_coverage, read_group)` before emitting**: `folded_reads` is an `AHashMap` with a

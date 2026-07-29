@@ -983,24 +983,32 @@ fn comparable(record: &PileupRecord) -> PileupRecord {
 /// Q_SUM_GRAIN: the granularity `q_sum` is compared at — see [`round_q_sum`].
 const Q_SUM_GRAIN: f64 = 1e9;
 
-/// Round `q_sum` to ~1e-9, because A3 changed the **order** of its accumulation and
-/// nothing else.
+/// Round `q_sum` to ~1e-9, because ng changed the **order** its accumulation happens in
+/// and nothing else.
 ///
-/// `q_sum` is an `f64` running sum, and the fold adds and subtracts into it as reads
-/// re-fold. Production keeps a bucket alive at `num_obs == 0` and keeps accumulating into
-/// it, so a read that leaves and returns leaves `+q -q +q` behind; ng evicts the empty
-/// bucket and recreates it, so the same read's sum starts from `0.0` and is *exactly* `q`.
-/// Production's `-2.999999999999999` against ng's `-3.0` is that, and only that.
+/// `q_sum` is an `f64` running sum, and `f64` addition is not associative. **Two changes
+/// reorder it, and the count below moved sharply when the second landed** — 521 records at
+/// A5, 5,368 at B1, over the same 20,000 cases:
 ///
-/// **This is a sixth divergence class and it is named rather than absorbed** — spec §3
-/// lists five, and warns that an unlisted one gets triaged as a listed one and contaminates
-/// the measurement. It is not a difference in evidence: no read moved, no base changed, and
-/// the two numbers differ in the last representable bits.
+/// - **A3's eviction.** Production keeps a bucket alive at `num_obs == 0` and keeps
+///   accumulating into it, so a read that leaves and returns leaves `+q -q +q` behind; ng
+///   evicts the empty bucket and recreates it, so the same read's sum starts from `0.0` and
+///   is *exactly* `q`. Production's `-2.999999999999999` against ng's `-3.0` is this.
+/// - **B1's per-read re-derivation.** Production's bucket total is accumulated during the
+///   walk, with a subtract-then-add on every re-fold; ng's row sums each read's contribution
+///   **once**, in `read_id` order. Same addends, different order — and ng's is the more
+///   accurate of the two, since nothing cancels.
+///
+/// Neither is a difference in evidence: no read moved, no base changed, and the two numbers
+/// differ in the last representable bits. **It is a named divergence class rather than an
+/// absorbed one** — spec §3 lists five and warns that an unlisted one gets triaged as a
+/// listed one and contaminates the measurement.
 ///
 /// The grain is nine decimal places on values of order `-3` to `-50`, where the smallest
 /// *real* difference is a whole read's `ln` contribution — order 1. So a genuine divergence
-/// cannot hide under it, and `float_only_divergences` counts how often it fires so it can
-/// be seen rather than assumed.
+/// cannot hide under it, and `float_only_divergences` counts how often it fires so it can be
+/// seen rather than assumed.
+///
 fn round_q_sum(q_sum: f64) -> f64 {
     (q_sum * Q_SUM_GRAIN).round() / Q_SUM_GRAIN
 }
@@ -1405,8 +1413,10 @@ fn ng_holds_the_same_evidence_as_production_on_complete_reads() {
          same evidence — same reference bytes, same support totals — with some rows' \
          bases differing, because production widened past a read it never re-folded. \
          Every other record is identical, field for field. {float_only} agree only after \
-         `q_sum` is rounded to 1e-9, which is A3's eviction changing the order the sum \
-         accumulates in and nothing else.",
+         `q_sum` is rounded to 1e-9 — the order the sum accumulates in, from two causes: \
+         A3's eviction recreating a bucket the reads return to, and B1 summing each read's \
+         contribution once where production accumulates into the bucket with a \
+         subtract-then-add per re-fold.",
         100.0 * widen_stale as f64 / compared_records as f64,
     );
 }
