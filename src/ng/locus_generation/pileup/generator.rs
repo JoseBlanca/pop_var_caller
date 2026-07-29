@@ -476,15 +476,31 @@ where
     /// what [`SampleReads::reads_in_region`]'s mismatch-fraction filter reads.
     ///
     /// **It is called once per file at every `begin_segment`'s first
-    /// `next_locus` — so a factory that opens a file is the ~564k-opens trap**
-    /// (spec §8), in the one accessor the generator cannot hold for the run:
-    /// the query gives each of a sample's k files its own, because they are
-    /// stateful readers and sharing one cursor between k streams is what the
-    /// factory exists to avoid. A caller whose accessor is cheap to share
-    /// should hand back a clone of one it already holds
-    /// (`Arc<T>` implements [`RawRefSeq`], for this); one whose factory
-    /// re-reads a `.fai` pays that per region, and the review measured that as
-    /// this design's one live conformance gap against §8.
+    /// `next_locus` — so an accessor that opens a file per call is the
+    /// ~564k-opens trap** (spec §8), in the one accessor the generator cannot
+    /// hold for the run: the query gives each of a sample's k files its own,
+    /// because they are stateful readers and sharing one cursor between k
+    /// streams is what the factory exists to avoid.
+    ///
+    /// **Where the cost actually is:** not in building the accessor —
+    /// [`WindowedRefSeq::new`](crate::ng::ref_seq::WindowedRefSeq) is a path and
+    /// a contig table, no I/O — but in its **first fetch**, which reaches
+    /// `RawChromReader::for_contig` and parses the whole `.fai` (~2,580 records
+    /// on GRCh38) before opening the FASTA. `ContigList` cannot spare it that:
+    /// its entries carry name, length and MD5, and no byte offsets.
+    ///
+    /// **What a caller should pass, and the answer depends on k.** With **one**
+    /// file, hand back a clone of an accessor already held — `Arc<T>` implements
+    /// [`RawRefSeq`] for this — and the per-region cost disappears. With
+    /// **several**, that same clone hands k interleaved streams one cursor and
+    /// one resident window, which is what the factory exists to prevent; trade
+    /// deliberately, or fix it properly one level down by giving
+    /// `RawChromReader` a constructor that takes an already-parsed index, so a
+    /// fresh per-file accessor costs an `open(2)` and no parse.
+    ///
+    /// No non-test caller exists yet, and the per-region constant has only been
+    /// measured with an in-memory reference — a free factory. D3 is where the
+    /// file-backed number gets taken.
     make_reference: MakeReference,
     /// The preparer and its scratch, lent to each region's read stream.
     preparation: Rc<RefCell<ReadPreparation<P>>>,
