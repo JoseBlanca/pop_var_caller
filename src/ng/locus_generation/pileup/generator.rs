@@ -22,8 +22,8 @@ use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{GenomeRegion, Position};
 
-use super::chain_id_allocator::ChainIdAllocator;
-use super::genome_walk::PileupWalker;
+use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
+use super::genome_walk::{PileupWalker, RunSummary};
 use super::{DEFAULT_MAX_ACTIVE_READS, WalkerConfig};
 
 /// The widest `max_record_span` this generator accepts: 65,535 reference
@@ -201,6 +201,63 @@ pub struct PileupGeneratorCounts {
     pub records_outside_region: u64,
 }
 
+impl PileupGeneratorCounts {
+    /// Fold one region's walk into the run's totals.
+    ///
+    /// **Not [`RunSummary::merge`], and the difference is the trap spec §8
+    /// names.** Production builds a fresh walker — and so a fresh allocator —
+    /// per region, so `summary()` *assigns* the allocator's three counters and
+    /// summing region summaries is right. ng shares one allocator across
+    /// regions and `reset()` deliberately preserves those counters, so every
+    /// region's summary reports the **run-to-date** total: adding them up
+    /// triangular-sums `chain_allocations` and `mate_lookup_evictions`, roughly
+    /// by the region count, in a plausible-looking `u64`. They are therefore
+    /// folded as **deltas** against `chain_ids_at_open`, the allocator's
+    /// counters as they stood when this walk took it.
+    ///
+    /// `active_reads_high_water` is a max and survives either treatment — which
+    /// is what would make the corruption look selective enough to rationalise.
+    fn fold_region_walk(
+        &mut self,
+        summary: &RunSummary,
+        chain_ids_at_open: ChainIdAllocatorCounters,
+    ) {
+        // Exhaustive destructure (no `..`), production's own idiom for this
+        // struct: a new `RunSummary` field is a compile error here until it is
+        // explicitly folded, and the fold is not uniform — two fields are
+        // deltas, one is a max, one is deliberately dropped.
+        let RunSummary {
+            reads_admitted,
+            records_emitted,
+            record_widen_events,
+            mate_overlap_positions,
+            chain_allocations,
+            active_reads_high_water,
+            mate_lookup_evictions,
+            column_depth_truncations,
+        } = *summary;
+        debug_assert!(
+            chain_allocations >= chain_ids_at_open.chain_allocations
+                && mate_lookup_evictions >= chain_ids_at_open.mate_lookup_evictions,
+            "the allocator's counters only grow; a baseline above the current value means \
+             the walk was handed a different allocator than the one it gave back",
+        );
+        self.reads_admitted += reads_admitted;
+        self.record_widen_events += record_widen_events;
+        self.mate_overlap_positions += mate_overlap_positions;
+        self.chain_allocations +=
+            chain_allocations.saturating_sub(chain_ids_at_open.chain_allocations);
+        self.active_reads_high_water = self.active_reads_high_water.max(active_reads_high_water);
+        self.mate_lookup_evictions +=
+            mate_lookup_evictions.saturating_sub(chain_ids_at_open.mate_lookup_evictions);
+        self.column_depth_truncations += column_depth_truncations;
+        // `records_emitted` is deliberately not mirrored: what a caller wants is
+        // loci *kept*, which is this minus `records_outside_region` — see the
+        // type's own doc.
+        let _ = records_emitted;
+    }
+}
+
 /// What the generator lends the per-segment read stream: the preparer, its
 /// scratch, and the slot the stream latches a fatal error into.
 ///
@@ -318,6 +375,14 @@ struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
     /// outside it, because the query returns every read *overlapping* the
     /// region and the halo widens that further still.
     region: GenomeRegion,
+    /// The chain-id allocator's counters as they stood when this walk took it —
+    /// the baseline its own contribution is measured against (C3).
+    ///
+    /// Snapshotted here rather than at `begin_segment`, which the plan's wording
+    /// suggests, because `begin_segment` opens nothing: between it and the
+    /// query, nothing touches the allocator, so the two moments hold the same
+    /// numbers and this one cannot drift from the walk it belongs to.
+    chain_ids_at_open: ChainIdAllocatorCounters,
 }
 
 /// ng's generic locus generator: a streaming pileup walk over one `Generic`
@@ -359,12 +424,14 @@ where
     make_reference: MakeReference,
     /// The preparer and its scratch, lent to each region's read stream.
     preparation: Rc<RefCell<ReadPreparation<P>>>,
-    /// Lives across segments so `next_id` never repeats.
-    #[expect(
-        dead_code,
-        reason = "C3 resets it between segments and folds its counters as deltas"
-    )]
-    chain_ids: ChainIdAllocator,
+    /// Lives across segments so `next_id` never repeats — **`None` exactly while
+    /// a walk holds it**, which is the invariant `open_walk` and `end_walk`
+    /// keep between them.
+    ///
+    /// An `Option` rather than a swap with a fresh allocator: a placeholder
+    /// starting at zero is the state this whole arrangement exists to avoid, and
+    /// it would fail silently. Absent, it fails loudly.
+    chain_ids: Option<ChainIdAllocator>,
     config: PileupGeneratorConfig,
     counts: PileupGeneratorCounts,
     /// The region [`begin_segment`](Self::begin_segment) was given, before any
@@ -400,10 +467,10 @@ where
                 scratch: P::Scratch::default(),
                 latched_error: None,
             })),
-            chain_ids: ChainIdAllocator::with_caps(
+            chain_ids: Some(ChainIdAllocator::with_caps(
                 config.max_active_reads,
                 config.mate_lookup_window,
-            ),
+            )),
             config,
             counts: PileupGeneratorCounts::default(),
             current_region: None,
@@ -426,12 +493,36 @@ where
     /// It cannot fail, and opening a read query can — so the query is opened by
     /// the first [`next_locus`](Self::next_locus), which is where an
     /// [`IngestError`](crate::ng::read::input::IngestError) surfaces (arch
-    /// §2.1). Any unfinished walk of the previous region is dropped here: the
+    /// §2.1). Any unfinished walk of the previous region is ended here: the
     /// contract is one segment at a time, and a half-drained walk of a region
-    /// nobody is asking about any more has nothing to contribute.
+    /// nobody is asking about any more has nothing left to contribute — but it
+    /// still holds the chain-id allocator, and **an abandoned walk is the one
+    /// case where `active_count` does not fall back to zero on its own** (spec
+    /// §8), so it is ended rather than dropped.
     pub fn begin_segment(&mut self, region: GenomeRegion) {
+        self.end_walk();
         self.current_region = Some(region);
-        self.walk = None;
+    }
+
+    /// End the walk in flight, if any: fold its counters into the run's totals,
+    /// take the chain-id allocator back, and `reset()` it for the next region.
+    ///
+    /// **The only place `walk` is cleared**, which is what keeps "the allocator
+    /// is absent exactly while a walk holds it" true without anyone having to
+    /// remember it. `reset()` clears `pending_mates` and `active_count` while
+    /// preserving `next_id` — carried across regions blindly, a pending first
+    /// mate from one region pairs with a read in another (the eviction test
+    /// compares raw positions) and `active_count` climbs toward
+    /// `ActiveReadsExhausted` (spec §8).
+    fn end_walk(&mut self) {
+        let Some(walk) = self.walk.take() else {
+            return;
+        };
+        self.counts
+            .fold_region_walk(&walk.walker.summary(), walk.chain_ids_at_open);
+        let mut chain_ids = walk.walker.into_chain_ids();
+        chain_ids.reset();
+        self.chain_ids = Some(chain_ids);
     }
 
     /// The next locus of the region begun, or `None` once the walk drains.
@@ -451,25 +542,32 @@ where
         if self.walk.is_none() {
             self.walk = Some(self.open_walk(region, reads)?);
         }
-        // PANIC-FREE: opened immediately above, and nothing between here and
-        // the loop can clear it.
-        let walk = self.walk.as_mut().expect("the walk was just opened");
         loop {
+            // PANIC-FREE: opened immediately above, and every path that clears
+            // the walk returns rather than looping.
+            let walk = self.walk.as_mut().expect("the walk was just opened");
+            let clamp = walk.region;
             match walk.walker.next() {
                 Some(Ok(locus)) => {
-                    if walk.region.contains(locus.region.start) {
+                    if clamp.contains(locus.region.start) {
                         return Ok(Some(locus));
                     }
                     self.counts.records_outside_region += 1;
                 }
-                Some(Err(source)) => return Err(LocusGenerationError::Walker(source)),
+                Some(Err(source)) => {
+                    // Fatal and terminal: the walker yields nothing after an
+                    // error, so the walk ends here and gives back the allocator
+                    // it was lent.
+                    self.end_walk();
+                    return Err(LocusGenerationError::Walker(source));
+                }
                 None => {
                     // The walk is over. A read stream that shed a fatal error
                     // also reported end-of-stream, so the walker drains
                     // normally and the error is only visible here — checked
                     // **before** `Ok(None)`, or a broken query would read as an
                     // empty region.
-                    self.walk = None;
+                    self.end_walk();
                     if let Some(error) = self.preparation.borrow_mut().latched_error.take() {
                         return Err(error);
                     }
@@ -523,13 +621,26 @@ where
         // stop bound clamped to `u32::MAX` makes the walk run long rather than
         // stop early.
         let stop_after = region.end.get().min(u64::from(u32::MAX)) as u32;
+        // Taken **after** the query, which is the only fallible step: taken
+        // before, an unqueryable region would carry the run's chain-id sequence
+        // off with the error.
+        let chain_ids = self
+            .chain_ids
+            .take()
+            .expect("the allocator is absent only while a walk holds it, and no walk is open");
+        let chain_ids_at_open = chain_ids.counters();
         let walker = super::genome_walk::run(
             prepared,
             Arc::clone(&self.reference),
             &self.config.to_walker_config(),
         )
-        .stopping_after(stop_after);
-        Ok(RegionWalk { walker, region })
+        .stopping_after(stop_after)
+        .adopting_chain_ids(chain_ids);
+        Ok(RegionWalk {
+            walker,
+            region,
+            chain_ids_at_open,
+        })
     }
 }
 
@@ -547,6 +658,7 @@ mod tests {
     use crate::ng::read::{AlignedRead, PreparedRead, ReadPrepError};
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::ContigId;
+    use crate::pileup_record::ChainId;
 
     /// Production's `--no-baq` build, re-attached to ng's read type — the read
     /// preparation these tests want out of the way, so what they measure is the
@@ -676,6 +788,29 @@ mod tests {
             .iter()
             .map(|observation| observation.num_obs)
             .sum()
+    }
+
+    /// A 30 bp read carrying exactly one mismatch, at `mismatch_offset` bases
+    /// into it.
+    ///
+    /// The fixture reference is all `A`, and a read that agrees with the
+    /// reference across everything it witnessed carries **no chain id** — so a
+    /// test about chain ids needs a read that disagrees somewhere. One base in
+    /// thirty is 3.3 %, comfortably under the 10 % the read filter drops at.
+    fn read_with_one_mismatch(
+        qname: &str,
+        reference_sequence_id: usize,
+        start: usize,
+        mismatch_offset: usize,
+    ) -> RecordBuf {
+        use noodles_sam::alignment::record_buf::Sequence;
+
+        const LENGTH: usize = 30;
+        let mut bases = vec![b'A'; LENGTH];
+        bases[mismatch_offset] = b'C';
+        let mut record = read_named_with_length(qname, reference_sequence_id, start, LENGTH);
+        *record.sequence_mut() = Sequence::from(bases);
+        record
     }
 
     /// A read whose CIGAR is spelled out — the fixture helpers only build plain
@@ -1139,6 +1274,148 @@ mod tests {
                 .next_locus(&reads)
                 .expect("no segment is not a failure")
                 .is_none()
+        );
+    }
+
+    // --- C3: the allocator across segments ----------------------------------
+
+    /// **The chain-id counters are folded as deltas, not summed.** Four reads
+    /// across two regions mint four chain ids. The allocator is shared and
+    /// `reset()` preserves its counters, so the second region's `RunSummary`
+    /// reports the **run-to-date** four; adding the two summaries gives six —
+    /// the triangular sum spec §8 names, in a number nothing else contradicts.
+    #[test]
+    fn the_allocators_counters_are_folded_as_deltas_across_regions() {
+        let records: Vec<RecordBuf> = [5, 40, 90, 130]
+            .iter()
+            .map(|start| read_named_with_length(&format!("r{start}"), 1, *start, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 5,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        loci_of(&mut generator, region(1, 1, 80), &reads);
+        loci_of(&mut generator, region(1, 81, 190), &reads);
+
+        assert_eq!(
+            generator.counts().reads_admitted,
+            4,
+            "two reads are anchored in each region, and no read spans the join"
+        );
+        assert_eq!(
+            generator.counts().chain_allocations,
+            4,
+            "one chain id per solo read — summing the summaries would report six"
+        );
+    }
+
+    /// **`reset()` between regions, and the abandoned walk is why it matters.**
+    /// `active_count` falls back to zero on its own only when a walk drains; a
+    /// walk abandoned mid-region leaves its reads counted as active for ever.
+    /// With a cap of two, the second region's first admission is where that
+    /// shows — as `ActiveReadsExhausted`, a failure with nothing to say about
+    /// the region it fires in.
+    #[test]
+    fn an_abandoned_walk_does_not_leak_its_active_reads_into_the_next_region() {
+        let records: Vec<RecordBuf> = [5, 6, 90, 91]
+            .iter()
+            .map(|start| read_named_with_length(&format!("r{start}"), 1, *start, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_active_reads: 2,
+            max_record_span: 5,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        // Abandon the first region with both its reads still active.
+        generator.begin_segment(region(1, 1, 80));
+        generator
+            .next_locus(&reads)
+            .expect("the walk succeeds")
+            .expect("the reads cover the region");
+
+        let second = loci_of(&mut generator, region(1, 81, 190), &reads);
+
+        assert!(
+            !second.is_empty(),
+            "the second region's reads must still be admissible"
+        );
+        assert_eq!(
+            generator.counts().chain_allocations,
+            4,
+            "the abandoned walk's allocations are folded too, and its ids are not reissued"
+        );
+    }
+
+    /// **Two regions never issue the same chain id.** This is what the shared
+    /// allocator is *for*: an id names the fragment a read came from, and a
+    /// later phasing step chains reads that share one — so two fragments in two
+    /// regions holding the same id would be chained into a haplotype neither
+    /// supports (spec §8).
+    ///
+    /// Asserted on the ids themselves rather than on the allocation *count*,
+    /// which is blind to the failure: a fresh allocator per region mints one id
+    /// per read either way, and both reads would come back as `ChainId(0)`.
+    #[test]
+    fn a_second_region_does_not_reissue_the_first_regions_chain_ids() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_with_one_mismatch("first", 1, 5, 10),
+            read_with_one_mismatch("second", 1, 90, 10),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 5,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        let ids_of = |loci: &[SampleLocusObservations]| -> Vec<ChainId> {
+            let mut ids: Vec<ChainId> = loci
+                .iter()
+                .flat_map(|locus| locus.observed_sequences.iter())
+                .flat_map(|observation| observation.chain_ids.iter().copied())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+
+        let first = ids_of(&loci_of(&mut generator, region(1, 1, 80), &reads));
+        let second = ids_of(&loci_of(&mut generator, region(1, 81, 190), &reads));
+
+        assert_eq!(first.len(), 1, "the mismatching read carries one chain id");
+        assert_eq!(second.len(), 1);
+        assert_ne!(
+            first[0], second[0],
+            "a fresh allocator per region would hand both fragments the same id"
+        );
+    }
+
+    /// An abandoned walk gives the allocator back, so the next region can open
+    /// at all. Without it the generator has no allocator to lend and cannot
+    /// build a second walk.
+    #[test]
+    fn an_abandoned_walk_returns_the_allocator() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        generator.begin_segment(region(0, 1, 100));
+        generator
+            .next_locus(&reads)
+            .expect("the walk succeeds")
+            .expect("the read covers the region");
+        generator.begin_segment(region(0, 1, 100));
+
+        assert!(
+            generator
+                .next_locus(&reads)
+                .expect("the second walk opens")
+                .is_some()
         );
     }
 

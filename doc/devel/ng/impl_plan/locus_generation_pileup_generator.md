@@ -208,7 +208,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   beyond it. The walk **stops** once `walker_pos > region.end` and no open record is anchored at or
   before `region.end`, or the halo is walked in full at every boundary. Records are dropped on their
   **anchor**. *Depends:* C1. *Source:* spec §2.
-- ☐ **C3 — the allocator across segments.** One `ChainIdAllocator` on the generator, `reset()` at
+- ✅ **C3 — the allocator across segments.** One `ChainIdAllocator` on the generator, `reset()` at
   each region end — it preserves `next_id` and clears `pending_mates`/`active_count`, without which
   a pending mate cross-pairs between contigs and `active_count` leaks toward
   `ActiveReadsExhausted`. **Snapshot its counters at `begin_segment` and fold the delta**: `reset()`

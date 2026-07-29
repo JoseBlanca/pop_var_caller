@@ -134,6 +134,33 @@ where
         self
     }
 
+    /// Walk with a chain-id allocator handed in from outside, replacing the one
+    /// [`new`](Self::new) built — **ng's addition, C3 (plan 3).**
+    ///
+    /// Production builds a walker per chromosome, so its allocator can be the
+    /// walker's own. ng walks one *region* at a time, and a fresh allocator per
+    /// region would give two fragments of two regions the same chain id, which a
+    /// later phasing step would chain together (spec §8). So the allocator lives
+    /// on the generator and is lent to each walk; [`into_chain_ids`](Self::into_chain_ids)
+    /// is how it comes back.
+    ///
+    /// Must be called before the walk starts — the walker is lazy, so
+    /// "before the first `next()`" is all that means.
+    pub fn adopting_chain_ids(mut self, chain_ids: ChainIdAllocator) -> Self {
+        self.state.chain_ids = chain_ids;
+        self
+    }
+
+    /// Take the chain-id allocator back out at the end of a region's walk, so
+    /// the next region continues the same `next_id` sequence.
+    ///
+    /// Consuming rather than swapping: a swap needs a placeholder allocator, and
+    /// a placeholder that starts at zero is exactly the state this exists to
+    /// avoid ever being in.
+    pub fn into_chain_ids(self) -> ChainIdAllocator {
+        self.state.chain_ids
+    }
+
     /// Whether the walk has passed its right bound with nothing left that
     /// could still belong to the region.
     ///
