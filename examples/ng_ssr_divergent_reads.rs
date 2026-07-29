@@ -33,6 +33,7 @@ use pop_var_caller::ng::locus_generation::ssr::{
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
+use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
@@ -142,7 +143,10 @@ fn run(
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
     let contigs = info.contig_list();
-    let sample = SampleReads::open_only_sample(bams, &info, ReadFilterConfig::default(), true)?;
+    // One reference for every file this run opens — and so one copy of the bases.
+    let reference = OpenReference::new(info);
+    let sample =
+        SampleReads::open_only_sample(bams, &reference, ReadFilterConfig::default(), true)?;
 
     let walk_config = TypedRegionConfig::default();
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);

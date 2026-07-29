@@ -1169,6 +1169,7 @@ fn ng_walks_identically_to_production_on_real_reads() {
     use super::RefSeqFetcher;
     use crate::ng::read::ReadFilterConfig;
     use crate::ng::read::input::SampleReads;
+    use crate::ng::read::input::reference::OpenReference;
     use crate::ng::read::left_align::LeftAlignPreparer;
     use crate::ng::read::{ReadPreparer, prepared_read::PreparedRead as NgPreparedRead};
     use crate::ng::ref_seq::WindowedRefSeq;
@@ -1193,6 +1194,8 @@ fn ng_walks_identically_to_production_on_real_reads() {
         read_reference_verifying_or_creating_fai(&cache, fasta.clone())
             .expect("the reference is readable and has (or can derive) a .fai");
     let contigs = reference_info.contig_list();
+    // One reference for every file this run opens, and so one copy of the bases.
+    let reference = OpenReference::new(reference_info);
 
     // `name:start-end`, 1-based inclusive — the same convention `GenomeRegion` uses, so
     // the string a user types and the region the walk covers are the same numbers.
@@ -1227,7 +1230,7 @@ fn ng_walks_identically_to_production_on_real_reads() {
 
     let sample = SampleReads::open_only_sample(
         &[PathBuf::from(&reads_path)],
-        &reference_info,
+        &reference,
         ReadFilterConfig::default(),
         true,
     )

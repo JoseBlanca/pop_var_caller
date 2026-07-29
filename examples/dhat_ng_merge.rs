@@ -62,8 +62,9 @@ use sam::header::record::value::map::{ReadGroup, ReferenceSequence};
 use pop_var_caller::bam::index_preflight::preflight_alignment_indexes;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
+use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::InMemoryRefSeq;
-use pop_var_caller::ng::reference_info::{ReferenceInfo, ReferenceSource, read_reference_info};
+use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info};
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
 const CONTIG: &str = "chr1";
@@ -152,7 +153,7 @@ struct Fixture {
     _fasta_dir: tempfile::TempDir,
     single: Vec<PathBuf>,
     pair: Vec<PathBuf>,
-    reference: ReferenceInfo,
+    reference: OpenReference,
 }
 
 impl Fixture {
@@ -167,11 +168,13 @@ impl Fixture {
     fn build(per_file: usize) -> Self {
         let fasta_dir = tempfile::tempdir().expect("tempdir");
         let fasta = write_fasta(fasta_dir.path());
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("read reference");
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
 
         let dir = tempfile::tempdir().expect("tempdir");
         let first = reads(per_file, 0);
@@ -201,7 +204,7 @@ impl Fixture {
     }
 }
 
-fn drain(paths: &[PathBuf], reference: &ReferenceInfo) -> usize {
+fn drain(paths: &[PathBuf], reference: &OpenReference) -> usize {
     let sample =
         SampleReads::open_only_sample(paths, reference, ReadFilterConfig::default(), false)
             .expect("the fixture files open");
