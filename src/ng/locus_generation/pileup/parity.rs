@@ -22,6 +22,27 @@
 //! divergence (`read_preparation.md` §6) into a comparison that is about the *walk*.
 //! The reference is one `MockFasta`, lent to both.
 //!
+//! # It has been shown to fail — B2, 2026-07-29
+//!
+//! A differential that has only ever passed is a claim. Each of the five behaviours the
+//! plan names was mutated **in ng's copy**, one at a time, and
+//! `ng_walks_identically_to_production` was required to fail; then the mutation was
+//! reverted and the differential re-run green. All five died inside the **first six
+//! cases of the first seed**, against a default of 400 cases × 4 seeds — so the margin
+//! is roughly two orders of magnitude, not a coin flip.
+//!
+//! | # | behaviour | mutation applied to ng's copy | first divergence |
+//! |---|---|---|---|
+//! | 1 | mate-overlap reconciliation | early `return` from `genome_walk::resolve_mate_overlap_at_pos` | seed 0 case 0, item 17 |
+//! | 2 | adaptor masking | `cigar_cursor::base_in_adaptor` always `false` | seed 0 case 0 — 29 records against production's 24 |
+//! | 3 | record widening | `open_record::widen` extends only `alleles[0]`, not every bucket | seed 0 case 5, item 5 |
+//! | 4 | the subtract-then-add re-fold | the `subtract_contribution` half dropped, so a re-folding read double-counts | seed 0 case 3, item 8 |
+//! | 5 | the column depth cap | the `truncate(cap)` removed, counter left incrementing | seed 0 case 1, item 2 |
+//!
+//! Mutation 5 is the one worth noting: it leaves `column_depth_truncations` incrementing,
+//! so a differential that compared only the summary would have passed it. The records
+//! caught it.
+//!
 //! # This harness dies in plan 3, by design
 //!
 //! Plan 3 makes the two walkers differ on purpose — the no-fill haplotype builder,

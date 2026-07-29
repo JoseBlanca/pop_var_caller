@@ -90,7 +90,7 @@ than reaches in (spec §3).
   `RunSummary`. Byte-identity is well defined because `PileupRecord`'s `PartialEq` compares the two
   `f32`s **by bits**, so the `NaN` placeholders compare equal. Feed **one** prepared stream to both —
   preparing separately would inject step 2's uppercase divergence. *Depends:* A4. *Source:* spec §3.
-- ☐ **B2 — prove the harness discriminates. Own commit, do not bundle.** Mutate each of five
+- ✅ **B2 — prove the harness discriminates. Own commit, do not bundle.** Mutate each of five
   behaviours in the ng copy in turn and require the differential to **fail**: mate-overlap
   reconciliation, adaptor masking, record widening, the subtract-then-add re-fold, and the column
   depth cap. A fixture that cannot fail is worth nothing, and this is where that is established —
