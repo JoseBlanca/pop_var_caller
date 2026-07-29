@@ -140,12 +140,10 @@ curve. Peak memory at 51 files splits into a fixed ~166 MiB — one chromosome p
 per-file term is what now sets the ceiling: ~1.1 GiB at the 64-file cohort, ~30 GiB at the
 archive's 2,085.
 
-**What that 14.6 MiB is has not been measured.** The per-file state `AlignmentFile` holds is the
-reader pool with its filter buffers, the parsed index, the `.crai`-by-contig table, and the decoded
-CRAM container each pooled reader keeps. The indexes are ruled out by inspection — these `.crai`
-files are ~1.6 KB each — which leaves the decoded container as the likely dominant term, since it
-holds a whole container's worth of decoded records. That is a hypothesis, not a result; one heap
-profile would settle it, and it is the obvious next measurement.
+**Measured, and answered, in
+[ng_cram_per_file_cost_2026-07-29.md](ng_cram_per_file_cost_2026-07-29.md).** It is the decoded
+CRAM container each pooled reader keeps — 12.7 MiB of live heap per open file, half of it
+auxiliary tags nothing reads. Now 4.04 MiB, and the 51-sample peak is down again with it.
 
 **Thread contention.** Sharing the cache shares its lock, and noodles takes the repository's
 *write* lock across the adapter read, so the first fetch of a contig blocks every other reader of
