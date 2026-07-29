@@ -109,6 +109,22 @@ same read's sum starts from `0.0`. `float_only_divergences` counts how often it 
 | `cargo test --all-targets --all-features` | green but for the pre-existing, unrelated panic at `benches/psp_writer_perf.rs:386` |
 | `cargo doc --no-deps` | 12 unresolved intra-doc links, all pre-existing and out of scope. A thirteenth, in scope, was introduced at A0 and fixed by the review |
 | `cargo audit` | **not run** — not installed in the container; no dependency changes in this milestone |
+| host-native `cargo test --lib` | **2672 passed**, 0 failed — the same result outside the container |
+
+**At soak scale, host-native** (`PVC_PARITY_CASES=5000 cargo test --release --lib
+ng::locus_generation::pileup::parity`), all eight parity tests green:
+
+| | |
+|---|---|
+| complete-reads anchor | **2,253,903** records over 20,000 cases, 197,380 of them multi-base. **3,073 (0.14 %)** in the one tolerated class; every other record identical field for field. 521 agree only after `q_sum` is rounded to 1e-9 |
+| the eviction census (new, from the review) | **1,008,679** emitted records, 30,747 with more than one non-REF bucket; **none** carried an unsupported one |
+| the fabrication census | **19,703 of 1,010,515 records (1.9 %)** carried bases production credited to a read that had not witnessed them — **D3's headline on synthetic data** |
+
+> **`PVC_PARITY_CASES` does not reach the container.** `scripts/dev.sh` forwards only
+> `CARGO_TARGET_DIR` and `HOME`, so `PVC_PARITY_CASES=5000 ./scripts/dev.sh cargo test …`
+> silently runs the *default* 1,600 cases and finishes in under a second. Soak runs must go
+> host-native, or the wrapper needs to forward the variable. Worth knowing before someone
+> reports a soak they did not run.
 
 **Mutation testing is the real validation here**, because every failure mode in this milestone is a
 wrong number rather than a crash. Twenty mutations across the six steps, each applied, run, and
