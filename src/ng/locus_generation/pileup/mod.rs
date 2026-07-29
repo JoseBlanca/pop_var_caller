@@ -26,8 +26,9 @@
 //! five are still guarded.
 //!
 //! What the copy was proven to *compute* is the stage-1 differential
-//! ([`parity`]); what it is proven to *be* is `copy_fidelity.rs`. The two are
-//! different claims.
+//! (`parity.rs`); what it is proven to *be* is `copy_fidelity.rs`. The two are
+//! different claims. Both are named as files rather than linked: they are
+//! `#[cfg(test)]` modules, so an intra-doc link to them breaks `cargo doc`.
 //!
 //! The copies still emit production's [`PileupRecord`](crate::pileup_record::PileupRecord),
 //! not ng's `SampleLocusObservations`. That changes in Milestone B.
@@ -78,8 +79,12 @@
 //! transcription being verbatim, never a design choice, and one that stopped
 //! being true the moment the two walkers began to diverge. The newtype, its
 //! error translation and both of that translation's lossy spots (a contig *name*
-//! rendered as an id; a `u64 → u32` narrowing) are **deleted**, and ng's
-//! non-test code imports neither `MultiChromRefFetcher` nor `ChromRefFetchError`.
+//! rendered as an id; a `u64 → u32` narrowing) are **deleted**, and **no file in
+//! this module** imports `MultiChromRefFetcher` or `ChromRefFetchError` outside
+//! `#[cfg(test)]` code. Scoped to this module deliberately: an earlier wording
+//! claimed it of ng's non-test code as a whole, which is false —
+//! [`raw_chrom_reader`](crate::ng::raw_chrom_reader) names `MultiChromRefFetcher`
+//! in public signatures, and always did.
 
 mod active_read_set;
 mod chain_id_allocator;

@@ -3,8 +3,15 @@
 //! ng owns this file outright — it is not one of the eight copies, and it exists so
 //! the copies can be checked from outside themselves (a test living inside
 //! `tests.rs` cannot compare `tests.rs` against its original, because it is part of
-//! it). Keeping it here also keeps the boundary a **file** boundary: everything in
-//! `pileup/` is either a verbatim copy or ng's own, and no file is both.
+//! it). Keeping it here also keeps the boundary a **file** boundary: every file in
+//! `pileup/` is either ng's own, a *still*-verbatim copy, or a copy this plan has
+//! **released** and begun changing.
+//!
+//! That third state is the one the wording used to deny — "no file is both" was
+//! written when there were only two — and A0 created it three lines below, in
+//! `genome_walk.rs`, `open_record.rs` and `errors.rs`. A released file is no longer
+//! guarded here and no longer claims to be production's; the release table below is
+//! the record of which are which.
 //!
 //! # Narrowed file by file, never retired wholesale
 //!

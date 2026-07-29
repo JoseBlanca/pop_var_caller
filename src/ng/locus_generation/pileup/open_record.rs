@@ -145,28 +145,52 @@ pub(super) struct RecordWitness {
 /// have expired long before the record closed, since `expire_passed` touches no
 /// open record (spec §4, §6).
 ///
-/// The extent is **clamped into the footprint** before it is measured. That is not
-/// belt-and-braces: `events_overlapping` does not clip a deletion, so a deletion
-/// anchored before the record comes back whole and its run can reach past the
-/// record's end (spec §8). `apply_events_into` already intersects for the extent it
-/// stores, and this repeats it so a wrong `offset_in_locus` cannot arrive by
-/// another route — the two numbers are only ever wrong quietly.
+/// The extent is **clamped into the footprint at both ends** before it is measured. That is
+/// not belt-and-braces: `events_overlapping` does not clip a deletion, so a deletion
+/// anchored before the record comes back whole and its run can reach past the record's end
+/// (spec §8). `apply_events_into` already intersects for the extent it stores, and this
+/// repeats it so a wrong `offset_in_locus` cannot arrive by another route — the two numbers
+/// are only ever wrong quietly.
 ///
-/// Narrowing to the `u16` the run is expressed in goes through [`LocusLen`], which
-/// owns that saturating cast. A record wider than `u16::MAX` cannot be described by
-/// a run at all; production's `max_record_span` is 5000, so saturation is
-/// unreachable at any configured value near it.
+/// The clamp was **one-sided** as first written: the left edge was pulled up to
+/// `record_pos` but never pushed down to `record_end_exclusive`, so an extent lying entirely
+/// right of the footprint yielded an `offset_in_locus` past the end of the locus paired with
+/// `positions_covered: 0` — a run of no positions, which both [`RefSpan`] and
+/// [`ReadCoverage`] document as not existing. Unreachable from the fold today, because a
+/// read that witnessed nothing inside a record does not fold into it; the `debug_assert`
+/// says so, and the clamp means a future caller gets a truthful answer rather than that one.
+///
+/// # The `u16` narrowing is bounded by config, not by a constant
+///
+/// Runs are expressed in `u16`, and the narrowing goes through [`LocusLen`], which owns the
+/// saturating cast. **An earlier version of this comment claimed saturation was unreachable
+/// because "production's `max_record_span` is 5000". That is the wrong bound**: the cap is
+/// `--max-record-span`, an unbounded `u32` CLI flag, so a caller may legally configure a
+/// footprint wider than `u16::MAX`, and a partial witness inside it would report a truncated
+/// `positions_covered` with no error. The `debug_assert` below states the envelope; enforcing
+/// it belongs with the knob rather than here, and is owed by **C1**, which is the step that
+/// turns these constants into `PileupGeneratorConfig`.
 pub(super) fn coverage_of(
     witnessed: RefSpan,
     record_pos: u32,
     record_end_exclusive: u32,
 ) -> ReadCoverage {
-    let first = witnessed.start.max(record_pos);
+    debug_assert!(
+        record_end_exclusive.saturating_sub(record_pos) <= u32::from(u16::MAX),
+        "record footprint {record_pos}..{record_end_exclusive} is wider than a `u16` run can \
+         describe; `max_record_span` needs a ceiling (C1)",
+    );
+    debug_assert!(
+        witnessed.start < record_end_exclusive && witnessed.end >= record_pos,
+        "witnessed extent {witnessed:?} does not intersect the footprint \
+         {record_pos}..{record_end_exclusive}; a read that witnessed nothing inside a record \
+         does not fold into it",
+    );
+    let first = witnessed.start.clamp(record_pos, record_end_exclusive);
     let past_last = witnessed
         .end
         .saturating_add(1)
-        .min(record_end_exclusive)
-        .max(first);
+        .clamp(first, record_end_exclusive);
     if first <= record_pos && past_last >= record_end_exclusive {
         return ReadCoverage::Complete;
     }
@@ -277,14 +301,11 @@ struct FoldedReadState {
     /// it; ng's [`PreparedRead`](super::PreparedRead) carries it, so nothing here
     /// reconstructs anything.
     ///
-    /// Unread until B1 puts it in the bucket key. The `expect` is a compiler
-    /// backstop that forces its own removal the moment that lands — an `allow`
-    /// would simply go stale.
-    #[expect(
-        dead_code,
-        reason = "B1 makes the read group part of the bucket key; this expect must \
-                  be deleted when it lands"
-    )]
+    /// It carried an `#[expect(dead_code)]` until the widen re-place began rebuilding the
+    /// whole state from an exhaustive destructure, which reads it — so the backstop
+    /// **fired**, as designed, and was removed rather than downgraded to an `allow`. Being
+    /// read is not the same as being *used*: **B1 still owes making it part of the bucket
+    /// key**, and until then it is carried through the fold without changing any answer.
     read_group: ReadGroupId,
     /// The positions this read actually witnessed inside the record — the union
     /// of its event footprints, **not** its alignment span. The span is blind to
@@ -381,9 +402,13 @@ impl OpenPileupRecord {
     pub fn finalise(self) -> (PileupRecord, RecordWitness) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
+        // Every field named, no `..Default::default()`: B2 reshapes this struct, and a field
+        // added then would compile here and arrive as a silent `0`. The same rule the
+        // exhaustive destructure in `to_production_support` enforces in the other direction.
         let mut witness = RecordWitness {
+            reads_complete: 0,
+            reads_partially_observed: 0,
             reads_without_observation: self.reads_without_observation.len() as u32,
-            ..RecordWitness::default()
         };
         let mut per_bucket: Vec<Vec<ChainId>> =
             (0..self.alleles.len()).map(|_| Vec::new()).collect();
@@ -411,6 +436,18 @@ impl OpenPileupRecord {
             }
             per_bucket[state.allele_index].push(state.chain_id);
         }
+        // **This is what exercises `coverage_of` on the real walk.** The tally itself is
+        // dropped by both walker call sites until B2 consumes it, so without this the
+        // function's only coverage would be its own hand fixtures — and it is resolved here
+        // for every record of every parity run, which is a few hundred thousand of them.
+        // Every folded read is resolved exactly once and lands in exactly one of the two
+        // classes; the no-observation set is disjoint from `folded_reads` by construction,
+        // its members having been removed when they produced nothing.
+        debug_assert_eq!(
+            witness.reads_complete + witness.reads_partially_observed,
+            self.folded_reads.len() as u32,
+            "every folded read resolves to exactly one coverage class",
+        );
         for chain_ids in &mut per_bucket {
             chain_ids.sort_unstable();
             chain_ids.dedup();
@@ -479,7 +516,7 @@ pub(super) struct OpenPileupRecordTable {
     /// 1-based anchor position → record.
     records: BTreeMap<u32, OpenPileupRecord>,
     /// Reusable scratch buffer for the per-(record, contributor)
-    /// haplotype string built by `apply_events_to_ref_into`. Hoisted
+    /// haplotype string built by [`apply_events_into`]. Hoisted
     /// here so the inner-fold's allele-equality check can run
     /// against a borrowed `&[u8]` and only `clone()` when adding a
     /// genuinely new allele. See L10/L11 in
@@ -632,18 +669,24 @@ impl OpenPileupRecordTable {
         None
     }
 
-    /// Widen the record at `key` so its REF span covers up to
-    /// `new_end_exclusive`, fetching the additional reference
-    /// bases. Existing alleles are rewritten by appending the
-    /// new reference bases (alleles whose previous coverage
-    /// already ran to the end of the old span); deletion alleles
-    /// keep their existing length, expressing "more bases deleted
-    /// relative to the wider REF" — see
-    /// `ia/specs/pileup_walker.md` §"Step 4.2".
+    /// Widen the record at `key` so its REF span covers up to `new_end_exclusive`, fetching
+    /// the additional reference bases.
     ///
-    /// Returns `true` when the record actually widened; `false`
-    /// when `new_end_exclusive` was already covered (no-op).
-    /// Callers use the bool to count real widen events without
+    /// **Only `alleles[0]` grows** — the record's own reference sequence. Every other bucket
+    /// holds what some read witnessed, and a read's witness does not change because the
+    /// window around it did (A3, spec §4). Production appends the new bases to *every*
+    /// bucket, and this doc comment said so until A3 inverted the behaviour and left the
+    /// sentence standing; the two paragraphs below the fetch carry the full argument.
+    ///
+    /// **Every live folded read is then re-placed against the wider window**
+    /// (`refold_live_reads`), which is why this takes `active_reads` and `contributors`.
+    /// Production re-folds only the contributors at the current walker position, so a read
+    /// sitting inside its own deletion — live, in this record, no event anchored here —
+    /// would otherwise keep an extent measured against a footprint the record has outgrown,
+    /// and A4 resolves coverage from exactly that.
+    ///
+    /// Returns `true` when the record actually widened; `false` when `new_end_exclusive` was
+    /// already covered (no-op). Callers use the bool to count real widen events without
     /// conflating them with fresh `open_new` calls.
     fn widen(
         &mut self,
@@ -985,7 +1028,7 @@ pub(super) fn apply_events(
 }
 
 /// Order rank for the tied-anchor precondition on
-/// `apply_events_to_ref`: at the same anchor, Match must come
+/// [`apply_events_into`]: at the same anchor, Match must come
 /// before Insertion which must come before Deletion. The cursor's
 /// CIGAR walk produces this order naturally; the rank is just a
 /// total order for the debug-assert.
@@ -1217,11 +1260,36 @@ fn refold_live_reads(
             );
             add_contribution(&mut alleles[new_index].support, &previous.contribution);
         }
+        // **Rebuilt from an exhaustive destructure, not patched by assigning two fields.**
+        // A re-place has to decide *every* field of the state it leaves behind. Assigning
+        // `allele_index` and `witnessed` and letting the rest ride means a field added to
+        // `FoldedReadState` errors at the fold literal in `fold_read_into_record` and is
+        // silently carried stale here — which is precisely how `witnessed` itself went
+        // wrong before A3, and the field's own doc records the consequence as "a wrong
+        // depth with no error". The destructure makes the compiler ask the question at both
+        // sites.
+        let FoldedReadState {
+            allele_index: _,
+            contribution,
+            chain_id,
+            read_group,
+            witnessed: _,
+            placed_start,
+        } = previous;
         let state = folded_reads
             .get_mut(&read_id)
             .expect("the id came from this record's own fold state");
-        state.allele_index = new_index;
-        state.witnessed = witnessed;
+        *state = FoldedReadState {
+            // The two the re-place decides.
+            allele_index: new_index,
+            witnessed,
+            // The rest are facts about the read, which a widen does not change — see the
+            // "it moves the read; it does not re-decide anything" note above.
+            contribution,
+            chain_id,
+            read_group,
+            placed_start,
+        };
     }
 }
 
@@ -1250,32 +1318,28 @@ fn evict_unsupported_alleles(
     if alleles.len() < 2 || alleles[1..].iter().all(|a| a.support.num_obs > 0) {
         return;
     }
-    let mut mapping: Vec<usize> = Vec::with_capacity(alleles.len());
-    let mut kept = 0usize;
+    // `None` is "evicted", rather than a `usize::MAX` sentinel. The sentinel makes the
+    // evicted state *representable* as an index, so a missed remap is a plausible-looking
+    // subscript rather than a type error — and this project has hit that trap in release
+    // twice already ([locus_generation/mod.rs:79](super::super)). With `Option` the only way
+    // past it is an `expect` that says what went wrong.
+    let mut mapping: Vec<Option<usize>> = Vec::with_capacity(alleles.len());
     let mut index = 0usize;
     alleles.retain(|allele| {
         let keep = index == 0 || allele.support.num_obs > 0;
         index += 1;
-        mapping.push(if keep {
-            let at = kept;
-            kept += 1;
-            at
-        } else {
-            usize::MAX
-        });
+        // `kept` was a third counter tracking what `mapping` already knows.
+        mapping.push(keep.then(|| mapping.iter().filter(|slot| slot.is_some()).count()));
         keep
     });
     for state in folded_reads.values_mut() {
-        // PANIC-FREE, and the assert says why: every bucket a folded read points at holds
-        // that read's own `num_obs`, so it is never one of the evicted ones. A
-        // `usize::MAX` here would mean the fold state and the bucket totals had drifted.
-        debug_assert_ne!(
-            mapping[state.allele_index],
-            usize::MAX,
-            "evicted bucket {} while a folded read still pointed at it",
-            state.allele_index,
+        // PANIC-FREE, and the message says why: every bucket a folded read points at holds
+        // that read's own `num_obs`, so it is never one of the evicted ones. Reaching the
+        // `expect` would mean the fold state and the bucket totals had drifted apart.
+        state.allele_index = mapping[state.allele_index].expect(
+            "a folded read pointed at a bucket with no support — the fold state and the \
+             bucket totals have drifted",
         );
-        state.allele_index = mapping[state.allele_index];
     }
 }
 
@@ -1285,7 +1349,7 @@ fn evict_unsupported_alleles(
 ///
 /// Takes `&mut Vec<OpenAllele>` rather than `&mut OpenPileupRecord`
 /// so the caller can hold an independent borrow on the record's
-/// `ref_seq` (e.g. for `apply_events_to_ref`) at the same time.
+/// `ref_seq` (e.g. for [`apply_events_into`]) at the same time.
 /// This is what lets `process_position` avoid cloning `ref_seq` per
 /// affected record. Mi6 in `ia/reviews/pileup_2026-05-09.md`.
 #[cfg(test)]
@@ -1405,8 +1469,8 @@ pub(super) fn process_position(
         // Destructure through `&mut` so `alleles` and `folded_reads`
         // are independent mutable borrows of disjoint fields. The
         // REF sequence is read from `alleles[0].seq` — that borrow
-        // ends inside each `apply_events_to_ref` call (which returns
-        // an owned `Vec<u8>`), leaving the rest of the inner loop
+        // ends inside each `apply_events_into` call (which writes into
+        // the table's scratch buffer), leaving the rest of the inner loop
         // free to mutate `alleles[other_idx]`. This is the same
         // disjoint-borrow shape Mi6 (`pileup_2026-05-09.md`)
         // introduced, with `ref_seq` collapsed onto `alleles[0]` —
@@ -1417,7 +1481,12 @@ pub(super) fn process_position(
             reads_without_observation,
             ..
         } = rec;
-        let rec_end = rec_pos + alleles[0].seq.len() as u32;
+        // `saturating_add`, matching `footprint_end_exclusive()` — every other reader of
+        // this quantity goes through that method, and Mi8 added the saturation there
+        // because a wrapped end on a multi-Gbp chromosome yields an empty event window
+        // and therefore a silently unfolded read. Open-coding a plain `+` here opted out
+        // of the same defence for no reason.
+        let rec_end = rec_pos.saturating_add(alleles[0].seq.len() as u32);
         let mut fold_state = RecordFoldState {
             alleles,
             folded_reads,
@@ -1478,6 +1547,10 @@ pub(super) fn process_position(
 
         // After every contributor has folded, not before: the empty buckets are created
         // *by* the re-folds a widen triggers, and by the no-observation path above.
+        // Moving this above the loop is not caught by the walk's own fixtures — buckets
+        // the *fold loop* empties then survive to `finalise` — which is why
+        // `parity::ng_emits_no_allele_bucket_without_support` asserts it on the records
+        // that leave the walker.
         evict_unsupported_alleles(fold_state.alleles, fold_state.folded_reads);
     }
 

@@ -303,8 +303,11 @@ mod tests {
     /// where a coordinate-convention disagreement produces wrong REF bases rather
     /// than an error.
     ///
-    /// `PileupRecord` has no `PartialEq`, so its `Debug` rendering is the oracle —
-    /// exact, and it names the field that moved when it fails.
+    /// Compared through the `Debug` rendering rather than by value: it names the field
+    /// that moved when it fails. (`PileupRecord` *does* have a hand-written `PartialEq`
+    /// — [pileup_record.rs:208](crate::pileup_record) — which an earlier version of this
+    /// comment denied; `parity.rs` relies on it. The `Debug` comparison is a
+    /// diagnostics choice here, not a necessity.)
     #[test]
     fn a_walk_over_the_double_matches_the_same_walk_over_a_real_reference() {
         use super::super::tests::snp_read;

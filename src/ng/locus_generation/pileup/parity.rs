@@ -45,7 +45,7 @@
 //! # It has been shown to fail — B2, re-run 2026-07-29
 //!
 //! A differential that has only ever passed is a claim. Each behaviour the plan names was
-//! mutated **in ng's copy**, one at a time, and `ng_walks_identically_to_production` was
+//! mutated **in ng's copy**, one at a time, and `ng_holds_the_same_evidence_as_production_on_complete_reads` was
 //! required to fail; then the mutation was reverted and the differential re-run green.
 //! Every one died inside the **first nineteen cases of the first seed**, against a default
 //! of 400 cases × 4 seeds.
@@ -118,7 +118,7 @@ use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
     run as production_run,
 };
-use crate::pileup_record::PileupRecord;
+use crate::pileup_record::{AlleleSupportStats, ChainId, PileupRecord};
 
 /// A deterministic PRNG, so a failure is reproducible from its seed alone.
 ///
@@ -1097,8 +1097,8 @@ fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> b
 const CASES_PER_SEED: usize = 400;
 
 /// Cases per seed, overridable by `PVC_PARITY_CASES` so a soak run is one command away —
-/// the convention `delimit_parity` set: `PVC_PARITY_CASES=20000 cargo test
-/// ng_walks_identically_to_production`.
+/// the convention `delimit_parity` set: `PVC_PARITY_CASES=20000 cargo test --release --lib
+/// ng::locus_generation::pileup::parity`.
 fn cases_per_seed() -> usize {
     std::env::var("PVC_PARITY_CASES")
         .ok()
@@ -1127,37 +1127,102 @@ enum RecordAgreement {
     Divergent,
 }
 
-/// The five support scalars of a whole record, summed across its buckets — "no evidence
-/// was created or lost", independent of which bucket it ended up in.
+/// **Every** support scalar of a whole record, summed across its buckets — "no evidence was
+/// created, lost or double counted", independent of which bucket any of it ended up in.
+///
+/// # Why this is a struct built by an exhaustive destructure
+///
+/// It was a six-field tuple read field by field, and it **omitted `placed_start`** — the one
+/// field this milestone made fragile, since A1 dropped it from ng's stats and `finalise`
+/// reconstructs it from a per-read flag. That is not a hypothetical: injecting a real wrong
+/// number (the REF bucket stops counting `placed_start`) left
+/// [`ng_holds_the_same_evidence_as_production_on_complete_reads`] — the permanent anchor, the test
+/// that *replaced* the retired stage-1 differential — **green**, while quietly moving
+/// `EvidenceIntact` from 264 records (0.15 %) to 2,806 (1.58 %) and printing "same support
+/// totals" and "Every other record is identical, field for field" as it went. 2,542 wrong
+/// records absorbed. Only an inherited test from production's own suite noticed.
+///
+/// So the sum is taken by **destructuring production's [`AlleleSupportStats`]
+/// exhaustively**: a field added to that type stops this file compiling instead of being
+/// silently left out of the oracle. Milestone A's whole verification argument rests on this
+/// function being total, and it was not.
 ///
 /// `q_sum` is summed as `f64` and rounded **once, at the end**. Rounding each bucket first
 /// would make the total depend on how the reads were distributed across buckets: two reads
 /// at `-4.835428695` in one bucket sum to `-9.670857391`, while the same two in separate
 /// buckets round to `-4835428695` twice and total `-9670857390`. A3 moves reads between
 /// buckets by design, so that is exactly the difference this function must not see.
-fn total_support(record: &PileupRecord) -> (u32, u32, u32, u32, u64, i64) {
-    let (num_obs, fwd, placed_left, mapq_sum, mapq_sum_sq, q_sum) = record.alleles.iter().fold(
-        (0, 0, 0, 0, 0, 0.0_f64),
-        |(num_obs, fwd, placed_left, mapq_sum, mapq_sum_sq, q_sum), allele| {
-            let s = &allele.support;
-            (
-                num_obs + s.num_obs,
-                fwd + s.fwd,
-                placed_left + s.placed_left,
-                mapq_sum + s.mapq_sum,
-                mapq_sum_sq + s.mapq_sum_sq,
-                q_sum + s.q_sum,
-            )
-        },
-    );
-    (
-        num_obs,
-        fwd,
-        placed_left,
-        mapq_sum,
-        mapq_sum_sq,
-        (q_sum * Q_SUM_GRAIN).round() as i64,
-    )
+#[derive(Debug, PartialEq, Eq)]
+struct RecordEvidence {
+    num_obs: u32,
+    fwd: u32,
+    placed_left: u32,
+    placed_start: u32,
+    mapq_sum: u32,
+    mapq_sum_sq: u64,
+    q_sum_rounded: i64,
+}
+
+fn total_support(record: &PileupRecord) -> RecordEvidence {
+    let mut totals = RecordEvidence {
+        num_obs: 0,
+        fwd: 0,
+        placed_left: 0,
+        placed_start: 0,
+        mapq_sum: 0,
+        mapq_sum_sq: 0,
+        q_sum_rounded: 0,
+    };
+    let mut q_sum = 0.0_f64;
+    for allele in &record.alleles {
+        // The exhaustive destructure is the point — see the doc above.
+        let AlleleSupportStats {
+            num_obs,
+            q_sum: bucket_q_sum,
+            fwd,
+            placed_left,
+            placed_start,
+            mapq_sum,
+            mapq_sum_sq,
+        } = allele.support;
+        totals.num_obs += num_obs;
+        totals.fwd += fwd;
+        totals.placed_left += placed_left;
+        totals.placed_start += placed_start;
+        totals.mapq_sum += mapq_sum;
+        totals.mapq_sum_sq += mapq_sum_sq;
+        q_sum += bucket_q_sum;
+    }
+    totals.q_sum_rounded = (q_sum * Q_SUM_GRAIN).round() as i64;
+    totals
+}
+
+/// Every chain id a record carries, sorted and deduplicated — the *other* half of "no
+/// evidence moved", and the half [`total_support`] cannot see because chain ids are a set
+/// per bucket rather than a scalar.
+///
+/// **Equality here is the wrong test, and the fixture proved it.** Requiring the two sets to
+/// match fails on `seed 0x5eed0001 case 11, record 30`, and correctly so: production folds a
+/// read into the REF bucket — `num_obs: 2`, chain ids dropped by the `allele_index == 0`
+/// rule — having missed an insertion it never re-folded, while ng emits the nine bases the
+/// read actually witnessed as its own row, carrying chain id `6`. That is the defect being
+/// fixed showing up in the ids, not evidence going missing.
+///
+/// So what is asserted is the **subset** direction, which is invariant: ng's REF bucket
+/// holds the record's full reference bytes, so any read whose witness is partial or carries
+/// an unseen event lands outside it and keeps its id. ng's REF bucket can therefore only
+/// ever be a *subset* of production's, and ng's id set only ever a **superset** of
+/// production's. An id production has that ng lacks means ng lost a read's identity, which
+/// no part of this change is allowed to do.
+fn record_chain_ids(record: &PileupRecord) -> Vec<ChainId> {
+    let mut ids: Vec<ChainId> = record
+        .alleles
+        .iter()
+        .flat_map(|allele| allele.chain_ids.iter().copied())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// **The one class of divergence A3 leaves on the complete-reads fixture — named, because
@@ -1202,7 +1267,16 @@ fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreemen
     // then carry up to fourteen half-grains of slack — more than the grain itself, so a
     // record whose reads merely sit in different buckets would fail this check on the
     // rounding alone. Summing first and rounding once is the whole point.
-    if ours.alleles[0].seq == theirs.alleles[0].seq && total_support(ours) == total_support(theirs)
+    //
+    // **The chain ids are checked too, by subset and not by equality** — see
+    // `record_chain_ids` for the record that settles which of the two is right. ng may hold
+    // an id production dropped into its REF bucket; it may never *lose* one.
+    let ng_ids = record_chain_ids(ours);
+    if ours.alleles[0].seq == theirs.alleles[0].seq
+        && total_support(ours) == total_support(theirs)
+        && record_chain_ids(theirs)
+            .iter()
+            .all(|id| ng_ids.binary_search(id).is_ok())
     {
         return RecordAgreement::EvidenceIntact;
     }
@@ -1228,7 +1302,7 @@ fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreemen
 /// A failure means ng has changed an answer on the class it promised not to touch; the
 /// seed and case index replay the exact input.
 #[test]
-fn ng_walks_identically_to_production_on_complete_reads() {
+fn ng_holds_the_same_evidence_as_production_on_complete_reads() {
     let mut compared_records = 0usize;
     let mut widened_records = 0usize;
     let mut widen_stale = 0usize;
@@ -1441,10 +1515,86 @@ fn ng_diverges_from_production_only_where_a_read_did_not_witness() {
         "{records} records compared and not one differed — the fill is still there, and \
          every complete-reads assertion in this module is passing for the wrong reason"
     );
+    // **A ceiling as well as a floor.** The floor alone makes this a census that cannot
+    // fail upwards: the headline can be driven from 1.9% to 91.8% by a genuine defect and
+    // the test still passes, reporting the defect as the measurement. The class is
+    // "production fabricated bases here", which is a minority of loci by construction —
+    // most positions carry no widened record at all — so a figure in the tens of percent
+    // means the walk changed, not that the defect is larger than thought.
+    assert!(
+        diverged * 10 < records,
+        "{diverged} of {records} records ({:.1}%) differ — this census measures production's \
+         fabrication, which is a small minority of loci; at this rate something in the walk \
+         has moved and the number is no longer the defect's size",
+        100.0 * diverged as f64 / records as f64,
+    );
     eprintln!(
         "the fabrication census: {diverged} of {records} records ({:.1}%) carried bases \
          production credited to a read that had not witnessed them",
         100.0 * diverged as f64 / records as f64,
+    );
+}
+
+/// **No record leaves the walker carrying a bucket no read is folded into** — A3's
+/// eviction, asserted on the records that are *emitted* rather than on the table inside.
+///
+/// Nothing checked this, and the gap was structural rather than accidental: A3's own
+/// eviction fixtures reach into `OpenPileupRecordTable` while the record is still open, and
+/// the differential is **blind by construction**, because [`comparable`] drops unsupported
+/// non-REF buckets on *both* sides before comparing — precisely so that ng evicting them and
+/// production keeping them is not read as a divergence. So the one projection that makes the
+/// two walkers comparable is also the one that hides whether ng evicted anything at all.
+///
+/// The concrete hole: moving `evict_unsupported_alleles` to *before* the contributor fold
+/// loop leaves the whole suite green. Buckets emptied by the widen are still caught, because
+/// the widen runs first — but buckets emptied by the **fold loop itself**, when a contributor
+/// re-folds into a different bucket at this position, survive to `finalise` and are emitted.
+/// That is the accumulation spec §7 says to design for rather than discover, against a
+/// `find_allele_index` that is a linear scan with a full byte compare.
+///
+/// `alleles[0]` is exempt: it is the REF sequence, and production creates it with zero
+/// observations by design.
+#[test]
+fn ng_emits_no_allele_bucket_without_support() {
+    let mut records = 0usize;
+    let mut multi_allele = 0usize;
+
+    for seed in SEEDS {
+        let mut rng = SplitMix64(seed);
+        for index in 0..cases_per_seed() {
+            let case = generate(&mut rng);
+            let where_ = format!("seed {seed:#x} case {index}");
+            for (position, item) in ng_walk(&case).records.iter().enumerate() {
+                let Ok(record) = item else { continue };
+                records += 1;
+                if record.alleles.len() > 2 {
+                    multi_allele += 1;
+                }
+                for (index, allele) in record.alleles.iter().enumerate().skip(1) {
+                    assert!(
+                        allele.support.num_obs > 0,
+                        "{where_}: emitted record {position} carries bucket {index} \
+                         ({:?}) with no supporting read — a re-fold left it behind and the \
+                         eviction did not run after it: {record:?}",
+                        String::from_utf8_lossy(&allele.seq),
+                    );
+                }
+            }
+        }
+    }
+
+    // Without a record that has somewhere to move a read *to*, the property is vacuous —
+    // a walk of one-allele records satisfies it against an implementation that never
+    // evicts anything.
+    assert!(
+        multi_allele * 100 > records,
+        "only {multi_allele} of {records} emitted records carry more than one non-REF \
+         bucket — this fixture cannot exercise a read moving between buckets, so the \
+         property it asserts is vacuous"
+    );
+    eprintln!(
+        "eviction census: {records} emitted records, {multi_allele} of them with more than \
+         one non-REF bucket; none carried an unsupported one"
     );
 }
 
@@ -1648,7 +1798,7 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
 /// milestones. So the five behaviours plan 2's B2 mutates are counted here, over the same
 /// generator, and each is required to fire. If a change to the generator stops producing
 /// deep columns or overlapping mates, this fails immediately and loudly rather than
-/// leaving `ng_walks_identically_to_production` quietly weaker.
+/// leaving `ng_holds_the_same_evidence_as_production_on_complete_reads` quietly weaker.
 ///
 /// The counts come from production's own `RunSummary` wherever it has one, so they measure
 /// what the *walker* did rather than what the generator intended. Adaptor boundaries have
@@ -1746,7 +1896,7 @@ fn the_generator_exercises_what_the_port_can_break() {
 
 /// **The `Err` half of the stream, which the main generator deliberately never produces.**
 ///
-/// `ng_walks_identically_to_production` is built to keep reads in bounds and in order — its
+/// `ng_holds_the_same_evidence_as_production_on_complete_reads` is built to keep reads in bounds and in order — its
 /// own coverage test reports zero walker errors — so `assert_same_walk`'s element-wise
 /// comparison only ever sees `Ok`, and the `map_err` machinery that exists to compare two
 /// nominally distinct `WalkerError` types is dead. Spec §3 states the claim as "the two
@@ -1873,7 +2023,7 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
 /// about the *fixture*, not about either impl.
 ///
 /// So it is checked rather than relied on. Without this, a generator change introducing a
-/// lower-case or ambiguity-coded base would surface as `ng_walks_identically_to_production`
+/// lower-case or ambiguity-coded base would surface as `ng_holds_the_same_evidence_as_production_on_complete_reads`
 /// failing on the bases inside a record, and be chased into the walk — where there is
 /// nothing to find.
 #[test]
@@ -1967,7 +2117,7 @@ fn the_adaptor_filter_changes_the_records_the_walk_emits() {
 /// PVC_PARITY_FASTA=$HOME/genomes/h_sapiens/gca_grch38/GCA_….fna \
 /// PVC_PARITY_READS=…/benchmarks/ssr_hg002/bam/10x/HG002_TR_v1.0.1_Tier_10x.bam \
 /// PVC_PARITY_REGION=chr1:1000000-1200000 \
-///   cargo test --release --lib ng_walks_identically_to_production_on_real_reads \
+///   cargo test --release --lib ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness \
 ///     -- --ignored --nocapture
 /// ```
 ///
@@ -1984,10 +2134,10 @@ fn the_adaptor_filter_changes_the_records_the_walk_emits() {
 /// `PreparedRead::into_production`. Preparing twice would compare two different inputs.
 /// A single `WindowedRefSeq` is lent to both walkers for the same reason: identical bytes
 /// by construction, so any divergence is the walk's. ng's walker takes it directly (A0);
-/// production's reaches it through [`ProductionView`], the local adaptor below.
+/// production's reaches it through [`SharedReference`], the local adaptor below.
 #[test]
 #[ignore = "needs a real BAM/CRAM and reference; see the doc comment for the invocation"]
-fn ng_walks_identically_to_production_on_real_reads() {
+fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness() {
     use std::path::PathBuf;
 
     use crate::ng::read::ReadFilterConfig;

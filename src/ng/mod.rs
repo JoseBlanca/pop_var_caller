@@ -19,10 +19,16 @@
 //! experiments ng exists to run have decided something.
 //!
 //! **The heaviest instance of that rule so far is
-//! [`locus_generation::pileup`]** — a verbatim copy of `src/pileup/walker/`
+//! [`locus_generation::pileup`]** — begun as a verbatim copy of `src/pileup/walker/`
 //! (~5,500 lines), kept *provably* identical to its source so that ng's later,
-//! deliberate divergences can be told apart from transcription slips. It is checked
+//! deliberate divergences could be told apart from transcription slips. It is checked
 //! textually, not asserted: `pileup/copy_fidelity.rs`.
+//!
+//! **Those divergences have now begun**, so "a verbatim copy" is no longer true of the
+//! directory as a whole: three files have been released from the guard and changed on
+//! purpose — the walker no longer fabricates the reference bases a read did not witness
+//! — and five remain verbatim and guarded. `copy_fidelity.rs` names which are which, and
+//! is the only thing that stays true as the balance shifts.
 
 #[cfg(test)]
 mod scanner_parity;
