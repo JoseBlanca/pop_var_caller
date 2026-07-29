@@ -255,7 +255,10 @@ pub(super) struct ObservationRow {
 /// A total order over [`ReadCoverage`], which is `Eq` but not `Ord` — the shared type has
 /// no natural ordering, and inventing an `Ord` impl on it would export this file's sorting
 /// convention to every other consumer.
-fn coverage_order(coverage: ReadCoverage) -> (u8, u16, u16) {
+/// `pub(super)` for the differential: D1's projection has to lay production's alleles out in
+/// **ng's** emission order, and a second spelling of this comparator in `parity.rs` is a
+/// spelling that can drift from the one the walk actually uses.
+pub(super) fn coverage_order(coverage: ReadCoverage) -> (u8, u16, u16) {
     match coverage {
         ReadCoverage::Complete => (0, 0, 0),
         ReadCoverage::Observed {
@@ -616,6 +619,29 @@ impl OpenPileupRecord {
                 })
                 .count() as u32,
         };
+        // **A3's eviction, checked where the buckets still exist — and D1 is why it is
+        // here.** The property is "no bucket survives that no read is folded into", and it
+        // is *invisible in the emitted locus*: `observation_rows` derives rows from
+        // `folded_reads`, so a stranded bucket produces no row and leaves no trace. A parity
+        // test asserted it on the emitted records, which was still meaningful while the walk
+        // emitted `PileupRecord`s and stopped being so at B2; D1 mutated the code the test
+        // named — moving `evict_unsupported_alleles` above the contributor fold loop, which
+        // strands every bucket that loop empties — and **the whole 198-test module stayed
+        // green.** That is the eleventh test on this branch that could not fail.
+        //
+        // A `debug_assert` rather than a test, because the invariant lives on a structure no
+        // test outside this file can reach, and this way every walk in the suite checks it —
+        // the census alone runs it over ~257,000 loci, and the `soak` profile keeps it armed
+        // at release speed. The mutation above now fails there instead of nowhere.
+        debug_assert!(
+            self.alleles
+                .iter()
+                .skip(1)
+                .all(|allele| allele.support.num_obs > 0),
+            "a bucket no read is folded into survived to finalise: the eviction did not run \
+             after the fold loop that emptied it. {:?}",
+            self.alleles,
+        );
         // **The rows come from the reads, not from the bucket totals** (B1). See
         // `observation_rows` for why, and for what makes the two agree at one read group.
         let mut rows = self.observation_rows(record_end_exclusive);
@@ -1782,10 +1808,10 @@ pub(super) fn process_position(
 
         // After every contributor has folded, not before: the empty buckets are created
         // *by* the re-folds a widen triggers, and by the no-observation path above.
-        // Moving this above the loop is not caught by the walk's own fixtures — buckets
-        // the *fold loop* empties then survive to `finalise` — which is why
-        // `parity::ng_emits_no_allele_bucket_without_support` asserts it on the records
-        // that leave the walker.
+        // Moving this above the loop strands every bucket the fold loop empties, and no
+        // fixture in this module catches that — the `debug_assert!` at the top of
+        // `finalise` is what does, every walk in the suite. (It used to say a parity test
+        // on the emitted records caught it; D1 mutated the code and found that it did not.)
         evict_unsupported_alleles(fold_state.alleles, fold_state.folded_reads);
     }
 

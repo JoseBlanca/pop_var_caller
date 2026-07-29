@@ -106,15 +106,17 @@
 //! is what says the banking is worth anything: a differential that has never been shown
 //! to fail is a claim, not evidence.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::tests::MockFasta;
 use super::{PreparedRead, WalkerConfig};
 use crate::ng::read::PLACEHOLDER_READ_GROUP;
+use crate::ng::types::{ContigId, GenomeRegion, Position};
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
-use super::super::SampleLocusObservations;
+use super::super::{LocusKind, ObservedSequence, ReadCoverage, SampleLocusObservations};
 use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
     run as production_run,
@@ -622,6 +624,151 @@ fn generate_complete(rng: &mut SplitMix64) -> Case {
     }
 }
 
+/// A case in which every read spans the contig whole **and shares one event set with every
+/// other read on its contig** — the permanent anchor's fixture (D1).
+///
+/// # Why the events have to be shared, which `generate_complete` did not know
+///
+/// "Every read witnessed the whole footprint" is not enough to make the two walkers agree,
+/// and D1 found the case that proves it. Production's `widen` appends reference bases to
+/// **every** bucket and re-folds nothing; ng's re-folds every live read
+/// (`refold_live_reads`, A3/option (b) — a function production has no counterpart to). So a
+/// record that widens after a read folded into it leaves production holding that read's
+/// haplotype computed against a **stale, narrower** footprint: reference bases where the
+/// read's own were, and events inside the widened region missed entirely. The read is a
+/// complete witness on ng's side and production is still wrong about it. (Both directions
+/// occur — the divergence that found this had ng's row one base *longer* than production's,
+/// an insertion anchored in the widened region.)
+///
+/// One shared event set removes the cause rather than filtering the symptom — **not by
+/// stopping records widening, which it does not.** Records widen here as often as anywhere
+/// else: a pileup opens a record at every covered position, so a deletion anchored at one
+/// widens the record already standing there. What the shared event set changes is *who is
+/// left stale by it*. Every read in the record carries **its own copy of the widening
+/// event**, so every read is re-folded by that event rather than having reference bases
+/// appended to a bucket nobody revisits. Production's append-to-every-bucket still runs; it
+/// is simply overwritten, for every read, by the read's own subtract-then-add.
+///
+/// The fixture's defining property is asserted rather than argued — the anchor checks that
+/// every read on a contig carries **one CIGAR**, and separately that widened records were
+/// reached at all, so neither "the generator stopped sharing events" nor "the widen path
+/// went unexercised" can quietly weaken the anchor.
+///
+/// What still varies, because it is what the anchor is for: the bases at every matched
+/// position (so records carry several alleles), qualities, MAPQ, strand, pairing and mate
+/// overlap, the column caps, and both contigs.
+fn generate_uniform_events(rng: &mut SplitMix64) -> Case {
+    let reference: Vec<String> = (0..CONTIGS)
+        .map(|_| {
+            (0..CONTIG_LENGTH)
+                .map(|_| b"ACGT"[rng.below(4)] as char)
+                .collect()
+        })
+        .collect();
+
+    // One template per contig: reads on different contigs never share a record, so their
+    // events cannot widen each other's.
+    let templates: Vec<ProductionPreparedRead> = (0..CONTIGS)
+        .map(|contig| {
+            generate_complete_read(
+                rng,
+                &reference,
+                contig as u32,
+                "template",
+                ProductionMateRole::Solo,
+            )
+        })
+        .collect();
+
+    let mut reads: Vec<ProductionPreparedRead> = Vec::new();
+    let read_count = 2 + rng.below(10);
+    for index in 0..read_count {
+        let chrom_id = if CONTIGS > 1 && rng.one_in(6) { 1 } else { 0 };
+        let contig = reference[chrom_id as usize].as_bytes();
+        // The template's CIGAR, with this read's own bases over it. The matched positions
+        // are walked in the same order the template built them, so the seq stays the length
+        // the CIGAR demands — a read whose seq and CIGAR disagree is rejected at admission
+        // and the case would test the rejection path instead of the fold.
+        fn vary(
+            rng: &mut SplitMix64,
+            contig: &[u8],
+            chrom_id: u32,
+            template: &ProductionPreparedRead,
+            qname: String,
+            role: ProductionMateRole,
+        ) -> ProductionPreparedRead {
+            let mut seq: Vec<u8> = Vec::with_capacity(template.seq.len());
+            let mut ref_pos = 0usize;
+            for op in &template.cigar {
+                match op {
+                    CigarOp::Match(len) | CigarOp::SeqMatch(len) | CigarOp::SeqMismatch(len) => {
+                        for offset in 0..*len as usize {
+                            seq.push(if rng.one_in(6) {
+                                b"ACGT"[rng.below(4)]
+                            } else {
+                                contig[ref_pos + offset]
+                            });
+                        }
+                        ref_pos += *len as usize;
+                    }
+                    CigarOp::Insertion(len) | CigarOp::SoftClip(len) => {
+                        seq.extend((0..*len).map(|_| b"ACGT"[rng.below(4)]));
+                    }
+                    CigarOp::Deletion(len) | CigarOp::Skip(len) => ref_pos += *len as usize,
+                    CigarOp::HardClip(_) | CigarOp::Padding(_) => {}
+                }
+            }
+            ProductionPreparedRead {
+                chrom_id,
+                alignment_start: template.alignment_start,
+                alignment_end: template.alignment_end,
+                cigar: template.cigar.clone(),
+                bq_baq: (0..seq.len()).map(|_| 20 + rng.below(21) as u8).collect(),
+                seq,
+                mq_log_err: -3.0 - (rng.below(4) as f64),
+                mapq: 20 + rng.below(41) as u8,
+                is_reverse_strand: rng.one_in(2),
+                qname: Arc::from(qname.as_str()),
+                mate_role: role,
+                adaptor_boundary: None,
+            }
+        }
+        let template = &templates[chrom_id as usize];
+        if rng.one_in(3) {
+            let qname = format!("pair{index}");
+            for role in [
+                ProductionMateRole::FirstOfPair,
+                ProductionMateRole::SecondOfPair,
+            ] {
+                reads.push(vary(rng, contig, chrom_id, template, qname.clone(), role));
+            }
+        } else {
+            reads.push(vary(
+                rng,
+                contig,
+                chrom_id,
+                template,
+                format!("solo{index}"),
+                ProductionMateRole::Solo,
+            ));
+        }
+    }
+    reads.sort_by_key(|read| (read.chrom_id, read.alignment_start));
+
+    let mut config = WalkerConfig::default();
+    if rng.one_in(3) {
+        config.max_snp_column_depth = 1 + rng.below(4) as u32;
+        config.max_indel_column_depth = 1 + rng.below(2) as u32;
+    }
+
+    Case {
+        reference,
+        reads,
+        config,
+        reads_with_live_adaptor_boundary: 0,
+    }
+}
+
 /// The eight `RunSummary` counters, **named**.
 ///
 /// Named rather than an `[u64; 8]` beside a parallel `[&str; 8]`, because two arrays that
@@ -710,7 +857,17 @@ fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
 /// not — the two copies share the format string verbatim, but ng panics from
 /// `src/ng/locus_generation/pileup/` and production from `src/pileup/walker/`.
 struct WalkOutcome {
-    records: Vec<Result<PileupRecord, String>>,
+    /// **ng's type on both sides, from D1 on.** Production's `PileupRecord`s arrive here
+    /// through [`project`]; ng's loci arrive as they are emitted. The comparison surface is
+    /// the type ng actually ships, so a field ng carries and production cannot say is a
+    /// *named* divergence rather than something the old back-projection quietly merged away.
+    records: Vec<Result<SampleLocusObservations, String>>,
+    /// What the projection had to drop to produce each stream item — one entry per item, so
+    /// the two index together. Class 4 (and class 5) are facts about the *projection*, not
+    /// about the emitted locus, so they cannot be read back off `records`: a dropped bucket
+    /// leaves no trace in what it was dropped from. Default — nothing dropped — for an error
+    /// item and for every item of an ng walk, which projects nothing.
+    drops: Vec<ProjectionDrops>,
     /// `None` when the walk panicked — there is no summary to read from a walker that
     /// unwound out from under us.
     summary: Option<SummaryCounters>,
@@ -902,10 +1059,21 @@ where
     W: Iterator<Item = Result<PileupRecord, E>>,
 {
     let mut records = Vec::new();
+    let mut drops = Vec::new();
     let mut summary = None;
     let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for item in &mut walker {
-            records.push(item.map_err(|error| render_error(&error)));
+            records.push(
+                item.map(|record| {
+                    let (locus, dropped) = project_counting_drops(&record);
+                    drops.push(dropped);
+                    locus
+                })
+                .map_err(|error| {
+                    drops.push(ProjectionDrops::default());
+                    render_error(&error)
+                }),
+            );
         }
         summary = Some(summary_of(&walker));
     }))
@@ -913,15 +1081,16 @@ where
     .map(panic_message);
     WalkOutcome {
         records,
+        drops,
         summary,
         panic_message,
     }
 }
 
-/// The same as [`drive_production`], for a walker that yields ng's own locus type — each record laid
-/// back out as a [`PileupRecord`] by [`to_pileup_record`](super::to_pileup_record) so the
-/// two streams stay comparable. Separate rather than generic over the item type: the
-/// projection is the thing worth seeing at the call site.
+/// The same as [`drive_production`], for a walker that yields ng's own locus type — which
+/// needs no projection at all, being the surface both sides are now compared on. Separate
+/// rather than generic over the item type: which side projects is the thing worth seeing at
+/// the call site, and the asymmetry is the whole of D1.
 fn drive_ng<W, E>(
     mut walker: W,
     render_error: impl Fn(&E) -> String,
@@ -931,13 +1100,15 @@ where
     W: Iterator<Item = Result<SampleLocusObservations, E>>,
 {
     let mut records = Vec::new();
+    let mut drops = Vec::new();
     let mut summary = None;
     let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for item in &mut walker {
-            records.push(
-                item.map(|locus| super::to_pileup_record(&locus))
-                    .map_err(|error| render_error(&error)),
-            );
+            records.push(item.map_err(|error| render_error(&error)));
+            // ng projects nothing, so nothing was dropped on the way here. The vector is
+            // kept the same length as `records` so the two index together whichever walk an
+            // outcome came from.
+            drops.push(ProjectionDrops::default());
         }
         summary = Some(summary_of(&walker));
     }))
@@ -945,6 +1116,7 @@ where
     .map(panic_message);
     WalkOutcome {
         records,
+        drops,
         summary,
         panic_message,
     }
@@ -968,53 +1140,233 @@ fn production_walk(case: &Case) -> WalkOutcome {
 /// and `both_sides_of_the_differential_are_served_the_same_bytes` checks the bytes rather
 /// than trusting that.
 fn ng_walk(case: &Case) -> WalkOutcome {
+    ng_walk_in_groups(case, 1)
+}
+
+/// ng's answer with the sample's reads dealt round-robin into `groups` read groups.
+///
+/// **The read group is the one part of a row's identity production has no way to say**, so
+/// spec §3's class 2 — "an allele supported from several read groups is several rows" — is
+/// unreachable on a one-group fixture: it would be a class counted zero forever, which is
+/// how an unexercised branch passes for a tested one. Dealing the same reads into two groups
+/// is what makes the class fire, and it is safe to do here because the group reaches
+/// **nothing but the row key**: `open_record.rs` reads `read_group` only to build
+/// `ObservationKey` and to order the emitted rows. So the walk is bit-for-bit the walk of
+/// `groups == 1`, and the only difference in the output is the split this class names —
+/// which `two_read_groups_split_rows_without_moving_evidence` pins by reconciling the split
+/// rows back against the one-group run.
+fn ng_walk_in_groups(case: &Case, groups: u32) -> WalkOutcome {
+    assert!(groups >= 1, "a walk has at least one read group");
     let fasta = case.fasta();
     let reads: Vec<PreparedRead> = case
         .reads
         .iter()
         .cloned()
-        // The read group plays no part in what the copy computes — it is carried for
-        // plan 3 — so a placeholder is right here, and a *varying* one would be a
-        // difference between the two streams rather than a property under test.
-        .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
+        .enumerate()
+        .map(|(index, read)| {
+            let group = if groups == 1 {
+                PLACEHOLDER_READ_GROUP
+            } else {
+                crate::ng::types::ReadGroupId(index as u32 % groups)
+            };
+            PreparedRead::from_production(read, group)
+        })
         .collect();
-    // **ng emits `SampleLocusObservations` from B2 on; the differential still compares
-    // `PileupRecord`s.** Laid back out through `to_pileup_record` rather than projecting
-    // production forward, which is D1's job and needs the five divergence classes named
-    // first. What the projection cannot carry is listed on it, and the two that matter here
-    // are named in `record_evidence` (`placed_start`, no longer computed at all) and in
-    // `classify_record` (chain ids, now dropped per read).
     drive_ng(super::run(reads, fasta, &case.config), render_ng_error, {
         |walker| ng_counters(walker.summary())
     })
 }
 
-/// Project a record onto the surface the two walkers can still be compared on — **two
-/// named differences, both of them projections rather than excuses** (spec §3, classes 4
-/// and 5).
+/// The read group every projected row carries: production has none, so one is chosen and
+/// named rather than defaulted at four call sites.
 ///
-/// 1. **Drop every non-REF bucket no read is folded into.** From A3 `widen` extends only
-///    `alleles[0]`, so a read that re-folds after a widen lands in a new bucket and leaves
-///    the old one behind at `num_obs == 0`; ng evicts those at the end of every fold, and
-///    production keeps them, because its append-to-every-bucket kept the re-fold landing
-///    back where it started. Neither side's *evidence* moves — an empty bucket supports no
-///    read and carries no chain id.
-/// 2. **Sort the non-REF buckets by their bases.** Production's order is bucket-creation
-///    order; ng's creation order now changes with eviction, and B2 makes ng sort before
-///    emitting anyway, for a reason that outlives this comparison: its rows come from an
-///    `AHashMap` whose iteration order is seeded per process.
+/// It is [`PLACEHOLDER_READ_GROUP`], the group [`ng_walk`] gives every read on a one-group
+/// walk — so on that fixture the field compares equal and the group is not a divergence.
+/// On a multi-group walk it is what spec §3's class 2 diverges *from*.
+const PROJECTED_READ_GROUP: crate::ng::types::ReadGroupId = PLACEHOLDER_READ_GROUP;
+
+/// **Production's record, said in ng's terms — the stage-2 projection** (spec §3).
 ///
-/// `alleles[0]` is left where it is whatever its support: it is the record's reference
-/// sequence, production creates it with zero observations by design, and moving it would
-/// break the positional REF invariant both sides still rely on.
+/// This is the direction D1 exists to reverse. Until now the differential ran the other way,
+/// laying ng's locus back out as a `PileupRecord` through `to_pileup_record` — and a
+/// back-projection can only ever compare what the *older, smaller* type can hold. Every
+/// field B2 added (`read_coverage`, `read_group`, the two per-record counters, the region's
+/// end) was merged or dropped on the way out, which is why Milestone B's review found three
+/// live surfaces the suite could not see. Projecting **forward** makes each of them visible:
+/// production has no way to say them, so each shows up as a difference with a name.
 ///
-/// Applied to **both** sides, so neither can hide a difference the other does not have: a
-/// bucket with `num_obs > 0` survives on either side and still has to match, bases and
-/// support and chain ids alike.
-fn comparable(record: &PileupRecord) -> PileupRecord {
-    let mut out = comparable_exact_q_sum(record);
-    for allele in &mut out.alleles {
-        allele.support.q_sum = round_q_sum(allele.support.q_sum);
+/// # Total, and the drops are the classes
+///
+/// `PileupRecord` is destructured exhaustively, so a field added to production's type stops
+/// this compiling instead of being silently left out of the oracle — the same rule
+/// [`RecordEvidence`] earned the hard way. What each field becomes:
+///
+/// - `chrom_id`, `pos` and `alleles[0].seq.len()` become the [`GenomeRegion`]. The **end**
+///   is production's only statement of the footprint's extent, and it is implicit in the REF
+///   bucket's length; ng carries it explicitly. Nothing projected *back* could see it.
+/// - `alleles[0].seq` becomes `reference_bases` — the REF bucket's bytes *are* the record's
+///   reference sequence, which is why ng does not store the two separately.
+/// - each allele with `num_obs > 0` becomes one [`ObservedSequence`]. **Class 4:** the ones
+///   with no support are dropped, because production creates `alleles[0]` at record open
+///   regardless and A3's widen strands empty non-REF buckets, while ng derives rows from
+///   reads that folded. `dropped_unsupported` on the returned census says how many, and
+///   the caller asserts nothing supported was ever dropped.
+/// - `read_coverage` is **`Complete` on every projected row. Class 1:** production has no
+///   notion of a read that witnessed part of a footprint — that is the defect, and this is
+///   where it becomes visible instead of being merged away.
+/// - `read_group` is [`PROJECTED_READ_GROUP`] on every projected row. **Class 2:** the
+///   group joins ng's row identity and production cannot split a row by it.
+/// - `reads_without_observation` and `reads_discarded_by_cap` are **zero. Class 3:**
+///   production keeps neither per record — only run-level totals on `RunSummary` — so these
+///   are asserted against hand-counted fixtures and against ng's own read accounting, never
+///   against production.
+/// - `windowed_gc` / `windowed_coverage` are dropped by name: `f32::NAN` placeholders the
+///   pileup→`.psp` seam fills from a sliding window the walker cannot compute (spec §3).
+///   ng's locus type has no counterpart and deliberately does not gain one here.
+/// - `placed_start` is dropped by name from every allele's support: ng stops computing it at
+///   B2 (spec §6), so there is nothing on the other side to compare and comparing
+///   production's value against a structural zero would fail every locus. The difference
+///   between this and the *oversight* it replaced is spelled out on [`RecordEvidence`].
+///
+/// Rows come out in ng's emission order — [`sort_rows`] — so **class 5** (production's order
+/// is bucket-creation order) is normalised here and counted by the census rather than
+/// tolerated silently.
+fn project(record: &PileupRecord) -> SampleLocusObservations {
+    project_counting_drops(record).0
+}
+
+/// How much [`project`] had to drop — the number that turns class 4 from an excuse into a
+/// measurement.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProjectionDrops {
+    /// Alleles dropped for having no supporting read.
+    ///
+    /// *(There is deliberately no "observations dropped" field beside this: the filter
+    /// **is** `num_obs == 0`, so such a counter could only ever read zero — a number that
+    /// cannot move is not evidence. The claim "no supported allele was dropped" is made
+    /// where it can fail, by [`assert_reads_are_accounted_for`], which reconciles ng's
+    /// per-locus observation total against production's.)*
+    unsupported: usize,
+    /// Chain ids carried by those alleles — a claim that **can** fail. Production's re-fold
+    /// subtracts a read's scalars from the bucket it leaves and clears its id
+    /// (`refold_after_widen_clears_chain_id_from_old_bucket`); an id stranded on a bucket at
+    /// `num_obs == 0` would be a read whose identity this projection silently discarded.
+    unsupported_chain_ids: usize,
+    /// Whether production's own allele order differed from ng's emission order — class 5,
+    /// counted so "ng sorts" is shown to be doing work.
+    reordered: bool,
+}
+
+fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, ProjectionDrops) {
+    // Exhaustive: a field added to production's record stops this compiling.
+    let PileupRecord {
+        chrom_id,
+        pos,
+        alleles,
+        // Filled at the pileup→`.psp` seam from a window the walker cannot see; ng's locus
+        // type has no counterpart (spec §3).
+        windowed_gc: _,
+        windowed_coverage: _,
+    } = record;
+
+    let reference_bases: Box<[u8]> = alleles
+        .first()
+        .expect("production creates alleles[0] with the record")
+        .seq
+        .clone()
+        .into_boxed_slice();
+
+    let mut drops = ProjectionDrops::default();
+    let mut rows: Vec<ObservedSequence> = Vec::with_capacity(alleles.len());
+    for allele in alleles {
+        // Exhaustive on the support too: `placed_start` is bound and dropped **by name**.
+        let AlleleSupportStats {
+            num_obs,
+            q_sum,
+            fwd,
+            placed_left,
+            placed_start: _,
+            mapq_sum,
+            mapq_sum_sq,
+        } = allele.support;
+        if num_obs == 0 {
+            drops.unsupported += 1;
+            drops.unsupported_chain_ids += allele.chain_ids.len();
+            continue;
+        }
+        let mut chain_ids = allele.chain_ids.clone();
+        chain_ids.sort_unstable();
+        chain_ids.dedup();
+        rows.push(ObservedSequence {
+            bases: allele.seq.clone().into_boxed_slice(),
+            read_coverage: ReadCoverage::Complete,
+            read_group: PROJECTED_READ_GROUP,
+            num_obs,
+            num_fwd: fwd,
+            q_sum,
+            mapq_sum,
+            mapq_sum_sq,
+            placed_left,
+            chain_ids,
+        });
+    }
+    let before = rows.clone();
+    sort_rows(&mut rows);
+    drops.reordered = before != rows;
+
+    let locus = SampleLocusObservations {
+        region: GenomeRegion {
+            contig: ContigId(*chrom_id),
+            // 1-based **inclusive**: the last covered position, not one past it.
+            start: Position(u64::from(*pos)),
+            end: Position(u64::from(*pos) + reference_bases.len() as u64 - 1),
+        },
+        reference_bases,
+        observed_sequences: rows,
+        // Class 3 — production keeps neither per record.
+        reads_without_observation: 0,
+        reads_discarded_by_cap: 0,
+        kind: LocusKind::Generic,
+    };
+    (locus, drops)
+}
+
+/// ng's emission order, applied to both sides — spec §3's class 5.
+///
+/// The `ReadCoverage` half of the comparator is **the walk's own**
+/// (`open_record::coverage_order`, lifted to `pub(super)` for this) rather than a second
+/// spelling here: `finalise` sorts `ObservationRow`s and this sorts `ObservedSequence`s, so
+/// the loop cannot be shared, but the one piece that could silently drift is.
+/// `the_projection_orders_rows_as_the_walk_does` covers the rest, by asserting that sorting
+/// an ng locus's rows with this function leaves them where the walk emitted them.
+fn sort_rows(rows: &mut [ObservedSequence]) {
+    use super::open_record::coverage_order;
+    rows.sort_by(|a, b| {
+        a.bases
+            .cmp(&b.bases)
+            .then_with(|| coverage_order(a.read_coverage).cmp(&coverage_order(b.read_coverage)))
+            .then_with(|| a.read_group.0.cmp(&b.read_group.0))
+    });
+}
+
+/// The surface the two sides are compared on — **three named projections, applied to both**
+/// (spec §3).
+///
+/// 1. `q_sum` rounded to [`Q_SUM_GRAIN`], because ng changed the **order** the sum
+///    accumulates in and nothing else — see [`round_q_sum`].
+/// 2. Rows sorted into ng's emission order (class 5). ng's are already; production's are in
+///    bucket-creation order.
+/// 3. The two per-record counters zeroed (class 3). Production has no counterpart, so an ng
+///    locus that counted a read out would otherwise differ on every comparison that has
+///    nothing to do with the rows. They are asserted **directly**, on ng's own locus, by
+///    [`assert_reads_are_accounted_for`] — which is a stronger claim than any equality
+///    against a structural zero could be.
+///
+/// Applied to **both** sides, so neither can hide a difference the other does not have.
+fn comparable(locus: &SampleLocusObservations) -> SampleLocusObservations {
+    let mut out = comparable_exact_q_sum(locus);
+    for row in &mut out.observed_sequences {
+        row.q_sum = round_q_sum(row.q_sum);
     }
     out
 }
@@ -1055,32 +1407,24 @@ fn round_q_sum(q_sum: f64) -> f64 {
 /// The projection itself, minus the `q_sum` rounding [`comparable`] adds — so a caller can
 /// count how many records agree **only** because of the rounding, and it is shown to be
 /// doing work rather than quietly matching nothing.
-fn comparable_exact_q_sum(record: &PileupRecord) -> PileupRecord {
-    let mut out = record.clone();
-    let mut index = 0usize;
-    out.alleles.retain(|allele| {
-        let keep = index == 0 || allele.support.num_obs > 0;
-        index += 1;
-        keep
-    });
-    out.alleles[1..].sort_by(|a, b| a.seq.cmp(&b.seq));
-    // **`placed_start` is zeroed on both sides — a third named projection, from B2.** ng
-    // stops computing the quantity entirely (spec §6: nothing consumes it, and it is a pure
-    // function of the read's start against the anchor), so its side is a structural zero and
-    // every record would otherwise diverge on it. Zeroing *both* keeps the comparison
-    // symmetric, which is the rule every projection here follows: neither side may be
-    // normalised in a way the other is not. See `RecordEvidence` for why this is a
-    // deliberate removal rather than the oversight it replaced.
-    for allele in &mut out.alleles {
-        allele.support.placed_start = 0;
-    }
+fn comparable_exact_q_sum(locus: &SampleLocusObservations) -> SampleLocusObservations {
+    let mut out = locus.clone();
+    sort_rows(&mut out.observed_sequences);
+    // **Class 3, zeroed on both sides.** Production keeps neither counter per record, so its
+    // side is a structural zero; zeroing ng's too keeps the comparison symmetric, which is
+    // the rule every projection here follows — neither side may be normalised in a way the
+    // other is not. The counters are not thereby unchecked: they are asserted on ng's own
+    // locus by `assert_reads_are_accounted_for`, which is where a claim about a quantity
+    // production cannot state belongs.
+    out.reads_without_observation = 0;
+    out.reads_discarded_by_cap = 0;
     out
 }
 
-/// Records that agree after the `q_sum` rounding and disagree before it.
+/// Loci that agree after the `q_sum` rounding and disagree before it.
 fn float_only_divergences(
-    ours: &[Result<PileupRecord, String>],
-    theirs: &[Result<PileupRecord, String>],
+    ours: &[Result<SampleLocusObservations, String>],
+    theirs: &[Result<SampleLocusObservations, String>],
 ) -> usize {
     ours.iter()
         .zip(theirs)
@@ -1119,14 +1463,14 @@ fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> b
         theirs.records.len(),
     );
     for (position, (ours, theirs)) in ours.records.iter().zip(theirs.records.iter()).enumerate() {
-        // Normalised on both sides — see `comparable` for why an empty bucket is a
-        // projection rather than an excuse.
-        let project = |item: &Result<PileupRecord, String>| {
+        // Normalised on both sides — see `comparable` for the three projections and why
+        // each is a named class rather than an excuse.
+        let normalise = |item: &Result<SampleLocusObservations, String>| {
             item.as_ref().map(comparable).map_err(String::clone)
         };
         assert_eq!(
-            project(ours),
-            project(theirs),
+            normalise(ours),
+            normalise(theirs),
             "{where_}: stream item {position} diverged"
         );
     }
@@ -1184,38 +1528,160 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE,
 ];
 
-/// How one record's evidence relates to production's.
-#[derive(Debug, PartialEq, Eq)]
-enum RecordAgreement {
-    /// Every supported bucket matches, bases and support and chain ids alike.
-    Exact,
-    /// The record's reference bytes and every support total match, and only the bases of
-    /// some rows differ — production having widened past a read it did not re-fold. See
-    /// [`classify_record`].
-    EvidenceIntact,
-    /// Anything else.
-    Divergent,
+/// **The five divergence classes spec §3 names**, as the set present at one locus.
+///
+/// A locus may be in several at once — a widened record with two read groups and a blind
+/// read is in three — so this is a set of flags rather than an enum. The rule D1 enforces is
+/// not "at most one class" but **"no divergence outside the five"**: [`classify_locus`]
+/// panics when two loci differ and no class is present, which is the whole of "counted, not
+/// excused".
+///
+/// The classes are stated as facts about **ng's** locus and the projection's drops, not as
+/// descriptions of the difference. That matters: a class read off the difference itself
+/// would be a label chosen after the fact, and the one thing spec §3 warns against is an
+/// unlisted class getting triaged as a listed one.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+struct DivergenceClasses {
+    /// **Class 1** — a read that did not witness the whole footprint becomes an `Observed`
+    /// row whose bases are what it saw, where production folded a reference-filled
+    /// haplotype into a bucket. *This is the deliverable* (spec §13.2).
+    partial_witness: bool,
+    /// **Class 2** — the read group joins ng's row identity and production cannot state it
+    /// at all, so any row whose group is not the one [`project`] had to invent is in this
+    /// class. The *split* — one allele carried by two groups becoming two rows — is the
+    /// visible consequence and is counted separately
+    /// ([`DivergenceCensus::group_split_rows`]), because a class flag that only fired on
+    /// the split would leave a locus whose single row merely names a different group
+    /// unclassified.
+    group_split: bool,
+    /// **Class 3** — `reads_without_observation` / `reads_discarded_by_cap` are non-zero.
+    /// Production keeps neither per record.
+    counters: bool,
+    /// **Class 4** — production emitted a bucket with `num_obs == 0` and ng emits no such
+    /// row; the projection dropped it.
+    unsupported_bucket: bool,
+    /// **Class 5** — row order: production's is bucket-creation order, ng's is sorted.
+    row_order: bool,
+    /// **Class 6 — the one spec §3's table does not list, found by D1 building the anchor.**
+    ///
+    /// Production's `widen` appends reference bases to every bucket and re-folds nothing;
+    /// ng's re-folds every live read (`refold_live_reads`, A3/option (b) — a function
+    /// production has no counterpart to) and leaves an expired one saying what it saw. So a
+    /// record that widens after a read has folded into it leaves production holding that
+    /// read's haplotype computed against a **stale, narrower footprint**, in either
+    /// direction: reference bases where the read's own belong, or events inside the widened
+    /// region missed entirely.
+    ///
+    /// **It is not class 1 and must not be filed there.** The read in the case that found
+    /// this witnessed every position of the final footprint — ng reports it `Complete` —
+    /// and production is wrong about it anyway. Filing it under "a read did not witness the
+    /// whole footprint" would put reads production mis-folded into the count of reads
+    /// production credited with bases they never sequenced, which is the deliverable, and
+    /// spec §13.2 asks for the two numbers **separately** ("the same three numbers for the
+    /// reads `widen` extended after they had already left the active set"). §3's table
+    /// naming five is what this class corrects.
+    stale_widen: bool,
 }
 
-/// **Every** support scalar of a whole record, summed across its buckets — "no evidence was
+impl DivergenceClasses {
+    fn any(self) -> bool {
+        self.partial_witness
+            || self.group_split
+            || self.counters
+            || self.unsupported_bucket
+            || self.row_order
+            || self.stale_widen
+    }
+}
+
+/// A running count of each class over a census, plus the three numbers spec §13.2 calls the
+/// deliverable.
+#[derive(Debug, Default)]
+struct DivergenceCensus {
+    loci: usize,
+    /// Loci equal to the projection under [`comparable`].
+    exact: usize,
+    partial_witness: usize,
+    group_split: usize,
+    counters: usize,
+    unsupported_bucket: usize,
+    row_order: usize,
+    stale_widen: usize,
+    /// Loci where one allele really is carried by two read groups and so becomes two rows —
+    /// class 2's *visible* consequence, and the check spec §13 asks for by name. Counted
+    /// apart from the class flag because the flag fires on any non-projected group, which is
+    /// a weaker event and would let this one go to zero unnoticed.
+    group_split_rows: usize,
+    /// Loci that agree only once `q_sum` is rounded — the accumulation-order class.
+    float_only: usize,
+    /// **The deliverable, one:** loci carrying at least one partial witness.
+    fabricating_loci: usize,
+    /// **The deliverable, two:** reads production credited with bases they never sequenced —
+    /// the observations sitting on `Observed` rows.
+    fabricated_reads: u64,
+    /// **The deliverable, three:** reference bases production credited to those reads —
+    /// summed as (footprint − positions witnessed) × reads, which is exactly the count of
+    /// bases `apply_events_to_ref_into` used to copy out of `ref_seq` on their behalf.
+    fabricated_ref_bases: u64,
+}
+
+impl DivergenceCensus {
+    fn record(&mut self, classes: DivergenceClasses, exact: bool) {
+        self.loci += 1;
+        if exact {
+            self.exact += 1;
+        }
+        self.partial_witness += usize::from(classes.partial_witness);
+        self.group_split += usize::from(classes.group_split);
+        self.counters += usize::from(classes.counters);
+        self.unsupported_bucket += usize::from(classes.unsupported_bucket);
+        self.row_order += usize::from(classes.row_order);
+        self.stale_widen += usize::from(classes.stale_widen);
+    }
+
+    /// Add one locus's contribution to the fabrication measurement (spec §13.2), and to the
+    /// tally of alleles genuinely split across read groups.
+    fn measure_fabrication(&mut self, locus: &SampleLocusObservations) {
+        self.group_split_rows += usize::from(rows_split_by_group(locus));
+        let footprint = locus.region.len();
+        let mut fabricating = false;
+        for row in &locus.observed_sequences {
+            let ReadCoverage::Observed {
+                positions_covered, ..
+            } = row.read_coverage
+            else {
+                continue;
+            };
+            fabricating = true;
+            self.fabricated_reads += u64::from(row.num_obs);
+            self.fabricated_ref_bases +=
+                footprint.saturating_sub(u64::from(positions_covered)) * u64::from(row.num_obs);
+        }
+        self.fabricating_loci += usize::from(fabricating);
+    }
+}
+
+/// **Every** support scalar of a whole locus, summed across its rows — "no evidence was
 /// created, lost or double counted", independent of which bucket any of it ended up in.
 ///
 /// # Why this is a struct built by an exhaustive destructure
 ///
 /// It was a six-field tuple read field by field, and it **omitted `placed_start`** — the one
-/// field this milestone made fragile, since A1 dropped it from ng's stats and `finalise`
-/// reconstructs it from a per-read flag. That is not a hypothetical: injecting a real wrong
-/// number (the REF bucket stops counting `placed_start`) left
-/// [`ng_holds_the_same_evidence_as_production_on_complete_reads`] — the permanent anchor, the test
-/// that *replaced* the retired stage-1 differential — **green**, while quietly moving
-/// `EvidenceIntact` from 264 records (0.15 %) to 2,806 (1.58 %) and printing "same support
-/// totals" and "Every other record is identical, field for field" as it went. 2,542 wrong
-/// records absorbed. Only an inherited test from production's own suite noticed.
+/// field Milestone A made fragile, since A1 dropped it from ng's stats and `finalise`
+/// reconstructed it from a per-read flag. That is not a hypothetical: injecting a real wrong
+/// number (the REF bucket stops counting `placed_start`) left the permanent anchor **green**,
+/// while quietly moving the tolerated class from 264 records (0.15 %) to 2,806 (1.58 %) and
+/// printing "same support totals" and "Every other record is identical, field for field" as
+/// it went. 2,542 wrong records absorbed. Only an inherited test from production's own suite
+/// noticed.
 ///
-/// So the sum is taken by **destructuring production's [`AlleleSupportStats`]
-/// exhaustively**: a field added to that type stops this file compiling instead of being
-/// silently left out of the oracle. Milestone A's whole verification argument rests on this
-/// function being total, and it was not.
+/// So the sum is taken by **destructuring [`ObservedSequence`] exhaustively**: a field added
+/// to ng's row type stops this file compiling instead of being silently left out of the
+/// oracle. D1 turns the comparison around — the sum is now taken over ng's rows on both
+/// sides, production's having been projected into them — and the guard has to turn with it,
+/// or a field added to `ObservedSequence` would go uncompared exactly as `placed_start` did.
+/// (`AlleleSupportStats` is still destructured exhaustively, in [`project`], which is the
+/// one place production's type is now read.)
 ///
 /// `q_sum` is summed as `f64` and rounded **once, at the end**. Rounding each bucket first
 /// would make the total depend on how the reads were distributed across buckets: two reads
@@ -1234,10 +1700,11 @@ enum RecordAgreement {
 /// fail every record.
 ///
 /// The exhaustive destructure below is what keeps the two cases apart. A field added to
-/// production's stats still stops this file compiling; `placed_start` is bound and dropped
-/// **by name**, at one site, with this comment attached. An oversight cannot look like this.
-#[derive(Debug, PartialEq, Eq)]
-struct RecordEvidence {
+/// ng's row type stops this file compiling; the two fields this sum deliberately excludes
+/// are bound and dropped **by name**, at one site, with this comment attached. An oversight
+/// cannot look like this.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LocusEvidence {
     num_obs: u32,
     fwd: u32,
     placed_left: u32,
@@ -1246,43 +1713,74 @@ struct RecordEvidence {
     q_sum_rounded: i64,
 }
 
-fn record_evidence(record: &PileupRecord) -> RecordEvidence {
-    let mut totals = RecordEvidence {
-        num_obs: 0,
-        fwd: 0,
-        placed_left: 0,
-        mapq_sum: 0,
-        mapq_sum_sq: 0,
-        q_sum_rounded: 0,
-    };
+/// The evidence on one row, so a caller can sum over whichever grouping it is reconciling.
+fn row_evidence(row: &ObservedSequence, totals: &mut LocusEvidence, q_sum: &mut f64) {
+    // The exhaustive destructure is the point — see the doc above.
+    let ObservedSequence {
+        // **Not summed, and each for its own reason.** `bases` is *what* the evidence says
+        // rather than how much of it there is — it is the thing class 1 moves, and summing
+        // it would be the excuse this census exists to refuse. `read_coverage` and
+        // `read_group` are the two halves of the row identity production cannot state
+        // (classes 1 and 2): including them would make every split locus differ here, where
+        // the question this function asks is only "did a read go missing".
+        bases: _,
+        read_coverage: _,
+        read_group: _,
+        num_obs,
+        num_fwd,
+        q_sum: row_q_sum,
+        mapq_sum,
+        mapq_sum_sq,
+        placed_left,
+        // Chain ids are a *set*, not a scalar; they are checked separately and by subset —
+        // see `locus_chain_ids` for the record that settles why subset and not equality.
+        chain_ids: _,
+    } = row;
+    totals.num_obs += num_obs;
+    totals.fwd += num_fwd;
+    totals.placed_left += placed_left;
+    totals.mapq_sum += mapq_sum;
+    totals.mapq_sum_sq += mapq_sum_sq;
+    *q_sum += row_q_sum;
+}
+
+fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
+    let mut totals = LocusEvidence::default();
     let mut q_sum = 0.0_f64;
-    for allele in &record.alleles {
-        // The exhaustive destructure is the point — see the doc above.
-        let AlleleSupportStats {
-            num_obs,
-            q_sum: bucket_q_sum,
-            fwd,
-            placed_left,
-            // Bound and dropped by name — see `RecordEvidence`. ng stops computing this
-            // at B2, so there is nothing on its side to compare against.
-            placed_start: _,
-            mapq_sum,
-            mapq_sum_sq,
-        } = allele.support;
-        totals.num_obs += num_obs;
-        totals.fwd += fwd;
-        totals.placed_left += placed_left;
-        totals.mapq_sum += mapq_sum;
-        totals.mapq_sum_sq += mapq_sum_sq;
-        q_sum += bucket_q_sum;
+    for row in &locus.observed_sequences {
+        row_evidence(row, &mut totals, &mut q_sum);
     }
     totals.q_sum_rounded = (q_sum * Q_SUM_GRAIN).round() as i64;
     totals
 }
 
-/// Every chain id a record carries, sorted and deduplicated — the *other* half of "no
-/// evidence moved", and the half [`record_evidence`] cannot see because chain ids are a set
-/// per bucket rather than a scalar.
+/// The same evidence, gathered per distinct `bases` — **spec §3's class-2 reconciliation**:
+/// "summing a locus's rows by `(bases, coverage)` must reproduce production's per-allele
+/// totals".
+///
+/// Grouped by `bases` alone rather than by `(bases, coverage)`, and the difference is
+/// deliberate: coverage is class **1**, which moves the bases too, so a grouping that kept
+/// coverage in the key would answer "the rows differ" for the class it is not asking about.
+/// What this reconciles is the split — several rows where production has one allele — and
+/// the split is invisible to `bases`.
+fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, LocusEvidence> {
+    let mut per_bases: BTreeMap<Vec<u8>, (LocusEvidence, f64)> = BTreeMap::new();
+    for row in &locus.observed_sequences {
+        let entry = per_bases.entry(row.bases.to_vec()).or_default();
+        row_evidence(row, &mut entry.0, &mut entry.1);
+    }
+    per_bases
+        .into_iter()
+        .map(|(bases, (mut totals, q_sum))| {
+            totals.q_sum_rounded = (q_sum * Q_SUM_GRAIN).round() as i64;
+            (bases, totals)
+        })
+        .collect()
+}
+
+/// Every chain id a locus carries, sorted and deduplicated — the *other* half of "no
+/// evidence moved", and the half [`locus_evidence`] cannot see because chain ids are a set
+/// per row rather than a scalar.
 ///
 /// **Equality here is the wrong test, and the fixture proved it.** Requiring the two sets to
 /// match fails on `seed 0x5eed0001 case 11, record 30`, and correctly so: production folds a
@@ -1297,73 +1795,260 @@ fn record_evidence(record: &PileupRecord) -> RecordEvidence {
 /// ever be a *subset* of production's, and ng's id set only ever a **superset** of
 /// production's. An id production has that ng lacks means ng lost a read's identity, which
 /// no part of this change is allowed to do.
-fn record_chain_ids(record: &PileupRecord) -> Vec<ChainId> {
-    let mut ids: Vec<ChainId> = record
-        .alleles
+fn locus_chain_ids(locus: &SampleLocusObservations) -> Vec<ChainId> {
+    let mut ids: Vec<ChainId> = locus
+        .observed_sequences
         .iter()
-        .flat_map(|allele| allele.chain_ids.iter().copied())
+        .flat_map(|row| row.chain_ids.iter().copied())
         .collect();
     ids.sort_unstable();
     ids.dedup();
     ids
 }
 
-/// **The one class of divergence A3 leaves on the complete-reads fixture — named, because
-/// an unnamed class gets triaged as a named one** (spec §3).
+/// **Whether ng's locus differs from the projection, and if so under which of the five
+/// classes — with every difference outside them a panic** (spec §3, §13.2).
 ///
-/// After the owner's decision of 2026-07-29, `widen` re-folds every **live** read already
-/// in the record, so a read sitting inside its own deletion no longer keeps a bucket — or,
-/// more importantly, a `witnessed` extent — pinned to the pre-widen footprint. What
-/// remains is the case production **cannot** get right by construction: a record that
-/// widens past a read it does not re-fold, which after (b) means a read that has already
-/// **expired**. Its cursor is gone, so neither walker can consult its events again;
-/// production appends the new reference bases to its bucket anyway, and ng leaves the
-/// bucket saying what the read saw.
+/// This replaces `classify_record`, whose own doc said what it was missing: it checked only
+/// that *no evidence moved* — the reference bytes and the support totals — and never *which*
+/// rows differed or by how much. It could not, because the surface it compared on was
+/// production's type, where a partial witness has no spelling. Projecting forward gives
+/// coverage a name, so the class can be read off ng's own rows rather than inferred from a
+/// difference.
 ///
-/// The difference runs in **both** directions, which is why this cannot be stated as "ng's
-/// bases are production's with a reference tail stripped":
+/// # What holds at every locus, class or no class
 ///
-/// - production credits the read with bases sequenced after it left the active set;
-/// - production also *misses* events the read did witness inside the final footprint,
-///   because it folded that read against a narrower window and never went back. An
-///   insertion anchored in the widened region is the case that shows it — ng's row is then
-///   one base **longer** than production's.
+/// These are asserted, not classified. A2 moves allele bytes between rows; it does not move
+/// a record's existence, its anchor, its footprint or its reads:
 ///
-/// So what is checked is that **no evidence moved**: the record's own reference bytes are
-/// identical, and every support scalar summed across the buckets is identical, so no read
-/// was created, lost or double counted — only the bases of some rows differ.
+/// - the **region** and the **reference bases** are identical, and so is the kind;
+/// - **the reads are all accounted for**: ng's observations plus the reads it counted out
+///   equal production's observations, exactly (see [`assert_reads_are_accounted_for`]);
+/// - **no chain id was lost**: production's ids are a subset of ng's. ng may hold an id
+///   production dropped into its REF bucket — see [`locus_chain_ids`] for the record that
+///   settles why this is a subset check and not an equality.
 ///
-/// # What this does not prove, and where it gets sharper
+/// # And the reconciliation that makes class 2 a measurement
 ///
-/// It does not check *which* rows differ or by how much. The right filter is the spec's
-/// own definition of the anchor class — "loci where every folded read witnessed the whole
-/// footprint" — which needs `FoldedReadState::witnessed` resolved against the final
-/// footprint, i.e. **A4's `coverage_of`**. When that lands, this classifier should be
-/// replaced by that predicate and the surviving class should be empty rather than merely
-/// evidence-preserving. Recorded here so it is tightened rather than rediscovered (D1).
-fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreement {
-    if comparable(ours) == comparable(theirs) {
-        return RecordAgreement::Exact;
-    }
-    // **The totals come from the originals, not from `comparable`'s output.** That
-    // projection rounds each bucket's `q_sum` to 1e-9, and a record's fourteen buckets
-    // then carry up to fourteen half-grains of slack — more than the grain itself, so a
-    // record whose reads merely sit in different buckets would fail this check on the
-    // rounding alone. Summing first and rounding once is the whole point.
-    //
-    // **The chain ids are checked too, by subset and not by equality** — see
-    // `record_chain_ids` for the record that settles which of the two is right. ng may hold
-    // an id production dropped into its REF bucket; it may never *lose* one.
-    let ng_ids = record_chain_ids(ours);
-    if ours.alleles[0].seq == theirs.alleles[0].seq
-        && record_evidence(ours) == record_evidence(theirs)
-        && record_chain_ids(theirs)
+/// When ng has no partial witness and counted no read out — so classes 1 and 3 are absent —
+/// the per-`bases` evidence must be **equal**, field for field. That is spec §3's own
+/// wording for class 2 ("summing a locus's rows must reproduce production's per-allele
+/// totals") and it is what stops a split from hiding a lost read: several rows summing to
+/// the wrong total would fail here where a row count never could.
+#[track_caller]
+fn classify_locus(
+    where_: &str,
+    ours: &SampleLocusObservations,
+    theirs: &SampleLocusObservations,
+    drops: &ProjectionDrops,
+) -> (DivergenceClasses, bool) {
+    assert_eq!(
+        (&ours.region, &ours.reference_bases, &ours.kind),
+        (&theirs.region, &theirs.reference_bases, &theirs.kind),
+        "{where_}: the locus moved its anchor, its footprint or its reference bytes — none \
+         of which the no-fabrication rule touches",
+    );
+    assert_eq!(
+        drops.unsupported_chain_ids, 0,
+        "{where_}: the projection dropped an unsupported bucket that still carried a chain \
+         id, so a read's identity went missing on production's side of the comparison",
+    );
+    assert_reads_are_accounted_for(where_, ours, theirs);
+
+    let mut classes = DivergenceClasses {
+        partial_witness: ours
+            .observed_sequences
             .iter()
-            .all(|id| ng_ids.binary_search(id).is_ok())
-    {
-        return RecordAgreement::EvidenceIntact;
+            .any(|row| row.read_coverage != ReadCoverage::Complete),
+        group_split: ours
+            .observed_sequences
+            .iter()
+            .any(|row| row.read_group != PROJECTED_READ_GROUP),
+        counters: ours.reads_without_observation > 0 || ours.reads_discarded_by_cap > 0,
+        unsupported_bucket: drops.unsupported > 0,
+        row_order: drops.reordered,
+        // Filled below: unlike the other five, class 6 is not a fact about ng's rows — a
+        // read production mis-folded looks, on ng's side, exactly like one it folded
+        // correctly. It is recognised by its **shape**, and the shape is checked.
+        stale_widen: false,
+    };
+
+    // The reconciliation, on the loci where it is meaningful. Class 1 moves the bases
+    // themselves, so grouping by them cannot line the two sides up; class 3 means a read ng
+    // dropped is still in production's totals; class 6 recomputes a read's bases against a
+    // footprint production never revisited.
+    let bases_reconcile = evidence_by_bases(ours) == evidence_by_bases(theirs);
+    // Computed once and used twice: it is both what excuses the reconciliation below and
+    // class 6 itself.
+    let stale_widen =
+        !classes.partial_witness && !bases_reconcile && stale_widen_shape(where_, ours, theirs);
+    if !classes.partial_witness && !classes.counters && !stale_widen {
+        assert!(
+            bases_reconcile,
+            "{where_}: ng's rows do not sum back to production's per-allele totals, and \
+             none of a partial witness, a counted-out read or a stale widen explains it\n  \
+             ng   {:?}\n  prod {:?}",
+            evidence_by_bases(ours),
+            evidence_by_bases(theirs),
+        );
     }
-    RecordAgreement::Divergent
+
+    // **Chain ids, where the two rules are the same rule.** ng drops a read's id when the
+    // read agreed with the reference across *everything it witnessed*; production drops it
+    // when the read's bucket is `alleles[0]`. Those coincide exactly when the read witnessed
+    // the whole footprint and both walkers put it in a bucket with the same bases — so that
+    // is where equality is asserted, and it is a stronger claim than the subset the old
+    // record-level comparison could make.
+    //
+    // Where the bases *do* differ the ids are part of that difference and not a separate
+    // fact: a read whose witnessed window happens to match the reference carries no id on
+    // ng's side while production, having folded it into a bucket its fill made non-REF,
+    // keeps one. An earlier draft asserted "ng's ids are a superset of production's" here
+    // and this census disproved it at `seed 0x5eed0001 case 22, locus 37` — the invariant
+    // held on the *record* comparison it was written for and does not survive the turn to a
+    // per-read rule.
+    if !classes.partial_witness && bases_reconcile {
+        assert_eq!(
+            locus_chain_ids(ours),
+            locus_chain_ids(theirs),
+            "{where_}: the two walkers put the same reads in the same buckets and disagree \
+             about which of them carry a chain id",
+        );
+    }
+
+    classes.stale_widen = stale_widen;
+    let exact = comparable(ours) == comparable(theirs);
+    assert!(
+        exact || classes.any(),
+        "{where_}: ng's locus differs from the projection and none of spec §3's five \
+         classes is present — an unlisted divergence, which is the one thing this census \
+         may not absorb.\n  ng   {:?}\n  prod {:?}",
+        comparable(ours),
+        comparable(theirs),
+    );
+    (classes, exact)
+}
+
+/// **Every read production folded is somewhere in ng's locus** — the identity that makes
+/// class 3 a claim rather than a shrug.
+///
+/// A read folds into exactly one bucket per record on production's side, contributing
+/// exactly one observation. ng either emits it in a row or removes it and counts it in
+/// `reads_without_observation` (A5) — so the two sides balance **exactly**, and any other
+/// arithmetic means evidence was created or lost rather than moved.
+///
+/// `reads_discarded_by_cap` is deliberately *not* in this identity: the cap truncates in the
+/// walk, before any record exists, so both walkers lose the same reads and neither counts
+/// them in its totals. ng merely says how many, which is the whole of that counter.
+#[track_caller]
+fn assert_reads_are_accounted_for(
+    where_: &str,
+    ours: &SampleLocusObservations,
+    theirs: &SampleLocusObservations,
+) {
+    let ours_obs: u32 = ours.observed_sequences.iter().map(|row| row.num_obs).sum();
+    let theirs_obs: u32 = theirs
+        .observed_sequences
+        .iter()
+        .map(|row| row.num_obs)
+        .sum();
+    assert_eq!(
+        ours_obs + ours.reads_without_observation,
+        theirs_obs,
+        "{where_}: ng emitted {ours_obs} observations and counted \
+         {} reads out, against production's {theirs_obs} — a read was created or lost, not \
+         moved",
+        ours.reads_without_observation,
+    );
+}
+
+/// **Does this divergence have the shape of production's stale widen?** — class 6's
+/// recogniser, and the one class that has to be recognised from the difference rather than
+/// read off ng's rows.
+///
+/// That asymmetry is a liability and is treated as one: a class recognised from the
+/// difference will absorb any *other* difference of the same shape, which is the failure
+/// mode that made the old `EvidenceIntact` classifier too weak to be an anchor. So the shape
+/// is made as narrow as the phenomenon allows, and every part of it is required:
+///
+/// 0. **The bases genuinely differ.** The caller has already established that grouping both
+///    sides by `bases` does not reconcile — without that, a locus differing only in its read
+///    groups would be filed here, and the class would fire everywhere.
+/// 1. **The footprint spans more than one position.** A widen strictly grows a record, and a
+///    one-base record has never been widened, so a one-base locus can never be in this class.
+/// 2. **No evidence moved.** Every support scalar summed over the locus is identical — no
+///    read was created, lost or double counted; the rows are the same reads, said
+///    differently.
+/// 3. **Every row production holds that ng does not is production's stale fold of an ng
+///    row**: some ng row's bases share a prefix with it, and what production has past that
+///    prefix is a **suffix of the reference bases** — which is precisely what appending the
+///    widened tail from `ref_seq` produces. The empty suffix is allowed and is the other
+///    direction of the same defect: production folded against a narrower footprint and so
+///    *missed* an event ng saw, leaving its row the shorter of the two.
+///
+/// Anything failing any of the three is unclassified, and [`classify_locus`] panics on it.
+#[track_caller]
+fn stale_widen_shape(
+    where_: &str,
+    ours: &SampleLocusObservations,
+    theirs: &SampleLocusObservations,
+) -> bool {
+    if ours.reference_bases.len() < 2 {
+        return false;
+    }
+    if locus_evidence(ours) != locus_evidence(theirs) {
+        return false;
+    }
+    let ng_bases: BTreeSet<&[u8]> = ours
+        .observed_sequences
+        .iter()
+        .map(|row| row.bases.as_ref())
+        .collect();
+    for row in &theirs.observed_sequences {
+        let theirs_bases: &[u8] = &row.bases;
+        if ng_bases.contains(theirs_bases) {
+            continue;
+        }
+        let explained = ng_bases.iter().any(|ours_bases| {
+            let shared = ours_bases
+                .iter()
+                .zip(theirs_bases)
+                .take_while(|(a, b)| a == b)
+                .count();
+            theirs_bases.len() >= shared && ours.reference_bases.ends_with(&theirs_bases[shared..])
+        });
+        if !explained {
+            eprintln!(
+                "{where_}: production's row {:?} is not any ng row's bases plus a reference \
+                 tail — the stale-widen shape does not fit, so this is an unlisted class",
+                String::from_utf8_lossy(theirs_bases),
+            );
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether any allele at this locus is carried by more than one read group — spec §3's
+/// class 2, read off ng's own rows.
+///
+/// Two rows sharing `(bases, read_coverage)` can only differ in the group, the three
+/// together being the whole row identity.
+fn rows_split_by_group(locus: &SampleLocusObservations) -> bool {
+    /// A row's identity **without** its read group: the bases, and the coverage run as the
+    /// walk's own total order gives it (`coverage_order`).
+    type RowIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
+
+    let mut seen: BTreeSet<RowIdentityWithoutGroup<'_>> = BTreeSet::new();
+    for row in &locus.observed_sequences {
+        if !seen.insert((
+            &row.bases,
+            super::open_record::coverage_order(row.read_coverage),
+        )) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Set in the child process by the determinism test below, to select its other half.
@@ -1542,50 +2227,75 @@ fn the_determinism_digest_responds_to_the_evidence() {
     );
 }
 
-/// **The permanent anchor: on reads that witnessed the whole footprint, the two walkers
-/// agree forever.**
+/// **The permanent anchor: at a locus where every folded read witnessed the whole footprint,
+/// ng and production agree exactly — forever.**
 ///
 /// From A2 the two walkers differ *on purpose* — production fills the positions a read did
-/// not witness from the reference, and ng does not — so the full stage-1 differential
-/// stops being a claim anyone can make. **What survives is narrower and is not a
-/// snapshot:** every change in this plan leaves the complete class alone by construction
-/// (there are no gaps to fill), so this must stay green through A3, A4, A5 and Milestone
-/// B, and it is what replaces the differential rather than merely outliving it.
+/// not witness from the reference, and ng does not — so the full stage-1 differential stops
+/// being a claim anyone can make. **What survives is narrower and is not a snapshot:** every
+/// change in this plan leaves the complete class alone by construction (there are no gaps to
+/// fill), so this must stay green through the rest of the plan and everything after it.
 ///
-/// The fixture is `generate_complete`, whose reads span their contig end to end and are
-/// silent nowhere inside it (`generate_complete_read` names the four exclusions and why
-/// each one matters). Everything else the walk does is still on it: substitutions,
-/// insertions, deletions that widen records past the reads that opened them, re-folds,
-/// mate overlap, both strands, the column cap.
+/// # D1 sharpened the predicate, and that is the point of this step
 ///
-/// A failure means ng has changed an answer on the class it promised not to touch; the
-/// seed and case index replay the exact input.
+/// The previous version of this test could not state its own class. It compared
+/// `PileupRecord`s — a type with no way to say "this read witnessed four of seven
+/// positions" — so it ran on *every* locus of a fixture chosen to make partial witnesses
+/// rare, and tolerated the ones that occurred anyway under `EvidenceIntact`: same reference
+/// bytes, same support totals, *some rows' bases differ*. Its own doc said what was missing:
+/// "It does not check which rows differ or by how much… the right filter is the spec's own
+/// definition of the anchor class, which needs A4's `coverage_of`."
+///
+/// That filter is now readable straight off the emitted locus. A locus qualifies when every
+/// row is [`Complete`](ReadCoverage::Complete) and no read was counted out — which *is*
+/// "every folded read witnessed the whole footprint" — and on those loci the comparison is
+/// **equality**, not evidence-preservation. The tolerated class is gone rather than
+/// counted: a locus that once landed in `EvidenceIntact` now fails the predicate and is
+/// measured by the census instead, where it belongs.
+///
+/// # And the predicate needed a second half, which is D1's other finding
+///
+/// "Every read witnessed the whole footprint" is **not sufficient**. Production's `widen`
+/// appends reference bases to every bucket and re-folds nothing, where ng re-folds every
+/// live read — so a record that widened after a read folded into it leaves production
+/// holding that read's haplotype against a stale footprint, whether or not the read went on
+/// to witness the whole thing. The fixture is what supplies the second half:
+/// [`generate_uniform_events`] gives every read on a contig the same event set, so **no
+/// record widens at all** — asserted here, on every case, rather than assumed. That is the
+/// class production genuinely cannot get wrong, and it is the one that must hold forever.
+///
+/// The loci this leaves out are not unchecked: they are the census's, where the stale widen
+/// is a **named** class with its own count
+/// (`every_divergence_from_production_is_one_of_the_six_named_classes`).
+///
+/// *Measured, so nobody mistakes which half is doing the work:* on this fixture the
+/// every-read-`Complete` filter currently excludes **nothing** — all 216,203 loci qualify —
+/// because uniform events leave no way for a read to be blind over part of a footprint (no
+/// adaptor boundary, no `N`, and the column cap removes a read outright rather than in part).
+/// So what is actually asserted here is that the two walkers agree at *every* locus of a
+/// fixture built to contain no fabrication. The filter is the guard that keeps that true if
+/// the fixture ever gains a partial witness; it is not the thing under test.
 #[test]
-fn ng_holds_the_same_evidence_as_production_on_complete_reads() {
-    let mut compared_records = 0usize;
-    let mut widened_records = 0usize;
-    let mut widen_stale = 0usize;
+fn ng_agrees_with_production_where_production_fabricated_nothing() {
+    let mut compared = 0usize;
+    let mut anchored = 0usize;
+    let mut anchored_multi_base = 0usize;
     let mut float_only = 0usize;
+    let mut widens = 0u64;
     let total = SEEDS.len() * cases_per_seed();
 
     for seed in SEEDS {
         let mut rng = SplitMix64(seed);
         for index in 0..cases_per_seed() {
-            let case = generate_complete(&mut rng);
+            let case = generate_uniform_events(&mut rng);
             let where_ = format!("seed {seed:#x} case {index}");
 
             let theirs = production_walk(&case);
             let ours = ng_walk(&case);
-            compared_records += ours.records.len();
-            widened_records += theirs
-                .records
-                .iter()
-                .filter(|item| item.as_ref().is_ok_and(|r| r.alleles[0].seq.len() > 1))
-                .count();
             assert_eq!(
                 ours.panic_message, None,
-                "{where_}: a complete-reads case must not panic — this fixture excludes \
-                 every input that reaches production's reachable precondition"
+                "{where_}: an anchor case must not panic — this fixture excludes every \
+                 input that reaches production's reachable precondition"
             );
             assert_eq!(
                 ours.panic_message, theirs.panic_message,
@@ -1598,23 +2308,52 @@ fn ng_holds_the_same_evidence_as_production_on_complete_reads() {
                 ours.records.len(),
                 theirs.records.len(),
             );
+            // **The fixture's own property, checked.** One CIGAR per contig is what leaves
+            // no read holding a stale fold after a widen; if the generator ever stops
+            // delivering that, this anchor would silently start tolerating production's
+            // stale folds and would no longer be an anchor.
+            for contig in 0..CONTIGS as u32 {
+                let mut on_contig = case.reads.iter().filter(|read| read.chrom_id == contig);
+                let Some(first) = on_contig.next() else {
+                    continue;
+                };
+                for read in on_contig {
+                    assert_eq!(
+                        (&read.cigar, read.alignment_start),
+                        (&first.cigar, first.alignment_start),
+                        "{where_}: two reads on contig {contig} carry different event sets, \
+                         so one of them can be left folded against a stale footprint and \
+                         this fixture is no longer an anchor",
+                    );
+                }
+            }
+            widens += theirs
+                .summary
+                .as_ref()
+                .expect("a walk that did not panic has a summary")
+                .record_widen_events;
             for (position, (ours, theirs)) in
                 ours.records.iter().zip(theirs.records.iter()).enumerate()
             {
                 match (ours, theirs) {
-                    (Ok(ours), Ok(theirs)) => match classify_record(ours, theirs) {
-                        RecordAgreement::Exact => {}
-                        RecordAgreement::EvidenceIntact => widen_stale += 1,
-                        RecordAgreement::Divergent => panic!(
-                            "{where_}: record {position} diverged on a complete-reads \
-                             case, and not as production's widen appending reference \
-                             bases to a bucket belonging to an already-expired read — \
-                             which is the only class this fixture is allowed to produce.\n  ng   {:?}\n  \
-                             prod {:?}",
+                    (Ok(ours), Ok(theirs)) => {
+                        compared += 1;
+                        if !every_read_witnessed_the_whole_footprint(ours) {
+                            continue;
+                        }
+                        anchored += 1;
+                        if ours.reference_bases.len() > 1 {
+                            anchored_multi_base += 1;
+                        }
+                        assert_eq!(
                             comparable(ours),
                             comparable(theirs),
-                        ),
-                    },
+                            "{where_}: locus {position} covers a footprint every one of \
+                             its reads witnessed in full, in a walk where no record \
+                             widened — so there is nothing for production to have \
+                             fabricated and nothing for ng to have withheld",
+                        );
+                    }
                     (ours, theirs) => assert_eq!(
                         ours, theirs,
                         "{where_}: stream item {position} diverged on the error channel"
@@ -1630,46 +2369,59 @@ fn ng_holds_the_same_evidence_as_production_on_complete_reads() {
         }
     }
 
-    // The anchor is only worth the ground it covered, and "multi-base records exist" is
-    // the part that matters most: a one-base record is `Complete` for every contributor
-    // whatever the builder does, so a fixture of only those would hold this test green
-    // against any implementation at all.
+    // The anchor is only worth the ground it covered, and **multi-base loci are the part
+    // that matters**: at a one-base locus every contributor is `Complete` whatever the
+    // builder does, so an anchor made only of those would stay green against a builder that
+    // filled every gap it found.
     assert!(
-        compared_records > total * 5,
-        "only {compared_records} records compared over {total} cases — the generator has \
-         stopped producing walks worth comparing"
+        anchored > total * 5,
+        "only {anchored} loci qualified over {total} cases — the generator has stopped \
+         producing walks worth anchoring"
     );
     assert!(
-        widened_records > total,
-        "only {widened_records} multi-base records over {total} cases — without them this \
-         anchor cannot tell a filling builder from a witnessing one"
+        anchored_multi_base > total,
+        "only {anchored_multi_base} qualifying loci span more than one base over {total} \
+         cases — without them this anchor cannot tell a filling builder from a witnessing \
+         one"
     );
-    // The class has to be **present**, or the classifier is a branch nothing takes and a
-    // record that started diverging some other way would be reported as this one.
+    // **And the widen path has to be on the walk.** The class this anchor exists to protect
+    // is not "records that never widened" — it is "reads no widen left stale", which is a
+    // claim about widened records. A fixture that stopped producing widens would satisfy
+    // every assertion above while testing the easy half.
     assert!(
-        widen_stale > 0,
-        "no record showed production widening past a read it never re-folded — either the \
-         generator stopped producing widens, or `classify_record` is matching something \
-         it should not"
-    );
-    assert!(
-        widen_stale * 20 < compared_records,
-        "{widen_stale} of {compared_records} records fell outside byte-identity — that \
-         class is supposed to be the rare corner where a record widens past an expired \
-         read, and at this rate it is something else"
+        widens > 0,
+        "no record widened over {total} cases — the anchor covers only records that never \
+         grew, which is the half of the property that was never in doubt"
     );
     eprintln!(
-        "complete-reads differential: {compared_records} records compared over {total} \
-         cases, {widened_records} of them multi-base. {widen_stale} ({:.2}%) hold the \
-         same evidence — same reference bytes, same support totals — with some rows' \
-         bases differing, because production widened past a read it never re-folded. \
-         Every other record is identical, field for field. {float_only} agree only after \
-         `q_sum` is rounded to 1e-9 — the order the sum accumulates in, from two causes: \
-         A3's eviction recreating a bucket the reads return to, and B1 summing each read's \
-         contribution once where production accumulates into the bucket with a \
-         subtract-then-add per re-fold.",
-        100.0 * widen_stale as f64 / compared_records as f64,
+        "the anchor: {anchored} of {compared} loci ({:.1}%) had every read witness the whole \
+         footprint, {anchored_multi_base} of them spanning more than one base, across \
+         {widens} widened records; all identical to the projection, field for field. \
+         {float_only} loci agree only after `q_sum` is rounded to 1e-9 — the order the sum \
+         accumulates in, from two causes: A3's eviction recreating a bucket the reads return \
+         to, and B1 summing each read's contribution once where production accumulates into \
+         the bucket with a subtract-then-add per re-fold.",
+        100.0 * anchored as f64 / compared as f64,
     );
+}
+
+/// The anchor class, spec §3's own words: *loci where every folded read witnessed the whole
+/// footprint*.
+///
+/// Both halves are needed and neither is redundant. Every row `Complete` says the reads that
+/// **produced** an observation each saw the whole footprint; `reads_without_observation`
+/// covers the reads that saw it in pieces and so produced none at all (A5) — those have no
+/// row to be `Observed`, and production folded them anyway, with the gaps filled.
+///
+/// `reads_discarded_by_cap` is deliberately not part of it: the cap acts in the walk, before
+/// any record exists, so both walkers lose the same reads and the locus is still one where
+/// everything that folded witnessed everything.
+fn every_read_witnessed_the_whole_footprint(locus: &SampleLocusObservations) -> bool {
+    locus.reads_without_observation == 0
+        && locus
+            .observed_sequences
+            .iter()
+            .all(|row| row.read_coverage == ReadCoverage::Complete)
 }
 
 /// **What A2 is allowed to change, and what it is not** — the comparison both the
@@ -1680,13 +2432,15 @@ fn ng_holds_the_same_evidence_as_production_on_complete_reads() {
 /// length, at the same anchors, with the same REF bytes, the same error items and the same
 /// `RunSummary`. Anything else is a bug rather than a design.
 ///
-/// Returns `(records compared, records whose allele lists differ)` — the census.
+/// Returns the census: every locus classified, and every difference outside the five classes
+/// a panic ([`classify_locus`]).
 #[track_caller]
 fn assert_only_allele_bytes_moved(
     where_: &str,
     ours: &WalkOutcome,
     theirs: &WalkOutcome,
-) -> (usize, usize) {
+    census: &mut DivergenceCensus,
+) {
     assert_eq!(
         ours.panic_message, theirs.panic_message,
         "{where_}: the two walkers did not stop the same way",
@@ -1699,22 +2453,26 @@ fn assert_only_allele_bytes_moved(
         ours.records.len(),
         theirs.records.len(),
     );
+    assert_eq!(
+        theirs.records.len(),
+        theirs.drops.len(),
+        "{where_}: the projection's drop census is a different length from the stream it \
+         came from",
+    );
 
-    let mut records = 0usize;
-    let mut diverged = 0usize;
-    for (position, (ours, theirs)) in ours.records.iter().zip(theirs.records.iter()).enumerate() {
-        records += 1;
+    for (position, ((ours, theirs), drops)) in ours
+        .records
+        .iter()
+        .zip(theirs.records.iter())
+        .zip(theirs.drops.iter())
+        .enumerate()
+    {
         match (ours, theirs) {
             (Ok(ours), Ok(theirs)) => {
-                assert_eq!(
-                    (ours.chrom_id, ours.pos, &ours.alleles[0].seq),
-                    (theirs.chrom_id, theirs.pos, &theirs.alleles[0].seq),
-                    "{where_}: record {position} moved its anchor or its REF bytes, which \
-                     A2 does not touch",
-                );
-                if comparable(ours) != comparable(theirs) {
-                    diverged += 1;
-                }
+                let at = format!("{where_}: locus {position}");
+                let (classes, exact) = classify_locus(&at, ours, theirs, drops);
+                census.record(classes, exact);
+                census.measure_fabrication(ours);
             }
             (ours, theirs) => assert_eq!(
                 ours, theirs,
@@ -1732,91 +2490,358 @@ fn assert_only_allele_bytes_moved(
              the events, which A2 does not touch",
         );
     }
-    (records, diverged)
+    census.float_only += float_only_divergences(&ours.records, &theirs.records);
 }
 
-/// **The fabrication is gone, and here is how much of it there was.**
+/// **Every divergence is one of the five, each is counted, and here is how big the first one
+/// is** — spec §3's stage-2 assertion and §13.2's deliverable, in one pass.
 ///
-/// The general fixture — partial reads, adaptor boundaries, `N` bases, ref-skips — is
-/// where the two walkers now differ, and this is the census of that difference rather than
-/// an assertion that it is absent. Two things are asserted, and they are what makes the
-/// census trustworthy:
+/// The general fixture — partial reads, adaptor boundaries, `N` bases, ref-skips — is where
+/// the two walkers now differ, and this is the census of that difference rather than an
+/// assertion that it is absent. What makes the census trustworthy:
 ///
-/// - **A2 changes no record's existence and no record's footprint.** Records are opened
-///   and widened from the *events*, which this step does not touch; only the allele
-///   buckets move. So the two streams must still be the same length, at the same
-///   positions, with the same REF bytes and the same `RunSummary`. A divergence there is a
-///   bug, not a design.
-/// - **Some records must differ.** A run in which nothing moved would mean the fill is
-///   still there and every other test in this module is passing for the wrong reason.
+/// - **A2 changes no locus's existence and no locus's footprint.** Records are opened and
+///   widened from the *events*, which this step does not touch; only the rows move. So the
+///   two streams must still be the same length, at the same regions, with the same reference
+///   bytes and the same `RunSummary`.
+/// - **No read is created or lost**, only moved — [`assert_reads_are_accounted_for`], at
+///   every locus.
+/// - **A divergence outside the five classes is a panic, not a bucket.** That is the whole
+///   of "counted, not excused": [`classify_locus`] reads each class off ng's own rows and
+///   the projection's drops, and fails on anything left over.
+/// - **Every class must fire.** A class counted zero for a whole census is a branch nothing
+///   takes, and a later divergence of that kind would be triaged as one of the classes that
+///   *did* fire — the exact contamination spec §3 warns about.
 ///
-/// The number reported here is the same quantity D3 measures on real data: how many loci
-/// production credits to reads that never sequenced them.
+/// The three numbers reported are the ones D3 re-measures on real data.
+///
+/// **Six, not five.** Spec §3's table lists five; building the anchor found a sixth —
+/// production's `widen` re-folding nothing — that is not a special case of any of them. See
+/// [`DivergenceClasses::stale_widen`].
+/// # Two passes, because one read group and two prove different things
+///
+/// At **one** read group class 2 cannot fire, so the "no unlisted divergence" panic has its
+/// full force: any difference at all has to be explained by one of the other five. At
+/// **two**, class 2 fires almost everywhere — the group is part of every row's identity —
+/// which exercises the class and the split it exists for but leaves the unlisted-divergence
+/// check with nothing to catch. Both passes run over the same cases, and each asserts what
+/// it is in a position to assert: the one-group pass that class 2 is *silent*, the two-group
+/// pass that it is not.
 #[test]
-fn ng_diverges_from_production_only_where_a_read_did_not_witness() {
-    let mut records = 0usize;
-    let mut diverged = 0usize;
+fn every_divergence_from_production_is_one_of_the_six_named_classes() {
+    let mut one_group = DivergenceCensus::default();
+    let mut two_groups = DivergenceCensus::default();
+
+    // Both generators: the general one reaches the classes that need partial witnesses, the
+    // complete-reads one is where a divergence must be the widen or nothing, so running it
+    // here is what keeps class 6 honest.
+    for generator in [
+        generate as fn(&mut SplitMix64) -> Case,
+        generate_complete as fn(&mut SplitMix64) -> Case,
+    ] {
+        for seed in SEEDS {
+            let mut rng = SplitMix64(seed);
+            for index in 0..cases_per_seed() {
+                let case = generator(&mut rng);
+                let where_ = format!("seed {seed:#x} case {index}");
+
+                let theirs = production_walk(&case);
+                for (groups, census) in [(1, &mut one_group), (2, &mut two_groups)] {
+                    // The read group reaches nothing but the row key — see
+                    // `ng_walk_in_groups` — so the walk itself is the same walk both times.
+                    let ours = ng_walk_in_groups(&case, groups);
+                    assert_only_allele_bytes_moved(&where_, &ours, &theirs, census);
+                }
+            }
+        }
+    }
+
+    let census = &one_group;
+    let diverged = census.loci - census.exact;
+    assert!(
+        diverged > 0,
+        "{} loci compared and not one differed — the fill is still there, and every anchor \
+         assertion in this module is passing for the wrong reason",
+        census.loci,
+    );
+    // **Each class, present.** A class counted zero is a branch nothing takes.
+    for (class, count) in [
+        ("1 (a partial witness)", census.partial_witness),
+        ("3 (a per-locus counter)", census.counters),
+        ("4 (an unsupported bucket)", census.unsupported_bucket),
+        ("5 (row order)", census.row_order),
+        ("6 (production's stale widen)", census.stale_widen),
+        // Class 2's own two counts, from the pass that can produce them.
+        (
+            "2 (a read group production cannot say)",
+            two_groups.group_split,
+        ),
+        // Not a class: the consequence class 2 exists for. Spec §13 asks for it by name —
+        // "an allele supported by both groups is two rows" — and the class flag fires on the
+        // weaker event of a row merely naming a different group, so this would go to zero
+        // unnoticed if the split ever stopped happening.
+        (
+            "2's split, an allele in two rows",
+            two_groups.group_split_rows,
+        ),
+    ] {
+        assert!(
+            count > 0,
+            "class {class} never fired over {} loci — it is a branch nothing takes, and the \
+             next divergence of that kind will be triaged as one of the classes that did",
+            census.loci,
+        );
+    }
+    // **And silent where it cannot be true.** One read group means every row carries the
+    // group `project` invents, so class 2 must count zero — without this, a bug that tagged
+    // rows with an arbitrary group would look like the class working.
+    assert_eq!(
+        census.group_split, 0,
+        "class 2 fired on a one-read-group walk, where every row's group is the one the \
+         projection uses — so the class is firing on something other than the group",
+    );
+    // **A ceiling as well as a floor on the deliverable.** The floor alone makes this a
+    // census that cannot fail upwards: the headline can be driven from 1.9 % to 91.8 % by a
+    // genuine defect and the test still passes, reporting the defect as the measurement.
+    // "Production fabricated bases here" is a minority of loci by construction — most
+    // positions carry no widened record at all — so a figure in the tens of percent means
+    // the walk changed, not that the defect is larger than thought.
+    assert!(
+        census.fabricating_loci * 10 < census.loci,
+        "{} of {} loci ({:.1} %) carry a partial witness — this census measures production's \
+         fabrication, which is a small minority of loci; at this rate something in the walk \
+         has moved and the number is no longer the defect's size",
+        census.fabricating_loci,
+        census.loci,
+        100.0 * census.fabricating_loci as f64 / census.loci as f64,
+    );
+    eprintln!(
+        "the divergence census over {} loci (one read group): {} identical to the \
+         projection, {diverged} differing, {} of those agreeing once `q_sum` is rounded to \
+         1e-9.\n  \
+         class 1 partial witness {}   class 3 counters {}   class 4 unsupported bucket {}   \
+         class 5 row order {}   class 6 stale widen {}\n  \
+         at two read groups: class 2 on {} loci, of which {} carry one allele in two rows.\n  \
+         the deliverable: production credited {} reads over {} loci with {} reference bases \
+         they never sequenced ({:.2} fabricated bases per fabricating locus).",
+        census.loci,
+        census.exact,
+        census.float_only,
+        census.partial_witness,
+        census.counters,
+        census.unsupported_bucket,
+        census.row_order,
+        census.stale_widen,
+        two_groups.group_split,
+        two_groups.group_split_rows,
+        census.fabricated_reads,
+        census.fabricating_loci,
+        census.fabricated_ref_bases,
+        census.fabricated_ref_bases as f64 / census.fabricating_loci.max(1) as f64,
+    );
+}
+
+/// **The projection lays production's record out the way the walk lays out ng's** — the
+/// promise [`sort_rows`] makes, checked rather than commented.
+///
+/// `finalise` sorts `ObservationRow`s and [`sort_rows`] sorts `ObservedSequence`s, so the two
+/// loops cannot be shared even though the `ReadCoverage` comparator is (`coverage_order`,
+/// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
+/// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted
+/// rows with this function does not move them. If either spelling of the order changes, the
+/// projection stops being comparable to the walk and spec §3's class 5 stops being a
+/// normalisation.
+///
+/// The fixture is the general one at two read groups, because a one-group walk cannot
+/// distinguish an order that considers the group from one that does not.
+#[test]
+fn the_projection_orders_rows_as_the_walk_does() {
+    let mut loci = 0usize;
+    let mut multi_row = 0usize;
+    let mut grouped = 0usize;
 
     for seed in SEEDS {
         let mut rng = SplitMix64(seed);
         for index in 0..cases_per_seed() {
             let case = generate(&mut rng);
             let where_ = format!("seed {seed:#x} case {index}");
-
-            let theirs = production_walk(&case);
-            let ours = ng_walk(&case);
-            let (seen, differing) = assert_only_allele_bytes_moved(&where_, &ours, &theirs);
-            records += seen;
-            diverged += differing;
+            for (position, item) in ng_walk_in_groups(&case, 2).records.iter().enumerate() {
+                let Ok(locus) = item else { continue };
+                loci += 1;
+                if locus.observed_sequences.len() > 1 {
+                    multi_row += 1;
+                }
+                if rows_split_by_group(locus) {
+                    grouped += 1;
+                }
+                let mut sorted = locus.observed_sequences.clone();
+                sort_rows(&mut sorted);
+                assert_eq!(
+                    sorted, locus.observed_sequences,
+                    "{where_}: locus {position} came out of the walk in an order this \
+                     projection would not have produced, so the two orders have drifted",
+                );
+            }
         }
     }
 
     assert!(
-        diverged > 0,
-        "{records} records compared and not one differed — the fill is still there, and \
-         every complete-reads assertion in this module is passing for the wrong reason"
-    );
-    // **A ceiling as well as a floor.** The floor alone makes this a census that cannot
-    // fail upwards: the headline can be driven from 1.9% to 91.8% by a genuine defect and
-    // the test still passes, reporting the defect as the measurement. The class is
-    // "production fabricated bases here", which is a minority of loci by construction —
-    // most positions carry no widened record at all — so a figure in the tens of percent
-    // means the walk changed, not that the defect is larger than thought.
-    assert!(
-        diverged * 10 < records,
-        "{diverged} of {records} records ({:.1}%) differ — this census measures production's \
-         fabrication, which is a small minority of loci; at this rate something in the walk \
-         has moved and the number is no longer the defect's size",
-        100.0 * diverged as f64 / records as f64,
-    );
-    eprintln!(
-        "the fabrication census: {diverged} of {records} records ({:.1}%) carried bases \
-         production credited to a read that had not witnessed them",
-        100.0 * diverged as f64 / records as f64,
+        multi_row * 10 > loci && grouped > 0,
+        "only {multi_row} of {loci} loci carry more than one row and {grouped} split by read \
+         group — an order test needs rows to order"
     );
 }
 
-/// **No record leaves the walker carrying a bucket no read is folded into** — A3's
-/// eviction, asserted on the records that are *emitted* rather than on the table inside.
+/// **Every field of a `PileupRecord` arrives somewhere, or is dropped by name** — the
+/// projection's own oracle, on a record built by hand so the expected locus can be written
+/// out in full.
 ///
-/// Nothing checked this, and the gap was structural rather than accidental: A3's own
-/// eviction fixtures reach into `OpenPileupRecordTable` while the record is still open, and
-/// the differential is **blind by construction**, because [`comparable`] drops unsupported
-/// non-REF buckets on *both* sides before comparing — precisely so that ng evicting them and
-/// production keeping them is not read as a divergence. So the one projection that makes the
-/// two walkers comparable is also the one that hides whether ng evicted anything at all.
-///
-/// The concrete hole: moving `evict_unsupported_alleles` to *before* the contributor fold
-/// loop leaves the whole suite green. Buckets emptied by the widen are still caught, because
-/// the widen runs first — but buckets emptied by the **fold loop itself**, when a contributor
-/// re-folds into a different bucket at this position, survive to `finalise` and are emitted.
-/// That is the accumulation spec §7 says to design for rather than discover, against a
-/// `find_allele_index` that is a linear scan with a full byte compare.
-///
-/// `alleles[0]` is exempt: it is the REF sequence, and production creates it with zero
-/// observations by design.
+/// The differential can only ever say "the two agree"; it cannot say the projection is
+/// *right*. If `project` mapped `fwd` onto `placed_left`, both sides of a comparison that
+/// went through it would be equally wrong and the census would be green — the A-versus-B
+/// blindness this branch has already been caught by once.
 #[test]
-fn ng_emits_no_allele_bucket_without_support() {
+fn the_projection_says_everything_a_record_says() {
+    use crate::pileup_record::AlleleObservation;
+
+    let record = PileupRecord {
+        chrom_id: 3,
+        pos: 940,
+        alleles: vec![
+            AlleleObservation {
+                seq: b"ACGT".to_vec(),
+                support: AlleleSupportStats {
+                    num_obs: 7,
+                    q_sum: -12.5,
+                    fwd: 3,
+                    placed_left: 2,
+                    // Dropped by name: ng stops computing it at B2 (spec §6).
+                    placed_start: 5,
+                    mapq_sum: 210,
+                    mapq_sum_sq: 6_300,
+                },
+                // Production drops ids from `alleles[0]`; an id here would be a bug on its
+                // side, so the REF row carries none and the projection must not invent any.
+                chain_ids: Vec::new(),
+            },
+            // A supported alt that sorts **before** the REF bucket, so production's
+            // creation order is genuinely not ng's emission order and class 5 fires on the
+            // rows the projection keeps. Its ids are out of order and duplicated — the
+            // projection sorts and dedups, as `finalise` does.
+            AlleleObservation {
+                seq: b"AAGT".to_vec(),
+                support: AlleleSupportStats {
+                    num_obs: 2,
+                    q_sum: -4.0,
+                    fwd: 1,
+                    placed_left: 1,
+                    placed_start: 1,
+                    mapq_sum: 100,
+                    mapq_sum_sq: 5_000,
+                },
+                chain_ids: vec![9, 4, 9],
+            },
+            // Class 4: a bucket A3's widen stranded. Dropped — and it sorts *between* the
+            // two kept rows, so a projection that kept it would fail the row list as well
+            // as the drop count.
+            AlleleObservation {
+                seq: b"GCGT".to_vec(),
+                support: AlleleSupportStats::default(),
+                chain_ids: Vec::new(),
+            },
+        ],
+        windowed_gc: f32::NAN,
+        windowed_coverage: f32::NAN,
+    };
+
+    let (locus, drops) = project_counting_drops(&record);
+
+    assert_eq!(
+        locus.region,
+        GenomeRegion {
+            contig: ContigId(3),
+            start: Position(940),
+            // 1-based inclusive over a four-base REF bucket: 940, 941, 942, 943.
+            end: Position(943),
+        },
+        "the region's end is the only statement production makes about the footprint's \
+         extent, and it is implicit in the REF bucket's length"
+    );
+    assert_eq!(&*locus.reference_bases, b"ACGT");
+    assert_eq!(locus.kind, LocusKind::Generic);
+    assert_eq!(
+        (
+            locus.reads_without_observation,
+            locus.reads_discarded_by_cap
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        drops,
+        ProjectionDrops {
+            unsupported: 1,
+            unsupported_chain_ids: 0,
+            // The rows the projection *keeps* come out of production as `ACGT`, `AAGT` —
+            // not sorted, so class 5 fired on this record. (Measured on the kept rows
+            // deliberately: dropping a bucket that happened to be out of place is class 4,
+            // and counting it here would make the two classes indistinguishable.)
+            reordered: true,
+        }
+    );
+    assert_eq!(
+        locus.observed_sequences,
+        vec![
+            ObservedSequence {
+                bases: Box::from(&b"AAGT"[..]),
+                read_coverage: ReadCoverage::Complete,
+                read_group: PROJECTED_READ_GROUP,
+                num_obs: 2,
+                num_fwd: 1,
+                q_sum: -4.0,
+                mapq_sum: 100,
+                mapq_sum_sq: 5_000,
+                placed_left: 1,
+                chain_ids: vec![4, 9],
+            },
+            ObservedSequence {
+                bases: Box::from(&b"ACGT"[..]),
+                read_coverage: ReadCoverage::Complete,
+                read_group: PROJECTED_READ_GROUP,
+                num_obs: 7,
+                num_fwd: 3,
+                q_sum: -12.5,
+                mapq_sum: 210,
+                mapq_sum_sq: 6_300,
+                placed_left: 2,
+                chain_ids: Vec::new(),
+            },
+        ],
+        "every support scalar must arrive on its own field, `fwd` as `num_fwd` and \
+         `placed_left` as `placed_left` — a projection that crossed the two would leave both \
+         sides of the differential equally wrong"
+    );
+    // The entry point the plan names, and the one the differential's other users call.
+    assert_eq!(project(&record), locus);
+}
+
+/// **Every emitted row is a row some read is folded into** — which is *not* A3's eviction,
+/// and D1 is where the difference was found.
+///
+/// This test used to claim the eviction. It ran on `PileupRecord`s and asserted that no
+/// emitted bucket had `num_obs == 0`, and while the walk emitted production's type that was a
+/// real check. **B2 made it vacuous:** ng's rows are derived from `folded_reads`, per read, so
+/// a bucket no read is folded into produces no row at all and leaves no trace in the output.
+/// D1 mutated the code the test named — moving `evict_unsupported_alleles` above the
+/// contributor fold loop, which strands every bucket that loop empties — and all 198 tests
+/// in this module stayed green. The eviction is now enforced by a `debug_assert!` in
+/// `finalise`, where the buckets still exist and where every walk in the suite checks it.
+///
+/// What is left here is worth keeping and is a different claim: **`num_obs` is never zero on
+/// an emitted row**, i.e. the re-derivation cannot mint a row for nothing. That would fail if
+/// `observation_rows` ever created rows from the bucket table instead of from the reads —
+/// which is precisely the B1 mistake it was written to avoid.
+#[test]
+fn every_emitted_row_carries_a_read() {
     let mut records = 0usize;
     let mut multi_allele = 0usize;
 
@@ -1826,36 +2851,34 @@ fn ng_emits_no_allele_bucket_without_support() {
             let case = generate(&mut rng);
             let where_ = format!("seed {seed:#x} case {index}");
             for (position, item) in ng_walk(&case).records.iter().enumerate() {
-                let Ok(record) = item else { continue };
+                let Ok(locus) = item else { continue };
                 records += 1;
-                if record.alleles.len() > 2 {
+                if locus.observed_sequences.len() > 2 {
                     multi_allele += 1;
                 }
-                for (index, allele) in record.alleles.iter().enumerate().skip(1) {
+                for (index, row) in locus.observed_sequences.iter().enumerate() {
                     assert!(
-                        allele.support.num_obs > 0,
-                        "{where_}: emitted record {position} carries bucket {index} \
-                         ({:?}) with no supporting read — a re-fold left it behind and the \
-                         eviction did not run after it: {record:?}",
-                        String::from_utf8_lossy(&allele.seq),
+                        row.num_obs > 0,
+                        "{where_}: emitted locus {position} carries row {index} \
+                         ({:?}) with no supporting read: {locus:?}",
+                        String::from_utf8_lossy(&row.bases),
                     );
                 }
             }
         }
     }
 
-    // Without a record that has somewhere to move a read *to*, the property is vacuous —
-    // a walk of one-allele records satisfies it against an implementation that never
-    // evicts anything.
+    // Loci where the reads disagreed, so a read has somewhere to move *to* — without them
+    // the fixture never exercises a re-fold at all.
     assert!(
         multi_allele * 100 > records,
-        "only {multi_allele} of {records} emitted records carry more than one non-REF \
-         bucket — this fixture cannot exercise a read moving between buckets, so the \
-         property it asserts is vacuous"
+        "only {multi_allele} of {records} emitted loci carry more than two rows — this \
+         fixture cannot exercise a read moving between buckets, so the property it asserts \
+         is vacuous"
     );
     eprintln!(
-        "eviction census: {records} emitted records, {multi_allele} of them with more than \
-         one non-REF bucket; none carried an unsupported one"
+        "{records} emitted loci, {multi_allele} of them with more than two rows; every row \
+         carried at least one read"
     );
 }
 
@@ -1980,24 +3003,30 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
     // spanning 19..=25, and `pair3/Second` folds in carrying a deletion anchored at 17
     // whose run covers 18–22 — so of this record's seven positions it witnessed only
     // 23, 24, 25.
+    // **The reference bytes first, then the rows.** On ng's type the locus's own reference
+    // sequence is a field rather than `alleles[0]`, so the two are read separately — which
+    // is why the "REF bucket" assertions below name `reference_bases`.
     let at_19 = |outcome: &WalkOutcome| {
         outcome
             .records
             .iter()
             .filter_map(|item| item.as_ref().ok())
-            .find(|record| record.pos == 19)
-            .map(|record| {
-                record
-                    .alleles
+            .find(|locus| locus.region.start.get() == 19)
+            .map(|locus| {
+                let reference = String::from_utf8_lossy(&locus.reference_bases).to_string();
+                let rows: Vec<String> = locus
+                    .observed_sequences
                     .iter()
-                    .map(|allele| String::from_utf8_lossy(&allele.seq).to_string())
-                    .collect::<Vec<_>>()
+                    .map(|row| String::from_utf8_lossy(&row.bases).to_string())
+                    .collect();
+                (reference, rows)
             })
             .expect("pair9's deletion opens a record at 19")
     };
-    let (theirs_at_19, ours_at_19) = (at_19(&theirs), at_19(&ours));
+    let ((theirs_reference, theirs_at_19), (ours_reference, ours_at_19)) =
+        (at_19(&theirs), at_19(&ours));
     assert_eq!(
-        theirs_at_19[0].len(),
+        theirs_reference.len(),
         7,
         "the record spans 19..=25: the anchor plus six deleted bases"
     );
@@ -2013,7 +3042,7 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
     // present" and "the wrong bases are gone" are different claims and a regression could
     // satisfy either alone. **Asserted on both walkers**: this is production's fix as much
     // as ng's, and it is the one claim in this test that A2 does not move.
-    let before_the_fix = format!("{}AAA", &theirs_at_19[0][..1]);
+    let before_the_fix = format!("{}AAA", &theirs_reference[..1]);
     for (whose, alleles) in [("production", &theirs_at_19), ("ng", &ours_at_19)] {
         assert!(
             alleles.iter().any(|allele| allele == "AAA"),
@@ -2044,10 +3073,10 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
         !ours_at_19.iter().any(|allele| allele == "AAAAGTA"),
         "ng still carries production's reference-padded spelling: {ours_at_19:?}",
     );
-    // Everything else about the record is untouched: same REF bytes, same anchor.
+    // Everything else about the record is untouched: same reference bytes, same anchor.
     assert_eq!(
-        theirs_at_19[0], ours_at_19[0],
-        "the REF bucket is the record's own reference bytes and A2 does not touch it",
+        theirs_reference, ours_reference,
+        "the locus's reference bytes are the record's own, and A2 does not touch them",
     );
 }
 
@@ -2094,11 +3123,15 @@ fn the_generator_exercises_what_the_port_can_break() {
             }
             for item in &outcome.records {
                 match item {
-                    Ok(record) => {
-                        if record.alleles[0].seq.len() > 1 {
+                    Ok(locus) => {
+                        if locus.reference_bases.len() > 1 {
                             multi_base_records += 1;
                         }
-                        if record.alleles.len() > 1 {
+                        // On the projection a row *is* a supported allele, so "more than
+                        // one" counts loci where the reads disagreed — which is what this
+                        // number always meant, production's unsupported `alleles[0]` having
+                        // been the reason the old spelling needed the `> 1`.
+                        if locus.observed_sequences.len() > 1 {
                             multi_allele_records += 1;
                         }
                     }
@@ -2534,7 +3567,8 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
     // data (spec §13.2, D3's headline). Not `assert_same_walk`: from A2 the two walkers
     // differ on purpose wherever a read did not witness a whole footprint, which on
     // paired-end sequencing is most long-deletion loci.
-    let (records_compared, diverged) = assert_only_allele_bytes_moved(&where_, &ours, &theirs);
+    let mut census = DivergenceCensus::default();
+    assert_only_allele_bytes_moved(&where_, &ours, &theirs, &mut census);
     let panicked = ours.panic_message.is_some();
 
     assert!(
@@ -2566,12 +3600,27 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
             .join()
             .expect("the .fai beside the reference describes it");
     }
+    // **The three numbers spec §13.2 calls the deliverable**, on real alignments — the same
+    // census the synthetic differential prints, over the same code path, so the two cannot
+    // measure subtly different quantities. D3 is what runs this at chromosome scale.
     eprintln!(
-        "real-data differential: {where_} — {records_compared} records compared from \
-         {prepared_reads} prepared reads; every anchor, REF sequence and counter identical. \
-         {diverged} records ({:.2}%) carried bases production credited to a read that had \
-         not witnessed them.",
-        100.0 * diverged as f64 / records_compared.max(1) as f64,
+        "real-data differential: {where_} — {} loci compared from {prepared_reads} prepared \
+         reads; every region, reference sequence and counter identical.\n  \
+         class 1 partial witness {}   class 2 group split {}   class 3 counters {}   \
+         class 4 unsupported bucket {}   class 5 row order {}   class 6 stale widen {}\n  \
+         the deliverable: production credited {} reads over {} loci ({:.2} % of them) with \
+         {} reference bases they never sequenced.",
+        census.loci,
+        census.partial_witness,
+        census.group_split,
+        census.counters,
+        census.unsupported_bucket,
+        census.row_order,
+        census.stale_widen,
+        census.fabricated_reads,
+        census.fabricating_loci,
+        100.0 * census.fabricating_loci as f64 / census.loci.max(1) as f64,
+        census.fabricated_ref_bases,
     );
 }
 

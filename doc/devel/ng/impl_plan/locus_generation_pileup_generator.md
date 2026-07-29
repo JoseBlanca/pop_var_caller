@@ -224,11 +224,29 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 
 ## Milestone D — prove it, then measure it
 
-- ☐ **D1 — stage-2 parity.** `project(PileupRecord) -> SampleLocusObservations` in the test module;
+- ✅ **D1 — stage-2 parity.** `project(PileupRecord) -> SampleLocusObservations` in the test module;
   every divergence falls in one of the **five** named classes and is counted, not excused. Build the
   **permanent** anchor here too — loci where every folded read witnessed the whole footprint must
   agree with production forever; that is what replaces the stage-1 differential this plan retires.
   *Depends:* C4. *Source:* spec §3.
+
+  **Two findings changed the step, both recorded in the
+  [D report](../../reports/implementations/ng_locus_generation_pileup_generator_d_2026-07-29.md):**
+
+  - **There are six classes, not five.** Production's `widen` appends reference bases to every
+    bucket and re-folds nothing — `refold_live_reads` is *ng's*, added by A3 — so a record that
+    widens after a read folded into it leaves production holding that read's haplotype against a
+    stale footprint. The read can be a **complete** witness and production still wrong about it, so
+    this is not class 1, and §13.2 wants the two counts separately. Spec §3's table needs the sixth
+    row; carried to Checkpoint D rather than edited in.
+  - **The anchor's predicate is insufficient**, for the same reason: "every folded read witnessed
+    the whole footprint" does not select an agreeing class. The anchor is therefore built on a new
+    fixture — every read on a contig sharing one event set, so every read is re-folded by its own
+    copy of every widening event and none is left stale — and the fixture's property is asserted
+    rather than argued.
+
+  `to_pileup_record` is off the differential and off `mock_reference.rs`; its 44 inherited-test
+  callers stay, which is a decision carried to Checkpoint D (report §8).
 - ☐ **D2 — the dump tool and the fixtures that must fail a wrong implementation.**
   `examples/ng_generic_loci_dump.rs`, following `ng_ssr_loci_dump.rs`. Six new fixtures, because
   **no inherited test exercises the defect**: a read adaptor-masked over part of a multi-base record
@@ -258,7 +276,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 | A1–A5 | the stage-1 differential still green **on reads whose events tile the footprint**; failing elsewhere by design, with each failure enumerated |
 | B | one-read-group row counts unchanged; output byte-identical across repeated runs (the sort) |
 | C | loci from two adjacent regions concatenate coordinate-sorted with no gap at the join; `records_outside_region` zero-sum across neighbours |
-| D1 | every divergence in one of five named classes; the complete-reads differential green as a permanent anchor |
+| D1 | every divergence in one of **six** named classes (D1 found the sixth); the fabrication-free fixture green as a permanent anchor |
 | D2 | six fixtures, each written so a span-derived or fill-preserving implementation fails it |
 | D3 | the defect size reported; throughput measured against production's `pileup` |
 

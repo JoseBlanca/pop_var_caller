@@ -351,19 +351,19 @@ mod tests {
         // base is a record `widen` grew, and growing it is the fetch shape
         // (`old_end` as a 1-based start) the direct-`fetch` tests never exercise.
         assert!(!records.is_empty(), "the fixture must emit records");
-        // The reach check goes through the `PileupRecord` projection, because "REF is
-        // `alleles[0]` and there are three alleles" is a statement about production's
-        // shape. The **comparison below stays on ng's own type**, which is what the two
-        // walks actually produce.
-        let projected: Vec<_> = records.iter().map(super::super::to_pileup_record).collect();
-        let widened = projected
+        // The reach check reads ng's own type (D1): the locus's reference bytes are a field,
+        // and a row per read that folded. It used to detour through the `PileupRecord`
+        // back-projection to say "REF is `alleles[0]`" — a statement about production's shape
+        // that this walk has not produced since B2.
+        let widened = records
             .iter()
-            .find(|record| record.alleles[0].seq.len() > 1)
+            .find(|locus| locus.reference_bases.len() > 1)
             .expect("the deletion must widen a record, or `widen` is not on the walk");
         assert_eq!(
-            widened.alleles.len(),
+            widened.observed_sequences.len(),
             3,
-            "the widened record should carry REF, the SNP read's haplotype and the deletion"
+            "the widened locus should carry a row each for the reference-matching read, the \
+             SNP read's haplotype and the deletion"
         );
 
         let over_double: Vec<String> = records.iter().map(|record| format!("{record:?}")).collect();

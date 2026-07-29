@@ -154,6 +154,23 @@ pub use genome_walk::{PileupWalker, RunSummary, run};
 /// Lay a finished locus back out as production's [`PileupRecord`] — **test-only, and the
 /// regression floor depends on it being read as what it is.**
 ///
+/// # What D1 changed about this function's standing
+///
+/// It is **no longer the only thing that sees the emitted type.** That was the hazard, and it
+/// is the hazard that is retired rather than the function: at Milestone B this projection was
+/// the sole view of `SampleLocusObservations` in the whole suite, and its losses hid three
+/// live surfaces from the review. D1 turned the differential around — `parity.rs` now projects
+/// production **forward** into ng's type and compares there, over ~257,000 loci per run — so
+/// `read_coverage`, `read_group`, the region's end and the two per-locus counters are all
+/// under test on the type that carries them, and D2's dump tool asserts on them too.
+///
+/// What is left for this function is the job B2 gave it and no more: adapting the **44
+/// inherited tests**, whose subject is the *walk* — which reads folded where, with what
+/// evidence — and for which 67 hand-translated assertions would be 67 chances to re-express a
+/// test slightly weaker than it was. Its remaining callers are `tests.rs` and two fixtures in
+/// `open_record.rs`. Whether they too move to ng's type is a decision, not a cleanup, and it
+/// is carried to Checkpoint D.
+///
 /// B2 changed what the walk emits. The 44 inherited tests that came with the copy are the
 /// walk's regression floor, and spec §12 sanctions adapting them mechanically to the new
 /// type. Routing them through one projection *is* that adaptation, and it is the safer form
