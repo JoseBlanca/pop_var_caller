@@ -651,14 +651,65 @@ impl OpenPileupRecordTable {
     }
 }
 
-/// Apply a list of events from one read to the open record's REF
-/// sequence to compute the haplotype string this read presents
-/// under that record.
+/// Build the haplotype one read presents under an open record, **emitting only
+/// what its events cover**, and return the extent they covered.
+///
+/// # What changed, and why it is the reason this whole step exists
+///
+/// Production's `apply_events_to_ref_into` emits a reference byte for every
+/// offset no event covered — between events, and past the last one
+/// ([open_record.rs:522-531](../../../../src/pileup/walker/open_record.rs#L522),
+/// [:568-573](../../../../src/pileup/walker/open_record.rs#L568)). At a six-base
+/// deletion locus a read that saw only the first two bases is folded as a full
+/// witness of a six-base reference haplotype it never saw. **ng emits nothing for
+/// a position no event covered** (spec §4, §6).
+///
+/// **Reads whose events tile the footprint come out byte for byte as before** —
+/// there are no gaps to fill — which is what keeps the complete class
+/// parity-comparable to production and makes every other divergence a measured
+/// one rather than an accident.
+///
+/// # `ref_seq` is still needed, and not for filling
+///
+/// An `Insertion`/`Deletion` arm emits the **anchor base** from the reference
+/// when no `Match` already emitted it. Normally the `Match` is there and the
+/// read's own base wins, so nothing is borrowed; the corner is a read whose base
+/// at the anchor was dropped — `N` or adaptor-masked — while its indel at that
+/// position was still emitted. It witnessed *the indel* but not *the anchor
+/// base's identity*. **Recorded as a known residual, not fixed** (spec §4): it is
+/// one base inside an event the read genuinely witnessed, and discarding an
+/// observed indel over a masked anchor loses more than it saves.
+///
+/// # The extent, and the trap in computing it
+///
+/// The returned span is the union of the events' **reference footprints**, in
+/// absolute coordinates, **intersected with `[record_pos, record_end)`**.
+/// `events_overlapping` clips a `Match` to the window but returns a `Deletion`
+/// **whole** whenever its footprint intersects — so a deletion anchored before
+/// the record comes back with its full run, and an unclipped union would put the
+/// extent's start below `record_pos` at exactly the long-deletion loci this
+/// change exists to fix (spec §8).
+///
+/// A `Deletion` witnesses every position it deletes, not just its anchor: the
+/// read is evidence that those bases are absent. That is why `footprint_span()`
+/// is `deleted_len + 1` and why `bases.len()` is **not** the number of positions
+/// covered — an insertion adds bases without positions, a deletion positions
+/// without bases (spec §8, §13).
+///
+/// # `None` means the witness is non-contiguous
+///
+/// An interior `N`, or a ref-skip, leaves a hole in the middle of the run. One
+/// `Observed { offset_in_locus, positions_covered }` cannot describe two runs
+/// honestly, so the read yields **no observation** and is counted in
+/// `reads_without_observation` (spec §6). Rare by construction — adaptor masking
+/// and the dropped-indel rule always truncate from one side, so they stay
+/// expressible.
 ///
 /// **Preconditions on `events`** (every caller in this module
 /// satisfies them; new callers must too):
 /// 1. Every event's anchor lies inside the record's footprint
-///    (`event.anchor_pos() >= record_pos`).
+///    (`event.anchor_pos() >= record_pos`), **except** a `Deletion`, which
+///    `events_overlapping` may return anchored before the record.
 /// 2. Events are sorted by anchor position, non-decreasing.
 /// 3. At a tied anchor, events appear in the order
 ///    `Match → Insertion → Deletion`. The Match must come first
@@ -667,23 +718,12 @@ impl OpenPileupRecordTable {
 ///    REF base. The cursor's CIGAR walk satisfies this by
 ///    construction (the M op preceding an I/D op emits its last
 ///    Match before the I/D's anchored event).
-///
-/// Mi9 in `ia/reviews/pileup_2026-05-09.md`: the previous
-/// implementation collected and stable-sorted by anchor on every
-/// call, which masked tied-anchor ordering as a "we sort it for
-/// you" guarantee but didn't actually canonicalise the kind
-/// order. The cursor was already producing the right shape, so
-/// the sort was wasted work and the contract was unclear. The
-/// preconditions above are now explicit and asserted in debug.
-pub(super) fn apply_events_to_ref_into(
+pub(super) fn apply_events_into(
     allele_seq: &mut Vec<u8>,
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
-) {
-    // Walk the ref_seq in offset order, applying events as we
-    // pass their anchor positions. Each event is positioned by an
-    // offset = (event.anchor_pos - record_pos).
+) -> Option<RefSpan> {
     allele_seq.clear();
     allele_seq.reserve(ref_seq.len() + 8);
 
@@ -693,39 +733,49 @@ pub(super) fn apply_events_to_ref_into(
             let b = (w[1].anchor_pos(), event_kind_rank(&w[1]));
             a <= b
         }),
-        "apply_events_to_ref_into: events must be sorted by (anchor, Match<Insertion<Deletion); got {events:?}",
+        "apply_events_into: events must be sorted by (anchor, Match<Insertion<Deletion); got {events:?}",
     );
 
-    // Skip indices already consumed by an event so we don't
-    // double-emit reference bases that an event has overridden.
+    // Skip indices already consumed by an event so an indel does not re-emit an
+    // anchor base a Match has already put down.
     let mut consumed_until: u32 = 0; // ref offset (exclusive) consumed by the last event
-    let mut ref_cursor: u32 = 0;
     let ref_len = ref_seq.len() as u32;
+    let record_end = record_pos.saturating_add(ref_len); // exclusive
+
+    // The witnessed run so far, in absolute reference coordinates, half-open.
+    // `None` until the first event contributes a position.
+    let mut witnessed: Option<(u32, u32)> = None;
 
     for ev in events {
         debug_assert!(
             ev.anchor_pos() >= record_pos || matches!(ev, ReadEvent::Deletion { .. }),
-            "apply_events_to_ref_into: event anchor {} below record_pos {}",
+            "apply_events_into: event anchor {} below record_pos {}",
             ev.anchor_pos(),
             record_pos,
         );
         let offset = ev.anchor_pos().saturating_sub(record_pos);
 
-        // Emit any REF bases between ref_cursor and the event's
-        // offset that haven't been consumed by a previous event.
-        // Once `ref_cursor >= consumed_until` the predicate is
-        // monotonically true for the rest of the gap, so the gap
-        // collapses to a single memcpy of the un-consumed slice.
-        // L11 in the perf review.
-        if ref_cursor < offset {
-            let start = ref_cursor.max(consumed_until);
-            let end = offset.min(ref_len);
-            if start < end {
-                allele_seq.extend_from_slice(&ref_seq[start as usize..end as usize]);
+        // The positions this event witnesses, clipped to the record. Clipping is
+        // the `Deletion` trap above; without it a deletion anchored before the
+        // record drags the extent's start below `record_pos`.
+        let event_start = ev.anchor_pos().max(record_pos);
+        let event_end = ev
+            .anchor_pos()
+            .saturating_add(ev.footprint_span())
+            .min(record_end);
+        if event_start < event_end {
+            match witnessed {
+                None => witnessed = Some((event_start, event_end)),
+                Some((run_start, run_end)) => {
+                    if event_start > run_end {
+                        // A hole: the read said nothing about the positions in
+                        // between. One run cannot describe that honestly.
+                        allele_seq.clear();
+                        return None;
+                    }
+                    witnessed = Some((run_start, run_end.max(event_end)));
+                }
             }
-            // ref_cursor is unconditionally overwritten by the
-            // match arm below (every event variant sets it), so
-            // we don't bother updating it here.
         }
 
         match ev {
@@ -733,7 +783,6 @@ pub(super) fn apply_events_to_ref_into(
                 if offset < ref_len {
                     allele_seq.push(*base);
                 }
-                ref_cursor = offset + 1;
                 consumed_until = consumed_until.max(offset + 1);
             }
             ReadEvent::Insertion { seq, .. } => {
@@ -745,7 +794,6 @@ pub(super) fn apply_events_to_ref_into(
                     allele_seq.push(ref_seq[offset as usize]);
                 }
                 allele_seq.extend_from_slice(seq);
-                ref_cursor = offset + 1;
                 consumed_until = consumed_until.max(offset + 1);
             }
             ReadEvent::Deletion {
@@ -763,36 +811,36 @@ pub(super) fn apply_events_to_ref_into(
                     .saturating_add(1)
                     .saturating_add(*deleted_len)
                     .saturating_sub(record_pos);
-                ref_cursor = skip_until;
                 consumed_until = consumed_until.max(skip_until);
             }
         }
     }
 
-    // Tail: emit remaining REF bases past the last event. Same
-    // memcpy collapse as the gap above.
-    if ref_cursor < ref_len {
-        let start = ref_cursor.max(consumed_until);
-        if start < ref_len {
-            allele_seq.extend_from_slice(&ref_seq[start as usize..ref_len as usize]);
-        }
-    }
+    // Half-open on the way in, inclusive on the way out — `RefSpan`'s convention.
+    // `end > start` holds for every run that got here, so the `- 1` cannot wrap.
+    witnessed.map(|(start, end)| RefSpan {
+        start,
+        end: end - 1,
+    })
 }
 
-/// Owning wrapper around `apply_events_to_ref_into`. Kept so unit
-/// tests (and any caller that isn't on the hot path) don't have to
-/// hoist a buffer manually. The hot-path call in `process_position`
-/// goes through the `_into` variant against a buffer on
-/// `OpenPileupRecordTable`.
+/// Owning wrapper around [`apply_events_into`]. Kept so unit tests (and any
+/// caller that isn't on the hot path) don't have to hoist a buffer manually. The
+/// hot-path call in `process_position` goes through the `_into` variant against a
+/// buffer on `OpenPileupRecordTable`.
+///
+/// Returns the bases **and** the extent, or `None` for a non-contiguous witness —
+/// a caller that wanted only the bases would be able to ignore the very
+/// distinction this step introduces.
 #[cfg(test)]
-pub(super) fn apply_events_to_ref(
+pub(super) fn apply_events(
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
-) -> Vec<u8> {
+) -> Option<(Vec<u8>, RefSpan)> {
     let mut out = Vec::new();
-    apply_events_to_ref_into(&mut out, record_pos, ref_seq, events);
-    out
+    let witnessed = apply_events_into(&mut out, record_pos, ref_seq, events)?;
+    Some((out, witnessed))
 }
 
 /// Order rank for the tied-anchor precondition on
@@ -986,7 +1034,30 @@ pub(super) fn process_position(
                 continue;
             }
 
-            apply_events_to_ref_into(allele_seq_buf, rec_pos, &alleles[0].seq, &window_events);
+            let Some(witnessed) =
+                apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, &window_events)
+            else {
+                // A non-contiguous witness — an interior `N`, or a ref-skip —
+                // yields no observation (spec §6). **The prior contribution has
+                // to come off first**, and this is not a corner: a read that
+                // folded contiguously *becomes* non-contiguous when the window
+                // widens right across an interior gap, so a bare `continue` here
+                // would strand a live contribution in a bucket for a read that
+                // now has no row, breaking `chain_ids.len() <= num_obs` silently
+                // and only on multi-base records (spec §4).
+                //
+                // A5 adds the other half — recording *which* reads these were,
+                // as a per-record set of read ids rather than a counter, since
+                // this path is reached at every position the record is affected
+                // at and a counter would multiply by the footprint length.
+                if let Some(prev) = folded_reads.remove(&contrib.read_id) {
+                    subtract_contribution(
+                        &mut alleles[prev.allele_index].support,
+                        &prev.contribution,
+                    );
+                }
+                continue;
+            };
             let bq = ln_bq_for_read(&window_events, contrib.bq_baq_at_walker_pos);
             let ln_q = bq.max(contrib.mq_log_err);
             let mapq = u32::from(contrib.mapq);
@@ -1026,16 +1097,7 @@ pub(super) fn process_position(
                     contribution: new_contribution,
                     chain_id: contrib.chain_id,
                     read_group: contrib.read_group,
-                    // A1's placeholder: production's builder fills every
-                    // unwitnessed offset from the reference, so the haplotype it
-                    // just produced *claims* the whole footprint. Recording that
-                    // claim keeps this step free of behaviour change; A2 replaces
-                    // it with what the events actually cover, and `rec_end` is
-                    // exclusive, so the inclusive end is one less.
-                    witnessed: RefSpan {
-                        start: rec_pos,
-                        end: rec_end - 1,
-                    },
+                    witnessed,
                     placed_start: contrib.alignment_start == rec_pos,
                 },
             );
@@ -1356,52 +1418,111 @@ mod tests {
         assert_eq!(key, Some(5), "wide record at 5 must be found");
     }
 
+    /// **The builder no longer fills.** No events means the read witnessed nothing
+    /// inside this record — production emitted the whole reference sequence here, as
+    /// if the read had seen every base of it.
+    ///
+    /// The caller never reaches this: `process_position` skips a contributor whose
+    /// window is empty. It is pinned anyway because it is the fabrication in its
+    /// purest form, and a re-introduced fill would show up here first.
     #[test]
-    fn apply_events_pure_match_yields_unchanged_ref() {
+    fn apply_events_with_no_events_witnesses_nothing() {
         let ref_seq = b"ACGTA";
-        let out = apply_events_to_ref(100, ref_seq, &[]);
-        assert_eq!(out, b"ACGTA");
+        assert!(apply_events(100, ref_seq, &[]).is_none());
     }
 
+    /// One `Match` inside a five-base record: the read witnessed **one** position and
+    /// contributes one base — where production emitted `ACXTA`, four bases of which
+    /// it invented.
     #[test]
-    fn apply_events_snp_replaces_one_base() {
+    fn apply_events_a_lone_match_contributes_only_the_base_it_saw() {
         let ref_seq = b"ACGTA";
         let snp = ReadEvent::Match {
             ref_pos: 102,
             base: b'X',
             bq_baq: 30,
         };
-        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&snp));
-        assert_eq!(out, b"ACXTA");
+        let (bases, witnessed) =
+            apply_events(100, ref_seq, std::slice::from_ref(&snp)).expect("one run");
+        assert_eq!(bases, b"X");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 102,
+                end: 102
+            }
+        );
     }
 
+    /// Events tiling the whole footprint are **byte-identical to production** — there
+    /// are no gaps to fill. This is the class the permanent differential anchors on,
+    /// and the reason the change can be measured rather than merely asserted.
     #[test]
-    fn apply_events_deletion_drops_bases_after_anchor() {
+    fn apply_events_tiling_the_footprint_reproduces_productions_bytes() {
+        let ref_seq = b"ACGTA";
+        let events: Vec<ReadEvent> = (0..5)
+            .map(|k| ReadEvent::Match {
+                ref_pos: 100 + k,
+                base: if k == 2 { b'X' } else { ref_seq[k as usize] },
+                bq_baq: 30,
+            })
+            .collect();
+        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        assert_eq!(
+            bases, b"ACXTA",
+            "exactly what production emits for this read"
+        );
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 104
+            }
+        );
+    }
+
+    /// **A deletion witnesses every position it deletes**, not just its anchor: the
+    /// read is evidence those bases are absent. So `bases.len()` (2) is not
+    /// `positions_covered` (3) — the §13 consistency check is an inequality, and an
+    /// implementer who derives the extent from the byte length has rebuilt the
+    /// span-versus-events confusion this step exists to remove.
+    #[test]
+    fn apply_events_a_deletion_witnesses_the_positions_it_deleted() {
         let ref_seq = b"ACGTA";
         let del = ReadEvent::Deletion {
             anchor_ref_pos: 100,
             deleted_len: 2,
             bq_proxy: 30,
         };
-        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&del));
-        // Anchor at 100 ("A"), then 2 bases deleted, then "TA".
-        assert_eq!(out, b"ATA");
+        let (bases, witnessed) =
+            apply_events(100, ref_seq, std::slice::from_ref(&del)).expect("one run");
+        // The anchor base only — 101 and 102 are deleted, and 103/104 were never
+        // witnessed, where production appended them from the reference ("ATA").
+        assert_eq!(bases, b"A");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 102
+            },
+            "anchor plus the two deleted positions"
+        );
     }
 
     /// A deletion **anchored before the record** contributes none of the bases it deleted,
-    /// and no anchor base — the anchor belongs to another record.
+    /// and no anchor base — the anchor belongs to another record. **And the extent is
+    /// clipped to the record**: `events_overlapping` returns such a deletion *whole*, so
+    /// an unclipped union would report a start below `record_pos` at exactly the
+    /// long-deletion loci this change exists to fix (spec §8).
     ///
-    /// `events_overlapping` does not clip a deletion to the window: one anchored before a
-    /// record, whose run reaches into it, comes back whole. The offset was then computed
-    /// with `saturating_sub`, which was silently wrong twice — it emitted `ref_seq[0]`, a
-    /// base the read had *deleted*, and skipped `offset + 1 + deleted_len`, one position
-    /// too many. Reachable in production: a mate-overlap collapse in the indel regime
-    /// removes the indel-carrying contributor, so no record opens at the anchor, and a
-    /// later record opens inside the deleted run. Found by ng's stage-1 walker differential
-    /// and by a debug assertion on real GIAB HG002 data at chr1:106,324,863.
+    /// The bases half is production's own defect, fixed in `5f32a62` and inherited here:
+    /// the offset was computed with `saturating_sub`, which emitted `ref_seq[0]` — a base
+    /// the read had *deleted* — and skipped one position too many. Reachable in
+    /// production: a mate-overlap collapse in the indel regime removes the indel-carrying
+    /// contributor, so no record opens at the anchor, and a later record opens inside the
+    /// deleted run. Seen on real GIAB HG002 data at chr1:106,324,863.
     ///
     /// Here the record starts at 100 and the deletion is anchored at 98, removing 99–101.
-    /// Positions 100 and 101 are therefore absent, and the haplotype is the tail from 102.
     #[test]
     fn apply_events_deletion_anchored_before_the_record_emits_no_anchor_base() {
         let ref_seq = b"ACGTA"; // positions 100..=104
@@ -1410,16 +1531,23 @@ mod tests {
             deleted_len: 3,
             bq_proxy: 30,
         };
-        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&del));
-        // 99, 100, 101 deleted; 100 and 101 are inside the record, so the first two
-        // reference bases are gone and the haplotype is "GTA" (102, 103, 104).
-        // Before the fix this was "ATA": a leading "A" — the base at 100, which the read
-        // deleted — and one position over-consumed.
-        assert_eq!(out, b"GTA");
+        let (bases, witnessed) =
+            apply_events(100, ref_seq, std::slice::from_ref(&del)).expect("one run");
+        // 99, 100, 101 deleted. 100 and 101 lie inside the record and are witnessed as
+        // absent; 102–104 the read said nothing about, where production emitted "GTA".
+        assert_eq!(bases, b"");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 101
+            },
+            "clipped to the record: the anchor at 98 is not inside it"
+        );
     }
 
-    /// The whole deleted run can also fall *past* the record, which must consume every
-    /// remaining position and emit nothing after the anchor's neighbours.
+    /// The whole deleted run can also fall *past* the record, so every position of it is
+    /// witnessed as absent and no base is contributed.
     #[test]
     fn apply_events_deletion_anchored_before_the_record_can_consume_all_of_it() {
         let ref_seq = b"ACGTA";
@@ -1428,10 +1556,16 @@ mod tests {
             deleted_len: 20,
             bq_proxy: 30,
         };
-        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&del));
+        let (bases, witnessed) =
+            apply_events(100, ref_seq, std::slice::from_ref(&del)).expect("one run");
+        assert_eq!(bases, b"");
         assert_eq!(
-            out, b"",
-            "every position of the record was deleted by this read"
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 104
+            },
+            "clipped at the record's end, not at the deletion's"
         );
     }
 
@@ -1456,23 +1590,231 @@ mod tests {
             seq: b"YY".to_vec(),
             bq_proxy: 30,
         };
-        let out = apply_events_to_ref(100, ref_seq, &[m, i]);
-        // Anchor: read base 'X' (not REF 'A'), then inserted "YY",
-        // then the rest of the REF tail.
-        assert_eq!(out, b"XYYCGTA");
+        let (bases, witnessed) = apply_events(100, ref_seq, &[m, i]).expect("one run");
+        // Anchor: read base 'X' (not REF 'A'), then inserted "YY". The REF tail
+        // production appended is gone — the read never witnessed 101–104.
+        assert_eq!(bases, b"XYY");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 100
+            },
+            "an insertion's footprint is one reference position, however many bases it adds"
+        );
     }
 
+    /// **The one residual: a borrowed reference base.** The insertion's anchor base was
+    /// not emitted by any `Match` — the read's own base there was dropped as `N` or
+    /// adaptor-masked — so the builder supplies the reference base for that one position.
+    /// Recorded, not fixed: it is one base inside an event the read genuinely witnessed,
+    /// and discarding an observed indel over a masked anchor loses more (spec §4).
+    ///
+    /// **Pinned at one base and no more:** the tail production appended is gone.
     #[test]
-    fn apply_events_insertion_appends_inserted_bases_after_anchor() {
+    fn apply_events_an_indel_over_a_masked_anchor_borrows_exactly_one_reference_base() {
         let ref_seq = b"ACGTA";
         let ins = ReadEvent::Insertion {
             anchor_ref_pos: 100,
             seq: b"XX".to_vec(),
             bq_proxy: 30,
         };
-        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&ins));
-        // Anchor "A", inserted "XX", then ref "CGTA".
-        assert_eq!(out, b"AXXCGTA");
+        let (bases, witnessed) =
+            apply_events(100, ref_seq, std::slice::from_ref(&ins)).expect("one run");
+        assert_eq!(bases, b"AXX", "the borrowed 'A', then the inserted run");
+        assert_eq!(
+            bases.iter().filter(|b| **b == b'A').count(),
+            1,
+            "exactly one reference base is borrowed — production emitted four more"
+        );
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 100
+            }
+        );
+    }
+
+    /// **A hole in the middle yields no observation at all.** An interior `N` or a
+    /// ref-skip leaves the read silent about positions inside a run it otherwise
+    /// witnessed, and one `Observed` run cannot describe two runs honestly (spec §6).
+    ///
+    /// Production filled the hole from the reference and folded the read as a complete
+    /// witness.
+    #[test]
+    fn apply_events_a_hole_in_the_middle_yields_no_observation() {
+        let ref_seq = b"ACGTA";
+        let events = vec![
+            ReadEvent::Match {
+                ref_pos: 100,
+                base: b'A',
+                bq_baq: 30,
+            },
+            // 101 and 102 witnessed by nothing.
+            ReadEvent::Match {
+                ref_pos: 103,
+                base: b'T',
+                bq_baq: 30,
+            },
+        ];
+        assert!(apply_events(100, ref_seq, &events).is_none());
+    }
+
+    /// **Adjacent is not a hole.** The gap check is `event_start > run_end` on a
+    /// half-open run, so two neighbouring positions stay one run — an off-by-one there
+    /// would send every ordinary read to the no-observation path.
+    #[test]
+    fn apply_events_adjacent_events_stay_one_run() {
+        let ref_seq = b"ACGTA";
+        let events = vec![
+            ReadEvent::Match {
+                ref_pos: 101,
+                base: b'C',
+                bq_baq: 30,
+            },
+            ReadEvent::Match {
+                ref_pos: 102,
+                base: b'G',
+                bq_baq: 30,
+            },
+        ];
+        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        assert_eq!(bases, b"CG");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 101,
+                end: 102
+            }
+        );
+    }
+
+    /// A deletion's run closes what would otherwise be a hole: the positions it deletes
+    /// are witnessed, so a `Match` on its far side continues the same run.
+    #[test]
+    fn apply_events_a_deletions_run_bridges_to_the_match_beyond_it() {
+        let ref_seq = b"ACGTA";
+        let events = vec![
+            ReadEvent::Deletion {
+                anchor_ref_pos: 100,
+                deleted_len: 2,
+                bq_proxy: 30,
+            },
+            ReadEvent::Match {
+                ref_pos: 103,
+                base: b'T',
+                bq_baq: 30,
+            },
+        ];
+        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        assert_eq!(bases, b"AT");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 103
+            },
+            "the deleted positions are witnessed, so 103 continues the run"
+        );
+    }
+
+    /// **A read that folded contiguously and then became non-contiguous is taken back
+    /// out of the record it had folded into.**
+    ///
+    /// The `None` path is not reached only on first contact. A record widens, and a read
+    /// whose witness *was* one run across the old footprint now has a hole inside the new
+    /// one — so it stops having an observation, and the contribution it already made has to
+    /// come off the bucket. A bare `continue` there leaves a live contribution behind for a
+    /// read that has no row, which is silent, only happens on multi-base records, and is
+    /// the failure spec §4 names.
+    ///
+    /// Nothing else in the suite catches it: the differential's census tolerates any
+    /// difference in the allele lists by design, and the inherited tests never widen a
+    /// record across a read's interior gap. So it is built by hand.
+    ///
+    /// ```text
+    /// ref     1        5   7    ...              20      25
+    /// wide    MMMMMMMMMMNMMMMMMMMMMMMMM     the N at 11 is silent
+    /// opener      M--MMMMMMMMMMMMMMMMMM     D2 opens the record at 5, span 5..=7
+    /// widener       M-------------MMMM      D13 widens it to 5..=20
+    /// ```
+    ///
+    /// `wide` folds at position 5 over the three-base record (5, 6, 7 — one run). At
+    /// position 7 `widener`'s deletion grows that record to sixteen bases, and `wide`'s
+    /// witness over it is now `5..=10` and `12..=20`: two runs, so no observation.
+    #[test]
+    fn a_read_that_becomes_non_contiguous_when_the_record_widens_leaves_its_bucket() {
+        use super::super::{CigarOp, MateRole, PreparedRead, WalkerConfig, run};
+        use crate::ng::types::ReadGroupId;
+        use std::sync::Arc;
+
+        let contig = "ACGTACGTACGTACGTACGTACGTA"; // 25 bases
+        let read =
+            |qname: &str, start: u32, end: u32, cigar: Vec<CigarOp>, seq: Vec<u8>| PreparedRead {
+                chrom_id: 0,
+                alignment_start: start,
+                alignment_end: end,
+                cigar,
+                bq_baq: vec![30; seq.len()],
+                seq,
+                mq_log_err: -3.0,
+                mapq: 60,
+                is_reverse_strand: false,
+                qname: Arc::from(qname),
+                mate_role: MateRole::Solo,
+                adaptor_boundary: None,
+                read_group: ReadGroupId(0),
+            };
+
+        // `wide` matches every position 1..=25 except 11, where its base is `N` and the
+        // cursor emits nothing — the interior hole, and a hole its *alignment span* is
+        // blind to, which is why coverage has to come from the events.
+        let mut wide_seq = contig.as_bytes().to_vec();
+        wide_seq[10] = b'N';
+        let reads = vec![
+            read("wide", 1, 25, vec![CigarOp::Match(25)], wide_seq),
+            read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(18)],
+                vec![b'A'; 19],
+            ),
+            read(
+                "widener",
+                7,
+                24,
+                vec![CigarOp::Match(1), CigarOp::Deletion(13), CigarOp::Match(4)],
+                vec![b'A'; 5],
+            ),
+        ];
+
+        let records: Vec<_> = run(reads, MockFasta::new(contig), &WalkerConfig::default())
+            .map(|record| record.expect("the walk succeeds"))
+            .collect();
+        let widened = records
+            .iter()
+            .find(|record| record.pos == 5)
+            .expect("the opener's deletion opens a record at 5");
+        assert_eq!(
+            widened.alleles[0].seq.len(),
+            16,
+            "the widener's deletion must grow the record to 5..=20, or this fixture does \
+             not reach the path it exists for"
+        );
+
+        let folded: u32 = widened
+            .alleles
+            .iter()
+            .map(|allele| allele.support.num_obs)
+            .sum();
+        assert_eq!(
+            folded, 2,
+            "only `opener` and `widener` witnessed this record as one run; `wide` folded \
+             into it before the widen and must have been subtracted back out when its \
+             witness split in two. Record: {widened:?}"
+        );
     }
 
     #[test]

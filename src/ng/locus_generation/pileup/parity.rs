@@ -463,6 +463,164 @@ fn generate(rng: &mut SplitMix64) -> Case {
     }
 }
 
+/// Build a read that **witnesses every reference position it spans** — the class ng's
+/// no-fabrication rule does not change, and therefore the class the two walkers must
+/// agree on forever.
+///
+/// Four things are excluded, and each is excluded because it makes a read *silent* at a
+/// position its alignment covers — which is precisely the fabrication primitive: "no event
+/// → reference base", wider than "outside the read's span" (spec §6).
+///
+/// - **`N` read bases** — the cursor emits no `Match` for one.
+/// - **an adaptor boundary** — the G1 filter silences every base past it.
+/// - **a reference skip** — it consumes reference and emits nothing.
+/// - **an indel as the first or last op** — the first/last-op rule drops it, leaving its
+///   reference footprint unwitnessed.
+///
+/// Everything else stays: substitutions, insertions, deletions, clips, padding, both
+/// strands, quality variation. What makes the *record* class complete is that the read
+/// runs from position 1 to the contig's end, so every record the walk opens lies inside
+/// its span and every position of every such record carries one of its events.
+fn generate_complete_read(
+    rng: &mut SplitMix64,
+    reference: &[String],
+    chrom_id: u32,
+    qname: &str,
+    mate_role: ProductionMateRole,
+) -> ProductionPreparedRead {
+    let contig = reference[chrom_id as usize].as_bytes();
+    let mut cigar: Vec<CigarOp> = Vec::new();
+    let mut seq: Vec<u8> = Vec::new();
+    let mut ref_pos: usize = 0; // 0-based cursor into the contig
+
+    // A leading soft clip on some reads: it consumes read bases but no reference, so it
+    // silences nothing. Never an indel here — the first/last-op rule would drop that.
+    if rng.one_in(4) {
+        let clip = 1 + rng.below(3);
+        cigar.push(CigarOp::SoftClip(clip as u32));
+        seq.extend((0..clip).map(|_| b"ACGT"[rng.below(4)]));
+    }
+
+    while ref_pos < contig.len() {
+        let remaining = contig.len() - ref_pos;
+        // The final block always runs to the contig's end, so the read spans it whole.
+        let matched = if remaining <= 12 {
+            remaining
+        } else {
+            2 + rng.below(8)
+        };
+        cigar.push(match rng.below(4) {
+            0 => CigarOp::SeqMatch(matched as u32),
+            1 => CigarOp::SeqMismatch(matched as u32),
+            _ => CigarOp::Match(matched as u32),
+        });
+        for offset in 0..matched {
+            // `ACGT` only: an `N` would silence this position, which is the one thing
+            // this generator exists to exclude.
+            let base = if rng.one_in(6) {
+                b"ACGT"[rng.below(4)]
+            } else {
+                contig[ref_pos + offset]
+            };
+            seq.push(base);
+        }
+        ref_pos += matched;
+
+        // An indel only while enough reference is left for a further match block, so it
+        // is never the last op.
+        if contig.len().saturating_sub(ref_pos) > 12 {
+            match rng.below(6) {
+                0 | 1 => {
+                    let deleted = 1 + rng.below(6);
+                    cigar.push(CigarOp::Deletion(deleted as u32));
+                    ref_pos += deleted;
+                }
+                2 => {
+                    let inserted = 1 + rng.below(3);
+                    cigar.push(CigarOp::Insertion(inserted as u32));
+                    seq.extend((0..inserted).map(|_| b"ACGT"[rng.below(4)]));
+                }
+                // Padding consumes neither axis, so it silences nothing.
+                3 => cigar.push(CigarOp::Padding(1 + rng.below(2) as u32)),
+                _ => {}
+            }
+        }
+    }
+
+    ProductionPreparedRead {
+        chrom_id,
+        alignment_start: 1,
+        alignment_end: contig.len() as u32,
+        cigar,
+        bq_baq: (0..seq.len()).map(|_| 20 + rng.below(21) as u8).collect(),
+        seq,
+        mq_log_err: -3.0 - (rng.below(4) as f64),
+        mapq: 20 + rng.below(41) as u8,
+        is_reverse_strand: rng.one_in(2),
+        qname: Arc::from(qname),
+        mate_role,
+        // No boundary: the G1 filter would silence bases the alignment spans.
+        adaptor_boundary: None,
+    }
+}
+
+/// A case in which **every folded read witnessed every position of every record it folded
+/// into** — the permanent anchor's fixture.
+///
+/// Depth is kept high enough that the column cap can bite and that mate overlap and
+/// re-folds after a widen are on the walk; the mates are placed at the same start rather
+/// than offset, because a read that begins later would not span the records before it.
+fn generate_complete(rng: &mut SplitMix64) -> Case {
+    let reference: Vec<String> = (0..CONTIGS)
+        .map(|_| {
+            (0..CONTIG_LENGTH)
+                .map(|_| b"ACGT"[rng.below(4)] as char)
+                .collect()
+        })
+        .collect();
+
+    let mut reads: Vec<ProductionPreparedRead> = Vec::new();
+    let read_count = 2 + rng.below(10);
+    for index in 0..read_count {
+        let chrom_id = if CONTIGS > 1 && rng.one_in(6) { 1 } else { 0 };
+        if rng.one_in(3) {
+            let qname = format!("pair{index}");
+            for role in [
+                ProductionMateRole::FirstOfPair,
+                ProductionMateRole::SecondOfPair,
+            ] {
+                reads.push(generate_complete_read(
+                    rng, &reference, chrom_id, &qname, role,
+                ));
+            }
+        } else {
+            let qname = format!("solo{index}");
+            reads.push(generate_complete_read(
+                rng,
+                &reference,
+                chrom_id,
+                &qname,
+                ProductionMateRole::Solo,
+            ));
+        }
+    }
+    reads.sort_by_key(|read| (read.chrom_id, read.alignment_start));
+
+    let mut config = WalkerConfig::default();
+    if rng.one_in(3) {
+        config.max_snp_column_depth = 1 + rng.below(4) as u32;
+        config.max_indel_column_depth = 1 + rng.below(2) as u32;
+    }
+
+    Case {
+        reference,
+        reads,
+        config,
+        // No read carries one, by construction — see `generate_complete_read`.
+        reads_with_live_adaptor_boundary: 0,
+    }
+}
+
 /// The eight `RunSummary` counters, **named**.
 ///
 /// Named rather than an `[u64; 8]` beside a parallel `[&str; 8]`, because two arrays that
@@ -860,16 +1018,156 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE,
 ];
 
-/// **The port anchor.** Every record production emits, ng emits identically — and every
-/// error, and every counter.
+/// **The permanent anchor: on reads that witnessed the whole footprint, the two walkers
+/// agree forever.**
 ///
-/// A failure means the copy has drifted from the walker it was transcribed from; the seed
-/// and case index in the message replay the exact input.
+/// From A2 the two walkers differ *on purpose* — production fills the positions a read did
+/// not witness from the reference, and ng does not — so the full stage-1 differential
+/// stops being a claim anyone can make. **What survives is narrower and is not a
+/// snapshot:** every change in this plan leaves the complete class alone by construction
+/// (there are no gaps to fill), so this must stay green through A3, A4, A5 and Milestone
+/// B, and it is what replaces the differential rather than merely outliving it.
+///
+/// The fixture is `generate_complete`, whose reads span their contig end to end and are
+/// silent nowhere inside it (`generate_complete_read` names the four exclusions and why
+/// each one matters). Everything else the walk does is still on it: substitutions,
+/// insertions, deletions that widen records past the reads that opened them, re-folds,
+/// mate overlap, both strands, the column cap.
+///
+/// A failure means ng has changed an answer on the class it promised not to touch; the
+/// seed and case index replay the exact input.
 #[test]
-fn ng_walks_identically_to_production() {
+fn ng_walks_identically_to_production_on_complete_reads() {
     let mut compared_records = 0usize;
-    let mut panicking_cases = 0usize;
+    let mut widened_records = 0usize;
     let total = SEEDS.len() * cases_per_seed();
+
+    for seed in SEEDS {
+        let mut rng = SplitMix64(seed);
+        for index in 0..cases_per_seed() {
+            let case = generate_complete(&mut rng);
+            let where_ = format!("seed {seed:#x} case {index}");
+
+            let theirs = production_walk(&case);
+            let ours = ng_walk(&case);
+            compared_records += ours.records.len();
+            widened_records += theirs
+                .records
+                .iter()
+                .filter(|item| item.as_ref().is_ok_and(|r| r.alleles[0].seq.len() > 1))
+                .count();
+            assert!(
+                !assert_same_walk(&where_, &ours, &theirs),
+                "{where_}: a complete-reads case must not panic — this fixture excludes \
+                 every input that reaches production's reachable precondition"
+            );
+        }
+    }
+
+    // The anchor is only worth the ground it covered, and "multi-base records exist" is
+    // the part that matters most: a one-base record is `Complete` for every contributor
+    // whatever the builder does, so a fixture of only those would hold this test green
+    // against any implementation at all.
+    assert!(
+        compared_records > total * 5,
+        "only {compared_records} records compared over {total} cases — the generator has \
+         stopped producing walks worth comparing"
+    );
+    assert!(
+        widened_records > total,
+        "only {widened_records} multi-base records over {total} cases — without them this \
+         anchor cannot tell a filling builder from a witnessing one"
+    );
+    eprintln!(
+        "complete-reads differential: {compared_records} records compared over {total} \
+         cases, {widened_records} of them multi-base; zero divergences"
+    );
+}
+
+/// **What A2 is allowed to change, and what it is not** — the comparison both the
+/// synthetic census and the real-data one run.
+///
+/// Records are opened and widened from the **events**, which the no-fabrication rule does
+/// not touch; only the allele buckets move. So the two streams must still be the same
+/// length, at the same anchors, with the same REF bytes, the same error items and the same
+/// `RunSummary`. Anything else is a bug rather than a design.
+///
+/// Returns `(records compared, records whose allele lists differ)` — the census.
+#[track_caller]
+fn assert_only_allele_bytes_moved(
+    where_: &str,
+    ours: &WalkOutcome,
+    theirs: &WalkOutcome,
+) -> (usize, usize) {
+    assert_eq!(
+        ours.panic_message, theirs.panic_message,
+        "{where_}: the two walkers did not stop the same way",
+    );
+    assert_eq!(
+        ours.records.len(),
+        theirs.records.len(),
+        "{where_}: ng emitted {} stream items, production {} — A2 moves allele bytes, \
+         never whether a record exists",
+        ours.records.len(),
+        theirs.records.len(),
+    );
+
+    let mut records = 0usize;
+    let mut diverged = 0usize;
+    for (position, (ours, theirs)) in ours.records.iter().zip(theirs.records.iter()).enumerate() {
+        records += 1;
+        match (ours, theirs) {
+            (Ok(ours), Ok(theirs)) => {
+                assert_eq!(
+                    (ours.chrom_id, ours.pos, &ours.alleles[0].seq),
+                    (theirs.chrom_id, theirs.pos, &theirs.alleles[0].seq),
+                    "{where_}: record {position} moved its anchor or its REF bytes, which \
+                     A2 does not touch",
+                );
+                if ours != theirs {
+                    diverged += 1;
+                }
+            }
+            (ours, theirs) => assert_eq!(
+                ours, theirs,
+                "{where_}: stream item {position} diverged on the error channel, which A2 \
+                 does not touch",
+            ),
+        }
+    }
+
+    if ours.panic_message.is_none() {
+        assert_eq!(
+            ours.summary.as_ref(),
+            theirs.summary.as_ref(),
+            "{where_}: the RunSummary counters diverged — every one of them is driven by \
+             the events, which A2 does not touch",
+        );
+    }
+    (records, diverged)
+}
+
+/// **The fabrication is gone, and here is how much of it there was.**
+///
+/// The general fixture — partial reads, adaptor boundaries, `N` bases, ref-skips — is
+/// where the two walkers now differ, and this is the census of that difference rather than
+/// an assertion that it is absent. Two things are asserted, and they are what makes the
+/// census trustworthy:
+///
+/// - **A2 changes no record's existence and no record's footprint.** Records are opened
+///   and widened from the *events*, which this step does not touch; only the allele
+///   buckets move. So the two streams must still be the same length, at the same
+///   positions, with the same REF bytes and the same `RunSummary`. A divergence there is a
+///   bug, not a design.
+/// - **Some records must differ.** A run in which nothing moved would mean the fill is
+///   still there and every other test in this module is passing for the wrong reason.
+///
+/// The number reported here is the same quantity D3 measures on real data: how many loci
+/// production credits to reads that never sequenced them.
+#[test]
+fn ng_diverges_from_production_only_where_a_read_did_not_witness() {
+    let mut records = 0usize;
+    let mut diverged = 0usize;
 
     for seed in SEEDS {
         let mut rng = SplitMix64(seed);
@@ -879,29 +1177,21 @@ fn ng_walks_identically_to_production() {
 
             let theirs = production_walk(&case);
             let ours = ng_walk(&case);
-            compared_records += ours.records.len();
-            if assert_same_walk(&where_, &ours, &theirs) {
-                panicking_cases += 1;
-            }
+            let (seen, differing) = assert_only_allele_bytes_moved(&where_, &ours, &theirs);
+            records += seen;
+            diverged += differing;
         }
     }
 
-    // The differential is only worth the ground it covered. A generator change that
-    // quietly stopped emitting records would leave every assertion above vacuous.
     assert!(
-        compared_records > total * 5,
-        "only {compared_records} records compared over {total} cases — the generator has \
-         stopped producing walks worth comparing"
+        diverged > 0,
+        "{records} records compared and not one differed — the fill is still there, and \
+         every complete-reads assertion in this module is passing for the wrong reason"
     );
-    // Reported, not asserted at a threshold. It was 4.2% before the production defect this
-    // harness found was fixed; it is 0 now. Deliberately **not** asserted to be zero
-    // either: the channel's job is to compare *how* the two walkers stop, not to claim
-    // nothing can stop them.
     eprintln!(
-        "stage-1 differential: {compared_records} records compared over {total} cases; \
-         {panicking_cases} cases ({:.1}%) reached production's reachable debug_assert! and \
-         panicked in both walkers",
-        100.0 * panicking_cases as f64 / total as f64,
+        "the fabrication census: {diverged} of {records} records ({:.1}%) carried bases \
+         production credited to a read that had not witnessed them",
+        100.0 * diverged as f64 / records as f64,
     );
 }
 
@@ -1021,21 +1311,29 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
         ours.panic_message, theirs.panic_message,
         "ng's copy carries the same fix, so it must stop — or not — the same way"
     );
-    assert_eq!(ours.records, theirs.records, "and the records must agree");
 
     // The record at 19 is the one the defect corrupted: `pair9/First`'s deletion opens it
     // spanning 19..=25, and `pair3/Second` folds in carrying a deletion anchored at 17
     // whose run covers 18–22 — so of this record's seven positions it witnessed only
     // 23, 24, 25.
-    let record = theirs
-        .records
-        .iter()
-        .filter_map(|item| item.as_ref().ok())
-        .find(|record| record.pos == 19)
-        .expect("pair9's deletion opens a record at 19");
-    let reference = &record.alleles[0].seq;
+    let at_19 = |outcome: &WalkOutcome| {
+        outcome
+            .records
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .find(|record| record.pos == 19)
+            .map(|record| {
+                record
+                    .alleles
+                    .iter()
+                    .map(|allele| String::from_utf8_lossy(&allele.seq).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .expect("pair9's deletion opens a record at 19")
+    };
+    let (theirs_at_19, ours_at_19) = (at_19(&theirs), at_19(&ours));
     assert_eq!(
-        reference.len(),
+        theirs_at_19[0].len(),
         7,
         "the record spans 19..=25: the anchor plus six deleted bases"
     );
@@ -1044,34 +1342,48 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
     // `pair3/Second`'s honest contribution to this record is its own three bases at 23, 24
     // and 25 — the positions past the end of its own deletion — and nothing before them.
     //
-    // Before the fix the saturated offset made the fold emit `ref_seq[0]` first: the base
+    // Before `5f32a62` the saturated offset made the fold emit `ref_seq[0]` first: the base
     // at **19**, which this read had deleted and never sequenced. So the allele was one
     // base longer and began with a reference base borrowed from a position the read
-    // explicitly says is absent. Both spellings are written out here, because "the right
-    // bases are present" and "the wrong bases are gone" are different claims and a
-    // regression could satisfy either alone.
-    let witnessed: &[u8] = b"AAA";
-    let before_the_fix: Vec<u8> = [&reference[..1], witnessed].concat();
-    let folded: Vec<String> = record
-        .alleles
-        .iter()
-        .map(|allele| String::from_utf8_lossy(&allele.seq).to_string())
-        .collect();
+    // explicitly says is absent. Both spellings are checked, because "the right bases are
+    // present" and "the wrong bases are gone" are different claims and a regression could
+    // satisfy either alone. **Asserted on both walkers**: this is production's fix as much
+    // as ng's, and it is the one claim in this test that A2 does not move.
+    let before_the_fix = format!("{}AAA", &theirs_at_19[0][..1]);
+    for (whose, alleles) in [("production", &theirs_at_19), ("ng", &ours_at_19)] {
+        assert!(
+            alleles.iter().any(|allele| allele == "AAA"),
+            "{whose}: the read whose deletion covers 19–22 should contribute the three \
+             bases it witnessed (AAA), but the record holds {alleles:?}",
+        );
+        assert!(
+            !alleles.contains(&before_the_fix),
+            "{whose}: the record still holds {before_the_fix}, the pre-fix spelling — a \
+             leading base at 19 that this read had deleted. Records: {alleles:?}",
+        );
+    }
 
+    // **And this is the witnessed-extent rule, on the fixture the defect handed it.**
+    // `pair3/First` matched 4–22, so of the record's seven positions it witnessed four:
+    // 19, 20, 21, 22. Production folded it as `AAAA` **plus the reference bases at 23, 24
+    // and 25** — three bases it never sequenced. ng emits the four it saw.
     assert!(
-        record.alleles.iter().any(|allele| allele.seq == witnessed),
-        "the read whose deletion covers 19–22 should contribute the three bases it \
-         witnessed ({}), but the record holds {folded:?}",
-        String::from_utf8_lossy(witnessed),
+        theirs_at_19.iter().any(|allele| allele == "AAAAGTA"),
+        "production should fabricate the tail here, or this fixture no longer shows the \
+         difference: {theirs_at_19:?}",
     );
     assert!(
-        !record
-            .alleles
-            .iter()
-            .any(|allele| allele.seq == before_the_fix),
-        "the record still holds {}, the pre-fix spelling: a leading base at 19 that this \
-         read had deleted. Records: {folded:?}",
-        String::from_utf8_lossy(&before_the_fix),
+        ours_at_19.iter().any(|allele| allele == "AAAA"),
+        "ng should carry only the four positions the read witnessed: {ours_at_19:?}",
+    );
+    assert!(
+        !ours_at_19.iter().any(|allele| allele == "AAAAGTA"),
+        "ng still carries production's reference-padded spelling: {ours_at_19:?}",
+    );
+    // Everything else about the record is untouched: same REF bytes, same anchor.
+    assert_eq!(
+        theirs_at_19[0], ours_at_19[0],
+        "the REF bucket is the record's own reference bytes and A2 does not touch it",
     );
 }
 
@@ -1547,13 +1859,19 @@ fn ng_walks_identically_to_production_on_real_reads() {
     );
 
     let where_ = format!("{reads_path} {region:?}");
-    let records_compared = theirs.records.len();
     let ok_records = theirs.records.iter().filter(|item| item.is_ok()).count();
     let first_error = theirs
         .records
         .iter()
         .find_map(|item| item.as_ref().err().cloned());
-    let panicked = assert_same_walk(&where_, &ours, &theirs);
+    // **The census, on real alignments** — the same comparison the synthetic one runs, and
+    // the same two claims: every record still exists at the same anchor with the same REF
+    // bytes, and the number whose alleles moved is the size of production's defect on real
+    // data (spec §13.2, D3's headline). Not `assert_same_walk`: from A2 the two walkers
+    // differ on purpose wherever a read did not witness a whole footprint, which on
+    // paired-end sequencing is most long-deletion loci.
+    let (records_compared, diverged) = assert_only_allele_bytes_moved(&where_, &ours, &theirs);
+    let panicked = ours.panic_message.is_some();
 
     assert!(
         !panicked,
@@ -1586,7 +1904,10 @@ fn ng_walks_identically_to_production_on_real_reads() {
     }
     eprintln!(
         "real-data differential: {where_} — {records_compared} records compared from \
-         {prepared_reads} prepared reads, zero divergences"
+         {prepared_reads} prepared reads; every anchor, REF sequence and counter identical. \
+         {diverged} records ({:.2}%) carried bases production credited to a read that had \
+         not witnessed them.",
+        100.0 * diverged as f64 / records_compared.max(1) as f64,
     );
 }
 

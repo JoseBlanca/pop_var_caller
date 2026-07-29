@@ -101,7 +101,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   coordinates); `FoldedReadState` gains `witnessed: RefSpan` and `read_group: ReadGroupId`;
   `AlleleSupportStats` becomes ng's copy, production's **minus `placed_start`** (`placed_left` is
   kept — it feeds production's QUAL penalty). Types only. *Depends:* —. *Source:* arch §1.2, spec §6.
-- ☐ **A2 — the builder stops filling. Own commit, do not bundle.** `apply_events_into` emits only
+- ✅ **A2 — the builder stops filling. Own commit, do not bundle.** `apply_events_into` emits only
   what the events cover and returns the extent; `None` when the witnessed positions are
   non-contiguous. Three traps the spec names: it still needs `ref_seq` for an **indel's anchor base**
   when no `Match` emitted it (the one recorded residual); `events_overlapping` does **not** clip a
