@@ -308,9 +308,19 @@ def _(MIN_LOCUS_DEPTH, np, pd, raw, rg_table, unit_sel):
     comp["len_band"] = pd.cut(
         comp["ref_len"], bins=LEN_EDGES, labels=LEN_LABELS, right=False, ordered=True
     )
+    # The same tract measured in repeat UNITS rather than bases. Slippage is a per-unit process, so
+    # copy number is the axis the mechanism would predict, while base length is the axis the read
+    # geometry cares about — and the two orderings differ, because 20 bp is ten dinucleotide copies
+    # but only three hexamer ones. Which of them stutter actually tracks is the question.
+    comp["ref_copies"] = comp["ref_len"] / comp["period"]
+    COPY_EDGES = [3, 4, 5, 6, 7, 9, 12, 16, 25, 10**9]
+    COPY_LABELS = ["3", "4", "5", "6", "7-8", "9-11", "12-15", "16-24", "25+"]
+    comp["copy_band"] = pd.cut(
+        comp["ref_copies"], bins=COPY_EDGES, labels=COPY_LABELS, right=False, ordered=True
+    )
     PERIOD_NAME = {1: "mono", 2: "di", 3: "tri", 4: "tetra", 5: "penta", 6: "hexa"}
     PERIODS = [1, 2, 3, 4, 5, 6]
-    return LEN_LABELS, PERIOD_NAME, PERIODS, comp
+    return COPY_LABELS, LEN_LABELS, PERIOD_NAME, PERIODS, comp
 
 
 @app.cell
@@ -318,8 +328,8 @@ def _(LEN_LABELS, PERIODS, np, plt):
     # A period × tract-length grid, the axis this whole question lives on. Shared with the human
     # bake-off dashboard deliberately: the same two dimensions, read the same way, so a number seen
     # in one is comparable with a number seen in the other.
-    def empty_grid():
-        return np.full((len(PERIODS), len(LEN_LABELS)), np.nan)
+    def empty_grid(cols=None):
+        return np.full((len(PERIODS), len(cols if cols is not None else LEN_LABELS)), np.nan)
 
     def annotate_grid(ax, grid, cmap, norm, fmt, ncnt=None):
         """Write each finite cell's value, picking white or dark text by the cell's luminance so
@@ -339,12 +349,13 @@ def _(LEN_LABELS, PERIODS, np, plt):
                     color="white" if lum < 0.5 else "#222",
                 )
 
-    def grid_axes(ax, period_label):
-        ax.set_xticks(range(len(LEN_LABELS)))
-        ax.set_xticklabels(LEN_LABELS, rotation=45, ha="right", fontsize=7.5)
+    def grid_axes(ax, period_label, labels=None, xlabel="reference tract length (bp)"):
+        labels = labels if labels is not None else LEN_LABELS
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7.5)
         ax.set_yticks(range(len(PERIODS)))
         ax.set_yticklabels([period_label(p) for p in PERIODS], fontsize=8)
-        ax.set_xlabel("reference tract length (bp)")
+        ax.set_xlabel(xlabel)
 
     return annotate_grid, empty_grid, grid_axes
 
@@ -532,6 +543,7 @@ def _(comp, mo, np, pd):
 
 @app.cell
 def _(
+    COPY_LABELS,
     LEN_LABELS,
     MIN_CELL_READS,
     Normalize,
@@ -545,53 +557,83 @@ def _(
     np,
     plt,
 ):
-    # SECTION 2 — the onset, as a period × length grid. This is the shape of the answer: a single
-    # number per cell, cohort-pooled, read straight off two axes. The per-sample curves that follow
-    # answer a different question (do samples agree?) and are much harder to read for this one.
-    def onset_grid_figure():
-        off = empty_grid()
-        n = empty_grid()
+    # SECTION 2 — the onset, as a period × size grid, drawn on both size axes. This is the shape of
+    # the answer: a single number per cell, cohort-pooled, read straight off two axes. The
+    # per-sample curves that follow answer a different question (do samples agree?) and are much
+    # harder to read for this one.
+    #
+    # Both axes share this one implementation, and — this is the point of drawing both — share one
+    # colour scale, so a cell's shade means the same thing in each and the two fronts are directly
+    # comparable rather than each normalised to its own maximum.
+    def onset_grid_figure(column, labels, xlabel, title, norm=None):
+        off = empty_grid(labels)
+        n = empty_grid(labels)
         for i, period in enumerate(PERIODS):
-            for j, band in enumerate(LEN_LABELS):
-                g = comp[(comp["period"] == period) & (comp["len_band"] == band)]
+            for j, band in enumerate(labels):
+                g = comp[(comp["period"] == period) & (comp[column] == band)]
                 tot = g["reads"].sum()
                 if tot < MIN_CELL_READS:
                     continue
                 n[i, j] = tot
                 off[i, j] = g.loc[g["off_mode"] != 0, "reads"].sum() / tot
 
-        fig, ax = plt.subplots(figsize=(9.5, 4.2))
+        fig, ax = plt.subplots(figsize=(max(9.5, 1.15 * len(labels)), 4.2))
         cmap = plt.get_cmap("Blues")
-        # Capped at the 95th percentile so one saturated cell does not flatten the gradient the
-        # onset is read from; the annotations carry the true value regardless.
-        finite = off[np.isfinite(off)]
-        vmax = max(float(np.nanpercentile(finite, 95)) if finite.size else 0.2, 0.05)
-        norm = Normalize(vmin=0, vmax=vmax)
-        im = ax.imshow(np.clip(off, 0, vmax), cmap=cmap, norm=norm, aspect="auto")
+        if norm is None:
+            # Capped at the 95th percentile so one saturated cell does not flatten the gradient the
+            # onset is read from; the annotations carry the true value regardless.
+            finite = off[np.isfinite(off)]
+            vmax = max(float(np.nanpercentile(finite, 95)) if finite.size else 0.2, 0.05)
+            norm = Normalize(vmin=0, vmax=vmax)
+        im = ax.imshow(np.clip(off, 0, norm.vmax), cmap=cmap, norm=norm, aspect="auto")
         fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02).set_label(
             "off-mode read fraction", fontsize=8.5
         )
         annotate_grid(ax, off, cmap, norm, "{:.1%}", ncnt=n)
-        grid_axes(ax, lambda p: f"{PERIOD_NAME.get(p, p)} ({p})")
-        ax.set_title(
-            "Stutter by period × tract length — cohort-pooled off-mode fraction",
-            fontweight="bold",
-            fontsize=11,
-        )
+        grid_axes(ax, lambda p: f"{PERIOD_NAME.get(p, p)} ({p})", labels=labels, xlabel=xlabel)
+        ax.set_title(title, fontweight="bold", fontsize=11)
         fig.tight_layout()
-        return fig
+        return fig, norm
+
+    _len_fig, _shared_norm = onset_grid_figure(
+        "len_band",
+        LEN_LABELS,
+        "reference tract length (bp)",
+        "Stutter by period × tract LENGTH — cohort-pooled off-mode fraction",
+    )
+    _copy_fig, _ = onset_grid_figure(
+        "copy_band",
+        COPY_LABELS,
+        "reference tract length (repeat units)",
+        "Stutter by period × REPEAT COUNT — same reads, same colour scale",
+        norm=_shared_norm,
+    )
 
     mo.vstack(
         [
             mo.md(
-                "## 2 · From what length does stuttering start to matter\n"
-                "One cell per (period, tract length), pooled over the cohort: the fraction of "
-                "complete reads sitting away from their own unit's modal length. Read the **onset** "
-                "as the column where a row stops being pale — it is not one length for all periods, "
-                "which is the whole point of putting both axes on the same picture. Cells with "
-                f"fewer than **{MIN_CELL_READS}** complete reads are left blank."
+                "## 2 · From what size does stuttering start to matter\n"
+                "One cell per (period, size), pooled over the cohort: the fraction of complete "
+                "reads sitting away from their own unit's modal length. Read the **onset** as the "
+                "column where a row stops being pale. Cells with fewer than "
+                f"**{MIN_CELL_READS}** complete reads are left blank.\n\n"
+                "**Two size axes, because they are different claims about the mechanism.** "
+                "Base length is what the *read* cares about — a tract competes with the read for "
+                "room to be spanned. Repeat count is what the *polymerase* cares about — slippage "
+                "happens per unit, so a run of ten copies offers ten chances to slip whether the "
+                "unit is 2 bp or 6 bp. If stutter tracked base length the front would fall in the "
+                "same column for every period; if it tracks copy number it should straighten out "
+                "on the second grid."
             ),
-            onset_grid_figure(),
+            _len_fig,
+            _copy_fig,
+            mo.md(
+                "*The two grids hold the same reads and share one colour scale, so shades are "
+                "comparable between them. The empty lower-left of the copy grid is not missing "
+                "data: the catalog's per-period copy floors (6 for mono, 4 for di and tri, 3 "
+                "above) mean short-copy tracts of some periods are never admitted in the first "
+                "place.*"
+            ),
         ]
     )
     return
