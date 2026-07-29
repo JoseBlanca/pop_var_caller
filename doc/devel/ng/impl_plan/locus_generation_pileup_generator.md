@@ -119,7 +119,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   `Complete` | `Observed { offset_in_locus, positions_covered }`, resolved once, against the
   **final** footprint. A read `Complete` when it folded becomes `Observed` after a widen with nothing
   about the read having changed. *Depends:* A3. *Source:* spec §4, §6.
-- ☐ **A5 — the no-observation path.** A non-contiguous witness yields no observation and the read is
+- ✅ **A5 — the no-observation path.** A non-contiguous witness yields no observation and the read is
   recorded — as a **per-record set of read ids, not a counter**: the path is reached at every
   position the record is affected at, so a counter multiplies by the footprint length. And a read
   that folded contiguously can *become* non-contiguous when the window widens, so the path must

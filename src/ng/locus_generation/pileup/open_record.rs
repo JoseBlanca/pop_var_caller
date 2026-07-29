@@ -127,6 +127,12 @@ pub(super) struct RecordWitness {
     pub reads_complete: u32,
     /// Folded reads that witnessed one contiguous run short of it.
     pub reads_partially_observed: u32,
+    /// Reads that covered this record and yielded **no observation at all** — their
+    /// witnessed positions inside the footprint were non-contiguous, which one
+    /// `Observed` run cannot describe honestly (spec §6). The size of
+    /// [`OpenPileupRecord::reads_without_observation`], which is a set of read ids
+    /// precisely so this number cannot be inflated by the footprint's length.
+    pub reads_without_observation: u32,
 }
 
 /// How much of the finished record a read witnessed, in **locus positions**.
@@ -218,6 +224,39 @@ pub(super) struct OpenPileupRecord {
     /// `ref_span` (B1 in `ia/reviews/pileup_2026-05-06.md`).
     ///
     folded_reads: AHashMap<u32, FoldedReadState>,
+    /// The reads that covered this record and produced no observation: their
+    /// witnessed positions inside the footprint were non-contiguous — an interior
+    /// `N`, a ref-skip — and `Observed` describes one run, so there is nothing
+    /// honest to emit (spec §6).
+    ///
+    /// **A set of read ids, and that is the whole point of the field (spec §4).**
+    /// The no-observation path is reached at *every* position the record is affected
+    /// at, so a counter incremented there would multiply by the footprint length —
+    /// the same once-per-record-not-once-per-position bug the subtract-then-add
+    /// mechanism exists to prevent, on the one path with no inherited test to catch
+    /// it. Membership is idempotent; the count is taken at `finalise`.
+    ///
+    /// A `Vec` rather than a hash set because the population is tiny by construction
+    /// — adaptor masking and the dropped-indel rule always truncate from one side,
+    /// so they stay expressible as a run, and only an interior hole lands here — and
+    /// an empty `Vec` costs no allocation on a path that runs once per covered base.
+    ///
+    /// *Invariant: membership is monotone.* The window's left edge is the record's
+    /// anchor and never moves; widening only extends the right. A hole inside the
+    /// footprint therefore stays a hole, so a read recorded here can never fold
+    /// successfully later — asserted in `fold_read_into_record` rather than handled,
+    /// because a removal path would be code no input can reach.
+    reads_without_observation: Vec<u32>,
+}
+
+/// Record `read_id` as having yielded no observation in this record, once.
+///
+/// Linear membership over a `Vec`: see [`OpenPileupRecord::reads_without_observation`]
+/// for why the population is small enough that this beats a set that allocates.
+fn note_no_observation(reads_without_observation: &mut Vec<u32>, read_id: u32) {
+    if !reads_without_observation.contains(&read_id) {
+        reads_without_observation.push(read_id);
+    }
 }
 
 /// What a single read currently contributes to one bucket of one
@@ -293,6 +332,9 @@ impl OpenPileupRecord {
             chrom_id,
             pos,
             alleles: vec![OpenAllele::new(ref_seq)],
+            // Unallocated until the first non-contiguous witness, which most records
+            // never see — see the field's own note.
+            reads_without_observation: Vec::new(),
             folded_reads: AHashMap::with_capacity(RECORD_FOLDED_READS_INITIAL_CAPACITY),
         }
     }
@@ -339,7 +381,10 @@ impl OpenPileupRecord {
     pub fn finalise(self) -> (PileupRecord, RecordWitness) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
-        let mut witness = RecordWitness::default();
+        let mut witness = RecordWitness {
+            reads_without_observation: self.reads_without_observation.len() as u32,
+            ..RecordWitness::default()
+        };
         let mut per_bucket: Vec<Vec<ChainId>> =
             (0..self.alleles.len()).map(|_| Vec::new()).collect();
         let mut placed_start_per_bucket: Vec<u32> = vec![0; self.alleles.len()];
@@ -952,6 +997,20 @@ fn event_kind_rank(ev: &ReadEvent) -> u8 {
     }
 }
 
+/// The three record fields a fold mutates, split-borrowed out of an
+/// [`OpenPileupRecord`] so the caller can hold `allele_seq_buf` — which lives on the
+/// *table*, not the record — mutably at the same time.
+///
+/// Grouped rather than passed as three parameters because they always travel together
+/// and always come from the same destructure: a fold that could touch the buckets
+/// without being able to record a read that produced no observation would be the A5
+/// defect, spelled in the type.
+struct RecordFoldState<'a> {
+    alleles: &'a mut Vec<OpenAllele>,
+    folded_reads: &'a mut AHashMap<u32, FoldedReadState>,
+    reads_without_observation: &'a mut Vec<u32>,
+}
+
 /// Fold one read into one open record, exactly once: build the haplotype its events
 /// present, place it in the matching bucket, and record what it contributed.
 ///
@@ -969,17 +1028,25 @@ fn event_kind_rank(ev: &ReadEvent) -> u8 {
 /// contributor path passes the contributor's walker-position BQ anyway, because that is
 /// what production passes and the parity claim is about the walk.
 fn fold_read_into_record(
-    alleles: &mut Vec<OpenAllele>,
-    folded_reads: &mut AHashMap<u32, FoldedReadState>,
+    record: &mut RecordFoldState<'_>,
     allele_seq_buf: &mut Vec<u8>,
     rec_pos: u32,
     active: &super::active_read_set::ActiveRead,
     window_events: &[ReadEvent],
     bq_fallback: u8,
 ) {
+    let RecordFoldState {
+        alleles,
+        folded_reads,
+        reads_without_observation,
+    } = record;
     let Some(witnessed) =
         apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, window_events)
     else {
+        // A5: **which** reads these were, as a per-record set. The path is reached at
+        // every position the record is affected at, so a counter here would multiply
+        // by the footprint length (spec §4).
+        note_no_observation(reads_without_observation, active.read_id);
         // A non-contiguous witness — an interior `N`, or a ref-skip — yields no
         // observation (spec §6). **The prior contribution has to come off first**, and
         // this is not a corner: a read that folded contiguously *becomes* non-contiguous
@@ -987,16 +1054,22 @@ fn fold_read_into_record(
         // would strand a live contribution in a bucket for a read that now has no row,
         // breaking `chain_ids.len() <= num_obs` silently and only on multi-base records
         // (spec §4).
-        //
-        // A5 adds the other half — recording *which* reads these were, as a per-record
-        // set of read ids rather than a counter, since this path is reached at every
-        // position the record is affected at and a counter would multiply by the
-        // footprint length.
         if let Some(prev) = folded_reads.remove(&active.read_id) {
             subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
         }
         return;
     };
+
+    // PANIC-FREE, and the assert states the invariant rather than defending against it:
+    // the record's left edge is its anchor and never moves, and a widen only extends the
+    // right, so a hole inside the footprint stays a hole. A read that once yielded no
+    // observation cannot fold successfully later — which is why nothing removes it from
+    // the set, and why a removal path would be code no input can reach.
+    debug_assert!(
+        !reads_without_observation.contains(&active.read_id),
+        "read {} folded after having been recorded as witnessing nothing contiguous",
+        active.read_id,
+    );
 
     let ln_q = ln_bq_for_read(window_events, bq_fallback).max(active.read.mq_log_err);
     let mapq = u32::from(active.read.mapq);
@@ -1090,6 +1163,7 @@ fn refold_live_reads(
     let OpenPileupRecord {
         alleles,
         folded_reads,
+        reads_without_observation,
         ..
     } = rec;
     for &read_id in ids.iter() {
@@ -1112,7 +1186,12 @@ fn refold_live_reads(
         let Some(witnessed) = apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, &window)
         else {
             // The wider window opened a hole in what was one run — see
-            // `fold_read_into_record` for why the contribution has to come off.
+            // `fold_read_into_record` for why the contribution has to come off, and
+            // why the read is recorded rather than merely dropped. **This is the
+            // arrival that makes the case ordinary rather than a corner:** a read
+            // folds contiguously, the record widens right across an interior gap, and
+            // the read that had a row a moment ago now has none.
+            note_no_observation(reads_without_observation, read_id);
             folded_reads.remove(&read_id);
             subtract_contribution(
                 &mut alleles[previous.allele_index].support,
@@ -1335,9 +1414,15 @@ pub(super) fn process_position(
         let OpenPileupRecord {
             alleles,
             folded_reads,
+            reads_without_observation,
             ..
         } = rec;
         let rec_end = rec_pos + alleles[0].seq.len() as u32;
+        let mut fold_state = RecordFoldState {
+            alleles,
+            folded_reads,
+            reads_without_observation,
+        };
 
         for contrib in contributors {
             // PANIC-FREE: every `ReadContribution` is built from
@@ -1382,8 +1467,7 @@ pub(super) fn process_position(
             }
 
             fold_read_into_record(
-                alleles,
-                folded_reads,
+                &mut fold_state,
                 allele_seq_buf,
                 rec_pos,
                 active_read,
@@ -1394,7 +1478,7 @@ pub(super) fn process_position(
 
         // After every contributor has folded, not before: the empty buckets are created
         // *by* the re-folds a widen triggers, and by the no-observation path above.
-        evict_unsupported_alleles(alleles, folded_reads);
+        evict_unsupported_alleles(fold_state.alleles, fold_state.folded_reads);
     }
 
     Ok(ProcessOutcome { widen_count })
@@ -2651,9 +2735,157 @@ mod tests {
             RecordWitness {
                 reads_complete: 1,
                 reads_partially_observed: 2,
+                reads_without_observation: 0,
             },
             "the opener's deletion witnessed 5..=20 whole; the shortie stopped at 7 and \
              the widener started there"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // A5 — the no-observation path: which reads, as a set.
+    // -----------------------------------------------------------------
+
+    /// **A read that witnesses nothing contiguous is recorded once, not once per
+    /// position** — the reason the field is a set of read ids and not a counter
+    /// (spec §4).
+    ///
+    /// The path is reached at *every* position the record is affected at. `holey`
+    /// matches 5..=9 with an `N` at 7, so it is a contributor at four of the record's
+    /// five positions and yields no observation at every one of them. A counter
+    /// incremented there would report **four** reads without an observation where
+    /// there is one — a number multiplied by the footprint's length, on the one path
+    /// with no inherited test to catch it.
+    #[test]
+    fn a_read_witnessing_nothing_contiguous_is_recorded_once_not_once_per_position() {
+        let reference = fa(WIDEN_CONTIG);
+        // `ACNTA` over 5..=9: the reference reads `ACGTA` there, and the `N` at 7
+        // makes the cursor emit nothing — a hole the read's *alignment span* is blind
+        // to, which is why coverage comes from the events.
+        let (active, _ids) = admitted(vec![
+            plain_read("holey", 5, 9, vec![CigarOp::Match(5)], b"ACNTA".to_vec()),
+            plain_read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(16)],
+                vec![b'A'; 17],
+            ),
+        ]);
+        let mut open = OpenPileupRecordTable::new();
+        // 7 is absent on purpose: the `N` means `holey` has no event there, so the
+        // walker would not stop for it either.
+        for pos in [5u32, 6, 8, 9] {
+            let contributors = contributors_at(&active, pos);
+            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+                .expect("the fixture walks cleanly");
+        }
+
+        let record = open.records.remove(&5).expect("the record at 5");
+        assert_eq!(
+            record.ref_span(),
+            5,
+            "the opener's deletion must open the record at 5..=9, or the hole at 7 is \
+             not inside the footprint and the fixture reaches nothing"
+        );
+        assert_eq!(
+            record.reads_without_observation.len(),
+            1,
+            "the same read at four positions is one read: {:?}",
+            record.reads_without_observation
+        );
+        let (_record, witness) = record.finalise();
+        assert_eq!(
+            witness.reads_without_observation, 1,
+            "a counter incremented on the path would report one per affected position"
+        );
+        assert_eq!(
+            witness.reads_complete, 1,
+            "the opener's deletion witnessed the whole footprint"
+        );
+    }
+
+    /// **A read whose witness splits when the record widens is recorded, not merely
+    /// dropped.**
+    ///
+    /// `holed`'s deletion covers 6 and 7, so it witnesses 5..=7 as one run and — being
+    /// inside that deletion at the widening position — is not a contributor there.
+    /// Only [`refold_live_reads`] reaches it. `widener` then grows the record to
+    /// 5..=20, which brings `holed`'s `N` at 11 inside the footprint and splits its
+    /// witness in two. It leaves its bucket, and it has to leave a record of itself
+    /// behind: a read that had a row a moment ago now has none, and nothing else in
+    /// the output says so.
+    #[test]
+    fn a_read_whose_witness_splits_at_a_widen_is_recorded_not_merely_dropped() {
+        let reference = fa(WIDEN_CONTIG);
+        // Match(1) at 5, deletion over 6..=7, then matches from 8. Position 11 is the
+        // fifth of those matched bases and is `N`.
+        let mut holed_seq = vec![b'A'; 19];
+        holed_seq[4] = b'N';
+        let (active, _ids) = admitted(vec![
+            plain_read(
+                "holed",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(18)],
+                holed_seq,
+            ),
+            plain_read(
+                "widener",
+                7,
+                24,
+                vec![CigarOp::Match(1), CigarOp::Deletion(13), CigarOp::Match(4)],
+                b"TAAAA".to_vec(),
+            ),
+        ]);
+        let mut open = OpenPileupRecordTable::new();
+
+        let contributors = contributors_at(&active, 5);
+        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("opens");
+        let holed_id = read_id_of(&active, "holed");
+        assert!(
+            open.records
+                .get(&5)
+                .expect("the record at 5")
+                .folded_reads
+                .contains_key(&holed_id),
+            "before the widen `holed` witnessed 5..=7 as one run and has a row"
+        );
+
+        let contributors = contributors_at(&active, 7);
+        assert!(
+            !contributors.iter().any(|c| c.read_id == holed_id),
+            "`holed` must be inside its own deletion at 7, or the fold loop reaches it \
+             and `refold_live_reads` is not the path under test"
+        );
+        process_position(&mut open, 7, 0, &contributors, &active, &reference).expect("widens");
+
+        let record = open.records.remove(&5).expect("the record at 5");
+        assert_eq!(
+            record.ref_span(),
+            16,
+            "the record must have widened to 5..=20"
+        );
+        assert_eq!(
+            record.reads_without_observation,
+            vec![holed_id],
+            "the widen brought the hole at 11 inside the footprint"
+        );
+        assert!(
+            !record.folded_reads.contains_key(&holed_id),
+            "and the read has no row left"
+        );
+        let (emitted, witness) = record.finalise();
+        assert_eq!(witness.reads_without_observation, 1);
+        assert_eq!(
+            emitted
+                .alleles
+                .iter()
+                .map(|allele| allele.support.num_obs)
+                .sum::<u32>(),
+            1,
+            "only `widener` still supports this record — `holed`'s contribution came \
+             off the bucket it was in: {emitted:?}"
         );
     }
 
