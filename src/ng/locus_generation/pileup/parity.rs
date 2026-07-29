@@ -1154,8 +1154,21 @@ fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> b
 const CASES_PER_SEED: usize = 400;
 
 /// Cases per seed, overridable by `PVC_PARITY_CASES` so a soak run is one command away —
-/// the convention `delimit_parity` set: `PVC_PARITY_CASES=20000 cargo test --release --lib
-/// ng::locus_generation::pileup::parity`.
+/// the convention `delimit_parity` set.
+///
+/// **Use `--profile soak`, not `--release`** (Cargo.toml): `[profile.release]` leaves
+/// `debug-assertions` off, so a release soak proves the two walkers diverge in the same
+/// places and proves nothing about the invariants asserted along the way — which is most of
+/// what this walk asserts. `soak` is release-speed with the assertions and overflow checks
+/// armed:
+///
+/// ```text
+/// PVC_PARITY_CASES=5000 cargo test --profile soak --lib ng::locus_generation::pileup::parity
+/// ```
+///
+/// **Host-native.** `scripts/dev.sh` forwards only `CARGO_TARGET_DIR` and `HOME`, so
+/// `PVC_PARITY_CASES` never reaches the container: a soak invoked through it silently walks
+/// the default case count and finishes in under a second, looking like it worked.
 fn cases_per_seed() -> usize {
     std::env::var("PVC_PARITY_CASES")
         .ok()
