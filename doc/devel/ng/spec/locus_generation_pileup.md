@@ -1047,11 +1047,13 @@ PROJECT_STATUS "Standing project-wide items".
 
 ## 12. What happens to production's tests
 
-The walker's 46 tests come with the copy. Knowing in advance which must still pass and which must
+The walker.s **113** tests come with the copy — 44 end-to-end in `tests.rs` plus 69 inline across the
+seven files (70 `#[test]` markers, one pair mutually exclusive by `cfg(debug_assertions)`). *(This
+spec and the port plan both said "46" until 2026-07-29, when A4 counted them.)* Knowing in advance which must still pass and which must
 change is how the port is kept honest — a test that changes silently is a behaviour change nobody
 decided.
 
-**At stage 1 (the verbatim copy) all 46 must pass, unmodified.** That *is* the gate. Anything that
+**At stage 1 (the verbatim copy) all 113 must pass, unmodified.** That *is* the gate. Anything that
 needs touching at this stage is a transcription error, not a design change.
 
 **At stage 2 they split three ways.**

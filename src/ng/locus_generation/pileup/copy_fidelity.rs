@@ -5,6 +5,20 @@
 //! `tests.rs` cannot compare `tests.rs` against its original, because it is part of
 //! it). Keeping it here also keeps the boundary a **file** boundary: everything in
 //! `pileup/` is either a verbatim copy or ng's own, and no file is both.
+//!
+//! # Why the copies carry no "do not edit" banner (owner, 2026-07-29)
+//!
+//! A review asked for a per-file banner, on a real worry: someone arrives at
+//! `genome_walk.rs` from a grep hit or a stack trace, tidies something, and the baseline
+//! this whole plan rests on is quietly gone. **Declined, deliberately.** A banner would
+//! widen the plan's sanctioned edit set, and it would cost `genome_walk.rs` and `errors.rs`
+//! their byte-identity with their originals — `diff` exit 0, the cheapest and most durable
+//! fidelity statement available, and one that survives a future re-copy.
+//!
+//! This test is the answer instead: it fails the build, at the same moment the banner would
+//! have been read, with a message that names the production original and says the file must
+//! not be edited. A failing build is a stronger signal than a comment, and it cannot be
+//! skimmed past.
 
 /// **"These eight files are production's, verbatim" — asserted, not claimed.**
 ///

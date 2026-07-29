@@ -47,8 +47,11 @@ than reaches in (spec §3).
   not at all yet.
 - **Production's walker is intact and frozen**: `driver.rs`, `open_record.rs`, `cigar_cursor.rs`,
   `decompose.rs`, `active_read_set.rs`, `chain_id_allocator.rs`, `errors.rs` (~5,495 lines).
-- **Its test suite exists** — 46 tests in [`walker/tests.rs`](../../../../src/pileup/walker/tests.rs),
-  with `MockFasta`, `snp_read` and `paired_snp_reads` reusable from ng's tests (`pub(crate)` under
+- **Its test suite exists** — **44** end-to-end tests in [`walker/tests.rs`](../../../../src/pileup/walker/tests.rs),
+  plus **69** inline across the seven files (70 `#[test]` markers; `subtract_contribution`.s debug and
+  release pair is mutually exclusive by `cfg`), so **113 inherited tests** in any one profile. *(Both
+  documents said "46" until 2026-07-29; the number was counted during A4 and corrected here.)*
+  `MockFasta`, `snp_read` and `paired_snp_reads` are reusable from ng.s tests (`pub(crate)` under
   `#[cfg(test)]`). Spec §12 classifies them.
 - **`CigarOp`, `PileupRecord`, `AlleleObservation`, `AlleleSupportStats` are `pub`** and unchanged by
   ng — reused, not copied.
@@ -72,7 +75,7 @@ than reaches in (spec §3).
 - ✅ **A3 — the reference shim.** `RefSeqFetcher<R: RefSeq>` implementing `MultiChromRefFetcher`.
   Semantically empty: both contracts are canonical uppercase `{A,C,G,T,N}`, verified in the
   implementation and not just the doc. *Depends:* A2. *Source:* arch §1.3.
-- ✅ **A4 — the copied suite is green.** All 46 inherited tests pass **unmodified**. Anything needing
+- ✅ **A4 — the copied suite is green.** All **113** inherited tests (44 end-to-end + 69 inline) pass **unmodified**. Anything needing
   a touch here is a transcription error, not a design change — spec §12 is explicit that this is the
   gate. *Depends:* A3. *Source:* spec §12.
 
@@ -111,7 +114,7 @@ than reaches in (spec §3).
 
 | milestone | proven by |
 |---|---|
-| A | production's 46 walker tests, **unmodified**, green against the copy |
+| A | production.s **113** inherited walker tests (44 end-to-end + 69 inline), **unmodified**, green against the copy |
 | B1 | element-wise equality of two `PileupRecord` streams + `RunSummary`, one input stream, bitwise `f32` comparison |
 | B2 | five mutations, five failures — the fixture is shown to discriminate before it is trusted |
 | B3 | zero divergences on GIAB HG002 and a tomato CRAM at `PVC_PARITY_CASES` scale |

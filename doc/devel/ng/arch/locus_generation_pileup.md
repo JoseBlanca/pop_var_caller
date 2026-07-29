@@ -39,11 +39,21 @@ src/ng/locus_generation/pileup/
   active_read_set.rs    – the active set
   chain_id_allocator.rs – chain ids + mate pairing
   errors.rs             – WalkerError
+  tests.rs              – #[cfg(test)] production's own end-to-end walker suite, copied
+                          verbatim: Milestone A's gate (spec §12). Dies with plan 3.
+  copy_fidelity.rs      – #[cfg(test)] ng's own: the textual check that the eight copies
+                          are still production's, from outside the files it checks
   parity.rs             – #[cfg(test)] the differential harness (spec §3)
 ```
 
-**Seven of those are copies** — `genome_walk` through `errors` — landing verbatim and changed only
-once the differential passes (spec §3). `mod.rs` and `parity.rs` are ng's own.
+**Eight of those are copies** — `genome_walk` through `errors`, plus `tests.rs` — landing verbatim
+and changed only once the differential passes (spec §3). `mod.rs`, `copy_fidelity.rs` and `parity.rs`
+are ng's own.
+
+*(Inventory corrected 2026-07-29: `tests.rs` and `copy_fidelity.rs` were missing. `tests.rs` is not
+optional — A4's gate is production's suite green **against the copy**, which is only meaningful if it
+runs against ng's walker. `copy_fidelity.rs` cannot live inside `tests.rs`, because `tests.rs` is one
+of the files it checks.)*
 `src/ng/read/` gains the read type they all name:
 
 ```

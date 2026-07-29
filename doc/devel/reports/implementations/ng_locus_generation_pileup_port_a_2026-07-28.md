@@ -233,21 +233,17 @@ banners, the "46 tests" in the plan and the spec, and the arch doc's file invent
 
 Each reaches past the step, which is why none was decided in code.
 
-1. **Should the seven copies carry a "this is a copy, do not edit" banner?** The review's M3 asked
-   for one per file. It is declined *for now*, with the reason: it widens the plan's sanctioned edit
-   set (A2 permits module paths and `PreparedRead`, nothing else), and it costs the byte-identity of
-   `genome_walk.rs` and `errors.rs`, which are currently identical to their originals at `diff` exit
-   0 — the cheapest fidelity statement available. `copy_fidelity.rs` addresses the same worry more
-   strongly, since it fails the build rather than asking to be read. But the worry is real: a
-   maintainer arriving from a grep hit or a stack trace sees nothing. **Owner's call**, and if yes,
-   the fidelity test's sanctioned set grows by one class.
-2. **The plan and the spec still say "46 tests"** — plan `:50`, `:75`, `:114`; spec `:1050`,
-   `:1054`. The real numbers are 44 end-to-end + 69 inline (§5). This skill does not edit design
-   documents, so A4 is ticked against a criterion this milestone disproved and the correction lives
-   only here.
-3. **The arch doc's *Module home* inventory** names `parity.rs` (correctly absent — it is B1's) but
-   omits `tests.rs` and now `copy_fidelity.rs`, and specifies a private `RefSeqFetcher` where the
-   code shipped `pub` (now narrowed to match). Two files to add, one line to adjust.
+1. **The copy banners — RESOLVED: no banner** (owner, 2026-07-29). It would widen the plan.s
+   sanctioned edit set and cost `genome_walk.rs` and `errors.rs` their byte-identity, and
+   `copy_fidelity.rs` answers the same worry by failing the build with a message that names the
+   production original. The reason is recorded in that file, so the decision is met where the
+   question arises.
+2. **The "46 tests" — RESOLVED: corrected** (owner, 2026-07-29). Plan `:50`, `:75`, `:114` and spec
+   `:1050`, `:1054` now read 113 (44 end-to-end + 69 inline), each with a dated note saying what the
+   number used to be and when it was counted.
+3. **The arch inventory — RESOLVED: fixed** (owner, 2026-07-29). `tests.rs` and `copy_fidelity.rs`
+   added, the count corrected to eight copies, with a dated note on why neither is optional. The
+   private-`RefSeqFetcher` mismatch was closed in the review pass by narrowing the code to match.
 4. **Should `RefSeqFetcher` be renamed, and should it move to its own file?** The review found the
    name was **deliberately retired** in this codebase for a different concept
    (`fasta/fetcher.rs:20-23`, a 2026-05-23 review), and that the name does not say which way the
