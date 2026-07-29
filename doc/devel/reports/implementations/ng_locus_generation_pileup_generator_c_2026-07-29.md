@@ -180,7 +180,7 @@ it), bringing the branch's count to nine.
 None of these blocks Milestone D.
 
 1. ~~No generator error carries the region it fired in.~~ **Done — owner
-   approved, 2026-07-29 (`a17f37b`).** Every generator-raised variant now carries
+   approved, 2026-07-29 (`49a8ff0`).** Every generator-raised variant now carries
    a `GenomeRegion`, `Reads` split into `OpenReadQuery` + `Reads`, and **none of
    the four has a `#[from]`** — with a blanket conversion a bare `?` compiles and
    silently produces an error with no region, which is the state the change
