@@ -143,6 +143,21 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   dropped **per read** — none for a read that agreed with the reference across everything it
   witnessed — because row splitting means "the REF row" is no longer a unique row. *Depends:* B1.
   *Source:* spec §3, §6.
+
+  **B2 owns the determinism test, and it must run the walk in *separate processes* — owner,
+  2026-07-29.** Milestone A's review found two mechanisms whose only observable effect is the order
+  rows are created in: `refold_live_reads`' `ids.sort_unstable()` (delete it and all 151 tests pass,
+  in four separate processes too) and the contributor skip in the same function. Neither is pinnable
+  from inside one process, because `ahash`'s seed is fixed *within* a process and both walkers run in
+  the same one — the tests compare ng against production, never one ng run against another.
+
+  Rather than write a cross-process test for a mechanism this step makes redundant, the decision is
+  that **B2's sort is the guarantee and B2's test is where determinism is proven** (owner: "enough
+  that B2 makes it so"). Once rows are ordered by `(bases, read_coverage, read_group)`, creation
+  order is invisible in the output and the sort at `refold_live_reads` is belt-and-braces, kept
+  because it costs nothing on a rare path. The test to write here is therefore: **the same input
+  walked in two separate processes emits byte-identical output** — which is the property spec §7 and
+  §13 actually claim, and which no test in Milestone A could have made.
 - ☐ **B3 — the per-record counters.** `reads_without_observation` (A5's set) and
   `reads_discarded_by_cap`. The cap truncates in the walk, **before any record exists**, so the
   truncated ids must be plumbed into the fold and registered per affected record; the count is those

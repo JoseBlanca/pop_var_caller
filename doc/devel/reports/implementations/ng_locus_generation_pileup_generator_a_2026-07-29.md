@@ -287,12 +287,15 @@ None of these blocks Milestone B.
    the STR generator to buy a range no data can occupy. **This makes `max_record_span` the one
    knob where ng's constant is not simply production's**, against C1's "by name" default.
    A4's `debug_assert` stays as the invariant's statement; C1 is its enforcement.
-2. **Is bucket-creation order part of ng's contract before B2's sort lands?** Two findings
-   hang on it: `refold_live_reads`' read-id sort is unpinned by any test (determinism *was*
-   verified empirically across five hash seeds), and the contributor skip in the same function
-   is unpinned for the same reason — given the carry (§6.1), its only residue is that order.
-   Both are recorded in the code. If the answer is "no, B2's sort is the contract", both stay
-   comments.
+2. ~~**Is row-creation order part of ng's contract before B2's sort lands?**~~ **Resolved
+   (owner, 2026-07-29): no — B2's sort is the guarantee.** Two mechanisms have no observable
+   effect but that order: `refold_live_reads`' `ids.sort_unstable()` and the contributor skip
+   in the same function. Neither is pinnable from inside one process — `ahash`'s seed is fixed
+   *within* a process, and every parity test compares ng against production in that same
+   process, never one ng run against another. Deleting the sort leaves all 151 tests green,
+   in four separate processes too. Both stay as comments; **B2 gains the determinism test, and
+   it must run the walk in separate processes** — the property spec §7 and §13 actually claim,
+   and one no Milestone A test could have made. Written into the plan's B2 step.
 3. **`coverage_of` takes two positional `u32` record coordinates** and transposing them
    compiles — the hazard that made plan 1 introduce `LocusLen`. A `debug_assert` catches it in
    debug builds; a footprint newtype is the real fix and is a small type addition, not an
