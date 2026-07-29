@@ -16,8 +16,8 @@
 //! `SsrSegment` into one locus.
 
 use super::{
-    LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
-    SsrDetail,
+    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage,
+    SampleLocusObservations, SsrDetail,
 };
 #[cfg(test)]
 use crate::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
@@ -1827,6 +1827,14 @@ where
     fn begin_segment(&mut self, region: GenomeRegion) {
         self.current_region = Some(region);
         self.produced = false;
+    }
+
+    /// The STR counts, reachable through a boxed generator — the same need the generic
+    /// generator's nine had. This tool-driven path reads them off the concrete type
+    /// ([`SsrGenerator::counts`]); a dispatcher-driven one cannot, and now does not have
+    /// to.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        Some(GeneratorCounts::Ssr(SsrGenerator::counts(self)))
     }
 
     fn next_locus(

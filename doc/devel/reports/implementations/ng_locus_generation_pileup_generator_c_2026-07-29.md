@@ -185,10 +185,11 @@ None of these blocks Milestone D.
    the four has a `#[from]`** — with a blanket conversion a bare `?` compiles and
    silently produces an error with no region, which is the state the change
    exists to make unreachable. See §9.
-2. **`PileupGeneratorCounts` is unreachable once the generator is boxed into a
-   `GeneratorSlot`** — nine counters with no reader that is not a test, and it is
-   what makes a zero-knob walk *totally* silent. Needs either a counts method on
-   the `LocusGenerator` trait, a fold into `LocusCounts`, or a caller-held sink.
+2. ~~`PileupGeneratorCounts` is unreachable once the generator is boxed into a
+   `GeneratorSlot`.~~ **Done — owner approved the trait method, 2026-07-29.**
+   `LocusGenerator::counts()` returns a kind-tagged `GeneratorCounts`, defaulted
+   to `None`. See §10. **Its first non-test reader is still owed** — D2's dump
+   header — and until then an end-to-end test stands in.
 3. **The read-query accessor factory is called once per file per region** — spec
    §8's ~564k-opens trap shape, in the one accessor the generator cannot hold for
    the run because `reads_in_region` requires a per-file one. Documented on the
@@ -261,3 +262,43 @@ to be charged to it.
 **Validation:** fmt clean, clippy `--all-targets --all-features -D warnings`
 clean, `cargo test --lib` **2718 passed**, `cargo doc --no-deps` still 12
 pre-existing unresolved links, host-native soak at 5,000 cases green.
+
+## 10. Reaching a boxed generator's counts (owner, 2026-07-29)
+
+Checkpoint C's second open item. `LocusGenerator` gains a **defaulted**
+`counts(&self) -> Option<GeneratorCounts<'_>>`, and `GeneratorCounts` is a
+kind-tagged enum over the two generators' count types.
+
+**Why this over the other two options.** A trait method cannot return an
+associated type through `dyn`, and a downcast moves a compile-time question to
+run time — so the kinds are enumerated in the shared module, which is **exactly
+what this module already does for loci**: `SampleLocusObservations.kind` is a
+`LocusKind` whose `Ssr` arm carries an `SsrDetail` defined in the same file, and
+`GeneratorSet` has one *named field per kind*. The coupling is pre-existing and
+deliberate; this adds no new kind of it. Folding into `LocusCounts` was rejected
+outright — that type is the coverage ledger ("how much genome does this caller
+not cover"), kind-agnostic on purpose, and sixteen generator internals would
+destroy what it is for. A caller-held `Rc<RefCell<…>>` sink works but
+reintroduces the failure mode this milestone spent itself paying down: a consumer
+that does not wire the sink gets zeros indistinguishable from "nothing happened".
+The trait method makes "nobody can read these" unrepresentable rather than
+unlikely.
+
+The default `None` means `NoLoci` and every test fake compile unchanged, and
+"this generator counts nothing of its own" is said by saying nothing. The STR
+generator implements it too — its tool reads the concrete type, but a
+dispatcher-driven caller could not, and now does not have to.
+
+**Mutation-checked both ways.** A surface returning a zeroed `PileupGeneratorCounts`
+(the "wired to a counter nothing increments" shape) fails on `reads_admitted`
+0 ≠ 1; a slot that forwards `None` fails on reachability. An `is_some()`
+assertion would have caught neither.
+
+**Landed ahead of its reader, deliberately and against my own advice.** I
+recommended pairing the accessor with D2's `#`-prefixed counts header, on the
+grounds that an accessor nothing calls is a second unread surface — this feature
+block already has two (`reads_silent_over_footprint` and the declined-read
+tally, both structurally zero). The owner asked for the mechanism now. The
+end-to-end test asserting a **non-zero** count through the public iterator is
+what stands in until D2, and it is the first thing that would catch a counter
+wired to nothing.

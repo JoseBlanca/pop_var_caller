@@ -16,7 +16,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ng::locus_generation::{LocusGenerationError, LocusGenerator, SampleLocusObservations};
+use crate::ng::locus_generation::{
+    GeneratorCounts, LocusGenerationError, LocusGenerator, SampleLocusObservations,
+};
 use crate::ng::read::input::{SampleReads, SampleRegionReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
 use crate::ng::ref_seq::RawRefSeq;
@@ -810,6 +812,14 @@ where
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError> {
         PileupGenerator::next_locus(self, reads)
+    }
+
+    /// **The only way these nine counters are reachable once the generator is boxed.**
+    /// `GeneratorSlot` erases the type, so before this they had no reader that was not
+    /// a test — and a walk that emitted nothing for a covered region counted the
+    /// truncations explaining it into a struct nobody could see (Milestone C review).
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        Some(GeneratorCounts::Pileup(PileupGenerator::counts(self)))
     }
 }
 
@@ -1633,6 +1643,58 @@ mod tests {
         assert_eq!(
             counts.unhandled_not_implemented, 0,
             "nothing is unimplemented in this fixture — the generic slot is filled"
+        );
+    }
+
+    /// **The generator's own counters are reachable through the boxed generator, and
+    /// they are the running ones.**
+    ///
+    /// `GeneratorSlot` erases the type, so until `LocusGenerator::counts` existed these
+    /// nine had no reader at all outside this file — which is what made a walk that
+    /// emitted nothing for a covered region *totally* silent: the truncations that
+    /// explained it were counted and then unreachable (Milestone C review).
+    ///
+    /// Asserted on a **non-zero** value, and through the public iterator rather than
+    /// the concrete type: a surface returning a default-constructed struct, or one
+    /// wired to a counter nothing increments, passes an `is_some()` and fails this.
+    #[test]
+    fn the_generators_own_counts_are_reachable_through_the_public_iterator() {
+        use crate::ng::locus_generation::{
+            GeneratorCounts, GeneratorSet, GeneratorSlot, SampleLocusObservationsIterator,
+            UnhandledReason,
+        };
+        use crate::ng::region_typing::{RegionKind, TypedRegion};
+
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let generators = GeneratorSet::new(
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+            GeneratorSlot::Generator(Box::new(
+                a_generator(PileupGeneratorConfig::default()).expect("config"),
+            )),
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        );
+        let typed = vec![Ok(TypedRegion {
+            region: region(0, 1, 100),
+            kind: RegionKind::Generic,
+        })];
+
+        let mut stream = SampleLocusObservationsIterator::new(typed.into_iter(), reads, generators);
+        let loci = (&mut stream)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the walk succeeds");
+        assert_eq!(loci.len(), 30);
+
+        let Some(GeneratorCounts::Pileup(counts)) = stream.generators().generic_counts() else {
+            panic!("the generic slot's counts must be reachable once it is filled");
+        };
+        assert_eq!(
+            counts.reads_admitted, 1,
+            "the running tally the walk actually kept, not a fresh one"
+        );
+        assert!(
+            stream.generators().ssr_counts().is_none(),
+            "an unfilled slot counts nothing"
         );
     }
 

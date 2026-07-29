@@ -406,6 +406,42 @@ pub trait LocusGenerator<S> {
         segment: &S,
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError>;
+
+    /// What this generator has counted so far, beside the shared [`LocusCounts`] — or
+    /// `None` if it counts nothing of its own.
+    ///
+    /// Readable at any point; final once the run is drained. **This exists because a
+    /// boxed generator's own counters were otherwise unreachable**: `GeneratorSlot`
+    /// erases the type, so the generic generator's nine counts had no reader that was
+    /// not a test, and a walk that emitted nothing for a covered region counted the
+    /// truncations that explained it into a struct nobody could see (Milestone C
+    /// review).
+    ///
+    /// Defaulted to `None` so a generator with nothing to report — [`NoLoci`], a test
+    /// fake — says so by saying nothing.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        None
+    }
+}
+
+/// What a generator counted, tagged by which generator counted it.
+///
+/// **The same shape [`LocusKind`] uses**, and for the same reason: a common surface
+/// with a per-kind payload, where the payload's type is the kind's own. A trait
+/// method cannot return an associated type through `dyn`, and a downcast would move
+/// a compile-time question to run time — so the kinds are enumerated here, exactly as
+/// this module already enumerates them for loci ([`LocusKind::Ssr`] carrying
+/// [`SsrDetail`]) and for slots ([`GeneratorSet`] has one named field per kind).
+///
+/// Borrowed, not owned: a caller reads a running tally rather than taking a snapshot
+/// it then has to keep fresh.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum GeneratorCounts<'a> {
+    /// The generic (SNP/indel) pileup generator's run-level counts.
+    Pileup(&'a pileup::PileupGeneratorCounts),
+    /// The STR generator's run-level counts.
+    Ssr(&'a ssr::SsrGeneratorCounts),
 }
 
 /// A generator that produces no loci and reports why.
@@ -632,6 +668,15 @@ impl<S> GeneratorSlot<S> {
             GeneratorSlot::Unfilled(_) => Ok(None),
         }
     }
+
+    /// What the generator in this slot has counted, or `None` — for an unfilled slot,
+    /// or a generator that counts nothing of its own.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        match self {
+            GeneratorSlot::Generator(generator) => generator.counts(),
+            GeneratorSlot::Unfilled(_) => None,
+        }
+    }
 }
 
 /// The set of generators the dispatcher routes to — one slot per region kind — plus the
@@ -680,6 +725,27 @@ impl GeneratorSet {
     /// The running tally — readable at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         &self.counts
+    }
+
+    /// What the **STR** generator has counted, if one is filled and counts anything.
+    pub fn ssr_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.ssr.counts()
+    }
+
+    /// What the **generic** generator has counted, if one is filled and counts anything.
+    ///
+    /// One accessor per slot rather than one keyed by [`RegionKind`]: the kinds are
+    /// already three named fields here, and a key would have to carry a payload
+    /// (`RegionKind::SsrSegment` holds a segment) that has nothing to do with reading a
+    /// tally.
+    pub fn generic_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.generic.counts()
+    }
+
+    /// What the **`SsrBundle`** generator has counted, if one is filled and counts
+    /// anything. `None` today: the slot has no generator (spec §10).
+    pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.ssr_bundle.counts()
     }
 
     /// Begin a region: count it, and ready its generator if one is filled. Every region is
@@ -799,6 +865,15 @@ impl<T> SampleLocusObservationsIterator<T> {
     /// The running tally — current at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         self.generators.counts()
+    }
+
+    /// The generator set, for the per-generator counts the shared tally does not carry
+    /// ([`GeneratorSet::generic_counts`] and its siblings).
+    ///
+    /// The whole set rather than three more forwarding methods: it is handed out by
+    /// `&`, so a caller can read every slot's tally and change none of them.
+    pub fn generators(&self) -> &GeneratorSet {
+        &self.generators
     }
 }
 
