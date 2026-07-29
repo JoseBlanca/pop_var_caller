@@ -278,11 +278,15 @@ milestone reviews must give each mutating agent its own worktree.**
 
 None of these blocks Milestone B.
 
-1. **Is `--max-record-span` allowed to exceed `u16::MAX`?** A `ReadCoverage` run is a `u16`;
-   the flag is an unbounded `u32`. Above 65,535 a partial witness silently reports a truncated
-   `positions_covered`. The envelope is now `debug_assert`ed and the enforcement assigned to
-   **C1**, the step that turns these constants into `PileupGeneratorConfig` — but whether the
-   answer is "cap the flag" or "widen the run" is the owner's.
+1. ~~**Is `--max-record-span` allowed to exceed `u16::MAX`?**~~ **Resolved (owner,
+   2026-07-29): cap the knob.** `PileupGeneratorConfig` will reject `max_record_span >
+   u16::MAX`, written into the plan's **C1** step. The reasoning is that the cap constrains
+   nothing real — a locus is at most ~100 bp of reference, and a 5,000 bp record is already
+   unreachable with Illumina reads, so production's default is generous fifty-fold and this
+   ceiling six hundred-fold; widening the run to `u32` would touch the shared locus type and
+   the STR generator to buy a range no data can occupy. **This makes `max_record_span` the one
+   knob where ng's constant is not simply production's**, against C1's "by name" default.
+   A4's `debug_assert` stays as the invariant's statement; C1 is its enforcement.
 2. **Is bucket-creation order part of ng's contract before B2's sort lands?** Two findings
    hang on it: `refold_live_reads`' read-id sort is unpinned by any test (determinism *was*
    verified empirically across five hash seeds), and the contributor skip in the same function

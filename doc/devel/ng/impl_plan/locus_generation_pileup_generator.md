@@ -160,6 +160,24 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   defaulting to production's `pub const`s **by name**), `PileupGeneratorCounts` (production's
   `RunSummary` fields plus `reads_silent_over_footprint` and `records_outside_region`). *Depends:*
   B3. *Source:* arch §1.1.
+
+  **`max_record_span` is capped at `u16::MAX` (65,535), and the config rejects more — owner,
+  2026-07-29.** A `ReadCoverage` run is expressed as two `u16`s, narrowed through
+  `LocusLen::from_positions`, which **saturates**. A footprint wider than 65,535 therefore makes a
+  partial witness report a truncated `positions_covered` — a wrong number, no error. Production's
+  own `--max-record-span` is an unbounded `u32` with a default of 5,000, so inheriting the knob "by
+  name" would inherit the hazard; **this is the one knob where ng's constant is not simply
+  production's.**
+
+  *Why capping is the right answer rather than widening the run to `u32`:* the cap is not a
+  constraint in practice. A locus is at most ~100 bp of reference, and a 5,000 bp record is already
+  unreachable with Illumina reads — the existing default is generous by a factor of fifty, and
+  65,535 by a factor of six hundred. Widening the run would touch the shared locus type and the STR
+  generator that also mints coverage, to buy a range no data can occupy (owner, 2026-07-29).
+
+  A4 left a `debug_assert` in `coverage_of` stating the envelope; **this step is what makes it
+  provable** rather than hopeful, so the assert stays as documentation of the invariant and the
+  rejection is the enforcement.
 - ☐ **C2 — the region walk. Own commit, do not bundle.** `begin_segment` records the region and
   opens nothing (it cannot fail; opening a query can, so the first `next_locus` is where an
   `IngestError` surfaces). The query is `[region.start, region.end + max_record_span]` — the halo,

@@ -165,11 +165,21 @@ pub(super) struct RecordWitness {
 /// Runs are expressed in `u16`, and the narrowing goes through [`LocusLen`], which owns the
 /// saturating cast. **An earlier version of this comment claimed saturation was unreachable
 /// because "production's `max_record_span` is 5000". That is the wrong bound**: the cap is
-/// `--max-record-span`, an unbounded `u32` CLI flag, so a caller may legally configure a
-/// footprint wider than `u16::MAX`, and a partial witness inside it would report a truncated
-/// `positions_covered` with no error. The `debug_assert` below states the envelope; enforcing
-/// it belongs with the knob rather than here, and is owed by **C1**, which is the step that
-/// turns these constants into `PileupGeneratorConfig`.
+/// `--max-record-span`, an unbounded `u32` CLI flag, so a caller could configure a footprint
+/// wider than `u16::MAX` and a partial witness inside it would report a truncated
+/// `positions_covered` with no error.
+///
+/// **Settled: `PileupGeneratorConfig` caps `max_record_span` at `u16::MAX` and rejects more
+/// (owner, 2026-07-29).** The cap costs nothing real — a locus is at most ~100 bp, and a
+/// 5,000 bp record is already unreachable with Illumina reads, so the existing default is
+/// generous by fifty-fold and this ceiling by six hundred. Widening the run to `u32` would
+/// touch the shared locus type and the STR generator that also mints coverage, to buy a range
+/// no data can occupy. **This is the one knob where ng's constant is not simply production's**
+/// — inheriting it "by name" would inherit the hazard.
+///
+/// So the `debug_assert` below is the invariant's statement and **C1 is its enforcement**;
+/// until C1 lands, ng's walker is reachable only from tests and the default 5,000 leaves
+/// thirteen-fold headroom.
 pub(super) fn coverage_of(
     witnessed: RefSpan,
     record_pos: u32,
