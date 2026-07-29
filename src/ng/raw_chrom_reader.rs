@@ -115,28 +115,43 @@ impl ContigFai {
 }
 
 /// Open `chrom_name` in the FASTA at `fasta_path`, reading its sibling `.fai`
-/// (or `fai_path`).
+/// (or `fai_path`) — **unless `index` already holds it**, in which case no `.fai`
+/// is read at all.
+///
+/// The pre-parsed arm exists because parsing is the whole cost: on a GRCh38-shaped
+/// index (2,580 records) a fresh reader costs **~188 µs**, against ~0.2 µs when the
+/// parse is already done — measured, and the reason
+/// [`RawChromReader::for_contig_with_index`] exists.
 fn open_contig(
     fasta_path: &Path,
     fai_path: Option<&Path>,
+    index: Option<&fai::Index>,
     chrom_name: &str,
 ) -> Result<(ContigFai, File), ChromRefFetchError> {
     let mut fai_pathbuf: OsString;
     let fai_path_owned: PathBuf;
-    let fai_path_resolved: &Path = match fai_path {
-        Some(p) => p,
-        None => {
-            fai_pathbuf = fasta_path.as_os_str().to_os_string();
-            fai_pathbuf.push(".fai");
-            fai_path_owned = PathBuf::from(fai_pathbuf);
-            &fai_path_owned
-        }
-    };
     let wrap_io = |source: io::Error| ChromRefFetchError::Io {
         chrom_name: chrom_name.to_string(),
         source,
     };
-    let index = fai::fs::read(fai_path_resolved).map_err(wrap_io)?;
+    let parsed: Option<fai::Index> = match index {
+        Some(_) => None,
+        None => {
+            let fai_path_resolved: &Path = match fai_path {
+                Some(p) => p,
+                None => {
+                    fai_pathbuf = fasta_path.as_os_str().to_os_string();
+                    fai_pathbuf.push(".fai");
+                    fai_path_owned = PathBuf::from(fai_pathbuf);
+                    &fai_path_owned
+                }
+            };
+            Some(fai::fs::read(fai_path_resolved).map_err(wrap_io)?)
+        }
+    };
+    // PANIC-FREE: exactly one of the two is `Some` — `parsed` is filled precisely
+    // when `index` is `None`.
+    let index = index.or(parsed.as_ref()).expect("one arm or the other");
     let record = index
         .as_ref()
         .iter()
@@ -240,7 +255,38 @@ impl RawChromReader {
     /// - [`ChromRefFetchError::Io`] (`InvalidData`) if the `.fai` entry is malformed.
     /// - [`ChromRefFetchError::Io`] propagating a `.fai`-read or `File::open` failure.
     pub fn for_contig(fasta_path: &Path, chrom_name: &str) -> Result<Self, ChromRefFetchError> {
-        let (fai, file) = open_contig(fasta_path, None, chrom_name)?;
+        Self::open(fasta_path, None, chrom_name)
+    }
+
+    /// The same reader, built from an **already-parsed** index — for a caller that
+    /// opens many readers over one FASTA.
+    ///
+    /// Reading the `.fai` is the entire cost of opening a reader, and it does not
+    /// shrink with the contig you want: `fai::fs::read` parses every record. On a
+    /// GRCh38-shaped index (2,580 records) that is **~188 µs per reader**, against
+    /// ~0.2 µs when the parse has already happened — so a caller building one reader
+    /// per region, or one per file per region, pays the whole index over and over.
+    /// That is the shape of the ~564k-opens regression `4bc3ef9` fixed on the STR
+    /// side; this is the constructor that makes it avoidable without giving two
+    /// readers one file cursor.
+    ///
+    /// The index is borrowed, not held: each reader keeps only the one record it
+    /// resolved, so the caller decides the index's lifetime (an `Arc` shared across
+    /// accessors is the intended shape).
+    pub fn for_contig_with_index(
+        fasta_path: &Path,
+        index: &fai::Index,
+        chrom_name: &str,
+    ) -> Result<Self, ChromRefFetchError> {
+        Self::open(fasta_path, Some(index), chrom_name)
+    }
+
+    fn open(
+        fasta_path: &Path,
+        index: Option<&fai::Index>,
+        chrom_name: &str,
+    ) -> Result<Self, ChromRefFetchError> {
+        let (fai, file) = open_contig(fasta_path, None, index, chrom_name)?;
         Ok(Self {
             chrom_name: chrom_name.to_string(),
             fai,

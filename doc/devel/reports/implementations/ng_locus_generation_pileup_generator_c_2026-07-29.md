@@ -190,11 +190,11 @@ None of these blocks Milestone D.
    `LocusGenerator::counts()` returns a kind-tagged `GeneratorCounts`, defaulted
    to `None`. See §10. **Its first non-test reader is still owed** — D2's dump
    header — and until then an end-to-end test stands in.
-3. **The read-query accessor factory is called once per file per region** — spec
-   §8's ~564k-opens trap shape, in the one accessor the generator cannot hold for
-   the run because `reads_in_region` requires a per-file one. Documented on the
-   field; no non-test caller exists yet, so it is an invitation rather than a
-   measured cost. D2's dump tool is the first caller that decides it.
+3. ~~The read-query accessor factory is called once per file per region.~~
+   **Measured and largely fixed, 2026-07-29 — see §11.** 189 µs → 19 µs per
+   accessor on a GRCh38-shaped reference. What remains is the `open(2)` that
+   giving each stream its own cursor means; whether even that matters is D3's to
+   say, against a real region count.
 4. **Nothing logs.** No `tracing` anywhere in the generator: the clamp, a
    declined read and a shed error are all counted or silent. Production's own
    allocator warns, so the convention exists in the copied code.
@@ -302,3 +302,65 @@ tally, both structurally zero). The owner asked for the mechanism now. The
 end-to-end test asserting a **non-zero** count through the public iterator is
 what stands in until D2, and it is the first thing that would catch a counter
 wired to nothing.
+
+## 11. What a per-region reference accessor costs (measured, 2026-07-29)
+
+Checkpoint C's third item. The recommendation was to measure before spending
+anything, because the only per-region number anyone had came from an in-memory
+reference — a free factory. The measurement changed what the fix was.
+
+**The baseline, on a GRCh38-shaped reference** (2,580 contigs, throwaway probe,
+release, 2,000 accessors):
+
+```
+fresh_per_region_us=188.8     a fresh accessor per region — what a factory does today
+shared_per_region_us=0.2      one accessor reused — what a k=1 caller can already do
+```
+
+**189 µs against a measured per-region walk constant of ~120 µs**: the factory
+would have more than doubled the cost of a region. That is 4bc3ef9's shape, not
+noise, and it decided the question the note had left open.
+
+**Fixing the obvious cost exposed a second one.** The `.fai` parse is the whole
+cost of *opening* a reader — `WindowedRefSeq::new` itself is a path and a table,
+no I/O — so `RawChromReader::for_contig_with_index` takes an already-parsed index
+and `WindowedRefSeq::with_shared_index` carries it. That took 189 µs to **52 µs**,
+and the remainder was not `open(2)`:
+
+```
+contig_list_clone_per_region_us=34.1
+```
+
+**34 µs of it was cloning the 2,580-entry `ContigList`** — 2,580 `String`
+allocations per accessor, invisible while the parse dominated, and a cost of the
+*signature* (`WindowedRefSeq` took the table by value) rather than of the I/O.
+`contigs` is now an `Arc<ContigList>`; `new` wraps, so its ten call sites are
+untouched.
+
+```
+indexed_per_region_us=19.0    both index and table shared
+```
+
+**189 µs → 19 µs, a 10× cut**, and what is left is the `open(2)` — which is what
+"each of a sample's k streams gets its own cursor" *means*, and therefore the
+floor unless file handles are pooled too. Against the ~120 µs region constant the
+factory has gone from +158 % to +16 %.
+
+**On a small reference it never mattered and still does not**: at 12 contigs the
+whole factory cost is 7.6 µs, of which the table clone is 0.1 µs. This is a
+large-assembly problem, which is why an in-memory fixture could never have shown
+it.
+
+**What pins the correctness.** The two constructors must agree byte for byte, or
+a shared index silently reads from wrong file offsets — wrong bases, no error.
+`a_shared_index_serves_the_same_bytes_as_a_self_parsed_one` asserts that over
+every contig of the fixture, raw *and* canonical, at every start and length. Its
+first mutation was a no-op (it perturbed both arms, which agree while both are
+wrong); perturbing **only** the shared arm fails it at the first byte, which is
+the check that was wanted.
+
+The probe was thrown away, per this branch's practice — the numbers live here and
+on the two constructors. **Nothing calls `with_shared_index` yet**: the generic
+generator's factory is caller-supplied and its first real caller is D2's dump
+tool, which is where the fix gets used and where the remaining 19 µs gets judged
+against a real region count.
