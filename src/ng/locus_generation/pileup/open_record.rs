@@ -8,12 +8,20 @@
 //! can touch the record (its footprint is fully behind the walker
 //! per the closure rule), it converts the open record into a
 //! finalised `PileupRecord` and pushes it through the channel.
+//!
+//! **No longer a verbatim copy — A0 (plan 3).** Copied from
+//! `src/pileup/walker/open_record.rs`, then changed: the reference is reached
+//! through ng's [`RefSeq`] rather than production's `MultiChromRefFetcher`, and
+//! through [`RefSeq::fetch_into`] rather than `fetch`, so `widen` writes into a
+//! buffer this table owns instead of allocating a `Vec<u8>` per call.
+//! `copy_fidelity.rs` released this file in that commit.
 
 use std::collections::BTreeMap;
 
 use ahash::AHashMap;
 
-use crate::fasta::MultiChromRefFetcher;
+use crate::ng::ref_seq::RefSeq;
+use crate::ng::types::ContigId;
 use crate::pileup_record::{AlleleObservation, AlleleSupportStats, ChainId, PileupRecord};
 
 use super::DEFAULT_MAX_RECORD_SPAN;
@@ -207,6 +215,13 @@ pub(super) struct OpenPileupRecordTable {
     /// paid each walker step. H2 in
     /// `ia/reviews/perf_pileup_2026-05-12.md`.
     closing_keys_buf: Vec<u32>,
+    /// Reusable destination for [`RefSeq::fetch_into`] in `widen` —
+    /// the buffer that came free with A0's move off
+    /// `MultiChromRefFetcher::fetch`, which allocated a fresh
+    /// `Vec<u8>` on every widen. `open_new` does **not** use it: the
+    /// bytes it fetches are moved into the record and kept, so a
+    /// scratch buffer there would only add a copy.
+    widen_bases_buf: Vec<u8>,
     /// Per-instance cap on per-record reference span, mirrors
     /// `WalkerConfig::max_record_span`. M11 in
     /// `ia/reviews/pileup_2026-05-11.md`.
@@ -233,6 +248,7 @@ impl OpenPileupRecordTable {
             records: BTreeMap::new(),
             allele_seq_buf: Vec::new(),
             closing_keys_buf: Vec::new(),
+            widen_bases_buf: Vec::new(),
             max_record_span,
         }
     }
@@ -253,6 +269,7 @@ impl OpenPileupRecordTable {
         self.records.clear();
         self.allele_seq_buf.clear();
         self.closing_keys_buf.clear();
+        self.widen_bases_buf.clear();
     }
 
     /// Drain every record whose footprint is fully behind the
@@ -349,16 +366,26 @@ impl OpenPileupRecordTable {
         &mut self,
         key: u32,
         new_end_exclusive: u32,
-        ref_fetcher: &dyn MultiChromRefFetcher,
+        reference: &dyn RefSeq,
     ) -> Result<bool, WalkerError> {
+        // Split-borrow so the fetch can write into `widen_bases_buf` while
+        // `rec` holds a mutable borrow of `records`. `max_record_span` is
+        // read through the same destructure rather than through `self`,
+        // which the outstanding `records` borrow would otherwise block.
+        let Self {
+            records,
+            widen_bases_buf,
+            max_record_span,
+            ..
+        } = self;
+        let max_record_span = *max_record_span;
         // PANIC-FREE: `widen` is only called from
         // `process_position` immediately after `find_overlapping`
         // returned `Some(key)` for this key, and we hold an
         // exclusive borrow on `self.records` from that call site
         // through here. No path between the find and this lookup
         // removes the entry.
-        let rec = self
-            .records
+        let rec = records
             .get_mut(&key)
             .expect("widen called on absent record");
         let old_end = rec.footprint_end_exclusive();
@@ -366,22 +393,28 @@ impl OpenPileupRecordTable {
             return Ok(false);
         }
         let extra_len = new_end_exclusive - old_end;
-        if (new_end_exclusive - rec.pos) > self.max_record_span {
+        if (new_end_exclusive - rec.pos) > max_record_span {
             return Err(WalkerError::RecordTooWide {
                 chrom_id: rec.chrom_id,
                 pos: rec.pos,
                 span: new_end_exclusive - rec.pos,
-                cap: self.max_record_span,
+                cap: max_record_span,
             });
         }
-        let extra_bases = ref_fetcher
-            .fetch(rec.chrom_id, old_end, extra_len)
+        reference
+            .fetch_into(
+                ContigId(rec.chrom_id),
+                u64::from(old_end),
+                u64::from(extra_len),
+                widen_bases_buf,
+            )
             .map_err(|source| WalkerError::Fasta {
                 chrom_id: rec.chrom_id,
                 start: old_end,
                 start_plus_len: new_end_exclusive,
                 source,
             })?;
+        let extra_bases = &*widen_bases_buf;
 
         // Rewrite each existing allele by appending the new REF
         // bases to its `seq`. `alleles[0]` is REF, so this loop is
@@ -414,19 +447,19 @@ impl OpenPileupRecordTable {
         // (longer than old span by the inserted run). Each gets
         // exactly the same `extra_bases` appended.
         for allele in &mut rec.alleles {
-            allele.seq.extend_from_slice(&extra_bases);
+            allele.seq.extend_from_slice(extra_bases);
         }
         Ok(true)
     }
 
     /// Open a fresh record at `pos` with REF span `span`, fetching
-    /// the reference bases from `ref_fetcher`.
+    /// the reference bases from `reference`.
     fn open_new(
         &mut self,
         chrom_id: u32,
         pos: u32,
         span: u32,
-        ref_fetcher: &dyn MultiChromRefFetcher,
+        reference: &dyn RefSeq,
     ) -> Result<&mut OpenPileupRecord, WalkerError> {
         if span > self.max_record_span {
             return Err(WalkerError::RecordTooWide {
@@ -436,15 +469,23 @@ impl OpenPileupRecordTable {
                 cap: self.max_record_span,
             });
         }
-        let ref_seq =
-            ref_fetcher
-                .fetch(chrom_id, pos, span)
-                .map_err(|source| WalkerError::Fasta {
-                    chrom_id,
-                    start: pos,
-                    start_plus_len: pos + span,
-                    source,
-                })?;
+        // A fresh `Vec` rather than the table's scratch: these bytes become the
+        // record's REF allele and are kept for the record's whole lifetime, so
+        // fetching into a reused buffer would only add a copy out of it.
+        let mut ref_seq = Vec::new();
+        reference
+            .fetch_into(
+                ContigId(chrom_id),
+                u64::from(pos),
+                u64::from(span),
+                &mut ref_seq,
+            )
+            .map_err(|source| WalkerError::Fasta {
+                chrom_id,
+                start: pos,
+                start_plus_len: pos + span,
+                source,
+            })?;
         let rec = OpenPileupRecord::new(chrom_id, pos, ref_seq);
         self.records.insert(pos, rec);
         // PANIC-FREE: the entry was just inserted on the previous
@@ -665,7 +706,7 @@ pub(super) fn process_position(
     chrom_id: u32,
     contributors: &[ReadContribution],
     active_reads: &ActiveReads,
-    ref_fetcher: &dyn MultiChromRefFetcher,
+    reference: &dyn RefSeq,
 ) -> Result<ProcessOutcome, WalkerError> {
     let mut affected: Vec<u32> = Vec::new();
     let mut widen_count: u64 = 0;
@@ -690,12 +731,12 @@ pub(super) fn process_position(
                     .get(&k)
                     .expect("just located")
                     .footprint_end_exclusive();
-                if event_end > cur_end && open.widen(k, event_end, ref_fetcher)? {
+                if event_end > cur_end && open.widen(k, event_end, reference)? {
                     widen_count += 1;
                 }
                 k
             } else {
-                let new = open.open_new(chrom_id, event_start, ev.footprint_span(), ref_fetcher)?;
+                let new = open.open_new(chrom_id, event_start, ev.footprint_span(), reference)?;
                 new.pos
             };
             if !affected.contains(&key) {
@@ -720,6 +761,7 @@ pub(super) fn process_position(
         records,
         allele_seq_buf,
         closing_keys_buf: _,
+        widen_bases_buf: _,
         max_record_span: _,
     } = open;
     for key in affected {

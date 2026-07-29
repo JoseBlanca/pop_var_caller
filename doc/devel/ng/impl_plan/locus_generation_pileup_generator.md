@@ -61,7 +61,7 @@ whether the change was worth making (Milestone D).
 A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step exists:
 **nothing is written into an observation that its read did not witness** (spec §4).
 
-- ☐ **A0 — delete the reference adaptor. Pure refactor, own commit, and it goes FIRST.**
+- ✅ **A0 — delete the reference adaptor. Pure refactor, own commit, and it goes FIRST.**
   ng's copies speak production's `MultiChromRefFetcher` for one reason only: they were
   transcribed verbatim, so their signatures are production's. That was never a design
   choice, and from this plan on the two walkers diverge — so `open_record.rs` takes a

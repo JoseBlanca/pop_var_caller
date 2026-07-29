@@ -9,6 +9,14 @@
 //! tick may emit 0, 1, or many records; the iterator buffers them
 //! in a small `VecDeque` and drains across successive `next()`
 //! calls.
+//!
+//! **No longer a verbatim copy — A0 (plan 3).** Copied from
+//! `src/pileup/walker/driver.rs`, then changed in one respect: the reference
+//! accessor is bound by ng's [`RefSeq`] rather than production's
+//! `MultiChromRefFetcher`, and the field and parameters carrying it are named
+//! `reference` rather than `ref_fetcher` — there is no fetcher any more.
+//! `copy_fidelity.rs` released this file in that commit; the walk itself is
+//! untouched.
 
 use std::collections::VecDeque;
 use std::iter::Peekable;
@@ -25,7 +33,7 @@ use super::open_record::{
     OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
 };
 use super::{PreparedRead, ReadLengthError, WalkerConfig};
-use crate::fasta::MultiChromRefFetcher;
+use crate::ng::ref_seq::RefSeq;
 
 /// Construct a [`PileupWalker`] over a coordinate-sorted stream of
 /// prepared reads. The walker is an `Iterator<Item = Result<PileupRecord,
@@ -38,12 +46,12 @@ use crate::fasta::MultiChromRefFetcher;
 /// have `(chrom_id, alignment_start)` non-decreasing relative to
 /// the previous one. A regression is a hard error — stale or
 /// malformed input shouldn't pass silently.
-pub fn run<R, F>(reads: R, ref_fetcher: F, config: &WalkerConfig) -> PileupWalker<R::IntoIter, F>
+pub fn run<R, F>(reads: R, reference: F, config: &WalkerConfig) -> PileupWalker<R::IntoIter, F>
 where
     R: IntoIterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    PileupWalker::new(reads.into_iter(), ref_fetcher, config)
+    PileupWalker::new(reads.into_iter(), reference, config)
 }
 
 /// Pull-shaped walker over a coordinate-sorted stream of prepared
@@ -51,10 +59,10 @@ where
 pub struct PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
     reads: Peekable<I>,
-    ref_fetcher: F,
+    reference: F,
     state: WalkerState,
     /// Records produced by walker ticks but not yet consumed by
     /// `Iterator::next`. A single tick may emit 0–many records
@@ -71,9 +79,9 @@ where
 impl<I, F> PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    pub fn new(reads: I, ref_fetcher: F, config: &WalkerConfig) -> Self {
+    pub fn new(reads: I, reference: F, config: &WalkerConfig) -> Self {
         let mut reads = reads.peekable();
         let mut state = WalkerState::new(*config);
         // Initial chromosome anchor: the first peeked read sets
@@ -86,7 +94,7 @@ where
         }
         Self {
             reads,
-            ref_fetcher,
+            reference,
             state,
             pending: VecDeque::new(),
             done: false,
@@ -177,7 +185,7 @@ where
             // ordering also keeps the active-read count accurate
             // when an emitted record's footprint coincides with a
             // read's `alignment_end`.
-            self.state.process_position(&self.ref_fetcher)?;
+            self.state.process_position(&self.reference)?;
             self.state.expire_passed_reads()?;
             self.state.close_aged_records_into(&mut self.pending);
 
@@ -197,7 +205,7 @@ where
 impl<I, F> Iterator for PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
     type Item = Result<PileupRecord, WalkerError>;
 
@@ -401,10 +409,7 @@ impl WalkerState {
         Ok(())
     }
 
-    fn process_position<F: MultiChromRefFetcher>(
-        &mut self,
-        ref_fetcher: &F,
-    ) -> Result<(), WalkerError> {
+    fn process_position<F: RefSeq>(&mut self, reference: &F) -> Result<(), WalkerError> {
         // Step 1: query each active read's cursor for events
         // anchored at walker_pos. Reads with no event here are
         // silent (deletion interior or N-skip), so they are not
@@ -487,7 +492,7 @@ impl WalkerState {
             self.chrom_id,
             contributors,
             &self.active_reads,
-            ref_fetcher,
+            reference,
         )?;
         self.summary.record_widen_events += outcome.widen_count;
 

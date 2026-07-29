@@ -21,8 +21,26 @@
 //! order by construction. Preparing separately would inject read preparation's uppercase
 //! divergence (`read_preparation.md` §6) into a comparison that is about the *walk*.
 //! Each walk builds its own `MockFasta` from the same bytes — the type is stateless, so
-//! that is equivalent to sharing one; the real-data test lends a single `RefSeqFetcher`
-//! to both because *its* accessor is not stateless.
+//! that is equivalent to sharing one; the real-data test lends a single reference to both
+//! because *its* accessor is not stateless.
+//!
+//! # The two sides no longer reach the reference the same way — A0
+//!
+//! Production's walker takes a `MultiChromRefFetcher`; ng's takes a
+//! [`RefSeq`](crate::ng::ref_seq::RefSeq). The **same `MockFasta` value** serves both,
+//! through its two impls — production's own, and the canonicalising one in
+//! [`mock_reference`](super::mock_reference) — so the bytes are shared by construction
+//! rather than by two fixtures agreeing. Where they could still part company is
+//! canonicalisation, which is the identity only because the generator draws from
+//! `ACGTN`: `both_sides_of_the_differential_are_served_the_same_bytes` pins that, so a
+//! future generator change introducing a lower-case or ambiguity-coded base fails there
+//! and not as "the walkers disagree".
+//!
+//! A0 also changes ng's `WalkerError::Fasta` to carry a `RefSeqError` where production's
+//! carries a `ChromRefFetchError`, so the two error streams can no longer be compared by
+//! `Debug` alone. `render_*_error` normalises **that one variant** and leaves the other
+//! eight rendered verbatim; `both_walkers_report_the_same_error_on_the_same_malformed_input`
+//! carries a fixture that reaches it.
 //!
 //! # It has been shown to fail — B2, re-run 2026-07-29
 //!
@@ -88,6 +106,7 @@
 //! is what says the banking is worth anything: a differential that has never been shown
 //! to fail is a claim, not evidence.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::tests::MockFasta;
@@ -540,6 +559,152 @@ struct WalkOutcome {
     panic_message: Option<String>,
 }
 
+/// A reference-fetch failure, said in terms **both** sides can state.
+///
+/// A0 gave ng's `WalkerError::Fasta` a [`RefSeqError`](crate::ng::ref_seq::RefSeqError)
+/// source where production's carries a `ChromRefFetchError`. The two are
+/// variant-for-variant equivalents but nominally distinct types, so `Debug` renders them
+/// differently and a raw `{:?}` comparison would report every fetch failure as a
+/// divergence — including the ones where the two walkers agree exactly.
+///
+/// **The contig identifier is deliberately not part of this.** Production names contigs
+/// by name and ng by `ContigId`, and there is nothing to compare; `WalkerError::Fasta`
+/// carries `chrom_id` *outside* the source, where it is compared verbatim.
+///
+/// One collapse is worth naming: an unknown contig reaches production as
+/// `Io { NotFound }` and ng as `UnknownContig`, because that is the convention
+/// `MockFasta` and its ng-side view use (`mock_reference.rs`). Both land on
+/// [`FetchFailure::UnknownContig`], which loses the distinction between "the contig is
+/// not in this reference" and "a file went missing mid-run" — neither of which any
+/// fixture here can produce by another route.
+#[derive(Debug, PartialEq, Eq)]
+enum FetchFailure {
+    OutOfBounds {
+        contig_length: u64,
+        start: u64,
+        end: u64,
+    },
+    InvalidStart,
+    UnknownContig,
+    Io(std::io::ErrorKind, String),
+    /// A variant with no counterpart on the other side. Rendered rather than dropped, so
+    /// it can never compare equal to anything by accident.
+    Unmatched(String),
+}
+
+fn production_fetch_failure(error: &crate::fasta::ChromRefFetchError) -> FetchFailure {
+    use crate::fasta::ChromRefFetchError as E;
+    match error {
+        E::OutOfBounds {
+            chrom_length,
+            start,
+            end,
+            chrom_name: _,
+        } => FetchFailure::OutOfBounds {
+            contig_length: u64::from(*chrom_length),
+            start: u64::from(*start),
+            end: u64::from(*end),
+        },
+        E::InvalidStart => FetchFailure::InvalidStart,
+        E::Io {
+            source,
+            chrom_name: _,
+        } if source.kind() == std::io::ErrorKind::NotFound => FetchFailure::UnknownContig,
+        E::Io {
+            source,
+            chrom_name: _,
+        } => FetchFailure::Io(source.kind(), source.to_string()),
+        // The streaming fetcher's; no `RefSeq` implementation has an equivalent.
+        E::OutOfPattern { .. } => FetchFailure::Unmatched(format!("{error:?}")),
+    }
+}
+
+fn ng_fetch_failure(error: &crate::ng::ref_seq::RefSeqError) -> FetchFailure {
+    use crate::ng::ref_seq::RefSeqError as E;
+    match error {
+        E::OutOfBounds {
+            contig_length,
+            start,
+            end,
+            contig: _,
+        } => FetchFailure::OutOfBounds {
+            contig_length: *contig_length,
+            start: *start,
+            end: *end,
+        },
+        E::InvalidStart => FetchFailure::InvalidStart,
+        E::UnknownContig(_) => FetchFailure::UnknownContig,
+        E::Io { source, contig: _ } => FetchFailure::Io(source.kind(), source.to_string()),
+    }
+}
+
+/// Production's `WalkerError`, rendered for comparison against ng's.
+///
+/// Only `Fasta` is rewritten — the other eight variants are structurally identical in
+/// the two enums and their derived `Debug` output prints no module path, so it is the
+/// same string on both sides. They are **listed by name rather than matched with `_`**,
+/// so a variant added to either enum stops this compiling instead of silently taking the
+/// verbatim path.
+fn render_production_error(error: &crate::pileup::walker::WalkerError) -> String {
+    use crate::pileup::walker::WalkerError as E;
+    match error {
+        E::Fasta {
+            chrom_id,
+            start,
+            start_plus_len,
+            source,
+        } => render_fasta_error(
+            *chrom_id,
+            *start,
+            *start_plus_len,
+            production_fetch_failure(source),
+        ),
+        E::OutOfOrder { .. }
+        | E::ZeroRefSpan { .. }
+        | E::ActiveReadsExhausted { .. }
+        | E::ChainIdSpaceExhausted { .. }
+        | E::PendingMatesExhausted { .. }
+        | E::RecordTooWide { .. }
+        | E::Internal { .. }
+        | E::MalformedRead { .. } => format!("{error:?}"),
+    }
+}
+
+/// ng's `WalkerError`, rendered the same way. Written out a second time rather than
+/// shared: the two enums are nominally distinct, and writing it twice is what makes
+/// *both* matches exhaustive — the same reason `production_counters` and `ng_counters`
+/// repeat their field lists.
+fn render_ng_error(error: &super::WalkerError) -> String {
+    use super::WalkerError as E;
+    match error {
+        E::Fasta {
+            chrom_id,
+            start,
+            start_plus_len,
+            source,
+        } => render_fasta_error(*chrom_id, *start, *start_plus_len, ng_fetch_failure(source)),
+        E::OutOfOrder { .. }
+        | E::ZeroRefSpan { .. }
+        | E::ActiveReadsExhausted { .. }
+        | E::ChainIdSpaceExhausted { .. }
+        | E::PendingMatesExhausted { .. }
+        | E::RecordTooWide { .. }
+        | E::Internal { .. }
+        | E::MalformedRead { .. } => format!("{error:?}"),
+    }
+}
+
+fn render_fasta_error(
+    chrom_id: u32,
+    start: u32,
+    start_plus_len: u32,
+    cause: FetchFailure,
+) -> String {
+    format!(
+        "Fasta {{ chrom_id: {chrom_id}, start: {start}, start_plus_len: {start_plus_len}, cause: {cause:?} }}"
+    )
+}
+
 /// Render a panic payload as its message, which is the part the two walkers must share.
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
@@ -561,20 +726,27 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 /// exception-safe, so on a panic it holds exactly the prefix that was emitted, which is
 /// what makes the comparison element-wise rather than all-or-nothing.
 ///
-/// Errors are rendered with `{:?}` rather than `to_string()`: the two `WalkerError` types
-/// are nominally distinct so they cannot be compared directly, and `Debug` shows the
-/// variant and every field where `Display` shows only what the format string chose — an
-/// `io::ErrorKind` inside `WalkerError::Fasta` is invisible through `Display`.
-fn drive<W, E>(mut walker: W, summary_of: impl FnOnce(&W) -> SummaryCounters) -> WalkOutcome
+/// Errors are rendered to a `String` rather than compared as values: the two
+/// `WalkerError` types are nominally distinct, so they cannot be compared directly. The
+/// rendering is mostly `{:?}` — which shows the variant and every field, where `Display`
+/// shows only what the format string chose — with `Fasta`'s source normalised, since A0
+/// gave the two enums different source types (`render_production_error` /
+/// `render_ng_error`). The renderer is a **parameter** rather than a `Debug` bound, so
+/// which side is being rendered is a fact at the call site and neither side can quietly
+/// fall back to a bound the other does not satisfy.
+fn drive<W, E>(
+    mut walker: W,
+    render_error: impl Fn(&E) -> String,
+    summary_of: impl FnOnce(&W) -> SummaryCounters,
+) -> WalkOutcome
 where
     W: Iterator<Item = Result<PileupRecord, E>>,
-    E: std::fmt::Debug,
 {
     let mut records = Vec::new();
     let mut summary = None;
     let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         for item in &mut walker {
-            records.push(item.map_err(|error| format!("{error:?}")));
+            records.push(item.map_err(|error| render_error(&error)));
         }
         summary = Some(summary_of(&walker));
     }))
@@ -592,11 +764,18 @@ fn production_walk(case: &Case) -> WalkOutcome {
     let fasta = case.fasta();
     drive(
         production_run(case.reads.clone(), &fasta, &case.config),
+        render_production_error,
         |walker| production_counters(walker.summary()),
     )
 }
 
 /// ng's answer, over the same reads converted to ng's read type.
+///
+/// The `MockFasta` goes in **by value** where production's went in by reference:
+/// `MultiChromRefFetcher` has a blanket impl for `&T` and `RefSeq` has none. The type is
+/// stateless and cheap, so this is a call-shape difference and not a fixture difference —
+/// and `both_sides_of_the_differential_are_served_the_same_bytes` checks the bytes rather
+/// than trusting that.
 fn ng_walk(case: &Case) -> WalkOutcome {
     let fasta = case.fasta();
     let reads: Vec<PreparedRead> = case
@@ -608,8 +787,8 @@ fn ng_walk(case: &Case) -> WalkOutcome {
         // difference between the two streams rather than a property under test.
         .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
         .collect();
-    drive(super::run(reads, &fasta, &case.config), |walker| {
-        ng_counters(walker.summary())
+    drive(super::run(reads, fasta, &case.config), render_ng_error, {
+        |walker| ng_counters(walker.summary())
     })
 }
 
@@ -1040,13 +1219,18 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
     }
 
     let reference = vec!["ACGT".repeat(40), "ACGT".repeat(40)];
-    let fixtures: Vec<(&str, Vec<ProductionPreparedRead>)> = vec![
+    // `(name, reads, the variant the fixture must reach)`. The third element is what
+    // makes each fixture prove its *own* claim: without it a fixture that started failing
+    // for some unrelated reason would still satisfy "production emitted an error", and
+    // the case would go on passing while testing something else.
+    let fixtures: Vec<(&str, Vec<ProductionPreparedRead>, &str)> = vec![
         (
             "out of order",
             vec![
                 read("a", 20, 27, vec![CigarOp::Match(8)], 8),
                 read("b", 4, 11, vec![CigarOp::Match(8)], 8),
             ],
+            "OutOfOrder",
         ),
         (
             // The check is `alignment_end < alignment_start`, not "the CIGAR consumes no
@@ -1054,10 +1238,12 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
             // sails through, which the fixture's own reach assertion caught.
             "zero reference span",
             vec![read("i", 4, 3, vec![CigarOp::Insertion(4)], 4)],
+            "ZeroRefSpan",
         ),
         (
             "cigar consumes more read bases than seq provides",
             vec![read("m", 4, 11, vec![CigarOp::Match(8)], 5)],
+            "MalformedRead",
         ),
         (
             "seq and bq of different lengths",
@@ -1066,10 +1252,30 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
                 malformed.bq_baq.truncate(7);
                 malformed
             }],
+            "MalformedRead",
+        ),
+        (
+            // The reference is 160 bases and this read's footprint runs past its end, so
+            // `open_new` asks for bases that do not exist. **This is the fixture that pays
+            // for A0's error normalisation:** `WalkerError::Fasta` is the one variant whose
+            // source type differs between the two enums, so without a case reaching it
+            // `render_production_error` and `render_ng_error` would be two pieces of dead
+            // code agreeing with each other. The main generator clamps every read inside
+            // its contig precisely to avoid this path, so it has to be built by hand — and
+            // the marker names the normalised *cause*, not just the variant, since it is
+            // the cause that the two sides state in different types.
+            //
+            // The failing fetch is at **161**, not at the read's start: a record is opened
+            // per covered position, so the walk fails at the first position past the
+            // contig rather than at the first position of the offending read.
+            "fetch past the contig end",
+            vec![read("far", 156, 175, vec![CigarOp::Match(20)], 20)],
+            "Fasta { chrom_id: 0, start: 161, start_plus_len: 162, cause: OutOfBounds { \
+             contig_length: 160, start: 161, end: 162 } }",
         ),
     ];
 
-    for (name, reads) in fixtures {
+    for (name, reads, expected) in fixtures {
         let case = Case {
             reference: reference.clone(),
             reads,
@@ -1078,12 +1284,64 @@ fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
         };
         let theirs = production_walk(&case);
         let ours = ng_walk(&case);
+        let rendered: Vec<&String> = theirs
+            .records
+            .iter()
+            .filter_map(|item| item.as_ref().err())
+            .collect();
         assert!(
-            theirs.records.iter().any(|item| item.is_err()),
-            "{name}: production emitted no error, so this fixture tests nothing"
+            rendered.iter().any(|error| error.contains(expected)),
+            "{name}: production reached no `{expected}`, so this fixture tests something \
+             else — it emitted {rendered:?}"
         );
         assert_same_walk(name, &ours, &theirs);
     }
+}
+
+/// **The two sides of the differential are handed the same reference bytes.**
+///
+/// A0 split how they reach it: production's walker takes `MockFasta` through
+/// `MultiChromRefFetcher`, ng's takes the same value through the canonicalising
+/// [`RefSeq`](crate::ng::ref_seq::RefSeq) view in
+/// [`mock_reference`](super::mock_reference). Those two agree only because the generator
+/// draws its reference from `ACGTN`, where canonicalisation is the identity — a fact
+/// about the *fixture*, not about either impl.
+///
+/// So it is checked rather than relied on. Without this, a generator change introducing a
+/// lower-case or ambiguity-coded base would surface as `ng_walks_identically_to_production`
+/// failing on the bases inside a record, and be chased into the walk — where there is
+/// nothing to find.
+#[test]
+fn both_sides_of_the_differential_are_served_the_same_bytes() {
+    use crate::fasta::MultiChromRefFetcher;
+    use crate::ng::ref_seq::RefSeq;
+    use crate::ng::types::ContigId;
+
+    let mut compared = 0usize;
+    for seed in SEEDS {
+        let mut rng = SplitMix64(seed);
+        // A handful of cases per seed: the reference is drawn from the same alphabet in
+        // every one, so this is about covering the *alphabet*, not the case count.
+        for index in 0..16 {
+            let case = generate(&mut rng);
+            let fasta = case.fasta();
+            for contig in 0..CONTIGS {
+                let length = case.reference[contig].len() as u32;
+                let theirs = MultiChromRefFetcher::fetch(&fasta, contig as u32, 1, length)
+                    .expect("the whole fixture contig is in range");
+                let ours = RefSeq::fetch(&fasta, ContigId(contig as u32), 1, u64::from(length))
+                    .expect("the whole fixture contig is in range");
+                assert_eq!(
+                    ours, theirs,
+                    "seed {seed:#x} case {index} contig {contig}: the two views of the \
+                     fixture reference disagree, so the differential is comparing two \
+                     walks over different bases"
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared > 0, "no fixture reference was compared");
 }
 
 /// **The adaptor counter's real claim, checked end to end.**
@@ -1159,14 +1417,14 @@ fn the_adaptor_filter_changes_the_records_the_walk_emits() {
 /// Reads are ingested through ng's own step 1 and prepared **once** by ng's
 /// `LeftAlignPreparer`; production's stream is that same stream converted down through
 /// `PreparedRead::into_production`. Preparing twice would compare two different inputs.
-/// A single `RefSeqFetcher` is lent to both walkers for the same reason: identical bytes
-/// by construction, so any divergence is the walk's.
+/// A single `WindowedRefSeq` is lent to both walkers for the same reason: identical bytes
+/// by construction, so any divergence is the walk's. ng's walker takes it directly (A0);
+/// production's reaches it through [`ProductionView`], the local adaptor below.
 #[test]
 #[ignore = "needs a real BAM/CRAM and reference; see the doc comment for the invocation"]
 fn ng_walks_identically_to_production_on_real_reads() {
     use std::path::PathBuf;
 
-    use super::RefSeqFetcher;
     use crate::ng::read::ReadFilterConfig;
     use crate::ng::read::input::SampleReads;
     use crate::ng::read::left_align::LeftAlignPreparer;
@@ -1269,17 +1527,24 @@ fn ng_walks_identically_to_production_on_real_reads() {
         .map(NgPreparedRead::into_production)
         .collect();
 
-    // One fetcher, lent to both walks: identical bytes by construction.
-    let fetcher = RefSeqFetcher(WindowedRefSeq::new(fasta.clone(), contigs.clone()));
+    // One reference, lent to both walks: identical bytes by construction, and one reader
+    // rather than two — building `WindowedRefSeq` twice would re-read the `.fai` and open
+    // the FASTA again, which is the per-query cost `4bc3ef9` removed on the STR side.
+    let reference = SharedReference(Rc::new(WindowedRefSeq::new(fasta.clone(), contigs.clone())));
     let config = WalkerConfig::default();
 
+    // Driven one after the other, not interleaved, so the shared reader's `RefCell` is
+    // never borrowed by both walks at once.
     let theirs = drive(
-        production_run(production_reads, &fetcher, &config),
+        production_run(production_reads, reference.clone(), &config),
+        render_production_error,
         |walker| production_counters(walker.summary()),
     );
-    let ours = drive(super::run(ng_reads, &fetcher, &config), |walker| {
-        ng_counters(walker.summary())
-    });
+    let ours = drive(
+        super::run(ng_reads, reference, &config),
+        render_ng_error,
+        |walker| ng_counters(walker.summary()),
+    );
 
     let where_ = format!("{reads_path} {region:?}");
     let records_compared = theirs.records.len();
@@ -1323,4 +1588,66 @@ fn ng_walks_identically_to_production_on_real_reads() {
         "real-data differential: {where_} — {records_compared} records compared from \
          {prepared_reads} prepared reads, zero divergences"
     );
+}
+
+/// **One reference, two traits — the real-data differential's shared accessor.**
+///
+/// Production's walker takes a `MultiChromRefFetcher`; ng's takes a
+/// [`RefSeq`](crate::ng::ref_seq::RefSeq). Lending **one** accessor to both is what makes
+/// "identical bytes by construction" true rather than hopeful, so one value implements
+/// both — exactly the shape `MockFasta` has on the synthetic side (`mock_reference.rs`),
+/// where production's own impl and ng's meet on one type.
+///
+/// **This is not `RefSeqFetcher` under a new name.** That type made *ng's walker* speak
+/// production's trait, which is what A0 deleted. This makes *production's* walker speak
+/// ng's reference, for the length of one `#[ignore]`d differential, and it dies with this
+/// file when the two walkers begin to diverge on purpose (A2).
+///
+/// `Rc`, not `Arc`: [`WindowedRefSeq`](crate::ng::ref_seq::WindowedRefSeq) buffers behind
+/// a `RefCell` and is therefore not `Sync`, and this test is single-threaded. The two
+/// walks are driven one after the other, so the buffer is never borrowed by both.
+struct SharedReference(Rc<crate::ng::ref_seq::WindowedRefSeq>);
+
+impl Clone for SharedReference {
+    fn clone(&self) -> Self {
+        Self(Rc::clone(&self.0))
+    }
+}
+
+impl crate::ng::ref_seq::RefSeq for SharedReference {
+    fn fetch_into(
+        &self,
+        contig: crate::ng::types::ContigId,
+        start_1based: u64,
+        length: u64,
+        dst: &mut Vec<u8>,
+    ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+        self.0.fetch_into(contig, start_1based, length, dst)
+    }
+}
+
+impl crate::fasta::MultiChromRefFetcher for SharedReference {
+    fn fetch(
+        &self,
+        chrom_id: u32,
+        start_1based: u32,
+        length: u32,
+    ) -> Result<Vec<u8>, crate::fasta::ChromRefFetchError> {
+        crate::ng::ref_seq::RefSeq::fetch(
+            self,
+            crate::ng::types::ContigId(chrom_id),
+            u64::from(start_1based),
+            u64::from(length),
+        )
+        // The failure is reported as I/O carrying ng's own rendering. It is not a
+        // faithful variant-for-variant translation and does not need to be: the two sides
+        // are compared through `FetchFailure`, which reads the *ng* error on ng's side,
+        // and this test refuses any error outright (`first_error.is_none()` above)
+        // because a walk that stopped early proves nothing. A divergence here is
+        // therefore loud, and it names the real cause.
+        .map_err(|error| crate::fasta::ChromRefFetchError::Io {
+            chrom_name: format!("chrom_id {chrom_id}"),
+            source: std::io::Error::other(format!("{error:?}")),
+        })
+    }
 }
