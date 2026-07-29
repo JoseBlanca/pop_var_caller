@@ -166,7 +166,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   because it costs nothing on a rare path. The test to write here is therefore: **the same input
   walked in two separate processes emits byte-identical output** — which is the property spec §7 and
   §13 actually claim, and which no test in Milestone A could have made.
-- ☐ **B3 — the per-record counters.** `reads_without_observation` (A5's set) and
+- ✅ **B3 — the per-record counters.** `reads_without_observation` (A5's set) and
   `reads_discarded_by_cap`. The cap truncates in the walk, **before any record exists**, so the
   truncated ids must be plumbed into the fold and registered per affected record; the count is those
   absent from `folded_reads` at `finalise`. Two cases have no clean answer and are recorded as such:

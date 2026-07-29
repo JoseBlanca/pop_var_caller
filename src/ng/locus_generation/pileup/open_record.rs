@@ -131,6 +131,11 @@ pub(super) struct RecordWitness {
     /// [`OpenPileupRecord::reads_without_observation`], which is a set of read ids
     /// precisely so this number cannot be inflated by the footprint's length.
     pub reads_without_observation: u32,
+    /// Reads a depth cap truncated at **every** position of this record's footprint where
+    /// they had events, so they folded nowhere — see
+    /// [`OpenPileupRecord::reads_discarded_by_cap`] for why that is the quantity rather
+    /// than "how often this record's columns were truncated".
+    pub reads_discarded_by_cap: u32,
 }
 
 /// How much of the finished record a read witnessed, in **locus positions**.
@@ -333,6 +338,30 @@ pub(super) struct OpenPileupRecord {
     /// successfully later — asserted in `fold_read_into_record` rather than handled,
     /// because a removal path would be code no input can reach.
     reads_without_observation: Vec<u32>,
+    /// The reads a depth cap truncated at some position of this record's footprint —
+    /// **candidates for `reads_discarded_by_cap`, not the count itself** (spec §6).
+    ///
+    /// # Why the obvious per-record count is wrong, and this is the correction
+    ///
+    /// Production counts `column_depth_truncations` on `RunSummary`: *positions* truncated,
+    /// run-wide. A read can be truncated at one position of a footprint and survive at
+    /// another, and **if it folds at all it folds with its whole window**, so its evidence
+    /// is not subsampled. Counting truncation events per record would therefore flag
+    /// records whose support is complete.
+    ///
+    /// What the locus type wants is "*the support counts are a subsample, not the depth*":
+    /// **reads that had events inside this footprint and were truncated at every position
+    /// where they did, so folded nowhere.** That is why this is a membership list resolved
+    /// at `finalise` against `folded_reads` rather than a counter — a read here that folded
+    /// later is not discarded, it is present.
+    ///
+    /// **The cap truncates in the walk, before any record is identified**, so these ids are
+    /// plumbed in from `genome_walk` rather than discovered here. Two cases have no clean
+    /// answer and are recorded rather than solved: a read truncated where no record is open
+    /// is unattributable to any locus, and a truncated read carrying a *deletion* would have
+    /// widened a record — so dropping it changes the footprint, and with it every other
+    /// read's coverage.
+    reads_discarded_by_cap: Vec<u32>,
 }
 
 /// Record `read_id` as having yielded no observation in this record, once.
@@ -406,8 +435,10 @@ impl OpenPileupRecord {
             pos,
             alleles: vec![OpenAllele::new(ref_seq)],
             // Unallocated until the first non-contiguous witness, which most records
-            // never see — see the field's own note.
+            // never see — see the field's own note. Same for the cap list: a truncated
+            // column is rare and most runs never see one at all.
             reads_without_observation: Vec::new(),
+            reads_discarded_by_cap: Vec::new(),
             folded_reads: AHashMap::with_capacity(RECORD_FOLDED_READS_INITIAL_CAPACITY),
         }
     }
@@ -566,6 +597,15 @@ impl OpenPileupRecord {
             reads_complete: 0,
             reads_partially_observed: 0,
             reads_without_observation: self.reads_without_observation.len() as u32,
+            // **Resolved here, not counted in the walk.** A read truncated at one position
+            // of this footprint may have folded at another, and a read that folds does so
+            // with its whole window — so only the ones still absent from `folded_reads` at
+            // the end were actually discarded (spec §6).
+            reads_discarded_by_cap: self
+                .reads_discarded_by_cap
+                .iter()
+                .filter(|read_id| !self.folded_reads.contains_key(read_id))
+                .count() as u32,
         };
         // **The rows come from the reads, not from the bucket totals** (B1). See
         // `observation_rows` for why, and for what makes the two agree at one read group.
@@ -658,12 +698,7 @@ impl OpenPileupRecord {
             reference_bases,
             observed_sequences,
             reads_without_observation: witness.reads_without_observation,
-            // **B3 fills this**, and zero is the honest placeholder rather than a lie: the
-            // depth cap truncates in the walk, before any record exists, so the truncated
-            // ids are not plumbed into the fold yet. A non-zero value would claim the
-            // support counts are a subsample; zero claims they are not, which is true of
-            // every record this step can build.
-            reads_discarded_by_cap: 0,
+            reads_discarded_by_cap: witness.reads_discarded_by_cap,
             kind: LocusKind::Generic,
         };
         (locus, witness)
@@ -1214,6 +1249,7 @@ struct RecordFoldState<'a> {
     alleles: &'a mut Vec<OpenAllele>,
     folded_reads: &'a mut AHashMap<u32, FoldedReadState>,
     reads_without_observation: &'a mut Vec<u32>,
+    reads_discarded_by_cap: &'a mut Vec<u32>,
 }
 
 /// Fold one read into one open record, exactly once: build the haplotype its events
@@ -1244,6 +1280,9 @@ fn fold_read_into_record(
         alleles,
         folded_reads,
         reads_without_observation,
+        // The fold does not decide what the cap removed — that is registered by
+        // `process_position` after this loop, from ids the walk hands down.
+        reads_discarded_by_cap: _,
     } = record;
     let Some(witnessed) =
         apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, window_events)
@@ -1556,6 +1595,7 @@ pub(super) fn process_position(
     walker_pos: u32,
     chrom_id: u32,
     contributors: &[ReadContribution],
+    truncated_by_cap: &[u32],
     active_reads: &ActiveReads,
     reference: &dyn RefSeq,
 ) -> Result<ProcessOutcome, WalkerError> {
@@ -1638,6 +1678,7 @@ pub(super) fn process_position(
             alleles,
             folded_reads,
             reads_without_observation,
+            reads_discarded_by_cap,
             ..
         } = rec;
         // `saturating_add`, matching `footprint_end_exclusive()` — every other reader of
@@ -1650,6 +1691,7 @@ pub(super) fn process_position(
             alleles,
             folded_reads,
             reads_without_observation,
+            reads_discarded_by_cap,
         };
 
         for contrib in contributors {
@@ -1702,6 +1744,18 @@ pub(super) fn process_position(
                 &window_events,
                 contrib.bq_baq_at_walker_pos,
             );
+        }
+
+        // **The reads the cap removed at this position, registered against every record
+        // affected here** (B3). Candidates, not the count: `finalise` keeps only those
+        // still absent from `folded_reads`, because a read truncated at one position of a
+        // footprint may fold at another — and if it folds at all, it folds with its whole
+        // window. Registered *after* the fold loop, so a read that both contributed and was
+        // truncated at this position could not be listed against a record it just folded
+        // into. That cannot happen today (truncation removes it from `contributors` before
+        // the fold ever sees it), and the ordering keeps it true if the cap ever moves.
+        for &read_id in truncated_by_cap {
+            note_no_observation(fold_state.reads_discarded_by_cap, read_id);
         }
 
         // After every contributor has folded, not before: the empty buckets are created
@@ -2577,7 +2631,7 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
         for pos in [5u32, 7] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
                 .expect("the fixture walks cleanly");
         }
         (open, active)
@@ -2630,7 +2684,7 @@ mod tests {
         let (active, _ids) = admitted(widen_fixture_reads());
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("opens");
+        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("opens");
 
         let opener_id = read_id_of(&active, "opener");
         // A quality the walk decided and the events cannot reproduce.
@@ -2647,7 +2701,7 @@ mod tests {
         }
 
         let contributors = contributors_at(&active, 7);
-        process_position(&mut open, 7, 0, &contributors, &active, &reference).expect("widens");
+        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference).expect("widens");
 
         let record = open.records.get(&5).expect("the record at 5");
         assert_eq!(
@@ -2866,7 +2920,7 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
 
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("opens");
+        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("opens");
         let shortie_id = read_id_of(&active, "shortie");
         let narrow = {
             let record = open.records.get(&5).expect("the record at 5");
@@ -2892,7 +2946,7 @@ mod tests {
         };
 
         let contributors = contributors_at(&active, 7);
-        process_position(&mut open, 7, 0, &contributors, &active, &reference).expect("widens");
+        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference).expect("widens");
 
         let record = open.records.get(&5).expect("the record at 5");
         assert_eq!(
@@ -2958,7 +3012,7 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
         for pos in [5u32, 7] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
                 .expect("the fixture walks cleanly");
         }
 
@@ -2970,6 +3024,7 @@ mod tests {
                 reads_complete: 1,
                 reads_partially_observed: 2,
                 reads_without_observation: 0,
+                reads_discarded_by_cap: 0,
             },
             "the opener's deletion witnessed 5..=20 whole; the shortie stopped at 7 and \
              the widener started there"
@@ -3011,7 +3066,7 @@ mod tests {
         ]);
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 7);
-        process_position(&mut open, 7, 0, &contributors, &active, &reference)
+        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference)
             .expect("the fixture walks cleanly");
         (open, active)
     }
@@ -3091,7 +3146,7 @@ mod tests {
         let (active, _ids) = admitted(vec![first, second]);
         let mut open = OpenPileupRecordTable::new();
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("walks");
+        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("walks");
 
         let record = open.records.get(&5).expect("the record at 5");
         let rows = record.observation_rows(record.footprint_end_exclusive());
@@ -3173,6 +3228,119 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // B3 — reads a depth cap discarded, per record.
+    // -----------------------------------------------------------------
+
+    /// The two halves the walk hands `process_position`: the contributors that survived the
+    /// column-depth cap, and the read ids it removed. Splitting them here rather than
+    /// truncating a list keeps the fixtures explicit about *which* read the cap took.
+    fn contributors_at_with_cap(
+        active: &ActiveReads,
+        pos: u32,
+        capped: &[u32],
+    ) -> (Vec<ReadContribution>, Vec<u32>) {
+        let (kept, removed): (Vec<_>, Vec<_>) = contributors_at(active, pos)
+            .into_iter()
+            .partition(|contrib| !capped.contains(&contrib.read_id));
+        (kept, removed.into_iter().map(|c| c.read_id).collect())
+    }
+
+    /// A record at 5 spanning 5..=9, opened by `opener`'s four-base deletion, with `capped`
+    /// matching every one of those positions. Walked at 5, 6, 8 and 9, with `capped`
+    /// removed by the cap at whichever of those `capped_at` names.
+    fn record_with_a_capped_read(capped_at: &[u32]) -> (OpenPileupRecordTable, ActiveReads) {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(vec![
+            plain_read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(4), CigarOp::Match(16)],
+                vec![b'A'; 17],
+            ),
+            plain_read(
+                "capped",
+                5,
+                9,
+                vec![CigarOp::Match(5)],
+                WIDEN_CONTIG.as_bytes()[4..9].to_vec(),
+            ),
+        ]);
+        let capped_id = read_id_of(&active, "capped");
+        let mut open = OpenPileupRecordTable::new();
+        for pos in [5u32, 6, 8, 9] {
+            let capped_here: &[u32] = if capped_at.contains(&pos) {
+                std::slice::from_ref(&capped_id)
+            } else {
+                &[]
+            };
+            let (contributors, truncated) = contributors_at_with_cap(&active, pos, capped_here);
+            process_position(
+                &mut open,
+                pos,
+                0,
+                &contributors,
+                &truncated,
+                &active,
+                &reference,
+            )
+            .expect("the fixture walks cleanly");
+        }
+        (open, active)
+    }
+
+    /// **A read the cap removed at every position it had events is reported as discarded** —
+    /// which is what "the support counts are a subsample, not the depth" means (spec §6).
+    #[test]
+    fn a_read_the_cap_removed_everywhere_is_reported_as_discarded() {
+        let (mut open, _active) = record_with_a_capped_read(&[5, 6, 8, 9]);
+        let record = open.records.remove(&5).expect("the record at 5");
+        assert_eq!(
+            record.ref_span(),
+            5,
+            "the opener's deletion must open the record at 5..=9"
+        );
+        let (locus, witness) = record.finalise();
+        assert_eq!(
+            witness.reads_discarded_by_cap, 1,
+            "`capped` had events at every position of this footprint and the cap took it at \
+             all of them, so it folded nowhere"
+        );
+        assert_eq!(
+            locus.reads_discarded_by_cap, 1,
+            "and the locus reports it, which is what a model reads to know the counts are a \
+             subsample"
+        );
+    }
+
+    /// **A read the cap removed at one position but not another is *not* discarded** — the
+    /// correction that makes this quantity worth having.
+    ///
+    /// Production counts truncated *positions*, run-wide. Counting them per record would
+    /// flag this record, whose support is complete: `capped` survived the cap at 6 and, like
+    /// every read that folds at all, folded with its **whole window**. Its evidence is not a
+    /// subsample of anything. That is why the fold keeps a membership list and `finalise`
+    /// resolves it against `folded_reads`, rather than incrementing a counter at the cap.
+    #[test]
+    fn a_read_the_cap_removed_at_only_some_positions_is_not_discarded() {
+        let (mut open, active) = record_with_a_capped_read(&[5, 8, 9]);
+        let record = open.records.remove(&5).expect("the record at 5");
+        assert!(
+            record
+                .folded_reads
+                .contains_key(&read_id_of(&active, "capped")),
+            "`capped` must have folded at 6, or this fixture is the other test"
+        );
+        let (locus, witness) = record.finalise();
+        assert_eq!(
+            witness.reads_discarded_by_cap, 0,
+            "it was truncated at three positions of four and folded anyway; a per-position \
+             counter would have reported three"
+        );
+        assert_eq!(locus.reads_discarded_by_cap, 0);
+    }
+
+    // -----------------------------------------------------------------
     // A5 — the no-observation path: which reads, as a set.
     // -----------------------------------------------------------------
 
@@ -3207,7 +3375,7 @@ mod tests {
         // walker would not stop for it either.
         for pos in [5u32, 6, 8, 9] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
                 .expect("the fixture walks cleanly");
         }
 
@@ -3271,7 +3439,7 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
 
         let contributors = contributors_at(&active, 5);
-        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("opens");
+        process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("opens");
         let holed_id = read_id_of(&active, "holed");
         assert!(
             open.records
@@ -3288,7 +3456,7 @@ mod tests {
             "`holed` must be inside its own deletion at 7, or the fold loop reaches it \
              and `refold_live_reads` is not the path under test"
         );
-        process_position(&mut open, 7, 0, &contributors, &active, &reference).expect("widens");
+        process_position(&mut open, 7, 0, &contributors, &[], &active, &reference).expect("widens");
 
         let record = open.records.remove(&5).expect("the record at 5");
         assert_eq!(
@@ -3343,7 +3511,7 @@ mod tests {
         let mut open = OpenPileupRecordTable::new();
         for pos in [5u32, 7] {
             let contributors = contributors_at(&active, pos);
-            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+            process_position(&mut open, pos, 0, &contributors, &[], &active, &reference)
                 .expect("the fixture walks cleanly");
         }
 

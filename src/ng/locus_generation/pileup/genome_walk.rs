@@ -325,6 +325,10 @@ struct WalkerState {
     /// allocated once and reused via `clear()` between steps. L6
     /// in `ia/reviews/perf_pileup_2026-05-10.md`.
     contributors_buf: Vec<ReadContribution>,
+    /// Reusable per-step buffer for the read ids the column-depth cap removed. Hoisted for
+    /// the same reason as `contributors_buf`: this runs once per covered reference base,
+    /// and a truncated column is rare, so the buffer is usually empty and never grows.
+    truncated_ids_buf: Vec<u32>,
     /// Reusable per-step buffer for `close_aged_records`'s drained
     /// records. Paired with `OpenPileupRecordTable::closing_keys_buf`;
     /// together they remove the two per-walker-step `Vec` allocations
@@ -349,6 +353,7 @@ impl WalkerState {
             summary: RunSummary::default(),
             config,
             contributors_buf: Vec::new(),
+            truncated_ids_buf: Vec::new(),
             drained_buf: Vec::new(),
         }
     }
@@ -473,8 +478,17 @@ impl WalkerState {
         // truncate-to-first-N is approximately unbiased and avoids
         // the random-sample machinery a per-allele clip would
         // require.
+        //
+        // **The ids the cap removes are kept** (B3). The locus type reports reads a cap
+        // discarded *per record*, and this is the only moment they are knowable: truncation
+        // happens before step 3, so a truncated read opens and widens nothing and is
+        // invisible to every record it would have reached. They are candidates rather than
+        // a count — see `OpenPileupRecord::reads_discarded_by_cap`.
         let cap = column_depth_cap(contributors, &self.config);
+        self.truncated_ids_buf.clear();
         if contributors.len() > cap {
+            self.truncated_ids_buf
+                .extend(contributors[cap..].iter().map(|contrib| contrib.read_id));
             contributors.truncate(cap);
             self.summary.column_depth_truncations += 1;
         }
@@ -490,6 +504,7 @@ impl WalkerState {
             walker_pos,
             self.chrom_id,
             contributors,
+            &self.truncated_ids_buf,
             &self.active_reads,
             reference,
         )?;
@@ -931,6 +946,50 @@ fn column_depth_cap(contributors: &[ReadContribution], config: &WalkerConfig) ->
 mod tests {
     use super::super::cigar_cursor::EventsAt;
     use super::*;
+
+    /// **The cap's discarded read ids reach the record** — the plumbing B3 adds, end to
+    /// end through `run` rather than through `process_position`.
+    ///
+    /// Worth its own test because the per-record fixtures drive the fold directly and hand
+    /// it the truncated ids themselves, so they cannot see the walk failing to *collect*
+    /// them. Deleting the collection leaves every one of those fixtures green.
+    ///
+    /// Six reads at one position with a cap of two: four are truncated, none of them folds
+    /// anywhere, and the record they would have reached says so.
+    #[test]
+    fn reads_the_column_cap_removed_are_reported_on_the_record() {
+        use crate::ng::locus_generation::pileup::tests::{MockFasta, snp_read};
+
+        let config = WalkerConfig {
+            max_snp_column_depth: 2,
+            ..WalkerConfig::default()
+        };
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let loci: Vec<_> = run(reads, &MockFasta::new("ACG"), &config)
+            .map(|item| item.expect("the walk succeeds"))
+            .collect();
+
+        assert!(!loci.is_empty(), "the fixture must emit loci");
+        let discarded: u32 = loci.iter().map(|locus| locus.reads_discarded_by_cap).sum();
+        assert!(
+            discarded > 0,
+            "six reads at a cap of two truncates four of them, and none folded anywhere — \
+             the walk is not handing the cap's read ids down to the fold: {loci:?}"
+        );
+        for locus in &loci {
+            let folded: u32 = locus
+                .observed_sequences
+                .iter()
+                .map(|observation| observation.num_obs)
+                .sum();
+            assert_eq!(
+                folded, 2,
+                "each column folds exactly the cap's worth, or the fixture is not capping"
+            );
+        }
+    }
 
     fn contribution(
         bq: u8,
