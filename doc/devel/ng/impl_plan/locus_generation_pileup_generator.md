@@ -97,7 +97,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 
   *Depends:* —. *Source:* arch §1.3, §4 (the `fetch_into` note); owner decision 2026-07-29.
 
-- ☐ **A1 — the state the rule needs.** `RefSpan { start, end }` (1-based inclusive, reference
+- ✅ **A1 — the state the rule needs.** `RefSpan { start, end }` (1-based inclusive, reference
   coordinates); `FoldedReadState` gains `witnessed: RefSpan` and `read_group: ReadGroupId`;
   `AlleleSupportStats` becomes ng's copy, production's **minus `placed_start`** (`placed_left` is
   kept — it feeds production's QUAL penalty). Types only. *Depends:* —. *Source:* arch §1.2, spec §6.

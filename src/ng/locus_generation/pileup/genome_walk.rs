@@ -442,6 +442,7 @@ impl WalkerState {
             contributors.push(ReadContribution {
                 read_id: active_read.read_id,
                 chain_id: active_read.chain_id,
+                read_group: active_read.read.read_group,
                 events_at_pos,
                 bq_baq_at_walker_pos: bq_at_walker,
                 mq_log_err: active_read.read.mq_log_err,
@@ -932,6 +933,7 @@ mod tests {
         ReadContribution {
             read_id: 0,
             chain_id: 0,
+            read_group: crate::ng::types::ReadGroupId(0),
             events_at_pos: events,
             bq_baq_at_walker_pos: bq,
             mq_log_err: -3.0,

@@ -21,8 +21,10 @@ use std::collections::BTreeMap;
 use ahash::AHashMap;
 
 use crate::ng::ref_seq::RefSeq;
-use crate::ng::types::ContigId;
-use crate::pileup_record::{AlleleObservation, AlleleSupportStats, ChainId, PileupRecord};
+use crate::ng::types::{ContigId, ReadGroupId};
+use crate::pileup_record::{
+    AlleleObservation, AlleleSupportStats as ProductionAlleleSupportStats, ChainId, PileupRecord,
+};
 
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
@@ -47,6 +49,64 @@ use super::errors::WalkerError;
 /// container (e.g. an arena-pooled map or a perfect hash on
 /// dense `read_id` ranges) can be evaluated.
 const RECORD_FOLDED_READS_INITIAL_CAPACITY: usize = 32;
+
+/// A stretch of reference positions, **1-based and inclusive of both ends** —
+/// the convention [`PreparedRead::alignment_start`](super::PreparedRead) and
+/// `alignment_end` already use, so a span built from a read's own coordinates
+/// needs no adjustment.
+///
+/// Deliberately **not** [`GenomeRegion`](crate::ng::types::GenomeRegion), which
+/// carries a `ContigId` and a `u64` this fold has no use for: an open record is
+/// already pinned to one contig, and every coordinate inside the walk is `u32`.
+///
+/// *Invariant:* `start <= end`. There is no empty span — a read that witnessed
+/// nothing inside a record does not fold into it at all, so "no positions" is
+/// the absence of a `RefSpan`, never a degenerate one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RefSpan {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// The support one allele bucket has accumulated — **ng's own**, and production's
+/// [`AlleleSupportStats`](crate::pileup_record::AlleleSupportStats) **minus
+/// `placed_start`**.
+///
+/// `placed_left` stays because something computes on it:
+/// [`vcf::qual_refine`](crate::vcf) turns it into the read-position-bias term
+/// subtracted from QUAL, live through `final_qual` into the cohort VCF writer
+/// and the `--min-qual` gate, so dropping it would forfeit the ability to
+/// reproduce production's QUAL. `placed_start` is merged, serialised and printed
+/// by the `psp-to-pileup` dump and read by **nothing that computes**, and it is
+/// cheap to reverse: both counters are pure functions of the read's start against
+/// the record's anchor (spec §6, arch §3).
+///
+/// # It is still emitted, for now, and that is deliberate
+///
+/// [`OpenPileupRecord::finalise`] still returns production's [`PileupRecord`],
+/// which has the field — so until Milestone B changes the output type, the value
+/// is **reconstructed at that boundary** from a per-read flag on
+/// [`FoldedReadState`], exactly and by definition. That is what keeps the stage-1
+/// differential comparing every field of every record through Milestone A, which
+/// is the oracle A2 and A3 are checked against; dropping the number here instead
+/// would have blinded that oracle, and broken one inherited test inside the still
+/// verbatim `tests.rs`, four steps before either needed to move.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct AlleleSupportStats {
+    /// Number of supporting reads for this allele in this record.
+    pub num_obs: u32,
+    /// `Σ max(ln(P_err_BQ_BAQ), ln(P_err_MQ))` over supporting reads.
+    pub q_sum: f64,
+    /// Reads on the forward strand among `num_obs`.
+    pub fwd: u32,
+    /// Reads whose mapped 5′ end is strictly to the left of this record's anchor
+    /// position (freebayes' `placedLeft`).
+    pub placed_left: u32,
+    /// Σ mapping quality over supporting reads.
+    pub mapq_sum: u32,
+    /// Σ mapq² over supporting reads.
+    pub mapq_sum_sq: u64,
+}
 
 /// One in-flight allele bucket inside an `OpenPileupRecord`.
 ///
@@ -109,6 +169,57 @@ struct FoldedReadState {
     allele_index: usize,
     contribution: AlleleSupportStats,
     chain_id: ChainId,
+    /// The read group this read was prepared in — part of the observation's
+    /// identity from B1 on, so a per-library model gets the allele × group cross
+    /// *with its quality moments* rather than a count beside a merged
+    /// observation (spec §6). Copied off the contributor like the fields around
+    /// it; ng's [`PreparedRead`](super::PreparedRead) carries it, so nothing here
+    /// reconstructs anything.
+    ///
+    /// Unread until B1 puts it in the bucket key. The `expect` is a compiler
+    /// backstop that forces its own removal the moment that lands — an `allow`
+    /// would simply go stale.
+    #[expect(
+        dead_code,
+        reason = "B1 makes the read group part of the bucket key; this expect must \
+                  be deleted when it lands"
+    )]
+    read_group: ReadGroupId,
+    /// The positions this read actually witnessed inside the record — the union
+    /// of its event footprints, **not** its alignment span. The span is blind to
+    /// `N`, adaptor-masked, ref-skipped and dropped-indel positions, all of which
+    /// production fills from the reference (spec §6).
+    ///
+    /// Held in **absolute reference coordinates**, not relative to the footprint:
+    /// the bucket a read folds into is chosen from its bases, which are fixed at
+    /// fold time, while its coverage is relative to a footprint that is not.
+    /// Coverage is therefore resolved once, at `finalise()`, against the record's
+    /// **final** footprint — by which time the read may be long gone, since
+    /// `expire_passed` touches no open record (spec §4).
+    ///
+    /// **A1 fills this with the record's whole footprint**, which is precisely
+    /// what production's fill assumes every folded read witnessed — so this step
+    /// changes no answer. A2 replaces it with the extent the events actually
+    /// cover, and that is where the answers move.
+    ///
+    /// Unread until A4 resolves coverage from it. Same backstop, same reason as
+    /// `read_group` above.
+    #[expect(
+        dead_code,
+        reason = "A4 resolves ReadCoverage from this at finalise; this expect must \
+                  be deleted when it lands"
+    )]
+    witnessed: RefSpan,
+    /// Whether this read's mapped 5′ end *is* the record's anchor position
+    /// (freebayes' `placedStart`).
+    ///
+    /// **Transitional, and it disappears with the `PileupRecord` boundary.** ng's
+    /// [`AlleleSupportStats`] does not carry `placed_start`, but `finalise` still
+    /// has to emit one; a per-read flag reconstructs the per-bucket count exactly,
+    /// because that count *is* "how many currently-folded reads in this bucket
+    /// started on the anchor". Milestone B deletes both this field and the
+    /// conversion that reads it.
+    placed_start: bool,
 }
 
 impl OpenPileupRecord {
@@ -151,10 +262,24 @@ impl OpenPileupRecord {
     ///
     /// REF (allele 0) chain ids are intentionally **not** emitted —
     /// see the skip in the projection loop below.
+    ///
+    /// **`placed_start` is projected here too, for the same reason and by the
+    /// same route.** ng's [`AlleleSupportStats`] does not carry it (spec §6), but
+    /// this function still returns production's `PileupRecord`, which has the
+    /// field. Per bucket it is "how many currently-folded reads in that bucket
+    /// started on the record's anchor", which is exactly what a per-read flag in
+    /// `folded_reads` counts — so the reconstruction is exact rather than
+    /// approximate, and it disappears with this whole conversion at Milestone B.
     pub fn finalise(self) -> PileupRecord {
         let mut per_bucket: Vec<Vec<ChainId>> =
             (0..self.alleles.len()).map(|_| Vec::new()).collect();
+        let mut placed_start_per_bucket: Vec<u32> = vec![0; self.alleles.len()];
         for state in self.folded_reads.values() {
+            // Counted before the REF skip below: `placed_start` is a property of
+            // every bucket, REF included, where chain ids are not.
+            if state.placed_start {
+                placed_start_per_bucket[state.allele_index] += 1;
+            }
             // Drop REF (allele 0) chain ids. The only downstream reader
             // of `chain_ids` is Stage 5's compound-haplotype check
             // (`per_group_merger::build_chain_proposals`), which links
@@ -176,9 +301,10 @@ impl OpenPileupRecord {
             .alleles
             .into_iter()
             .zip(per_bucket)
-            .map(|(a, chain_ids)| AlleleObservation {
+            .zip(placed_start_per_bucket)
+            .map(|((a, chain_ids), placed_start)| AlleleObservation {
                 seq: a.seq,
-                support: a.support,
+                support: to_production_support(a.support, placed_start),
                 chain_ids,
             })
             .collect();
@@ -192,6 +318,37 @@ impl OpenPileupRecord {
             windowed_gc: f32::NAN,
             windowed_coverage: f32::NAN,
         }
+    }
+}
+
+/// Widen ng's support stats back to production's, re-attaching the
+/// `placed_start` this fold no longer tracks.
+///
+/// **Transitional — it dies with the `PileupRecord` return at Milestone B.**
+/// Written as an exhaustive destructure of ng's type rather than a
+/// field-by-field read, so a field added to ng's stats stops this compiling
+/// instead of being silently dropped on the way out; that is the direction that
+/// can lose information, since production's type is the frozen one.
+fn to_production_support(
+    stats: AlleleSupportStats,
+    placed_start: u32,
+) -> ProductionAlleleSupportStats {
+    let AlleleSupportStats {
+        num_obs,
+        q_sum,
+        fwd,
+        placed_left,
+        mapq_sum,
+        mapq_sum_sq,
+    } = stats;
+    ProductionAlleleSupportStats {
+        num_obs,
+        q_sum,
+        fwd,
+        placed_left,
+        placed_start,
+        mapq_sum,
+        mapq_sum_sq,
     }
 }
 
@@ -838,7 +995,6 @@ pub(super) fn process_position(
                 q_sum: ln_q,
                 fwd: u32::from(!contrib.is_reverse_strand),
                 placed_left: u32::from(contrib.alignment_start < rec_pos),
-                placed_start: u32::from(contrib.alignment_start == rec_pos),
                 mapq_sum: mapq,
                 mapq_sum_sq: (mapq as u64) * (mapq as u64),
             };
@@ -869,6 +1025,18 @@ pub(super) fn process_position(
                     allele_index: new_index,
                     contribution: new_contribution,
                     chain_id: contrib.chain_id,
+                    read_group: contrib.read_group,
+                    // A1's placeholder: production's builder fills every
+                    // unwitnessed offset from the reference, so the haplotype it
+                    // just produced *claims* the whole footprint. Recording that
+                    // claim keeps this step free of behaviour change; A2 replaces
+                    // it with what the events actually cover, and `rec_end` is
+                    // exclusive, so the inclusive end is one less.
+                    witnessed: RefSpan {
+                        start: rec_pos,
+                        end: rec_end - 1,
+                    },
+                    placed_start: contrib.alignment_start == rec_pos,
                 },
             );
         }
@@ -913,7 +1081,6 @@ fn add_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStats) {
     support.q_sum += c.q_sum;
     support.fwd += c.fwd;
     support.placed_left += c.placed_left;
-    support.placed_start += c.placed_start;
     support.mapq_sum += c.mapq_sum;
     support.mapq_sum_sq += c.mapq_sum_sq;
 }
@@ -949,12 +1116,6 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
         c.placed_left,
     );
     debug_assert!(
-        support.placed_start >= c.placed_start,
-        "subtract_contribution underflow on placed_start: {} -= {}",
-        support.placed_start,
-        c.placed_start,
-    );
-    debug_assert!(
         support.mapq_sum >= c.mapq_sum,
         "subtract_contribution underflow on mapq_sum: {} -= {}",
         support.mapq_sum,
@@ -970,7 +1131,6 @@ fn subtract_contribution(support: &mut AlleleSupportStats, c: &AlleleSupportStat
     support.q_sum -= c.q_sum;
     support.fwd = support.fwd.saturating_sub(c.fwd);
     support.placed_left = support.placed_left.saturating_sub(c.placed_left);
-    support.placed_start = support.placed_start.saturating_sub(c.placed_start);
     support.mapq_sum = support.mapq_sum.saturating_sub(c.mapq_sum);
     support.mapq_sum_sq = support.mapq_sum_sq.saturating_sub(c.mapq_sum_sq);
 }
@@ -1035,6 +1195,12 @@ pub(super) struct ReadContribution {
     /// read up against the `ActiveReads` to query window events.
     pub read_id: u32,
     pub chain_id: ChainId,
+    /// The read group this read was prepared in, copied off the active read like
+    /// the fields around it — ng's [`PreparedRead`](super::PreparedRead) carries
+    /// it, so nothing here reconstructs it from a side channel. Unread until B1
+    /// makes it part of the observation's identity; carried to
+    /// [`FoldedReadState`] from A1 so the fold has it when that lands.
+    pub read_group: ReadGroupId,
     /// Events whose anchor *is* this walker_pos (used by step 3
     /// to identify candidate records). At most 2 events anchor at
     /// any walker_pos (one Match plus at most one indel), so the
@@ -1399,7 +1565,6 @@ mod tests {
             q_sum: 0.0,
             fwd: 1,
             placed_left: 0,
-            placed_start: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -1408,7 +1573,6 @@ mod tests {
             q_sum: 0.0,
             fwd: 0,
             placed_left: 0,
-            placed_start: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -1423,7 +1587,6 @@ mod tests {
             q_sum: -1.0,
             fwd: 1,
             placed_left: 0,
-            placed_start: 1,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -1432,7 +1595,6 @@ mod tests {
             q_sum: -1.0,
             fwd: 5,
             placed_left: 5,
-            placed_start: 5,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -1440,7 +1602,6 @@ mod tests {
         assert_eq!(s.num_obs, 0);
         assert_eq!(s.fwd, 0);
         assert_eq!(s.placed_left, 0);
-        assert_eq!(s.placed_start, 0);
         // q_sum is straight f64 subtract by design (signed):
         // (-1.0) - (-1.0) = 0.0.
         assert!((s.q_sum - 0.0).abs() < 1e-12);
@@ -1456,7 +1617,6 @@ mod tests {
             q_sum: -3.0,
             fwd: 4,
             placed_left: 2,
-            placed_start: 1,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -1465,7 +1625,6 @@ mod tests {
             q_sum: -2.0,
             fwd: 1,
             placed_left: 0,
-            placed_start: 0,
             mapq_sum: 0,
             mapq_sum_sq: 0,
         };
@@ -1475,7 +1634,6 @@ mod tests {
         assert_eq!(bucket.num_obs, snapshot.num_obs);
         assert_eq!(bucket.fwd, snapshot.fwd);
         assert_eq!(bucket.placed_left, snapshot.placed_left);
-        assert_eq!(bucket.placed_start, snapshot.placed_start);
         assert!((bucket.q_sum - snapshot.q_sum).abs() < 1e-12);
     }
 }
