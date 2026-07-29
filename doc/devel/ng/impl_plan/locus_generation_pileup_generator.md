@@ -13,7 +13,8 @@ Follows [`locus_generation_pileup_prerequisites.md`](locus_generation_pileup_pre
 
 ## Scope
 
-**In:** the behaviour changes inside the copied walker (Milestone A), the ng-shaped output
+**In:** taking ownership of the copies outright (A0 — the reference adaptor deleted, `copy_fidelity`
+narrowed), the behaviour changes inside them (the rest of Milestone A), the ng-shaped output
 (Milestone B), the generator and its region walk (Milestone C), and the measurements that decide
 whether the change was worth making (Milestone D).
 
@@ -41,18 +42,60 @@ whether the change was worth making (Milestone D).
 ## Preconditions (already in place)
 
 - **Plans 1 and 2 are complete.** The shared locus type is final; the region stream is owned; ng's
-  walker is proven byte-identical to production's and the differential has been shown to
-  discriminate. **That baseline cannot be rebuilt after A2** — the first commit of this plan makes
-  the two walkers differ on purpose.
+  walker is proven to compute what production computes — 1.5 M synthetic records and 437 k real ones,
+  zero divergences — and the differential has been shown to fail six ways. **That baseline cannot be
+  rebuilt after A2**, which is the first commit that makes the two walkers differ on purpose. A0 sits
+  before it precisely because it is the last step the full differential can still verify.
+- **`copy_fidelity.rs` guards all eight copies today.** This plan retires it file by file, starting
+  at A0; that narrowing is part of each step, not a cleanup at the end.
+- **The production defect plan 2 found is fixed** (`5f32a62`), in production and in ng's copy. It sat
+  in `apply_events_to_ref_into` — the function A2 replaces — so the fix is inherited rather than
+  redone, and the three-read case that pins it is a ready-made fixture for the witnessed-extent rule.
 - The dump-tool precedent [`examples/ng_ssr_loci_dump.rs`](../../../../examples/ng_ssr_loci_dump.rs)
   exists and D2 follows it.
 
 ---
 
-## Milestone A — stop the fabrication
+## Milestone A — take ownership, then stop the fabrication
 
-The one behaviour change, and the reason for the whole step: **nothing is written into an
-observation that its read did not witness** (spec §4).
+A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step exists:
+**nothing is written into an observation that its read did not witness** (spec §4).
+
+- ☐ **A0 — delete the reference adaptor. Pure refactor, own commit, and it goes FIRST.**
+  ng's copies speak production's `MultiChromRefFetcher` for one reason only: they were
+  transcribed verbatim, so their signatures are production's. That was never a design
+  choice, and from this plan on the two walkers diverge — so `open_record.rs` takes a
+  `RefSeq` directly and `RefSeqFetcher` is **deleted**, not renamed (owner, 2026-07-29).
+
+  What goes with it: `to_chrom_ref_fetch_error` and its two lossy spots (a contig *name*
+  rendered as an id, the `u64 → u32` narrowing); `WalkerError::Fasta`'s source becomes
+  `RefSeqError`; and ng stops importing `MultiChromRefFetcher` / `ChromRefFetchError`
+  entirely — one fewer coupling to frozen production. Use **`fetch_into`**, not `fetch`:
+  arch §4 already noted the latter allocates a `Vec<u8>` per `open_new`/`widen` where the
+  former writes into a caller buffer, and the buffer comes free with the removal.
+
+  **Why first, and not later: it is the last moment the refactor can be proven free.** A0
+  changes no behaviour, so the stage-1 differential must stay green across it — and every
+  step after A2 deliberately breaks that differential. Done later, this refactor would land
+  with no oracle at all.
+
+  *Two things this step must handle, not discover:*
+  - **The differential's two sides stop sharing one accessor.** Production's walker takes
+    `MockFasta`, ng's takes an `InMemoryRefSeq` over the same bytes. They agree only because
+    the generator draws its reference from `ACGT`, where `MockFasta`'s raw passthrough and
+    `InMemoryRefSeq`'s canonicalisation coincide. **Pin that**, in `parity.rs`, with a test
+    asserting the two serve identical bytes over the fixture contig — otherwise a later
+    generator change that introduced a lower-case or ambiguity-coded base would show up as
+    "the walkers disagree" and be chased into the walk.
+  - **`copy_fidelity.rs` must be narrowed, not retired.** A0 is the first commit that makes
+    a copied file genuinely diverge. Drop `open_record.rs` (and `errors.rs`) from its
+    checked set **in this commit**, leaving `cigar_cursor.rs`, `decompose.rs`,
+    `active_read_set.rs`, `chain_id_allocator.rs` and `tests.rs` still guarded as the
+    verbatim copies they still are. Each later step drops the file it changes, so the guard
+    keeps protecting what is still a copy instead of being switched off wholesale at the
+    first change.
+
+  *Depends:* —. *Source:* arch §1.3, §4 (the `fetch_into` note); owner decision 2026-07-29.
 
 - ☐ **A1 — the state the rule needs.** `RefSpan { start, end }` (1-based inclusive, reference
   coordinates); `FoldedReadState` gains `witnessed: RefSpan` and `read_group: ReadGroupId`;
@@ -170,7 +213,8 @@ observation that its read did not witness** (spec §4).
 
 | milestone | proven by |
 |---|---|
-| A | the stage-1 differential still green **on reads whose events tile the footprint**; failing elsewhere by design, with each failure enumerated |
+| A0 | the stage-1 differential still green **in full** — A0 changes no behaviour, and this is the last step at which that is true |
+| A1–A5 | the stage-1 differential still green **on reads whose events tile the footprint**; failing elsewhere by design, with each failure enumerated |
 | B | one-read-group row counts unchanged; output byte-identical across repeated runs (the sort) |
 | C | loci from two adjacent regions concatenate coordinate-sorted with no gap at the join; `records_outside_region` zero-sum across neighbours |
 | D1 | every divergence in one of five named classes; the complete-reads differential green as a permanent anchor |

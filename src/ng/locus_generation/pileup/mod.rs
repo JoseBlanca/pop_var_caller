@@ -172,6 +172,20 @@ pub use genome_walk::{PileupWalker, RunSummary, run};
 /// bitwise-copy semantics for an accessor of unbounded size. The `R: RefSeq` bound lives
 /// on the impl below, not here, so it is stated where it does work.
 ///
+/// # Temporary — plan 3's A0 deletes this (owner, 2026-07-29)
+///
+/// This type exists for one reason: the copies were transcribed **verbatim**, so their
+/// signatures are production's and ask for `MultiChromRefFetcher`. That is a consequence of
+/// the copy, not a design choice, and it stops being true the moment the two walkers
+/// diverge. Plan 3's **first** step — while the stage-1 differential can still prove a
+/// refactor free — has `open_record.rs` take a `RefSeq` directly, at which point this type,
+/// [`to_chrom_ref_fetch_error`] and both of the lossy spots documented above go away, and
+/// `fetch_into` replaces `fetch` (arch §4's allocation note).
+///
+/// The name is also one this codebase **deliberately retired** for a different concept
+/// (`fasta/fetcher.rs:20-23`, a 2026-05-23 review); deleting it settles that too, where a
+/// rename would only have moved it.
+///
 /// **Dead outside tests until plan 3**, which is what the `expect` records: this
 /// milestone builds the shim and proves it, and `PileupGenerator` is the first
 /// non-test consumer. The attribute is a compiler backstop that forces its own

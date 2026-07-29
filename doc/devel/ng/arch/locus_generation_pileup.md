@@ -227,6 +227,20 @@ it off the active read like the fields around it and nothing here reconstructs a
 struct RefSeqFetcher<R: RefSeq>(R);
 ```
 
+> **⚠ Superseded 2026-07-29 — this shim is temporary and plan 3 deletes it (owner).** It exists
+> for one reason: the copies were transcribed *verbatim*, so their signatures are production's
+> and say `MultiChromRefFetcher`. That is a consequence of the copy, not a design choice, and it
+> stops being true the moment the two walkers diverge. **Plan 3's A0** — its first step, while the
+> stage-1 differential can still prove the refactor free — has `open_record.rs` take a `RefSeq`
+> directly, deletes `RefSeqFetcher` and its error translation, and switches to `fetch_into`, which
+> is the allocation note in §4 below. ng then imports neither `MultiChromRefFetcher` nor
+> `ChromRefFetchError`.
+>
+> *(A review also found the name was **deliberately retired** in this codebase for a different
+> concept — `fasta/fetcher.rs:20-23`, a 2026-05-23 review — so a grep returns both the retirement
+> note and a live type. Deleting it settles that too; a rename was the alternative and was not
+> taken.)*
+
 ## 2. The interface
 
 ### 2.1 The generator
