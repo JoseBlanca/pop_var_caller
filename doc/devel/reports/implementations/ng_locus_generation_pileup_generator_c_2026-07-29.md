@@ -179,13 +179,12 @@ it), bringing the branch's count to nine.
 
 None of these blocks Milestone D.
 
-1. **No generator error carries the region it fired in.** All four
-   `LocusGenerationError` variants name a phase and nothing else, and the
-   generator knows the region at every `?`. It is what let Blocker 1 go
-   unnoticed. The fix widens a **shared** enum that `ssr.rs` also returns
-   through, so it is the owner's call: a `region` field on three variants, or the
-   struct-plus-`Kind` shape. `Reads`'s two origins (open vs mid-stream) want
-   splitting in the same pass.
+1. ~~No generator error carries the region it fired in.~~ **Done — owner
+   approved, 2026-07-29 (`a17f37b`).** Every generator-raised variant now carries
+   a `GenomeRegion`, `Reads` split into `OpenReadQuery` + `Reads`, and **none of
+   the four has a `#[from]`** — with a blanket conversion a bare `?` compiles and
+   silently produces an error with no region, which is the state the change
+   exists to make unreachable. See §9.
 2. **`PileupGeneratorCounts` is unreachable once the generator is boxed into a
    `GeneratorSlot`** — nine counters with no reader that is not a test, and it is
    what makes a zero-knob walk *totally* silent. Needs either a counts method on
@@ -213,3 +212,52 @@ None of these blocks Milestone D.
 8. **The arch inventory still places `PileupGenerator` in `mod.rs`** and lists
    neither `generator.rs` nor `mock_reference.rs`.
 9. **Checkpoint A's and B's remaining items**, and plan 2's four, stand.
+
+## 9. The region on the error (owner, 2026-07-29)
+
+Checkpoint C's first open item, decided and applied.
+
+**Shape.** Four variants carry a `GenomeRegion` —`OpenReadQuery`, `Reads`,
+`Reference`, `Walker` — and `TypedRegion` deliberately does not, the region
+*stream* being what failed there. A `region()` accessor answers the question
+without matching, so a consumer does not rot when a variant is added. Splitting
+`Reads` into open-vs-mid-stream came in the same pass, as the review asked: "the
+index query for this region could not be opened" and "the record stream broke
+40 kb in" are different operational problems that rendered identically.
+
+**No `#[from]` on any of the four, and that is the enforcement.** A blanket
+conversion means a bare `?` compiles and yields an error with no region — the
+state this change exists to make unreachable. Removing it turned every affected
+`?` into a compile error, which is how the eight attachment sites were found
+rather than remembered: four in the pileup generator, four in the STR generator,
+which returns through the same shared type.
+
+**Which region gets attached:** the one the generator was working over — the
+segment, not the halo-widened span it queried, because the segment is the unit a
+caller can act on. The one exception says so where it attaches: the STR read
+fetch is a free function handed a tract-plus-margin span and knows no other.
+
+`GenomeRegion` gained a `Display` (`contig 3:940-1100`). It says *contig 3* and
+not *chr4* because the type holds an id, not a name — rendering one as the other
+is a lossy translation this branch has already deleted once (A0).
+
+### It caught a test of mine that could not fail — the tenth on this branch
+
+`an_abandoned_regions_shed_error_is_not_charged_to_the_next_region`, written for
+the review's own Blocker in `94758d7`, called `begin_segment` twice in a row —
+and **`begin_segment` opens nothing**. So the "abandoned" region never ran, never
+shed anything, and the error the test caught came from the *second* region's own
+read. It failed when the fix was reverted, which is why it looked sound; what it
+actually pinned was "a shed error is reported at all", which another test already
+covers.
+
+The region assertion is what exposed it: the error named contig 0 where the test
+said contig 1. Rebuilt so the failing read is one the walker reaches **while an
+earlier read is still producing loci** — the only shape in which a region can be
+abandoned with its failure latched and unreported — it now reproduces reviewer
+probe A exactly: with the fix reverted, chr1 emits loci while chr2's error waits
+to be charged to it.
+
+**Validation:** fmt clean, clippy `--all-targets --all-features -D warnings`
+clean, `cargo test --lib` **2718 passed**, `cargo doc --no-deps` still 12
+pre-existing unresolved links, host-native soak at 5,000 cases green.

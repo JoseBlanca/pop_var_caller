@@ -341,6 +341,10 @@ struct ReadPreparation<P: ReadPreparer> {
 /// region-shaped one, on regions that run to hundreds of kilobases (spec §7).
 struct PreparedRegionReads<R: RawRefSeq, P: ReadPreparer> {
     reads: SampleRegionReads<R>,
+    /// The region this stream's failures are attributed to — **the segment, not
+    /// the halo-widened span it queries**. The span is an implementation detail
+    /// of the halo; the segment is the unit a caller can act on.
+    region: GenomeRegion,
     preparation: Rc<RefCell<ReadPreparation<P>>>,
     /// Set once the query is exhausted or an error was latched. Both are
     /// terminal: a stream that shed an error must not resume, or the walk would
@@ -359,7 +363,10 @@ impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
                     return None;
                 }
                 Some(Ok(read)) => read,
-                Some(Err(source)) => return self.shed(source.into()),
+                Some(Err(source)) => {
+                    let region = self.region;
+                    return self.shed(LocusGenerationError::Reads { region, source });
+                }
             };
             let mut preparation = self.preparation.borrow_mut();
             // Split the borrow: `prepare_read` takes `&self` and `&mut
@@ -382,8 +389,11 @@ impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
                     // crates but not this one, so a preparation failure ng
                     // cannot yet describe is a compile error here instead of a
                     // reference error it is not.
+                    let region = self.region;
                     let error = match source {
-                        ReadPrepError::Reference(source) => LocusGenerationError::Reference(source),
+                        ReadPrepError::Reference(source) => {
+                            LocusGenerationError::Reference { region, source }
+                        }
                     };
                     return self.shed(error);
                 }
@@ -683,7 +693,10 @@ where
                     // same walk is left pending rather than lost, and the next
                     // call reports that one before fusing.
                     self.end_walk();
-                    return Err(self.fail(LocusGenerationError::Walker(source)));
+                    return Err(self.fail(LocusGenerationError::Walker {
+                        region: clamp,
+                        source,
+                    }));
                 }
                 None => {
                     // The walk is over. A read stream that shed a fatal error
@@ -735,9 +748,12 @@ where
         // would otherwise hold a borrow of `self` across the call that stores
         // the walk back into `self`.
         let make_reference = &mut self.make_reference;
-        let stream = reads.reads_in_region(query, make_reference)?;
+        let stream = reads
+            .reads_in_region(query, make_reference)
+            .map_err(|source| LocusGenerationError::OpenReadQuery { region, source })?;
         let prepared = PreparedRegionReads {
             reads: stream,
+            region,
             preparation: Rc::clone(&self.preparation),
             done: false,
         };
@@ -852,6 +868,31 @@ mod tests {
             scratch: &mut Self::Scratch,
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
             self.prepared.set(self.prepared.get() + 1);
+            PassthroughPreparer.prepare_read(read, scratch)
+        }
+    }
+
+    /// A preparer that fails on **one named read** and passes every other.
+    ///
+    /// The selectivity is the point: a region that fails on its first read never
+    /// gets to be a region with an *unreported* error, because the walk drains
+    /// and reports immediately. To abandon a region mid-drain with its failure
+    /// still pending, the failure has to come from a read the walker reaches
+    /// while earlier reads are still producing loci.
+    struct FailsToPrepareRead(&'static str);
+
+    impl ReadPreparer for FailsToPrepareRead {
+        type Scratch = ();
+        fn prepare_read(
+            &self,
+            read: AlignedRead,
+            scratch: &mut Self::Scratch,
+        ) -> Result<Option<PreparedRead>, ReadPrepError> {
+            if read.qname == self.0.as_bytes() {
+                return Err(ReadPrepError::Reference(
+                    crate::ng::ref_seq::RefSeqError::UnknownContig(ContigId(7)),
+                ));
+            }
             PassthroughPreparer.prepare_read(read, scratch)
         }
     }
@@ -1441,8 +1482,14 @@ mod tests {
             .next_locus(&reads)
             .expect_err("a region on a contig the file does not have cannot be queried");
         assert!(
-            matches!(error, LocusGenerationError::Reads(_)),
-            "the read query's failure reaches the caller as a read failure, got {error:?}"
+            matches!(error, LocusGenerationError::OpenReadQuery { .. }),
+            "an *open* that failed is its own variant, distinct from a stream that broke \
+             mid-region, got {error:?}"
+        );
+        assert_eq!(
+            error.region(),
+            Some(region(9, 1, 100)),
+            "and it names the region it was opening for"
         );
     }
 
@@ -1463,8 +1510,13 @@ mod tests {
             .next_locus(&reads)
             .expect_err("the preparer failed on the only read");
         assert!(
-            matches!(error, LocusGenerationError::Reference(_)),
+            matches!(error, LocusGenerationError::Reference { .. }),
             "a failed preparation reaches the caller as the reference failure it is, got {error:?}"
+        );
+        assert_eq!(
+            error.region(),
+            Some(region(0, 1, 100)),
+            "attributed to the region being walked, not to the halo-widened span queried"
         );
     }
 
@@ -1496,8 +1548,13 @@ mod tests {
         }
         let error = result.expect_err("a 41-position record exceeds a 20-position cap");
         assert!(
-            matches!(error, LocusGenerationError::Walker(_)),
+            matches!(error, LocusGenerationError::Walker { .. }),
             "got {error:?}"
+        );
+        assert_eq!(error.region(), Some(region(1, 1, 100)));
+        assert!(
+            error.to_string().contains("contig 1:1-100"),
+            "the message names the region, which is what a log line has to go on: {error}"
         );
     }
 
@@ -1972,7 +2029,7 @@ mod tests {
         while matches!(result, Ok(Some(_))) {
             result = generator.next_locus(&reads);
         }
-        assert!(matches!(result, Err(LocusGenerationError::Walker(_))));
+        assert!(matches!(result, Err(LocusGenerationError::Walker { .. })));
         let admitted = generator.counts().reads_admitted;
         assert!(
             admitted > 0,
@@ -1995,35 +2052,49 @@ mod tests {
     /// before it drained carried its failure into the next region, which
     /// reported it after emitting every one of its own loci.
     ///
-    /// Here the failing read is on chr2 and the second region is on chr1: with
-    /// the error still charged to the generator, a region that never saw the
-    /// read fails.
+    /// **The first version of this test could not fail for its stated reason**,
+    /// and adding the region to the error is what exposed it: it called
+    /// `begin_segment` twice in a row, and `begin_segment` opens nothing — so
+    /// the "abandoned" region never ran, never shed anything, and the error it
+    /// caught came from the *second* region's own read. It failed under the fix
+    /// being reverted, which is why it looked sound, but what it pinned was "a
+    /// shed error is reported at all", which another test already covers.
+    ///
+    /// The shape it needs: the failing read must be one the walker reaches while
+    /// an earlier read is still producing loci, so the caller can stop mid-drain
+    /// with the failure latched and unreported. `bad` on chr2 is that read;
+    /// `good` gives the region loci to emit first.
     #[test]
     fn an_abandoned_regions_shed_error_is_not_charged_to_the_next_region() {
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
             read_named_with_length("chr1_read", 0, 10, 30),
-            read_named_with_length("chr2_read", 1, 10, 30),
+            read_named_with_length("good", 1, 10, 30),
+            read_named_with_length("bad", 1, 50, 30),
         ]);
         let mut generator =
-            a_generator_with(PileupGeneratorConfig::default(), FailsToPrepare).expect("config");
+            a_generator_with(PileupGeneratorConfig::default(), FailsToPrepareRead("bad"))
+                .expect("config");
 
-        // chr2's region sheds an error on its only read, and is abandoned
-        // before anyone drains it.
+        // chr2 emits at least one locus and sheds on `bad` — then is abandoned
+        // with that failure still unreported.
         generator.begin_segment(region(1, 1, 100));
+        let first = generator
+            .next_locus(&reads)
+            .expect("the walk succeeds up to the failing read")
+            .expect("`good` covers the region");
+        assert_eq!(first.region.start, Position(10));
+
         generator.begin_segment(region(0, 1, 100));
 
-        let first = generator.next_locus(&reads);
-        assert!(
-            matches!(first, Err(LocusGenerationError::Reference(_))),
-            "the abandoned region's error is reported at once, before the new region \
-             produces anything, got {first:?}"
-        );
-        assert!(
-            generator
-                .next_locus(&reads)
-                .expect("the run is over")
-                .is_none(),
-            "and the run is over, rather than continuing into the new region"
+        let error = generator
+            .next_locus(&reads)
+            .expect_err("the abandoned region's failure is reported before the new region walks");
+        assert!(matches!(error, LocusGenerationError::Reference { .. }));
+        assert_eq!(
+            error.region(),
+            Some(region(1, 1, 100)),
+            "the error belongs to chr2, whose read failed — not to the chr1 region current \
+             when it surfaced"
         );
     }
 

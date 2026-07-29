@@ -452,37 +452,94 @@ impl<S> LocusGenerator<S> for NoLoci {
 /// the upstream walk ([`TypedRegion`](Self::TypedRegion)) or a generator's own fetch
 /// ([`Reference`](Self::Reference)) — and they stay distinct because they fail in different
 /// places.
+///
+/// # Every generator failure names the region it happened over (owner, 2026-07-29)
+///
+/// A region is the unit of this whole step: it is what `begin_segment` takes, what the
+/// counters are keyed to, and what the clamp and the halo reason about. An error that did not
+/// name one could be *believed of the wrong region*, and that is not hypothetical — the
+/// generic generator shipped exactly that defect, a failed read charged to the next region
+/// after it had emitted all of its own loci, and the missing region is why nobody noticed
+/// ([Milestone C review](../../../doc/devel/reports/reviews/ng_locus_generation_pileup_generator_c_2026-07-29.md)).
+///
+/// So the four generator-raised variants carry a [`GenomeRegion`] and **none of them has a
+/// `#[from]` conversion**. That is the enforcement, not an oversight: with a blanket `From`, a
+/// bare `?` compiles and silently produces an error with no region, which is the state this
+/// change exists to make unreachable. Attaching at the `?` site costs one `map_err` and is the
+/// only moment the region is known for certain.
+///
+/// [`TypedRegion`](Self::TypedRegion) is the exception and carries none, because the region
+/// *stream* is what failed — there is no region to name, that being the point.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LocusGenerationError {
     /// The upstream typed-region walk failed.
     #[error("typed-region walk failed during locus generation")]
     TypedRegion(#[from] TypedRegionError),
-    /// A read query failed — **either** opening it for a region **or** mid-stream,
-    /// the alignment input being malformed.
+    /// The read query for a region could not be **opened** — a missing or unreadable
+    /// index, a contig the file does not have, a region the planner rejects.
     ///
-    /// The two origins are one variant and the `Display` does not tell them apart:
-    /// "the index query for this region could not be opened" and "the record stream
-    /// broke 40 kb in" are different operational problems. Splitting them, and
-    /// carrying the region on the error, is
-    /// [Checkpoint C's open item](../../../doc/devel/reports/implementations/ng_locus_generation_pileup_generator_c_2026-07-29.md);
-    /// until then the wording at least names both, having previously denied the
-    /// first ("the open already succeeded upstream") while the generic generator's
-    /// `open_walk` raised exactly that (review).
-    #[error("read access failed during locus generation")]
-    Reads(#[from] IngestError),
+    /// Split from [`Reads`](Self::Reads) because the two are different operational
+    /// problems: "the index query for this region could not be opened" is a broken
+    /// input or a bad request, "the record stream broke 40 kb in" is a truncated or
+    /// corrupt file. One variant rendered them identically, and its own doc used to
+    /// deny that the first could happen at all.
+    #[error("the read query for {region} could not be opened")]
+    OpenReadQuery {
+        region: GenomeRegion,
+        #[source]
+        source: IngestError,
+    },
+    /// A read query failed **mid-stream**, or the alignment input was malformed: the
+    /// open already succeeded and reads were flowing.
+    #[error("read access over {region} failed during locus generation")]
+    Reads {
+        region: GenomeRegion,
+        #[source]
+        source: IngestError,
+    },
     /// A reference fetch failed — a broken reference, or a region past a contig end.
-    #[error("reference fetch failed during locus generation")]
-    Reference(#[from] RefSeqError),
+    #[error("reference fetch over {region} failed during locus generation")]
+    Reference {
+        region: GenomeRegion,
+        #[source]
+        source: RefSeqError,
+    },
     /// The pileup walk failed: a malformed read, reads out of coordinate order, a
     /// record wider than the span cap, or an exhausted chain-id space. Fatal and
     /// terminal for the walk that raised it
     /// (`locus_generation_pileup.md` §7).
     ///
-    /// None of the three variants above covers it — they name the *inputs* failing,
-    /// and this names the walk over inputs it already accepted.
-    #[error("the pileup walk failed during locus generation")]
-    Walker(#[from] pileup::WalkerError),
+    /// None of the variants above covers it — they name the *inputs* failing, and this
+    /// names the walk over inputs it already accepted.
+    #[error("the pileup walk over {region} failed")]
+    Walker {
+        region: GenomeRegion,
+        #[source]
+        source: pileup::WalkerError,
+    },
+}
+
+impl LocusGenerationError {
+    /// The region the failure is attributed to, or `None` for a failure of the region
+    /// *stream* itself.
+    ///
+    /// The region a generator attaches is **the one it was working over** — the segment
+    /// it was given, not the wider span it queried, since the segment is the unit a
+    /// caller can act on. The one exception is a helper that only ever knows a span
+    /// (the STR read fetch), which says so where it attaches.
+    ///
+    /// Here so a consumer — a log line, a per-region tally — can ask without matching
+    /// every variant, which is what would rot the moment a variant is added.
+    pub fn region(&self) -> Option<GenomeRegion> {
+        match self {
+            LocusGenerationError::TypedRegion(_) => None,
+            LocusGenerationError::OpenReadQuery { region, .. }
+            | LocusGenerationError::Reads { region, .. }
+            | LocusGenerationError::Reference { region, .. }
+            | LocusGenerationError::Walker { region, .. } => Some(*region),
+        }
+    }
 }
 
 /// The running tally — "no silent caps": every region and every base is accounted for, so
@@ -1129,7 +1186,10 @@ mod tests {
                 self.emitted = true;
                 return Ok(Some(locus(region(1, 1), Vec::new())));
             }
-            Err(LocusGenerationError::Reads(IngestError::NoFiles))
+            Err(LocusGenerationError::Reads {
+                region: region(1, 1),
+                source: IngestError::NoFiles,
+            })
         }
     }
 
@@ -1238,7 +1298,7 @@ mod tests {
             "the one locus before the failure"
         );
         match iterator.next() {
-            Some(Err(LocusGenerationError::Reads(_))) => {}
+            Some(Err(LocusGenerationError::Reads { .. })) => {}
             other => panic!("expected a fatal generator error, got {other:?}"),
         }
         assert!(
