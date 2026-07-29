@@ -9,7 +9,7 @@ You are scanning Rust code for performance-improvement candidates. You are **not
 
 This work has a hostile prior: most "obvious" optimizations either do not matter (cold code), do not help (the compiler already handles it), or trade real complexity for an imagined win. Be skeptical. Each candidate must answer: where on the call graph does this run? what would we measure? how much complexity does the fix add?
 
-The review is split across focused per-category checklists in `ai/skills/rust-performance-review/performance_review/`. **You are the orchestrator**: you triage which categories apply to the scope, dispatch one sub-agent per category in parallel, then synthesize their findings into a single report. Per-category rules are not duplicated in this file — read each category file when dispatching the corresponding sub-agent.
+The review is split across focused per-category checklists in `ai/skills/rust-performance-review/performance_review/`. **You are the orchestrator**: you triage which categories apply to the scope, dispatch one sub-agent per category in parallel — **each in its own git worktree** (step 5) — then synthesize their findings into a single report. Per-category rules are not duplicated in this file — read each category file when dispatching the corresponding sub-agent.
 
 ## Review principles (must always hold)
 
@@ -140,13 +140,34 @@ Decide which per-category checklists apply. Each lives at `ai/skills/rust-perfor
 
 When in doubt, dispatch — a sub-agent that finds nothing applicable writes `No findings.` and is cheap.
 
-### 5. Dispatch sub-agents in parallel
+### 5. Dispatch sub-agents in parallel — **each in its own worktree**
 
 Create the scratch directory: `tmp/perf_review_<YYYY-MM-DD>_<scope-slug>/` (append `_v<N>` if it already exists). The slug is a short kebab-case identifier of the reviewed module or PR (e.g. `gvcf_parser`, `pr-142`).
 
 Project rule: scratch space is project-local `tmp/`, never `/tmp`. Add `tmp/` to `.gitignore` if it is not already covered by the existing target ignores.
 
-For each selected category, dispatch a `general-purpose` sub-agent **in parallel** — issue a single message with multiple Agent tool calls. Each sub-agent prompt:
+For each selected category, dispatch a `general-purpose` sub-agent **in parallel** — issue a single message with multiple Agent tool calls — and pass **`isolation: "worktree"`** on every one.
+
+#### Why the isolation is mandatory here in particular
+
+This skill's whole currency is measurement, and **a measurement taken on a shared checkout is not a measurement**. Two agents benchmarking at once contend for the same target directory and the same machine; one rebuilding while another times is an unattributable number, and an ablation is worse — it needs the tree to hold *one* change while a baseline and a variant are timed in turn.
+
+A code review of a shared tree has already been observed losing to this: nine agents, edits overwritten mid-experiment, `src/` reverted under an agent three times, one agent's baseline failing on another's marker, five of nine retreating into private worktrees late and after wasted work, and every mutation result needing serial re-verification before it could be believed. A perf review is more exposed, not less, because its results are continuous — interference does not show up as a failed build, it shows up as a plausible wrong number.
+
+Two further rules follow, and they are this skill's not the code review's:
+
+- **Ablations and baselines belong to one agent inside one worktree.** Never split "measure the baseline" and "measure the variant" across agents; they will not be comparable.
+- **Say whether the numbers are comparable *across* agents.** Separate worktrees mean separate target directories and concurrent load. Timings from different agents are the same order of magnitude, not the same experiment — at synthesis, treat a cross-agent comparison as needing a re-run by one agent before it enters the report.
+
+#### What isolation changes in the prompt
+
+1. **Where it builds and benchmarks.** The agent is *in* its worktree and runs the project's tooling from there. Never point it at the main checkout.
+2. **Where its findings go.** Its worktree is temporary and is cleaned up, so the findings file goes to an **absolute path in the main checkout's** `tmp/perf_review_<date>_<slug>/`. Each agent writes its own file.
+3. **What it may now do.** It has its own tree: it may apply a candidate fix and measure it rather than only proposing a measurement plan. Say so — a measured fix outranks a plan, and this is what buys it.
+
+Do **not** ask isolated agents to leave the tree clean or revert their experiments — that is a shared-checkout instruction, and here it wastes effort on a tree about to be discarded.
+
+Each sub-agent prompt:
 
 > Run the **<category>** checklist on the following Rust performance-review scope.
 >
@@ -161,9 +182,10 @@ For each selected category, dispatch a `general-purpose` sub-agent **in parallel
 > 2. Read `ai/skills/rust-performance-review/performance_review/_finding_format.md` for the severity rubric and finding format.
 > 3. Read each in-scope file.
 > 4. Apply each rule and produce findings in the specified format. For every candidate, propose the **measurement plan** (benchmark or profile that confirms the gain) and the **complexity cost** of the fix. Findings without a measurement plan are downgraded.
-> 5. Write findings to `tmp/perf_review_<date>_<slug>/<category>.md`. If no findings apply, write only the line `No findings.`
-> 6. Do not invent profile output, benchmark numbers, or call frequencies. Cite only what was provided in the prompt or what you read in the source.
-> 7. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.
+> 5. **You are in your own isolated git worktree.** Build, benchmark and mutate freely *there* — nothing you do can collide with another agent. Where you can, go past proposing a measurement plan and **run it**: apply the candidate, measure baseline against variant *in this one worktree*, and report both numbers. A measured fix outranks a proposed one. Keep every ablation inside your own tree; a baseline timed in one worktree and a variant in another are not comparable.
+> 6. Write findings to the **absolute path** `<main-checkout>/tmp/perf_review_<date>_<slug>/<category>.md` — outside your worktree, which is temporary and will be discarded. If no findings apply, write only the line `No findings.`
+> 7. Do not invent profile output, benchmark numbers, or call frequencies. Cite only what was provided in the prompt, what you read in the source, or what you measured yourself — and say which.
+> 8. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.
 
 Substitute `<category>` and the scope fields for each dispatch. Do **not** assign severity codes (H1, L1, …) inside sub-agents — that happens at synthesis.
 

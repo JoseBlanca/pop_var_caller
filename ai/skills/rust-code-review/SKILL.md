@@ -7,7 +7,7 @@ description: Use this skill whenever the user asks for a code review, audit, cri
 
 You are performing a professional, uncompromising code review of Rust code. Quality is the highest priority — be precise, specific, and direct. Vague praise is forbidden; every comment must point to a concrete location and propose a concrete change.
 
-The review is split across focused per-category checklists in `ai/skills/rust-code-review/code_review/`. **You are the orchestrator**: you triage which categories apply to the scope, dispatch one sub-agent per category in parallel, then synthesize their findings into a single report. Per-category rules are not duplicated in this file — read each category file when dispatching the corresponding sub-agent.
+The review is split across focused per-category checklists in `ai/skills/rust-code-review/code_review/`. **You are the orchestrator**: you triage which categories apply to the scope, dispatch one sub-agent per category in parallel — **each in its own git worktree** (step 6) — then synthesize their findings into a single report. Per-category rules are not duplicated in this file — read each category file when dispatching the corresponding sub-agent.
 
 ## Review principles (must always hold)
 
@@ -73,13 +73,36 @@ Decide which per-category checklists apply. Each lives at `ai/skills/rust-code-r
 
 When in doubt, dispatch — a sub-agent that finds nothing applicable writes `No findings.` and is cheap.
 
-### 6. Dispatch sub-agents in parallel
+### 6. Dispatch sub-agents in parallel — **each in its own worktree**
 
 Create the scratch directory: `tmp/review_<YYYY-MM-DD>_<scope-slug>/` (append `_v<N>` if it already exists). The slug is a short kebab-case identifier of the reviewed module or PR (e.g. `gvcf_parser`, `pr-142`).
 
 Project rule: scratch space is project-local `tmp/`, never `/tmp`. Add `tmp/` to `.gitignore` if it is not already covered by the existing target ignores.
 
-For each selected category, dispatch a `general-purpose` sub-agent **in parallel** — issue a single message with multiple Agent tool calls. Each sub-agent prompt:
+For each selected category, dispatch a `general-purpose` sub-agent **in parallel** — issue a single message with multiple Agent tool calls — and pass **`isolation: "worktree"`** on every one.
+
+#### Why the isolation is mandatory, not an optimization
+
+A reviewer that only reads cannot tell a load-bearing line from a decorative one. The findings that matter come from *changing* the code and watching what fails — and the moment two agents do that in one checkout they are editing the same files at the same time. Measured, on one 9-agent review of a shared tree:
+
+- agents reported their edits overwritten mid-experiment, `src/` reverted under them three times, and one build reading a half-written file;
+- one agent's baseline failed on **another agent's** marker, which it then had to diagnose;
+- five of the nine detected the interference and retreated into private worktrees of their own — so more than half the fan-out paid the isolation cost anyway, late, after wasted work;
+- every mutation result was untrustworthy in principle (a "green" run can be another agent's revert landing first, a "red" one their mutation), so the orchestrator had to re-verify the decisive findings **serially** before accepting them.
+
+The next milestone's review, over comparable code with 5 agents and a worktree each, had zero collisions, every result first-hand and nothing needing re-verification. Isolation is cheaper than the bookkeeping its absence forces.
+
+#### What isolation changes in the prompt
+
+Three things, and all three must be said explicitly or the agent will get them wrong:
+
+1. **Where it builds.** The agent is *in* its worktree; it runs the project's build tooling from there. Never point it at the main checkout for a build.
+2. **Where its findings go.** Its worktree is temporary and is cleaned up. The findings file must be written to an **absolute path in the main checkout's** `tmp/review_<date>_<slug>/`, which is outside the worktree and survives. Each agent writes its own file, so there is no contention.
+3. **What it may now do.** Say plainly that it has its own tree and should mutation-test aggressively — the isolation only pays if the agents use it. An agent that still reviews by reading has cost you a worktree for nothing.
+
+Do **not** ask isolated agents to leave the tree clean or to revert their experiments. That instruction is for a shared checkout; here it wastes their effort on a tree that is about to be discarded, and a dirty worktree is evidence you can still inspect.
+
+Each sub-agent prompt:
 
 > Run the **<category>** checklist on the following Rust code review scope.
 >
@@ -94,9 +117,10 @@ For each selected category, dispatch a `general-purpose` sub-agent **in parallel
 > 2. Read `ai/skills/rust-code-review/code_review/_finding_format.md` for the severity rubric and finding format.
 > 3. Read each in-scope file.
 > 4. Apply each rule and produce findings in the specified format.
-> 5. Write findings to `tmp/review_<date>_<slug>/<category>.md`. If no findings apply, write only the line `No findings.`
-> 6. Do not invent file paths, line numbers, command output, or behavior. Cite only locations you have read.
-> 7. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.
+> 5. **You are in your own isolated git worktree.** Build, mutate and revert freely *there* — nothing you do can collide with another agent, so mutation-test aggressively rather than reviewing by reading. Run the project's build tooling from your own worktree root.
+> 6. Write findings to the **absolute path** `<main-checkout>/tmp/review_<date>_<slug>/<category>.md` — outside your worktree, which is temporary and will be discarded. If no findings apply, write only the line `No findings.`
+> 7. Do not invent file paths, line numbers, command output, or behavior. Cite only locations you have read.
+> 8. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.
 
 Substitute `<category>` and the scope fields for each dispatch. Do **not** assign severity codes (B1, M1, Mi1, …) inside sub-agents — that happens at synthesis.
 
