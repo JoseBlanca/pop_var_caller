@@ -34,11 +34,20 @@
 //! Rows stream to stdout as they are produced rather than accumulating — a 50-sample cohort emits
 //! millions of rows, and buffering them all would cost gigabytes for no benefit.
 //!
-//! Output: a `#`-prefixed run-level line per sample, a bare TSV column line, then the rows. Each
-//! covered locus contributes, per sample, one row per distinct observed sequence (tagged
-//! `complete` / `partial_left` / `partial_right`) plus, when non-zero, a synthetic `no_border` row
-//! (reads that reached the aligner and anchored nothing) and a `capped` row (reads the depth cap
-//! discarded). A locus no read of that sample reaches emits nothing for that sample.
+//! Output: the run's **read-group table** as `#rg` lines, a bare TSV column line, then the rows.
+//! Each covered locus contributes, per sample, one row per distinct (sequence, coverage, read
+//! group) plus, when non-zero, a synthetic `no_border` row (reads that reached the aligner and
+//! anchored nothing) and a `capped` row (reads the depth cap discarded). A locus no read of that
+//! sample reaches emits nothing for that sample.
+//!
+//! **The read group is on every observation row**, because that is the grain chemistry actually
+//! varies at. An allele seen from two groups is two rows, so a per-group model gets the allele ×
+//! group cross *with its quality moments* rather than a count that has already been merged. Rows
+//! carry only the numeric id; the `#rg` table maps it to sample, library, experiment, platform and
+//! file, so a consumer picks its own grain — read group, library, experiment or sample — instead of
+//! this step guessing one. That matters here: one BioSample can hold several libraries (and in this
+//! archive one holds sixteen), so folding to the sample would destroy exactly the contrast a
+//! chemistry question is asking about.
 //!
 //! The dashboard derives period = `len(motif)`, tract length = `len(ref_tract)`, and two stutter
 //! measures: `obs_len − ref_len` (off-reference, comparable across samples but confounded by
@@ -58,7 +67,7 @@ use pop_var_caller::ng::locus_generation::{
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::build_read_groups;
+use pop_var_caller::ng::read::input::read_groups::{NameOrigin, build_read_groups};
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
@@ -112,11 +121,24 @@ fn write_locus<W: Write>(
     let ref_tract = String::from_utf8_lossy(&locus.reference_bases);
     let motif_str = String::from_utf8_lossy(&motif);
 
-    let row = |out: &mut W, coverage: &str, observed: &str, reads: u32| {
+    // `read_group` is the numeric id from the run's table, not a name: the names live once in the
+    // `#rg` header rather than repeated across millions of rows. Empty for the synthetic
+    // `no_border` / `capped` tallies, which are per-locus counters and belong to no one group.
+    let row = |out: &mut W, rg: &str, coverage: &str, observed: &str, reads: u32| {
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            counts.name, chrom, start, end, motif_str, ref_tract, depth, coverage, observed, reads,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            counts.name,
+            rg,
+            chrom,
+            start,
+            end,
+            motif_str,
+            ref_tract,
+            depth,
+            coverage,
+            observed,
+            reads,
         )
     };
 
@@ -134,6 +156,7 @@ fn write_locus<W: Write>(
         }
         row(
             out,
+            &obs.read_group.get().to_string(),
             label,
             &String::from_utf8_lossy(&obs.bases),
             obs.num_obs,
@@ -141,13 +164,22 @@ fn write_locus<W: Write>(
     }
     if locus.reads_without_observation > 0 {
         counts.reads_no_border += u64::from(locus.reads_without_observation);
-        row(out, "no_border", "", locus.reads_without_observation)?;
+        row(out, "", "no_border", "", locus.reads_without_observation)?;
     }
     if locus.reads_discarded_by_cap > 0 {
         counts.reads_capped += u64::from(locus.reads_discarded_by_cap);
-        row(out, "capped", "", locus.reads_discarded_by_cap)?;
+        row(out, "", "capped", "", locus.reads_discarded_by_cap)?;
     }
     Ok(())
+}
+
+/// Whether a grouping name is the file's own or one this run invented — the reader has to be able
+/// to tell, because a synthesized library is a guess and a declared one is evidence.
+fn origin_label(origin: NameOrigin) -> &'static str {
+    match origin {
+        NameOrigin::Declared => "declared",
+        NameOrigin::Synthesized => "synthesized",
+    }
 }
 
 /// The tag a read-coverage carries in the `coverage` column.
@@ -258,9 +290,34 @@ fn run_cohort(
 
     let stdout = std::io::stdout();
     let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
+
+    // The read-group table, once, as `#`-prefixed lines above the data. The rows carry only the
+    // numeric id, so this is what makes them resolvable — and it is what lets a consumer fold to
+    // whatever grain it wants. `library` and `experiment` each carry the origin of their name,
+    // because a grouping this module synthesized and one the file declared are not equally
+    // trustworthy and a chemistry report has to be able to say which it used.
+    for (id, group) in read_groups.iter() {
+        writeln!(
+            out,
+            "#rg\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            id.get(),
+            group.sample,
+            group.library.value,
+            origin_label(group.library.origin),
+            group.experiment.value,
+            origin_label(group.experiment.origin),
+            group.platform.as_deref().unwrap_or(""),
+            group.file.display(),
+        )?;
+    }
     writeln!(
         out,
-        "sample\tcontig\tstart\tend\tmotif\tref_tract\tdepth\tcoverage\tobserved\treads"
+        "#rg_columns\tread_group\tsample\tlibrary\tlibrary_origin\texperiment\t\
+         experiment_origin\tplatform\tfile"
+    )?;
+    writeln!(
+        out,
+        "sample\tread_group\tcontig\tstart\tend\tmotif\tref_tract\tdepth\tcoverage\tobserved\treads"
     )?;
 
     // The BED path walks only the targeted spans; without one, every contig end to end. Both feed

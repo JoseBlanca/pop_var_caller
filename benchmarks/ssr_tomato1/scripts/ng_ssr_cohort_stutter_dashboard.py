@@ -135,9 +135,30 @@ def _(Path, mo, os, pd):
     # sequences are needed only to measure them. So the strings are turned into lengths and then
     # dropped, and the repeated identifiers are held as categories; without this the frame is
     # several gigabytes of text that is never read again.
+    # The `#rg` header is the run's read-group table: the rows carry only a numeric id, and this is
+    # what resolves it to sample / library / experiment. Reading it first also means the dump can
+    # gain read groups without the loader below caring.
+    _rg_rows = []
+    with open(tsv_path) as _fh:
+        for _line in _fh:
+            if not _line.startswith("#"):
+                break
+            if _line.startswith("#rg\t"):
+                _rg_rows.append(_line.rstrip("\n").split("\t")[1:])
+    rg_table = pd.DataFrame(
+        _rg_rows,
+        columns=[
+            "read_group", "sample", "library", "library_origin",
+            "experiment", "experiment_origin", "platform", "file",
+        ],
+    )
+    if not rg_table.empty:
+        rg_table["read_group"] = rg_table["read_group"].astype("int32")
+
     raw = pd.read_csv(
         tsv_path,
         sep="\t",
+        comment="#",
         dtype={
             "observed": str,
             "motif": str,
@@ -158,19 +179,62 @@ def _(Path, mo, os, pd):
         if meta_path.is_file()
         else pd.DataFrame(columns=["sample", "run", "project", "reads", "duplicates", "dup_pct"])
     )
-    return meta, meta_path, raw, tsv_path
+    return meta, meta_path, raw, rg_table, tsv_path
 
 
 @app.cell
-def _(MIN_LOCUS_DEPTH, np, pd, raw):
+def _(mo, rg_table):
+    # The grain to analyse at. Chemistry is a property of the library preparation, so the sample is
+    # the wrong default whenever one sample holds several libraries — and in this archive one holds
+    # sixteen. The dump stores the finest grain (the read group) precisely so this stays a choice.
+    _choices = {
+        "library — one preparation (recommended)": "library",
+        "experiment — preparation + sequencing config": "experiment",
+        "read group — one @RG, usually a lane": "read_group",
+        "sample — the individual (merges libraries)": "sample",
+    }
+    unit_sel = mo.ui.radio(
+        _choices, value="library — one preparation (recommended)", label="Analysis unit"
+    )
+    _have_rg = not rg_table.empty
+    mo.vstack(
+        [
+            mo.md(
+                "Chemistry belongs to the **library**, not to the individual. Where a sample holds "
+                "more than one library, folding to the sample averages across preparations — which "
+                "is the very thing a stutter comparison is trying to separate. Pick the grain:"
+                if _have_rg
+                else "*This dump predates the read-group table, so only the sample grain is "
+                "available. Regenerate it with the current `ng_ssr_cohort_stutter` to fold by "
+                "library or experiment.*"
+            ),
+            unit_sel if _have_rg else mo.md(""),
+        ]
+    )
+    return (unit_sel,)
+
+
+@app.cell
+def _(MIN_LOCUS_DEPTH, np, pd, raw, rg_table, unit_sel):
     # The one derived frame everything below shares: complete reads only, each tagged with its
-    # sample's modal length at that locus, and with both stutter measures.
+    # unit's modal length at that locus, and with both stutter measures.
     #
     # Only complete reads carry a length at all — a partial is a censored lower bound and cannot
     # enter a spread. Loci with fewer than MIN_LOCUS_DEPTH complete reads are dropped because their
     # "mode" would be a single read, against which every other read scores as stutter.
     comp = raw[raw["coverage"] == "complete"].copy()
-    _locus = ["sample", "contig", "start", "end"]
+
+    # `unit` is the analysis grain. It is resolved per row from the read-group table, so the modal
+    # length, the depth filter and every statistic below are computed within one chemistry rather
+    # than across a mixture of them.
+    if rg_table.empty or unit_sel.value == "sample":
+        comp["unit"] = comp["sample"].astype(str)
+    else:
+        _map = rg_table.set_index("read_group")[unit_sel.value]
+        comp["unit"] = comp["read_group"].map(_map).astype(str)
+    comp["unit"] = comp["unit"].astype("category")
+
+    _locus = ["unit", "contig", "start", "end"]
 
     _depth = comp.groupby(_locus, observed=True)["reads"].transform("sum")
     comp = comp[_depth >= MIN_LOCUS_DEPTH].copy()
@@ -250,9 +314,9 @@ def _(MIN_LOCUS_DEPTH, np, pd, raw):
 
 @app.cell
 def _(MIN_LOCUS_DEPTH, comp, meta, mo, pd, raw):
-    # Per-sample headline: how much data each sample contributes and how much it stutters overall.
+    # Per-unit headline: how much data each unit contributes and how much it stutters overall.
     def _per_sample():
-        g = comp.groupby("sample", observed=True)
+        g = comp.groupby("unit", observed=True)
         out = pd.DataFrame(
             {
                 "loci": g.apply(
@@ -280,6 +344,11 @@ def _(MIN_LOCUS_DEPTH, comp, meta, mo, pd, raw):
                 ),
             }
         ).reset_index()
+        # The duplicate-rate metadata is keyed by sample. A unit belongs to exactly one sample
+        # (a library is prepared from one individual), so carrying that sample across is a lookup,
+        # never an aggregation.
+        owner = comp.groupby("unit", observed=True)["sample"].first().astype(str)
+        out["sample"] = out["unit"].map(owner)
         if not meta.empty:
             out = out.merge(meta[["sample", "run", "dup_pct"]], on="sample", how="left")
         return out.sort_values("off_mode", ascending=False)
@@ -337,7 +406,7 @@ def _(ACCENT, GREY, INK, mo, np, per_sample, plt):
             label="off-reference (stutter + real alleles)",
         )
         ax.set_yticks(y)
-        ax.set_yticklabels(d["sample"], fontsize=6)
+        ax.set_yticklabels(d["unit"], fontsize=6)
         ax.set_xlabel("fraction of complete reads away from the sample's modal length")
         ax.xaxis.set_major_formatter(lambda v, _p: f"{v:.0%}")
         ax.grid(True, axis="x", alpha=0.25)
@@ -373,7 +442,7 @@ def _(comp, mo, np, pd):
     # its own — with a few thousand reads per sample the extremes move a long way on noise alone.
     # This is the test that separates "samples differ" from "small n".
     def overdispersion(sub):
-        g = sub.groupby("sample", observed=True)
+        g = sub.groupby("unit", observed=True)
         tab = pd.DataFrame(
             {
                 "n": g["reads"].sum(),
@@ -453,7 +522,7 @@ def _(
         fig, axes = plt.subplots(2, 3, figsize=(13, 6.4), sharey=True, sharex=True)
         for ax, period in zip(axes.flat, periods):
             sub = comp[comp["period"] == period]
-            for sample, g in sub.groupby("sample", observed=True):
+            for sample, g in sub.groupby("unit", observed=True):
                 xs, ys = [], []
                 for j, band in enumerate(LEN_LABELS):
                     cell = g[g["len_band"] == band]
@@ -507,7 +576,7 @@ def _(LEN_LABELS, MIN_CELL_READS, PERIOD_NAME, comp, mo, np, pd, plt):
     # because the whole question is whether samples differ.
     def onset_table(threshold):
         rows = []
-        for (sample, period), g in comp.groupby(["sample", "period"], observed=True):
+        for (sample, period), g in comp.groupby(["unit", "period"], observed=True):
             onset = None
             for band in LEN_LABELS:
                 cell = g[g["len_band"] == band]
@@ -655,7 +724,7 @@ def _(comp, meta_path, mo, tsv_path):
     mo.md(
         f"""
         ---
-        *Source: `{tsv_path.name}` — {comp['sample'].nunique()} samples,
+        *Source: `{tsv_path.name}` — {comp['unit'].nunique()} units,
         {comp[['contig', 'start', 'end']].drop_duplicates().shape[0]:,} loci, ng's default STR
         delimiter, one region-typing walk (`examples/ng_ssr_cohort_stutter.rs`). Sample metadata:
         `{meta_path.name}`. Only complete reads carry a length, so partials — censored lower
