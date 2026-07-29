@@ -179,7 +179,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 
 ## Milestone C — the generator
 
-- ☐ **C1 — `PileupGenerator` + config + counts.** The struct, `PileupGeneratorConfig` (five knobs,
+- ✅ **C1 — `PileupGenerator` + config + counts.** The struct, `PileupGeneratorConfig` (five knobs,
   defaulting to production's `pub const`s **by name**), `PileupGeneratorCounts` (production's
   `RunSummary` fields plus `reads_silent_over_footprint` and `records_outside_region`). *Depends:*
   B3. *Source:* arch §1.1.

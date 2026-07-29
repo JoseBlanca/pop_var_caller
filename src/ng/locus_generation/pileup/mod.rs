@@ -94,6 +94,7 @@ mod chain_id_allocator;
 mod cigar_cursor;
 mod decompose;
 mod errors;
+mod generator;
 mod genome_walk;
 mod open_record;
 
@@ -144,6 +145,10 @@ pub(crate) use crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW;
 // This module's own surface, as against the vocabulary above.
 pub use chain_id_allocator::DEFAULT_MAX_ACTIVE_READS;
 pub use errors::WalkerError;
+pub use generator::{
+    MAX_RECORD_SPAN_CEILING, PileupGenerator, PileupGeneratorConfig, PileupGeneratorConfigError,
+    PileupGeneratorCounts,
+};
 pub use genome_walk::{PileupWalker, RunSummary, run};
 
 /// Lay a finished locus back out as production's [`PileupRecord`] — **test-only, and the
