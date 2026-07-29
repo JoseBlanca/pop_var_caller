@@ -641,7 +641,7 @@ struct SummaryCounters {
 
 /// Production's `RunSummary`, named. **Exhaustively destructured, no `..`**: a ninth field
 /// on production's summary must stop this compiling, or it would silently leave the parity
-/// claim. `RunSummary::merge` destructures for exactly this reason.
+/// claim. `PileupGeneratorCounts::fold_region_walk` destructures for exactly this reason.
 fn production_counters(summary: crate::pileup::walker::RunSummary) -> SummaryCounters {
     let crate::pileup::walker::RunSummary {
         reads_admitted,

@@ -129,6 +129,10 @@ where
     /// and an unbounded one needs no argument at all: production's `run` is
     /// unchanged, which is what keeps the stage-1 differential comparing like
     /// with like.
+    ///
+    /// `#[must_use]`, because a consuming builder called as a bare statement
+    /// compiles, discards the walker and bounds nothing.
+    #[must_use]
     pub fn stopping_after(mut self, pos: u32) -> Self {
         self.stop_after = Some(pos);
         self
@@ -144,9 +148,24 @@ where
     /// on the generator and is lent to each walk; [`into_chain_ids`](Self::into_chain_ids)
     /// is how it comes back.
     ///
-    /// Must be called before the walk starts — the walker is lazy, so
-    /// "before the first `next()`" is all that means.
+    /// Must be called before the walk starts — the walker is lazy, so "before
+    /// the first `next()`" is all that means, and the assert says so in the
+    /// build that can check it. Swapped in **mid-walk** it discards the ids
+    /// already issued for the reads still active, and the allocations they
+    /// represent go missing from the summary: one fragment, two identities,
+    /// which is the corruption a run-lifetime allocator exists to prevent
+    /// (review).
+    ///
+    /// `#[must_use]`, because a consuming builder called as a bare statement
+    /// compiles, discards the walker and adopts nothing.
+    #[must_use]
     pub fn adopting_chain_ids(mut self, chain_ids: ChainIdAllocator) -> Self {
+        debug_assert!(
+            self.state.summary.reads_admitted == 0,
+            "adopting_chain_ids after {} reads: the ids already issued for the active reads \
+             would be discarded",
+            self.state.summary.reads_admitted,
+        );
         self.state.chain_ids = chain_ids;
         self
     }
@@ -353,35 +372,17 @@ impl RunSummary {
         self
     }
 
-    /// Total `other`'s per-region tallies into `self`. Counts add;
-    /// `active_reads_high_water` takes the **max** — regions are walked
-    /// one at a time, so the peak concurrent active-read count for the
-    /// whole run is the largest single region's peak, not the sum.
-    pub fn merge(&mut self, other: &RunSummary) {
-        // Exhaustive destructure (no `..`): a new RunSummary field is a
-        // compile error here until it is explicitly folded in — important
-        // because the fold is not uniform (`active_reads_high_water` takes
-        // the max, the rest add), so a copy-paste `+=` on a new field
-        // would be silently wrong (review M3).
-        let RunSummary {
-            reads_admitted,
-            records_emitted,
-            record_widen_events,
-            mate_overlap_positions,
-            chain_allocations,
-            active_reads_high_water,
-            mate_lookup_evictions,
-            column_depth_truncations,
-        } = *other;
-        self.reads_admitted += reads_admitted;
-        self.records_emitted += records_emitted;
-        self.record_widen_events += record_widen_events;
-        self.mate_overlap_positions += mate_overlap_positions;
-        self.chain_allocations += chain_allocations;
-        self.active_reads_high_water = self.active_reads_high_water.max(active_reads_high_water);
-        self.mate_lookup_evictions += mate_lookup_evictions;
-        self.column_depth_truncations += column_depth_truncations;
-    }
+    // **Production's `merge` is deliberately not copied here — deleted at the
+    // Milestone C review.** It totals one region's summary into another, which is
+    // right for production (a fresh walker, and so a fresh chain-id allocator,
+    // per region) and **wrong for ng**: ng shares one allocator across regions and
+    // `reset()` preserves its counters, so summing region summaries
+    // triangular-sums `chain_allocations` and `mate_lookup_evictions` (spec §8).
+    // It had no ng caller, and a `pub fn merge` sitting on the type that
+    // `PileupGeneratorCounts::fold_region_walk` exists to fold *correctly* is a
+    // trap name-completion offers first. The exhaustive-destructure idiom it
+    // carried lives on in `fold_region_walk` and in `parity.rs`'s summary
+    // comparison.
 }
 
 /// A genomic locus: a position on a specific chromosome. The

@@ -74,16 +74,23 @@ const _: () = assert!(
 /// that again (owner, 2026-07-29).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PileupGeneratorConfig {
-    /// Reads folded at a position with no indel anchored there. Production: 8,000.
+    // The values are named, never spelled: `Default` reaches production's
+    // constants by name so a retune arrives as a diff, and a literal in the
+    // prose here would go stale silently while every test stayed green (review).
+    /// Reads folded at a position with no indel anchored there. Defaults to
+    /// [`DEFAULT_MAX_SNP_COLUMN_DEPTH`](crate::pileup::walker::DEFAULT_MAX_SNP_COLUMN_DEPTH).
     pub max_snp_column_depth: u32,
-    /// Reads folded at a position where any read has an indel. Production: 250.
+    /// Reads folded at a position where any read has an indel. Defaults to
+    /// [`DEFAULT_MAX_INDEL_COLUMN_DEPTH`](crate::pileup::walker::DEFAULT_MAX_INDEL_COLUMN_DEPTH).
     pub max_indel_column_depth: u32,
-    /// Widest record footprint before the walk fails. Production: 5,000; ng
-    /// additionally rejects anything above [`MAX_RECORD_SPAN_CEILING`].
+    /// Widest record footprint before the walk fails. Defaults to
+    /// [`DEFAULT_MAX_RECORD_SPAN`](crate::pileup::walker::DEFAULT_MAX_RECORD_SPAN);
+    /// ng additionally rejects anything above [`MAX_RECORD_SPAN_CEILING`].
     pub max_record_span: u32,
-    /// How far a first mate stays available for pairing. Production: 10,000.
+    /// How far a first mate stays available for pairing. Defaults to
+    /// [`DEFAULT_MATE_LOOKUP_WINDOW`](crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW).
     pub mate_lookup_window: u32,
-    /// Active-read ceiling. Production: 4,096.
+    /// Active-read ceiling. Defaults to [`DEFAULT_MAX_ACTIVE_READS`].
     pub max_active_reads: u32,
 }
 
@@ -119,6 +126,27 @@ impl PileupGeneratorConfig {
                 ceiling: MAX_RECORD_SPAN_CEILING,
             });
         }
+        // **Every knob has a floor as well as the one that has a ceiling** — the
+        // review measured what a zero does, and all five are bad in one of three
+        // ways: `max_active_reads` and `max_record_span` abort the walk on its
+        // first read with an error naming a region rather than a knob;
+        // `mate_lookup_window` silently fails to collapse a mate pair, so one
+        // fragment gets two chain ids; and `max_snp_column_depth` walks
+        // **successfully** and returns *zero loci for a covered region*, with the
+        // truncations that explain it counted into a struct the dispatcher
+        // cannot read. The last is the one this module's "no silent caps"
+        // principle rules out outright.
+        for (knob, value) in [
+            ("max_snp_column_depth", self.max_snp_column_depth),
+            ("max_indel_column_depth", self.max_indel_column_depth),
+            ("max_record_span", self.max_record_span),
+            ("mate_lookup_window", self.mate_lookup_window),
+            ("max_active_reads", self.max_active_reads),
+        ] {
+            if value == 0 {
+                return Err(PileupGeneratorConfigError::KnobIsZero { knob });
+            }
+        }
         Ok(())
     }
 
@@ -127,7 +155,12 @@ impl PileupGeneratorConfig {
     /// Written as an exhaustive struct literal rather than with `..default()`:
     /// a knob production adds to [`WalkerConfig`] is then a compile error here,
     /// which is a decision to make rather than a default to inherit silently.
-    pub fn to_walker_config(&self) -> WalkerConfig {
+    ///
+    /// `pub(super)`, not `pub`: public, it was a **bypass** — the ceiling on
+    /// `max_record_span` is enforced by [`PileupGenerator::new`], and a caller
+    /// could reach a `WalkerConfig` from an unchecked config and hand it
+    /// straight to this module's re-exported `run` (review).
+    pub(super) fn to_walker_config(self) -> WalkerConfig {
         WalkerConfig {
             max_snp_column_depth: self.max_snp_column_depth,
             max_indel_column_depth: self.max_indel_column_depth,
@@ -155,6 +188,13 @@ pub enum PileupGeneratorConfigError {
          positions_covered rather than an error"
     )]
     RecordSpanExceedsCoverageRun { max_record_span: u32, ceiling: u32 },
+    /// A knob set to zero. Each of the five means something the walk cannot do
+    /// at all — fold no reads at a column, allow no active reads, keep no mate
+    /// pending, allow no record span — and the walk's answer to each is either a
+    /// run-fatal error naming a region rather than the knob, or a plausible
+    /// wrong result. The knob is named so the message points at what to change.
+    #[error("{knob} must be at least 1, got 0")]
+    KnobIsZero { knob: &'static str },
 }
 
 /// Run-level counts for this generator, kept alongside the shared
@@ -228,7 +268,12 @@ impl PileupGeneratorCounts {
         // deltas, one is a max, one is deliberately dropped.
         let RunSummary {
             reads_admitted,
-            records_emitted,
+            // Deliberately not mirrored: what a caller wants is loci *kept*,
+            // which is this minus `records_outside_region`, and the kept count is
+            // already `LocusCounts::loci_emitted`. Bound to `_` in the pattern
+            // rather than discarded in the body, so it reads as a decision at the
+            // one place the exhaustive destructure forces one.
+            records_emitted: _,
             record_widen_events,
             mate_overlap_positions,
             chain_allocations,
@@ -251,10 +296,6 @@ impl PileupGeneratorCounts {
         self.mate_lookup_evictions +=
             mate_lookup_evictions.saturating_sub(chain_ids_at_open.mate_lookup_evictions);
         self.column_depth_truncations += column_depth_truncations;
-        // `records_emitted` is deliberately not mirrored: what a caller wants is
-        // loci *kept*, which is this minus `records_outside_region` — see the
-        // type's own doc.
-        let _ = records_emitted;
     }
 }
 
@@ -421,6 +462,17 @@ where
     reference: Arc<R>,
     /// Builds a fresh read-query accessor for each file of the sample, which is
     /// what [`SampleReads::reads_in_region`]'s mismatch-fraction filter reads.
+    ///
+    /// **It is called once per file at every `begin_segment`'s first
+    /// `next_locus` — so a factory that opens a file is the ~564k-opens trap**
+    /// (spec §8), in the one accessor the generator cannot hold for the run:
+    /// the query gives each of a sample's k files its own, because they are
+    /// stateful readers and sharing one cursor between k streams is what the
+    /// factory exists to avoid. A caller whose accessor is cheap to share
+    /// should hand back a clone of one it already holds
+    /// (`Arc<T>` implements [`RawRefSeq`], for this); one whose factory
+    /// re-reads a `.fai` pays that per region, and the review measured that as
+    /// this design's one live conformance gap against §8.
     make_reference: MakeReference,
     /// The preparer and its scratch, lent to each region's read stream.
     preparation: Rc<RefCell<ReadPreparation<P>>>,
@@ -439,6 +491,24 @@ where
     current_region: Option<GenomeRegion>,
     /// The walk over `current_region`, opened by the first `next_locus`.
     walk: Option<RegionWalk<R, P>>,
+    /// A fatal error that has happened and not yet been reported.
+    ///
+    /// The stream's errors are **shed** (it hands the walker an infallible item
+    /// type), so they surface a call later than they happen; this is where they
+    /// wait, moved out of the walk's cell by `end_walk` so an error can never
+    /// outlive the region that raised it. Never `Some` while
+    /// [`failed`](Self::failed) is `false`.
+    pending_failure: Option<LocusGenerationError>,
+    /// Set the moment a fatal error happens, and never cleared.
+    ///
+    /// **Every error this generator can raise is terminal for the run** (spec
+    /// §7), so after one it emits nothing more: `next_locus` reports the
+    /// error(s) once each and then answers `Ok(None)` for ever, whatever
+    /// `begin_segment` is called with. Without the latch it re-opened the query
+    /// and re-walked the region — the same reads admitted twice, and one
+    /// fragment handed two chain ids, which is the corruption the run-lifetime
+    /// allocator exists to prevent, arrived at from the other direction (review).
+    failed: bool,
 }
 
 impl<R: RawRefSeq, MakeReference, P: ReadPreparer> PileupGenerator<R, MakeReference, P>
@@ -475,6 +545,8 @@ where
             counts: PileupGeneratorCounts::default(),
             current_region: None,
             walk: None,
+            pending_failure: None,
+            failed: false,
         })
     }
 
@@ -514,7 +586,23 @@ where
     /// mate from one region pairs with a read in another (the eviction test
     /// compares raw positions) and `active_count` climbs toward
     /// `ActiveReadsExhausted` (spec §8).
+    ///
+    /// **It also takes the walk's shed error with it**, which is the third piece
+    /// of per-region state and the one that went missing (review): the error
+    /// slot lives on the preparation cell, which the generator holds for its
+    /// whole life, so an error shed by a region **abandoned** before it drained
+    /// stayed there and became the *next* region's failure — reported after that
+    /// region had emitted every one of its loci, and against a region that never
+    /// saw the failing read. Moved here, an error cannot outlive the walk that
+    /// raised it.
     fn end_walk(&mut self) {
+        // **The region ends with its walk.** `begin_segment` sets it again
+        // immediately; every other caller of this wants the segment over. Left
+        // set, a `next_locus` after the walk drained saw `walk.is_none()`, opened
+        // the query again and **re-emitted the whole region** — with every read
+        // admitted a second time and its fragment handed a second chain id
+        // (review).
+        self.current_region = None;
         let Some(walk) = self.walk.take() else {
             return;
         };
@@ -523,6 +611,20 @@ where
         let mut chain_ids = walk.walker.into_chain_ids();
         chain_ids.reset();
         self.chain_ids = Some(chain_ids);
+        if let Some(error) = self.preparation.borrow_mut().latched_error.take() {
+            self.failed = true;
+            // First error wins: a later one describes a run that is already over.
+            self.pending_failure.get_or_insert(error);
+        }
+    }
+
+    /// Mark the run failed and hand the error straight back to the caller.
+    ///
+    /// Every error this generator raises is terminal (spec §7), so there is no
+    /// path that records one and keeps walking.
+    fn fail(&mut self, error: LocusGenerationError) -> LocusGenerationError {
+        self.failed = true;
+        error
     }
 
     /// The next locus of the region begun, or `None` once the walk drains.
@@ -532,15 +634,34 @@ where
     /// — the rule that makes neighbouring regions tile without duplicates or
     /// holes, since typed regions tile the genome gap-free and disjointly
     /// (spec §2).
+    ///
+    /// # After a fatal error, nothing more comes out
+    ///
+    /// Every error here is terminal for the run (spec §7). Each is reported
+    /// once — a shed stream error surfaces one call after it happened, so there
+    /// can be two — and then this answers `Ok(None)` for ever, whatever
+    /// `begin_segment` is called with afterwards. Without that latch a caller
+    /// that logged the error and asked again (a shape the return type positively
+    /// invites) got the whole region re-walked: the same reads admitted twice,
+    /// and one fragment carrying two chain ids.
     pub fn next_locus(
         &mut self,
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError> {
+        if let Some(error) = self.pending_failure.take() {
+            return Err(error);
+        }
+        if self.failed {
+            return Ok(None);
+        }
         let Some(region) = self.current_region else {
             return Ok(None);
         };
         if self.walk.is_none() {
-            self.walk = Some(self.open_walk(region, reads)?);
+            match self.open_walk(region, reads) {
+                Ok(walk) => self.walk = Some(walk),
+                Err(error) => return Err(self.fail(error)),
+            }
         }
         loop {
             // PANIC-FREE: opened immediately above, and every path that clears
@@ -557,18 +678,22 @@ where
                 Some(Err(source)) => {
                     // Fatal and terminal: the walker yields nothing after an
                     // error, so the walk ends here and gives back the allocator
-                    // it was lent.
+                    // it was lent. The walk's own failure is the proximate one
+                    // and is reported now; a stream error shed earlier in the
+                    // same walk is left pending rather than lost, and the next
+                    // call reports that one before fusing.
                     self.end_walk();
-                    return Err(LocusGenerationError::Walker(source));
+                    return Err(self.fail(LocusGenerationError::Walker(source)));
                 }
                 None => {
                     // The walk is over. A read stream that shed a fatal error
                     // also reported end-of-stream, so the walker drains
-                    // normally and the error is only visible here — checked
-                    // **before** `Ok(None)`, or a broken query would read as an
-                    // empty region.
+                    // normally and the error is only visible after `end_walk`
+                    // has moved it out of the walk — checked **before**
+                    // `Ok(None)`, or a broken query would read as an empty
+                    // region.
                     self.end_walk();
-                    if let Some(error) = self.preparation.borrow_mut().latched_error.take() {
+                    if let Some(error) = self.pending_failure.take() {
                         return Err(error);
                     }
                     return Ok(None);
@@ -709,6 +834,25 @@ mod tests {
                 ),
                 read_group,
             )))
+        }
+    }
+
+    /// A passthrough preparer that counts the reads pulled through it — the
+    /// only seam that sees the query being consumed, one read at a time.
+    #[derive(Default)]
+    struct CountingPreparer {
+        prepared: std::cell::Cell<u32>,
+    }
+
+    impl ReadPreparer for CountingPreparer {
+        type Scratch = ();
+        fn prepare_read(
+            &self,
+            read: AlignedRead,
+            scratch: &mut Self::Scratch,
+        ) -> Result<Option<PreparedRead>, ReadPrepError> {
+            self.prepared.set(self.prepared.get() + 1);
+            PassthroughPreparer.prepare_read(read, scratch)
         }
     }
 
@@ -958,9 +1102,73 @@ mod tests {
         let PileupGeneratorConfigError::RecordSpanExceedsCoverageRun {
             max_record_span,
             ceiling,
-        } = error;
+        } = error
+        else {
+            panic!("wrong variant: {error:?}");
+        };
         assert_eq!(max_record_span, MAX_RECORD_SPAN_CEILING + 1);
         assert_eq!(ceiling, MAX_RECORD_SPAN_CEILING);
+    }
+
+    /// **Every knob has a floor, and the review measured why.** A zero is
+    /// accepted by arithmetic and then means something the walk cannot do: two
+    /// of the five abort the walk on its first read with an error naming a
+    /// region rather than the knob, one silently fails to collapse a mate pair,
+    /// and `max_snp_column_depth` walks **successfully** and returns zero loci
+    /// for a covered region.
+    #[test]
+    fn a_knob_set_to_zero_is_rejected_at_construction() {
+        let sound = PileupGeneratorConfig::default();
+        let zeroed = [
+            (
+                "max_snp_column_depth",
+                PileupGeneratorConfig {
+                    max_snp_column_depth: 0,
+                    ..sound
+                },
+            ),
+            (
+                "max_indel_column_depth",
+                PileupGeneratorConfig {
+                    max_indel_column_depth: 0,
+                    ..sound
+                },
+            ),
+            (
+                "max_record_span",
+                PileupGeneratorConfig {
+                    max_record_span: 0,
+                    ..sound
+                },
+            ),
+            (
+                "mate_lookup_window",
+                PileupGeneratorConfig {
+                    mate_lookup_window: 0,
+                    ..sound
+                },
+            ),
+            (
+                "max_active_reads",
+                PileupGeneratorConfig {
+                    max_active_reads: 0,
+                    ..sound
+                },
+            ),
+        ];
+        for (name, config) in zeroed {
+            let error = config
+                .check()
+                .expect_err(&format!("{name} = 0 must be rejected"));
+            let PileupGeneratorConfigError::KnobIsZero { knob } = error else {
+                panic!("{name} = 0 was rejected for the wrong reason: {error:?}");
+            };
+            assert_eq!(knob, name, "the message must name the knob to change");
+            assert!(
+                a_generator(config).is_err(),
+                "{name} = 0 must be rejected at construction, not mid-walk"
+            );
+        }
     }
 
     /// **The rejection reaches the constructor**, which is the only door the
@@ -1078,6 +1286,11 @@ mod tests {
             whole.counts().records_outside_region,
             0,
             "nothing is anchored outside a region covering every read"
+        );
+        assert!(
+            split.counts().records_outside_region > 0,
+            "and the split run really does exercise the clamp — asserting only the \
+             whole-region zero would pass with the clamp deleted"
         );
     }
 
@@ -1505,6 +1718,312 @@ mod tests {
                 .next_locus(&reads)
                 .expect("the second walk opens")
                 .is_some()
+        );
+    }
+
+    // --- the review's fixes: properties that were load-bearing and unpinned --
+
+    /// **The halo is exactly `max_record_span` wide.** The shipped halo test put
+    /// its far read 20 positions into a 60-position halo, so a halo of *half*
+    /// the width passed it (review). Here the far read starts at 131 — one past
+    /// half of a 60-position halo over a region ending at 100 — and folds into a
+    /// record anchored at the region's last position whose deletion runs the
+    /// full span.
+    #[test]
+    fn the_halo_reaches_a_read_at_its_far_end() {
+        use noodles_sam::alignment::record::cigar::op::Kind;
+
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_with_cigar(
+                "opener",
+                1,
+                96,
+                &[(Kind::Match, 5), (Kind::Deletion, 59), (Kind::Match, 30)],
+            ),
+            read_named_with_length("far", 1, 131, 30),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 60,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
+
+        let widened = loci
+            .iter()
+            .find(|locus| locus.region.start == Position(100))
+            .expect("the deletion opens a record at 100, the region's last position");
+        assert_eq!(widened.region.end, Position(159));
+        assert_eq!(
+            total_obs(widened),
+            2,
+            "a halo narrower than max_record_span never returns the read at 131"
+        );
+    }
+
+    /// **The locus anchored exactly at the region's last position is emitted.**
+    /// The stop rule is `walker_pos > region.end`; as `>=` it stops one position
+    /// early and leaves a **one-base hole at every region boundary** (review).
+    ///
+    /// **The fixture has to leave nothing open at the boundary, or the rule's
+    /// other half covers for the mutation** — which is how it survived the first
+    /// version of this test, and every other test in the file. Coverage starting
+    /// *at* `region.end` is that case: the walker jumps the uncovered span, so
+    /// when it arrives at 100 no record is open and only the comparison decides
+    /// whether position 100 is walked at all.
+    #[test]
+    fn the_locus_at_the_regions_last_position_is_not_lost_to_the_stop() {
+        // chr2 (200 bp), so the read may run past the region's end without
+        // running past the contig's.
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 1, 100, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
+
+        assert_eq!(
+            anchors(&loci),
+            vec![100],
+            "the read covers 100..=129 and the region owns exactly its first position"
+        );
+    }
+
+    /// **All three of `fold_region_walk`'s rules, on the two counters no BAM
+    /// fixture reaches.** `mate_lookup_evictions` needs paired reads at eviction
+    /// distance and `active_reads_high_water` needs a max rather than a sum;
+    /// dropping the delta on the first and summing the second both survived the
+    /// end-to-end tests (review), so the fold is exercised directly.
+    #[test]
+    fn the_fold_deltas_the_allocators_counters_and_maxes_the_high_water() {
+        let mut counts = PileupGeneratorCounts::default();
+        let baseline = ChainIdAllocatorCounters {
+            chain_allocations: 10,
+            active_reads_high_water: 7,
+            mate_lookup_evictions: 4,
+        };
+        let summary = RunSummary {
+            reads_admitted: 3,
+            records_emitted: 99,
+            record_widen_events: 1,
+            mate_overlap_positions: 2,
+            // Run-to-date values, as `summary()` reports them: the allocator is
+            // shared and `reset()` preserves its counters.
+            chain_allocations: 14,
+            active_reads_high_water: 5,
+            mate_lookup_evictions: 6,
+            column_depth_truncations: 8,
+        };
+
+        counts.fold_region_walk(&summary, baseline);
+        // A second region, whose allocator counters have grown further still.
+        counts.fold_region_walk(
+            &RunSummary {
+                chain_allocations: 20,
+                active_reads_high_water: 9,
+                mate_lookup_evictions: 9,
+                ..summary
+            },
+            ChainIdAllocatorCounters {
+                chain_allocations: 14,
+                active_reads_high_water: 5,
+                mate_lookup_evictions: 6,
+            },
+        );
+
+        assert_eq!(
+            counts.chain_allocations,
+            (14 - 10) + (20 - 14),
+            "deltas, not the run-to-date totals — summing them is the triangular sum"
+        );
+        assert_eq!(
+            counts.mate_lookup_evictions,
+            (6 - 4) + (9 - 6),
+            "the other counter the same trap applies to"
+        );
+        assert_eq!(
+            counts.active_reads_high_water, 9,
+            "a peak is the largest region's, never the sum"
+        );
+        assert_eq!(counts.reads_admitted, 6, "per-walk counters add");
+        assert_eq!(counts.column_depth_truncations, 16);
+    }
+
+    /// **The query is consumed as the walk advances, never up front.** Spec §7
+    /// makes this the property a port can quietly destroy: collecting the query
+    /// into a `Vec` to make an ownership problem go away turns a depth-shaped
+    /// footprint into a region-shaped one, and a `Generic` region runs to
+    /// hundreds of kilobases. The review ablated the stream to a `collect()` and
+    /// **the entire library suite stayed green**, parity included — so nothing
+    /// was watching.
+    ///
+    /// The preparer is the seam that sees each read arrive, so counting there
+    /// counts pulls. One read is in hand and one is peeked, so the first locus
+    /// must have cost two of the five, not five.
+    #[test]
+    fn the_query_is_pulled_as_the_walk_advances_not_collected_up_front() {
+        let records: Vec<RecordBuf> = [10, 50, 90, 130, 170]
+            .iter()
+            .map(|start| read_named_with_length(&format!("r{start}"), 1, *start, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = a_generator_with(
+            PileupGeneratorConfig::default(),
+            CountingPreparer::default(),
+        )
+        .expect("config");
+
+        generator.begin_segment(region(1, 1, 200));
+        generator
+            .next_locus(&reads)
+            .expect("the walk succeeds")
+            .expect("the first read covers the region");
+
+        let after_first = generator.preparation.borrow().preparer.prepared.get();
+        assert!(
+            after_first <= 2,
+            "the first locus needs the read under the walker and the one peeked ahead, \
+             not the region's whole read set; {after_first} of 5 were pulled"
+        );
+
+        while generator
+            .next_locus(&reads)
+            .expect("the walk succeeds")
+            .is_some()
+        {}
+        assert_eq!(
+            generator.preparation.borrow().preparer.prepared.get(),
+            5,
+            "and by the end every read has been pulled exactly once"
+        );
+    }
+
+    /// A failed open must not strand the chain-id allocator. Since a fatal error
+    /// now fuses the generator, nothing re-opens a walk to trip over it — so the
+    /// ordering is pinned where it is decided rather than by its consequence
+    /// (review).
+    #[test]
+    fn a_failed_query_leaves_the_allocator_with_the_generator() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        generator.begin_segment(region(9, 1, 100));
+        assert!(generator.next_locus(&reads).is_err());
+
+        assert!(
+            generator.chain_ids.is_some(),
+            "the allocator is taken only after the one fallible step of opening a walk"
+        );
+    }
+
+    // --- the review's fixes: the generator ends, and stays ended -------------
+
+    /// **A drained segment stays drained.** `next_locus` returning `None` is the
+    /// caller's signal to move on; asking once more used to re-open the query
+    /// and re-emit every locus of the region, with every read admitted a second
+    /// time and its fragment handed a second chain id.
+    #[test]
+    fn a_drained_segment_yields_nothing_when_asked_again() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let loci = loci_of(&mut generator, region(0, 1, 100), &reads);
+        assert_eq!(loci.len(), 30);
+        let admitted = generator.counts().reads_admitted;
+
+        assert!(
+            generator
+                .next_locus(&reads)
+                .expect("a drained segment is not an error")
+                .is_none(),
+            "the region was already drained"
+        );
+        assert_eq!(
+            generator.counts().reads_admitted,
+            admitted,
+            "nothing was walked a second time"
+        );
+    }
+
+    /// **A failed run stays failed.** Every error here is terminal (spec §7);
+    /// asking again used to re-open the region, re-emit its loci and re-issue
+    /// its chain ids — the corruption the run-lifetime allocator exists to
+    /// prevent, reached from the other direction.
+    #[test]
+    fn a_walk_that_failed_does_not_restart() {
+        use noodles_sam::alignment::record::cigar::op::Kind;
+
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[read_with_cigar(
+            "too_wide",
+            1,
+            95,
+            &[(Kind::Match, 5), (Kind::Deletion, 40), (Kind::Match, 30)],
+        )]);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 20,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        generator.begin_segment(region(1, 1, 100));
+        let mut result = generator.next_locus(&reads);
+        while matches!(result, Ok(Some(_))) {
+            result = generator.next_locus(&reads);
+        }
+        assert!(matches!(result, Err(LocusGenerationError::Walker(_))));
+        let admitted = generator.counts().reads_admitted;
+        assert!(
+            admitted > 0,
+            "the erroring region's counters are folded too — `end_walk` runs on the error \
+             path, and nothing begins another region after a fatal error to fold them later"
+        );
+
+        assert!(
+            generator
+                .next_locus(&reads)
+                .expect("a failed run reports its error once, then yields nothing")
+                .is_none()
+        );
+        assert_eq!(generator.counts().reads_admitted, admitted);
+    }
+
+    /// **A shed error belongs to the region that shed it.** The stream's errors
+    /// surface a call after they happen, and the slot they wait in used to live
+    /// on the generator rather than on the walk — so a region **abandoned**
+    /// before it drained carried its failure into the next region, which
+    /// reported it after emitting every one of its own loci.
+    ///
+    /// Here the failing read is on chr2 and the second region is on chr1: with
+    /// the error still charged to the generator, a region that never saw the
+    /// read fails.
+    #[test]
+    fn an_abandoned_regions_shed_error_is_not_charged_to_the_next_region() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("chr1_read", 0, 10, 30),
+            read_named_with_length("chr2_read", 1, 10, 30),
+        ]);
+        let mut generator =
+            a_generator_with(PileupGeneratorConfig::default(), FailsToPrepare).expect("config");
+
+        // chr2's region sheds an error on its only read, and is abandoned
+        // before anyone drains it.
+        generator.begin_segment(region(1, 1, 100));
+        generator.begin_segment(region(0, 1, 100));
+
+        let first = generator.next_locus(&reads);
+        assert!(
+            matches!(first, Err(LocusGenerationError::Reference(_))),
+            "the abandoned region's error is reported at once, before the new region \
+             produces anything, got {first:?}"
+        );
+        assert!(
+            generator
+                .next_locus(&reads)
+                .expect("the run is over")
+                .is_none(),
+            "and the run is over, rather than continuing into the new region"
         );
     }
 

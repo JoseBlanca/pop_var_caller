@@ -458,8 +458,17 @@ pub enum LocusGenerationError {
     /// The upstream typed-region walk failed.
     #[error("typed-region walk failed during locus generation")]
     TypedRegion(#[from] TypedRegionError),
-    /// A read query failed mid-stream, or the alignment input was malformed (the open
-    /// already succeeded upstream; this fires while a generator pulls reads).
+    /// A read query failed — **either** opening it for a region **or** mid-stream,
+    /// the alignment input being malformed.
+    ///
+    /// The two origins are one variant and the `Display` does not tell them apart:
+    /// "the index query for this region could not be opened" and "the record stream
+    /// broke 40 kb in" are different operational problems. Splitting them, and
+    /// carrying the region on the error, is
+    /// [Checkpoint C's open item](../../../doc/devel/reports/implementations/ng_locus_generation_pileup_generator_c_2026-07-29.md);
+    /// until then the wording at least names both, having previously denied the
+    /// first ("the open already succeeded upstream") while the generic generator's
+    /// `open_walk` raised exactly that (review).
     #[error("read access failed during locus generation")]
     Reads(#[from] IngestError),
     /// A reference fetch failed — a broken reference, or a region past a contig end.
