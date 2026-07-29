@@ -202,13 +202,11 @@ struct FoldedReadState {
     /// changes no answer. A2 replaces it with the extent the events actually
     /// cover, and that is where the answers move.
     ///
-    /// Unread until A4 resolves coverage from it. Same backstop, same reason as
-    /// `read_group` above.
-    #[expect(
-        dead_code,
-        reason = "A4 resolves ReadCoverage from this at finalise; this expect must \
-                  be deleted when it lands"
-    )]
+    /// **A3 keeps it current across a widen** (owner, 2026-07-29): `refold_live_reads`
+    /// re-places every live folded read and rewrites this field, so a read sitting inside
+    /// its own deletion at the widening position no longer carries an extent measured
+    /// against a footprint the record has outgrown. A4 resolves `ReadCoverage` from it,
+    /// and would otherwise have reported a wrong depth with no error.
     witnessed: RefSpan,
     /// Whether this read's mapped 5′ end *is* the record's anchor position
     /// (freebayes' `placedStart`).
@@ -379,6 +377,11 @@ pub(super) struct OpenPileupRecordTable {
     /// bytes it fetches are moved into the record and kept, so a
     /// scratch buffer there would only add a copy.
     widen_bases_buf: Vec<u8>,
+    /// Reusable scratch for the read ids `widen` re-folds. Held rather than allocated
+    /// per widen, and **sorted** before use: `folded_reads` is an `AHashMap` with a
+    /// per-process seed, so folding in its iteration order would make bucket *creation*
+    /// order — and therefore the emitted allele order — differ run to run.
+    refold_ids_buf: Vec<u32>,
     /// Per-instance cap on per-record reference span, mirrors
     /// `WalkerConfig::max_record_span`. M11 in
     /// `ia/reviews/pileup_2026-05-11.md`.
@@ -406,6 +409,7 @@ impl OpenPileupRecordTable {
             allele_seq_buf: Vec::new(),
             closing_keys_buf: Vec::new(),
             widen_bases_buf: Vec::new(),
+            refold_ids_buf: Vec::new(),
             max_record_span,
         }
     }
@@ -427,6 +431,7 @@ impl OpenPileupRecordTable {
         self.allele_seq_buf.clear();
         self.closing_keys_buf.clear();
         self.widen_bases_buf.clear();
+        self.refold_ids_buf.clear();
     }
 
     /// Drain every record whose footprint is fully behind the
@@ -524,6 +529,8 @@ impl OpenPileupRecordTable {
         key: u32,
         new_end_exclusive: u32,
         reference: &dyn RefSeq,
+        active_reads: &ActiveReads,
+        contributors: &[ReadContribution],
     ) -> Result<bool, WalkerError> {
         // Split-borrow so the fetch can write into `widen_bases_buf` while
         // `rec` holds a mutable borrow of `records`. `max_record_span` is
@@ -531,7 +538,9 @@ impl OpenPileupRecordTable {
         // which the outstanding `records` borrow would otherwise block.
         let Self {
             records,
+            allele_seq_buf,
             widen_bases_buf,
+            refold_ids_buf,
             max_record_span,
             ..
         } = self;
@@ -573,39 +582,50 @@ impl OpenPileupRecordTable {
             })?;
         let extra_bases = &*widen_bases_buf;
 
-        // Rewrite each existing allele by appending the new REF
-        // bases to its `seq`. `alleles[0]` is REF, so this loop is
-        // also where the canonical REF sequence widens.
+        // **Only the REF bucket grows.** `alleles[0]` is the record's own reference
+        // sequence and genuinely does get longer; every other bucket holds what some
+        // read witnessed, and a read's witness does not change because the window
+        // around it did.
         //
-        // **Invariant preserved by `apply_events_to_ref`:** every
-        // allele's `seq` ends with a ref-aligned suffix — concretely,
-        // the bytes `ref_seq[k..ref_seq.len()]` for some `k` ≥ the
-        // offset of the last event the read had inside this record.
-        // The function is by construction: after processing each
-        // event it advances `ref_cursor` past the event's footprint,
-        // and the post-event tail loop emits `ref_seq[ref_cursor..]`
-        // verbatim. So whatever modifications (SNP, INS, DEL) sit in
-        // the allele, the *trailing* bytes are always ref bases.
+        // Production appends `extra_bases` to *every* bucket, with a 25-line comment
+        // above the loop proving that this reproduces what a re-fold would emit
+        // ([open_record.rs:390-415](../../../../src/pileup/walker/open_record.rs#L390)).
+        // That is exactly the mechanism the no-fabrication rule has to remove: it is
+        // what lets an **expired** read's bucket keep growing with reference bases the
+        // read never saw, retroactively, after it has left the active set. A live read
+        // re-folds against the wider window at the next position it has an event
+        // inside the footprint and lands wherever its bases put it; an expired one
+        // keeps a bucket whose bases already say exactly what it saw (spec §4).
         //
-        // Widening extends `ref_seq` with `extra_bases`. The
-        // ref-aligned tail of every allele then becomes
-        // `ref_seq_old[k..] ++ extra_bases`, which is still
-        // ref-aligned (now to the wider `ref_seq`). Appending
-        // `extra_bases` to each allele's `seq` therefore reproduces
-        // exactly what `apply_events_to_ref` would emit if we
-        // re-folded the read against the wider `ref_seq`, modulo
-        // the new bytes never being event-modified by this read
-        // (events at the new positions, if any, haven't been folded
-        // yet — they are processed at a later walker step which
-        // re-folds the read into the right bucket).
+        // **This is what makes the rule implementable at all** — production cannot
+        // express it, because the bases live on the shared bucket and its
+        // `FoldedReadState` holds none of its own.
+        rec.alleles[0].seq.extend_from_slice(extra_bases);
+
+        // **Every live read that had folded into this record folds again, against the
+        // wider window** (owner, 2026-07-29). Production's `process_position` re-folds
+        // only the *contributors* at the current walker position, and a read sitting
+        // inside its own deletion has no event anchored there — so it is live, it is in
+        // this record, and it does not re-fold. Production hides that by appending the
+        // reference bases to every bucket; with REF-only widening it would leave the
+        // read's `witnessed` extent pinned to the pre-widen footprint, and `finalise`
+        // resolves coverage from exactly that. The result would be a **wrong depth**, at
+        // the long-deletion loci this port exists to fix, with no error.
         //
-        // So this loop is correct for all allele kinds: SNP/MNP
-        // (`seq.len() == old_ref_seq.len()`), DEL (shorter), INS
-        // (longer than old span by the inserted run). Each gets
-        // exactly the same `extra_bases` appended.
-        for allele in &mut rec.alleles {
-            allele.seq.extend_from_slice(extra_bases);
-        }
+        // Spec §4 already asserts "a live read re-folds against the wider window"; this
+        // is what makes the assertion true rather than nearly true.
+        //
+        // **An expired read is deliberately not re-folded** — it cannot be, since its
+        // cursor is gone with it, and it should not be: its bucket already says exactly
+        // what it saw, and extending it is the retroactive fabrication this rule removes.
+        refold_live_reads(
+            rec,
+            allele_seq_buf,
+            refold_ids_buf,
+            active_reads,
+            contributors,
+        );
+
         Ok(true)
     }
 
@@ -856,6 +876,254 @@ fn event_kind_rank(ev: &ReadEvent) -> u8 {
     }
 }
 
+/// Fold one read into one open record, exactly once: build the haplotype its events
+/// present, place it in the matching bucket, and record what it contributed.
+///
+/// **Idempotent by construction** — the read's prior contribution is subtracted from
+/// whichever bucket it was in before the new one is added, which is what makes "each
+/// (record, read) pair folds exactly once over the record's lifetime" hold across
+/// re-folds. That invariant is the single thing most likely to be lost in a port: a
+/// six-base footprint would otherwise count a spanning read six times.
+///
+/// Its sibling [`refold_live_reads`] deliberately does **not** call this: a widen re-places
+/// a read without re-deciding its quality, which this function would recompute.
+///
+/// `bq_fallback` is `ln_bq_for_read`'s answer for an **empty** window, which no caller can
+/// reach: a read with no events in the window yields no observation a line below. The
+/// contributor path passes the contributor's walker-position BQ anyway, because that is
+/// what production passes and the parity claim is about the walk.
+fn fold_read_into_record(
+    alleles: &mut Vec<OpenAllele>,
+    folded_reads: &mut AHashMap<u32, FoldedReadState>,
+    allele_seq_buf: &mut Vec<u8>,
+    rec_pos: u32,
+    active: &super::active_read_set::ActiveRead,
+    window_events: &[ReadEvent],
+    bq_fallback: u8,
+) {
+    let Some(witnessed) =
+        apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, window_events)
+    else {
+        // A non-contiguous witness — an interior `N`, or a ref-skip — yields no
+        // observation (spec §6). **The prior contribution has to come off first**, and
+        // this is not a corner: a read that folded contiguously *becomes* non-contiguous
+        // when the window widens right across an interior gap, so a bare early return
+        // would strand a live contribution in a bucket for a read that now has no row,
+        // breaking `chain_ids.len() <= num_obs` silently and only on multi-base records
+        // (spec §4).
+        //
+        // A5 adds the other half — recording *which* reads these were, as a per-record
+        // set of read ids rather than a counter, since this path is reached at every
+        // position the record is affected at and a counter would multiply by the
+        // footprint length.
+        if let Some(prev) = folded_reads.remove(&active.read_id) {
+            subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
+        }
+        return;
+    };
+
+    let ln_q = ln_bq_for_read(window_events, bq_fallback).max(active.read.mq_log_err);
+    let mapq = u32::from(active.read.mapq);
+    let new_contribution = AlleleSupportStats {
+        num_obs: 1,
+        q_sum: ln_q,
+        fwd: u32::from(!active.read.is_reverse_strand),
+        placed_left: u32::from(active.read.alignment_start < rec_pos),
+        mapq_sum: mapq,
+        mapq_sum_sq: (mapq as u64) * (mapq as u64),
+    };
+
+    if let Some(prev) = folded_reads.remove(&active.read_id) {
+        subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
+    }
+    // Borrowed lookup; only `clone()` the bytes when adding a genuinely new allele. In
+    // SNP/REF steady state every contributor lands in the same existing bucket, so the
+    // clone path never fires.
+    let new_index = match find_allele_index(alleles, allele_seq_buf) {
+        Some(index) => index,
+        None => {
+            alleles.push(OpenAllele::new(allele_seq_buf.clone()));
+            alleles.len() - 1
+        }
+    };
+    add_contribution(&mut alleles[new_index].support, &new_contribution);
+    folded_reads.insert(
+        active.read_id,
+        FoldedReadState {
+            allele_index: new_index,
+            contribution: new_contribution,
+            chain_id: active.chain_id,
+            read_group: active.read.read_group,
+            witnessed,
+            placed_start: active.read.alignment_start == rec_pos,
+        },
+    );
+}
+
+/// Re-place every **live** read already folded into this record against the window it now
+/// has. Called from `widen`, immediately after `alleles[0]` grows — see the comment there
+/// for why the contributor-only re-fold production does is not enough.
+///
+/// # It moves the read; it does not re-decide anything
+///
+/// The read's **`contribution` is carried across untouched** and only its bases, its
+/// bucket and its `witnessed` extent are recomputed. That is not an optimisation, it is
+/// the correctness argument: a widen changes *which positions the record covers*, not
+/// *what quality evidence a read carried*. `q_sum` in particular encodes decisions the
+/// **walk** took at earlier positions and replayed into the fold — a mate-overlap loser's
+/// zeroed Match, an agree-case keeper's summed BQ — and those live on the `ReadContribution`
+/// of the position they were taken at, which is long gone by the time a later widen fires.
+/// Recomputing quality here would silently undo every reconciliation made earlier in the
+/// record's footprint, which is exactly the failure spec §5 names: *"forget the replay and
+/// reconciliation silently applies at one position out of a record's whole footprint"*.
+///
+/// A **contributor at this position** is skipped outright: the fold loop is about to
+/// re-fold it *with* its mate-overlap replay, so re-placing it here is work whose result is
+/// overwritten a moment later.
+///
+/// **Unpinned, and deliberately so — the honest state of this line.** Mutating the skip away
+/// leaves the whole suite green, and the reason is the carry above: a contributor re-placed
+/// here keeps its old contribution, and the fold loop then subtracts that and adds the
+/// recomputed one, landing on the same final state. The residue is bucket *creation* order,
+/// which decides the order alleles are emitted in, and buckets left transiently empty, which
+/// `evict_unsupported_alleles` clears at the end of the same call. So the skip earns its
+/// place on cost, not on correctness — it was load-bearing before the contribution was
+/// carried, and it is kept because re-placing every contributor twice per widen is pure
+/// waste. Do not read the absence of a failing test here as the absence of a reason.
+///
+/// An **expired** read is skipped because it cannot be reached — its cursor went with it —
+/// and should not be: its bucket already says exactly what it saw, and extending it is the
+/// retroactive fabrication this whole rule removes.
+///
+/// Reads are taken in **`read_id` order**, not `folded_reads` iteration order: that map is
+/// an `AHashMap` with a per-process seed, and bucket *creation* order decides the emitted
+/// allele order, so working in hash order would make the output differ run to run.
+fn refold_live_reads(
+    rec: &mut OpenPileupRecord,
+    allele_seq_buf: &mut Vec<u8>,
+    ids: &mut Vec<u32>,
+    active_reads: &ActiveReads,
+    contributors: &[ReadContribution],
+) {
+    ids.clear();
+    ids.extend(rec.folded_reads.keys().copied());
+    ids.sort_unstable();
+
+    let rec_pos = rec.pos;
+    let rec_end = rec.footprint_end_exclusive();
+    let OpenPileupRecord {
+        alleles,
+        folded_reads,
+        ..
+    } = rec;
+    for &read_id in ids.iter() {
+        if contributors.iter().any(|c| c.read_id == read_id) {
+            continue;
+        }
+        let Some(active) = active_reads.get_by_read_id(read_id) else {
+            continue;
+        };
+        // PANIC-FREE: `read_id` was just taken from this map's keys, and nothing between
+        // then and here removes an entry other than this loop — which `continue`s past
+        // any id it has already handled, each id appearing once.
+        let previous = *folded_reads
+            .get(&read_id)
+            .expect("the id came from this record's own fold state");
+        let window = active
+            .cursor
+            .events_overlapping(rec_pos, rec_end, &active.read);
+
+        let Some(witnessed) = apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, &window)
+        else {
+            // The wider window opened a hole in what was one run — see
+            // `fold_read_into_record` for why the contribution has to come off.
+            folded_reads.remove(&read_id);
+            subtract_contribution(
+                &mut alleles[previous.allele_index].support,
+                &previous.contribution,
+            );
+            continue;
+        };
+
+        let new_index = match find_allele_index(alleles, allele_seq_buf) {
+            Some(index) => index,
+            None => {
+                alleles.push(OpenAllele::new(allele_seq_buf.clone()));
+                alleles.len() - 1
+            }
+        };
+        // Guarded, and not only to save work: subtracting and re-adding the same `f64`
+        // into the same bucket is not the identity, and would put rounding noise into
+        // `q_sum` at every widen for every read that did not move.
+        if new_index != previous.allele_index {
+            subtract_contribution(
+                &mut alleles[previous.allele_index].support,
+                &previous.contribution,
+            );
+            add_contribution(&mut alleles[new_index].support, &previous.contribution);
+        }
+        let state = folded_reads
+            .get_mut(&read_id)
+            .expect("the id came from this record's own fold state");
+        state.allele_index = new_index;
+        state.witnessed = witnessed;
+    }
+}
+
+/// Drop every non-REF bucket no read is folded into, remapping the fold state.
+///
+/// **Required by A3's REF-only widening, not merely tidy.** Production's
+/// append-to-every-bucket kept a re-folding read landing back in its *existing* bucket;
+/// without it, a read that re-folds after a widen lands somewhere new and leaves the old
+/// bucket behind at `num_obs == 0`. `find_allele_index` is a **linear scan with a full
+/// byte compare**, run once per (record, contributor) at every position of the footprint,
+/// and the comment above it — "records typically carry ≤ a few alleles" — stops being true
+/// exactly at the long-deletion loci this port exists to fix (spec §7).
+///
+/// Called at the end of the fold rather than inside `widen`, because the empties are
+/// created *by* the re-fold that a widen triggers, not by the widen itself.
+///
+/// `alleles[0]` is never evicted: it is the REF sequence, it is what `ref_span()`
+/// measures, and production creates it with zero observations by design. The
+/// counter-pressure spec §7 names is paid right here — a positional `allele_index` on
+/// `FoldedReadState` has to be remapped, which is why a mapping is built rather than the
+/// buckets simply retained.
+fn evict_unsupported_alleles(
+    alleles: &mut Vec<OpenAllele>,
+    folded_reads: &mut AHashMap<u32, FoldedReadState>,
+) {
+    if alleles.len() < 2 || alleles[1..].iter().all(|a| a.support.num_obs > 0) {
+        return;
+    }
+    let mut mapping: Vec<usize> = Vec::with_capacity(alleles.len());
+    let mut kept = 0usize;
+    let mut index = 0usize;
+    alleles.retain(|allele| {
+        let keep = index == 0 || allele.support.num_obs > 0;
+        index += 1;
+        mapping.push(if keep {
+            let at = kept;
+            kept += 1;
+            at
+        } else {
+            usize::MAX
+        });
+        keep
+    });
+    for state in folded_reads.values_mut() {
+        // PANIC-FREE, and the assert says why: every bucket a folded read points at holds
+        // that read's own `num_obs`, so it is never one of the evicted ones. A
+        // `usize::MAX` here would mean the fold state and the bucket totals had drifted.
+        debug_assert_ne!(
+            mapping[state.allele_index],
+            usize::MAX,
+            "evicted bucket {} while a folded read still pointed at it",
+            state.allele_index,
+        );
+        state.allele_index = mapping[state.allele_index];
+    }
+}
+
 /// Find or create the allele bucket inside a record matching `seq`.
 /// Returns the bucket index. Linear scan is fine — records
 /// typically carry ≤ a few alleles.
@@ -936,7 +1204,9 @@ pub(super) fn process_position(
                     .get(&k)
                     .expect("just located")
                     .footprint_end_exclusive();
-                if event_end > cur_end && open.widen(k, event_end, reference)? {
+                if event_end > cur_end
+                    && open.widen(k, event_end, reference, active_reads, contributors)?
+                {
                     widen_count += 1;
                 }
                 k
@@ -967,6 +1237,7 @@ pub(super) fn process_position(
         allele_seq_buf,
         closing_keys_buf: _,
         widen_bases_buf: _,
+        refold_ids_buf: _,
         max_record_span: _,
     } = open;
     for key in affected {
@@ -1034,74 +1305,20 @@ pub(super) fn process_position(
                 continue;
             }
 
-            let Some(witnessed) =
-                apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, &window_events)
-            else {
-                // A non-contiguous witness — an interior `N`, or a ref-skip —
-                // yields no observation (spec §6). **The prior contribution has
-                // to come off first**, and this is not a corner: a read that
-                // folded contiguously *becomes* non-contiguous when the window
-                // widens right across an interior gap, so a bare `continue` here
-                // would strand a live contribution in a bucket for a read that
-                // now has no row, breaking `chain_ids.len() <= num_obs` silently
-                // and only on multi-base records (spec §4).
-                //
-                // A5 adds the other half — recording *which* reads these were,
-                // as a per-record set of read ids rather than a counter, since
-                // this path is reached at every position the record is affected
-                // at and a counter would multiply by the footprint length.
-                if let Some(prev) = folded_reads.remove(&contrib.read_id) {
-                    subtract_contribution(
-                        &mut alleles[prev.allele_index].support,
-                        &prev.contribution,
-                    );
-                }
-                continue;
-            };
-            let bq = ln_bq_for_read(&window_events, contrib.bq_baq_at_walker_pos);
-            let ln_q = bq.max(contrib.mq_log_err);
-            let mapq = u32::from(contrib.mapq);
-            let new_contribution = AlleleSupportStats {
-                num_obs: 1,
-                q_sum: ln_q,
-                fwd: u32::from(!contrib.is_reverse_strand),
-                placed_left: u32::from(contrib.alignment_start < rec_pos),
-                mapq_sum: mapq,
-                mapq_sum_sq: (mapq as u64) * (mapq as u64),
-            };
-
-            // Subtract any prior contribution this read had to
-            // this record. Re-folds happen when a record widens
-            // and the read's haplotype under the wider span
-            // either changes bucket or stays in the same bucket
-            // with a possibly-different ln_q.
-            if let Some(prev) = folded_reads.remove(&contrib.read_id) {
-                subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
-            }
-            // Borrowed lookup; only `clone()` the bytes when adding
-            // a genuinely new allele. In SNP/REF steady state every
-            // contributor lands in the same existing bucket, so
-            // the clone path never fires.
-            let new_index = match find_allele_index(alleles, allele_seq_buf) {
-                Some(idx) => idx,
-                None => {
-                    alleles.push(OpenAllele::new(allele_seq_buf.clone()));
-                    alleles.len() - 1
-                }
-            };
-            add_contribution(&mut alleles[new_index].support, &new_contribution);
-            folded_reads.insert(
-                contrib.read_id,
-                FoldedReadState {
-                    allele_index: new_index,
-                    contribution: new_contribution,
-                    chain_id: contrib.chain_id,
-                    read_group: contrib.read_group,
-                    witnessed,
-                    placed_start: contrib.alignment_start == rec_pos,
-                },
+            fold_read_into_record(
+                alleles,
+                folded_reads,
+                allele_seq_buf,
+                rec_pos,
+                active_read,
+                &window_events,
+                contrib.bq_baq_at_walker_pos,
             );
         }
+
+        // After every contributor has folded, not before: the empty buckets are created
+        // *by* the re-folds a widen triggers, and by the no-observation path above.
+        evict_unsupported_alleles(alleles, folded_reads);
     }
 
     Ok(ProcessOutcome { widen_count })
@@ -1251,18 +1468,17 @@ fn phred_to_ln_perr(q: u8) -> f64 {
 /// `CigarCursor` via `read_id` lookup against the `ActiveReads`.
 #[derive(Debug, Clone)]
 pub(super) struct ReadContribution {
+    // **No copies of the read's own scalars.** Production carried `mq_log_err`, `mapq`,
+    // `is_reverse_strand` and the read group here, duplicating fields the fold could read
+    // off the active read it already looks up. A3's `widen` re-fold has no contributor to
+    // read them from, so the fold takes them from the read directly — which removes the
+    // duplicate rather than adding a second way to reach it.
     /// Active-set local id of the contributing read. Keys the
     /// per-record `folded_reads` map (so re-folds subtract the
     /// prior contribution) and is also how the fold looks the
     /// read up against the `ActiveReads` to query window events.
     pub read_id: u32,
     pub chain_id: ChainId,
-    /// The read group this read was prepared in, copied off the active read like
-    /// the fields around it — ng's [`PreparedRead`](super::PreparedRead) carries
-    /// it, so nothing here reconstructs it from a side channel. Unread until B1
-    /// makes it part of the observation's identity; carried to
-    /// [`FoldedReadState`] from A1 so the fold has it when that lands.
-    pub read_group: ReadGroupId,
     /// Events whose anchor *is* this walker_pos (used by step 3
     /// to identify candidate records). At most 2 events anchor at
     /// any walker_pos (one Match plus at most one indel), so the
@@ -1272,12 +1488,6 @@ pub(super) struct ReadContribution {
     /// quality, used as the fallback when the cursor's window
     /// returns no events — a clean REF read).
     pub bq_baq_at_walker_pos: u8,
-    pub mq_log_err: f64,
-    /// Raw BAM MAPQ for this contributor, forwarded from
-    /// [`PreparedRead::mapq`] so the fold can accumulate
-    /// `mapq_sum` / `mapq_sum_sq` on the chosen allele bucket.
-    pub mapq: u8,
-    pub is_reverse_strand: bool,
     pub alignment_start: u32,
     /// SAM-flag-derived mate role. Carries through from
     /// [`PreparedRead::mate_role`]; only
@@ -1329,16 +1539,30 @@ mod tests {
         assert_eq!(rec.alleles[0].support.num_obs, 0);
     }
 
+    /// **`widen` grows the REF bucket and nothing else** (A3). Production appends the
+    /// new reference bases to *every* bucket; ng appends them to `alleles[0]` alone,
+    /// because that is the record's own reference sequence and the others hold what some
+    /// read witnessed. The empty active set is honest here: no read has folded into this
+    /// record, so there is nothing to re-fold.
     #[test]
-    fn widen_extends_ref_seq_and_existing_alleles() {
+    fn widen_extends_the_ref_bucket_and_leaves_the_others_alone() {
         let mut t = OpenPileupRecordTable::new();
         let f = fa("ACGTAC");
-        // Open at pos 1 with span 1 ("A").
+        let active = ActiveReads::new();
+        // Open at pos 1 with span 1 ("A"), and give it a second bucket by hand.
         t.open_new(0, 1, 1, &f).unwrap();
+        let rec = t.records.get_mut(&1).unwrap();
+        rec.alleles.push(OpenAllele::new(b"T".to_vec()));
+        rec.alleles[1].support.num_obs = 1;
         // Now widen to span 3 ("ACG").
-        t.widen(1, 4, &f).unwrap();
+        t.widen(1, 4, &f, &active, &[]).unwrap();
         let rec = t.records.get(&1).unwrap();
-        assert_eq!(rec.alleles[0].seq, b"ACG");
+        assert_eq!(rec.alleles[0].seq, b"ACG", "the REF bucket grows");
+        assert_eq!(
+            rec.alleles[1].seq, b"T",
+            "an allele bucket holds what a read witnessed, and the window growing around \
+             it does not change that — production appends `CG` here"
+        );
     }
 
     #[test]
@@ -1814,6 +2038,364 @@ mod tests {
             "only `opener` and `widener` witnessed this record as one run; `wide` folded \
              into it before the widen and must have been subtracted back out when its \
              witness split in two. Record: {widened:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // A3 — what `widen` does to the reads already in the record
+    //
+    // These drive `process_position` against the table directly rather than through
+    // `run`, because the three properties A3 introduces are **not visible on a
+    // `PileupRecord`**: `witnessed` is consumed at A4, a carried-over `contribution` is
+    // indistinguishable from a recomputed one unless the two differ, and an evicted
+    // bucket is one a comparison would drop anyway. Mutating each of the three left the
+    // whole suite green, which is how they came to be written.
+    // -----------------------------------------------------------------
+
+    use super::super::chain_id_allocator::ChainIdAllocator;
+    use super::super::{CigarOp, MateRole, PreparedRead};
+
+    /// Admit reads into an active set and return it with its allocator.
+    fn admitted(reads: Vec<PreparedRead>) -> (ActiveReads, ChainIdAllocator) {
+        let mut active = ActiveReads::new();
+        let mut chain_ids = ChainIdAllocator::new();
+        for read in reads {
+            active
+                .admit(read, &mut chain_ids)
+                .expect("the fixture reads are well formed");
+        }
+        (active, chain_ids)
+    }
+
+    /// The contributors at `pos`: every active read with an event anchored there, in
+    /// admission order — what `genome_walk` builds, minus the mate-overlap resolution
+    /// these fixtures do not need.
+    fn contributors_at(active: &ActiveReads, pos: u32) -> Vec<ReadContribution> {
+        active
+            .iter()
+            .filter_map(|entry| {
+                let events_at_pos = entry.cursor.events_at(pos, &entry.read);
+                if events_at_pos.is_empty() {
+                    return None;
+                }
+                let bq = events_at_pos
+                    .iter()
+                    .find_map(|event| match event {
+                        ReadEvent::Match { bq_baq, .. } => Some(*bq_baq),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                Some(ReadContribution {
+                    read_id: entry.read_id,
+                    chain_id: entry.chain_id,
+                    events_at_pos,
+                    bq_baq_at_walker_pos: bq,
+                    alignment_start: entry.read.alignment_start,
+                    mate_role: entry.read.mate_role,
+                    bq_zero_in_window: false,
+                    bq_override_at_walker_pos: None,
+                })
+            })
+            .collect()
+    }
+
+    fn plain_read(
+        qname: &str,
+        start: u32,
+        end: u32,
+        cigar: Vec<CigarOp>,
+        seq: Vec<u8>,
+    ) -> PreparedRead {
+        PreparedRead {
+            chrom_id: 0,
+            alignment_start: start,
+            alignment_end: end,
+            cigar,
+            bq_baq: vec![30; seq.len()],
+            seq,
+            mq_log_err: -3.0,
+            mapq: 60,
+            is_reverse_strand: false,
+            qname: std::sync::Arc::from(qname),
+            mate_role: MateRole::Solo,
+            adaptor_boundary: None,
+            read_group: crate::ng::types::ReadGroupId(0),
+        }
+    }
+
+    /// The contig every widen fixture below walks, 25 bases.
+    const WIDEN_CONTIG: &str = "ACGTACGTACGTACGTACGTACGTA";
+
+    /// The three reads the widen fixtures share.
+    ///
+    /// `spanner` matches every position; `opener`'s two-base deletion opens a record at 5
+    /// spanning 5..=7; `widener`'s thirteen-base deletion anchored at 7 grows that record
+    /// to 5..=20. At position 7 `spanner` and `widener` are contributors and `opener` is
+    /// **not** — it is inside its own deletion — so the fixture holds both a read the fold
+    /// loop re-folds and a read only `refold_live_reads` reaches.
+    ///
+    /// **The widener's matched base is `T` where the opener's is `A`, and that is
+    /// load-bearing.** Both bases sit at a position where the reference reads `G`, so
+    /// either is a mismatch and either opens a bucket. But with both `A` the widener folds
+    /// into the very bucket the opener's re-fold has just left, refilling it in the same
+    /// call — no bucket ever reaches `num_obs == 0`, and the eviction test below passes
+    /// against an implementation that never evicts anything.
+    fn widen_fixture_reads() -> Vec<PreparedRead> {
+        vec![
+            plain_read(
+                "spanner",
+                1,
+                25,
+                vec![CigarOp::Match(25)],
+                WIDEN_CONTIG.as_bytes().to_vec(),
+            ),
+            plain_read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(18)],
+                vec![b'A'; 19],
+            ),
+            plain_read(
+                "widener",
+                7,
+                24,
+                vec![CigarOp::Match(1), CigarOp::Deletion(13), CigarOp::Match(4)],
+                b"TAAAA".to_vec(),
+            ),
+        ]
+    }
+
+    /// The read id of the fixture read named `qname`.
+    fn read_id_of(active: &ActiveReads, qname: &str) -> u32 {
+        active
+            .iter()
+            .find(|entry| &*entry.read.qname == qname)
+            .unwrap_or_else(|| panic!("{qname} is still active"))
+            .read_id
+    }
+
+    /// [`widen_fixture_reads`] walked at 5 and then at 7, leaving one record at 5 that has
+    /// widened once.
+    fn widened_record() -> (OpenPileupRecordTable, ActiveReads) {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(widen_fixture_reads());
+        let mut open = OpenPileupRecordTable::new();
+        for pos in [5u32, 7] {
+            let contributors = contributors_at(&active, pos);
+            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+                .expect("the fixture walks cleanly");
+        }
+        (open, active)
+    }
+
+    /// **`witnessed` follows the record when it widens** — the property option (b) exists
+    /// for, and the only observable effect it has.
+    ///
+    /// `opener` is inside its own deletion at position 7, so it is not a contributor
+    /// there and the fold loop never revisits it. Without the live re-fold its extent
+    /// would stay `5..=7`, measured against a footprint the record has outgrown — and
+    /// A4 resolves `ReadCoverage` from exactly that, so the read would be reported as
+    /// having seen three positions of sixteen when its deletion witnessed all of them.
+    /// A wrong depth, with no error.
+    #[test]
+    fn widening_updates_the_witnessed_extent_of_a_read_that_is_not_a_contributor() {
+        let (open, active) = widened_record();
+        let record = open.records.get(&5).expect("the record at 5");
+        assert_eq!(
+            record.alleles[0].seq.len(),
+            16,
+            "the widener's deletion must grow the record to 5..=20, or this fixture does \
+             not reach the path it exists for"
+        );
+        let opener = record
+            .folded_reads
+            .get(&read_id_of(&active, "opener"))
+            .expect("the opener folded into this record at position 5");
+        assert_eq!(
+            opener.witnessed,
+            RefSpan { start: 5, end: 20 },
+            "the opener's deletion witnesses 6 and 7 and its matches witness 8..=20, so \
+             its extent covers the widened footprint whole"
+        );
+    }
+
+    /// **The re-placement carries the read's contribution; it does not recompute it.**
+    ///
+    /// A widen changes which positions the record covers, not what quality evidence a
+    /// read carried. `q_sum` in particular encodes decisions the walk took at *earlier*
+    /// positions and replayed into the fold — a mate-overlap loser's zeroed Match, an
+    /// agree-case keeper's summed BQ — and those live on the `ReadContribution` of the
+    /// position they were taken at, which is gone by the time a later widen fires.
+    ///
+    /// Here the opener's contribution is stamped with a quality no recomputation could
+    /// produce from its events, and it has to survive the widen unchanged.
+    #[test]
+    fn widening_carries_a_reads_contribution_rather_than_recomputing_it() {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(widen_fixture_reads());
+        let mut open = OpenPileupRecordTable::new();
+        let contributors = contributors_at(&active, 5);
+        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("opens");
+
+        let opener_id = read_id_of(&active, "opener");
+        // A quality the walk decided and the events cannot reproduce.
+        const RECONCILED: f64 = -0.5;
+        {
+            let record = open.records.get_mut(&5).expect("the record at 5");
+            let state = record
+                .folded_reads
+                .get_mut(&opener_id)
+                .expect("the opener folded");
+            let was = state.contribution.q_sum;
+            record.alleles[state.allele_index].support.q_sum += RECONCILED - was;
+            state.contribution.q_sum = RECONCILED;
+        }
+
+        let contributors = contributors_at(&active, 7);
+        process_position(&mut open, 7, 0, &contributors, &active, &reference).expect("widens");
+
+        let record = open.records.get(&5).expect("the record at 5");
+        assert_eq!(
+            record.alleles[0].seq.len(),
+            16,
+            "the record must have widened"
+        );
+        let opener = record
+            .folded_reads
+            .get(&opener_id)
+            .expect("the opener is still folded");
+        assert_eq!(
+            opener.contribution.q_sum, RECONCILED,
+            "a widen re-places the read; recomputing its quality here would silently undo \
+             every reconciliation the walk made earlier in this record's footprint"
+        );
+    }
+
+    /// **A bucket no read is folded into is evicted, and the fold state is remapped.**
+    ///
+    /// With REF-only widening a re-folding read lands in a new bucket and leaves its old
+    /// one behind at `num_obs == 0`. `find_allele_index` is a linear scan with a full
+    /// byte compare, run once per (record, contributor) at every position of the
+    /// footprint, so those accumulate against exactly the long-deletion loci this port
+    /// exists to fix.
+    ///
+    /// The assertion is **which bucket each read sits in**, by bytes, because that is the
+    /// only form that survives both ways of getting this wrong. Skipping the eviction
+    /// leaves the opener's pre-widen `b"A"` bucket behind at `num_obs == 0`; skipping the
+    /// *remap* leaves the opener's `allele_index` one bucket too high — pointing at the
+    /// widener's, which does have support, so "every folded read points at a bucket with
+    /// observations" would wave it straight through.
+    #[test]
+    fn widening_evicts_the_buckets_its_re_folds_emptied() {
+        let (open, active) = widened_record();
+        let record = open.records.get(&5).expect("the record at 5");
+        assert_eq!(
+            record.alleles[0].seq.len(),
+            16,
+            "the record must have widened"
+        );
+
+        let buckets: Vec<_> = record
+            .alleles
+            .iter()
+            .map(|a| {
+                (
+                    String::from_utf8_lossy(&a.seq).to_string(),
+                    a.support.num_obs,
+                )
+            })
+            .collect();
+        let bucket_of = |qname: &str| -> &OpenAllele {
+            let state = record
+                .folded_reads
+                .get(&read_id_of(&active, qname))
+                .unwrap_or_else(|| panic!("{qname} folded into this record"));
+            &record.alleles[state.allele_index]
+        };
+
+        assert_eq!(
+            bucket_of("spanner").seq.as_slice(),
+            &WIDEN_CONTIG.as_bytes()[4..20],
+            "the spanner matched the widened footprint whole, so it is in REF: {buckets:?}"
+        );
+        assert_eq!(
+            bucket_of("opener").seq.as_slice(),
+            [b'A'; 14].as_slice(),
+            "the opener's anchor base plus its thirteen matches beyond the deletion: \
+             {buckets:?}"
+        );
+        assert_eq!(
+            bucket_of("widener").seq.as_slice(),
+            b"T".as_slice(),
+            "the widener witnessed one base and deleted the rest: {buckets:?}"
+        );
+        assert_eq!(
+            record.alleles.len(),
+            3,
+            "REF, the opener's and the widener's — the opener's pre-widen b\"A\" bucket \
+             was emptied by its re-fold and must be gone: {buckets:?}"
+        );
+        assert!(
+            record.alleles[1..].iter().all(|a| a.support.num_obs > 0),
+            "every non-REF bucket must support a read: {buckets:?}"
+        );
+    }
+
+    /// **The REF bucket is never evicted, whatever its support.**
+    ///
+    /// `alleles[0]` is the record's own reference sequence: it is what `ref_span()`
+    /// measures, what `widen` extends, and what `finalise` emits as the record's reference
+    /// bytes. Production creates it with zero observations by design, and a record every
+    /// read disagrees with keeps it at zero. Drop the `index == 0` guard and such a record
+    /// loses its reference bytes — and with them its span — the moment any other bucket
+    /// empties.
+    ///
+    /// Same walk as [`widened_record`] minus the spanner, which is the only read that
+    /// matches the reference. The opener's re-fold still empties its pre-widen bucket, so
+    /// the eviction genuinely runs rather than returning early.
+    #[test]
+    fn eviction_keeps_the_ref_bucket_even_with_no_observations() {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(
+            widen_fixture_reads()
+                .into_iter()
+                .filter(|read| &*read.qname != "spanner")
+                .collect(),
+        );
+        let mut open = OpenPileupRecordTable::new();
+        for pos in [5u32, 7] {
+            let contributors = contributors_at(&active, pos);
+            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+                .expect("the fixture walks cleanly");
+        }
+
+        let record = open.records.get(&5).expect("the record at 5");
+        let buckets: Vec<_> = record
+            .alleles
+            .iter()
+            .map(|a| {
+                (
+                    String::from_utf8_lossy(&a.seq).to_string(),
+                    a.support.num_obs,
+                )
+            })
+            .collect();
+        assert_eq!(
+            record.alleles.len(),
+            3,
+            "REF, the opener's and the widener's — one bucket must have been evicted, or \
+             this fixture returns early and never reaches the guard it exists for: \
+             {buckets:?}"
+        );
+        assert_eq!(
+            record.alleles[0].support.num_obs, 0,
+            "no read here matches the reference, or the guard is not under test: {buckets:?}"
+        );
+        assert_eq!(
+            record.alleles[0].seq.as_slice(),
+            &WIDEN_CONTIG.as_bytes()[4..20],
+            "the REF bucket must still hold the record's reference bytes: {buckets:?}"
         );
     }
 

@@ -110,7 +110,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   deletion the reverse). *Oracle:* reads whose events tile the footprint must stay byte-identical to
   production — there are no gaps to fill — so the stage-1 differential still passes **on that class**
   and fails only where it should. *Depends:* A1. *Source:* spec §4, §8.
-- ☐ **A3 — `widen` extends the REF bucket only. Own commit, do not bundle.** `alleles[0]` grows;
+- ✅ **A3 — `widen` extends the REF bucket only. Own commit, do not bundle.** `alleles[0]` grows;
   no other bucket does. Evict `num_obs == 0` buckets at widen — without production's
   append-to-every-bucket the re-fold no longer lands in its old bucket, so stranded empties
   accumulate against a `find_allele_index` that is a linear byte-compare scan. *Depends:* A2.

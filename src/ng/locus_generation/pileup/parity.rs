@@ -950,6 +950,93 @@ fn ng_walk(case: &Case) -> WalkOutcome {
     })
 }
 
+/// Project a record onto the surface the two walkers can still be compared on — **two
+/// named differences, both of them projections rather than excuses** (spec §3, classes 4
+/// and 5).
+///
+/// 1. **Drop every non-REF bucket no read is folded into.** From A3 `widen` extends only
+///    `alleles[0]`, so a read that re-folds after a widen lands in a new bucket and leaves
+///    the old one behind at `num_obs == 0`; ng evicts those at the end of every fold, and
+///    production keeps them, because its append-to-every-bucket kept the re-fold landing
+///    back where it started. Neither side's *evidence* moves — an empty bucket supports no
+///    read and carries no chain id.
+/// 2. **Sort the non-REF buckets by their bases.** Production's order is bucket-creation
+///    order; ng's creation order now changes with eviction, and B2 makes ng sort before
+///    emitting anyway, for a reason that outlives this comparison: its rows come from an
+///    `AHashMap` whose iteration order is seeded per process.
+///
+/// `alleles[0]` is left where it is whatever its support: it is the record's reference
+/// sequence, production creates it with zero observations by design, and moving it would
+/// break the positional REF invariant both sides still rely on.
+///
+/// Applied to **both** sides, so neither can hide a difference the other does not have: a
+/// bucket with `num_obs > 0` survives on either side and still has to match, bases and
+/// support and chain ids alike.
+fn comparable(record: &PileupRecord) -> PileupRecord {
+    let mut out = comparable_exact_q_sum(record);
+    for allele in &mut out.alleles {
+        allele.support.q_sum = round_q_sum(allele.support.q_sum);
+    }
+    out
+}
+
+/// Q_SUM_GRAIN: the granularity `q_sum` is compared at — see [`round_q_sum`].
+const Q_SUM_GRAIN: f64 = 1e9;
+
+/// Round `q_sum` to ~1e-9, because A3 changed the **order** of its accumulation and
+/// nothing else.
+///
+/// `q_sum` is an `f64` running sum, and the fold adds and subtracts into it as reads
+/// re-fold. Production keeps a bucket alive at `num_obs == 0` and keeps accumulating into
+/// it, so a read that leaves and returns leaves `+q -q +q` behind; ng evicts the empty
+/// bucket and recreates it, so the same read's sum starts from `0.0` and is *exactly* `q`.
+/// Production's `-2.999999999999999` against ng's `-3.0` is that, and only that.
+///
+/// **This is a sixth divergence class and it is named rather than absorbed** — spec §3
+/// lists five, and warns that an unlisted one gets triaged as a listed one and contaminates
+/// the measurement. It is not a difference in evidence: no read moved, no base changed, and
+/// the two numbers differ in the last representable bits.
+///
+/// The grain is nine decimal places on values of order `-3` to `-50`, where the smallest
+/// *real* difference is a whole read's `ln` contribution — order 1. So a genuine divergence
+/// cannot hide under it, and `float_only_divergences` counts how often it fires so it can
+/// be seen rather than assumed.
+fn round_q_sum(q_sum: f64) -> f64 {
+    (q_sum * Q_SUM_GRAIN).round() / Q_SUM_GRAIN
+}
+
+/// The projection itself, minus the `q_sum` rounding [`comparable`] adds — so a caller can
+/// count how many records agree **only** because of the rounding, and it is shown to be
+/// doing work rather than quietly matching nothing.
+fn comparable_exact_q_sum(record: &PileupRecord) -> PileupRecord {
+    let mut out = record.clone();
+    let mut index = 0usize;
+    out.alleles.retain(|allele| {
+        let keep = index == 0 || allele.support.num_obs > 0;
+        index += 1;
+        keep
+    });
+    out.alleles[1..].sort_by(|a, b| a.seq.cmp(&b.seq));
+    out
+}
+
+/// Records that agree after the `q_sum` rounding and disagree before it.
+fn float_only_divergences(
+    ours: &[Result<PileupRecord, String>],
+    theirs: &[Result<PileupRecord, String>],
+) -> usize {
+    ours.iter()
+        .zip(theirs)
+        .filter(|(ours, theirs)| match (ours, theirs) {
+            (Ok(ours), Ok(theirs)) => {
+                comparable_exact_q_sum(ours) != comparable_exact_q_sum(theirs)
+                    && comparable(ours) == comparable(theirs)
+            }
+            _ => false,
+        })
+        .count()
+}
+
 /// Assert the two walks agree, and return whether they agreed *by both panicking*.
 ///
 /// Shared by the synthetic differential and the real-data one, so the two cannot drift
@@ -975,7 +1062,16 @@ fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> b
         theirs.records.len(),
     );
     for (position, (ours, theirs)) in ours.records.iter().zip(theirs.records.iter()).enumerate() {
-        assert_eq!(ours, theirs, "{where_}: stream item {position} diverged");
+        // Normalised on both sides — see `comparable` for why an empty bucket is a
+        // projection rather than an excuse.
+        let project = |item: &Result<PileupRecord, String>| {
+            item.as_ref().map(comparable).map_err(String::clone)
+        };
+        assert_eq!(
+            project(ours),
+            project(theirs),
+            "{where_}: stream item {position} diverged"
+        );
     }
 
     if ours.panic_message.is_some() {
@@ -1018,6 +1114,101 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE,
 ];
 
+/// How one record's evidence relates to production's.
+#[derive(Debug, PartialEq, Eq)]
+enum RecordAgreement {
+    /// Every supported bucket matches, bases and support and chain ids alike.
+    Exact,
+    /// The record's reference bytes and every support total match, and only the bases of
+    /// some rows differ — production having widened past a read it did not re-fold. See
+    /// [`classify_record`].
+    EvidenceIntact,
+    /// Anything else.
+    Divergent,
+}
+
+/// The five support scalars of a whole record, summed across its buckets — "no evidence
+/// was created or lost", independent of which bucket it ended up in.
+///
+/// `q_sum` is summed as `f64` and rounded **once, at the end**. Rounding each bucket first
+/// would make the total depend on how the reads were distributed across buckets: two reads
+/// at `-4.835428695` in one bucket sum to `-9.670857391`, while the same two in separate
+/// buckets round to `-4835428695` twice and total `-9670857390`. A3 moves reads between
+/// buckets by design, so that is exactly the difference this function must not see.
+fn total_support(record: &PileupRecord) -> (u32, u32, u32, u32, u64, i64) {
+    let (num_obs, fwd, placed_left, mapq_sum, mapq_sum_sq, q_sum) = record.alleles.iter().fold(
+        (0, 0, 0, 0, 0, 0.0_f64),
+        |(num_obs, fwd, placed_left, mapq_sum, mapq_sum_sq, q_sum), allele| {
+            let s = &allele.support;
+            (
+                num_obs + s.num_obs,
+                fwd + s.fwd,
+                placed_left + s.placed_left,
+                mapq_sum + s.mapq_sum,
+                mapq_sum_sq + s.mapq_sum_sq,
+                q_sum + s.q_sum,
+            )
+        },
+    );
+    (
+        num_obs,
+        fwd,
+        placed_left,
+        mapq_sum,
+        mapq_sum_sq,
+        (q_sum * Q_SUM_GRAIN).round() as i64,
+    )
+}
+
+/// **The one class of divergence A3 leaves on the complete-reads fixture — named, because
+/// an unnamed class gets triaged as a named one** (spec §3).
+///
+/// After the owner's decision of 2026-07-29, `widen` re-folds every **live** read already
+/// in the record, so a read sitting inside its own deletion no longer keeps a bucket — or,
+/// more importantly, a `witnessed` extent — pinned to the pre-widen footprint. What
+/// remains is the case production **cannot** get right by construction: a record that
+/// widens past a read it does not re-fold, which after (b) means a read that has already
+/// **expired**. Its cursor is gone, so neither walker can consult its events again;
+/// production appends the new reference bases to its bucket anyway, and ng leaves the
+/// bucket saying what the read saw.
+///
+/// The difference runs in **both** directions, which is why this cannot be stated as "ng's
+/// bases are production's with a reference tail stripped":
+///
+/// - production credits the read with bases sequenced after it left the active set;
+/// - production also *misses* events the read did witness inside the final footprint,
+///   because it folded that read against a narrower window and never went back. An
+///   insertion anchored in the widened region is the case that shows it — ng's row is then
+///   one base **longer** than production's.
+///
+/// So what is checked is that **no evidence moved**: the record's own reference bytes are
+/// identical, and every support scalar summed across the buckets is identical, so no read
+/// was created, lost or double counted — only the bases of some rows differ.
+///
+/// # What this does not prove, and where it gets sharper
+///
+/// It does not check *which* rows differ or by how much. The right filter is the spec's
+/// own definition of the anchor class — "loci where every folded read witnessed the whole
+/// footprint" — which needs `FoldedReadState::witnessed` resolved against the final
+/// footprint, i.e. **A4's `coverage_of`**. When that lands, this classifier should be
+/// replaced by that predicate and the surviving class should be empty rather than merely
+/// evidence-preserving. Recorded here so it is tightened rather than rediscovered (D1).
+fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreement {
+    if comparable(ours) == comparable(theirs) {
+        return RecordAgreement::Exact;
+    }
+    // **The totals come from the originals, not from `comparable`'s output.** That
+    // projection rounds each bucket's `q_sum` to 1e-9, and a record's fourteen buckets
+    // then carry up to fourteen half-grains of slack — more than the grain itself, so a
+    // record whose reads merely sit in different buckets would fail this check on the
+    // rounding alone. Summing first and rounding once is the whole point.
+    if ours.alleles[0].seq == theirs.alleles[0].seq && total_support(ours) == total_support(theirs)
+    {
+        return RecordAgreement::EvidenceIntact;
+    }
+    RecordAgreement::Divergent
+}
+
 /// **The permanent anchor: on reads that witnessed the whole footprint, the two walkers
 /// agree forever.**
 ///
@@ -1040,6 +1231,8 @@ const SEEDS: [u64; 4] = [
 fn ng_walks_identically_to_production_on_complete_reads() {
     let mut compared_records = 0usize;
     let mut widened_records = 0usize;
+    let mut widen_stale = 0usize;
+    let mut float_only = 0usize;
     let total = SEEDS.len() * cases_per_seed();
 
     for seed in SEEDS {
@@ -1056,11 +1249,51 @@ fn ng_walks_identically_to_production_on_complete_reads() {
                 .iter()
                 .filter(|item| item.as_ref().is_ok_and(|r| r.alleles[0].seq.len() > 1))
                 .count();
-            assert!(
-                !assert_same_walk(&where_, &ours, &theirs),
+            assert_eq!(
+                ours.panic_message, None,
                 "{where_}: a complete-reads case must not panic — this fixture excludes \
                  every input that reaches production's reachable precondition"
             );
+            assert_eq!(
+                ours.panic_message, theirs.panic_message,
+                "{where_}: the two walkers did not stop the same way",
+            );
+            assert_eq!(
+                ours.records.len(),
+                theirs.records.len(),
+                "{where_}: ng emitted {} stream items, production {}",
+                ours.records.len(),
+                theirs.records.len(),
+            );
+            for (position, (ours, theirs)) in
+                ours.records.iter().zip(theirs.records.iter()).enumerate()
+            {
+                match (ours, theirs) {
+                    (Ok(ours), Ok(theirs)) => match classify_record(ours, theirs) {
+                        RecordAgreement::Exact => {}
+                        RecordAgreement::EvidenceIntact => widen_stale += 1,
+                        RecordAgreement::Divergent => panic!(
+                            "{where_}: record {position} diverged on a complete-reads \
+                             case, and not as production's widen appending reference \
+                             bases to a bucket belonging to an already-expired read — \
+                             which is the only class this fixture is allowed to produce.\n  ng   {:?}\n  \
+                             prod {:?}",
+                            comparable(ours),
+                            comparable(theirs),
+                        ),
+                    },
+                    (ours, theirs) => assert_eq!(
+                        ours, theirs,
+                        "{where_}: stream item {position} diverged on the error channel"
+                    ),
+                }
+            }
+            assert_eq!(
+                ours.summary.as_ref(),
+                theirs.summary.as_ref(),
+                "{where_}: the RunSummary counters diverged",
+            );
+            float_only += float_only_divergences(&ours.records, &theirs.records);
         }
     }
 
@@ -1078,9 +1311,29 @@ fn ng_walks_identically_to_production_on_complete_reads() {
         "only {widened_records} multi-base records over {total} cases — without them this \
          anchor cannot tell a filling builder from a witnessing one"
     );
+    // The class has to be **present**, or the classifier is a branch nothing takes and a
+    // record that started diverging some other way would be reported as this one.
+    assert!(
+        widen_stale > 0,
+        "no record showed production widening past a read it never re-folded — either the \
+         generator stopped producing widens, or `classify_record` is matching something \
+         it should not"
+    );
+    assert!(
+        widen_stale * 20 < compared_records,
+        "{widen_stale} of {compared_records} records fell outside byte-identity — that \
+         class is supposed to be the rare corner where a record widens past an expired \
+         read, and at this rate it is something else"
+    );
     eprintln!(
         "complete-reads differential: {compared_records} records compared over {total} \
-         cases, {widened_records} of them multi-base; zero divergences"
+         cases, {widened_records} of them multi-base. {widen_stale} ({:.2}%) hold the \
+         same evidence — same reference bytes, same support totals — with some rows' \
+         bases differing, because production widened past a read it never re-folded. \
+         Every other record is identical, field for field. {float_only} agree only after \
+         `q_sum` is rounded to 1e-9, which is A3's eviction changing the order the sum \
+         accumulates in and nothing else.",
+        100.0 * widen_stale as f64 / compared_records as f64,
     );
 }
 
@@ -1124,7 +1377,7 @@ fn assert_only_allele_bytes_moved(
                     "{where_}: record {position} moved its anchor or its REF bytes, which \
                      A2 does not touch",
                 );
-                if ours != theirs {
+                if comparable(ours) != comparable(theirs) {
                     diverged += 1;
                 }
             }
