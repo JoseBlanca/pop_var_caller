@@ -115,7 +115,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   append-to-every-bucket the re-fold no longer lands in its old bucket, so stranded empties
   accumulate against a `find_allele_index` that is a linear byte-compare scan. *Depends:* A2.
   *Source:* spec §4, §7.
-- ☐ **A4 — coverage at `finalise`.** `coverage_of(witnessed, record_pos, record_end)` →
+- ✅ **A4 — coverage at `finalise`.** `coverage_of(witnessed, record_pos, record_end)` →
   `Complete` | `Observed { offset_in_locus, positions_covered }`, resolved once, against the
   **final** footprint. A read `Complete` when it folded becomes `Observed` after a widen with nothing
   about the read having changed. *Depends:* A3. *Source:* spec §4, §6.

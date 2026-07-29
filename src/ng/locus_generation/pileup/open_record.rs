@@ -26,6 +26,7 @@ use crate::pileup_record::{
     AlleleObservation, AlleleSupportStats as ProductionAlleleSupportStats, ChainId, PileupRecord,
 };
 
+use super::super::{LocusLen, ReadCoverage};
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
 use super::decompose::ReadEvent;
@@ -106,6 +107,67 @@ pub(super) struct AlleleSupportStats {
     pub mapq_sum: u32,
     /// Σ mapq² over supporting reads.
     pub mapq_sum_sq: u64,
+}
+
+/// How the reads folded into one finished record witnessed it — the tally
+/// [`OpenPileupRecord::finalise`] produces on its way past every
+/// [`FoldedReadState`], resolving [`coverage_of`] once against the **final**
+/// footprint.
+///
+/// **Two counts rather than the per-read runs themselves, and only until B2.**
+/// `finalise` still returns production's [`PileupRecord`], which has nowhere to
+/// put a [`ReadCoverage`]; B2 replaces the return with `SampleLocusObservations`,
+/// where each row carries its own. What has to be true *before* that is the
+/// resolution point — coverage read at fold time is measured against a footprint
+/// the record may still outgrow — so A4 resolves it here and reports what it
+/// found, and B2 turns the same loop into rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct RecordWitness {
+    /// Folded reads that witnessed every position of the final footprint.
+    pub reads_complete: u32,
+    /// Folded reads that witnessed one contiguous run short of it.
+    pub reads_partially_observed: u32,
+}
+
+/// How much of the finished record a read witnessed, in **locus positions**.
+///
+/// Resolved once, at [`finalise`](OpenPileupRecord::finalise), from the read's
+/// `witnessed` extent against the record's **final** footprint — never during the
+/// fold, when that footprint is not yet known. A read that was a complete witness
+/// when it folded becomes `Observed` after a later widen **with nothing about the
+/// read having changed**, and there is no re-fold that would notice: the read may
+/// have expired long before the record closed, since `expire_passed` touches no
+/// open record (spec §4, §6).
+///
+/// The extent is **clamped into the footprint** before it is measured. That is not
+/// belt-and-braces: `events_overlapping` does not clip a deletion, so a deletion
+/// anchored before the record comes back whole and its run can reach past the
+/// record's end (spec §8). `apply_events_into` already intersects for the extent it
+/// stores, and this repeats it so a wrong `offset_in_locus` cannot arrive by
+/// another route — the two numbers are only ever wrong quietly.
+///
+/// Narrowing to the `u16` the run is expressed in goes through [`LocusLen`], which
+/// owns that saturating cast. A record wider than `u16::MAX` cannot be described by
+/// a run at all; production's `max_record_span` is 5000, so saturation is
+/// unreachable at any configured value near it.
+pub(super) fn coverage_of(
+    witnessed: RefSpan,
+    record_pos: u32,
+    record_end_exclusive: u32,
+) -> ReadCoverage {
+    let first = witnessed.start.max(record_pos);
+    let past_last = witnessed
+        .end
+        .saturating_add(1)
+        .min(record_end_exclusive)
+        .max(first);
+    if first <= record_pos && past_last >= record_end_exclusive {
+        return ReadCoverage::Complete;
+    }
+    ReadCoverage::Observed {
+        offset_in_locus: LocusLen::from_positions(u64::from(first - record_pos)).get(),
+        positions_covered: LocusLen::from_positions(u64::from(past_last - first)).get(),
+    }
 }
 
 /// One in-flight allele bucket inside an `OpenPileupRecord`.
@@ -268,11 +330,24 @@ impl OpenPileupRecord {
     /// started on the record's anchor", which is exactly what a per-read flag in
     /// `folded_reads` counts — so the reconstruction is exact rather than
     /// approximate, and it disappears with this whole conversion at Milestone B.
-    pub fn finalise(self) -> PileupRecord {
+    /// (continued) **Coverage is resolved here too, and here is the only place it
+    /// can be** (A4). A read's `witnessed` extent is absolute; what it means —
+    /// complete witness or one short run — is relative to a footprint that grows
+    /// until the record closes. Resolving at fold time would answer against a
+    /// footprint the record may still outgrow, and no re-fold would come back to
+    /// correct it, because the read may have expired in between (spec §4).
+    pub fn finalise(self) -> (PileupRecord, RecordWitness) {
+        let record_pos = self.pos;
+        let record_end_exclusive = self.footprint_end_exclusive();
+        let mut witness = RecordWitness::default();
         let mut per_bucket: Vec<Vec<ChainId>> =
             (0..self.alleles.len()).map(|_| Vec::new()).collect();
         let mut placed_start_per_bucket: Vec<u32> = vec![0; self.alleles.len()];
         for state in self.folded_reads.values() {
+            match coverage_of(state.witnessed, record_pos, record_end_exclusive) {
+                ReadCoverage::Complete => witness.reads_complete += 1,
+                ReadCoverage::Observed { .. } => witness.reads_partially_observed += 1,
+            }
             // Counted before the REF skip below: `placed_start` is a property of
             // every bucket, REF included, where chain ids are not.
             if state.placed_start {
@@ -306,7 +381,7 @@ impl OpenPileupRecord {
                 chain_ids,
             })
             .collect();
-        PileupRecord {
+        let record = PileupRecord {
             chrom_id: self.chrom_id,
             pos: self.pos,
             alleles,
@@ -315,7 +390,8 @@ impl OpenPileupRecord {
             // sliding-window accumulator before writing.
             windowed_gc: f32::NAN,
             windowed_coverage: f32::NAN,
-        }
+        };
+        (record, witness)
     }
 }
 
@@ -2339,6 +2415,245 @@ mod tests {
         assert!(
             record.alleles[1..].iter().all(|a| a.support.num_obs > 0),
             "every non-REF bucket must support a read: {buckets:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // A4 — coverage resolved at `finalise`, against the final footprint.
+    // -----------------------------------------------------------------
+
+    /// A witness that tiles the footprint is a complete one.
+    #[test]
+    fn coverage_of_a_witness_covering_the_whole_footprint_is_complete() {
+        assert_eq!(
+            coverage_of(RefSpan { start: 5, end: 20 }, 5, 21),
+            ReadCoverage::Complete
+        );
+    }
+
+    /// Flush with the left border and short of the right — freebayes' prefix constraint,
+    /// which `is_flush_left` has to keep being able to read off the run.
+    #[test]
+    fn coverage_of_a_witness_flush_left_reports_a_zero_offset() {
+        let coverage = coverage_of(RefSpan { start: 5, end: 7 }, 5, 21);
+        assert_eq!(
+            coverage,
+            ReadCoverage::Observed {
+                offset_in_locus: 0,
+                positions_covered: 3,
+            }
+        );
+        assert!(coverage.is_flush_left());
+        assert!(!coverage.is_flush_right(LocusLen::from_positions(16)));
+    }
+
+    /// Flush with the right border — the suffix constraint, and the offset is derived
+    /// rather than assumed.
+    #[test]
+    fn coverage_of_a_witness_flush_right_reports_the_offset_it_starts_at() {
+        let coverage = coverage_of(RefSpan { start: 18, end: 20 }, 5, 21);
+        assert_eq!(
+            coverage,
+            ReadCoverage::Observed {
+                offset_in_locus: 13,
+                positions_covered: 3,
+            }
+        );
+        assert!(!coverage.is_flush_left());
+        assert!(coverage.is_flush_right(LocusLen::from_positions(16)));
+    }
+
+    /// **A run flush with neither border**, which is what the generic path mints and
+    /// neither `from_left` nor `from_right` can express — the case
+    /// [`ReadCoverage`](super::super::ReadCoverage)'s own note said would only be
+    /// knowable when this generator produced its first run.
+    #[test]
+    fn coverage_of_an_interior_witness_is_flush_with_neither_border() {
+        let coverage = coverage_of(RefSpan { start: 9, end: 12 }, 5, 21);
+        assert_eq!(
+            coverage,
+            ReadCoverage::Observed {
+                offset_in_locus: 4,
+                positions_covered: 4,
+            }
+        );
+        assert!(!coverage.is_flush_left());
+        assert!(!coverage.is_flush_right(LocusLen::from_positions(16)));
+    }
+
+    /// **An extent reaching past either border is clamped into the footprint, not
+    /// believed.** `events_overlapping` does not clip a deletion — one anchored before
+    /// the record comes back whole, so its run can start below `record_pos` and end past
+    /// `record_end` (spec §8). Unclamped, a deletion spanning the record would report an
+    /// enormous `positions_covered`, or an `offset_in_locus` that underflowed.
+    #[test]
+    fn coverage_of_clamps_an_extent_that_overruns_the_footprint() {
+        assert_eq!(
+            coverage_of(RefSpan { start: 1, end: 40 }, 5, 21),
+            ReadCoverage::Complete,
+            "a witness swallowing the footprint witnessed all of it, and nothing more"
+        );
+        assert_eq!(
+            coverage_of(RefSpan { start: 1, end: 7 }, 5, 21),
+            ReadCoverage::Observed {
+                offset_in_locus: 0,
+                positions_covered: 3,
+            },
+            "the run starts at the record's own anchor, never before it"
+        );
+        assert_eq!(
+            coverage_of(RefSpan { start: 18, end: 40 }, 5, 21),
+            ReadCoverage::Observed {
+                offset_in_locus: 13,
+                positions_covered: 3,
+            },
+            "and it ends at the record's own end"
+        );
+    }
+
+    /// **A read that was a complete witness becomes `Observed` when the record widens
+    /// under it, with nothing about the read having changed** — the whole reason
+    /// coverage is resolved at `finalise` and not at the fold (spec §4, plan A4).
+    ///
+    /// `shortie` matches positions 5..=7 and stops. When the record spans 5..=7 that is
+    /// every position it has. `widener`'s deletion then grows the record to 5..=20, and
+    /// the same three positions are now three of sixteen. The read is not consulted; its
+    /// `witnessed` extent is byte for byte what it was.
+    #[test]
+    fn a_complete_witness_becomes_observed_when_the_record_widens_under_it() {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(vec![
+            plain_read(
+                "shortie",
+                5,
+                7,
+                vec![CigarOp::Match(3)],
+                WIDEN_CONTIG.as_bytes()[4..7].to_vec(),
+            ),
+            plain_read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(18)],
+                vec![b'A'; 19],
+            ),
+            plain_read(
+                "widener",
+                7,
+                24,
+                vec![CigarOp::Match(1), CigarOp::Deletion(13), CigarOp::Match(4)],
+                b"TAAAA".to_vec(),
+            ),
+        ]);
+        let mut open = OpenPileupRecordTable::new();
+
+        let contributors = contributors_at(&active, 5);
+        process_position(&mut open, 5, 0, &contributors, &active, &reference).expect("opens");
+        let shortie_id = read_id_of(&active, "shortie");
+        let narrow = {
+            let record = open.records.get(&5).expect("the record at 5");
+            assert_eq!(
+                record.ref_span(),
+                3,
+                "the opener's deletion must open the record at 5..=7"
+            );
+            let state = record
+                .folded_reads
+                .get(&shortie_id)
+                .expect("the shortie folded at 5");
+            assert_eq!(
+                coverage_of(
+                    state.witnessed,
+                    record.pos,
+                    record.footprint_end_exclusive()
+                ),
+                ReadCoverage::Complete,
+                "against a 5..=7 footprint the shortie witnessed everything"
+            );
+            state.witnessed
+        };
+
+        let contributors = contributors_at(&active, 7);
+        process_position(&mut open, 7, 0, &contributors, &active, &reference).expect("widens");
+
+        let record = open.records.get(&5).expect("the record at 5");
+        assert_eq!(
+            record.ref_span(),
+            16,
+            "the record must have widened to 5..=20"
+        );
+        let state = record
+            .folded_reads
+            .get(&shortie_id)
+            .expect("the shortie is still folded");
+        assert_eq!(
+            state.witnessed, narrow,
+            "the read saw exactly what it saw; a widen is not news about the read"
+        );
+        assert_eq!(
+            coverage_of(
+                state.witnessed,
+                record.pos,
+                record.footprint_end_exclusive()
+            ),
+            ReadCoverage::Observed {
+                offset_in_locus: 0,
+                positions_covered: 3,
+            },
+            "the same extent, resolved against the footprint the record ended with"
+        );
+    }
+
+    /// **`finalise` resolves every folded read against the record's final footprint**,
+    /// and reports what it found. Same walk as the test above: the shortie stopped at 7,
+    /// the widener started there, and only the opener's deletion carried it across the
+    /// whole widened footprint.
+    ///
+    /// A `finalise` that answered from the *fold-time* footprint would call the shortie
+    /// complete, and the number it feeds — a depth — would be wrong with no error.
+    #[test]
+    fn finalise_counts_the_witnesses_against_the_footprint_the_record_ended_with() {
+        let reference = fa(WIDEN_CONTIG);
+        let (active, _ids) = admitted(vec![
+            plain_read(
+                "shortie",
+                5,
+                7,
+                vec![CigarOp::Match(3)],
+                WIDEN_CONTIG.as_bytes()[4..7].to_vec(),
+            ),
+            plain_read(
+                "opener",
+                5,
+                25,
+                vec![CigarOp::Match(1), CigarOp::Deletion(2), CigarOp::Match(18)],
+                vec![b'A'; 19],
+            ),
+            plain_read(
+                "widener",
+                7,
+                24,
+                vec![CigarOp::Match(1), CigarOp::Deletion(13), CigarOp::Match(4)],
+                b"TAAAA".to_vec(),
+            ),
+        ]);
+        let mut open = OpenPileupRecordTable::new();
+        for pos in [5u32, 7] {
+            let contributors = contributors_at(&active, pos);
+            process_position(&mut open, pos, 0, &contributors, &active, &reference)
+                .expect("the fixture walks cleanly");
+        }
+
+        let record = open.records.remove(&5).expect("the record at 5");
+        let (_record, witness) = record.finalise();
+        assert_eq!(
+            witness,
+            RecordWitness {
+                reads_complete: 1,
+                reads_partially_observed: 2,
+            },
+            "the opener's deletion witnessed 5..=20 whole; the shortie stopped at 7 and \
+             the widener started there"
         );
     }
 

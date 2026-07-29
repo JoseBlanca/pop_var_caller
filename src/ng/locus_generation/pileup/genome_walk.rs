@@ -510,7 +510,15 @@ impl WalkerState {
         // we drain the hoisted buffer rather than `into_iter()`ing
         // it; the backing `Vec` stays allocated and reusable.
         for open in self.drained_buf.drain(..) {
-            out.push_back(open.finalise());
+            // The witness tally is resolved at `finalise` and dropped here, and both
+            // halves are deliberate (A4). **Resolved there** because coverage is a
+            // read's extent measured against the record's *final* footprint, which
+            // only `finalise` knows and no later caller can reconstruct — the reads
+            // may have expired. **Dropped here** because this walker still emits
+            // production's `PileupRecord`, which has nowhere to carry it; B2 changes
+            // the emitted type and the tally becomes the rows.
+            let (record, _witness) = open.finalise();
+            out.push_back(record);
             self.summary.records_emitted += 1;
         }
     }
@@ -571,7 +579,9 @@ impl WalkerState {
         // open at end-of-chromosome is by definition ready to
         // close — there are no future reads on this chromosome).
         for open in self.open_records.drain_all() {
-            out.push_back(open.finalise());
+            // Same as `close_aged_records_into` — see the note there.
+            let (record, _witness) = open.finalise();
+            out.push_back(record);
             self.summary.records_emitted += 1;
         }
         // Release any active-set reads so the active-count
