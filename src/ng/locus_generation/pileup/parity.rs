@@ -114,6 +114,7 @@ use super::{PreparedRead, WalkerConfig};
 use crate::ng::read::PLACEHOLDER_READ_GROUP;
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
+use super::super::SampleLocusObservations;
 use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
     run as production_run,
@@ -917,6 +918,38 @@ where
     }
 }
 
+/// The same as [`drive`], for a walker that yields ng's own locus type — each record laid
+/// back out as a [`PileupRecord`] by [`as_pileup_record`](super::as_pileup_record) so the
+/// two streams stay comparable. Separate rather than generic over the item type: the
+/// projection is the thing worth seeing at the call site.
+fn drive_ng<W, E>(
+    mut walker: W,
+    render_error: impl Fn(&E) -> String,
+    summary_of: impl FnOnce(&W) -> SummaryCounters,
+) -> WalkOutcome
+where
+    W: Iterator<Item = Result<SampleLocusObservations, E>>,
+{
+    let mut records = Vec::new();
+    let mut summary = None;
+    let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for item in &mut walker {
+            records.push(
+                item.map(|locus| super::as_pileup_record(&locus))
+                    .map_err(|error| render_error(&error)),
+            );
+        }
+        summary = Some(summary_of(&walker));
+    }))
+    .err()
+    .map(panic_message);
+    WalkOutcome {
+        records,
+        summary,
+        panic_message,
+    }
+}
+
 /// Production's answer.
 fn production_walk(case: &Case) -> WalkOutcome {
     let fasta = case.fasta();
@@ -945,7 +978,13 @@ fn ng_walk(case: &Case) -> WalkOutcome {
         // difference between the two streams rather than a property under test.
         .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
         .collect();
-    drive(super::run(reads, fasta, &case.config), render_ng_error, {
+    // **ng emits `SampleLocusObservations` from B2 on; the differential still compares
+    // `PileupRecord`s.** Laid back out through `as_pileup_record` rather than projecting
+    // production forward, which is D1's job and needs the five divergence classes named
+    // first. What the projection cannot carry is listed on it, and the two that matter here
+    // are named in `total_support` (`placed_start`, no longer computed at all) and in
+    // `classify_record` (chain ids, now dropped per read).
+    drive_ng(super::run(reads, fasta, &case.config), render_ng_error, {
         |walker| ng_counters(walker.summary())
     })
 }
@@ -1025,6 +1064,16 @@ fn comparable_exact_q_sum(record: &PileupRecord) -> PileupRecord {
         keep
     });
     out.alleles[1..].sort_by(|a, b| a.seq.cmp(&b.seq));
+    // **`placed_start` is zeroed on both sides — a third named projection, from B2.** ng
+    // stops computing the quantity entirely (spec §6: nothing consumes it, and it is a pure
+    // function of the read's start against the anchor), so its side is a structural zero and
+    // every record would otherwise diverge on it. Zeroing *both* keeps the comparison
+    // symmetric, which is the rule every projection here follows: neither side may be
+    // normalised in a way the other is not. See `RecordEvidence` for why this is a
+    // deliberate removal rather than the oversight it replaced.
+    for allele in &mut out.alleles {
+        allele.support.placed_start = 0;
+    }
     out
 }
 
@@ -1160,12 +1209,25 @@ enum RecordAgreement {
 /// at `-4.835428695` in one bucket sum to `-9.670857391`, while the same two in separate
 /// buckets round to `-4835428695` twice and total `-9670857390`. A3 moves reads between
 /// buckets by design, so that is exactly the difference this function must not see.
+/// **`placed_start` is deliberately absent from this struct, and the difference between
+/// that and its earlier absence is the whole point.**
+///
+/// Until B2 it was missing by *oversight*: the sum was a six-field tuple read field by
+/// field, and a real wrong number in `placed_start` went unnoticed while 2,542 records were
+/// absorbed into the tolerated class. From B2 ng does not compute the quantity **at all** —
+/// spec §6: no model consumes it, it is a pure function of the read's start against the
+/// anchor, and a later consumer re-derives it without touching the fold — so there is
+/// nothing to compare, and comparing production's value against a structural zero would
+/// fail every record.
+///
+/// The exhaustive destructure below is what keeps the two cases apart. A field added to
+/// production's stats still stops this file compiling; `placed_start` is bound and dropped
+/// **by name**, at one site, with this comment attached. An oversight cannot look like this.
 #[derive(Debug, PartialEq, Eq)]
 struct RecordEvidence {
     num_obs: u32,
     fwd: u32,
     placed_left: u32,
-    placed_start: u32,
     mapq_sum: u32,
     mapq_sum_sq: u64,
     q_sum_rounded: i64,
@@ -1176,7 +1238,6 @@ fn total_support(record: &PileupRecord) -> RecordEvidence {
         num_obs: 0,
         fwd: 0,
         placed_left: 0,
-        placed_start: 0,
         mapq_sum: 0,
         mapq_sum_sq: 0,
         q_sum_rounded: 0,
@@ -1189,14 +1250,15 @@ fn total_support(record: &PileupRecord) -> RecordEvidence {
             q_sum: bucket_q_sum,
             fwd,
             placed_left,
-            placed_start,
+            // Bound and dropped by name — see `RecordEvidence`. ng stops computing this
+            // at B2, so there is nothing on its side to compare against.
+            placed_start: _,
             mapq_sum,
             mapq_sum_sq,
         } = allele.support;
         totals.num_obs += num_obs;
         totals.fwd += fwd;
         totals.placed_left += placed_left;
-        totals.placed_start += placed_start;
         totals.mapq_sum += mapq_sum;
         totals.mapq_sum_sq += mapq_sum_sq;
         q_sum += bucket_q_sum;
@@ -1289,6 +1351,133 @@ fn classify_record(ours: &PileupRecord, theirs: &PileupRecord) -> RecordAgreemen
         return RecordAgreement::EvidenceIntact;
     }
     RecordAgreement::Divergent
+}
+
+/// Set in the child process by the determinism test below, to select its other half.
+const DETERMINISM_CHILD_VAR: &str = "PVC_DETERMINISM_CHILD";
+
+/// The name the determinism test spawns itself under. A `const` beside the test rather
+/// than a literal at the call site, because a rename that missed one of the two would make
+/// the child run *no* test, print no digest, and fail with "the child printed no digest" —
+/// which reads like a bug in the walk rather than a stale string.
+const DETERMINISM_TEST_PATH: &str =
+    "ng::locus_generation::pileup::parity::ng_emits_the_same_bytes_in_a_second_process";
+
+/// Walk a fixed set of cases and reduce the whole emitted stream to one digest.
+///
+/// Over ng's **own** type, not the `PileupRecord` projection: the claim under test is about
+/// what the generator emits, and the projection merges rows back together, which is exactly
+/// the axis a hash-order bug would show up on.
+fn determinism_digest() -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut rng = SplitMix64(0xD37E_2E1D);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut records = 0usize;
+    for _ in 0..32 {
+        let case = generate(&mut rng);
+        let fasta = case.fasta();
+        let reads: Vec<PreparedRead> = case
+            .reads
+            .iter()
+            .cloned()
+            .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
+            .collect();
+        for item in super::run(reads, fasta, &case.config) {
+            match item {
+                Ok(locus) => {
+                    records += 1;
+                    format!("{locus:?}").hash(&mut hasher);
+                }
+                Err(error) => render_ng_error(&error).hash(&mut hasher),
+            }
+        }
+    }
+    format!("{records}:{:016x}", hasher.finish())
+}
+
+/// **The same input walked in two separate processes emits the same bytes** — spec §7's
+/// "output is a deterministic function of (reference, config, reads)", which until now was
+/// claimed and never tested.
+///
+/// # Why it has to be two processes
+///
+/// `folded_reads` is an `AHashMap`, and `ahash` seeds itself **per process**. Inside one
+/// process that order is arbitrary but *fixed*, so a hash-order dependency is invisible to
+/// any number of runs in the same binary — and every other test in this file compares ng
+/// against production in that same process, never one ng run against another. Two
+/// mechanisms in `refold_live_reads` are unpinnable for exactly this reason; the owner's
+/// decision (2026-07-29) was that B2's sort is the guarantee and that this is where it gets
+/// proven, rather than writing cross-process tests for mechanisms the sort makes redundant.
+///
+/// # The canary, which is what stops this passing vacuously
+///
+/// If `ahash` ever stopped randomising, the digests would match for a reason that has
+/// nothing to do with the sort, and this test would go on passing while proving nothing —
+/// the failure mode this branch has hit repeatedly. So each child also prints a hash of a
+/// fixed string under a fresh `RandomState`, and the parent asserts those **differ**. The
+/// two assertions together say: the seed really did change, and the output really did not.
+#[test]
+fn ng_emits_the_same_bytes_in_a_second_process() {
+    if std::env::var(DETERMINISM_CHILD_VAR).is_ok() {
+        println!("DIGEST {}", determinism_digest());
+        println!(
+            "CANARY {:016x}",
+            ahash::RandomState::new().hash_one("canary")
+        );
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("a test binary knows its own path");
+    let run_child = || -> (String, String) {
+        let output = std::process::Command::new(&exe)
+            .args(["--exact", DETERMINISM_TEST_PATH, "--nocapture"])
+            .env(DETERMINISM_CHILD_VAR, "1")
+            .output()
+            .expect("the child test binary runs");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "the child walk failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let field = |prefix: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the child printed no {prefix}line — has {DETERMINISM_TEST_PATH} \
+                         been renamed?\n{stdout}"
+                    )
+                })
+                .to_owned()
+        };
+        (field("DIGEST "), field("CANARY "))
+    };
+
+    let (first_digest, first_canary) = run_child();
+    let (second_digest, second_canary) = run_child();
+
+    assert_ne!(
+        first_canary, second_canary,
+        "the two child processes hashed a fixed string to the same value, so `ahash` is \
+         not seeding per process here and this test cannot detect a hash-order dependency \
+         at all — it would pass whatever the walk did"
+    );
+    assert!(
+        first_digest.split(':').next().is_some_and(|records| {
+            records.parse::<usize>().is_ok_and(|records| records > 1000)
+        }),
+        "only {first_digest} — too few records for the fixture to exercise the fold's \
+         hash-order surface"
+    );
+    assert_eq!(
+        first_digest, second_digest,
+        "the same reads, reference and config emitted different bytes in two processes — \
+         something in the emission depends on the per-process hash seed, which spec §7 \
+         forbids outright"
+    );
 }
 
 /// **The permanent anchor: on reads that witnessed the whole footprint, the two walkers
@@ -2265,7 +2454,7 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
         render_production_error,
         |walker| production_counters(walker.summary()),
     );
-    let ours = drive(
+    let ours = drive_ng(
         super::run(ng_reads, reference, &config),
         render_ng_error,
         |walker| ng_counters(walker.summary()),

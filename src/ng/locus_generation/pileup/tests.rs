@@ -162,8 +162,11 @@ pub fn drive_walker_with_config(
     config: &WalkerConfig,
 ) -> (Vec<crate::pileup_record::PileupRecord>, super::RunSummary) {
     let mut walker = run(reads, &ref_fetcher, config);
+    // B2 changed what the walk emits; these inherited tests are the walk's regression
+    // floor and are adapted through one projection rather than 67 hand-edits — see
+    // `super::as_pileup_record` for what it can and cannot reproduce.
     let records: Vec<crate::pileup_record::PileupRecord> = (&mut walker)
-        .map(|r| r.expect("walker yielded error"))
+        .map(|r| super::as_pileup_record(&r.expect("walker yielded error")))
         .collect();
     let summary = walker.summary();
     (records, summary)
@@ -471,13 +474,20 @@ fn forward_strand_count_recorded_correctly() {
 }
 
 #[test]
-fn placed_left_and_placed_start_are_per_record() {
+fn placed_left_is_per_record() {
     // Reference ACGTA. Two reads:
     //   r1 starts at pos 1, covers 1..5
     //   r2 starts at pos 3, covers 3..5
-    // At record pos 3:
-    //   r1 was placed_left (start=1 < 3)
-    //   r2 was placed_start (start=3 == 3)
+    // At record pos 3, r1 was placed_left (start=1 < 3) and r2 was not (start=3 == 3).
+    //
+    // **Adapted at B2, and the half that went is the point** (spec §12): this was
+    // `placed_left_and_placed_start_are_per_record`, and ng no longer computes
+    // `placed_start` at all — nothing consumes it, and it is a pure function of the read's
+    // start against the anchor, so a later consumer re-derives it without touching the fold
+    // (spec §6). `placed_left` **is** consumed — `vcf::qual_refine` turns it into the
+    // read-position-bias term subtracted from QUAL — so that half stands unchanged, and
+    // the count of reads that did *not* start left is asserted through `num_obs` rather
+    // than through the field that is gone.
     let fa = MockFasta::new("ACGTA");
     let r1 = snp_read("r1", 1, b"ACGTA", &[30; 5]);
     let r2 = snp_read("r2", 3, b"GTA", &[30; 3]);
@@ -485,7 +495,11 @@ fn placed_left_and_placed_start_are_per_record() {
     let rec3 = records.iter().find(|r| r.pos == 3).unwrap();
     assert_eq!(rec3.alleles[0].support.num_obs, 2);
     assert_eq!(rec3.alleles[0].support.placed_left, 1);
-    assert_eq!(rec3.alleles[0].support.placed_start, 1);
+    assert_eq!(
+        rec3.alleles[0].support.num_obs - rec3.alleles[0].support.placed_left,
+        1,
+        "the other read started exactly on the anchor"
+    );
 }
 
 #[test]

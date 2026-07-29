@@ -23,7 +23,9 @@ use std::iter::Peekable;
 
 use ahash::AHashMap;
 
-use crate::pileup_record::{ChainId, PileupRecord};
+use crate::pileup_record::ChainId;
+
+use super::super::SampleLocusObservations;
 
 use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
@@ -69,7 +71,7 @@ where
     /// (e.g. a wide deletion at an earlier anchor unblocks several
     /// narrower records simultaneously); they're appended here in
     /// emission order and drained via `pop_front`.
-    pending: VecDeque<PileupRecord>,
+    pending: VecDeque<SampleLocusObservations>,
     /// `true` once end-of-input has been flushed *or* a `next()`
     /// call has returned an error. Both terminal states stop the
     /// iterator from doing further work.
@@ -207,7 +209,7 @@ where
     I: Iterator<Item = PreparedRead>,
     F: RefSeq,
 {
-    type Item = Result<PileupRecord, WalkerError>;
+    type Item = Result<SampleLocusObservations, WalkerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(record) = self.pending.pop_front() {
@@ -500,7 +502,7 @@ impl WalkerState {
     /// the walker and append them to `out` in emission order.
     /// Returns without touching `out` if there are no aged records
     /// to drain.
-    fn close_aged_records_into(&mut self, out: &mut VecDeque<PileupRecord>) {
+    fn close_aged_records_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
         self.open_records
             .drain_aged_into(self.walker_pos, &mut self.drained_buf);
         if self.drained_buf.is_empty() {
@@ -573,7 +575,7 @@ impl WalkerState {
     /// emission order.
     fn flush_chromosome_into(
         &mut self,
-        out: &mut VecDeque<PileupRecord>,
+        out: &mut VecDeque<SampleLocusObservations>,
     ) -> Result<(), WalkerError> {
         // Drain remaining open records (anything that was still
         // open at end-of-chromosome is by definition ready to

@@ -143,6 +143,88 @@ pub use chain_id_allocator::DEFAULT_MAX_ACTIVE_READS;
 pub use errors::WalkerError;
 pub use genome_walk::{PileupWalker, RunSummary, run};
 
+/// Lay a finished locus back out as production's [`PileupRecord`] — **test-only, and the
+/// regression floor depends on it being read as what it is.**
+///
+/// B2 changed what the walk emits. The 44 inherited tests that came with the copy are the
+/// walk's regression floor, and spec §12 sanctions adapting them mechanically to the new
+/// type. Routing them through one projection *is* that adaptation, and it is the safer form
+/// of it: 67 hand-translated assertions are 67 chances to re-express a test slightly weaker
+/// than it was, which is the failure mode this branch has hit in six consecutive
+/// milestones. One function can be reviewed once.
+///
+/// # What it cannot reproduce, and why each is a deliberate change rather than a gap
+///
+/// - **`placed_start` comes back as `0`.** ng does not carry it at all from B2 on (spec §6);
+///   no model consumes it, and it is a pure function of the read's start against the anchor,
+///   so a later consumer re-derives it without touching the fold. The three inherited
+///   assertions on it change, which spec §12 already lists.
+/// - **Allele order is ng's**, which is sorted by `(bases, read_coverage, read_group)`,
+///   where production's is bucket-creation order. Spec §12 lists order-asserting tests as
+///   must-change. REF is placed first regardless, because `alleles[0] == REF` is an
+///   invariant of the type being projected onto, not an ordering preference.
+/// - **Chain ids follow ng's per-read rule**, so a read that agreed with the reference over
+///   everything it witnessed carries none even where production would have given it one.
+///
+/// Rows that split by coverage or read group are **merged back together** here. That is the
+/// point: the inherited suite tests the *walk* — which reads folded where, with what
+/// evidence — not the shape of the emitted type, which has its own tests (`observation_rows`)
+/// and the differential.
+#[cfg(test)]
+pub(crate) fn as_pileup_record(
+    locus: &crate::ng::locus_generation::SampleLocusObservations,
+) -> crate::pileup_record::PileupRecord {
+    use crate::pileup_record::{AlleleObservation, AlleleSupportStats};
+
+    let mut alleles: Vec<AlleleObservation> = Vec::new();
+    // REF first and always present: production creates `alleles[0]` at record open
+    // regardless of support, and ng emits no row for a reference nobody witnessed.
+    alleles.push(AlleleObservation {
+        seq: locus.reference_bases.to_vec(),
+        support: AlleleSupportStats::default(),
+        chain_ids: Vec::new(),
+    });
+    for observation in &locus.observed_sequences {
+        let index = match alleles
+            .iter()
+            .position(|allele| allele.seq.as_slice() == observation.bases.as_ref())
+        {
+            Some(index) => index,
+            None => {
+                alleles.push(AlleleObservation {
+                    seq: observation.bases.to_vec(),
+                    support: AlleleSupportStats::default(),
+                    chain_ids: Vec::new(),
+                });
+                alleles.len() - 1
+            }
+        };
+        let support = &mut alleles[index].support;
+        support.num_obs += observation.num_obs;
+        support.q_sum += observation.q_sum;
+        support.fwd += observation.num_fwd;
+        support.placed_left += observation.placed_left;
+        support.mapq_sum += observation.mapq_sum;
+        support.mapq_sum_sq += observation.mapq_sum_sq;
+        alleles[index]
+            .chain_ids
+            .extend_from_slice(&observation.chain_ids);
+    }
+    for allele in &mut alleles {
+        allele.chain_ids.sort_unstable();
+        allele.chain_ids.dedup();
+    }
+    crate::pileup_record::PileupRecord {
+        chrom_id: locus.region.contig.0,
+        pos: locus.region.start.get() as u32,
+        alleles,
+        // The walker cannot compute the centred window (it needs look-ahead); the
+        // pileup→psp seam fills these from the sliding-window accumulator before writing.
+        windowed_gc: f32::NAN,
+        windowed_coverage: f32::NAN,
+    }
+}
+
 // `walker_vocabulary_tests`, not `tests`: the copied `walker/tests.rs` lands as this
 // module's `tests` child (A4), and mirroring production's module names is what makes
 // the two suites comparable name for name. Named for its subject rather than for the

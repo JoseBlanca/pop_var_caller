@@ -351,7 +351,12 @@ mod tests {
         // base is a record `widen` grew, and growing it is the fetch shape
         // (`old_end` as a 1-based start) the direct-`fetch` tests never exercise.
         assert!(!records.is_empty(), "the fixture must emit records");
-        let widened = records
+        // The reach check goes through the `PileupRecord` projection, because "REF is
+        // `alleles[0]` and there are three alleles" is a statement about production's
+        // shape. The **comparison below stays on ng's own type**, which is what the two
+        // walks actually produce.
+        let projected: Vec<_> = records.iter().map(super::super::as_pileup_record).collect();
+        let widened = projected
             .iter()
             .find(|record| record.alleles[0].seq.len() > 1)
             .expect("the deletion must widen a record, or `widen` is not on the walk");

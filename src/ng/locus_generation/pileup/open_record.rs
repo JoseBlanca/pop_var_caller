@@ -21,12 +21,10 @@ use std::collections::BTreeMap;
 use ahash::AHashMap;
 
 use crate::ng::ref_seq::RefSeq;
-use crate::ng::types::{ContigId, ReadGroupId};
-use crate::pileup_record::{
-    AlleleObservation, AlleleSupportStats as ProductionAlleleSupportStats, ChainId, PileupRecord,
-};
+use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use crate::pileup_record::ChainId;
 
-use super::super::{LocusLen, ReadCoverage};
+use super::super::{LocusKind, LocusLen, ObservedSequence, ReadCoverage, SampleLocusObservations};
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
 use super::decompose::ReadEvent;
@@ -236,20 +234,32 @@ pub(super) struct ObservationKey {
 pub(super) struct ObservationRow {
     pub key: ObservationKey,
     pub support: AlleleSupportStats,
-    /// Reads in this row whose mapped 5′ end *is* the record's anchor — production's
-    /// `placed_start`, which ng's stats do not carry but the `PileupRecord` boundary
-    /// still emits. Dies with that boundary at B2.
-    pub placed_start: u32,
-    /// The chain ids of the reads in this row. Empty for reads that sat in the REF
-    /// bucket, per production's rule; **B2 restates that rule per read**, because row
-    /// splitting means "the REF row" is no longer a unique row.
+    /// The chain ids of the reads in this row — **absent for a read that agreed with the
+    /// reference across everything it witnessed** (spec §6).
+    ///
+    /// Production's rule is positional: `allele_index == 0`, the REF bucket. That named a
+    /// unique row while there was one row per allele, and it no longer does — rows split by
+    /// coverage and by read group, so a reference-matching read can sit in a *partial* row
+    /// whose bases are a prefix of the reference bytes and never compare equal to them.
+    ///
+    /// So the rule is stated **per read** instead: it is decidable at fold time from what
+    /// the read is, it survives every split of the rows, and it reduces to production's
+    /// exactly when the rows are one-per-allele. A chain id marks which haplotype a read
+    /// came from, and the reference is the default — a default needs no tag.
     pub chain_ids: Vec<ChainId>,
-    /// **Transitional, and it dies at B2**: which bucket these reads folded into, so
-    /// `finalise` can lay the rows back onto production's *positional* allele list —
-    /// `alleles[0]` is REF, and the rest are in bucket-creation order. Keeping the index
-    /// makes that projection exact rather than a reconstruction from the bases, and it is
-    /// what lets B1 change how rows are derived without changing what is emitted.
-    pub allele_index: usize,
+}
+
+/// A total order over [`ReadCoverage`], which is `Eq` but not `Ord` — the shared type has
+/// no natural ordering, and inventing an `Ord` impl on it would export this file's sorting
+/// convention to every other consumer.
+fn coverage_order(coverage: ReadCoverage) -> (u8, u16, u16) {
+    match coverage {
+        ReadCoverage::Complete => (0, 0, 0),
+        ReadCoverage::Observed {
+            offset_in_locus,
+            positions_covered,
+        } => (1, offset_in_locus, positions_covered),
+    }
 }
 
 /// One in-flight allele bucket inside an `OpenPileupRecord`.
@@ -382,16 +392,6 @@ struct FoldedReadState {
     /// against a footprint the record has outgrown. A4 resolves `ReadCoverage` from it,
     /// and would otherwise have reported a wrong depth with no error.
     witnessed: RefSpan,
-    /// Whether this read's mapped 5′ end *is* the record's anchor position
-    /// (freebayes' `placedStart`).
-    ///
-    /// **Transitional, and it disappears with the `PileupRecord` boundary.** ng's
-    /// [`AlleleSupportStats`] does not carry `placed_start`, but `finalise` still
-    /// has to emit one; a per-read flag reconstructs the per-bucket count exactly,
-    /// because that count *is* "how many currently-folded reads in this bucket
-    /// started on the anchor". Milestone B deletes both this field and the
-    /// conversion that reads it.
-    placed_start: bool,
 }
 
 impl OpenPileupRecord {
@@ -435,16 +435,14 @@ impl OpenPileupRecord {
     /// the chain id set from `folded_reads` at finalise removes
     /// that drift surface entirely.
     ///
-    /// REF (allele 0) chain ids are intentionally **not** emitted —
-    /// see the skip in the projection loop below.
+    /// Chain ids are **not** emitted for a read that agreed with the reference across
+    /// everything it witnessed — see [`read_agreed_with_reference`](Self::read_agreed_with_reference).
     ///
-    /// **`placed_start` is projected here too, for the same reason and by the
-    /// same route.** ng's [`AlleleSupportStats`] does not carry it (spec §6), but
-    /// this function still returns production's `PileupRecord`, which has the
-    /// field. Per bucket it is "how many currently-folded reads in that bucket
-    /// started on the record's anchor", which is exactly what a per-read flag in
-    /// `folded_reads` counts — so the reconstruction is exact rather than
-    /// approximate, and it disappears with this whole conversion at Milestone B.
+    /// **`placed_start` is gone with this conversion, as A1 said it would be.** ng's stats
+    /// never carried it; the `PileupRecord` boundary did, reconstructed from a per-read
+    /// flag, and that boundary is what this step removes. No model consumes it, and it is a
+    /// pure function of the read's start against the anchor, so a later consumer can
+    /// re-derive it without changing the fold (spec §6).
     /// (continued) **Coverage is resolved here too, and here is the only place it
     /// can be** (A4). A read's `witnessed` extent is absolute; what it means —
     /// complete witness or one short run — is relative to a footprint that grows
@@ -476,6 +474,12 @@ impl OpenPileupRecord {
     /// which spec §7 forbids outright. The bucket totals this replaces were accumulated in
     /// *walk* order and had the property for free; re-deriving is what puts it at risk.
     ///
+    /// **This line is the determinism guarantee, not `finalise`'s row sort.** Pinned by
+    /// `parity::ng_emits_the_same_bytes_in_a_second_process`, which walks the same input in
+    /// two processes and compares: delete this sort and it fails; delete the row sort and it
+    /// stays green. Row order inherits determinism from here, and no test inside a single
+    /// process can see any of it, because `ahash` seeds once per process.
+    ///
     /// *Cost, recorded rather than discovered:* this adds a `Vec<u32>` and a sort per
     /// emitted record, on a path that runs once per covered reference base, and a reviewer
     /// has already measured `finalise` as this milestone's largest single cost component.
@@ -483,6 +487,33 @@ impl OpenPileupRecord {
     /// measures throughput, so the cheap variants (reuse the bucket total when a bucket
     /// does not split; lend a scratch buffer from the table) are worth choosing *after* a
     /// number, not before one.
+    /// Whether this read **agreed with the reference across everything it witnessed** — the
+    /// per-read form of production's `allele_index == 0` chain-id rule (spec §6).
+    ///
+    /// Production's rule is positional and unportable once rows split: a reference-matching
+    /// read that witnessed only part of the footprint sits in a *partial* row whose bases
+    /// are a prefix of the reference bytes, so "the row whose bases equal
+    /// `reference_bases`" no longer names it. Asking the question of the **read** instead
+    /// works at every split, and reduces to production's rule exactly when the rows are
+    /// one-per-allele: a complete witness that agreed everywhere *is* the REF bucket.
+    ///
+    /// The comparison is against the reference **over the positions the read witnessed**,
+    /// not the whole footprint — that is the entire difference. Note the two axes do not
+    /// have to line up: `bases` is in read coordinates and an insertion makes it longer
+    /// than the run it covers, which simply means it cannot equal the reference slice, and
+    /// the read keeps its id. Correct, and for the right reason.
+    fn read_agreed_with_reference(&self, state: &FoldedReadState) -> bool {
+        let reference = &self.alleles[0].seq;
+        let first = state.witnessed.start.saturating_sub(self.pos) as usize;
+        let past_last = (state.witnessed.end.saturating_sub(self.pos) as usize)
+            .saturating_add(1)
+            .min(reference.len());
+        if first >= past_last {
+            return false;
+        }
+        self.alleles[state.allele_index].seq == reference[first..past_last]
+    }
+
     fn observation_rows(&self, record_end_exclusive: u32) -> Vec<ObservationRow> {
         let mut ids: Vec<u32> = self.folded_reads.keys().copied().collect();
         ids.sort_unstable();
@@ -500,27 +531,21 @@ impl OpenPileupRecord {
                 read_coverage: coverage_of(state.witnessed, self.pos, record_end_exclusive),
                 read_group: state.read_group,
             };
+            let agreed_with_reference = self.read_agreed_with_reference(state);
             let row = match rows.iter_mut().find(|row| row.key == key) {
                 Some(row) => row,
                 None => {
                     rows.push(ObservationRow {
                         key,
                         support: AlleleSupportStats::default(),
-                        placed_start: 0,
                         chain_ids: Vec::new(),
-                        allele_index: state.allele_index,
                     });
                     // PANIC-FREE: pushed on the line above.
                     rows.last_mut().expect("just pushed")
                 }
             };
             add_contribution(&mut row.support, &state.contribution);
-            row.placed_start += u32::from(state.placed_start);
-            // Production's positional rule, unchanged at this step: a read in the REF
-            // bucket contributes no chain id. **B2 restates it per read** — "a read that
-            // agreed with the reference across everything it witnessed" — because once
-            // rows split by coverage and group, `alleles[0]` stops being a unique row.
-            if state.allele_index != 0 {
+            if !agreed_with_reference {
                 row.chain_ids.push(state.chain_id);
             }
         }
@@ -531,58 +556,26 @@ impl OpenPileupRecord {
         rows
     }
 
-    pub fn finalise(self) -> (PileupRecord, RecordWitness) {
+    pub fn finalise(self) -> (SampleLocusObservations, RecordWitness) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
-        // Every field named, no `..Default::default()`: B2 reshapes this struct, and a field
-        // added then would compile here and arrive as a silent `0`. The same rule the
-        // exhaustive destructure in `to_production_support` enforces in the other direction.
+        let chrom_id = self.chrom_id;
+        // Every field named, no `..Default::default()`: a field added to `RecordWitness`
+        // would otherwise compile here and arrive as a silent `0`.
         let mut witness = RecordWitness {
             reads_complete: 0,
             reads_partially_observed: 0,
             reads_without_observation: self.reads_without_observation.len() as u32,
         };
-        // **B1: the rows come from the reads, not from the bucket totals.** See
+        // **The rows come from the reads, not from the bucket totals** (B1). See
         // `observation_rows` for why, and for what makes the two agree at one read group.
-        let rows = self.observation_rows(record_end_exclusive);
+        let mut rows = self.observation_rows(record_end_exclusive);
         for state in self.folded_reads.values() {
             match coverage_of(state.witnessed, record_pos, record_end_exclusive) {
                 ReadCoverage::Complete => witness.reads_complete += 1,
                 ReadCoverage::Observed { .. } => witness.reads_partially_observed += 1,
             }
         }
-
-        // **The projection back onto production's positional allele list — transitional,
-        // and it is what lets B1 change the derivation without changing the output.**
-        // Rows split by coverage and read group; a `PileupRecord` allele cannot, so rows
-        // sharing a bucket are merged back together here. B2 deletes this and emits the
-        // rows themselves.
-        //
-        // Laid out by `allele_index` rather than matched on bases: the mapping is a
-        // bijection (`find_allele_index` never creates two buckets with the same bytes),
-        // so the two agree — but the index is what production's order *is*, and
-        // reproducing an order by re-deriving it is how orders drift.
-        let mut per_bucket: Vec<Vec<ChainId>> =
-            (0..self.alleles.len()).map(|_| Vec::new()).collect();
-        let mut placed_start_per_bucket: Vec<u32> = vec![0; self.alleles.len()];
-        let mut support_per_bucket: Vec<AlleleSupportStats> =
-            vec![AlleleSupportStats::default(); self.alleles.len()];
-        for row in &rows {
-            add_contribution(&mut support_per_bucket[row.allele_index], &row.support);
-            placed_start_per_bucket[row.allele_index] += row.placed_start;
-            // Chain ids are already absent for the REF bucket — `observation_rows` applies
-            // production's rule when it builds them. The only downstream reader is Stage
-            // 5's compound-haplotype check (`per_group_merger::build_chain_proposals`),
-            // which links non-reference alleles only and explicitly skips allele 0, so REF
-            // chain ids are provably never read. They are ~96.6% of all chain ids on real
-            // cohorts, so not materialising them keeps them out of the `.psp` entirely.
-            // See doc/devel/specs/phase_chain.md §8.
-            per_bucket[row.allele_index].extend_from_slice(&row.chain_ids);
-        }
-        // **This is what exercises `coverage_of` on the real walk.** The tally itself is
-        // dropped by both walker call sites until B2 consumes it, so without this the
-        // function's only coverage would be its own hand fixtures — and it is resolved here
-        // for every record of every parity run, which is a few hundred thousand of them.
         // Every folded read is resolved exactly once and lands in exactly one of the two
         // classes; the no-observation set is disjoint from `folded_reads` by construction,
         // its members having been removed when they produced nothing.
@@ -591,73 +584,89 @@ impl OpenPileupRecord {
             self.folded_reads.len() as u32,
             "every folded read resolves to exactly one coverage class",
         );
-        for chain_ids in &mut per_bucket {
-            chain_ids.sort_unstable();
-            chain_ids.dedup();
-        }
-        // The support comes from the **rows** now, not from `a.support`. The two agree by
-        // construction — every folded read's contribution reached its bucket and reaches
-        // exactly one row — but not always bit for bit: the bucket total was accumulated in
-        // *walk* order with a subtract-then-add on every re-fold, where a row sums each
-        // read's contribution once. `q_sum` can therefore differ in its last bits, which
-        // the differential reports through `float_only_divergences` rather than hiding, and
-        // which is the more accurate of the two: no cancellation.
-        let alleles = self
+
+        // **Sorted into a canonical order — and this is *not* what makes the output
+        // deterministic, which is worth stating because the first version of this comment
+        // said it was.** Mutation-tested both ways: deleting this sort leaves
+        // `ng_emits_the_same_bytes_in_a_second_process` green, while deleting
+        // `observation_rows`' `ids.sort_unstable()` fails it. Determinism is already won
+        // upstream, by taking the reads in `read_id` order; first-seen row order inherits it.
+        //
+        // What the sort buys is that row order is a function of the row's **own identity**
+        // rather than of which read happened to arrive first — so the emitted order does not
+        // change when an unrelated read is added, and two loci with the same evidence
+        // present it the same way. That is what a consumer diffing output wants, and it is
+        // what the STR generator sorts for. Belt and braces on determinism; the belt is
+        // upstream.
+        rows.sort_by(|a, b| {
+            a.key
+                .bases
+                .cmp(&b.key.bases)
+                .then_with(|| {
+                    coverage_order(a.key.read_coverage).cmp(&coverage_order(b.key.read_coverage))
+                })
+                .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
+        });
+
+        let observed_sequences = rows
+            .into_iter()
+            .map(|row| {
+                // Exhaustively destructured on the way out, in the direction that can lose
+                // information: a field added to ng's stats stops this compiling instead of
+                // being silently dropped at the boundary.
+                let AlleleSupportStats {
+                    num_obs,
+                    q_sum,
+                    fwd,
+                    placed_left,
+                    mapq_sum,
+                    mapq_sum_sq,
+                } = row.support;
+                ObservedSequence {
+                    bases: row.key.bases.into_boxed_slice(),
+                    read_coverage: row.key.read_coverage,
+                    read_group: row.key.read_group,
+                    num_obs,
+                    num_fwd: fwd,
+                    q_sum,
+                    mapq_sum,
+                    mapq_sum_sq,
+                    placed_left,
+                    chain_ids: row.chain_ids,
+                }
+            })
+            .collect();
+
+        // `alleles[0]` is the REF bucket and its bytes are the record's reference sequence
+        // — there is no separate copy, which is why this moves rather than clones.
+        let reference_bases = self
             .alleles
             .into_iter()
-            .zip(per_bucket)
-            .zip(placed_start_per_bucket)
-            .zip(support_per_bucket)
-            .map(
-                |(((a, chain_ids), placed_start), support)| AlleleObservation {
-                    seq: a.seq,
-                    support: to_production_support(support, placed_start),
-                    chain_ids,
-                },
-            )
-            .collect();
-        let record = PileupRecord {
-            chrom_id: self.chrom_id,
-            pos: self.pos,
-            alleles,
-            // The walker cannot compute the centred window (it needs
-            // look-ahead); the pileup→psp seam fills these from the
-            // sliding-window accumulator before writing.
-            windowed_gc: f32::NAN,
-            windowed_coverage: f32::NAN,
-        };
-        (record, witness)
-    }
-}
+            .next()
+            .expect("alleles[0] is created with the record and never evicted")
+            .seq
+            .into_boxed_slice();
 
-/// Widen ng's support stats back to production's, re-attaching the
-/// `placed_start` this fold no longer tracks.
-///
-/// **Transitional — it dies with the `PileupRecord` return at Milestone B.**
-/// Written as an exhaustive destructure of ng's type rather than a
-/// field-by-field read, so a field added to ng's stats stops this compiling
-/// instead of being silently dropped on the way out; that is the direction that
-/// can lose information, since production's type is the frozen one.
-fn to_production_support(
-    stats: AlleleSupportStats,
-    placed_start: u32,
-) -> ProductionAlleleSupportStats {
-    let AlleleSupportStats {
-        num_obs,
-        q_sum,
-        fwd,
-        placed_left,
-        mapq_sum,
-        mapq_sum_sq,
-    } = stats;
-    ProductionAlleleSupportStats {
-        num_obs,
-        q_sum,
-        fwd,
-        placed_left,
-        placed_start,
-        mapq_sum,
-        mapq_sum_sq,
+        let locus = SampleLocusObservations {
+            // `GenomeRegion` is 1-based **inclusive**, so the end is the last covered
+            // position rather than one past it (spec §6).
+            region: GenomeRegion {
+                contig: ContigId(chrom_id),
+                start: Position(u64::from(record_pos)),
+                end: Position(u64::from(record_end_exclusive.saturating_sub(1))),
+            },
+            reference_bases,
+            observed_sequences,
+            reads_without_observation: witness.reads_without_observation,
+            // **B3 fills this**, and zero is the honest placeholder rather than a lie: the
+            // depth cap truncates in the walk, before any record exists, so the truncated
+            // ids are not plumbed into the fold yet. A non-zero value would claim the
+            // support counts are a subsample; zero claims they are not, which is true of
+            // every record this step can build.
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        };
+        (locus, witness)
     }
 }
 
@@ -1300,7 +1309,6 @@ fn fold_read_into_record(
             chain_id: active.chain_id,
             read_group: active.read.read_group,
             witnessed,
-            placed_start: active.read.alignment_start == rec_pos,
         },
     );
 }
@@ -1427,7 +1435,6 @@ fn refold_live_reads(
             chain_id,
             read_group,
             witnessed: _,
-            placed_start,
         } = previous;
         let state = folded_reads
             .get_mut(&read_id)
@@ -1441,7 +1448,6 @@ fn refold_live_reads(
             contribution,
             chain_id,
             read_group,
-            placed_start,
         };
     }
 }
@@ -2400,8 +2406,10 @@ mod tests {
             ),
         ];
 
+        // Laid back out as `PileupRecord`s — this is one of the inherited-shape
+        // assertions B2 adapts through the projection rather than by hand.
         let records: Vec<_> = run(reads, MockFasta::new(contig), &WalkerConfig::default())
-            .map(|record| record.expect("the walk succeeds"))
+            .map(|record| super::super::as_pileup_record(&record.expect("the walk succeeds")))
             .collect();
         let widened = records
             .iter()
@@ -3143,20 +3151,21 @@ mod tests {
             );
         }
         // Every bucket that supports a read has at least one row, and the rows over a
-        // bucket sum to it.
-        for (index, allele) in record.alleles.iter().enumerate() {
+        // bucket sum to it. Matched on **bases**, which is a bijection with the bucket —
+        // `find_allele_index` never creates two buckets with the same bytes.
+        for allele in record.alleles.iter() {
             if allele.support.num_obs == 0 {
                 continue;
             }
             let over_bucket: u32 = rows
                 .iter()
-                .filter(|row| row.allele_index == index)
+                .filter(|row| row.key.bases == allele.seq)
                 .map(|row| row.support.num_obs)
                 .sum();
             assert_eq!(
                 over_bucket,
                 allele.support.num_obs,
-                "bucket {index} ({:?}) has {} observations but its rows carry {over_bucket}",
+                "bucket {:?} has {} observations but its rows carry {over_bucket}",
                 String::from_utf8_lossy(&allele.seq),
                 allele.support.num_obs,
             );
@@ -3300,9 +3309,9 @@ mod tests {
         assert_eq!(witness.reads_without_observation, 1);
         assert_eq!(
             emitted
-                .alleles
+                .observed_sequences
                 .iter()
-                .map(|allele| allele.support.num_obs)
+                .map(|observation| observation.num_obs)
                 .sum::<u32>(),
             1,
             "only `widener` still supports this record — `holed`'s contribution came \

@@ -144,7 +144,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   the rows back onto the positional allele list, so the stage-1 differential still proves the
   re-derivation faithful — the same "keep the oracle alive across the risky change" that put A0
   first. B2 deletes the projection.
-- ☐ **B2 — `finalise` returns `SampleLocusObservations`.** Rows are re-derived from `folded_reads`
+- ✅ **B2 — `finalise` returns `SampleLocusObservations`.** Rows are re-derived from `folded_reads`
   (per-read), not from per-bucket totals — coverage and group are per-read facts. **Sort by
   `(bases, read_coverage, read_group)` before emitting**: `folded_reads` is an `AHashMap` with a
   per-process seed, so fold order would make the output non-deterministic run to run. Chain ids are
