@@ -20,44 +20,59 @@
 //! `PreparedRead::from_production`, so the two walkers see the same bytes in the same
 //! order by construction. Preparing separately would inject read preparation's uppercase
 //! divergence (`read_preparation.md` §6) into a comparison that is about the *walk*.
-//! The reference is one `MockFasta`, lent to both.
+//! Each walk builds its own `MockFasta` from the same bytes — the type is stateless, so
+//! that is equivalent to sharing one; the real-data test lends a single `RefSeqFetcher`
+//! to both because *its* accessor is not stateless.
 //!
-//! # It has been shown to fail — B2, 2026-07-29
+//! # It has been shown to fail — B2, re-run 2026-07-29
 //!
-//! A differential that has only ever passed is a claim. Each of the five behaviours the
-//! plan names was mutated **in ng's copy**, one at a time, and
-//! `ng_walks_identically_to_production` was required to fail; then the mutation was
-//! reverted and the differential re-run green. All five died inside the **first six
-//! cases of the first seed**, against a default of 400 cases × 4 seeds — so the margin
-//! is roughly two orders of magnitude, not a coin flip.
+//! A differential that has only ever passed is a claim. Each behaviour the plan names was
+//! mutated **in ng's copy**, one at a time, and `ng_walks_identically_to_production` was
+//! required to fail; then the mutation was reverted and the differential re-run green.
+//! Every one died inside the **first nineteen cases of the first seed**, against a default
+//! of 400 cases × 4 seeds.
 //!
 //! | # | behaviour | mutation applied to ng's copy | first divergence |
 //! |---|---|---|---|
-//! | 1 | mate-overlap reconciliation | early `return` from `genome_walk::resolve_mate_overlap_at_pos` | seed 0 case 0, item 17 |
-//! | 2 | adaptor masking | `cigar_cursor::base_in_adaptor` always `false` | seed 0 case 0 — 29 records against production's 24 |
-//! | 3 | record widening | `open_record::widen` extends only `alleles[0]`, not every bucket | seed 0 case 5, item 5 |
-//! | 4 | the subtract-then-add re-fold | the `subtract_contribution` half dropped, so a re-folding read double-counts | seed 0 case 3, item 8 |
-//! | 5 | the column depth cap | the `truncate(cap)` removed, counter left incrementing | seed 0 case 1, item 2 |
+//! | 1 | mate-overlap reconciliation | early `return` from `genome_walk::resolve_mate_overlap_at_pos` | seed 0 case 2, item 6 |
+//! | 2 | adaptor masking | `cigar_cursor::base_in_adaptor` always `false` | seed 0 case 0 — 27 records against production's 25 |
+//! | 3 | record widening | `open_record::widen` extends only `alleles[0]`, not every bucket | seed 0 case 18, item 17 |
+//! | 4 | the subtract-then-add re-fold | the `subtract_contribution` half dropped, so a re-folding read double-counts | seed 0 case 0, item 16 |
+//! | 5 | the column depth cap | the `truncate(cap)` removed, counter left incrementing | seed 0 case 0, item 10 |
+//! | 6 | **the panic *cause*** | ng's copy of the reachable `debug_assert!` replaced by an unrelated `panic!` | seed 0 case 15 — "the two walkers did not stop the same way" |
 //!
-//! Mutation 5 is the one worth noting: it leaves `column_depth_truncations` incrementing,
-//! so a differential that compared only the summary would have passed it. The records
-//! caught it.
+//! Two of these are worth keeping in mind rather than skimming.
 //!
-//! # Run at scale — B3, 2026-07-29. **Zero divergences everywhere.**
+//! **Mutation 5** leaves `column_depth_truncations` incrementing, so a differential that
+//! compared only the `RunSummary` — a plausible way to write this harness — would have
+//! passed it. The records caught it.
+//!
+//! **Mutation 6 is here because a review demonstrated it passing.** The first version of
+//! this harness stored `catch_unwind(..).is_err()`, so "both stopped" counted as
+//! agreement; replacing ng's copy of production's reachable `debug_assert!` with a
+//! semantically unrelated `panic!` left the *entire* parity module green, including the
+//! test whose own doc claimed to check that ng reaches the same precondition.
+//! `open_record.rs` alone carries eight distinct `debug_assert!`s. `WalkOutcome` now
+//! carries the panic **message**.
+//!
+//! # Run at scale — B3, re-run 2026-07-29 after the review. **Zero divergences everywhere.**
 //!
 //! | run | scale | result |
 //! |---|---|---|
-//! | synthetic, release, `PVC_PARITY_CASES=5000` | 20,000 cases | **968,852 records, 0 divergences** |
-//! | synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **469,069 records, 0 divergences**; 457 cases (4.6%) panicked — in *both* walkers |
+//! | synthetic, release, `PVC_PARITY_CASES=5000` | 20,000 cases | **1,010,515 records, 0 divergences** |
+//! | synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **492,224 records, 0 divergences**; 415 cases (4.2%) panicked — in *both* walkers, with the *same message* |
 //! | GIAB HG002 10×, `chr1:1000000-1400000` | targeted TR bundle | **4,600 records, 0 divergences** |
 //! | GIAB HG002 300×, `chr1:100000000-120000000` | 20 Mb | **137,591 records, 0 divergences** |
 //! | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:3406886-3506886` | 100 kb | **96,260 records, 0 divergences** |
 //! | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:13806669-15092603` | 1.3 Mb | **198,673 records, 0 divergences** |
 //!
 //! 437,124 records of real sequencing data across two organisms, a BAM and a CRAM, 10× and
-//! 300×; 1.4 M more synthetic. The debug row is the one that says something the others
+//! 300×; 1.5 M more synthetic. The debug row is the one that says something the others
 //! cannot: at scale the two walkers agree not only on outputs but on **which inputs reach
-//! production's reachable `debug_assert!`** — 457 cases, both walkers, every time.
+//! production's reachable `debug_assert!` and on what it says when they do** — 415 cases,
+//! both walkers, same message, every time. That is 4.2% of cases whose walks are *truncated*
+//! at the panic, so the record comparison for them covers a prefix; the release row is where
+//! those same cases run to completion.
 //!
 //! # This harness dies in plan 3, by design
 //!
@@ -72,7 +87,7 @@ use std::sync::Arc;
 
 use super::tests::MockFasta;
 use super::{PreparedRead, WalkerConfig};
-use crate::ng::types::ReadGroupId;
+use crate::ng::read::PLACEHOLDER_READ_GROUP;
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
 use crate::pileup::walker::{
@@ -161,6 +176,12 @@ fn generate_read(
     let mut seq: Vec<u8> = Vec::new();
     let mut ref_pos = start as usize - 1; // 0-based cursor into the contig
 
+    // A leading hard clip on some reads: it consumes **neither** reference nor read, so it
+    // is the op that probes the cursor's offset-table walk without moving either cursor.
+    if rng.one_in(6) {
+        cigar.push(CigarOp::HardClip(1 + rng.below(3) as u32));
+    }
+
     // A leading soft clip on some reads: it consumes read bases but no reference, which
     // is the offset arithmetic the cursor is most easily got wrong on.
     if rng.one_in(4) {
@@ -178,7 +199,15 @@ fn generate_read(
             break;
         }
         let matched = 2 + rng.below(8);
-        cigar.push(CigarOp::Match(matched as u32));
+        // `M`, `=` and `X` are the **same op to the walker** — they share the `Match` arm at
+        // four sites in the cursor — which is exactly why a copy that treated them
+        // differently has to be caught here rather than assumed. `=`/`X` are what minimap2
+        // `--eqx` and DRAGEN emit, so this is not an exotic input class.
+        cigar.push(match rng.below(4) {
+            0 => CigarOp::SeqMatch(matched as u32),
+            1 => CigarOp::SeqMismatch(matched as u32),
+            _ => CigarOp::Match(matched as u32),
+        });
         for offset in 0..matched {
             // Mostly the reference base, so REF alleles dominate as they do in real data;
             // a substitution now and then, so records carry more than one allele.
@@ -207,6 +236,10 @@ fn generate_read(
                 cigar.push(CigarOp::Insertion(inserted as u32));
                 seq.extend((0..inserted).map(|_| rng.base()));
             }
+            // Padding — like a hard clip, it consumes neither axis. Emitted here rather
+            // than at an end so it is never the first or last op, where the walker's
+            // first/last-op rules would make it uninteresting.
+            4 => cigar.push(CigarOp::Padding(1 + rng.below(2) as u32)),
             // A reference skip — emits nothing and lets both flanks emit independently.
             3 => {
                 let skipped = 1 + rng.below(4);
@@ -221,34 +254,72 @@ fn generate_read(
 
     // A read with no reference-consuming op is rejected at admission (`ZeroRefSpan`),
     // which would end both walks at the same place but stop the case testing anything.
+    // The **position** is clamped, not just the base index: a read whose `alignment_end`
+    // ran past the contig would be rejected with a fatal `WalkerError::Fasta`, which
+    // silently converts a fold test into a rejection-path test.
     if !cigar.iter().any(|op| {
         matches!(
             op,
-            CigarOp::Match(_) | CigarOp::Deletion(_) | CigarOp::Skip(_)
+            CigarOp::Match(_)
+                | CigarOp::SeqMatch(_)
+                | CigarOp::SeqMismatch(_)
+                | CigarOp::Deletion(_)
+                | CigarOp::Skip(_)
         )
     }) {
+        ref_pos = ref_pos.min(contig.len() - 1);
         cigar.push(CigarOp::Match(1));
-        seq.push(contig[ref_pos.min(contig.len() - 1)]);
+        seq.push(contig[ref_pos]);
         ref_pos += 1;
     }
+    debug_assert!(
+        ref_pos <= contig.len(),
+        "a generated read must end inside its contig"
+    );
 
     let alignment_end = ref_pos as u32; // 1-based inclusive == 0-based exclusive
     let is_reverse_strand = rng.one_in(2);
 
-    // The adaptor boundary. Placed *inside* the read's own span on most of the reads that
-    // get one, because a boundary outside it silences nothing and would make the G1
-    // filter a no-op the differential could not see.
-    let (adaptor_boundary, live_boundary) = if rng.one_in(4) {
+    // The adaptor boundary, and whether it is **live** — i.e. whether the G1 filter will
+    // actually silence a base on this read.
+    //
+    // "Inside the alignment span" is the wrong predicate, and an earlier version used it
+    // (worse: it returned `true` unconditionally, so the counter was just `is_some()`).
+    // `base_in_adaptor` is consulted **only at Match-emit sites**, so a forward-strand
+    // boundary landing in a read's trailing `D`/`N` tail silences nothing. Liveness is
+    // therefore computed the way the cursor computes it: over the positions a `Match`,
+    // `=` or `X` will actually emit.
+    let adaptor_boundary = if rng.one_in(4) {
         let span = alignment_end.saturating_sub(start);
-        if span >= 2 {
-            let boundary = start + 1 + (rng.below(span as usize - 1) as u32);
-            (Some(boundary), true)
+        Some(if span >= 2 {
+            start + 1 + (rng.below(span as usize - 1) as u32)
         } else {
-            (Some(start), true)
-        }
+            start
+        })
     } else {
-        (None, false)
+        None
     };
+    let live_boundary = adaptor_boundary.is_some_and(|boundary| {
+        let mut pos = start;
+        cigar.iter().any(|op| match *op {
+            CigarOp::Match(n) | CigarOp::SeqMatch(n) | CigarOp::SeqMismatch(n) => {
+                let emitted = pos..pos + n;
+                pos += n;
+                emitted.into_iter().any(|p| {
+                    if is_reverse_strand {
+                        p <= boundary
+                    } else {
+                        p >= boundary
+                    }
+                })
+            }
+            CigarOp::Deletion(n) | CigarOp::Skip(n) => {
+                pos += n;
+                false
+            }
+            _ => false,
+        })
+    });
 
     let read = ProductionPreparedRead {
         chrom_id,
@@ -285,7 +356,17 @@ fn generate(rng: &mut SplitMix64) -> Case {
         // Reads cluster near the contig start so columns get deep enough for the depth
         // cap to bite; a scattered stream would leave every column at depth one or two.
         let chrom_id = if CONTIGS > 1 && rng.one_in(6) { 1 } else { 0 };
-        let start = 1 + rng.below(CONTIG_LENGTH / 3) as u32;
+        // Most reads cluster near the contig start so columns get deep enough for the
+        // depth cap to bite. **A minority sit at the far end**, where a record widened by
+        // the longest possible deletion produces the fetch most likely to be off by one —
+        // without them the last third of every contig is never touched and the bounds
+        // guards below never fire even once. `- 6` leaves room for a second mate's offset,
+        // so no read is placed past the contig.
+        let start = if rng.one_in(8) {
+            (CONTIG_LENGTH - 6) as u32 + rng.below(6) as u32
+        } else {
+            1 + rng.below(CONTIG_LENGTH / 3) as u32
+        };
 
         if rng.one_in(3) {
             // A pair. Placed to overlap, because mate-overlap reconciliation is detected
@@ -341,8 +422,13 @@ fn generate(rng: &mut SplitMix64) -> Case {
         config.max_snp_column_depth = 1 + rng.below(4) as u32;
         config.max_indel_column_depth = 1 + rng.below(2) as u32;
     }
+    // The window only bites when it is smaller than the gap between a first mate and the
+    // next admitted read, and mates are placed within 5 bp of each other — so a window
+    // drawn up to 40 almost never evicts. Drawn small, so the path where a pair silently
+    // degrades to two solos (different chain id, no reconciliation, a different fold) is
+    // actually on the walk; `the_generator_exercises_what_the_port_can_break` asserts it.
     if rng.one_in(8) {
-        config.mate_lookup_window = 1 + rng.below(40) as u32;
+        config.mate_lookup_window = 1 + rng.below(8) as u32;
     }
 
     Case {
@@ -353,66 +439,156 @@ fn generate(rng: &mut SplitMix64) -> Case {
     }
 }
 
-/// What one walk produced: its record/error stream, its summary, and whether it **panicked**.
+/// The eight `RunSummary` counters, **named**.
 ///
-/// The panic flag is not defensiveness. Production's `apply_events_to_ref_into` carries a
-/// `debug_assert!` that every event's anchor is at or after the record's own position, and
-/// that precondition is **reachable on a legal read stream** — see
+/// Named rather than an `[u64; 8]` beside a parallel `[&str; 8]`, because two arrays that
+/// must stay in step are two arrays that can drift — and the failure mode is a divergence
+/// report that names the wrong counter, which is worse than no name at all.
+#[derive(Debug, PartialEq, Eq)]
+struct SummaryCounters {
+    reads_admitted: u64,
+    records_emitted: u64,
+    record_widen_events: u64,
+    mate_overlap_positions: u64,
+    chain_allocations: u64,
+    active_reads_high_water: u64,
+    mate_lookup_evictions: u64,
+    column_depth_truncations: u64,
+}
+
+/// Production's `RunSummary`, named. **Exhaustively destructured, no `..`**: a ninth field
+/// on production's summary must stop this compiling, or it would silently leave the parity
+/// claim. `RunSummary::merge` destructures for exactly this reason.
+fn production_counters(summary: crate::pileup::walker::RunSummary) -> SummaryCounters {
+    let crate::pileup::walker::RunSummary {
+        reads_admitted,
+        records_emitted,
+        record_widen_events,
+        mate_overlap_positions,
+        chain_allocations,
+        active_reads_high_water,
+        mate_lookup_evictions,
+        column_depth_truncations,
+    } = summary;
+    SummaryCounters {
+        reads_admitted,
+        records_emitted,
+        record_widen_events,
+        mate_overlap_positions,
+        chain_allocations,
+        active_reads_high_water: u64::from(active_reads_high_water),
+        mate_lookup_evictions,
+        column_depth_truncations,
+    }
+}
+
+/// ng's copy of `RunSummary`, named. The field list appears twice because the two types are
+/// nominally distinct and Rust cannot bound on field access — and writing it twice is what
+/// makes *both* exhaustive.
+fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
+    let super::RunSummary {
+        reads_admitted,
+        records_emitted,
+        record_widen_events,
+        mate_overlap_positions,
+        chain_allocations,
+        active_reads_high_water,
+        mate_lookup_evictions,
+        column_depth_truncations,
+    } = summary;
+    SummaryCounters {
+        reads_admitted,
+        records_emitted,
+        record_widen_events,
+        mate_overlap_positions,
+        chain_allocations,
+        active_reads_high_water: u64::from(active_reads_high_water),
+        mate_lookup_evictions,
+        column_depth_truncations,
+    }
+}
+
+/// What one walk produced: its record/error stream, its summary, and — if it stopped —
+/// **why**.
+///
+/// The panic channel is not defensiveness. Production's `apply_events_to_ref_into` carries
+/// a `debug_assert!` that every event's anchor is at or after the record's own position,
+/// and that precondition is **reachable on a legal read stream** — see
 /// `both_walkers_panic_on_a_deletion_anchored_before_its_record` for the three-read case
 /// and the mechanism. So on those inputs a debug build panics before either walker can
 /// finish, and a harness that could not represent that would have to exclude exactly the
 /// long-deletion inputs this port exists to get right.
 ///
-/// Representing it instead makes the parity claim *stronger*: the two walkers must agree
-/// on **which inputs they panic on**, and on every record emitted before the panic. A
-/// verbatim copy must panic verbatim.
+/// **It is the panic *message*, not a `bool`.** An earlier version stored
+/// `catch_unwind(..).is_err()`, and a review demonstrated the hole: replacing ng's copy of
+/// that `debug_assert!` with an unrelated `panic!` left the whole suite green, because
+/// "both stopped" is not "both reached the same precondition". `open_record.rs` alone
+/// carries eight distinct `debug_assert!`s. The message is compared and the *location* is
+/// not — the two copies share the format string verbatim, but ng panics from
+/// `src/ng/locus_generation/pileup/` and production from `src/pileup/walker/`.
 struct WalkOutcome {
     records: Vec<Result<PileupRecord, String>>,
     /// `None` when the walk panicked — there is no summary to read from a walker that
     /// unwound out from under us.
-    summary: Option<[u64; 8]>,
-    panicked: bool,
+    summary: Option<SummaryCounters>,
+    /// `Some(message)` when the walk panicked.
+    panic_message: Option<String>,
 }
 
-/// Flatten a `RunSummary` — production's or ng's copy, which are structurally identical
-/// and nominally distinct — into the array `SUMMARY_FIELDS` names.
-macro_rules! summary_array {
-    ($summary:expr) => {{
-        let summary = $summary;
-        [
-            summary.reads_admitted,
-            summary.records_emitted,
-            summary.record_widen_events,
-            summary.mate_overlap_positions,
-            summary.chain_allocations,
-            u64::from(summary.active_reads_high_water),
-            summary.mate_lookup_evictions,
-            summary.column_depth_truncations,
-        ]
-    }};
+/// Render a panic payload as its message, which is the part the two walkers must share.
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// Drive one walker to exhaustion, surviving a panic with whatever it emitted first.
+///
+/// Generic over the walker, so production's and ng's — nominally distinct types with no
+/// shared trait — go through **one** body. An earlier version had this block four times and
+/// the two inlined copies had already drifted.
+///
+/// `records` is filled inside the closure and read after the unwind: `Vec::push` is
+/// exception-safe, so on a panic it holds exactly the prefix that was emitted, which is
+/// what makes the comparison element-wise rather than all-or-nothing.
+///
+/// Errors are rendered with `{:?}` rather than `to_string()`: the two `WalkerError` types
+/// are nominally distinct so they cannot be compared directly, and `Debug` shows the
+/// variant and every field where `Display` shows only what the format string chose — an
+/// `io::ErrorKind` inside `WalkerError::Fasta` is invisible through `Display`.
+fn drive<W, E>(mut walker: W, summary_of: impl FnOnce(&W) -> SummaryCounters) -> WalkOutcome
+where
+    W: Iterator<Item = Result<PileupRecord, E>>,
+    E: std::fmt::Debug,
+{
+    let mut records = Vec::new();
+    let mut summary = None;
+    let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for item in &mut walker {
+            records.push(item.map_err(|error| format!("{error:?}")));
+        }
+        summary = Some(summary_of(&walker));
+    }))
+    .err()
+    .map(panic_message);
+    WalkOutcome {
+        records,
+        summary,
+        panic_message,
+    }
 }
 
 /// Production's answer.
 fn production_walk(case: &Case) -> WalkOutcome {
     let fasta = case.fasta();
-    let mut records = Vec::new();
-    let mut summary = None;
-    // `records` is filled inside the closure and survives an unwind, so a panicking walk
-    // still yields everything it emitted first — which is what makes the comparison
-    // element-wise rather than all-or-nothing.
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut walker = production_run(case.reads.clone(), &fasta, &case.config);
-        for item in &mut walker {
-            records.push(item.map_err(|error| error.to_string()));
-        }
-        summary = Some(summary_array!(walker.summary()));
-    }))
-    .is_err();
-    WalkOutcome {
-        records,
-        summary,
-        panicked,
-    }
+    drive(
+        production_run(case.reads.clone(), &fasta, &case.config),
+        |walker| production_counters(walker.summary()),
+    )
 }
 
 /// ng's answer, over the same reads converted to ng's read type.
@@ -425,37 +601,12 @@ fn ng_walk(case: &Case) -> WalkOutcome {
         // The read group plays no part in what the copy computes — it is carried for
         // plan 3 — so a placeholder is right here, and a *varying* one would be a
         // difference between the two streams rather than a property under test.
-        .map(|read| PreparedRead::from_production(read, ReadGroupId(0)))
+        .map(|read| PreparedRead::from_production(read, PLACEHOLDER_READ_GROUP))
         .collect();
-    let mut records = Vec::new();
-    let mut summary = None;
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut walker = super::run(reads, &fasta, &case.config);
-        for item in &mut walker {
-            records.push(item.map_err(|error| error.to_string()));
-        }
-        summary = Some(summary_array!(walker.summary()));
-    }))
-    .is_err();
-    WalkOutcome {
-        records,
-        summary,
-        panicked,
-    }
+    drive(super::run(reads, &fasta, &case.config), |walker| {
+        ng_counters(walker.summary())
+    })
 }
-
-/// The `RunSummary` field names, in the order `WalkOutcome::summary` stores them, so a
-/// divergence names the counter instead of an index.
-const SUMMARY_FIELDS: [&str; 8] = [
-    "reads_admitted",
-    "records_emitted",
-    "record_widen_events",
-    "mate_overlap_positions",
-    "chain_allocations",
-    "active_reads_high_water",
-    "mate_lookup_evictions",
-    "column_depth_truncations",
-];
 
 /// Assert the two walks agree, and return whether they agreed *by both panicking*.
 ///
@@ -463,6 +614,17 @@ const SUMMARY_FIELDS: [&str; 8] = [
 /// into asserting different things about the same claim.
 #[track_caller]
 fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> bool {
+    // **The panic comparison runs first**, and it compares the *message*. A verbatim copy
+    // must panic verbatim: the claim is that the two reach the *same* precondition on the
+    // same input, not merely that both stopped. Ordering matters for the diagnosis, not
+    // the verdict — with the length check first, a case where ng panics early and
+    // production does not reported "ng emitted 3 stream items, production 24", which names
+    // the symptom and hides the cause.
+    assert_eq!(
+        ours.panic_message, theirs.panic_message,
+        "{where_}: the two walkers did not stop the same way",
+    );
+
     assert_eq!(
         ours.records.len(),
         theirs.records.len(),
@@ -474,32 +636,20 @@ fn assert_same_walk(where_: &str, ours: &WalkOutcome, theirs: &WalkOutcome) -> b
         assert_eq!(ours, theirs, "{where_}: stream item {position} diverged");
     }
 
-    // A verbatim copy must panic verbatim: the two must agree on *which* inputs reach
-    // production's reachable `debug_assert!`, not merely on the outputs of the inputs
-    // that do not.
-    assert_eq!(
-        ours.panicked, theirs.panicked,
-        "{where_}: ng panicked={} but production panicked={}",
-        ours.panicked, theirs.panicked,
-    );
-    if ours.panicked {
+    if ours.panic_message.is_some() {
         return true;
     }
 
-    let (ours, theirs) = (
+    assert_eq!(
         ours.summary
+            .as_ref()
             .expect("a walk that did not panic has a summary"),
         theirs
             .summary
+            .as_ref()
             .expect("a walk that did not panic has a summary"),
+        "{where_}: the RunSummary counters diverged",
     );
-    for (field, (ours, theirs)) in ours.iter().zip(theirs.iter()).enumerate() {
-        assert_eq!(
-            ours, theirs,
-            "{where_}: RunSummary::{} diverged",
-            SUMMARY_FIELDS[field],
-        );
-    }
     false
 }
 
@@ -676,15 +826,25 @@ fn both_walkers_panic_on_a_deletion_anchored_before_its_record() {
     let theirs = production_walk(&case);
     let ours = ng_walk(&case);
 
+    // **Pinned by cause, not by stoppage.** An earlier version asserted only that both
+    // walkers panicked, and a review demonstrated the hole by replacing ng's copy of this
+    // very assertion with an unrelated `panic!` — the test stayed green while its own doc
+    // claimed it checked that ng "reach[es] the same precondition". `open_record.rs`
+    // carries eight distinct `debug_assert!`s; naming this one is what tells them apart.
+    let message = theirs.panic_message.as_deref().unwrap_or_else(|| {
+        panic!(
+            "production should still reach its own debug_assert! on this input; if it no \
+             longer does, production has been fixed and this test is the record of what it \
+             used to do"
+        )
+    });
     assert!(
-        theirs.panicked,
-        "production should still reach its own debug_assert! on this input; if it no \
-         longer does, production has been fixed and this test is the record of what it \
-         used to do"
+        message.contains("apply_events_to_ref_into: event anchor"),
+        "production stopped for a different reason than the one this test pins: {message}"
     );
-    assert!(
-        ours.panicked,
-        "ng's copy is verbatim, so it must reach the same precondition on the same input"
+    assert_eq!(
+        ours.panic_message, theirs.panic_message,
+        "ng's copy is verbatim, so it must reach the *same* precondition on the same input"
     );
     assert_eq!(
         ours.records, theirs.records,
@@ -714,19 +874,24 @@ fn the_generator_exercises_what_the_port_can_break() {
     let mut chain_allocations = 0u64;
     let mut multi_base_records = 0usize;
     let mut multi_allele_records = 0usize;
+    let mut mate_evictions = 0u64;
     let mut errors = 0usize;
 
     for seed in SEEDS {
         let mut rng = SplitMix64(seed);
-        for _ in 0..CASES_PER_SEED {
+        // Scales with `PVC_PARITY_CASES` like the differential does: a soak that widened
+        // the comparison but not the coverage floor would report more confidence in the
+        // same evidence.
+        for _ in 0..cases_per_seed() {
             let case = generate(&mut rng);
             adaptor_boundaries += case.reads_with_live_adaptor_boundary;
             let outcome = production_walk(&case);
-            if let Some(summary) = outcome.summary {
-                widens += summary[2];
-                mate_overlaps += summary[3];
-                chain_allocations += summary[4];
-                cap_truncations += summary[7];
+            if let Some(summary) = &outcome.summary {
+                widens += summary.record_widen_events;
+                mate_overlaps += summary.mate_overlap_positions;
+                chain_allocations += summary.chain_allocations;
+                cap_truncations += summary.column_depth_truncations;
+                mate_evictions += summary.mate_lookup_evictions;
             }
             for item in &outcome.records {
                 match item {
@@ -747,8 +912,9 @@ fn the_generator_exercises_what_the_port_can_break() {
     eprintln!(
         "generator coverage: {widens} widens, {mate_overlaps} mate-overlap positions, \
          {cap_truncations} cap truncations, {adaptor_boundaries} live adaptor boundaries, \
-         {chain_allocations} chain allocations, {multi_base_records} multi-base records, \
-         {multi_allele_records} multi-allele records, {errors} walker errors"
+         {chain_allocations} chain allocations, {mate_evictions} mate evictions, \
+         {multi_base_records} multi-base records, {multi_allele_records} multi-allele \
+         records, {errors} walker errors"
     );
 
     // Each of these is a behaviour B2 mutates. A zero here means that mutation could not
@@ -761,6 +927,13 @@ fn the_generator_exercises_what_the_port_can_break() {
         "no read carried a live adaptor boundary"
     );
     assert!(chain_allocations > 0, "no chain id was ever allocated");
+    // The eighth compared counter. Without this it is compared but never shown to be
+    // non-trivially populated — and it is the path where a pair silently degrades to two
+    // solos, which is a different chain id and a different fold.
+    assert!(
+        mate_evictions > 0,
+        "the mate-lookup window never evicted, so that counter's comparison is vacuous"
+    );
 
     // A widened record with several alleles is where the subtract-then-add re-fold runs:
     // a live read re-folds against the wider window and must move between buckets exactly
@@ -780,6 +953,136 @@ fn the_generator_exercises_what_the_port_can_break() {
     assert!(
         errors * 20 < multi_allele_records.max(1),
         "the generator is producing too many walker errors ({errors}) to be testing the fold"
+    );
+}
+
+/// **The `Err` half of the stream, which the main generator deliberately never produces.**
+///
+/// `ng_walks_identically_to_production` is built to keep reads in bounds and in order — its
+/// own coverage test reports zero walker errors — so `assert_same_walk`'s element-wise
+/// comparison only ever sees `Ok`, and the `map_err` machinery that exists to compare two
+/// nominally distinct `WalkerError` types is dead. Spec §3 states the claim as "the two
+/// `Result<PileupRecord, WalkerError>` streams are equal element for element"; without this
+/// test, half of that has no input behind it.
+///
+/// Every `WalkerError` variant is fatal and terminal for the iterator, so these cases
+/// cannot live in the main generator without truncating the walks that test the fold. They
+/// get their own fixtures, and each fixture is required to actually **reach** its error —
+/// otherwise this compares two clean walks and calls it error parity, which is the exact
+/// failure it exists to close.
+#[test]
+fn both_walkers_report_the_same_error_on_the_same_malformed_input() {
+    fn read(
+        qname: &str,
+        start: u32,
+        end: u32,
+        cigar: Vec<CigarOp>,
+        seq_len: usize,
+    ) -> ProductionPreparedRead {
+        ProductionPreparedRead {
+            chrom_id: 0,
+            alignment_start: start,
+            alignment_end: end,
+            cigar,
+            seq: vec![b'A'; seq_len],
+            bq_baq: vec![30; seq_len],
+            mq_log_err: -3.0,
+            mapq: 60,
+            is_reverse_strand: false,
+            qname: Arc::from(qname),
+            mate_role: ProductionMateRole::Solo,
+            adaptor_boundary: None,
+        }
+    }
+
+    let reference = vec!["ACGT".repeat(40), "ACGT".repeat(40)];
+    let fixtures: Vec<(&str, Vec<ProductionPreparedRead>)> = vec![
+        (
+            "out of order",
+            vec![
+                read("a", 20, 27, vec![CigarOp::Match(8)], 8),
+                read("b", 4, 11, vec![CigarOp::Match(8)], 8),
+            ],
+        ),
+        (
+            // The check is `alignment_end < alignment_start`, not "the CIGAR consumes no
+            // reference" — an all-insertion read whose `alignment_end` equals its start
+            // sails through, which the fixture's own reach assertion caught.
+            "zero reference span",
+            vec![read("i", 4, 3, vec![CigarOp::Insertion(4)], 4)],
+        ),
+        (
+            "cigar consumes more read bases than seq provides",
+            vec![read("m", 4, 11, vec![CigarOp::Match(8)], 5)],
+        ),
+        (
+            "seq and bq of different lengths",
+            vec![{
+                let mut malformed = read("q", 4, 11, vec![CigarOp::Match(8)], 8);
+                malformed.bq_baq.truncate(7);
+                malformed
+            }],
+        ),
+    ];
+
+    for (name, reads) in fixtures {
+        let case = Case {
+            reference: reference.clone(),
+            reads,
+            config: WalkerConfig::default(),
+            reads_with_live_adaptor_boundary: 0,
+        };
+        let theirs = production_walk(&case);
+        let ours = ng_walk(&case);
+        assert!(
+            theirs.records.iter().any(|item| item.is_err()),
+            "{name}: production emitted no error, so this fixture tests nothing"
+        );
+        assert_same_walk(name, &ours, &theirs);
+    }
+}
+
+/// **The adaptor counter's real claim, checked end to end.**
+///
+/// `reads_with_live_adaptor_boundary` is tallied at generation and cannot see the walk, so
+/// however carefully it computes liveness it remains a statement about the *input*. The
+/// only honest test of "the G1 filter is on this walk" is that **removing it changes the
+/// answer** — which is exactly what B2's mutation 2 exploits, made permanent here so the
+/// property survives a generator change rather than resting on a hand-run exercise.
+#[test]
+fn the_adaptor_filter_changes_the_records_the_walk_emits() {
+    let mut cases_changed = 0usize;
+    for seed in SEEDS {
+        let mut rng = SplitMix64(seed);
+        for _ in 0..CASES_PER_SEED {
+            let case = generate(&mut rng);
+            if case.reads_with_live_adaptor_boundary == 0 {
+                continue;
+            }
+            let without = Case {
+                reference: case.reference.clone(),
+                reads: case
+                    .reads
+                    .iter()
+                    .cloned()
+                    .map(|mut read| {
+                        read.adaptor_boundary = None;
+                        read
+                    })
+                    .collect(),
+                config: case.config,
+                reads_with_live_adaptor_boundary: 0,
+            };
+            if production_walk(&case).records != production_walk(&without).records {
+                cases_changed += 1;
+            }
+        }
+    }
+    assert!(
+        cases_changed > 0,
+        "clearing every adaptor boundary changed no case's records — the generator places \
+         boundaries where they silence nothing, so the live-boundary count is measuring the \
+         RNG rather than the walk"
     );
 }
 
@@ -915,6 +1218,7 @@ fn ng_walks_identically_to_production_on_real_reads() {
         "no reads in {region:?} of {reads_path} — the region is empty, so this run would \
          prove nothing"
     );
+    let prepared_reads = ng_reads.len();
     let production_reads: Vec<ProductionPreparedRead> = ng_reads
         .iter()
         .cloned()
@@ -925,47 +1229,43 @@ fn ng_walks_identically_to_production_on_real_reads() {
     let fetcher = RefSeqFetcher(WindowedRefSeq::new(fasta.clone(), contigs.clone()));
     let config = WalkerConfig::default();
 
-    let mut theirs = Vec::new();
-    let mut their_summary = None;
-    let their_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut walker = production_run(production_reads, &fetcher, &config);
-        for item in &mut walker {
-            theirs.push(item.map_err(|error| error.to_string()));
-        }
-        their_summary = Some(summary_array!(walker.summary()));
-    }))
-    .is_err();
-
-    let mut ours = Vec::new();
-    let mut our_summary = None;
-    let our_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut walker = super::run(ng_reads, &fetcher, &config);
-        for item in &mut walker {
-            ours.push(item.map_err(|error| error.to_string()));
-        }
-        our_summary = Some(summary_array!(walker.summary()));
-    }))
-    .is_err();
-
-    let reads = production_reads_len(&theirs);
-    let where_ = format!("{reads_path} {region:?}");
-    let panicked = assert_same_walk(
-        &where_,
-        &WalkOutcome {
-            records: ours,
-            summary: our_summary,
-            panicked: our_panic,
-        },
-        &WalkOutcome {
-            records: theirs,
-            summary: their_summary,
-            panicked: their_panic,
-        },
+    let theirs = drive(
+        production_run(production_reads, &fetcher, &config),
+        |walker| production_counters(walker.summary()),
     );
+    let ours = drive(super::run(ng_reads, &fetcher, &config), |walker| {
+        ng_counters(walker.summary())
+    });
+
+    let where_ = format!("{reads_path} {region:?}");
+    let records_compared = theirs.records.len();
+    let ok_records = theirs.records.iter().filter(|item| item.is_ok()).count();
+    let first_error = theirs
+        .records
+        .iter()
+        .find_map(|item| item.as_ref().err().cloned());
+    let panicked = assert_same_walk(&where_, &ours, &theirs);
+
     assert!(
         !panicked,
         "{where_}: both walkers panicked, which agrees but measures nothing — re-run with \
          --release, where production's debug_assert! is compiled out"
+    );
+    // **The floor the synthetic differential has and this one lacked.** Every `WalkerError`
+    // is fatal and terminal for the iterator, so a walk that dies on its first read yields
+    // one identical `Err` on each side, `assert_same_walk` agrees, and the run prints
+    // "1 records compared, zero divergences" — green, and proof of nothing. This is the
+    // only evidence in the milestone that the two agree on real data, and it is hand-run,
+    // so a green-but-empty run must not look like a real one.
+    assert!(
+        first_error.is_none(),
+        "{where_}: the walk ended in a WalkerError, so the two streams agree only up to \
+         where both stopped: {first_error:?}"
+    );
+    assert!(
+        ok_records * 4 > prepared_reads,
+        "{where_}: {ok_records} records from {prepared_reads} prepared reads — far too few \
+         for a walk that ran to completion, so this run compared a prefix and proves nothing"
     );
     // Joined at the end rather than dropped: a `.fai` that does not describe this FASTA
     // would mean the two walks agreed about the wrong bases, which is a green run that
@@ -975,10 +1275,8 @@ fn ng_walks_identically_to_production_on_real_reads() {
             .join()
             .expect("the .fai beside the reference describes it");
     }
-    eprintln!("real-data differential: {where_} — {reads} records compared, zero divergences");
-}
-
-/// The number of stream items, named so the message above reads as what it is.
-fn production_reads_len(records: &[Result<PileupRecord, String>]) -> usize {
-    records.len()
+    eprintln!(
+        "real-data differential: {where_} — {records_compared} records compared from \
+         {prepared_reads} prepared reads, zero divergences"
+    );
 }

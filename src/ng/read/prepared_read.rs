@@ -608,6 +608,90 @@ mod tests {
         );
     }
 
+    /// **The reverse conversion moves every field too.** The mirror of the test below, and
+    /// the one that needs saying out loud: `into_production`'s only caller is the
+    /// `#[ignore]`d walker parity harness, so without this it is compiled and never
+    /// executed — zero runtime coverage on the conversion the entire real-data half of the
+    /// oracle rests on. A lossy one would surface as "the two walkers disagree", which is
+    /// the wrong diagnosis and would be chased into the walker.
+    #[test]
+    fn into_production_moves_every_field_to_its_counterpart() {
+        let ours = PreparedRead {
+            chrom_id: 2,
+            alignment_start: 101,
+            alignment_end: 140,
+            cigar: vec![CigarOp::SoftClip(1), CigarOp::Match(3)],
+            seq: b"TACG".to_vec(),
+            bq_baq: vec![11, 22, 33, 44],
+            mq_log_err: -13.5,
+            mapq: 37,
+            is_reverse_strand: true,
+            qname: Arc::from("frag/1"),
+            mate_role: MateRole::SecondOfPair,
+            adaptor_boundary: Some(137),
+            read_group: ReadGroupId(4),
+        };
+
+        let theirs = ours.clone().into_production();
+
+        assert_eq!(theirs.chrom_id, 2);
+        assert_eq!(theirs.alignment_start, 101);
+        assert_eq!(theirs.alignment_end, 140);
+        assert_eq!(theirs.cigar, ours.cigar);
+        assert_eq!(theirs.seq, b"TACG".to_vec());
+        assert_eq!(theirs.bq_baq, vec![11, 22, 33, 44]);
+        assert_eq!(theirs.mq_log_err, -13.5);
+        assert_eq!(theirs.mapq, 37);
+        assert!(theirs.is_reverse_strand);
+        assert_eq!(&*theirs.qname, "frag/1");
+        assert_eq!(theirs.mate_role, ProductionMateRole::SecondOfPair);
+        assert_eq!(theirs.adaptor_boundary, Some(137));
+    }
+
+    /// **The claim the real-data differential rests on: the round trip is lossless for
+    /// everything the walk reads.**
+    ///
+    /// One prepared stream is handed to both walkers by converting ng's *down* to
+    /// production's, so a field that does not survive the trip means the two walkers saw
+    /// different inputs — and the divergence would be blamed on the walk. The two
+    /// conversions are individually plausible and could still disagree; this is what rules
+    /// that out, as `every_production_mate_role_maps_to_its_counterpart` does for the role.
+    ///
+    /// `read_group` is the one field *meant* to be lost, so the round trip re-attaches it
+    /// and everything else must match.
+    #[test]
+    fn the_two_conversions_round_trip_every_field_the_walk_reads() {
+        for (role, boundary) in [
+            (ProductionMateRole::Solo, None),
+            (ProductionMateRole::FirstOfPair, Some(137)),
+            (ProductionMateRole::SecondOfPair, Some(1)),
+        ] {
+            let original = ProductionPreparedRead {
+                chrom_id: 2,
+                alignment_start: 101,
+                alignment_end: 140,
+                cigar: vec![CigarOp::SoftClip(1), CigarOp::Match(3)],
+                seq: b"TACG".to_vec(),
+                bq_baq: vec![11, 22, 33, 44],
+                mq_log_err: -13.5,
+                mapq: 37,
+                is_reverse_strand: true,
+                qname: Arc::from("frag/1"),
+                mate_role: role,
+                adaptor_boundary: boundary,
+            };
+            let back =
+                PreparedRead::from_production(original.clone(), ReadGroupId(4)).into_production();
+            // Production's type has no `PartialEq`, so `Debug` is the oracle — total over
+            // these fields, and it names the one that moved.
+            assert_eq!(
+                format!("{back:?}"),
+                format!("{original:?}"),
+                "the round trip lost or altered a field on {role:?}",
+            );
+        }
+    }
+
     /// **The conversion moves every field to its counterpart, not to a
     /// neighbour of the same type.** The destructure makes it exhaustive; only
     /// this makes it correct. The fixture gives each field a distinct value for
