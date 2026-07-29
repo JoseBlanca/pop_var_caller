@@ -12,11 +12,19 @@
 //! ([`begin_segment`](super::super::LocusGenerator::begin_segment) and the halo)
 //! is C2's, and the allocator's lifetime across segments is C3's.
 
-use crate::ng::read::ReadPreparer;
-use crate::ng::ref_seq::RefSeq;
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
-use super::WalkerConfig;
+use crate::ng::locus_generation::{LocusGenerationError, SampleLocusObservations};
+use crate::ng::read::input::{SampleReads, SampleRegionReads};
+use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
+use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::types::{GenomeRegion, Position};
+
 use super::chain_id_allocator::ChainIdAllocator;
+use super::genome_walk::PileupWalker;
+use super::{DEFAULT_MAX_ACTIVE_READS, WalkerConfig};
 
 /// The widest `max_record_span` this generator accepts: 65,535 reference
 /// positions, the widest footprint a [`ReadCoverage`] run can describe.
@@ -91,7 +99,7 @@ impl Default for PileupGeneratorConfig {
             // ng's copy of the constant, which `walker_vocabulary_tests` pins equal
             // to production's — the one `DEFAULT_*` the verbatim copy forked, because
             // it is declared inside `chain_id_allocator.rs`.
-            max_active_reads: super::DEFAULT_MAX_ACTIVE_READS,
+            max_active_reads: DEFAULT_MAX_ACTIVE_READS,
         }
     }
 }
@@ -193,6 +201,125 @@ pub struct PileupGeneratorCounts {
     pub records_outside_region: u64,
 }
 
+/// What the generator lends the per-segment read stream: the preparer, its
+/// scratch, and the slot the stream latches a fatal error into.
+///
+/// **Shared because the stream lives inside the walk and the walk lives inside
+/// the generator.** The walk owns its read stream (arch §2.2) and the stream
+/// has to reach the preparer for every read; a borrow of a sibling field is not
+/// expressible, so the three travel together behind one handle the generator
+/// keeps and each walk clones. Keeping the *scratch* here rather than in the
+/// stream is the point of the arrangement — a stream-owned scratch would be
+/// reallocated at every region boundary, which is what a generator-level
+/// scratch field exists to prevent (arch §1.1).
+///
+/// One `RefCell` borrow per read, held only across `prepare_read`; the walk is
+/// single-threaded (arch §9) and nothing else touches the cell while a read is
+/// being prepared.
+struct ReadPreparation<P: ReadPreparer> {
+    preparer: P,
+    scratch: P::Scratch,
+    /// The first fatal error the stream hit, kept because an
+    /// `Iterator<Item = PreparedRead>` has nowhere to report one.
+    ///
+    /// The walker consumes an infallible item type, so a failed query or a
+    /// failed preparation has to shed its error and report end-of-stream; the
+    /// generator takes it back once the walker drains. Production hit the same
+    /// seam and solved it the same way (`ErrorSheddingAdapter` in
+    /// `pop_var_caller/cli/error_bridge.rs`) — ng keeps its own because it
+    /// shed*s* two error types into one and because a locus generator has no
+    /// business importing from the CLI.
+    latched_error: Option<LocusGenerationError>,
+}
+
+/// One region's read stream, prepared: the query's `AlignedRead`s canonicalised
+/// into the `PreparedRead`s the walk consumes, with fatal errors shed into the
+/// shared [`ReadPreparation`] and reported as end-of-stream.
+///
+/// **Lazy, and it must stay lazy.** The query is a pull iterator that collects
+/// nothing, so what is resident is the reads overlapping the walker's current
+/// position — bounded by depth, not by the region's length. Collecting here to
+/// make an ownership problem go away would turn a depth-shaped footprint into a
+/// region-shaped one, on regions that run to hundreds of kilobases (spec §7).
+struct PreparedRegionReads<R: RawRefSeq, P: ReadPreparer> {
+    reads: SampleRegionReads<R>,
+    preparation: Rc<RefCell<ReadPreparation<P>>>,
+    /// Set once the query is exhausted or an error was latched. Both are
+    /// terminal: a stream that shed an error must not resume, or the walk would
+    /// carry on over a hole it was never told about.
+    done: bool,
+}
+
+impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
+    type Item = PreparedRead;
+
+    fn next(&mut self) -> Option<PreparedRead> {
+        while !self.done {
+            let read = match self.reads.next() {
+                None => {
+                    self.done = true;
+                    return None;
+                }
+                Some(Ok(read)) => read,
+                Some(Err(source)) => return self.shed(source.into()),
+            };
+            let mut preparation = self.preparation.borrow_mut();
+            // Split the borrow: `prepare_read` takes `&self` and `&mut
+            // Self::Scratch`, which are two fields of the same cell.
+            let ReadPreparation {
+                preparer, scratch, ..
+            } = &mut *preparation;
+            match preparer.prepare_read(read, scratch) {
+                Ok(Some(prepared)) => return Some(prepared),
+                // "No usable observation" — the preparer declined this read and
+                // the run continues. **No v1 preparer returns it** (the only
+                // step that could decline was BAQ, deferred), so there is no
+                // tally for it yet; when a declining preparer lands, its count
+                // belongs beside `reads_silent_over_footprint`.
+                Ok(None) => continue,
+                Err(source) => {
+                    drop(preparation);
+                    // Matched exhaustively rather than through a catch-all:
+                    // `ReadPrepError` is `#[non_exhaustive]`, which binds other
+                    // crates but not this one, so a preparation failure ng
+                    // cannot yet describe is a compile error here instead of a
+                    // reference error it is not.
+                    let error = match source {
+                        ReadPrepError::Reference(source) => LocusGenerationError::Reference(source),
+                    };
+                    return self.shed(error);
+                }
+            }
+        }
+        None
+    }
+}
+
+impl<R: RawRefSeq, P: ReadPreparer> PreparedRegionReads<R, P> {
+    /// Latch a fatal error and report end-of-stream. The **first** error wins:
+    /// a later one describes a walk that was already over.
+    fn shed(&mut self, error: LocusGenerationError) -> Option<PreparedRead> {
+        self.done = true;
+        let mut preparation = self.preparation.borrow_mut();
+        if preparation.latched_error.is_none() {
+            preparation.latched_error = Some(error);
+        }
+        None
+    }
+}
+
+/// The walk over one region: **owns** its read stream, so nothing borrows the
+/// `SampleReads` it was built from and nothing has to be materialised (arch
+/// §2.2). One per region, built on the first `next_locus` and drained across the
+/// calls that follow.
+struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
+    walker: PileupWalker<PreparedRegionReads<R, P>, Arc<R>>,
+    /// The region records are clamped to — the walk emits records anchored just
+    /// outside it, because the query returns every read *overlapping* the
+    /// region and the halo widens that further still.
+    region: GenomeRegion,
+}
+
 /// ng's generic locus generator: a streaming pileup walk over one `Generic`
 /// region, emitting one
 /// [`SampleLocusObservations`](super::super::SampleLocusObservations) per covered
@@ -201,37 +328,37 @@ pub struct PileupGeneratorCounts {
 /// # What it holds, and why it holds it
 ///
 /// A generator owns its accessors as fields (`locus_generation.md` §2). **Two
-/// reference accessors, not one:** `preparer` carries its own (read
-/// preparation's rule), and `reference` serves the walk's REF fetches. Neither is
-/// rebuilt per segment — a fresh accessor per region throws away the sliding
-/// buffer at every boundary and re-pays a `.fai` parse plus two `open(2)`s, which
-/// is the ~564k-opens trap the STR side already paid for (spec §8).
+/// reference accessors, not one:** the preparer carries its own (read
+/// preparation's rule), and `reference` serves the walk's REF fetches. Neither
+/// is rebuilt per segment — a fresh accessor per region throws away the sliding
+/// buffer at every boundary and re-pays a `.fai` parse plus two `open(2)`s,
+/// which is the ~564k-opens trap the STR side already paid for (spec §8). That
+/// is why it is held behind an `Arc`: the walk must *own* a `RefSeq`, and an
+/// `Arc` clone is the owned handle that does not rebuild the reader
+/// ([`ref_seq`](crate::ng::ref_seq)'s shared-handle impls exist for this).
+///
+/// `make_reference` is a third accessor and deliberately a **factory**: the read
+/// query gives each of a sample's k files its own raw accessor, because they are
+/// stateful readers and sharing one would make k streams share a file cursor
+/// ([`SampleReads::reads_in_region`]).
 ///
 /// The chain-id allocator likewise lives here rather than inside the walk: ng
 /// walks one region where production walks a chromosome, and a fresh allocator
 /// per segment would give two fragments of different regions the same id (spec
 /// §8). What that costs — `reset()` between segments, and counters that must be
 /// folded as deltas because `reset()` preserves them — is C3's.
-pub struct PileupGenerator<R: RefSeq, P: ReadPreparer> {
-    /// The reference the walk fetches REF bases from. Built once, for the run.
-    #[expect(
-        dead_code,
-        reason = "C2's walk is the reader; C1 is the state that walk will run on"
-    )]
-    reference: R,
-    /// Canonicalises each read the query returns before the walk sees it.
-    #[expect(
-        dead_code,
-        reason = "C2's walk is the reader; C1 is the state that walk will run on"
-    )]
-    preparer: P,
-    /// The preparer's reusable buffers — allocated once for the generator, never
-    /// per read and never per segment.
-    #[expect(
-        dead_code,
-        reason = "C2's walk is the reader; C1 is the state that walk will run on"
-    )]
-    prep_scratch: P::Scratch,
+pub struct PileupGenerator<R: RawRefSeq, MakeReference, P: ReadPreparer>
+where
+    MakeReference: FnMut() -> R,
+{
+    /// The reference the walk fetches REF bases from. Built once, for the run,
+    /// and handed to each walk as a shared handle.
+    reference: Arc<R>,
+    /// Builds a fresh read-query accessor for each file of the sample, which is
+    /// what [`SampleReads::reads_in_region`]'s mismatch-fraction filter reads.
+    make_reference: MakeReference,
+    /// The preparer and its scratch, lent to each region's read stream.
+    preparation: Rc<RefCell<ReadPreparation<P>>>,
     /// Lives across segments so `next_id` never repeats.
     #[expect(
         dead_code,
@@ -240,31 +367,47 @@ pub struct PileupGenerator<R: RefSeq, P: ReadPreparer> {
     chain_ids: ChainIdAllocator,
     config: PileupGeneratorConfig,
     counts: PileupGeneratorCounts,
+    /// The region [`begin_segment`](Self::begin_segment) was given, before any
+    /// query has been opened for it.
+    current_region: Option<GenomeRegion>,
+    /// The walk over `current_region`, opened by the first `next_locus`.
+    walk: Option<RegionWalk<R, P>>,
 }
 
-impl<R: RefSeq, P: ReadPreparer> PileupGenerator<R, P> {
-    /// Build a generator over `reference` (the walk's REF fetches) and `preparer`
-    /// (per-read canonicalisation), with `config` checked before anything is
-    /// held.
+impl<R: RawRefSeq, MakeReference, P: ReadPreparer> PileupGenerator<R, MakeReference, P>
+where
+    MakeReference: FnMut() -> R,
+{
+    /// Build a generator over `reference` (the walk's REF fetches),
+    /// `make_reference` (the read query's per-file accessor factory) and
+    /// `preparer` (per-read canonicalisation), with `config` checked before
+    /// anything is held.
     ///
     /// Fails only on a configuration a coverage run could not describe — see
     /// [`PileupGeneratorConfig::check`].
     pub fn new(
-        reference: R,
+        reference: Arc<R>,
+        make_reference: MakeReference,
         preparer: P,
         config: PileupGeneratorConfig,
     ) -> Result<Self, PileupGeneratorConfigError> {
         config.check()?;
         Ok(Self {
             reference,
-            preparer,
-            prep_scratch: P::Scratch::default(),
+            make_reference,
+            preparation: Rc::new(RefCell::new(ReadPreparation {
+                preparer,
+                scratch: P::Scratch::default(),
+                latched_error: None,
+            })),
             chain_ids: ChainIdAllocator::with_caps(
                 config.max_active_reads,
                 config.mate_lookup_window,
             ),
             config,
             counts: PileupGeneratorCounts::default(),
+            current_region: None,
+            walk: None,
         })
     }
 
@@ -277,39 +420,293 @@ impl<R: RefSeq, P: ReadPreparer> PileupGenerator<R, P> {
     pub fn counts(&self) -> &PileupGeneratorCounts {
         &self.counts
     }
+
+    /// Start a region: record it and **open nothing**.
+    ///
+    /// It cannot fail, and opening a read query can — so the query is opened by
+    /// the first [`next_locus`](Self::next_locus), which is where an
+    /// [`IngestError`](crate::ng::read::input::IngestError) surfaces (arch
+    /// §2.1). Any unfinished walk of the previous region is dropped here: the
+    /// contract is one segment at a time, and a half-drained walk of a region
+    /// nobody is asking about any more has nothing to contribute.
+    pub fn begin_segment(&mut self, region: GenomeRegion) {
+        self.current_region = Some(region);
+        self.walk = None;
+    }
+
+    /// The next locus of the region begun, or `None` once the walk drains.
+    ///
+    /// Records whose **anchor** falls outside the region are dropped and
+    /// tallied in [`records_outside_region`](PileupGeneratorCounts::records_outside_region)
+    /// — the rule that makes neighbouring regions tile without duplicates or
+    /// holes, since typed regions tile the genome gap-free and disjointly
+    /// (spec §2).
+    pub fn next_locus(
+        &mut self,
+        reads: &SampleReads,
+    ) -> Result<Option<SampleLocusObservations>, LocusGenerationError> {
+        let Some(region) = self.current_region else {
+            return Ok(None);
+        };
+        if self.walk.is_none() {
+            self.walk = Some(self.open_walk(region, reads)?);
+        }
+        // PANIC-FREE: opened immediately above, and nothing between here and
+        // the loop can clear it.
+        let walk = self.walk.as_mut().expect("the walk was just opened");
+        loop {
+            match walk.walker.next() {
+                Some(Ok(locus)) => {
+                    if walk.region.contains(locus.region.start) {
+                        return Ok(Some(locus));
+                    }
+                    self.counts.records_outside_region += 1;
+                }
+                Some(Err(source)) => return Err(LocusGenerationError::Walker(source)),
+                None => {
+                    // The walk is over. A read stream that shed a fatal error
+                    // also reported end-of-stream, so the walker drains
+                    // normally and the error is only visible here — checked
+                    // **before** `Ok(None)`, or a broken query would read as an
+                    // empty region.
+                    self.walk = None;
+                    if let Some(error) = self.preparation.borrow_mut().latched_error.take() {
+                        return Err(error);
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    /// Open the query for `region` and build the walk over it.
+    ///
+    /// **The query is `[region.start, region.end + max_record_span]` — the
+    /// halo.** A record anchored inside the region can have a footprint
+    /// reaching `max_record_span` past its end (a long deletion does exactly
+    /// that), and reads that fold into it may lie *entirely beyond* the region.
+    /// A query for "reads overlapping the region" never returns them, and the
+    /// record is then emitted by the right region with part of its support
+    /// missing — **and no counter notices**, because the record itself is not
+    /// lost (spec §2). The extra reads are walked and their records clamped
+    /// away unless anchored in the region.
+    ///
+    /// The walk is **stopped** at the region's end rather than run to the end of
+    /// the halo: see [`PileupWalker::stopping_after`].
+    fn open_walk(
+        &mut self,
+        region: GenomeRegion,
+        reads: &SampleReads,
+    ) -> Result<RegionWalk<R, P>, LocusGenerationError> {
+        let query = GenomeRegion {
+            contig: region.contig,
+            start: region.start,
+            end: Position(
+                region
+                    .end
+                    .get()
+                    .saturating_add(u64::from(self.config.max_record_span)),
+            ),
+        };
+        // Reborrowed into a local: the factory is a field, and `reads_in_region`
+        // would otherwise hold a borrow of `self` across the call that stores
+        // the walk back into `self`.
+        let make_reference = &mut self.make_reference;
+        let stream = reads.reads_in_region(query, make_reference)?;
+        let prepared = PreparedRegionReads {
+            reads: stream,
+            preparation: Rc::clone(&self.preparation),
+            done: false,
+        };
+        // Saturating, and in the safe direction: the walker's positions are
+        // `u32`, so a region ending past 4 Gb cannot be walked at all, and a
+        // stop bound clamped to `u32::MAX` makes the walk run long rather than
+        // stop early.
+        let stop_after = region.end.get().min(u64::from(u32::MAX)) as u32;
+        let walker = super::genome_walk::run(
+            prepared,
+            Arc::clone(&self.reference),
+            &self.config.to_walker_config(),
+        )
+        .stopping_after(stop_after);
+        Ok(RegionWalk { walker, region })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use noodles_sam::alignment::RecordBuf;
+
     use crate::ng::locus_generation::LocusLen;
+    use crate::ng::read::input::test_fixtures::{
+        FIXTURE_CONTIGS, fixture_reference, header, indexed_bam, matching_contigs,
+        read_named_with_length,
+    };
     use crate::ng::read::{AlignedRead, PreparedRead, ReadPrepError};
     use crate::ng::ref_seq::InMemoryRefSeq;
+    use crate::ng::types::ContigId;
 
-    /// A preparer that prepares nothing — the generator's constructor never calls
-    /// it, and C1 has no walk to feed.
-    struct PreparesNothing;
+    /// Production's `--no-baq` build, re-attached to ng's read type — the read
+    /// preparation these tests want out of the way, so what they measure is the
+    /// walk. Mirrors `ng::read`'s own `prepare_via_passthrough`.
+    struct PassthroughPreparer;
 
-    impl ReadPreparer for PreparesNothing {
+    impl ReadPreparer for PassthroughPreparer {
+        type Scratch = ();
+        fn prepare_read(
+            &self,
+            read: AlignedRead,
+            _scratch: &mut Self::Scratch,
+        ) -> Result<Option<PreparedRead>, ReadPrepError> {
+            let read_group = read.read_group;
+            let chrom_id = u32::try_from(read.ref_id).expect("ref_id fits u32");
+            Ok(Some(PreparedRead::from_production(
+                crate::pileup::per_sample::baq_engine::prepare_passthrough(
+                    read.into_mapped_read(),
+                    chrom_id,
+                ),
+                read_group,
+            )))
+        }
+    }
+
+    /// A preparer that fails on every read — the fatal-error path, which the
+    /// stream has to shed and the generator has to report.
+    struct FailsToPrepare;
+
+    impl ReadPreparer for FailsToPrepare {
         type Scratch = ();
         fn prepare_read(
             &self,
             _read: AlignedRead,
             _scratch: &mut Self::Scratch,
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
-            Ok(None)
+            Err(ReadPrepError::Reference(
+                crate::ng::ref_seq::RefSeqError::UnknownContig(ContigId(7)),
+            ))
         }
+    }
+
+    /// The reference the walk fetches REF bases from: the fixture contigs, all
+    /// `A`, which is what `build_fasta` writes and what the fixture reads carry —
+    /// so every locus is REF-only and the tests are about *which* loci exist and
+    /// what supports them.
+    fn fixture_bases() -> InMemoryRefSeq {
+        InMemoryRefSeq::from_named_contigs(
+            FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+                .collect(),
+        )
+    }
+
+    fn a_generator_with<P: ReadPreparer>(
+        config: PileupGeneratorConfig,
+        preparer: P,
+    ) -> Result<
+        PileupGenerator<InMemoryRefSeq, impl FnMut() -> InMemoryRefSeq, P>,
+        PileupGeneratorConfigError,
+    > {
+        PileupGenerator::new(Arc::new(fixture_bases()), fixture_bases, preparer, config)
     }
 
     fn a_generator(
         config: PileupGeneratorConfig,
-    ) -> Result<PileupGenerator<InMemoryRefSeq, PreparesNothing>, PileupGeneratorConfigError> {
-        PileupGenerator::new(
-            InMemoryRefSeq::from_contigs(vec![b"ACGTACGTAC".to_vec()]),
-            PreparesNothing,
-            config,
-        )
+    ) -> Result<
+        PileupGenerator<InMemoryRefSeq, impl FnMut() -> InMemoryRefSeq, PassthroughPreparer>,
+        PileupGeneratorConfigError,
+    > {
+        a_generator_with(config, PassthroughPreparer)
+    }
+
+    fn region(contig: u32, start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(contig),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    /// Open a `SampleReads` over one indexed BAM of `records`, against the
+    /// fixture reference. The two `TempDir`s must outlive the sample.
+    fn sample_reads_with(
+        records: &[RecordBuf],
+    ) -> (tempfile::TempDir, tempfile::TempDir, SampleReads) {
+        use crate::ng::read::filtering::ReadFilterConfig;
+        let (reference_dir, reference) = fixture_reference(false);
+        let (bam_dir, bam) = indexed_bam(
+            &header(
+                Some("coordinate"),
+                &matching_contigs(),
+                &[("rg1", Some("NA12878"))],
+            ),
+            records,
+        );
+        let reads =
+            SampleReads::open_only_sample(&[bam], &reference, ReadFilterConfig::default(), false)
+                .expect("the fixture sample opens");
+        (reference_dir, bam_dir, reads)
+    }
+
+    /// Drain a whole segment: every locus `next_locus` yields for `region`.
+    fn loci_of<R: RawRefSeq, MF: FnMut() -> R, P: ReadPreparer>(
+        generator: &mut PileupGenerator<R, MF, P>,
+        region: GenomeRegion,
+        reads: &SampleReads,
+    ) -> Vec<SampleLocusObservations> {
+        generator.begin_segment(region);
+        let mut loci = Vec::new();
+        while let Some(locus) = generator.next_locus(reads).expect("the walk succeeds") {
+            loci.push(locus);
+        }
+        loci
+    }
+
+    /// The 1-based anchor of each locus, in emission order.
+    fn anchors(loci: &[SampleLocusObservations]) -> Vec<u64> {
+        loci.iter().map(|locus| locus.region.start.get()).collect()
+    }
+
+    /// Total observations supporting a locus, across every row.
+    fn total_obs(locus: &SampleLocusObservations) -> u32 {
+        locus
+            .observed_sequences
+            .iter()
+            .map(|observation| observation.num_obs)
+            .sum()
+    }
+
+    /// A read whose CIGAR is spelled out — the fixture helpers only build plain
+    /// matches, and the halo exists for records a deletion widens.
+    fn read_with_cigar(
+        qname: &str,
+        reference_sequence_id: usize,
+        start: usize,
+        ops: &[(noodles_sam::alignment::record::cigar::op::Kind, usize)],
+    ) -> RecordBuf {
+        use noodles_core::Position as RecordPosition;
+        use noodles_sam::alignment::record::Flags;
+        use noodles_sam::alignment::record::MappingQuality;
+        use noodles_sam::alignment::record::cigar::op::{Kind, Op};
+        use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+        let read_bases: usize = ops
+            .iter()
+            .filter(|(kind, _)| matches!(kind, Kind::Match | Kind::Insertion | Kind::SoftClip))
+            .map(|(_, len)| len)
+            .sum();
+        RecordBuf::builder()
+            .set_name(qname.as_bytes())
+            .set_reference_sequence_id(reference_sequence_id)
+            .set_flags(Flags::empty())
+            .set_mapping_quality(MappingQuality::new(60).expect("mapq in range"))
+            .set_alignment_start(RecordPosition::try_from(start).expect("start is 1-based"))
+            .set_cigar(ops.iter().map(|(kind, len)| Op::new(*kind, *len)).collect())
+            .set_sequence(Sequence::from(vec![b'A'; read_bases]))
+            .set_quality_scores(QualityScores::from(vec![30u8; read_bases]))
+            .build()
     }
 
     /// **The defaults are production's, read from production's own constants.**
@@ -447,5 +844,329 @@ mod tests {
         let generator = a_generator(PileupGeneratorConfig::default()).expect("default config");
         assert_eq!(*generator.counts(), PileupGeneratorCounts::default());
         assert_eq!(*generator.config(), PileupGeneratorConfig::default());
+    }
+
+    // --- C2: the region walk ------------------------------------------------
+
+    /// A locus per covered position, and none where nothing was read — the shape
+    /// of the whole output, before any boundary is involved.
+    #[test]
+    fn the_walk_emits_a_locus_at_every_covered_position() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let loci = loci_of(&mut generator, region(0, 1, 100), &reads);
+
+        assert_eq!(
+            anchors(&loci),
+            (10..40).collect::<Vec<u64>>(),
+            "one locus per position the read covered, and nothing outside it"
+        );
+    }
+
+    /// **Records are dropped on their anchor, and the drop is counted.** The
+    /// query returns every read *overlapping* the region, so a read starting
+    /// before it produces records the region does not own.
+    #[test]
+    fn a_record_anchored_before_the_region_is_dropped_and_counted() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let loci = loci_of(&mut generator, region(0, 20, 100), &reads);
+
+        assert_eq!(
+            anchors(&loci),
+            (20..40).collect::<Vec<u64>>(),
+            "positions 10..=19 are covered but anchored outside the region"
+        );
+        assert_eq!(
+            generator.counts().records_outside_region,
+            10,
+            "the ten dropped records are tallied, not silently discarded"
+        );
+    }
+
+    /// **Neighbouring regions tile: no duplicates, no holes, coordinate order
+    /// preserved** — the acceptance property for the clamp (plan's verification
+    /// table, spec §2). Split at 50, and every locus of the whole-region walk
+    /// appears exactly once, in the same order, with the same support.
+    #[test]
+    fn two_adjacent_regions_concatenate_into_the_single_region_walk() {
+        let records: Vec<RecordBuf> = (0..4)
+            .map(|i| read_named_with_length(&format!("r{i}"), 0, 5 + i * 20, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+
+        let mut whole = a_generator(PileupGeneratorConfig::default()).expect("config");
+        let expected = loci_of(&mut whole, region(0, 1, 100), &reads);
+
+        let mut split = a_generator(PileupGeneratorConfig::default()).expect("config");
+        let mut joined = loci_of(&mut split, region(0, 1, 50), &reads);
+        joined.extend(loci_of(&mut split, region(0, 51, 100), &reads));
+
+        assert!(!expected.is_empty(), "the fixture must produce loci at all");
+        assert_eq!(
+            joined, expected,
+            "two adjacent regions must emit exactly what one region does"
+        );
+        assert_eq!(
+            whole.counts().records_outside_region,
+            0,
+            "nothing is anchored outside a region covering every read"
+        );
+    }
+
+    /// **The halo: a record anchored inside the region keeps the support lying
+    /// beyond the boundary.** `widener`'s deletion grows a record anchored at 99
+    /// out to 139; `beyond` starts at 120, entirely past the region's end, and
+    /// folds into that record. A query for "reads overlapping the region" never
+    /// returns `beyond`, and the record would then be emitted — by the right
+    /// region, with a counter reading zero — carrying half its evidence (spec §2).
+    #[test]
+    fn the_halo_keeps_the_support_that_lies_past_the_region_end() {
+        use noodles_sam::alignment::record::cigar::op::Kind;
+
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_with_cigar(
+                "widener",
+                1,
+                95,
+                &[(Kind::Match, 5), (Kind::Deletion, 40), (Kind::Match, 30)],
+            ),
+            read_named_with_length("beyond", 1, 120, 30),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 60,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
+
+        let widened = loci
+            .iter()
+            .find(|locus| locus.region.start == Position(99))
+            .expect("the deletion opens a record at its anchor, inside the region");
+        assert_eq!(
+            widened.region.end,
+            Position(139),
+            "the record spans the whole deletion"
+        );
+        assert_eq!(
+            total_obs(widened),
+            2,
+            "both the widener and the read lying entirely beyond the region support it"
+        );
+    }
+
+    /// **The halo is stopped, not walked.** Nothing is anchored inside the
+    /// region, so the walk has no reason to look at the reads filling the halo —
+    /// and every record it finalised in there would be built at full depth and
+    /// then thrown away by the clamp. `records_outside_region` is what that waste
+    /// would show up as.
+    #[test]
+    fn the_walk_stops_at_the_region_end_instead_of_walking_the_whole_halo() {
+        let records: Vec<RecordBuf> = (0..4)
+            .map(|i| read_named_with_length(&format!("beyond{i}"), 1, 110 + i * 20, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 90,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
+
+        assert!(loci.is_empty(), "no read covers the region itself");
+        assert_eq!(
+            generator.counts().records_outside_region,
+            0,
+            "a walk that ran the halo out would finalise ~80 records and clamp them all away"
+        );
+    }
+
+    /// **A record anchored inside the region keeps growing past the boundary.**
+    /// The stop rule has two halves and this is the second one: at position 101
+    /// the record anchored at 99 is still open, so the walk must carry on rather
+    /// than finalise it where it stands.
+    ///
+    /// The fixture is built so that only *widening* distinguishes the two halves.
+    /// A record's footprint is fixed when it opens, so an early flush does not
+    /// shorten it — the observable difference is the widen that has not happened
+    /// yet: `later` is anchored at 99, inside the region and inside a plain query,
+    /// and its deletion anchors at **101**, one position past the bound. Stop at
+    /// 101 and the record is emitted spanning 99..=109; wait for it and it spans
+    /// 99..=131.
+    #[test]
+    fn a_record_anchored_inside_the_region_still_widens_past_the_boundary() {
+        use noodles_sam::alignment::record::cigar::op::Kind;
+
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_with_cigar(
+                "opener",
+                1,
+                95,
+                &[(Kind::Match, 5), (Kind::Deletion, 10), (Kind::Match, 25)],
+            ),
+            read_with_cigar(
+                "later",
+                1,
+                99,
+                &[(Kind::Match, 3), (Kind::Deletion, 30), (Kind::Match, 27)],
+            ),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 60,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        let loci = loci_of(&mut generator, region(1, 1, 100), &reads);
+
+        let widened = loci
+            .iter()
+            .find(|locus| locus.region.start == Position(99))
+            .expect("the first deletion opens a record at 99, inside the region");
+        assert_eq!(
+            widened.region.end,
+            Position(131),
+            "the walk stopped before the second deletion widened the record"
+        );
+    }
+
+    /// A region whose halo runs past the end of the contig is still walkable —
+    /// the last region of every contig is this case, so it must not be an error.
+    #[test]
+    fn a_region_ending_at_the_contig_end_still_queries_its_halo() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 61, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let loci = loci_of(&mut generator, region(0, 51, 100), &reads);
+
+        assert_eq!(anchors(&loci), (61..91).collect::<Vec<u64>>());
+    }
+
+    /// **`begin_segment` cannot fail; the first `next_locus` is where the query
+    /// does.** A contig the header does not have is the cheapest way to make the
+    /// open fail, and the point is *where* the failure surfaces (arch §2.1).
+    #[test]
+    fn the_query_opens_at_the_first_locus_not_at_begin_segment() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        generator.begin_segment(region(9, 1, 100));
+
+        let error = generator
+            .next_locus(&reads)
+            .expect_err("a region on a contig the file does not have cannot be queried");
+        assert!(
+            matches!(error, LocusGenerationError::Reads(_)),
+            "the read query's failure reaches the caller as a read failure, got {error:?}"
+        );
+    }
+
+    /// **A stream that failed is not an empty region.** The walker consumes an
+    /// infallible item type, so a preparation failure has to be shed and
+    /// reported as end-of-stream; if the generator read that as "the walk
+    /// drained", a broken run would look like a region with no coverage.
+    #[test]
+    fn a_read_preparation_failure_is_reported_rather_than_read_as_an_empty_region() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator =
+            a_generator_with(PileupGeneratorConfig::default(), FailsToPrepare).expect("config");
+
+        generator.begin_segment(region(0, 1, 100));
+
+        let error = generator
+            .next_locus(&reads)
+            .expect_err("the preparer failed on the only read");
+        assert!(
+            matches!(error, LocusGenerationError::Reference(_)),
+            "a failed preparation reaches the caller as the reference failure it is, got {error:?}"
+        );
+    }
+
+    /// A failure inside the walk reaches the caller as `Walker` — the variant
+    /// that exists because none of the other three describes a walk over inputs
+    /// it already accepted. A deletion wider than `max_record_span` is the
+    /// cheapest one to provoke.
+    #[test]
+    fn a_walk_failure_reaches_the_caller_as_a_walker_error() {
+        use noodles_sam::alignment::record::cigar::op::Kind;
+
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[read_with_cigar(
+            "too_wide",
+            1,
+            95,
+            &[(Kind::Match, 5), (Kind::Deletion, 40), (Kind::Match, 30)],
+        )]);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 20,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        generator.begin_segment(region(1, 1, 100));
+
+        let mut result = generator.next_locus(&reads);
+        while matches!(result, Ok(Some(_))) {
+            result = generator.next_locus(&reads);
+        }
+        let error = result.expect_err("a 41-position record exceeds a 20-position cap");
+        assert!(
+            matches!(error, LocusGenerationError::Walker(_)),
+            "got {error:?}"
+        );
+    }
+
+    /// Asking for a locus before any segment has begun is a normal `None`, not a
+    /// panic and not an error: the pairing of `begin_segment` and `next_locus` is
+    /// a contract nothing in the types enforces.
+    #[test]
+    fn next_locus_before_any_segment_yields_none() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        assert!(
+            generator
+                .next_locus(&reads)
+                .expect("no segment is not a failure")
+                .is_none()
+        );
+    }
+
+    /// **Beginning a segment abandons the walk in flight.** One segment at a
+    /// time is the contract; a half-drained walk of a region nobody is asking
+    /// about must not leak into the next one's stream.
+    #[test]
+    fn beginning_a_segment_abandons_the_walk_in_flight() {
+        let (_reference_dir, _bam_dir, reads) =
+            sample_reads_with(&[read_named_with_length("r", 0, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        generator.begin_segment(region(0, 1, 100));
+        let first = generator
+            .next_locus(&reads)
+            .expect("the walk succeeds")
+            .expect("the read covers the region");
+        assert_eq!(first.region.start, Position(10));
+
+        generator.begin_segment(region(0, 1, 100));
+        let restarted = generator
+            .next_locus(&reads)
+            .expect("the walk succeeds")
+            .expect("the second segment starts over");
+        assert_eq!(
+            restarted.region.start,
+            Position(10),
+            "the new segment starts at its own first covered position"
+        );
     }
 }

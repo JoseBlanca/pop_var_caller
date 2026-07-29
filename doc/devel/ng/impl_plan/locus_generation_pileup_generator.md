@@ -201,7 +201,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   A4 left a `debug_assert` in `coverage_of` stating the envelope; **this step is what makes it
   provable** rather than hopeful, so the assert stays as documentation of the invariant and the
   rejection is the enforcement.
-- ☐ **C2 — the region walk. Own commit, do not bundle.** `begin_segment` records the region and
+- ✅ **C2 — the region walk. Own commit, do not bundle.** `begin_segment` records the region and
   opens nothing (it cannot fail; opening a query can, so the first `next_locus` is where an
   `IngestError` surfaces). The query is `[region.start, region.end + max_record_span]` — the halo,
   without which a record whose footprint crosses the boundary silently loses the support lying

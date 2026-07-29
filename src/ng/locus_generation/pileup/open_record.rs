@@ -798,6 +798,19 @@ impl OpenPileupRecordTable {
         self.refold_ids_buf.clear();
     }
 
+    /// The lowest anchor position still open, or `None` when nothing is —
+    /// **ng's addition, C2 (plan 3)**, and the whole open-record half of the
+    /// region walk's stop rule.
+    ///
+    /// The table is keyed by anchor, so "is any record anchored at or before
+    /// the region's end still open?" is one `BTreeMap` first-key lookup rather
+    /// than a scan. It has to be the *anchor* and not the footprint: a record
+    /// anchored inside the region is the region's to emit however far past the
+    /// boundary its footprint runs (spec §2).
+    pub(super) fn first_open_anchor(&self) -> Option<u32> {
+        self.records.keys().next().copied()
+    }
+
     /// Drain every record whose footprint is fully behind the
     /// walker (`pos + ref_span ≤ walker_pos`), in coordinate
     /// order. Used by the walker's `close_aged_records` step.

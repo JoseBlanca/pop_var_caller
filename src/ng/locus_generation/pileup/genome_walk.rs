@@ -76,6 +76,23 @@ where
     /// call has returned an error. Both terminal states stop the
     /// iterator from doing further work.
     done: bool,
+    /// The last position worth walking, or `None` for production's
+    /// unbounded walk — **ng's addition, C2 (plan 3).**
+    ///
+    /// A region walk queries a halo of `max_record_span` past the region's
+    /// end, so a record anchored inside the region still sees the reads that
+    /// fold into it from beyond the boundary (spec §2). Querying the halo is
+    /// not enough: the walk has no right bound of its own, so it would walk
+    /// all 5,000 halo positions at full depth, finalise every record in them
+    /// and throw them away at the region clamp — a tax that, with regions
+    /// tiling the genome, can exceed the region interiors.
+    ///
+    /// So the walk stops once it is past this position **and nothing anchored
+    /// at or before it is still open**. The second half is what makes the stop
+    /// safe rather than merely early: a record anchored inside the region can
+    /// have a footprint running far past the boundary, and it is not finished
+    /// until the walker has passed all of it.
+    stop_after: Option<u32>,
 }
 
 impl<I, F> PileupWalker<I, F>
@@ -100,7 +117,41 @@ where
             state,
             pending: VecDeque::new(),
             done: false,
+            stop_after: None,
         }
+    }
+
+    /// Stop the walk once it is past `pos` and no record anchored at or
+    /// before `pos` is still open — the region walk's right bound
+    /// ([`stop_after`](Self::stop_after)).
+    ///
+    /// Consuming, so a bounded walk reads as one expression at the call site
+    /// and an unbounded one needs no argument at all: production's `run` is
+    /// unchanged, which is what keeps the stage-1 differential comparing like
+    /// with like.
+    pub fn stopping_after(mut self, pos: u32) -> Self {
+        self.stop_after = Some(pos);
+        self
+    }
+
+    /// Whether the walk has passed its right bound with nothing left that
+    /// could still belong to the region.
+    ///
+    /// **Both halves matter.** `walker_pos > stop` alone would cut a record
+    /// anchored inside the region short of its own footprint — the long
+    /// deletions the halo exists for are exactly the records still open here.
+    /// The open-record table is keyed by anchor, so "anything anchored at or
+    /// before `stop`" is its first key.
+    fn reached_stop(&self) -> bool {
+        let Some(stop) = self.stop_after else {
+            return false;
+        };
+        self.state.walker_pos > stop
+            && self
+                .state
+                .open_records
+                .first_open_anchor()
+                .is_none_or(|anchor| anchor > stop)
     }
 
     /// Cumulative counters for the run so far. Safe to call
@@ -115,6 +166,18 @@ where
     /// the remaining chromosome and sets `done = true`.
     fn fill_pending(&mut self) -> Result<(), WalkerError> {
         loop {
+            // Terminal condition (ng's, C2): the walk is past its right bound
+            // and nothing anchored at or before it is still open. Flushed the
+            // same way end-of-input is — the records still open are anchored
+            // past the bound, so the region clamp discards them, but they are
+            // emitted rather than dropped on the floor so the clamp can count
+            // them.
+            if self.reached_stop() {
+                self.state.flush_chromosome_into(&mut self.pending)?;
+                self.done = true;
+                return Ok(());
+            }
+
             // Terminal condition: no more reads to pull and the
             // active set is empty. Stopping at "reads empty" alone
             // would leak open records whose anchors sit ahead of

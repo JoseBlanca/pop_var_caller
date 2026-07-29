@@ -465,6 +465,15 @@ pub enum LocusGenerationError {
     /// A reference fetch failed — a broken reference, or a region past a contig end.
     #[error("reference fetch failed during locus generation")]
     Reference(#[from] RefSeqError),
+    /// The pileup walk failed: a malformed read, reads out of coordinate order, a
+    /// record wider than the span cap, or an exhausted chain-id space. Fatal and
+    /// terminal for the walk that raised it
+    /// (`locus_generation_pileup.md` §7).
+    ///
+    /// None of the three variants above covers it — they name the *inputs* failing,
+    /// and this names the walk over inputs it already accepted.
+    #[error("the pileup walk failed during locus generation")]
+    Walker(#[from] pileup::WalkerError),
 }
 
 /// The running tally — "no silent caps": every region and every base is accounted for, so
