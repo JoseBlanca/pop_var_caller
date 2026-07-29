@@ -148,7 +148,7 @@ def _(Path, mo, os, pd):
     rg_table = pd.DataFrame(
         _rg_rows,
         columns=[
-            "read_group", "sample", "library", "library_origin",
+            "read_group", "rg_id", "sample", "library", "library_origin",
             "experiment", "experiment_origin", "platform", "file",
         ],
     )

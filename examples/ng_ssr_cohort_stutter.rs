@@ -299,8 +299,9 @@ fn run_cohort(
     for (id, group) in read_groups.iter() {
         writeln!(
             out,
-            "#rg\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "#rg\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             id.get(),
+            group.id,
             group.sample,
             group.library.value,
             origin_label(group.library.origin),
@@ -310,9 +311,12 @@ fn run_cohort(
             group.file.display(),
         )?;
     }
+    // `read_group` is minted per run and means nothing across runs; `(file, rg_id)` is the stable
+    // identity, because the SAM specification makes `@RG ID` unique within its file. Anything that
+    // merges the output of two runs — a batched cohort, say — has to renumber on that pair.
     writeln!(
         out,
-        "#rg_columns\tread_group\tsample\tlibrary\tlibrary_origin\texperiment\t\
+        "#rg_columns\tread_group\trg_id\tsample\tlibrary\tlibrary_origin\texperiment\t\
          experiment_origin\tplatform\tfile"
     )?;
     writeln!(
