@@ -309,7 +309,44 @@ def _(MIN_LOCUS_DEPTH, np, pd, raw, rg_table, unit_sel):
         comp["ref_len"], bins=LEN_EDGES, labels=LEN_LABELS, right=False, ordered=True
     )
     PERIOD_NAME = {1: "mono", 2: "di", 3: "tri", 4: "tetra", 5: "penta", 6: "hexa"}
-    return LEN_LABELS, PERIOD_NAME, comp
+    PERIODS = [1, 2, 3, 4, 5, 6]
+    return LEN_LABELS, PERIOD_NAME, PERIODS, comp
+
+
+@app.cell
+def _(LEN_LABELS, PERIODS, np, plt):
+    # A period × tract-length grid, the axis this whole question lives on. Shared with the human
+    # bake-off dashboard deliberately: the same two dimensions, read the same way, so a number seen
+    # in one is comparable with a number seen in the other.
+    def empty_grid():
+        return np.full((len(PERIODS), len(LEN_LABELS)), np.nan)
+
+    def annotate_grid(ax, grid, cmap, norm, fmt, ncnt=None):
+        """Write each finite cell's value, picking white or dark text by the cell's luminance so
+        the number stays legible on pale and saturated fills alike."""
+        for i in range(grid.shape[0]):
+            for j in range(grid.shape[1]):
+                v = grid[i, j]
+                if not np.isfinite(v):
+                    continue
+                r, g, b, _ = cmap(norm(v))
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                txt = fmt.format(v)
+                if ncnt is not None and np.isfinite(ncnt[i, j]):
+                    txt = f"{txt}\nn={int(ncnt[i, j]):,}"
+                ax.text(
+                    j, i, txt, ha="center", va="center", fontsize=6.2,
+                    color="white" if lum < 0.5 else "#222",
+                )
+
+    def grid_axes(ax, period_label):
+        ax.set_xticks(range(len(LEN_LABELS)))
+        ax.set_xticklabels(LEN_LABELS, rotation=45, ha="right", fontsize=7.5)
+        ax.set_yticks(range(len(PERIODS)))
+        ax.set_yticklabels([period_label(p) for p in PERIODS], fontsize=8)
+        ax.set_xlabel("reference tract length (bp)")
+
+    return annotate_grid, empty_grid, grid_axes
 
 
 @app.cell
@@ -495,6 +532,73 @@ def _(comp, mo, np, pd):
 
 @app.cell
 def _(
+    LEN_LABELS,
+    MIN_CELL_READS,
+    Normalize,
+    PERIODS,
+    PERIOD_NAME,
+    annotate_grid,
+    comp,
+    empty_grid,
+    grid_axes,
+    mo,
+    np,
+    plt,
+):
+    # SECTION 2 — the onset, as a period × length grid. This is the shape of the answer: a single
+    # number per cell, cohort-pooled, read straight off two axes. The per-sample curves that follow
+    # answer a different question (do samples agree?) and are much harder to read for this one.
+    def onset_grid_figure():
+        off = empty_grid()
+        n = empty_grid()
+        for i, period in enumerate(PERIODS):
+            for j, band in enumerate(LEN_LABELS):
+                g = comp[(comp["period"] == period) & (comp["len_band"] == band)]
+                tot = g["reads"].sum()
+                if tot < MIN_CELL_READS:
+                    continue
+                n[i, j] = tot
+                off[i, j] = g.loc[g["off_mode"] != 0, "reads"].sum() / tot
+
+        fig, ax = plt.subplots(figsize=(9.5, 4.2))
+        cmap = plt.get_cmap("Blues")
+        # Capped at the 95th percentile so one saturated cell does not flatten the gradient the
+        # onset is read from; the annotations carry the true value regardless.
+        finite = off[np.isfinite(off)]
+        vmax = max(float(np.nanpercentile(finite, 95)) if finite.size else 0.2, 0.05)
+        norm = Normalize(vmin=0, vmax=vmax)
+        im = ax.imshow(np.clip(off, 0, vmax), cmap=cmap, norm=norm, aspect="auto")
+        fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02).set_label(
+            "off-mode read fraction", fontsize=8.5
+        )
+        annotate_grid(ax, off, cmap, norm, "{:.1%}", ncnt=n)
+        grid_axes(ax, lambda p: f"{PERIOD_NAME.get(p, p)} ({p})")
+        ax.set_title(
+            "Stutter by period × tract length — cohort-pooled off-mode fraction",
+            fontweight="bold",
+            fontsize=11,
+        )
+        fig.tight_layout()
+        return fig
+
+    mo.vstack(
+        [
+            mo.md(
+                "## 2 · From what length does stuttering start to matter\n"
+                "One cell per (period, tract length), pooled over the cohort: the fraction of "
+                "complete reads sitting away from their own unit's modal length. Read the **onset** "
+                "as the column where a row stops being pale — it is not one length for all periods, "
+                "which is the whole point of putting both axes on the same picture. Cells with "
+                f"fewer than **{MIN_CELL_READS}** complete reads are left blank."
+            ),
+            onset_grid_figure(),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(
     DUP_CMAP,
     GREY,
     LEN_LABELS,
@@ -508,9 +612,9 @@ def _(
     per_sample,
     plt,
 ):
-    # SECTION 2 — the onset. Off-mode fraction against tract length, one line per sample, faceted
-    # by period. Lines are coloured by duplicate rate so the PCR question is answered by looking:
-    # if amplification drives stutter, the dark lines separate upward.
+    # SECTION 2b — the same axis, one line per sample. Lines are coloured by duplicate rate so the
+    # PCR question is answered by looking: if amplification drives stutter, the dark lines separate
+    # upward.
     def onset_curves_figure():
         dup = (
             meta.set_index("sample")["dup_pct"].to_dict() if not meta.empty else {}
@@ -557,10 +661,11 @@ def _(
     mo.vstack(
         [
             mo.md(
-                "## 2 · From what length does stuttering start to matter\n"
-                "One line per sample, faceted by motif period, coloured by duplicate rate. Read "
-                "the **onset** as the length band where a period's lines lift off the floor — it "
-                f"differs by period, which is why this is not one curve. Cells with fewer than "
+                "### 2b · The same thing per sample\n"
+                "One line per sample, faceted by motif period, coloured by duplicate rate. The grid "
+                "above answers *where* stutter starts; this answers *whether samples agree about "
+                "it*. Fifty-one lines is a thicket by design — what to read is whether the dark "
+                f"(high-duplicate) lines sit above the pale ones. Cells with fewer than "
                 f"**{MIN_CELL_READS}** complete reads are skipped."
             ),
             onset_curves_figure(),
@@ -776,6 +881,45 @@ def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
         fig.tight_layout()
         return fig
 
+    # The headline of this section as its own chart rather than a percentage buried in six panel
+    # titles: whether slippage moves the tract by whole motif units is a claim the read model rests
+    # on, so it deserves to be readable at a glance.
+    def whole_unit_figure():
+        off = comp[comp["off_mode"] != 0].copy()
+        off["whole_unit"] = off["off_mode"] % off["period"] == 0
+        periods, fracs, counts = [], [], []
+        for period in sorted(off["period"].unique()):
+            if period > 6:
+                continue
+            g = off[off["period"] == period]
+            tot = g["reads"].sum()
+            if tot < 100:
+                continue
+            periods.append(period)
+            fracs.append(g.loc[g["whole_unit"], "reads"].sum() / tot)
+            counts.append(int(tot))
+
+        fig, ax = plt.subplots(figsize=(9, 3.4))
+        x = np.arange(len(periods))
+        # Period 1 is grey, not blue: it is 1.0 by construction and must not read as a measurement.
+        colours = [GREY if p == 1 else "#2a78d6" for p in periods]
+        ax.bar(x, fracs, color=colours, width=0.7)
+        for xi, (f, c, p) in enumerate(zip(fracs, counts, periods)):
+            label = f"{f:.0%}\nn={c:,}" + ("\nby construction" if p == 1 else "")
+            ax.text(xi, f + 0.02, label, ha="center", va="bottom", fontsize=7.5, color=INK)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{PERIOD_NAME.get(p, p)}\n({p} bp)" for p in periods], fontsize=8.5)
+        ax.set_ylabel("of off-mode reads")
+        ax.set_ylim(0, 1.28)
+        ax.yaxis.set_major_formatter(lambda v, _p: f"{v:.0%}")
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+        ax.set_title(
+            "Stutter moves the tract by whole motif units", fontweight="bold", fontsize=11
+        )
+        fig.tight_layout()
+        return fig
+
     mo.vstack(
         [
             mo.md(
@@ -784,8 +928,17 @@ def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
                 "a geometric over that step, so both are assumptions worth testing rather than "
                 "asserting. A read whose length difference is *not* a multiple of the period is "
                 "not slippage at all — it is an indel, an interruption, or a mis-delimited tract. "
-                "Each panel's title gives the whole-unit share; **period 1 is 1.0 by construction**, "
-                "since every integer is a multiple of one, so it carries no evidence either way."
+                "**Period 1 is 1.0 by construction** — every integer is a multiple of one — so it "
+                "is drawn in grey and carries no evidence either way."
+            ),
+            whole_unit_figure(),
+            mo.md(
+                "The model's premise holds where it can be tested: di and tri are 95–98% whole-unit "
+                "and hexa 93%. Tetra and penta fall short, and their non-unit residue sits at ±1 **bp** "
+                "— single-base indels rather than slippage, which is what the remainder *should* look "
+                "like if the model is right about the rest. Both cells are thin, so treat the shortfall "
+                "as a flag for the synthetic validation to settle, not as a measured rate.\n\n"
+                "Given whole-unit steps, this is the kernel:"
             ),
             shape_figure(),
             mo.md(
