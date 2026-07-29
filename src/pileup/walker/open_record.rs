@@ -506,7 +506,7 @@ pub(super) fn apply_events_to_ref_into(
 
     for ev in events {
         debug_assert!(
-            ev.anchor_pos() >= record_pos,
+            ev.anchor_pos() >= record_pos || matches!(ev, ReadEvent::Deletion { .. }),
             "apply_events_to_ref_into: event anchor {} below record_pos {}",
             ev.anchor_pos(),
             record_pos,
@@ -550,13 +550,21 @@ pub(super) fn apply_events_to_ref_into(
                 ref_cursor = offset + 1;
                 consumed_until = consumed_until.max(offset + 1);
             }
-            ReadEvent::Deletion { deleted_len, .. } => {
+            ReadEvent::Deletion {
+                anchor_ref_pos,
+                deleted_len,
+                ..
+            } => {
                 // DEL: keep the anchor base, drop the next
                 // `deleted_len` reference bases.
-                if offset < ref_len && offset >= consumed_until {
+                let anchor_inside = *anchor_ref_pos >= record_pos;
+                if anchor_inside && offset < ref_len && offset >= consumed_until {
                     allele_seq.push(ref_seq[offset as usize]);
                 }
-                let skip_until = offset + 1 + *deleted_len;
+                let skip_until = anchor_ref_pos
+                    .saturating_add(1)
+                    .saturating_add(*deleted_len)
+                    .saturating_sub(record_pos);
                 ref_cursor = skip_until;
                 consumed_until = consumed_until.max(skip_until);
             }
@@ -1170,6 +1178,53 @@ mod tests {
         let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&del));
         // Anchor at 100 ("A"), then 2 bases deleted, then "TA".
         assert_eq!(out, b"ATA");
+    }
+
+    /// A deletion **anchored before the record** contributes none of the bases it deleted,
+    /// and no anchor base — the anchor belongs to another record.
+    ///
+    /// `events_overlapping` does not clip a deletion to the window: one anchored before a
+    /// record, whose run reaches into it, comes back whole. The offset was then computed
+    /// with `saturating_sub`, which was silently wrong twice — it emitted `ref_seq[0]`, a
+    /// base the read had *deleted*, and skipped `offset + 1 + deleted_len`, one position
+    /// too many. Reachable in production: a mate-overlap collapse in the indel regime
+    /// removes the indel-carrying contributor, so no record opens at the anchor, and a
+    /// later record opens inside the deleted run. Found by ng's stage-1 walker differential
+    /// and by a debug assertion on real GIAB HG002 data at chr1:106,324,863.
+    ///
+    /// Here the record starts at 100 and the deletion is anchored at 98, removing 99–101.
+    /// Positions 100 and 101 are therefore absent, and the haplotype is the tail from 102.
+    #[test]
+    fn apply_events_deletion_anchored_before_the_record_emits_no_anchor_base() {
+        let ref_seq = b"ACGTA"; // positions 100..=104
+        let del = ReadEvent::Deletion {
+            anchor_ref_pos: 98,
+            deleted_len: 3,
+            bq_proxy: 30,
+        };
+        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&del));
+        // 99, 100, 101 deleted; 100 and 101 are inside the record, so the first two
+        // reference bases are gone and the haplotype is "GTA" (102, 103, 104).
+        // Before the fix this was "ATA": a leading "A" — the base at 100, which the read
+        // deleted — and one position over-consumed.
+        assert_eq!(out, b"GTA");
+    }
+
+    /// The whole deleted run can also fall *past* the record, which must consume every
+    /// remaining position and emit nothing after the anchor's neighbours.
+    #[test]
+    fn apply_events_deletion_anchored_before_the_record_can_consume_all_of_it() {
+        let ref_seq = b"ACGTA";
+        let del = ReadEvent::Deletion {
+            anchor_ref_pos: 98,
+            deleted_len: 20,
+            bq_proxy: 30,
+        };
+        let out = apply_events_to_ref(100, ref_seq, std::slice::from_ref(&del));
+        assert_eq!(
+            out, b"",
+            "every position of the record was deleted by this read"
+        );
     }
 
     #[test]

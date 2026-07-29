@@ -60,19 +60,24 @@
 //! | run | scale | result |
 //! |---|---|---|
 //! | synthetic, release, `PVC_PARITY_CASES=5000` | 20,000 cases | **1,010,515 records, 0 divergences** |
-//! | synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **492,224 records, 0 divergences**; 415 cases (4.2%) panicked — in *both* walkers, with the *same message* |
+//! | synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **505,979 records, 0 divergences**, **0 panics** |
 //! | GIAB HG002 10×, `chr1:1000000-1400000` | targeted TR bundle | **4,600 records, 0 divergences** |
 //! | GIAB HG002 300×, `chr1:100000000-120000000` | 20 Mb | **137,591 records, 0 divergences** |
 //! | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:3406886-3506886` | 100 kb | **96,260 records, 0 divergences** |
 //! | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:13806669-15092603` | 1.3 Mb | **198,673 records, 0 divergences** |
 //!
 //! 437,124 records of real sequencing data across two organisms, a BAM and a CRAM, 10× and
-//! 300×; 1.5 M more synthetic. The debug row is the one that says something the others
-//! cannot: at scale the two walkers agree not only on outputs but on **which inputs reach
-//! production's reachable `debug_assert!` and on what it says when they do** — 415 cases,
-//! both walkers, same message, every time. That is 4.2% of cases whose walks are *truncated*
-//! at the panic, so the record comparison for them covers a prefix; the release row is where
-//! those same cases run to completion.
+//! 300×; 1.5 M more synthetic.
+//!
+//! **The debug row used to read "415 cases (4.2%) panicked — in *both* walkers".** That was
+//! the production defect this harness found; it is now **fixed in both copies** (see
+//! `a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_deleted`), so the
+//! rate is zero and 13,755 more records are compared in debug than before, because those
+//! cases now run to completion instead of being truncated at the panic.
+//!
+//! The panic channel stays, and it is not vestigial: it is what verifies the fix was applied
+//! **identically to both copies**. A fix in one and not the other would show up here as a
+//! panic-message divergence rather than as a silent difference in bases.
 //!
 //! # This harness dies in plan 3, by design
 //!
@@ -709,9 +714,10 @@ fn ng_walks_identically_to_production() {
         "only {compared_records} records compared over {total} cases — the generator has \
          stopped producing walks worth comparing"
     );
-    // Reported, not asserted at a threshold: this is the size of the production defect
-    // this harness found, and it is expected to be a small minority of cases. Asserting
-    // it is non-zero would make the differential fail the day production is fixed.
+    // Reported, not asserted at a threshold. It was 4.2% before the production defect this
+    // harness found was fixed; it is 0 now. Deliberately **not** asserted to be zero
+    // either: the channel's job is to compare *how* the two walkers stop, not to claim
+    // nothing can stop them.
     eprintln!(
         "stage-1 differential: {compared_records} records compared over {total} cases; \
          {panicking_cases} cases ({:.1}%) reached production's reachable debug_assert! and \
@@ -720,37 +726,39 @@ fn ng_walks_identically_to_production() {
     );
 }
 
-/// **A production defect this differential found, pinned — and the reason `WalkOutcome`
-/// carries a panic flag at all.**
+/// **The regression test for the production defect this differential found** (owner:
+/// *"we should fix the production bug"*, 2026-07-29).
 ///
-/// `apply_events_to_ref_into` asserts in debug that every event it is handed is anchored
-/// at or after the record's own position
-/// ([open_record.rs](../../../pileup/walker/open_record.rs)). Spec §8 already records that
-/// `events_overlapping` **does not clip a deletion to the window** — "one anchored before
-/// the record can report an anchor below `record_pos`" — but not that production carries a
-/// `debug_assert!` requiring the opposite. It does, and it is reachable:
+/// `events_overlapping` **does not clip a deletion to the window** — spec §8 records that,
+/// and a deletion anchored before a record whose run reaches into it comes back whole. What
+/// nobody had recorded is that `apply_events_to_ref_into` then took
+/// `offset = anchor.saturating_sub(record_pos)`, and the saturation was **silently wrong
+/// twice**: it emitted `ref_seq[0]` — a base this read had *deleted* — and skipped
+/// `offset + 1 + deleted_len`, one position too many. In debug a `debug_assert!` caught it;
+/// in release it produced wrong allele bytes with no error, at exactly the long-deletion
+/// loci this port exists to get right.
+///
+/// The fixture is the three-read case the differential's generator produced, shrunk:
 ///
 /// 1. `pair3/Second` carries a deletion anchored at **17**, spanning 18–22.
-/// 2. At position 17 it overlaps its own mate, `pair3/First`. Mate-overlap reconciliation
-///    in the indel regime **collapses the pair to a single observation**, and the
-///    contributor that carried the indel is the one removed — so no record opens at 17.
-/// 3. `pair9/First`'s own deletion, anchored at **19**, then opens a record at 19 — inside
-///    the footprint of a deletion that never opened one.
-/// 4. Later, where `pair3/Second` matches again (23+), it folds into that record, and
-///    `events_overlapping` hands the fold its deletion **anchored at 17**, two positions
-///    before `record_pos`.
+/// 2. At 17 it overlaps its own mate. Mate-overlap reconciliation in the indel regime
+///    **collapses the pair to a single observation**, removing the contributor that carried
+///    the indel — so **no record opens at 17**.
+/// 3. `pair9/First`'s deletion, anchored at **19**, opens a record there — *inside* the
+///    footprint of a deletion that never opened one.
+/// 4. Where `pair3/Second` matches again (23+), it folds into that record, and the fold is
+///    handed its deletion anchored at 17, two positions before `record_pos`.
 ///
-/// In a debug build that panics. **In release, `saturating_sub` clamps the offset to 0**,
-/// so the deletion is applied at the record's first base — wrong allele bytes, no error,
-/// at exactly the long-deletion loci this port exists to get right.
+/// The fix computes the skip from **absolute coordinates** —
+/// `anchor + 1 + deleted_len - record_pos` — and emits the anchor base only when the anchor
+/// is inside the record. For a deletion anchored *within* its record that is arithmetically
+/// identical to the old expression, which is why it changed nothing else.
 ///
-/// Production is frozen, so this is **recorded, not fixed**. What this test asserts is the
-/// parity claim: the copy reaches the same precondition on the same input. Its value is
-/// that it fails if ng's copy ever stops behaving like production here — including when
-/// plan 3 changes the haplotype builder, which is precisely the code that would fix it.
+/// **This test is the parity claim and the regression together:** the two walkers must
+/// agree, and the record must show `pair3/Second` contributing none of the bases it
+/// deleted.
 #[test]
-#[cfg(debug_assertions)]
-fn both_walkers_panic_on_a_deletion_anchored_before_its_record() {
+fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_deleted() {
     fn read(
         qname: &str,
         role: ProductionMateRole,
@@ -826,29 +834,65 @@ fn both_walkers_panic_on_a_deletion_anchored_before_its_record() {
     let theirs = production_walk(&case);
     let ours = ng_walk(&case);
 
-    // **Pinned by cause, not by stoppage.** An earlier version asserted only that both
-    // walkers panicked, and a review demonstrated the hole by replacing ng's copy of this
-    // very assertion with an unrelated `panic!` — the test stayed green while its own doc
-    // claimed it checked that ng "reach[es] the same precondition". `open_record.rs`
-    // carries eight distinct `debug_assert!`s; naming this one is what tells them apart.
-    let message = theirs.panic_message.as_deref().unwrap_or_else(|| {
-        panic!(
-            "production should still reach its own debug_assert! on this input; if it no \
-             longer does, production has been fixed and this test is the record of what it \
-             used to do"
-        )
-    });
-    assert!(
-        message.contains("apply_events_to_ref_into: event anchor"),
-        "production stopped for a different reason than the one this test pins: {message}"
+    assert_eq!(
+        theirs.panic_message, None,
+        "the input that used to trip production's debug_assert! must now walk cleanly"
     );
     assert_eq!(
         ours.panic_message, theirs.panic_message,
-        "ng's copy is verbatim, so it must reach the *same* precondition on the same input"
+        "ng's copy carries the same fix, so it must stop — or not — the same way"
     );
+    assert_eq!(ours.records, theirs.records, "and the records must agree");
+
+    // The record at 19 is the one the defect corrupted: `pair9/First`'s deletion opens it
+    // spanning 19..=25, and `pair3/Second` folds in carrying a deletion anchored at 17
+    // whose run covers 18–22 — so of this record's seven positions it witnessed only
+    // 23, 24, 25.
+    let record = theirs
+        .records
+        .iter()
+        .filter_map(|item| item.as_ref().ok())
+        .find(|record| record.pos == 19)
+        .expect("pair9's deletion opens a record at 19");
+    let reference = &record.alleles[0].seq;
     assert_eq!(
-        ours.records, theirs.records,
-        "and the records emitted before the panic must agree"
+        reference.len(),
+        7,
+        "the record spans 19..=25: the anchor plus six deleted bases"
+    );
+
+    // **The wrong answer, named.** Every fixture read's `seq` is all `A`, so
+    // `pair3/Second`'s honest contribution to this record is its own three bases at 23, 24
+    // and 25 — the positions past the end of its own deletion — and nothing before them.
+    //
+    // Before the fix the saturated offset made the fold emit `ref_seq[0]` first: the base
+    // at **19**, which this read had deleted and never sequenced. So the allele was one
+    // base longer and began with a reference base borrowed from a position the read
+    // explicitly says is absent. Both spellings are written out here, because "the right
+    // bases are present" and "the wrong bases are gone" are different claims and a
+    // regression could satisfy either alone.
+    let witnessed: &[u8] = b"AAA";
+    let before_the_fix: Vec<u8> = [&reference[..1], witnessed].concat();
+    let folded: Vec<String> = record
+        .alleles
+        .iter()
+        .map(|allele| String::from_utf8_lossy(&allele.seq).to_string())
+        .collect();
+
+    assert!(
+        record.alleles.iter().any(|allele| allele.seq == witnessed),
+        "the read whose deletion covers 19–22 should contribute the three bases it \
+         witnessed ({}), but the record holds {folded:?}",
+        String::from_utf8_lossy(witnessed),
+    );
+    assert!(
+        !record
+            .alleles
+            .iter()
+            .any(|allele| allele.seq == before_the_fix),
+        "the record still holds {}, the pre-fix spelling: a leading base at 19 that this \
+         read had deleted. Records: {folded:?}",
+        String::from_utf8_lossy(&before_the_fix),
     );
 }
 

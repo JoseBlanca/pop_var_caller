@@ -53,9 +53,9 @@ verification": **0** — every number below was measured.
 
 ## 4. Open questions and assumptions
 
-1. **The production defect the harness found** (`apply_events_to_ref_into`'s reachable
-   `debug_assert!`, 4.2% of generated cases) is recorded, not fixed, because production is frozen.
-   Does it want a research note of its own? Carried to Checkpoint B.
+1. **The production defect the harness found** was carried to Checkpoint B and the owner chose to
+   **fix it** (2026-07-29). Applied to production and to ng.s copy in the same commit; see the
+   Milestone B impl report §4.
 
 ## 5. Top 3 priorities
 

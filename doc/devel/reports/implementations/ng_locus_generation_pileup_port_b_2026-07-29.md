@@ -84,7 +84,7 @@ Re-run after the review, since the generator changed:
 | run | scale | result |
 |---|---|---|
 | synthetic, release, `PVC_PARITY_CASES=5000` | 20,000 cases | **1,010,515 records, 0 divergences** |
-| synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **492,224 records, 0 divergences**; 415 cases (4.2%) panicked in *both*, with the same message |
+| synthetic, debug, `PVC_PARITY_CASES=2500` | 10,000 cases | **505,979 records, 0 divergences, 0 panics** (was 492,224 with 415 panics, before the §4 fix) |
 | GIAB HG002 10×, `chr1:1000000-1400000` | targeted TR bundle | **4,600 records, 0 divergences** |
 | GIAB HG002 300×, `chr1:100000000-120000000` | 20 Mb | **137,591 records, 0 divergences** |
 | tomato CRAM `SRR7279481.p1`, `SL4.0ch01:3406886-3506886` | 100 kb | **96,260 records, 0 divergences** |
@@ -92,7 +92,7 @@ Re-run after the review, since the generator changed:
 
 437,124 records of real sequencing data across two organisms, a BAM and a CRAM, 10× and 300×.
 
-## 4. The production defect this milestone found
+## 4. The production defect this milestone found — **and fixed** (owner, 2026-07-29)
 
 **`apply_events_to_ref_into`'s `debug_assert!` is reachable on a legal read stream**, and the
 release behaviour behind it is silently wrong.
@@ -100,7 +100,7 @@ release behaviour behind it is silently wrong.
 Spec §8 already records that `events_overlapping` **does not clip a deletion to the window** — "one
 anchored before the record can report an anchor below `record_pos`". What it does not record is that
 production asserts the opposite. The mechanism, shrunk from a generated case to three reads and
-pinned as `both_walkers_panic_on_a_deletion_anchored_before_its_record`:
+pinned as `a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_deleted`:
 
 1. a mate carries a deletion anchored at 17, spanning 18–22;
 2. at 17 it overlaps its own mate, and mate-overlap reconciliation **in the indel regime collapses
@@ -115,7 +115,49 @@ Debug panics. **Release `saturating_sub`s the offset to 0**, applying the deleti
 record's first base — wrong allele bytes, no error, at exactly the long-deletion loci this port
 exists to get right. ~4.2% of generated cases reach it.
 
-Production is frozen, so this is **recorded, not fixed**. It is a Checkpoint B question (§8).
+### The fix (owner: *"we should fix the production bug"*)
+
+`offset` is `anchor.saturating_sub(record_pos)`, and the saturation was wrong twice: it emitted
+`ref_seq[0]` — a base the read had deleted — and skipped `offset + 1 + deleted_len`, one position too
+many. The fix computes the skip from **absolute coordinates** and emits the anchor base only when the
+anchor is inside the record:
+
+```rust
+let anchor_inside = *anchor_ref_pos >= record_pos;
+if anchor_inside && offset < ref_len && offset >= consumed_until {
+    allele_seq.push(ref_seq[offset as usize]);
+}
+let skip_until = anchor_ref_pos
+    .saturating_add(1)
+    .saturating_add(*deleted_len)
+    .saturating_sub(record_pos);
+```
+
+**For a deletion anchored *inside* its record this is arithmetically identical** to
+`offset + 1 + deleted_len`, which is why nothing else moved. The `debug_assert!` is relaxed to permit
+a `Deletion` — and only a `Deletion` — anchored before the record, since `events_overlapping` clips
+matches but not deletions.
+
+**Blast radius, measured rather than estimated.** Applied to production *and* to ng's copy (which
+`copy_fidelity` requires to stay identical), the entire suite passed except **one test: the one
+written to pin the defect**, failing with the message written for exactly this moment. Nothing else
+in 2,652 tests moved.
+
+**Verified in both directions:**
+
+| | unfixed | fixed |
+|---|---|---|
+| debug, the three-read fixture | panics at `open_record.rs:508` | walks cleanly |
+| **release**, the three-read fixture | silently emits **`GAAA`** — a 4-base allele beginning with a `G` the read deleted | **`AAA`**, the three bases it witnessed |
+| debug soak, 10,000 cases | 415 panics (4.2%) | **0**, and 13,755 *more* records compared |
+| GIAB HG002 300× chr1:100–120 Mb, debug | panics | walks cleanly, 137,591 records, 0 divergences |
+
+**Regression coverage.** Production owns two unit tests on `apply_events_to_ref` directly
+(`apply_events_deletion_anchored_before_the_record_emits_no_anchor_base`, and the case where the
+deleted run consumes the whole record); ng's copy carries them verbatim; and the walk-level case is
+`a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_deleted`, which names **both**
+spellings — the right bases present *and* the pre-fix `GAAA` absent, because those are different
+claims and a regression could satisfy either alone.
 
 ## 5. Validation
 
@@ -125,7 +167,7 @@ Container (`./scripts/dev.sh`), at each commit:
 - `cargo clippy --all-targets --all-features -- -D warnings` — no diagnostics. *(It caught one real
   thing: `to_production` on a non-`Copy` type taking `self` by value. Renamed `into_production`,
   which also matches `AlignedRead::into_mapped_read`.)*
-- `cargo test --all-targets --all-features` — **2648 passed / 0 failed / 5 ignored** after the review fixes (2644 before), plus the
+- `cargo test --all-targets --all-features` — **2652 passed / 0 failed / 5 ignored** after the review fixes and the §4 production fix (2644 → 2648 → 2652), plus the
   pre-existing `benches/psp_writer_perf.rs:386` panic.
 - The soaks and real-data runs tabulated in §3.
 
@@ -190,14 +232,11 @@ enough to bite, and asserted (61 → 221); one generic `drive` replacing four co
 catch-unwind block, two of which had already drifted; and `into_production` given the runtime
 coverage it had none of.
 
-## 8. Checkpoint B — questions for the owner
+## 8. Checkpoint B — resolved and open
 
-1. **The production defect (§4).** Recorded, not fixed, because production is frozen. Worth knowing:
-   plan 3 replaces the haplotype builder that contains it, so the *ng* side stops being wrong as a
-   side effect — but production keeps mis-placing deletion bases at these loci until someone
-   decides to touch it. Does it want a research note of its own, or an entry in the production
-   defect list beside the partial-coverage ref-fill finding?
-2. **Milestone A's four questions are still open** — the copy banners, the "46 tests" in the plan and
+1. **The production defect (§4) — RESOLVED: fix it** (owner, 2026-07-29). Done, in both copies,
+   with the blast radius measured (§4) rather than estimated.
+2. **Milestone A.s four questions are still open** — the copy banners, the "46 tests" in the plan and
    the spec, the arch doc's file inventory, and whether `RefSeqFetcher` should be renamed and moved.
    None blocks plan 3.
 
