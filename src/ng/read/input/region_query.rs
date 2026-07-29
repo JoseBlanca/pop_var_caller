@@ -1643,11 +1643,13 @@ mod tests {
         let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, 30_000);
         // `Fasta`, not `Fai`: a CRAM needs the reference *bases* to decode against, so `open`
         // rejects a reference that cannot supply a path to them.
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("the fixture reference reads");
+        let reference = crate::ng::read::input::reference::RunReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("the fixture reference reads"),
+        );
 
         // Two regions far enough apart to be in different containers (the fixture writes ~30k
         // records per container over 400 kb).
@@ -1670,8 +1672,8 @@ mod tests {
         };
 
         // What each region looks like to a reader that has never decoded anything.
-        let cold_early = positions_of(&open(), early, &reference);
-        let cold_late = positions_of(&open(), late, &reference);
+        let cold_early = positions_of(&open(), early, reference.info());
+        let cold_late = positions_of(&open(), late, reference.info());
         assert!(!cold_early.is_empty(), "the early region is covered");
         assert_ne!(
             cold_early, cold_late,
@@ -1681,9 +1683,9 @@ mod tests {
 
         // One file, so all three queries share the pool — and therefore the cache.
         let file = open();
-        let warm_early = positions_of(&file, early, &reference);
-        let warm_late = positions_of(&file, late, &reference);
-        let warm_early_again = positions_of(&file, early, &reference);
+        let warm_early = positions_of(&file, early, reference.info());
+        let warm_late = positions_of(&file, late, reference.info());
+        let warm_early_again = positions_of(&file, early, reference.info());
 
         assert_eq!(warm_early, cold_early, "first query, cache cold");
         assert_eq!(

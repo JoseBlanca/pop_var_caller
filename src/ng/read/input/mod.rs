@@ -24,6 +24,7 @@
 pub mod merge;
 pub mod open_bam;
 pub mod read_groups;
+pub mod reference;
 pub mod region_query;
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ use crate::ng::read::input::read_groups::{
     ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, RecordOwner, SampleReadGroups,
     build_read_groups,
 };
+use crate::ng::read::input::reference::RunReference;
 use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
@@ -355,10 +357,16 @@ impl SampleReads {
     ///
     /// A per-file failure is wrapped with the position of the file that raised
     /// it, so a message can always name the culprit.
+    ///
+    /// **`reference` is the run's, not this sample's**, and that is what makes
+    /// a cohort affordable: a CRAM decodes against the reference bases, and
+    /// [`RunReference`] holds the one copy of them that every sample's every
+    /// file shares (`reference.rs`). A per-sample reference would put the whole
+    /// genome in memory once per sample.
     pub fn open(
         sample: &SampleReadGroups,
         read_groups: &ReadGroups,
-        reference: &ReferenceInfo,
+        reference: &RunReference,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
     ) -> Result<Self, IngestError> {
@@ -418,7 +426,7 @@ impl SampleReads {
     /// table being run-wide.
     pub fn open_only_sample(
         paths: &[PathBuf],
-        reference: &ReferenceInfo,
+        reference: &RunReference,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
     ) -> Result<Self, IngestError> {
@@ -1597,11 +1605,13 @@ mod tests {
             ],
             &[("rg1", Some("NA12878")), ("rg2", Some("NA12878"))],
         );
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("read reference");
+        let reference = RunReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
 
         let read_groups = build_read_groups(std::slice::from_ref(&cram_path)).expect("one sample");
         let [sample] = read_groups.read_groups_per_sample() else {
@@ -1870,11 +1880,13 @@ mod tests {
             ],
             &[("rg1", Some("NA12878")), ("rg2", Some("HG002"))],
         );
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("read reference");
+        let reference = RunReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
 
         let read_groups = build_read_groups(std::slice::from_ref(&cram_path)).expect("two samples");
         assert_eq!(read_groups.read_groups_per_sample().len(), 2);

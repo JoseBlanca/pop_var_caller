@@ -31,7 +31,6 @@ use noodles_cram as cram;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 
-use crate::bam::alignment_input::build_fasta_repository;
 use crate::bam::index_preflight::{
     AlignmentFileKind, AlignmentIndex, load_alignment_index, preflight_alignment_indexes,
 };
@@ -41,8 +40,8 @@ use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadGroupCounts,
 };
 use crate::ng::read::input::read_groups::ReadGroupResolution;
+use crate::ng::read::input::reference::{ReferenceBasesError, RunReference};
 use crate::ng::ref_seq::RawRefSeq;
-use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::GenomeRegion;
 
 use super::AlignmentFileError;
@@ -134,7 +133,13 @@ pub struct AlignmentFile {
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
     crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
-    /// The reference bases CRAM slice decoding consults, built once at open.
+    /// The reference bases CRAM slice decoding consults — **the run's one
+    /// repository**, taken from [`RunReference`] at open, not built here.
+    ///
+    /// A handle, not a copy: `fasta::Repository` is an `Arc` inside, so every
+    /// file in a run points at the same whole-contig cache. That is what keeps
+    /// a cohort's resident reference at `genome` rather than `files × genome`
+    /// (see `reference.rs`, and the note at the open site).
     ///
     /// `None` for a BAM, which stores its own sequences and needs no
     /// reference to decode.
@@ -309,7 +314,7 @@ impl AlignmentFile {
     /// wrap the result itself.
     pub fn open(
         path: &Path,
-        reference: &ReferenceInfo,
+        reference: &RunReference,
         filter_config: ReadFilterConfig,
         build_index_if_missing: bool,
         resolution: ReadGroupResolution,
@@ -343,7 +348,7 @@ impl AlignmentFile {
                 detail: bad.detail,
             })?;
         file_contigs
-            .first_disagreement(&reference.contig_list())
+            .first_disagreement(&reference.info().contig_list())
             .map_err(|detail| AlignmentFileError::ContigReconcile {
                 path: path.to_path_buf(),
                 detail,
@@ -379,9 +384,18 @@ impl AlignmentFile {
         //    by `SampleReads` (spec §4, §8).
         //
         // 5. A CRAM needs the reference *bases* to decode at all, so the
-        //    repository is built here — once — and a reference that cannot
-        //    supply one is a hard error now rather than a mystery at the first
-        //    query.
+        //    repository is taken here — from the **run's** `RunReference`, not
+        //    built per file — and a reference that cannot supply one is a hard
+        //    error now rather than a mystery at the first query.
+        //
+        //    Asking `RunReference` rather than building here is the whole of
+        //    the memory fix. A `fasta::Repository` memoises whole contigs and
+        //    never evicts, so a per-file repository costs `files × genome`:
+        //    measured at ~752 MiB per open file against the 746 MiB tomato
+        //    reference, which is a 51-sample cohort dying at 38 GiB. Sharing
+        //    the run's one repository makes that `genome`, once. The type
+        //    builds it lazily on this first call, so a BAM-only run still
+        //    never touches the FASTA.
         let crai_by_contig = match &index {
             AlignmentIndex::Crai(crai) => group_crai_by_contig(crai, file_contigs.entries.len()),
             _ => Vec::new(),
@@ -389,17 +403,15 @@ impl AlignmentFile {
 
         let reference_repository = match AlignmentFileKind::from_path(path) {
             Some(AlignmentFileKind::Cram) => {
-                let fasta = reference.fasta_path.as_deref().ok_or_else(|| {
-                    AlignmentFileError::CramNeedsReferenceFasta {
+                Some(reference.bases().map_err(|source| match source {
+                    ReferenceBasesError::NoFasta => AlignmentFileError::CramNeedsReferenceFasta {
                         path: path.to_path_buf(),
-                    }
-                })?;
-                Some(
-                    build_fasta_repository(fasta).map_err(|source| AlignmentFileError::Open {
-                        path: fasta.to_path_buf(),
+                    },
+                    ReferenceBasesError::Build { fasta, source } => AlignmentFileError::Open {
+                        path: fasta,
                         source: std::io::Error::other(source),
-                    })?,
-                )
+                    },
+                })?)
             }
             _ => None,
         };
@@ -1188,11 +1200,13 @@ mod tests {
 
         // The `Fasta` arm, because a CRAM can only be decoded against the
         // bases — see `a_cram_against_a_fai_only_reference_is_refused_at_open`.
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("read reference");
+        let reference = RunReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
         let file = AlignmentFile::open(
             &cram_path,
             &reference,
@@ -1723,11 +1737,13 @@ mod tests {
         .expect("the BAM opens");
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&records);
-        let cram_reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("read reference");
+        let cram_reference = RunReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
         let cram = AlignmentFile::open(
             &cram_path,
             &cram_reference,
@@ -1779,10 +1795,12 @@ mod tests {
     fn a_cram_against_a_fai_only_reference_is_refused_at_open() {
         let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram(&one_read());
 
-        let fai_only = read_reference_info(ReferenceSource::Fai(
-            crate::ng::reference_info::sibling_fai_path(&fasta),
-        ))
-        .expect("read reference");
+        let fai_only = RunReference::from(
+            read_reference_info(ReferenceSource::Fai(
+                crate::ng::reference_info::sibling_fai_path(&fasta),
+            ))
+            .expect("read reference"),
+        );
 
         let error = AlignmentFile::open(
             &cram_path,
@@ -1828,11 +1846,13 @@ mod tests {
         const READS: usize = 30_000;
 
         let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, READS);
-        let reference = read_reference_info(ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        })
-        .expect("read reference");
+        let reference = RunReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
         let file = AlignmentFile::open(
             &cram_path,
             &reference,
@@ -1949,7 +1969,7 @@ mod tests {
         // Only now, against a reference read through the FASTA arm and so
         // carrying real digests, does the fault surface.
         let (_verified_dir, verified) = fixture_reference(true);
-        let error = check_assembly(file.path(), file.sq_md5s(), &verified)
+        let error = check_assembly(file.path(), file.sq_md5s(), verified.info())
             .expect_err("the wrong assembly is caught, after the fact");
         assert_eq!(error.contig, "chr1");
         assert_eq!(error.observed, [0xff; 16]);
@@ -2128,7 +2148,7 @@ mod tests {
         assert!(
             contig_list(&permuted)
                 .expect("no M5 tags")
-                .first_disagreement(&reference.contig_list())
+                .first_disagreement(&reference.info().contig_list())
                 .is_err(),
             "the ordered comparison must reject what the probe accepted"
         );
