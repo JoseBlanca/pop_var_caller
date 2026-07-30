@@ -1351,7 +1351,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
 ///
 /// The `ReadWitness` half of the comparator is **the walk's own**
 /// (`open_record::witness_order`, lifted to `pub(super)` for this) rather than a second
-/// spelling here: `finalise` sorts `ObservationRow`s and this sorts `SequenceObservation`s, so
+/// spelling here: `finalise` sorts `KeyedObservation`s and this sorts `SequenceObservation`s, so
 /// the loop cannot be shared, but the one piece that could silently drift is.
 /// `the_projection_orders_rows_as_the_walk_does` covers the rest, by asserting that sorting
 /// an ng locus's rows with this function leaves them where the walk emitted them.
@@ -2945,7 +2945,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 /// **The projection lays production's record out the way the walk lays out ng's** — the
 /// promise [`sort_rows`] makes, checked rather than commented.
 ///
-/// `finalise` sorts `ObservationRow`s and [`sort_rows`] sorts `SequenceObservation`s, so the two
+/// `finalise` sorts `KeyedObservation`s and [`sort_rows`] sorts `SequenceObservation`s, so the two
 /// loops cannot be shared even though the `ReadWitness` comparator is (`witness_order`,
 /// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
 /// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted

@@ -236,7 +236,7 @@ pub(super) struct ObservationKey {
 /// One row of a finished record, accumulated across the reads that share its
 /// [`ObservationKey`].
 #[derive(Debug, Clone)]
-pub(super) struct ObservationRow {
+pub(super) struct KeyedObservation {
     pub key: ObservationKey,
     pub support: AlleleSupportStats,
     /// The chain ids of the reads in this row — **absent for a read that agreed with the
@@ -515,11 +515,11 @@ impl OpenPileupRecord {
     /// input in two processes: delete that sort and it fails; delete `finalise`'s *row* sort
     /// and it stays green. No test inside one process can see any of this, because `ahash`
     /// seeds once per process.
-    fn observation_rows(&self, record_end_exclusive: u32) -> Vec<ObservationRow> {
+    fn observation_rows(&self, record_end_exclusive: u32) -> Vec<KeyedObservation> {
         let mut ids: Vec<u32> = self.folded_reads.keys().copied().collect();
         ids.sort_unstable();
 
-        let mut rows: Vec<ObservationRow> = Vec::new();
+        let mut rows: Vec<KeyedObservation> = Vec::new();
         for read_id in ids {
             // PANIC-FREE: the id came from this map's own keys a few lines above, and
             // nothing between then and here mutates the map.
@@ -546,7 +546,7 @@ impl OpenPileupRecord {
             let row = match existing {
                 Some(index) => &mut rows[index],
                 None => {
-                    rows.push(ObservationRow {
+                    rows.push(KeyedObservation {
                         key: ObservationKey {
                             bases: bases.to_vec(),
                             read_witness,
