@@ -28,6 +28,7 @@ use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
 use super::decompose::ReadEvent;
 use super::errors::WalkerError;
+use super::witnessed_ref::{WitnessedRefPositions, WitnessedRefRuns};
 use crate::ng::locus_generation::{
     LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
@@ -50,24 +51,6 @@ use crate::ng::locus_generation::{
 /// container (e.g. an arena-pooled map or a perfect hash on
 /// dense `read_id` ranges) can be evaluated.
 const RECORD_FOLDED_READS_INITIAL_CAPACITY: usize = 32;
-
-/// A stretch of reference positions, **1-based and inclusive of both ends** —
-/// the convention [`PreparedRead::alignment_start`](super::PreparedRead) and
-/// `alignment_end` already use, so a span built from a read's own coordinates
-/// needs no adjustment.
-///
-/// Deliberately **not** [`GenomeRegion`](crate::ng::types::GenomeRegion), which
-/// carries a `ContigId` and a `u64` this fold has no use for: an open record is
-/// already pinned to one contig, and every coordinate inside the walk is `u32`.
-///
-/// *Invariant:* `start <= end`. There is no empty span — a read that witnessed
-/// nothing inside a record does not fold into it at all, so "no positions" is
-/// the absence of a `RefSpan`, never a degenerate one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct RefSpan {
-    pub start: u32,
-    pub end: u32,
-}
 
 /// The support one allele bucket has accumulated — **ng's own**, and production's
 /// [`AlleleSupportStats`](crate::pileup_record::AlleleSupportStats) **minus
@@ -162,10 +145,20 @@ pub(super) struct RecordWitnessCounts {
 /// The clamp was **one-sided** as first written: the left edge was pulled up to
 /// `record_pos` but never pushed down to `record_end_exclusive`, so an extent lying entirely
 /// right of the footprint yielded an `offset_in_locus` past the end of the locus paired with
-/// `positions_covered: 0` — a run of no positions, which both [`RefSpan`] and
+/// `positions_covered: 0` — a run of no positions, which both [`WitnessedRefPositions`] and
 /// [`ReadWitness`] document as not existing. Unreachable from the fold today, because a
 /// read that witnessed nothing inside a record does not fold into it; the `debug_assert`
 /// says so, and the clamp means a future caller gets a truthful answer rather than that one.
+///
+/// # It reads the enclosing extent, and **C2 is what makes that stop being enough**
+///
+/// The input is a *set* of runs since C1, and this body still measures only its outermost
+/// edges — first run's start, last run's end. That is exact today and only today:
+/// `apply_events_into` still throws away a witness with a hole in it, so every set
+/// reaching here holds **exactly one run**, and its enclosing extent is itself. C2 replaces
+/// the two edges below with a walk over `runs()`, clamping **each run** into the footprint;
+/// clamping the enclosing extent instead is how the hole gets swallowed, which is the whole
+/// thing this milestone removes ([Milestone B review](../../../../doc/devel/reports/reviews/ng_locus_witness_representation_b_2026-07-30.md) M3).
 ///
 /// # The `u16` narrowing is bounded by config, not by a constant
 ///
@@ -184,11 +177,13 @@ pub(super) struct RecordWitnessCounts {
 /// no data can occupy. **This is the one knob where ng's constant is not simply production's**
 /// — inheriting it "by name" would inherit the hazard.
 ///
-/// So the `debug_assert` below is the invariant's statement and **C1 is its enforcement**;
-/// until C1 lands, ng's walker is reachable only from tests and the default 5,000 leaves
-/// thirteen-fold headroom.
+/// So the `debug_assert` below restates an envelope
+/// [`PileupGeneratorConfig::check`](super::generator::PileupGeneratorConfig::check) already
+/// **enforces**, by rejecting a `max_record_span` above
+/// [`MAX_RECORD_SPAN_CEILING`](super::generator::MAX_RECORD_SPAN_CEILING) before any locus is
+/// walked. The assertion is what makes the two statements provably the same one.
 pub(super) fn witness_of(
-    witnessed: RefSpan,
+    witnessed: &WitnessedRefPositions,
     record_pos: u32,
     record_end_exclusive: u32,
 ) -> ReadWitness {
@@ -197,17 +192,21 @@ pub(super) fn witness_of(
         "record footprint {record_pos}..{record_end_exclusive} is wider than a `u16` run can \
          describe; `max_record_span` needs a ceiling (C1)",
     );
+    // The set is never empty — that is `WitnessedRefPositions`' own invariant — so both
+    // ends exist. Half-open, so `last_end` is one past the last position witnessed.
+    let mut runs = witnessed.runs();
+    let (first_start, mut last_end) = runs.next().expect("a witnessed set is never empty");
+    for (_, end) in runs {
+        last_end = end;
+    }
     debug_assert!(
-        witnessed.start < record_end_exclusive && witnessed.end >= record_pos,
-        "witnessed extent {witnessed:?} does not intersect the footprint \
+        first_start < record_end_exclusive && last_end > record_pos,
+        "witnessed extent {first_start}..{last_end} does not intersect the footprint \
          {record_pos}..{record_end_exclusive}; a read that witnessed nothing inside a record \
          does not fold into it",
     );
-    let first = witnessed.start.clamp(record_pos, record_end_exclusive);
-    let past_last = witnessed
-        .end
-        .saturating_add(1)
-        .clamp(first, record_end_exclusive);
+    let first = first_start.clamp(record_pos, record_end_exclusive);
+    let past_last = last_end.clamp(first, record_end_exclusive);
     if first <= record_pos && past_last >= record_end_exclusive {
         return ReadWitness::Complete;
     }
@@ -371,7 +370,12 @@ fn note_no_observation(reads_without_observation: &mut Vec<u32>, read_id: u32) {
 /// haplotype seq under the record). `chain_id` is also stored here
 /// so the per-bucket chain id set can be projected at `finalise()`
 /// time straight from the current fold state — see [`OpenAllele`].
-#[derive(Debug, Clone, Copy)]
+///
+/// **No longer `Copy` since C1**, because `witnessed` is a set rather than two `u32`s.
+/// The re-place in [`refold_live_reads`] used to lift the whole state out with a `*`; it
+/// now copies the four scalar facts out of a borrow and **refills the witness in place**,
+/// which is what keeps a widen from allocating for a read whose witness has spilled.
+#[derive(Debug, Clone)]
 struct FoldedReadState {
     allele_index: usize,
     contribution: AlleleSupportStats,
@@ -411,7 +415,12 @@ struct FoldedReadState {
     /// its own deletion at the widening position no longer carries an extent measured
     /// against a footprint the record has outgrown. A4 resolves `ReadWitness` from it,
     /// and would otherwise have reported a wrong depth with no error.
-    witnessed: RefSpan,
+    ///
+    /// **C1 widened it from one run to a set** ([`WitnessedRefPositions`]). Nothing it can
+    /// hold has changed yet — `apply_events_into` still refuses a witness with a hole in it,
+    /// so every set here holds exactly one run — but the field can now *say* two, which is
+    /// what C3 needs before it can stop discarding the read that saw them.
+    witnessed: WitnessedRefPositions,
 }
 
 impl OpenPileupRecord {
@@ -463,12 +472,25 @@ impl OpenPileupRecord {
     /// have to line up: `bases` is in read coordinates and an insertion makes it longer
     /// than the run it covers, which simply means it cannot equal the reference slice, and
     /// the read keeps its id. Correct, and for the right reason.
+    ///
+    /// **It reads the enclosing extent of the witness, and C3 is what makes that a
+    /// question.** Every set reaching here holds exactly one run — `apply_events_into`
+    /// still answers "nothing" for a witness with a hole — so the enclosing extent *is*
+    /// the run. Once C3 lets a holed read through, "the reference over the positions the
+    /// read witnessed" stops being one slice, and `bases` cannot be cut per run anyway: it
+    /// is in read coordinates, where an insertion adds bytes no position accounts for. C3
+    /// owns that decision; C1 must not pre-empt it, so the extent is read here exactly as
+    /// the inclusive `RefSpan` was.
     fn read_agreed_with_reference(&self, state: &FoldedReadState) -> bool {
         let reference = &self.alleles[0].seq;
-        let first = state.witnessed.start.saturating_sub(self.pos) as usize;
-        let past_last = (state.witnessed.end.saturating_sub(self.pos) as usize)
-            .saturating_add(1)
-            .min(reference.len());
+        let mut runs = state.witnessed.runs();
+        let (start, mut end) = runs.next().expect("a witnessed set is never empty");
+        for (_, run_end) in runs {
+            end = run_end;
+        }
+        let first = start.saturating_sub(self.pos) as usize;
+        // Half-open on the way in since C1, where the inclusive `RefSpan` needed a `+ 1`.
+        let past_last = (end.saturating_sub(self.pos) as usize).min(reference.len());
         if first >= past_last {
             return false;
         }
@@ -523,7 +545,7 @@ impl OpenPileupRecord {
             // stay: they are the determinism guarantee. The linear `find` itself measured
             // 0 %, and hash-keying the observations measured *worse*.)
             let bases = self.alleles[state.allele_index].seq.as_slice();
-            let read_witness = witness_of(state.witnessed, self.pos, record_end_exclusive);
+            let read_witness = witness_of(&state.witnessed, self.pos, record_end_exclusive);
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
             let existing = observations.iter().position(|observation| {
@@ -636,7 +658,7 @@ impl OpenPileupRecord {
         // `keyed_observations` for why, and for what makes the two agree at one read group.
         let mut keyed = self.keyed_observations(record_end_exclusive);
         for state in self.folded_reads.values() {
-            match witness_of(state.witnessed, record_pos, record_end_exclusive) {
+            match witness_of(&state.witnessed, record_pos, record_end_exclusive) {
                 ReadWitness::Complete => witness_counts.reads_complete += 1,
                 ReadWitness::Partial { .. } => witness_counts.reads_partial += 1,
             }
@@ -747,6 +769,19 @@ pub(super) struct OpenPileupRecordTable {
     /// genuinely new allele. See L10/L11 in
     /// `ia/reviews/perf_pileup_2026-05-10.md`.
     allele_seq_buf: Vec<u8>,
+    /// Reusable scratch buffer for the per-(record, contributor) **witnessed runs**
+    /// [`apply_events_into`] accumulates, the witness's counterpart to `allele_seq_buf`
+    /// and hoisted beside it for the same reason (arch §2).
+    ///
+    /// The fold never builds a [`WitnessedRefPositions`] from scratch: it fills this and
+    /// then either [`take_from`](WitnessedRefPositions::take_from)s it into a new
+    /// [`FoldedReadState`], or [`refill_from`](WitnessedRefPositions::refill_from)s an
+    /// existing one — which **swaps**, so the buffer inherits the old witness's storage.
+    /// That is what keeps a widen free: `refold_live_reads` rebuilds every live read's
+    /// witness on **every** widen, so a move-based refill would allocate once per
+    /// (read × widen) for any witness of three or more runs — the multi-junction RNA-seq
+    /// case this milestone exists for (Milestone B review M2).
+    witnessed_runs_buf: WitnessedRefRuns,
     /// Reusable scratch buffer for `drain_aged_into`'s "keys to
     /// remove" list. Sized to ~1 entry per call at steady state;
     /// cleared between calls so a per-call `Vec` allocation is not
@@ -790,6 +825,7 @@ impl OpenPileupRecordTable {
         Self {
             records: BTreeMap::new(),
             allele_seq_buf: Vec::new(),
+            witnessed_runs_buf: WitnessedRefRuns::new(),
             closing_keys_buf: Vec::new(),
             widen_bases_buf: Vec::new(),
             refold_ids_buf: Vec::new(),
@@ -812,6 +848,7 @@ impl OpenPileupRecordTable {
         );
         self.records.clear();
         self.allele_seq_buf.clear();
+        self.witnessed_runs_buf.clear();
         self.closing_keys_buf.clear();
         self.widen_bases_buf.clear();
         self.refold_ids_buf.clear();
@@ -941,6 +978,7 @@ impl OpenPileupRecordTable {
         let Self {
             records,
             allele_seq_buf,
+            witnessed_runs_buf,
             widen_bases_buf,
             refold_ids_buf,
             max_record_span,
@@ -1023,6 +1061,7 @@ impl OpenPileupRecordTable {
         refold_live_reads(
             rec,
             allele_seq_buf,
+            witnessed_runs_buf,
             refold_ids_buf,
             active_reads,
             contributors,
@@ -1118,14 +1157,37 @@ impl OpenPileupRecordTable {
 /// covered — an insertion adds bases without positions, a deletion positions
 /// without bases (spec §8, §13).
 ///
-/// # `None` means the witness is non-contiguous
+/// # `false` means the read gets no observation, and C3 narrows what puts it there
 ///
-/// An interior `N`, or a ref-skip, leaves a hole in the middle of the run. One
-/// `Partial { offset_in_locus, positions_covered }` cannot describe two runs
-/// honestly, so the read yields **no observation** and is counted in
-/// `reads_without_observation` (spec §6). Rare by construction — adaptor masking
-/// and the dropped-indel rule always truncate from one side, so they stay
-/// expressible.
+/// Two shapes answer `false` today. One is a read that witnessed **nothing** inside the
+/// record. The other is a witness with a **hole** in it — an interior `N`, or a ref-skip —
+/// which one `Partial { offset_in_locus, positions_covered }` cannot describe honestly, so
+/// the read yields no observation and is counted in `reads_without_observation` (spec §6).
+/// Rare by construction on DNA-seq: adaptor masking and the dropped-indel rule always
+/// truncate from one side, so they stay expressible, and the §8 probe saw **zero** holes in
+/// 225 million event-folds.
+///
+/// **C3 removes the second shape**, which is this milestone's whole point: the runs
+/// accumulate into `witnessed_runs` either way, and a hole stops being a reason to throw
+/// them away. C1 keeps the discard so the change is provably byte-identical — the hole
+/// branch below is the one line C3 deletes.
+///
+/// # Where the runs go
+///
+/// Into `witnessed_runs`, a buffer the **caller** owns and this function clears on entry,
+/// exactly as it does `allele_seq` (arch §2). The caller then turns it into a
+/// [`WitnessedRefPositions`] with `take_from` (a first fold) or `refill_from` (a re-fold),
+/// and it is that second one — a swap, not a move — that keeps a widen from allocating.
+/// Returning the set from here instead would have taken the buffer's storage with it and
+/// left the next read to allocate again.
+///
+/// *Contract, both directions:* `true` leaves at least one non-empty run in
+/// `witnessed_runs`, so the caller's `take_from` / `refill_from` cannot answer "nothing";
+/// `false` leaves it **empty**, so a read that got no observation cannot leak runs into
+/// the next one's witness. The clear on entry is what makes the second half true, and a
+/// leak there would be silent — the witness is a third of an observation's identity, so
+/// two reads would stop sharing an observation, or share one that overstates what either
+/// saw.
 ///
 /// **Preconditions on `events`** (every caller in this module
 /// satisfies them; new callers must too):
@@ -1151,12 +1213,14 @@ impl OpenPileupRecordTable {
 ///    ones, and it is what makes the run below grow monotonically.
 pub(super) fn apply_events_into(
     allele_seq: &mut Vec<u8>,
+    witnessed_runs: &mut WitnessedRefRuns,
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
-) -> Option<RefSpan> {
+) -> bool {
     allele_seq.clear();
     allele_seq.reserve(ref_seq.len() + 8);
+    witnessed_runs.clear();
 
     debug_assert!(
         events.windows(2).all(|w| {
@@ -1214,8 +1278,18 @@ pub(super) fn apply_events_into(
                     if event_start > run_end {
                         // A hole: the read said nothing about the positions in
                         // between. One run cannot describe that honestly.
+                        //
+                        // **C3 deletes this branch** and pushes the closed run instead,
+                        // so the read keeps both stretches. Until then the discard stays,
+                        // which is what makes C1 byte-identical.
+                        //
+                        // `witnessed_runs` needs no clearing here: it was emptied on entry
+                        // and the single run is only pushed on the way out, so the
+                        // "`false` means the buffer is empty" contract already holds. C3
+                        // is where the run starts being pushed inside this loop, and it
+                        // takes the contract with it.
                         allele_seq.clear();
-                        return None;
+                        return false;
                     }
                     // `.max()`, not a plain `event_end`: under precondition 4 the
                     // two are equal — which is why no test can tell them apart,
@@ -1270,30 +1344,41 @@ pub(super) fn apply_events_into(
         }
     }
 
-    // Half-open on the way in, inclusive on the way out — `RefSpan`'s convention.
-    // `end > start` holds for every run that got here, so the `- 1` cannot wrap.
-    witnessed.map(|(start, end)| RefSpan {
-        start,
-        end: end - 1,
-    })
+    // Half-open in and half-open out since C1 — the inclusive `RefSpan` this used to
+    // return was the one place the two conventions met, and its `- 1` here paired with a
+    // `+ 1` in `witness_of`. A set is held half-open so merging needs neither.
+    match witnessed {
+        Some(run) => {
+            witnessed_runs.push(run);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Owning wrapper around [`apply_events_into`]. Kept so unit tests (and any
-/// caller that isn't on the hot path) don't have to hoist a buffer manually. The
-/// hot-path call in `process_position` goes through the `_into` variant against a
-/// buffer on `OpenPileupRecordTable`.
+/// caller that isn't on the hot path) don't have to hoist two buffers manually. The
+/// hot-path call in `process_position` goes through the `_into` variant against buffers
+/// on `OpenPileupRecordTable`.
 ///
-/// Returns the bases **and** the extent, or `None` for a non-contiguous witness —
-/// a caller that wanted only the bases would be able to ignore the very
-/// distinction this step introduces.
+/// Returns the bases **and** the witnessed set, or `None` when the read got no observation
+/// — a caller that wanted only the bases would be able to ignore the very distinction this
+/// step introduces.
 #[cfg(test)]
 pub(super) fn apply_events(
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
-) -> Option<(Vec<u8>, RefSpan)> {
+) -> Option<(Vec<u8>, WitnessedRefPositions)> {
     let mut out = Vec::new();
-    let witnessed = apply_events_into(&mut out, record_pos, ref_seq, events)?;
+    let mut runs = WitnessedRefRuns::new();
+    if !apply_events_into(&mut out, &mut runs, record_pos, ref_seq, events) {
+        return None;
+    }
+    // The two answers cannot disagree: `apply_events_into` returns `true` exactly when it
+    // pushed a run, and every run it pushes is non-empty.
+    let witnessed = WitnessedRefPositions::take_from(&mut runs)
+        .expect("apply_events_into reported a witnessed run");
     Some((out, witnessed))
 }
 
@@ -1344,6 +1429,7 @@ struct RecordFoldState<'a> {
 fn fold_read_into_record(
     record: &mut RecordFoldState<'_>,
     allele_seq_buf: &mut Vec<u8>,
+    witnessed_runs_buf: &mut WitnessedRefRuns,
     rec_pos: u32,
     active: &super::active_read_set::ActiveRead,
     window_events: &[ReadEvent],
@@ -1357,9 +1443,13 @@ fn fold_read_into_record(
         // `process_position` after this loop, from ids the walk hands down.
         reads_discarded_by_cap: _,
     } = record;
-    let Some(witnessed) =
-        apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, window_events)
-    else {
+    if !apply_events_into(
+        allele_seq_buf,
+        witnessed_runs_buf,
+        rec_pos,
+        &alleles[0].seq,
+        window_events,
+    ) {
         // A5: **which** reads these were, as a per-record set. The path is reached at
         // every position the record is affected at, so a counter here would multiply
         // by the footprint length (spec §4).
@@ -1375,7 +1465,7 @@ fn fold_read_into_record(
             subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
         }
         return;
-    };
+    }
 
     // PANIC-FREE, and the assert states the invariant rather than defending against it:
     // the record's left edge is its anchor and never moves, and a widen only extends the
@@ -1387,6 +1477,19 @@ fn fold_read_into_record(
         "read {} folded after having been recorded as witnessing nothing contiguous",
         active.read_id,
     );
+
+    // The buffer's runs become this read's witness, and the buffer comes back empty for the
+    // next read. **Taking rather than refilling** because the state below is built fresh:
+    // this function also runs on a *re*-fold at a later walker position, where the read's
+    // previous witness is dropped by the `remove` and its storage with it — which costs
+    // nothing while a witness is one or two runs, since those are inline. If a
+    // multi-junction witness ever makes this path allocate, `refold_live_reads`' in-place
+    // refill is the shape to copy here (Milestone B review M2).
+    //
+    // PANIC-FREE: `apply_events_into` returned `true` above, which it does exactly when it
+    // pushed a run, and every run it pushes is non-empty.
+    let witnessed = WitnessedRefPositions::take_from(witnessed_runs_buf)
+        .expect("apply_events_into reported a witnessed run");
 
     let ln_q = ln_bq_for_read(window_events, bq_fallback).max(active.read.mq_log_err);
     let mapq = u32::from(active.read.mapq);
@@ -1466,6 +1569,7 @@ fn fold_read_into_record(
 fn refold_live_reads(
     rec: &mut OpenPileupRecord,
     allele_seq_buf: &mut Vec<u8>,
+    witnessed_runs_buf: &mut WitnessedRefRuns,
     ids: &mut Vec<u32>,
     active_reads: &ActiveReads,
     contributors: &[ReadContribution],
@@ -1492,15 +1596,32 @@ fn refold_live_reads(
         // PANIC-FREE: `read_id` was just taken from this map's keys, and nothing between
         // then and here removes an entry other than this loop — which `continue`s past
         // any id it has already handled, each id appearing once.
-        let previous = *folded_reads
+        //
+        // **The scalars are copied out; the witness deliberately is not.** It is a set
+        // since C1, so lifting the whole state out with a `*` would clone it only to drop
+        // it a few lines later — the storage the refill below wants to reuse. The pattern
+        // is still exhaustive, so a field added to `FoldedReadState` has to be decided here
+        // rather than silently carried stale.
+        let &FoldedReadState {
+            allele_index: previous_allele_index,
+            contribution: previous_contribution,
+            chain_id: _,
+            read_group: _,
+            witnessed: _,
+        } = folded_reads
             .get(&read_id)
             .expect("the id came from this record's own fold state");
         let window = active
             .cursor
             .events_overlapping(rec_pos, rec_end, &active.read);
 
-        let Some(witnessed) = apply_events_into(allele_seq_buf, rec_pos, &alleles[0].seq, &window)
-        else {
+        if !apply_events_into(
+            allele_seq_buf,
+            witnessed_runs_buf,
+            rec_pos,
+            &alleles[0].seq,
+            &window,
+        ) {
             // The wider window opened a hole in what was one run — see
             // `fold_read_into_record` for why the contribution has to come off, and
             // why the read is recorded rather than merely dropped. **This is the
@@ -1510,11 +1631,11 @@ fn refold_live_reads(
             note_no_observation(reads_without_observation, read_id);
             folded_reads.remove(&read_id);
             subtract_contribution(
-                &mut alleles[previous.allele_index].support,
-                &previous.contribution,
+                &mut alleles[previous_allele_index].support,
+                &previous_contribution,
             );
             continue;
-        };
+        }
 
         let new_index = match find_allele_index(alleles, allele_seq_buf) {
             Some(index) => index,
@@ -1526,41 +1647,45 @@ fn refold_live_reads(
         // Guarded, and not only to save work: subtracting and re-adding the same `f64`
         // into the same bucket is not the identity, and would put rounding noise into
         // `q_sum` at every widen for every read that did not move.
-        if new_index != previous.allele_index {
+        if new_index != previous_allele_index {
             subtract_contribution(
-                &mut alleles[previous.allele_index].support,
-                &previous.contribution,
+                &mut alleles[previous_allele_index].support,
+                &previous_contribution,
             );
-            add_contribution(&mut alleles[new_index].support, &previous.contribution);
+            add_contribution(&mut alleles[new_index].support, &previous_contribution);
         }
-        // **Rebuilt from an exhaustive destructure, not patched by assigning two fields.**
-        // A re-place has to decide *every* field of the state it leaves behind. Assigning
-        // `allele_index` and `witnessed` and letting the rest ride means a field added to
-        // `FoldedReadState` errors at the fold literal in `fold_read_into_record` and is
-        // silently carried stale here — which is precisely how `witnessed` itself went
-        // wrong before A3, and the field's own doc records the consequence as "a wrong
-        // depth with no error". The destructure makes the compiler ask the question at both
-        // sites.
-        let FoldedReadState {
-            allele_index: _,
-            contribution,
-            chain_id,
-            read_group,
-            witnessed: _,
-        } = previous;
+        // **The destination is destructured exhaustively, not patched by assigning two
+        // fields.** A re-place has to decide *every* field of the state it leaves behind.
+        // Assigning `allele_index` and `witnessed` and letting the rest ride means a field
+        // added to `FoldedReadState` errors at the fold literal in `fold_read_into_record`
+        // and is silently carried stale here — which is precisely how `witnessed` itself
+        // went wrong before A3, and the field's own doc records the consequence as "a
+        // wrong depth with no error". A pattern with no `..` makes the compiler ask the
+        // question at both sites; before C1 this was a whole-struct assignment, which
+        // asked it the same way.
         let state = folded_reads
             .get_mut(&read_id)
             .expect("the id came from this record's own fold state");
-        *state = FoldedReadState {
+        let FoldedReadState {
             // The two the re-place decides.
-            allele_index: new_index,
+            allele_index,
             witnessed,
             // The rest are facts about the read, which a widen does not change — see the
             // "it moves the read; it does not re-decide anything" note above.
-            contribution,
-            chain_id,
-            read_group,
-        };
+            contribution: _,
+            chain_id: _,
+            read_group: _,
+        } = state;
+        *allele_index = new_index;
+        // **Refilled in place, which swaps** — the read's old witness storage goes back
+        // into the buffer rather than being dropped, so a re-fold of a spilled witness
+        // allocates nothing however many times the record widens (arch §2, Milestone B
+        // review M2).
+        let refilled = witnessed.refill_from(witnessed_runs_buf);
+        debug_assert!(
+            refilled,
+            "apply_events_into reported a witnessed run for read {read_id} a few lines above",
+        );
     }
 }
 
@@ -1726,6 +1851,7 @@ pub(super) fn process_position(
     let OpenPileupRecordTable {
         records,
         allele_seq_buf,
+        witnessed_runs_buf,
         closing_keys_buf: _,
         widen_bases_buf: _,
         refold_ids_buf: _,
@@ -1812,6 +1938,7 @@ pub(super) fn process_position(
             fold_read_into_record(
                 &mut fold_state,
                 allele_seq_buf,
+                witnessed_runs_buf,
                 rec_pos,
                 active_read,
                 &window_events,
@@ -2047,6 +2174,18 @@ mod tests {
         MockFasta::new(s)
     }
 
+    /// The one-run witness the fold mints, spelled the way the set holds it: **half-open**,
+    /// `[start, past_end)`.
+    ///
+    /// `RefSpan` spelled the same run with an *inclusive* end, so every expectation below
+    /// gained a `+ 1` at C1 and the two conventions no longer meet anywhere in the walk.
+    /// A run is passed as one pair rather than as an offset and a length for the reason
+    /// `LocusLen` exists: the two are the same shape and would transpose silently.
+    fn ref_run(start: u32, past_end: u32) -> WitnessedRefPositions {
+        WitnessedRefPositions::from_half_open_runs([(start, past_end)])
+            .expect("a non-empty half-open run")
+    }
+
     #[test]
     fn open_new_creates_record_with_ref_allele_zero_obs() {
         let mut t = OpenPileupRecordTable::new();
@@ -2174,6 +2313,58 @@ mod tests {
         assert!(apply_events(100, ref_seq, &[]).is_none());
     }
 
+    /// **The witnessed-runs buffer is the callee's to clear, and C1 is what put a caller's
+    /// buffer there to forget.** The fold hands the same `witnessed_runs_buf` to every
+    /// read of every record, so a fold that only ever *pushed* would give a read the
+    /// previous read's runs, merged into its witness by `canonicalise_runs`.
+    ///
+    /// The failure is silent twice over: nothing panics, and the witness is a third of an
+    /// observation's identity, so the read either stops sharing an observation with the
+    /// reads it agrees with or shares one claiming positions neither saw. `allele_seq` has
+    /// carried the same contract since the port and no test named it; this names both.
+    ///
+    /// Both directions of the contract are asserted, because only the second one is new:
+    /// `true` leaves the run it witnessed, `false` leaves the buffer **empty**.
+    #[test]
+    fn apply_events_into_clears_the_witness_buffer_it_was_handed() {
+        let ref_seq = b"ACGTA"; // positions 100..=104
+        let mut allele_seq = Vec::new();
+        let mut runs = WitnessedRefRuns::new();
+        // What a previous read left behind — a run that *contains* the one below, so a
+        // leak reports five witnessed positions where the read saw one.
+        runs.push((100, 105));
+
+        let snp = ReadEvent::Match {
+            ref_pos: 102,
+            base: b'X',
+            bq_baq: 30,
+        };
+        assert!(apply_events_into(
+            &mut allele_seq,
+            &mut runs,
+            100,
+            ref_seq,
+            std::slice::from_ref(&snp),
+        ));
+        assert_eq!(
+            runs.as_slice(),
+            &[(102, 103)],
+            "the previous read's run must not survive into this one's witness",
+        );
+
+        assert!(!apply_events_into(
+            &mut allele_seq,
+            &mut runs,
+            100,
+            ref_seq,
+            &[],
+        ));
+        assert!(
+            runs.is_empty(),
+            "a read that got no observation leaves the buffer empty for the next one",
+        );
+    }
+
     /// One `Match` inside a five-base record: the read witnessed **one** position and
     /// contributes one base — where production emitted `ACXTA`, four bases of which
     /// it invented.
@@ -2188,13 +2379,7 @@ mod tests {
         let (bases, witnessed) =
             apply_events(100, ref_seq, std::slice::from_ref(&snp)).expect("one run");
         assert_eq!(bases, b"X");
-        assert_eq!(
-            witnessed,
-            RefSpan {
-                start: 102,
-                end: 102
-            }
-        );
+        assert_eq!(witnessed, ref_run(102, 103));
     }
 
     /// Events tiling the whole footprint are **byte-identical to production** — there
@@ -2215,13 +2400,7 @@ mod tests {
             bases, b"ACXTA",
             "exactly what production emits for this read"
         );
-        assert_eq!(
-            witnessed,
-            RefSpan {
-                start: 100,
-                end: 104
-            }
-        );
+        assert_eq!(witnessed, ref_run(100, 105));
     }
 
     /// **A deletion witnesses every position it deletes**, not just its anchor: the
@@ -2244,10 +2423,7 @@ mod tests {
         assert_eq!(bases, b"A");
         assert_eq!(
             witnessed,
-            RefSpan {
-                start: 100,
-                end: 102
-            },
+            ref_run(100, 103),
             "anchor plus the two deleted positions"
         );
     }
@@ -2281,10 +2457,7 @@ mod tests {
         assert_eq!(bases, b"");
         assert_eq!(
             witnessed,
-            RefSpan {
-                start: 100,
-                end: 101
-            },
+            ref_run(100, 102),
             "clipped to the record: the anchor at 98 is not inside it"
         );
     }
@@ -2304,10 +2477,7 @@ mod tests {
         assert_eq!(bases, b"");
         assert_eq!(
             witnessed,
-            RefSpan {
-                start: 100,
-                end: 104
-            },
+            ref_run(100, 105),
             "clipped at the record's end, not at the deletion's"
         );
     }
@@ -2339,10 +2509,7 @@ mod tests {
         assert_eq!(bases, b"XYY");
         assert_eq!(
             witnessed,
-            RefSpan {
-                start: 100,
-                end: 100
-            },
+            ref_run(100, 101),
             "an insertion's footprint is one reference position, however many bases it adds"
         );
     }
@@ -2370,13 +2537,7 @@ mod tests {
             1,
             "exactly one reference base is borrowed — production emitted four more"
         );
-        assert_eq!(
-            witnessed,
-            RefSpan {
-                start: 100,
-                end: 100
-            }
-        );
+        assert_eq!(witnessed, ref_run(100, 101));
     }
 
     /// **A hole in the middle yields no observation at all.** An interior `N` or a
@@ -2424,13 +2585,7 @@ mod tests {
         ];
         let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
         assert_eq!(bases, b"CG");
-        assert_eq!(
-            witnessed,
-            RefSpan {
-                start: 101,
-                end: 102
-            }
-        );
+        assert_eq!(witnessed, ref_run(101, 103));
     }
 
     /// A deletion's run closes what would otherwise be a hole: the positions it deletes
@@ -2454,10 +2609,7 @@ mod tests {
         assert_eq!(bases, b"AT");
         assert_eq!(
             witnessed,
-            RefSpan {
-                start: 100,
-                end: 103
-            },
+            ref_run(100, 104),
             "the deleted positions are witnessed, so 103 continues the run"
         );
     }
@@ -2514,10 +2666,7 @@ mod tests {
         assert_eq!(bases, b"A", "the anchor base once, from the first deletion");
         assert_eq!(
             witnessed,
-            RefSpan {
-                start: 100,
-                end: 105
-            },
+            ref_run(100, 106),
             "the run keeps the longer deletion's reach; a plain assignment would report 102",
         );
     }
@@ -2794,7 +2943,7 @@ mod tests {
             .expect("the opener folded into this record at position 5");
         assert_eq!(
             opener.witnessed,
-            RefSpan { start: 5, end: 20 },
+            ref_run(5, 21),
             "the opener's deletion witnesses 6 and 7 and its matches witness 8..=20, so \
              its extent covers the widened footprint whole"
         );
@@ -2928,17 +3077,14 @@ mod tests {
     /// A witness that tiles the footprint is a complete one.
     #[test]
     fn witness_of_a_witness_covering_the_whole_footprint_is_complete() {
-        assert_eq!(
-            witness_of(RefSpan { start: 5, end: 20 }, 5, 21),
-            ReadWitness::Complete
-        );
+        assert_eq!(witness_of(&ref_run(5, 21), 5, 21), ReadWitness::Complete);
     }
 
     /// Flush with the left border and short of the right — freebayes' prefix constraint,
     /// which `is_flush_left` has to keep being able to read off the run.
     #[test]
     fn witness_of_a_witness_flush_left_reports_a_zero_offset() {
-        let witness = witness_of(RefSpan { start: 5, end: 7 }, 5, 21);
+        let witness = witness_of(&ref_run(5, 8), 5, 21);
         assert_eq!(
             witness,
             ReadWitness::Partial {
@@ -2954,7 +3100,7 @@ mod tests {
     /// rather than assumed.
     #[test]
     fn witness_of_a_witness_flush_right_reports_the_offset_it_starts_at() {
-        let witness = witness_of(RefSpan { start: 18, end: 20 }, 5, 21);
+        let witness = witness_of(&ref_run(18, 21), 5, 21);
         assert_eq!(
             witness,
             ReadWitness::Partial {
@@ -2972,7 +3118,7 @@ mod tests {
     /// knowable when this generator produced its first run.
     #[test]
     fn witness_of_an_interior_witness_is_flush_with_neither_border() {
-        let witness = witness_of(RefSpan { start: 9, end: 12 }, 5, 21);
+        let witness = witness_of(&ref_run(9, 13), 5, 21);
         assert_eq!(
             witness,
             ReadWitness::Partial {
@@ -2992,12 +3138,12 @@ mod tests {
     #[test]
     fn witness_of_clamps_an_extent_that_overruns_the_footprint() {
         assert_eq!(
-            witness_of(RefSpan { start: 1, end: 40 }, 5, 21),
+            witness_of(&ref_run(1, 41), 5, 21),
             ReadWitness::Complete,
             "a witness swallowing the footprint witnessed all of it, and nothing more"
         );
         assert_eq!(
-            witness_of(RefSpan { start: 1, end: 7 }, 5, 21),
+            witness_of(&ref_run(1, 8), 5, 21),
             ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 3,
@@ -3005,7 +3151,7 @@ mod tests {
             "the run starts at the record's own anchor, never before it"
         );
         assert_eq!(
-            witness_of(RefSpan { start: 18, end: 40 }, 5, 21),
+            witness_of(&ref_run(18, 41), 5, 21),
             ReadWitness::Partial {
                 offset_in_locus: 13,
                 positions_covered: 3,
@@ -3066,14 +3212,15 @@ mod tests {
                 .expect("the shortie folded at 5");
             assert_eq!(
                 witness_of(
-                    state.witnessed,
+                    &state.witnessed,
                     record.pos,
                     record.footprint_end_exclusive()
                 ),
                 ReadWitness::Complete,
                 "against a 5..=7 footprint the shortie witnessed everything"
             );
-            state.witnessed
+            // Cloned rather than copied out: the witness is a set since C1.
+            state.witnessed.clone()
         };
 
         let contributors = contributors_at(&active, 7);
@@ -3095,7 +3242,7 @@ mod tests {
         );
         assert_eq!(
             witness_of(
-                state.witnessed,
+                &state.witnessed,
                 record.pos,
                 record.footprint_end_exclusive()
             ),

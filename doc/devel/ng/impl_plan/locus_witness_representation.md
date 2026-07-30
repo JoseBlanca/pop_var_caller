@@ -127,7 +127,7 @@ expectations is a step that did more than rename.
 
 ## Milestone C — the fold (the behaviour change)
 
-- ☐ **C1.** `apply_events_into` accumulates runs into a caller-owned buffer and returns
+- ✅ **C1.** `apply_events_into` accumulates runs into a caller-owned buffer and returns
   `WitnessedRefPositions` — **and still returns `None` on a hole.** Byte-identical by construction;
   the §8 probe demonstrated this exact shape against the full suite. *Depends:* B3. *Source:*
   arch §2. **B3 built the buffer API this needs**: accumulate into a `WitnessedRefRuns` owned by

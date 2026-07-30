@@ -15,7 +15,9 @@ use smallvec::SmallVec;
 use crate::ng::locus_generation::witness::canonicalise_runs;
 
 /// The reference positions one read witnessed inside a record — the fold-time counterpart
-/// of [`WitnessedLocusPositions`](crate::ng::locus_generation::WitnessedLocusPositions), and what replaces [`RefSpan`](super::open_record::RefSpan) at C1.
+/// of [`WitnessedLocusPositions`](crate::ng::locus_generation::WitnessedLocusPositions), and
+/// what C1 put in place of `RefSpan` — the one-run, inclusive-ended pair the fold used to
+/// return, deleted in the same commit.
 ///
 /// Canonical half-open runs in **reference** coordinates, sorted, non-empty, and separated
 /// by at least one position the read did not witness. It carries `RefSpan`'s invariant
@@ -45,9 +47,6 @@ use crate::ng::locus_generation::witness::canonicalise_runs;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct WitnessedRefPositions(SmallVec<[(u32, u32); 2]>);
 
-// Removed at C1, which is where the fold starts returning this instead of a `RefSpan`.
-// `expect` rather than `allow` so that wiring it up *fails* until the attribute goes — the
-// type's own tests keep the struct itself live, so only the accessors need it.
 /// The scratch a fold accumulates one read's runs into, so the buffer is the caller's and
 /// the per-read cost is a swap rather than an allocation (arch §2).
 pub(super) type WitnessedRefRuns = SmallVec<[(u32, u32); 2]>;
@@ -56,9 +55,18 @@ impl WitnessedRefPositions {
     /// From runs in **any** order, normalised: sorted by start, then touching and
     /// overlapping runs merged. Half-open `[start, end)`. `None` for an empty iterator or
     /// any run with `start >= end`.
+    ///
+    /// The fold does not use this — it owns a buffer and goes through
+    /// [`take_from`](Self::take_from) / [`refill_from`](Self::refill_from) so a re-fold
+    /// costs a swap rather than an allocation. This is the shape a *test* wants, where the
+    /// runs are written out literally, and the `expect` is what makes a caller who reaches
+    /// for it on the hot path notice.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "wired into the fold at C1; B3 is types-first")
+        expect(
+            dead_code,
+            reason = "the fold owns a buffer and goes through take_from/refill_from"
+        )
     )]
     pub(super) fn from_half_open_runs(runs: impl IntoIterator<Item = (u32, u32)>) -> Option<Self> {
         canonicalise_runs(runs.into_iter().collect()).map(Self)
@@ -72,10 +80,6 @@ impl WitnessedRefPositions {
     /// caller owns and the callee clears, like `allele_seq`, so a fold allocates nothing
     /// per read". Its sibling [`refill_from`](Self::refill_from) is what keeps that true
     /// across *re*-folds.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired into the fold at C1; B3 is types-first")
-    )]
     pub(super) fn take_from(buf: &mut WitnessedRefRuns) -> Option<Self> {
         canonicalise_runs(std::mem::take(buf)).map(Self)
     }
@@ -90,10 +94,6 @@ impl WitnessedRefPositions {
     /// window. A witness of three or more runs owns a heap buffer, so a move-based refill
     /// would allocate per (read × widen) on exactly the multi-junction RNA-seq case this
     /// milestone exists for (Milestone B review).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired into the fold at C1; B3 is types-first")
-    )]
     pub(super) fn refill_from(&mut self, buf: &mut WitnessedRefRuns) -> bool {
         let Some(canonical) = canonicalise_runs(std::mem::take(buf)) else {
             // `take` emptied the buffer; give it back, so "nothing witnessed" leaves both
@@ -115,10 +115,6 @@ impl WitnessedRefPositions {
     /// witness, and reinstates the span-swallows-the-hole behaviour this milestone exists to
     /// remove — silently, because `positions_covered` is a third of an observation's
     /// identity. Both accessors were dead code, so they are gone; C1 walks the runs.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired into the fold at C1; B3 is types-first")
-    )]
     pub(super) fn runs(&self) -> impl ExactSizeIterator<Item = (u32, u32)> + '_ {
         self.0.iter().copied()
     }
@@ -126,9 +122,17 @@ impl WitnessedRefPositions {
     /// How many reference positions the read witnessed — **the positions, not the span**.
     /// The number under the obvious name, at the point where the wrong one (last end minus
     /// first start) is tempting.
+    ///
+    /// The fold has no use for it: `witness_of` resolves the runs against the *footprint*,
+    /// which is a different number from the runs' own total, and nothing else on this axis
+    /// wants a count. It stays because the tests below are what pin the merge against the
+    /// enclosing span, and it is the reference-axis half of the number the locus axis emits.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "wired into the fold at C1; B3 is types-first")
+        expect(
+            dead_code,
+            reason = "the fold measures against the footprint, not the runs' own total"
+        )
     )]
     pub(super) fn positions_covered(&self) -> u64 {
         self.0
