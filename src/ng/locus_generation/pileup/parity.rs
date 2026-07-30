@@ -1164,8 +1164,13 @@ fn ng_walk(case: &Case) -> WalkOutcome {
 /// **nothing but the row key**: `open_record.rs` reads `read_group` only to build
 /// `ObservationKey` and to order the emitted rows. So the walk is bit-for-bit the walk of
 /// `groups == 1`, and the only difference in the output is the split this class names —
-/// which `two_read_groups_split_rows_without_moving_evidence` pins by reconciling the split
-/// rows back against the one-group run.
+/// which is pinned in two places — **not** by a
+/// `two_read_groups_split_rows_without_moving_evidence`, which this comment cited until
+/// 2026-07-30 and which exists nowhere in the repository. What discharges it: this module's
+/// [`evidence_by_bases`] reconciliation, applied at **every** census locus, which groups the
+/// evidence by bases and so is blind to how many rows carry it; and the dump tool's
+/// `two_read_groups_split_one_allele_into_two_rows_that_sum_back`, which asserts the split
+/// rows' `num_obs` sum back to the one-group total on a committed fixture.
 fn ng_walk_in_groups(case: &Case, groups: u32) -> WalkOutcome {
     assert!(groups >= 1, "a walk has at least one read group");
     let fasta = case.fasta();
@@ -1363,8 +1368,11 @@ fn sort_rows(rows: &mut [ObservedSequence]) {
 /// The surface the two sides are compared on — **three named projections, applied to both**
 /// (spec §3).
 ///
-/// 1. `q_sum` rounded to [`Q_SUM_GRAIN`], because ng changed the **order** the sum
-///    accumulates in and nothing else — see [`round_q_sum`].
+/// 1. `q_sum` compared within [`Q_SUM_TOLERANCE`] — a **relative** tolerance, applied by
+///    [`ComparableLocus`]'s `PartialEq` rather than by normalising the value — because ng
+///    changed the **order** the sum accumulates in and nothing else. It was a fixed 1e-9
+///    rounding until D3; the two constants it named, `Q_SUM_GRAIN` and `round_q_sum`, no
+///    longer exist, and the reason the grain had to go is on [`Q_SUM_TOLERANCE`].
 /// 2. Rows sorted into ng's emission order (class 5). ng's are already; production's are in
 ///    bucket-creation order.
 /// 3. The two per-record counters zeroed (class 3). Production has no counterpart, so an ng
@@ -1710,7 +1718,10 @@ struct DivergenceCensus {
     /// apart from the class flag because the flag fires on any non-projected group, which is
     /// a weaker event and would let this one go to zero unnoticed.
     group_split_rows: usize,
-    /// Loci that agree only once `q_sum` is rounded — the accumulation-order class.
+    /// Loci that agree only once `q_sum` is compared within [`Q_SUM_TOLERANCE`] — the
+    /// accumulation-order class. A subset of the **exact** count, since `classify_locus`
+    /// decides `exact` with [`comparable`], which applies the tolerance. Bounded above as
+    /// well as below: see the ceiling at the census's assertions.
     float_only: usize,
     /// **The deliverable, one:** loci carrying at least one partial witness.
     fabricating_loci: usize,
@@ -1851,11 +1862,14 @@ impl DivergenceCensus {
 /// (`AlleleSupportStats` is still destructured exhaustively, in [`project`], which is the
 /// one place production's type is now read.)
 ///
-/// `q_sum` is summed as `f64` and rounded **once, at the end**. Rounding each bucket first
-/// would make the total depend on how the reads were distributed across buckets: two reads
-/// at `-4.835428695` in one bucket sum to `-9.670857391`, while the same two in separate
-/// buckets round to `-4835428695` twice and total `-9670857390`. A3 moves reads between
-/// buckets by design, so that is exactly the difference this function must not see.
+/// `q_sum` is summed as `f64` and compared **once, at the end**, within
+/// [`Q_SUM_TOLERANCE`] — never per bucket. The reason survives D3's move from a rounding to a
+/// tolerance unchanged, and is why the sum is taken here rather than compared bucket by
+/// bucket: a per-bucket comparison makes the verdict depend on how the reads were distributed
+/// across buckets, and A3 moves reads between buckets by design. (Under the old grain the same
+/// hazard was arithmetic rather than a verdict: two reads at `-4.835428695` in one bucket
+/// summed to `-9.670857391`, while the same two in separate buckets rounded to `-4835428695`
+/// twice and totalled `-9670857390`.)
 /// **`placed_start` is deliberately absent from this struct, and the difference between
 /// that and its earlier absence is the whole point.**
 ///
