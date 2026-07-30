@@ -244,7 +244,18 @@ Each reaches past the step, which is why none was decided in code.
 3. **The arch inventory — RESOLVED: fixed** (owner, 2026-07-29). `tests.rs` and `copy_fidelity.rs`
    added, the count corrected to eight copies, with a dated note on why neither is optional. The
    private-`RefSeqFetcher` mismatch was closed in the review pass by narrowing the code to match.
-4. **Should `RefSeqFetcher` be renamed, and should it move to its own file?** The review found the
+4. **RESOLVED: neither — it is deleted** (owner, 2026-07-29, executed by plan 3's A0 in `da778ab`).
+   ng's `open_record.rs` takes a `RefSeq` directly, and the newtype, `to_chrom_ref_fetch_error` and
+   both of that translation's lossy spots (a contig *name* rendered as an id, a `u64 → u32`
+   narrowing) went with it; no file in `pileup/` imports `MultiChromRefFetcher` or
+   `ChromRefFetchError` outside `#[cfg(test)]`. **A rename would have been the wrong fix to the
+   right observation:** the adapter existed because the copies' signatures were production's, which
+   was a consequence of transcribing verbatim, and the moment the two walkers began to diverge the
+   adapter had nothing left to adapt. **With this, all four of Milestone A's questions are closed**
+   and plan 2 carries nothing.
+
+   The question as it was asked, kept because the reasoning is what decided it:
+   **Should `RefSeqFetcher` be renamed, and should it move to its own file?** The review found the
    name was **deliberately retired** in this codebase for a different concept
    (`fasta/fetcher.rs:20-23`, a 2026-05-23 review), and that the name does not say which way the
    adapter runs. Separately, `pileup/mod.rs` is now the one file that both stands in for

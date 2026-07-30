@@ -75,6 +75,13 @@ than reaches in (spec §3).
 - ✅ **A3 — the reference shim.** `RefSeqFetcher<R: RefSeq>` implementing `MultiChromRefFetcher`.
   Semantically empty: both contracts are canonical uppercase `{A,C,G,T,N}`, verified in the
   implementation and not just the doc. *Depends:* A2. *Source:* arch §1.3.
+
+  > **Deleted 2026-07-29 by plan 3's A0** — the shim, its error translation and both of that
+  > translation's lossy spots. It existed because the copies' signatures were production's, which
+  > was a consequence of transcribing verbatim and never a design choice; ng's `open_record.rs`
+  > now takes a `RefSeq` directly. The step stays ✅ and stays described as built, because this
+  > plan's gate (A4's inherited suite) ran against the shim — but a reader arriving here looking
+  > for the type will not find it.
 - ✅ **A4 — the copied suite is green.** All **113** inherited tests (44 end-to-end + 69 inline) pass **unmodified**. Anything needing
   a touch here is a transcription error, not a design change — spec §12 is explicit that this is the
   gate. *Depends:* A3. *Source:* spec §12.
