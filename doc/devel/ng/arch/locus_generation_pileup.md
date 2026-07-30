@@ -453,6 +453,27 @@ of its own (§4), on the `bundle_threshold` model.
   counted at run level** in `PileupGeneratorCounts::reads_silent_over_footprint` (§1.1). The
   per-locus value is therefore an honest **lower bound** — say so in its doc comment, since the
   shared type's own wording promises more (spec §11).
+- **The generator does not log; its counters are the channel** (2026-07-30, carried from
+  Checkpoint C as *"nothing logs"*). Four facts decided it. **The crate has no logging framework:**
+  neither `tracing` nor `log` is a dependency, so adopting one is a crate-wide call — a new
+  dependency, a subscriber every binary must install, and a level policy — and not something a
+  correctness item inside one generator can settle. **Everything a line would say is already
+  counted:** ten public `PileupGeneratorCounts` fields, which is spec §13's read-accounting
+  requirement expressed as a type, and the dump tool prints every one of them. **A library's
+  `eprintln!` cannot be silenced by its caller**, and this generator is per-sample and per-region:
+  `locus_generation.md` §9 gives each worker its own accessor, so the fan-out to come multiplies
+  every line by the worker count. **No error is swallowed to compensate** — a stream error shed by
+  an abandoned region is carried to `pending_failure` by `end_walk` and returned by the next
+  `next_locus`, so the caller sees it rather than a log reader.
+  *Rejected:* one-shot `eprintln!`s at each site, on the shape of production's
+  `chain_id_allocator::maybe_warn_high_water` (which ng's copy inherits and still emits — the one
+  warning this module prints). **The single candidate worth revisiting is
+  `reads_declined_by_preparer`:** no v1 preparer declines anything, so a non-zero value is news by
+  construction, and its shape is a `bool` latch plus one line at `end_walk`. Left unwritten because
+  a counter that reads zero on every real run is one no caller is missing, and because the counter
+  is already printed. **Revisit when** the crate adopts a logging framework, or when the first
+  consumer that is not a dump tool lands; the other two sites are `records_outside_region` (routine
+  on every run — a counter, never a line) and the shed error (already a return value).
 - **`LocusGenerationError` gains a `Walker` variant.** No fork: none of `TypedRegion` / `Reads` /
   `Reference` ([locus_generation/mod.rs:263](../../../../src/ng/locus_generation/mod.rs#L263))
   describes a malformed read or an exhausted chain-id space. ng's own `#[non_exhaustive]` enum, so

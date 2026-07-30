@@ -222,6 +222,14 @@ pub enum PileupGeneratorConfigError {
 /// *kept*, which is the walk's emissions minus
 /// [`records_outside_region`](Self::records_outside_region), and the kept count is
 /// already `LocusCounts::loci_emitted`.
+///
+/// **These counters are the only thing this generator reports, and that is a
+/// decision** (owner-facing, 2026-07-30, arch §3 *"the generator does not log"*):
+/// nothing here writes to stderr, and the crate has no logging framework to write
+/// to instead. A caller that wants to know what a walk saw reads this struct — the
+/// dump tool prints every field of it — and a caller that wants a *message* is
+/// asking for a policy a library cannot set for it. The one warning in this module
+/// is `chain_id_allocator`'s high-water line, inherited verbatim from production.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PileupGeneratorCounts {
     /// Reads the walk admitted, across every segment.
