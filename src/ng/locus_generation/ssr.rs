@@ -850,12 +850,20 @@ mod classify {
         // saturates to full coverage).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
         let locus_len = LocusLen::from_positions(locus.segment.tract_len());
+        // **The constructors answer `None` for a run covering no position, and that is the
+        // same fact `classify_read`'s guard states.** Unreachable from here — the guard
+        // already rejected an empty span, and a locus has a non-empty tract — but the two
+        // are the *same* decision, so they give the same answer rather than one of them
+        // silently minting a witness of nothing (C0, C2).
+        let Some(read_witness) = (match border {
+            AnchoredBorder::Left => ReadWitness::from_left(reach, locus_len),
+            AnchoredBorder::Right => ReadWitness::from_right(reach, locus_len),
+        }) else {
+            return Classified::NoObservation(NoObservationReason::OutsideTract);
+        };
         Classified::Observed {
             bases: region_seq[tract.clone()].into(),
-            read_witness: match border {
-                AnchoredBorder::Left => ReadWitness::from_left(reach, locus_len),
-                AnchoredBorder::Right => ReadWitness::from_right(reach, locus_len),
-            },
+            read_witness,
             // Partials are kept without the quality gate (spec §3), but still carry the BQ moment.
             q_sum: ln_p_err_sum(&region_qual[tract]),
         }
@@ -952,17 +960,13 @@ mod classify {
             match classified {
                 Classified::Observed {
                     bases,
-                    read_witness:
-                        ReadWitness::Partial {
-                            offset_in_locus,
-                            positions_covered,
-                        },
+                    read_witness: ReadWitness::Partial { positions },
                     ..
                 } => {
                     assert_eq!(&*bases, b"CACA");
-                    // Flush with the left border: the run starts at locus position 0.
-                    assert_eq!(offset_in_locus, 0);
-                    assert_eq!(positions_covered, 4);
+                    // Flush with the left border: the run starts at locus position 0 and
+                    // covers four. Half-open, so it ends at 4.
+                    assert_eq!(positions.runs().collect::<Vec<_>>(), vec![(0, 4)]);
                 }
                 other => panic!("expected a left partial, got {other:?}"),
             }
@@ -983,18 +987,13 @@ mod classify {
             match classify(&read) {
                 Classified::Observed {
                     bases,
-                    read_witness:
-                        ReadWitness::Partial {
-                            offset_in_locus,
-                            positions_covered,
-                        },
+                    read_witness: ReadWitness::Partial { positions },
                     ..
                 } => {
                     assert_eq!(&*bases, b"CACA");
                     // The tract is "CACACA" — 6 positions — so a 4-position run flush with the
-                    // right border starts at 2.
-                    assert_eq!(offset_in_locus, 6 - 4);
-                    assert_eq!(positions_covered, 4);
+                    // right border starts at 2 and ends at the locus's own end.
+                    assert_eq!(positions.runs().collect::<Vec<_>>(), vec![(6 - 4, 6)]);
                 }
                 other => panic!("expected a right partial, got {other:?}"),
             }
@@ -1345,8 +1344,10 @@ mod tally {
         #[test]
         fn an_expanded_allele_merges_the_two_sides_into_one_observation() {
             let locus_len = LocusLen::from_positions(6);
-            let left = ReadWitness::from_left(9, locus_len);
-            let right = ReadWitness::from_right(9, locus_len);
+            let left =
+                ReadWitness::from_left(9, locus_len).expect("a run covering at least one position");
+            let right = ReadWitness::from_right(9, locus_len)
+                .expect("a run covering at least one position");
             assert_eq!(
                 left, right,
                 "the two sides denote the same run once saturated"
@@ -1415,7 +1416,8 @@ mod tally {
                     &fwd,
                     observed(
                         b"CACACA",
-                        ReadWitness::from_left(6, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(6, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position"),
                         -1.0,
                     ),
                 ),
@@ -1437,7 +1439,8 @@ mod tally {
                     &fwd,
                     observed(
                         b"CACA",
-                        ReadWitness::from_left(4, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(4, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position"),
                         -1.0,
                     ),
                 ),
@@ -1445,7 +1448,8 @@ mod tally {
                     &fwd,
                     observed(
                         b"CACA",
-                        ReadWitness::from_left(4, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(4, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position"),
                         -1.0,
                     ),
                 ),
@@ -1522,7 +1526,8 @@ mod tally {
                     &r,
                     observed(
                         b"AA",
-                        ReadWitness::from_right(2, LocusLen::from_positions(6)),
+                        ReadWitness::from_right(2, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position"),
                         -1.0,
                     ),
                 ),
@@ -1531,7 +1536,8 @@ mod tally {
                     &r,
                     observed(
                         b"AA",
-                        ReadWitness::from_left(2, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(2, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position"),
                         -1.0,
                     ),
                 ),
@@ -1541,7 +1547,7 @@ mod tally {
             let order: Vec<(&[u8], ReadWitness)> = result
                 .observations
                 .iter()
-                .map(|o| (o.bases.as_ref(), o.read_witness))
+                .map(|o| (o.bases.as_ref(), o.read_witness.clone()))
                 .collect();
             assert_eq!(
                 order,
@@ -1550,10 +1556,12 @@ mod tally {
                     (
                         b"AA".as_ref(),
                         ReadWitness::from_left(2, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position")
                     ),
                     (
                         b"AA".as_ref(),
                         ReadWitness::from_right(2, LocusLen::from_positions(6))
+                            .expect("a run covering at least one position")
                     ),
                     (b"GG".as_ref(), ReadWitness::Complete),
                 ]
@@ -1579,18 +1587,37 @@ mod tally {
             let r = read(0, 60);
             let len = LocusLen::from_positions(6);
             let outcomes = vec![
-                (&r, observed(b"AA", ReadWitness::from_right(2, len), -1.0)),
-                (&r, observed(b"AA", ReadWitness::from_left(4, len), -1.0)),
+                (
+                    &r,
+                    observed(
+                        b"AA",
+                        ReadWitness::from_right(2, len)
+                            .expect("a run covering at least one position"),
+                        -1.0,
+                    ),
+                ),
+                (
+                    &r,
+                    observed(
+                        b"AA",
+                        ReadWitness::from_left(4, len)
+                            .expect("a run covering at least one position"),
+                        -1.0,
+                    ),
+                ),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
-            let order: Vec<ReadWitness> =
-                result.observations.iter().map(|o| o.read_witness).collect();
+            let order: Vec<ReadWitness> = result
+                .observations
+                .iter()
+                .map(|o| o.read_witness.clone())
+                .collect();
             assert_eq!(
                 order,
                 vec![
-                    ReadWitness::from_left(4, len),
-                    ReadWitness::from_right(2, len),
+                    ReadWitness::from_left(4, len).expect("a run covering at least one position"),
+                    ReadWitness::from_right(2, len).expect("a run covering at least one position"),
                 ],
                 "a left-flush run must precede a right-flush one whatever their lengths",
             );

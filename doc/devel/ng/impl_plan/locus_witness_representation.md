@@ -152,7 +152,10 @@ expectations is a step that did more than rename.
   each accessor's `#[cfg_attr(not(test), expect(dead_code, …))]` is part of the step; the attributes
   are per-method, so wiring one and forgetting another is a build failure rather than a silent
   suppression.
-- ☐ **C2.** `witness_of` resolves a `WitnessedRefPositions` against the final footprint into a
+- ✅ **C2** — and it absorbed **C4**, **D1** and **D2** (owner, 2026-07-30): `ReadWitness::Partial`
+  cannot carry a set without `sort_key` borrowing, `num_obs_along_locus` iterating runs and the
+  flush predicates delegating, all in the commit that has to compile. C3 is unaffected and still
+  lands alone. **C2.** `witness_of` resolves a `WitnessedRefPositions` against the final footprint into a
   `ReadWitness`, keeping the both-ends clamp and the `Complete` short-circuit. Still one run in
   practice, so still byte-identical. *Depends:* C1. *Source:* arch §2. **Two off-by-one traps the B
   review found, both silent:** the set is **half-open** where `RefSpan` was inclusive, so
@@ -170,7 +173,7 @@ expectations is a step that did more than rename.
   "read absent" to "read present with a two-run witness", the STR dump stays byte-identical, and
   the generic census gains its own class rather than absorbing the change into an existing one.
   *Depends:* C2. *Source:* spec §1 goal 1, §3.1, §4; arch §2.
-- ☐ **C4.** `witness_order` borrows instead of returning `(u8, u16, u16)`, and `finalise` sorts
+- ✅ **C4 — landed at C2.** `witness_order` borrows instead of returning `(u8, u16, u16)`, and `finalise` sorts
   with it. `ReadWitness` still gets no `Ord` of its own. *Depends:* C3. *Source:* arch §2, §3.
   **Now `ReadWitness::sort_key`, one copy on the type** (B1 absorbed the two that had drifted
   apart), so this step rewrites one function — but note `parity.rs`'s
@@ -183,10 +186,10 @@ expectations is a step that did more than rename.
 
 ## Milestone D — consumers and surfaces
 
-- ☐ **D1.** `num_obs_along_locus` iterates the runs instead of one range. **Its clamp stays** — the
+- ✅ **D1 — landed at C2.** `num_obs_along_locus` iterates the runs instead of one range. **Its clamp stays** — the
   comment there explains why the bound is not expressible on the type, and a set does not change
   that. *Depends:* C4. *Source:* spec §4, arch §5.
-- ☐ **D2.** `is_flush_left` / `is_flush_right` derive from the first and last run; signatures
+- ✅ **D2 — landed at C2.** `is_flush_left` / `is_flush_right` derive from the first and last run; signatures
   unchanged. *Depends:* D1. *Source:* arch §1.1.
 - ☐ **D3.** `ReadWitness::from_run`, the interior-run constructor the deferred note on the variant
   asked for. `from_left` / `from_right` keep their signatures, so the STR generator's four call

@@ -171,33 +171,32 @@ impl DumpReport {
             locus.region,
         );
         for obs in &locus.observations {
-            match obs.read_witness {
+            match &obs.read_witness {
                 ReadWitness::Complete => {
                     self.rows_complete += 1;
                     self.reads_complete += u64::from(obs.num_obs);
                 }
-                ReadWitness::Partial {
-                    offset_in_locus,
-                    positions_covered,
-                } => {
+                ReadWitness::Partial { positions } => {
                     self.rows_observed += 1;
                     self.reads_observed += u64::from(obs.num_obs);
-                    let reach = u64::from(offset_in_locus) + u64::from(positions_covered);
-                    assert!(
-                        reach <= footprint,
-                        "a row at {:?} claims positions {}..{} of a {footprint}-position \
-                         locus — a witness cannot reach past the footprint it is measured \
-                         against",
-                        locus.region,
-                        offset_in_locus,
-                        reach,
-                    );
-                    assert!(
-                        positions_covered > 0,
-                        "a row at {:?} witnessed zero positions, which is not an \
-                         observation at all — it belongs in reads_without_observation",
-                        locus.region,
-                    );
+                    // **Per run since C2.** A witness is a set, so checking the extent that
+                    // encloses its runs would wave through an interior run reaching past the
+                    // locus, and would say nothing at all about the holes between them.
+                    for (start, end) in positions.runs() {
+                        assert!(
+                            u64::from(end) <= footprint,
+                            "a row at {:?} claims positions {start}..{end} of a \
+                             {footprint}-position locus — a witness cannot reach past the \
+                             footprint it is measured against",
+                            locus.region,
+                        );
+                        assert!(
+                            start < end,
+                            "a row at {:?} carries a run {start}..{end} witnessing zero \
+                             positions, which is not an observation at all",
+                            locus.region,
+                        );
+                    }
                 }
             }
             self.rows.push(ObservationRow {
@@ -206,7 +205,7 @@ impl DumpReport {
                 end: locus.region.end.get(),
                 ref_bases: locus.reference_bases.to_vec(),
                 depth,
-                read_witness: witness_label(obs.read_witness),
+                read_witness: witness_label(&obs.read_witness),
                 read_group: obs.read_group.0,
                 observed: obs.bases.to_vec(),
                 reads: obs.num_obs,
@@ -294,13 +293,21 @@ impl DumpReport {
 /// side label: on the generic path a read can be blind in the *middle* of a footprint, where
 /// "partial:left" would be a lie, and the offset is what a consumer needs to place the
 /// evidence anyway.
-fn witness_label(witness: ReadWitness) -> String {
+fn witness_label(witness: &ReadWitness) -> String {
     match witness {
         ReadWitness::Complete => "complete".to_string(),
-        ReadWitness::Partial {
-            offset_in_locus,
-            positions_covered,
-        } => format!("observed:{offset_in_locus}+{positions_covered}"),
+        // **One `<offset>+<positions>` per run, comma-separated.** A one-run witness renders
+        // exactly as it did before C2 — which is every witness the generic path mints until
+        // C3 — so this column has not moved; the comma is what a holed witness will need.
+        // **D4 owns what this column finally says**, along with the drift between the three
+        // dumps' own labels; this is the smallest form that can express the new shape.
+        ReadWitness::Partial { positions } => {
+            let runs: Vec<String> = positions
+                .runs()
+                .map(|(start, end)| format!("{start}+{}", end - start))
+                .collect();
+            format!("observed:{}", runs.join(","))
+        }
     }
 }
 

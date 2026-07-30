@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 
 use ahash::AHashMap;
+use smallvec::SmallVec;
 
 use crate::ng::ref_seq::RefSeq;
 use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
@@ -31,6 +32,7 @@ use super::errors::WalkerError;
 use super::witnessed_ref::{WitnessedRefPositions, WitnessedRefRuns};
 use crate::ng::locus_generation::{
     LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
+    WitnessedLocusPositions,
 };
 
 /// Pre-allocated capacity for `OpenPileupRecord::folded_reads` —
@@ -150,15 +152,18 @@ pub(super) struct RecordWitnessCounts {
 /// read that witnessed nothing inside a record does not fold into it; the `debug_assert`
 /// says so, and the clamp means a future caller gets a truthful answer rather than that one.
 ///
-/// # It reads the enclosing extent, and **C2 is what makes that stop being enough**
+/// # Every run is clamped, never the extent that encloses them
 ///
-/// The input is a *set* of runs since C1, and this body still measures only its outermost
-/// edges — first run's start, last run's end. That is exact today and only today:
-/// `apply_events_into` still throws away a witness with a hole in it, so every set
-/// reaching here holds **exactly one run**, and its enclosing extent is itself. C2 replaces
-/// the two edges below with a walk over `runs()`, clamping **each run** into the footprint;
-/// clamping the enclosing extent instead is how the hole gets swallowed, which is the whole
-/// thing this milestone removes ([Milestone B review](../../../../doc/devel/reports/reviews/ng_locus_witness_representation_b_2026-07-30.md) M3).
+/// The input is a *set* of runs, and C2's whole content is that the clamp is applied **per
+/// run**. Clamping the enclosing extent instead — first run's start against last run's end —
+/// type-checks, is exact for a one-run witness, and swallows the hole in every other case:
+/// the read is credited with the positions between its runs, which is the fabrication this
+/// milestone exists to remove
+/// ([Milestone B review](../../../../doc/devel/reports/reviews/ng_locus_witness_representation_b_2026-07-30.md) M3).
+/// It is why the type offers no `start()` / `end_exclusive()` to reach for.
+///
+/// Today every set arriving here still holds one run — `apply_events_into` discards a holed
+/// witness until C3 — so this step moves no byte. It is written for the sets C3 lets through.
 ///
 /// # The `u16` narrowing is bounded by config, not by a constant
 ///
@@ -192,28 +197,41 @@ pub(super) fn witness_of(
         "record footprint {record_pos}..{record_end_exclusive} is wider than a `u16` run can \
          describe; `max_record_span` needs a ceiling (C1)",
     );
-    // The set is never empty — that is `WitnessedRefPositions`' own invariant — so both
-    // ends exist. Half-open, so `last_end` is one past the last position witnessed.
-    let mut runs = witnessed.runs();
-    let (first_start, mut last_end) = runs.next().expect("a witnessed set is never empty");
-    for (_, end) in runs {
-        last_end = end;
-    }
-    debug_assert!(
-        first_start < record_end_exclusive && last_end > record_pos,
-        "witnessed extent {first_start}..{last_end} does not intersect the footprint \
-         {record_pos}..{record_end_exclusive}; a read that witnessed nothing inside a record \
-         does not fold into it",
-    );
-    let first = first_start.clamp(record_pos, record_end_exclusive);
-    let past_last = last_end.clamp(first, record_end_exclusive);
-    if first <= record_pos && past_last >= record_end_exclusive {
+    // Each run intersected with the footprint and rebased onto the locus, half-open. A run
+    // lying wholly outside collapses to nothing and is dropped rather than becoming a run of
+    // no positions — which is what `first < past_last` says, and the only reason the filter
+    // is here rather than left to the constructor, which would reject the whole set for it.
+    let clamped: SmallVec<[(u16, u16); 2]> = witnessed
+        .runs()
+        .filter_map(|(start, end)| {
+            let first = start.clamp(record_pos, record_end_exclusive);
+            let past_last = end.clamp(first, record_end_exclusive);
+            (first < past_last).then(|| {
+                (
+                    LocusLen::from_positions(u64::from(first - record_pos)).get(),
+                    LocusLen::from_positions(u64::from(past_last - record_pos)).get(),
+                )
+            })
+        })
+        .collect();
+
+    // PANIC-FREE, and the argument is the fold's, not this function's: every run stored on a
+    // read is clipped into `[record_pos, record_end)` by `apply_events_into` at the moment it
+    // folds, a record's anchor never moves, and a widen only extends the right — so no run
+    // can lie outside the *final* footprint, and the clamp above can never empty the set. It
+    // is kept because `events_overlapping` returns a deletion whole, so a run reaching past
+    // the record arrives by that route and must be cut rather than believed (spec §8).
+    let positions = WitnessedLocusPositions::from_half_open_runs(clamped)
+        .expect("a folded read witnessed at least one position inside the record it folded into");
+
+    // **`Complete` is decided on the set, not on its outermost edges.** A witness whose first
+    // run starts at the border and whose last ends at the other one can still have a hole in
+    // the middle; only covering every position makes it complete. The runs are disjoint and
+    // inside the locus, so their total says exactly that.
+    if positions.positions_covered() == record_end_exclusive - record_pos {
         return ReadWitness::Complete;
     }
-    ReadWitness::Partial {
-        offset_in_locus: LocusLen::from_positions(u64::from(first - record_pos)).get(),
-        positions_covered: LocusLen::from_positions(u64::from(past_last - first)).get(),
-    }
+    ReadWitness::Partial { positions }
 }
 
 /// **The identity of one emitted observation** — what makes two reads the same observation.
@@ -2186,6 +2204,19 @@ mod tests {
             .expect("a non-empty half-open run")
     }
 
+    /// A one-run partial witness on the **locus** axis, in the offset-and-length spelling
+    /// these expectations were written in. C2 made `Partial`'s payload a set; the runs are
+    /// still one, so the expectations say the same thing they always did.
+    fn partial_run(offset_in_locus: u16, positions_covered: u16) -> ReadWitness {
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(
+                offset_in_locus,
+                positions_covered,
+            )
+            .expect("a run covering at least one position"),
+        }
+    }
+
     #[test]
     fn open_new_creates_record_with_ref_allele_zero_obs() {
         let mut t = OpenPileupRecordTable::new();
@@ -3080,18 +3111,86 @@ mod tests {
         assert_eq!(witness_of(&ref_run(5, 21), 5, 21), ReadWitness::Complete);
     }
 
+    /// **A witness with a hole is not complete, however far its ends reach — and this is
+    /// the whole of C2.**
+    ///
+    /// The read touches both borders of a 5..21 footprint and is blind in the middle. Read
+    /// as the extent that *encloses* its runs, that is 5..21 and the answer is `Complete`:
+    /// the read is credited with fifteen positions it never saw, and the record's depth is
+    /// wrong at every one of them, with nothing to raise. Read as a set, it is two runs
+    /// covering six positions.
+    ///
+    /// The fold cannot hand this in yet — `apply_events_into` still discards a holed
+    /// witness until C3 — so this is the one place C2's change is visible, and the mutation
+    /// that names it is "clamp the enclosing extent": replace the per-run walk in
+    /// `witness_of` with `first_start..last_end` and this test fails while every other test
+    /// and the STR dump stay green.
+    #[test]
+    fn witness_of_a_witness_with_a_hole_is_not_complete_however_far_its_ends_reach() {
+        let spliced = WitnessedRefPositions::from_half_open_runs([(5, 8), (18, 21)])
+            .expect("two runs with a hole between them");
+        let witness = witness_of(&spliced, 5, 21);
+        assert_ne!(
+            witness,
+            ReadWitness::Complete,
+            "the read saw 6 of the footprint's 16 positions",
+        );
+        let ReadWitness::Partial { positions } = &witness else {
+            unreachable!("asserted not complete a line above");
+        };
+        assert_eq!(
+            positions.runs().collect::<Vec<_>>(),
+            vec![(0, 3), (13, 16)],
+            "both runs survive, rebased onto the locus",
+        );
+        assert_eq!(positions.positions_covered(), 6);
+        assert!(
+            witness.is_flush_left() && witness.is_flush_right(LocusLen::from_positions(16)),
+            "flush at both borders and still partial — which is exactly why `Complete` \
+             cannot be decided from the borders",
+        );
+    }
+
+    /// **Each run is clamped into the footprint on its own.** A deletion anchored before the
+    /// record comes back whole from `events_overlapping`, so a witness can overhang either
+    /// end; clamping the enclosing extent would cut the overhang and leave the interior run
+    /// untouched, which is right only by accident. Here both outer runs overhang and the
+    /// middle one does not, so a clamp applied to the wrong thing shows up as a wrong middle
+    /// run rather than as a wrong total.
+    #[test]
+    fn witness_of_clamps_each_run_rather_than_the_extent_enclosing_them() {
+        let overhanging = WitnessedRefPositions::from_half_open_runs([(1, 7), (9, 12), (18, 40)])
+            .expect("three runs");
+        let witness = witness_of(&overhanging, 5, 21);
+        let ReadWitness::Partial { positions } = &witness else {
+            unreachable!("six positions of sixteen are missing");
+        };
+        assert_eq!(
+            positions.runs().collect::<Vec<_>>(),
+            vec![(0, 2), (4, 7), (13, 16)],
+            "the outer two are cut at the footprint; the interior one is untouched",
+        );
+    }
+
+    /// A run lying **wholly outside** the footprint contributes nothing and does not become
+    /// a run of no positions — the degenerate shape both witnessed-set types forbid. It
+    /// cannot arrive from the fold (every run is clipped into the record when it folds, the
+    /// anchor never moves, and a widen only extends the right), which is why `witness_of`
+    /// asserts rather than returns an `Option`; what is pinned here is that the *survivors*
+    /// are unaffected by it.
+    #[test]
+    fn witness_of_drops_a_run_that_falls_outside_the_footprint_entirely() {
+        let past_the_end = WitnessedRefPositions::from_half_open_runs([(9, 12), (30, 40)])
+            .expect("two runs, the second beyond the record");
+        assert_eq!(witness_of(&past_the_end, 5, 21), partial_run(4, 3));
+    }
+
     /// Flush with the left border and short of the right — freebayes' prefix constraint,
     /// which `is_flush_left` has to keep being able to read off the run.
     #[test]
     fn witness_of_a_witness_flush_left_reports_a_zero_offset() {
         let witness = witness_of(&ref_run(5, 8), 5, 21);
-        assert_eq!(
-            witness,
-            ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 3,
-            }
-        );
+        assert_eq!(witness, partial_run(0, 3));
         assert!(witness.is_flush_left());
         assert!(!witness.is_flush_right(LocusLen::from_positions(16)));
     }
@@ -3101,13 +3200,7 @@ mod tests {
     #[test]
     fn witness_of_a_witness_flush_right_reports_the_offset_it_starts_at() {
         let witness = witness_of(&ref_run(18, 21), 5, 21);
-        assert_eq!(
-            witness,
-            ReadWitness::Partial {
-                offset_in_locus: 13,
-                positions_covered: 3,
-            }
-        );
+        assert_eq!(witness, partial_run(13, 3));
         assert!(!witness.is_flush_left());
         assert!(witness.is_flush_right(LocusLen::from_positions(16)));
     }
@@ -3119,13 +3212,7 @@ mod tests {
     #[test]
     fn witness_of_an_interior_witness_is_flush_with_neither_border() {
         let witness = witness_of(&ref_run(9, 13), 5, 21);
-        assert_eq!(
-            witness,
-            ReadWitness::Partial {
-                offset_in_locus: 4,
-                positions_covered: 4,
-            }
-        );
+        assert_eq!(witness, partial_run(4, 4));
         assert!(!witness.is_flush_left());
         assert!(!witness.is_flush_right(LocusLen::from_positions(16)));
     }
@@ -3144,18 +3231,12 @@ mod tests {
         );
         assert_eq!(
             witness_of(&ref_run(1, 8), 5, 21),
-            ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 3,
-            },
+            partial_run(0, 3),
             "the run starts at the record's own anchor, never before it"
         );
         assert_eq!(
             witness_of(&ref_run(18, 41), 5, 21),
-            ReadWitness::Partial {
-                offset_in_locus: 13,
-                positions_covered: 3,
-            },
+            partial_run(13, 3),
             "and it ends at the record's own end"
         );
     }
@@ -3246,10 +3327,7 @@ mod tests {
                 record.pos,
                 record.footprint_end_exclusive()
             ),
-            ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 3,
-            },
+            partial_run(0, 3),
             "the same extent, resolved against the footprint the record ended with"
         );
     }
@@ -3378,29 +3456,23 @@ mod tests {
         );
 
         let mut observations = record.keyed_observations(record.footprint_end_exclusive());
-        observations.sort_by_key(|observation| match observation.key.read_witness {
-            ReadWitness::Complete => 0u16,
-            ReadWitness::Partial {
-                positions_covered, ..
-            } => positions_covered,
+        observations.sort_by_key(|observation| match &observation.key.read_witness {
+            ReadWitness::Complete => 0u32,
+            ReadWitness::Partial { positions } => positions.positions_covered(),
         });
         let split: Vec<_> = observations
             .iter()
             .filter(|observation| observation.key.bases == b"G")
-            .map(|observation| (observation.key.read_witness, observation.support.num_obs))
+            .map(|observation| {
+                (
+                    observation.key.read_witness.clone(),
+                    observation.support.num_obs,
+                )
+            })
             .collect();
         assert_eq!(
             split,
-            vec![
-                (ReadWitness::Complete, 1),
-                (
-                    ReadWitness::Partial {
-                        offset_in_locus: 0,
-                        positions_covered: 1,
-                    },
-                    1
-                ),
-            ],
+            vec![(ReadWitness::Complete, 1), (partial_run(0, 1), 1),],
             "one bucket, two observations: the deleter witnessed all fourteen positions and the \
              shortie one. Rows: {observations:?}"
         );

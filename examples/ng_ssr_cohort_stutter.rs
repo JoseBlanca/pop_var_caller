@@ -121,7 +121,7 @@ fn write_locus<W: Write>(
     };
 
     for obs in &locus.observations {
-        let label = witness_label(obs.read_witness, locus.locus_len());
+        let label = witness_label(&obs.read_witness, locus.locus_len());
         match obs.read_witness {
             ReadWitness::Complete => {
                 counts.obs_complete += 1;
@@ -151,7 +151,7 @@ fn write_locus<W: Write>(
 }
 
 /// The tag a witness carries in the `coverage` column.
-fn witness_label(witness: ReadWitness, locus_len: LocusLen) -> &'static str {
+fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
     // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),

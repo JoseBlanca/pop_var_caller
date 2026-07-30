@@ -223,3 +223,110 @@ output is correct and cheap; not handing them to the aligner at all would be che
 here, because it is a change to the read fetch and this milestone is about the witness. **Home:**
 [`locus_generation_ssr.md`](../../ng/spec/locus_generation_ssr.md) §2, when someone measures what
 the aligner spends on them.
+
+---
+
+## C2 — `witness_of` resolves a set, and `Partial` carries one
+
+### Scope: C2 absorbed C4, D1 and D2 (owner, 2026-07-30)
+
+C2's own contract — "clamp **each run** into the footprint, never the enclosing span" — only
+means anything if `ReadWitness::Partial` carries a `WitnessedLocusPositions`. That swap does
+not compile alone. In one commit it forces:
+
+| plan step | what the swap forces | why it cannot wait |
+|---|---|---|
+| **C4** | `sort_key` borrows: `(u8, &[(u16, u16)])` | `(u8, u16, u16)` cannot be a total order over a set, and `ReadWitness` stops being `Copy` |
+| **D1** | `num_obs_along_locus` iterates runs | it read the two `u16` fields directly |
+| **D2** | `is_flush_left` / `is_flush_right` delegate | one line each; `WitnessedLocusPositions` already implements both |
+| part of **D4** | the generic dump's and the census's per-`Partial` invariants | they destructure the fields |
+
+13 files carry `ReadWitness`, ~200 sites. Raised before writing any of it; the owner chose to
+absorb rather than split. **C3 is untouched by this** — it still lands alone and bisectable.
+D4 keeps its real content (the three dumps' label drift, sharing `witness_label`'s
+derivation); D1 and D2 are marked landed-at-C2 in the plan.
+
+### The constructors return `Option`, which arch §1.1 did not ask for
+
+`from_left` / `from_right` are `-> Option<Self>` where the arch keeps them infallible and §5
+says "call sites unchanged". C0 is why: a clamped run covering **no** position cannot be a
+`WitnessedLocusPositions`, and the three alternatives were all worse — panicking on a public
+constructor, fabricating a position, or leaving the empty case expressible on a type whose
+producer had just been fixed for minting 6,704 of them.
+
+The result is better than the signature it replaced: the STR path's only mint now reads
+
+```rust
+let Some(read_witness) = (match border { … }) else {
+    return Classified::NoObservation(NoObservationReason::OutsideTract);
+};
+```
+
+so C0's guard and the type give the **same** answer instead of being two decisions that can
+drift. Two production call sites and ~20 test sites moved; the plan's D3 note ("`from_left` /
+`from_right` keep their signatures") is superseded.
+
+**One arch contract deliberately not implemented.** §1.1 says all constructors "return
+`Complete` when the result covers the whole locus". They do not, and must not here: on the STR
+path an expanded allele gives a reach past the reference tract, so `from_left(n ≥ len, len)`
+is reachable and would flip observations from `Partial` to `Complete` — moving the STR output
+that spec §1 goal 3 protects. The existing full-locus merge (`from_left(len, len)` and
+`from_right(len, len)` are the same value) is preserved: both build the same one-run set.
+**Raise at D3**, which owns the constructor set.
+
+### What `witness_of` does now
+
+Each run is intersected with the footprint and rebased onto the locus; runs falling wholly
+outside are dropped rather than becoming runs of no positions; the survivors go through
+`WitnessedLocusPositions::from_half_open_runs`. **`Complete` is decided on the set's total
+coverage**, not on its outermost edges — a witness flush at *both* borders can still have a
+hole, and calling that complete is the fabrication C2 exists to prevent.
+
+The empty-after-clamp case is an `expect`, not an `Option` return (the plan flagged the
+choice). The argument is the fold's: every run is clipped into `[record_pos, record_end)` when
+it folds, a record's anchor never moves, and a widen only extends the right — so no run can
+lie outside the *final* footprint. Returning `Option` would have made every caller invent a
+policy for a state the fold cannot produce.
+
+### Four new tests, each failing under the defect it names
+
+C2 moves no byte — the fold still discards a holed witness until C3 — so its change is only
+visible on sets built directly. All four mutations were run and the output quoted:
+
+| test | mutation | result |
+|---|---|---|
+| `witness_of_a_witness_with_a_hole_is_not_complete_however_far_its_ends_reach` | `witness_of` clamps the enclosing extent | **3 failed**, incl. this one |
+| `witness_of_clamps_each_run_rather_than_the_extent_enclosing_them` | *(same)* | fails |
+| `witness_of_drops_a_run_that_falls_outside_the_footprint_entirely` | *(same)* | fails |
+| `depth_over_a_witness_with_a_hole_leaves_the_hole_at_zero` | `num_obs_along_locus` sums the enclosing extent | **1 failed** |
+| `witness_order_is_total_over_witnesses_of_several_runs` | `sort_key` returns only the first run | **1 failed** |
+| `a_constructor_asked_for_no_positions_answers_none` | `from_left` saturates a zero-length run to one position | **1 failed** |
+
+The first is the milestone's point in one fixture: a read touching both borders of a 5..21
+footprint and blind between them is credited with all sixteen positions under the enclosing
+reading, and with the six it saw under the set.
+
+### One test rewritten rather than kept
+
+`a_run_whose_end_would_overflow_is_still_flush_right` named a hazard C2 removed: `is_flush_right`
+had to *add* offset and length, and the Milestone B review showed a `wrapping_add` there
+survived the whole suite. A run now carries its end, so there is no addition; and the
+offset-and-length spelling that could overflow lives in one constructor that rejects the sum,
+pinned by `an_empty_input_or_an_empty_run_is_rejected_rather_than_dropped`. What remains
+testable — the predicate at the last representable position — is
+`a_run_reaching_the_last_representable_position_is_flush_right`, which fails if the predicate
+reads the wrong end of the set.
+
+### Validation
+
+| check | result |
+|---|---|
+| `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` | clean |
+| `cargo test --lib --bins --tests --examples --all-features` | **2,831** passed, 0 failed (2,825 before) |
+| `ng::locus_generation` | **300** passed (294 before) |
+| STR dump vs the C0 baseline | **byte-identical** |
+| the three parity anchors | green |
+
+The generic dump's `read_witness` column renders one `<offset>+<positions>` per run, comma
+separated — identical for the one-run witnesses the generic path mints today. **D4 still owns
+what that column finally says**, and the label drift across the three STR dumps with it.

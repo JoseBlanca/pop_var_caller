@@ -187,37 +187,45 @@ impl WitnessedLocusPositions {
 /// folded in: it is the overwhelmingly common case and it keeps
 /// [`complete_observations`](super::SampleLocusObservations::complete_observations) a cheap
 /// equality instead of arithmetic against the footprint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// **Not `Copy` since C2**, because `Partial` carries a set. Every consumer either matches on
+/// it or clones it, and the one place that mattered — the fold's per-read state — took the
+/// same medicine at C1.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReadWitness {
     /// The read reached both borders of the locus.
     Complete,
-    /// The stretch the read did witness, in **locus positions** — the axis `bases` is
-    /// not on (that is allele content, in read coordinates).
+    /// The positions the read did witness, in **locus positions** — the axis `bases` is
+    /// not on (that is allele content, in read coordinates). **One run, or several.**
     ///
     /// **Named `Partial`, not `Observed`.** Next to `Complete`, "observed" is not a
     /// contrast — a complete witness was observed too — and once the enum itself says
     /// *witness*, the word adds nothing. `Partial` says the one thing that separates
     /// the two (spec §3.1).
     ///
-    /// **The fields are public, and the clamping in [`from_left`](Self::from_left) /
-    /// [`from_right`](Self::from_right) is therefore a convention rather than a type
-    /// invariant.** Left that way deliberately (2026-07-28): private fields would prove
-    /// only that a run had been clamped against *some* [`LocusLen`], and nothing ties
-    /// that length to the locus the run is finally attached to — `ReadWitness` cannot
-    /// know its own locus. So the real check has to live where the region is in hand,
-    /// which is `num_obs_along_locus`, and it does.
+    /// # C2 replaced two `u16`s with a set, and what that changed
     ///
-    /// Revisit when the **generic** path mints its first run: it needs runs flush with
-    /// neither border (a read blind in the middle of a footprint), which neither
-    /// constructor expresses, so the full constructor set — and with it the case for
-    /// sealing the variant — is only knowable then. Building it now would be designing
-    /// against one producer and guessing at the second.
+    /// It used to be `{ offset_in_locus, positions_covered }` — one run, and one run only.
+    /// The generic fold now mints witnesses with **holes** in them (a spliced read across a
+    /// widened record, spec §8), which two numbers can only describe by swallowing the gap.
+    /// A set says it.
+    ///
+    /// The field stays public, and the clamping in [`from_left`](Self::from_left) /
+    /// [`from_right`](Self::from_right) is still a convention rather than a type invariant,
+    /// for the reason recorded in 2026-07-28: private fields would prove only that a run had
+    /// been clamped against *some* [`LocusLen`], and nothing ties that length to the locus
+    /// the run is finally attached to — `ReadWitness` cannot know its own locus. So the real
+    /// check lives where the region is in hand, which is `num_obs_along_locus`.
+    ///
+    /// **What the set does seal is the other half**, and it is the half that was failing:
+    /// [`WitnessedLocusPositions`] has a private field and canonicalising constructors, so a
+    /// witness reaching here is sorted, non-overlapping and — the one C0 turned up —
+    /// **non-empty**. A `Partial` covering no position at all used to be expressible, and
+    /// the STR path minted 6,704 of them on one tomato chromosome
+    /// ([`locus_generation_ssr.md`](../../../doc/devel/ng/spec/locus_generation_ssr.md) §3).
     Partial {
-        /// Locus positions between the locus's left border and the first one
-        /// witnessed. `0` = flush with the left border, i.e. a prefix constraint.
-        offset_in_locus: u16,
-        /// How many locus positions were witnessed, running from `offset_in_locus`.
-        positions_covered: u16,
+        /// The locus positions witnessed — canonical runs, never empty.
+        positions: WitnessedLocusPositions,
     },
 }
 
@@ -265,11 +273,18 @@ impl ReadWitness {
     /// `locus_len` clamps the run into the locus. It is needed because a producer's
     /// reach can be measured in *read* bases, which diverge from locus positions under
     /// stutter; a run must never claim positions the locus does not have.
-    pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Self {
-        Self::Partial {
-            offset_in_locus: 0,
-            positions_covered: positions_covered.min(locus_len.get()),
-        }
+    ///
+    /// **`None` when the clamped run covers no position** — the caller is describing a read
+    /// that witnessed nothing of this locus, which is not a witness. C2 made that
+    /// unrepresentable rather than merely wrong: `Partial { 0, 0 }` and `Partial { len, 0 }`
+    /// used to be two *different* values, distinguishable by flushness and by bucket key,
+    /// while both said the read saw nothing — and the STR path minted 6,704 of them on one
+    /// tomato chromosome before C0 stopped it. The `Option` is what keeps the two decisions
+    /// from drifting apart: the producer's guard and the type now have to agree.
+    pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Option<Self> {
+        let covered = positions_covered.min(locus_len.get());
+        WitnessedLocusPositions::one_run_from_offset_and_length(0, covered)
+            .map(|positions| Self::Partial { positions })
     }
 
     /// A run flush with the locus's **right** border, `positions_covered` long — the
@@ -299,12 +314,13 @@ impl ReadWitness {
     /// the pre-reshape answer, and the plan's stated equivalence
     /// `PartialRight(n) ⇔ Partial { len - n, n }` stops holding at `n = len`. Pinned by
     /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_observation`.
-    pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Self {
+    ///
+    /// **`None` when the clamped run covers no position**, for the reason
+    /// [`from_left`](Self::from_left) gives.
+    pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Option<Self> {
         let covered = positions_covered.min(locus_len.get());
-        Self::Partial {
-            offset_in_locus: locus_len.get() - covered,
-            positions_covered: covered,
-        }
+        WitnessedLocusPositions::one_run_from_offset_and_length(locus_len.get() - covered, covered)
+            .map(|positions| Self::Partial { positions })
     }
 
     /// Whether the run starts at the locus's left border — a **prefix** constraint on
@@ -312,9 +328,10 @@ impl ReadWitness {
     pub fn is_flush_left(&self) -> bool {
         match self {
             Self::Complete => true,
-            Self::Partial {
-                offset_in_locus, ..
-            } => *offset_in_locus == 0,
+            // The **first** run, which is the set's own predicate: with a hole in the middle
+            // the witness can still start at the border, and that is what a prefix
+            // constraint means.
+            Self::Partial { positions } => positions.is_flush_left(),
         }
     }
 
@@ -323,10 +340,9 @@ impl ReadWitness {
     pub fn is_flush_right(&self, locus_len: LocusLen) -> bool {
         match self {
             Self::Complete => true,
-            Self::Partial {
-                offset_in_locus,
-                positions_covered,
-            } => offset_in_locus.saturating_add(*positions_covered) >= locus_len.get(),
+            // The **last** run. The `saturating_add` the one-run form needed is gone with the
+            // addition: a canonical run holds its end, so nothing is recomputed here.
+            Self::Partial { positions } => positions.is_flush_right(locus_len),
         }
     }
 
@@ -346,18 +362,28 @@ impl ReadWitness {
     /// disagree while both still compile.
     ///
     /// The order it produces is the pre-reshape one — complete, then left-flush partials,
-    /// then right-flush — without naming a side: a left-flush run has
-    /// `offset_in_locus == 0` and so sorts ahead of every right-flush one, whose offset is
-    /// `locus_len - covered`. Pinned by
+    /// then right-flush — without naming a side: a left-flush run starts at 0 and so sorts
+    /// ahead of every right-flush one, which starts at `locus_len - covered`. Pinned by
     /// `witness_order_ranks_partials_by_offset_before_length`, which is the test that
     /// fails when the two components are exchanged.
-    pub fn sort_key(self) -> (u8, u16, u16) {
+    ///
+    /// # It borrows since C2, and the order over one run is unchanged
+    ///
+    /// `(u8, u16, u16)` cannot be a total order over a *set* — a witness can hold any number
+    /// of runs — so the key is a tag and a **slice of the canonical runs**, compared
+    /// lexicographically (arch §2). Over a one-run witness that is exactly the old order:
+    /// the old key compared `(offset, covered)` and the new one compares `(start, end)` at
+    /// the same start, so the second component ranks the same runs the same way. Over
+    /// several runs it keeps ordering by where the witness *begins*, then by how it
+    /// continues, which is the same rule read further.
+    ///
+    /// `ReadWitness` still gets no `Ord` of its own, unchanged reasoning: a named key is
+    /// opt-in at the sort site, where an impl would make a witness silently comparable
+    /// everywhere.
+    pub fn sort_key(&self) -> (u8, &[(u16, u16)]) {
         match self {
-            Self::Complete => (0, 0, 0),
-            Self::Partial {
-                offset_in_locus,
-                positions_covered,
-            } => (1, offset_in_locus, positions_covered),
+            Self::Complete => (0, &[]),
+            Self::Partial { positions } => (1, &positions.0),
         }
     }
 }
@@ -380,6 +406,20 @@ mod tests {
 
     fn runs_of(positions: &WitnessedLocusPositions) -> Vec<(u16, u16)> {
         positions.runs().collect()
+    }
+
+    /// A one-run partial witness, in the **offset and length** spelling the tests below were
+    /// written in and the STR path still mints. C2 made the payload a set; this keeps the
+    /// expectations reading as the constraint they describe rather than as a pair of
+    /// coordinates.
+    fn partial_run(offset_in_locus: u16, positions_covered: u16) -> ReadWitness {
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(
+                offset_in_locus,
+                positions_covered,
+            )
+            .expect("a run covering at least one position"),
+        }
     }
 
     /// **Touching and overlapping runs are one run** — the merge half of the invariant.
@@ -542,22 +582,31 @@ mod tests {
         );
     }
 
-    /// **The one-run predicate's addition must not wrap**, which nothing said until the
-    /// Milestone B review swapped `saturating_add` for `wrapping_add` and watched all 287
-    /// tests pass. `Partial`'s fields are public and its clamping is a convention rather
-    /// than a type invariant (see the variant's own doc), so an over-long run is reachable
-    /// without going through a constructor — and under wrapping it reports *not* flush
-    /// right, which reads as "this read is missing the locus's tail" when it covered
+    /// **The addition that could wrap is gone, and this is what replaced it.**
+    ///
+    /// The Milestone B review swapped `is_flush_right`'s `saturating_add` for
+    /// `wrapping_add` and watched all 287 tests pass: `Partial` carried an offset and a
+    /// length, so the predicate had to add them, and an over-long run — reachable because
+    /// the fields were public and the clamping only a convention — then reported *not*
+    /// flush right, which reads as "this read is missing the locus's tail" when it covered
     /// everything.
+    ///
+    /// C2 removed both halves. A run now carries its **end**, so the predicate reads it
+    /// rather than recomputing it, and the offset-and-length spelling that could overflow
+    /// lives in one constructor which rejects the sum outright — pinned by
+    /// `an_empty_input_or_an_empty_run_is_rejected_rather_than_dropped`. What is left to
+    /// assert is the predicate at the last representable position, which fails if it ever
+    /// reads the wrong end of the set.
     #[test]
-    fn a_run_whose_end_would_overflow_is_still_flush_right() {
-        let over_long = ReadWitness::Partial {
-            offset_in_locus: u16::MAX - 1,
-            positions_covered: 8,
-        };
+    fn a_run_reaching_the_last_representable_position_is_flush_right() {
+        let to_the_border = partial_run(u16::MAX - 8, 8);
         assert!(
-            over_long.is_flush_right(LocusLen::from_positions(u64::from(u16::MAX))),
-            "the reach saturates at u16::MAX and still reaches the border",
+            to_the_border.is_flush_right(LocusLen::from_positions(u64::from(u16::MAX))),
+            "the run ends at u16::MAX, which is the locus's own end",
+        );
+        assert!(
+            !to_the_border.is_flush_left(),
+            "and it starts nowhere near the other border",
         );
     }
 
@@ -678,27 +727,43 @@ mod tests {
     #[test]
     fn witness_order_ranks_partials_by_offset_before_length() {
         assert!(
-            ReadWitness::Complete.sort_key()
-                < ReadWitness::Partial {
-                    offset_in_locus: 0,
-                    positions_covered: 1,
-                }
-                .sort_key(),
+            ReadWitness::Complete.sort_key() < partial_run(0, 1).sort_key(),
             "a complete witness sorts ahead of every run",
         );
         assert!(
-            ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 9,
-            }
-            .sort_key()
-                < ReadWitness::Partial {
-                    offset_in_locus: 4,
-                    positions_covered: 2,
-                }
-                .sort_key(),
+            partial_run(0, 9).sort_key() < partial_run(4, 2).sort_key(),
             "where a run starts outranks how far it runs, so a left-flush run precedes a \
              right-flush one whatever their lengths",
+        );
+    }
+
+    /// **The order is total over sets, not just over single runs**, which is what C2 needed
+    /// it for: `finalise` sorts observations by it and the emitted bytes have to be a
+    /// function of the observation's own identity (spec §3.3, §7).
+    ///
+    /// Two witnesses that begin the same way and differ only in what comes *after* the hole
+    /// are the case a fixed-width key could not separate — under the old `(u8, u16, u16)`
+    /// they would have had to collapse to the same key, making the sort unstable in the one
+    /// place determinism is claimed. Ordering by the whole run list separates them, and
+    /// keeps the first run deciding whenever it can.
+    #[test]
+    fn witness_order_is_total_over_witnesses_of_several_runs() {
+        let holed = |runs: [(u16, u16); 2]| ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs(runs).expect("two runs"),
+        };
+
+        assert!(
+            holed([(0, 3), (7, 9)]).sort_key() < holed([(0, 3), (7, 10)]).sort_key(),
+            "same first run, so the second decides",
+        );
+        assert!(
+            holed([(0, 3), (9, 10)]).sort_key() < holed([(1, 3), (4, 5)]).sort_key(),
+            "and the first run still decides whenever it differs, however the rest run",
+        );
+        assert!(
+            partial_run(0, 3).sort_key() < holed([(0, 3), (7, 9)]).sort_key(),
+            "one run is a prefix of the same run plus another, so the shorter list sorts \
+             first — which is a total order and not merely a consistent one",
         );
     }
 
@@ -713,17 +778,35 @@ mod tests {
     fn from_right_places_the_run_against_the_right_border() {
         assert_eq!(
             ReadWitness::from_left(4, LocusLen::from_positions(10)),
-            ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 4
-            }
+            Some(partial_run(0, 4))
         );
         assert_eq!(
             ReadWitness::from_right(4, LocusLen::from_positions(10)),
-            ReadWitness::Partial {
-                offset_in_locus: 6,
-                positions_covered: 4
-            }
+            Some(partial_run(6, 4))
+        );
+    }
+
+    /// **A run covering no position is not a witness, and the constructors say so.** Added at
+    /// C2, where `Partial`'s payload became a set that cannot be empty — before which
+    /// `from_left(0, len)` and `from_right(0, len)` produced two *different* values, both
+    /// claiming a read had witnessed nothing. That was not theoretical: the STR path minted
+    /// 6,704 of them on chr01 of tomato `SRR7279503` against 7,085 genuine partials, and C0
+    /// stopped it at the producer. This is the same statement on the type, so the two cannot
+    /// drift apart.
+    ///
+    /// A zero-length *locus* is the other way in, and it is rejected for the same reason:
+    /// there is no position for a run to cover.
+    #[test]
+    fn a_constructor_asked_for_no_positions_answers_none() {
+        assert_eq!(ReadWitness::from_left(0, LocusLen::from_positions(6)), None);
+        assert_eq!(
+            ReadWitness::from_right(0, LocusLen::from_positions(6)),
+            None
+        );
+        assert_eq!(ReadWitness::from_left(4, LocusLen::from_positions(0)), None);
+        assert_eq!(
+            ReadWitness::from_right(4, LocusLen::from_positions(0)),
+            None
         );
     }
 
@@ -740,10 +823,7 @@ mod tests {
     fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
         assert_eq!(
             ReadWitness::from_left(9, LocusLen::from_positions(3)),
-            ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 3
-            }
+            Some(partial_run(0, 3))
         );
         assert_eq!(
             ReadWitness::from_right(9, LocusLen::from_positions(3)),
@@ -762,11 +842,13 @@ mod tests {
         assert!(ReadWitness::Complete.is_flush_left());
         assert!(ReadWitness::Complete.is_flush_right(LocusLen::from_positions(10)));
 
-        let left = ReadWitness::from_left(4, LocusLen::from_positions(10));
+        let left = ReadWitness::from_left(4, LocusLen::from_positions(10))
+            .expect("a run covering at least one position");
         assert!(left.is_flush_left(), "a prefix constraint");
         assert!(!left.is_flush_right(LocusLen::from_positions(10)));
 
-        let right = ReadWitness::from_right(4, LocusLen::from_positions(10));
+        let right = ReadWitness::from_right(4, LocusLen::from_positions(10))
+            .expect("a run covering at least one position");
         assert!(!right.is_flush_left());
         assert!(
             right.is_flush_right(LocusLen::from_positions(10)),
@@ -775,10 +857,7 @@ mod tests {
 
         // An interior run — flush with neither border. The STR path cannot mint one, but the
         // predicates are shared and the generic path will.
-        let interior = ReadWitness::Partial {
-            offset_in_locus: 3,
-            positions_covered: 4,
-        };
+        let interior = partial_run(3, 4);
         assert!(!interior.is_flush_left());
         assert!(!interior.is_flush_right(LocusLen::from_positions(10)));
     }

@@ -88,21 +88,27 @@ impl SampleLocusObservations {
             // over whole cohorts, and a debug-only guard compiles out of the release build
             // this repo actually runs (a trap it has recorded hitting twice). Clamping
             // keeps the derivation total on any input.
-            let (from, to) = match obs.read_witness {
-                ReadWitness::Complete => (0, len),
-                ReadWitness::Partial {
-                    offset_in_locus,
-                    positions_covered,
-                } => {
-                    let from = (offset_in_locus as usize).min(len);
-                    (
-                        from,
-                        from.saturating_add(positions_covered as usize).min(len),
-                    )
+            //
+            // **Per run since C2, and that is the point of the set.** Clamping the run the
+            // witness *encloses* would count depth straight through a hole — the read
+            // credited with positions it never saw, at exactly the spliced loci the set
+            // exists to describe. So each run is clamped and added on its own; a witness of
+            // one run, which is every witness on DNA-seq, walks the same slice as before.
+            match &obs.read_witness {
+                ReadWitness::Complete => {
+                    for slot in &mut depth[0..len] {
+                        *slot = slot.saturating_add(obs.num_obs);
+                    }
                 }
-            };
-            for slot in &mut depth[from..to] {
-                *slot = slot.saturating_add(obs.num_obs);
+                ReadWitness::Partial { positions } => {
+                    for (start, end) in positions.runs() {
+                        let from = (start as usize).min(len);
+                        let to = (end as usize).min(len).max(from);
+                        for slot in &mut depth[from..to] {
+                            *slot = slot.saturating_add(obs.num_obs);
+                        }
+                    }
+                }
             }
         }
         depth
@@ -811,6 +817,19 @@ mod tests {
         }
     }
 
+    /// A one-run partial witness, in the offset-and-length spelling these depth fixtures
+    /// were written in. C2 made `Partial`'s payload a set; a fixture that says "four
+    /// positions from offset three" still reads as the constraint it is.
+    fn partial_run(offset_in_locus: u16, positions_covered: u16) -> ReadWitness {
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(
+                offset_in_locus,
+                positions_covered,
+            )
+            .expect("a run covering at least one position"),
+        }
+    }
+
     /// An observation of `bases` with `num_obs` reads at a given witness — the moment
     /// fields are irrelevant to the depth derivation, so they are fixed.
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
@@ -1362,7 +1381,8 @@ mod tests {
             chain_ids: Vec::new(),
         };
         let partial = SequenceObservation {
-            read_witness: ReadWitness::from_left(6, LocusLen::from_positions(6)),
+            read_witness: ReadWitness::from_left(6, LocusLen::from_positions(6))
+                .expect("a run covering at least one position"),
             ..complete.clone()
         };
         assert_ne!(complete, partial);
@@ -1382,12 +1402,14 @@ mod tests {
                 obs(b"AAAAAAAAAA", ReadWitness::Complete, 3),
                 obs(
                     b"AAAA",
-                    ReadWitness::from_left(4, LocusLen::from_positions(10)),
+                    ReadWitness::from_left(4, LocusLen::from_positions(10))
+                        .expect("a run covering at least one position"),
                     2,
                 ),
                 obs(
                     b"AAA",
-                    ReadWitness::from_right(3, LocusLen::from_positions(10)),
+                    ReadWitness::from_right(3, LocusLen::from_positions(10))
+                        .expect("a run covering at least one position"),
                     5,
                 ),
             ],
@@ -1439,7 +1461,8 @@ mod tests {
             region(1, 3),
             vec![obs(
                 b"AAA",
-                ReadWitness::from_left(9, LocusLen::from_positions(3)),
+                ReadWitness::from_left(9, LocusLen::from_positions(3))
+                    .expect("a run covering at least one position"),
                 4,
             )],
         );
@@ -1452,20 +1475,32 @@ mod tests {
     /// it is also the only one where an off-by-one in the arm is purely silent.
     #[test]
     fn depth_over_an_interior_run_raises_only_the_witnessed_stretch() {
-        let l = locus(
-            region(1, 10),
-            vec![obs(
-                b"AAAA",
-                ReadWitness::Partial {
-                    offset_in_locus: 3,
-                    positions_covered: 4,
-                },
-                7,
-            )],
-        );
+        let l = locus(region(1, 10), vec![obs(b"AAAA", partial_run(3, 4), 7)]);
         // positions: 1  2  3  4  5  6  7  8  9 10
         //            .  .  .  7  7  7  7  .  .  .
         assert_eq!(l.num_obs_along_locus(), vec![0, 0, 0, 7, 7, 7, 7, 0, 0, 0]);
+    }
+
+    /// **Depth over a witness with a hole raises the runs and not the gap** — the derivation
+    /// C2's set exists for, and the one number that says whether the hole survived the trip
+    /// from the fold to a depth profile.
+    ///
+    /// A spliced read witnessing positions 1–3 and 8–10 of a ten-position locus must leave
+    /// 4–7 at zero. Summing over the extent that *encloses* its runs raises all ten instead,
+    /// which is the read being credited with an intron it never sequenced — no panic, no
+    /// clamp, just a depth that is 60 % too wide. That mutation is what this test fails
+    /// under; nothing else in the suite notices it, because every witness the fold mints
+    /// before C3 has one run and the two readings agree on those.
+    #[test]
+    fn depth_over_a_witness_with_a_hole_leaves_the_hole_at_zero() {
+        let spliced = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 3), (7, 10)])
+                .expect("two runs"),
+        };
+        let l = locus(region(1, 10), vec![obs(b"AAACCC", spliced, 5)]);
+        // positions: 1  2  3  4  5  6  7  8  9 10
+        //            5  5  5  .  .  .  .  5  5  5
+        assert_eq!(l.num_obs_along_locus(), vec![5, 5, 5, 0, 0, 0, 0, 5, 5, 5]);
     }
 
     /// `complete_observations()` yields only the complete entries — the guard that a
@@ -1478,13 +1513,15 @@ mod tests {
                 obs(b"ATATAT", ReadWitness::Complete, 4),
                 obs(
                     b"ATATAT",
-                    ReadWitness::from_left(6, LocusLen::from_positions(6)),
+                    ReadWitness::from_left(6, LocusLen::from_positions(6))
+                        .expect("a run covering at least one position"),
                     2,
                 ),
                 obs(b"ATGTAT", ReadWitness::Complete, 3),
                 obs(
                     b"ATAT",
-                    ReadWitness::from_right(4, LocusLen::from_positions(6)),
+                    ReadWitness::from_right(4, LocusLen::from_positions(6))
+                        .expect("a run covering at least one position"),
                     1,
                 ),
             ],

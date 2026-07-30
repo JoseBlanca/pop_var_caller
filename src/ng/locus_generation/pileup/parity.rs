@@ -1768,15 +1768,18 @@ impl DivergenceCensus {
         let footprint = locus.region.len();
         let mut fabricating = false;
         for observation in &locus.observations {
-            let ReadWitness::Partial {
-                positions_covered, ..
-            } = observation.read_witness
-            else {
+            let ReadWitness::Partial { positions } = &observation.read_witness else {
                 continue;
             };
             fabricating = true;
             self.fabricated_reads += u64::from(observation.num_obs);
-            self.fabricated_ref_bases += footprint.saturating_sub(u64::from(positions_covered))
+            // **The positions, not the span.** Since C2 a witness can have a hole in it, and
+            // production would have filled that hole from the reference too — so the bases
+            // ng declines to fabricate are the footprint minus everything the read actually
+            // witnessed, which is what `positions_covered` sums and the enclosing extent
+            // would understate.
+            self.fabricated_ref_bases += footprint
+                .saturating_sub(u64::from(positions.positions_covered()))
                 * u64::from(observation.num_obs);
         }
         self.fabricating_loci += usize::from(fabricating);
@@ -2087,18 +2090,23 @@ fn classify_locus(
     // payload was its own alibi. Placed at every locus of both census passes, this is the
     // one thing that fails on it: a flush-left run `{0, k}` becomes `{k, 0}`, and a run of
     // no positions is caught by name and locus.
+    //
+    // **Per run since C2, and that is what keeps it discriminating.** A witness is a set of
+    // runs, so asserting the extent that encloses them would pass on a set whose *interior*
+    // run reaches past the locus, and pass on any hole at all. Two of the three things this
+    // once caught are now unrepresentable — the transposition, because the constructors name
+    // their convention, and the empty run, because `WitnessedLocusPositions` rejects it — but
+    // the third is not, and cannot be: nothing on the type ties a run to the locus it ends up
+    // attached to, which is the reason the variant is still unsealed.
     for observation in &ours.observations {
-        if let ReadWitness::Partial {
-            offset_in_locus,
-            positions_covered,
-        } = observation.read_witness
-        {
+        let ReadWitness::Partial { positions } = &observation.read_witness else {
+            continue;
+        };
+        for (start, end) in positions.runs() {
             assert!(
-                positions_covered > 0
-                    && u64::from(offset_in_locus) + u64::from(positions_covered)
-                        <= ours.region.len(),
-                "{where_}: a partial run {offset_in_locus}+{positions_covered} is empty or \
-                 reaches past its own locus of {} positions",
+                start < end && u64::from(end) <= ours.region.len(),
+                "{where_}: a partial run {start}..{end} is empty or reaches past its own \
+                 locus of {} positions",
                 ours.region.len(),
             );
         }
@@ -2289,9 +2297,13 @@ fn stale_widen_shape(
 /// Two observations sharing `(bases, read_witness)` can only differ in the group, the three
 /// together being the whole observation identity.
 fn observations_split_by_group(locus: &SampleLocusObservations) -> bool {
-    /// An observation's identity **without** its read group: the bases, and the witness run as the
+    /// An observation's identity **without** its read group: the bases, and the witness as the
     /// type's own total order gives it ([`ReadWitness::sort_key`]).
-    type ObservationIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
+    ///
+    /// The witness half is a tag and a borrowed slice of runs since C2, where it was a fixed
+    /// `(u8, u16, u16)` — a set has no fixed width. It still borrows from the observation, so
+    /// the key lives exactly as long as the loop below.
+    type ObservationIdentityWithoutGroup<'a> = (&'a [u8], (u8, &'a [(u16, u16)]));
 
     let mut seen: BTreeSet<ObservationIdentityWithoutGroup<'_>> = BTreeSet::new();
     for observation in &locus.observations {

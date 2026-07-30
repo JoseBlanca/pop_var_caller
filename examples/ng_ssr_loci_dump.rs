@@ -115,7 +115,7 @@ impl DumpReport {
                 motif: motif.clone(),
                 ref_tract: locus.reference_bases.to_vec(),
                 depth,
-                read_witness: witness_label(obs.read_witness, locus_len),
+                read_witness: witness_label(&obs.read_witness, locus_len),
                 observed: obs.bases.to_vec(),
                 reads: obs.num_obs,
             });
@@ -160,7 +160,7 @@ impl DumpReport {
 }
 
 /// The tag a witness carries in the `read_witness` column.
-fn witness_label(witness: ReadWitness, locus_len: LocusLen) -> &'static str {
+fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
     // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
