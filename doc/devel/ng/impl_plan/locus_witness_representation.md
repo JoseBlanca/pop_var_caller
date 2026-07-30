@@ -101,6 +101,16 @@ expectations is a step that did more than rename.
 - ☐ **B1.** Create `src/ng/locus_generation/witness.rs` and **move** `ReadWitness` and `LocusLen`
   into it, re-exported from `locus_generation` so no import path changes. Pure move, no edits.
   *Depends:* A6. *Source:* arch *Module home*.
+  **Two items the Milestone A review deferred here, because the move is where they cost
+  nothing** ([review](../../reports/reviews/ng_locus_witness_representation_a_2026-07-30.md)
+  Mi11, Mi13): (a) `witness_order` exists **twice**, byte-identical, in `pileup/open_record.rs`
+  and in `ssr.rs`'s tally — `open_record`'s comment justifies withholding an `Ord` impl because
+  it "would export *this file's* sorting convention", which the STR copy refutes, so the move
+  should absorb the comparator rather than carry two copies across (a reviewer verified that
+  deriving `Ord` and reducing both call sites leaves 275 tests passing); (b) three files import
+  the witness vocabulary through `super::super::` while two use the crate-absolute path, and in
+  `open_record.rs` the same spelling resolves to two different modules — converting them here
+  makes `grep crate::ng::locus_generation::witness` answer "who depends on this".
 - ☐ **B2.** `WitnessedLocusPositions`: private field, `new` normalising (sort, merge adjacent and
   overlapping), `one_run`, `runs`, `positions_covered`, `is_flush_left`, `is_flush_right`. Encoding
   is runs with two inline. Derived `Eq`/`Hash`, sound because construction canonicalises. **Own
@@ -151,7 +161,15 @@ expectations is a step that did more than rename.
   sites do not move. *Depends:* D2. *Source:* arch §1.1, spec §1 goal 3.
 - ☐ **D4.** Both dump tools print the set rather than one run, and the generic dump's invariant
   check (`offset_in_locus + positions_covered <= footprint`) becomes a check per run. *Depends:*
-  D3. *Source:* spec §4, §8.
+  D3. *Source:* spec §4, §8. **Deferred here by the Milestone A review** (Mi15): `witness_label`
+  exists in **three** example dumps, identical down to a shared seven-line comment, and the three
+  have already drifted — `ng_ssr_loci_dump` emits `partial:left`/`partial:right` where the other
+  two emit `partial_left`/`partial_right` but keep `partial:interior`. The two research dumps'
+  labels are their own output and must not move by accident, so D4 should share the *derivation*
+  and let each tool spell its own strings — deciding the drift rather than inheriting it. D4 also
+  owns the generic dump's `observed:<offset>+<positions>` value label and its
+  `rows_observed`/`reads_observed` counter keys, the last user-visible uses of A4's retired
+  variant name.
 - ☐ **D5.** The divergence census counts holed witnesses and the positions inside them — the
   counters the §8 measurement used, kept this time rather than thrown away. *Depends:* D4.
   *Source:* spec §4.

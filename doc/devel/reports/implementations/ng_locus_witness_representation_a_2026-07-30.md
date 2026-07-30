@@ -83,6 +83,27 @@ key", "the observations sitting on `Partial` observations" became "whose witness
 that needed editing would mean the step did more than rename. The suite moved from 2,806
 passing tests to 2,806 passing tests.
 
+> **⚠ Corrected after the review (2026-07-30).** Three statements in this section and §3
+> were wrong, and the [fix-application report](ng_locus_witness_representation_a_fixes_2026-07-30.md) §3
+> carries them in full:
+>
+> - **One expectation was edited, and it is the predicted one** — the header literal in
+>   `ng_ssr_loci_dump`'s `render_emits_the_spec_9_header_and_tsv_rows`. A string inside
+>   `assert_eq!` is not an identifier, so no rename tool moves it; it was edited by hand,
+>   and it is the same byte the CRAM oracle reports. The plan's tripwire is "any test that
+>   changes expectations did more than rename", so naming the one benign instance is the
+>   point — asserting it did not happen disarms the tripwire.
+> - **Two output headers moved, not one.** The generic dump's column was renamed as well as
+>   the STR dump's; the plan authorises both, but the checkpoint oracle only covered the STR
+>   dump, and the generic dump's header was pinned by no test. The review added the pin.
+> - **A6's departure list was short by two rewrites**, and its "two article fixes" was
+>   mechanically ~23 a/an flips. Also: A6's message claims it moved `ssr.rs`'s "one row per
+>   (allele, read group) cell"; it did not — that is an assertion message, and A6 was
+>   comments-only. It moved in the fix commit.
+>
+> The review also added the tests this section says were not needed: four of them, each
+> verified to fail under the mutation it names. See the fix report.
+
 ## 5. Validation results
 
 Run in the project container, from **this worktree's** `scripts/dev.sh` (see §6 — the wrapper
