@@ -92,13 +92,50 @@ A reviewer that only reads cannot tell a load-bearing line from a decorative one
 
 The next milestone's review, over comparable code with 5 agents and a worktree each, had zero collisions, every result first-hand and nothing needing re-verification. Isolation is cheaper than the bookkeeping its absence forces.
 
+#### The worktree starts on `main`, not on your branch — every prompt needs a step 0
+
+**`isolation: "worktree"` hands each agent its own tree and checks it out at `main`.** Probed
+during Milestone D's review: the agent's `HEAD` came back exactly `git rev-parse main`, and
+`src/ng/locus_generation/pileup/` held 11 files there against 13 on the branch — the two missing
+ones being the generator itself. **The code under review was absent from every agent's tree.**
+
+The failure is silent and expensive. An agent handed its scope by absolute path finds those files
+in *your* checkout, because that is the only copy on the machine where they exist — so a fan-out
+meant to isolate five mutation-heavy agents converges all five on the author's working tree. That
+happened once, and the whole review had to be re-run.
+
+So **every agent prompt begins with a step 0**, before anything else:
+
+> 0. **Re-point your worktree at the commit under review.** Your tree was created from `main` and
+>    does not contain this branch's code. Run `git checkout --detach <sha>` in your own worktree
+>    root, then `ls` <two files that exist only on the branch>. If either is missing, **stop and
+>    report** — do not review from another checkout.
+
+Verified on a worktree created off `main` exactly as the harness makes them: the branch-only files
+were absent before and present after, the tree stayed clean, and no fetch was needed since the
+worktrees share one object store. A second mechanism stacks on top: an **unchanged** worktree is
+auto-cleaned, so an agent resumed after that lands in a real checkout — one more reason the check
+is a hard stop rather than a warning.
+
 #### What isolation changes in the prompt
 
 Three things, and all three must be said explicitly or the agent will get them wrong:
 
-1. **Where it builds.** The agent is *in* its worktree; it runs the project's build tooling from there. Never point it at the main checkout for a build.
+1. **Where it builds — its own copy of the build script, by that copy's absolute path.** The agent
+   is *in* its worktree, and this project's `scripts/dev.sh` derives `PROJECT_DIR` from the
+   script's own location: **the agent's copy mounts and builds the agent's tree**, while
+   `<main-checkout>/scripts/dev.sh` builds the main checkout and ignores the caller's directory.
+   Instruct the agent by its own worktree's absolute path. (Measured: an agent's own `dev.sh`
+   compiles that worktree in ~31 s and leaves ~1.3 GB in its `target-container`. An earlier note
+   claiming `dev.sh` "cannot build a worktree" was describing an invocation of the *main* copy —
+   it is wrong, and it is what misdirected one fan-out.)
 2. **Where its findings go.** Its worktree is temporary and is cleaned up. The findings file must be written to an **absolute path in the main checkout's** `tmp/review_<date>_<slug>/`, which is outside the worktree and survives. Each agent writes its own file, so there is no contention.
 3. **What it may now do.** Say plainly that it has its own tree and should mutation-test aggressively — the isolation only pays if the agents use it. An agent that still reviews by reading has cost you a worktree for nothing.
+
+**Clear the worktrees afterwards, and lift the evidence out first.** A dirty worktree is evidence
+only until it is deleted, so extract any probe or candidate fix you want to keep before pruning:
+`git worktree remove --force <path>` then `git branch -D worktree-agent-<id>` (the branch pointer
+survives the removal).
 
 Do **not** ask isolated agents to leave the tree clean or to revert their experiments. That instruction is for a shared checkout; here it wastes their effort on a tree that is about to be discarded, and a dirty worktree is evidence you can still inspect.
 
@@ -113,11 +150,15 @@ Each sub-agent prompt:
 > **Verification command output:** <verbatim quotes from step 3, or "not run, because …">
 >
 > **Instructions:**
+> 0. **Re-point your worktree at the commit under review.** It was created from `main` and does
+>    not contain this branch's code. Run `git checkout --detach <sha>` in your own worktree root,
+>    then confirm <two branch-only files> exist. If either is missing, **stop and report** rather
+>    than reviewing from another checkout.
 > 1. Read `ai/skills/rust-code-review/code_review/<category>.md` for the rules to apply.
 > 2. Read `ai/skills/rust-code-review/code_review/_finding_format.md` for the severity rubric and finding format.
 > 3. Read each in-scope file.
 > 4. Apply each rule and produce findings in the specified format.
-> 5. **You are in your own isolated git worktree.** Build, mutate and revert freely *there* — nothing you do can collide with another agent, so mutation-test aggressively rather than reviewing by reading. Run the project's build tooling from your own worktree root.
+> 5. **You are in your own isolated git worktree.** Build, mutate and revert freely *there* — nothing you do can collide with another agent, so mutation-test aggressively rather than reviewing by reading. Run the project's build tooling **from your own worktree's copy, by its absolute path** (`<your-worktree>/scripts/dev.sh …`): the script builds whichever tree it lives in, so the main checkout's copy would build the wrong code.
 > 6. Write findings to the **absolute path** `<main-checkout>/tmp/review_<date>_<slug>/<category>.md` — outside your worktree, which is temporary and will be discarded. If no findings apply, write only the line `No findings.`
 > 7. Do not invent file paths, line numbers, command output, or behavior. Cite only locations you have read.
 > 8. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.

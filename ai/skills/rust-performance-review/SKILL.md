@@ -159,9 +159,32 @@ Two further rules follow, and they are this skill's not the code review's:
 - **Ablations and baselines belong to one agent inside one worktree.** Never split "measure the baseline" and "measure the variant" across agents; they will not be comparable.
 - **Say whether the numbers are comparable *across* agents.** Separate worktrees mean separate target directories and concurrent load. Timings from different agents are the same order of magnitude, not the same experiment — at synthesis, treat a cross-agent comparison as needing a re-run by one agent before it enters the report.
 
+#### The worktree starts on `main`, not on your branch — every prompt needs a step 0
+
+**`isolation: "worktree"` checks the agent's tree out at `main`.** Probed during a review on a
+feature branch: the agent's `HEAD` came back exactly `git rev-parse main`, and the module under
+review was missing two of its files there. **The code under review is absent from every agent's
+tree**, so an agent handed its scope by absolute path silently works in *your* checkout instead —
+the one place those files exist. On a perf review that is worse than on a code review: several
+agents benchmarking in one tree produce plausible wrong numbers rather than a failed build.
+
+So **every agent prompt begins with a step 0**: `git checkout --detach <sha>` in its own worktree
+root, then `ls` two files that exist only on the branch, and **stop and report** if either is
+missing. Verified: the branch-only files were absent before and present after, the tree stayed
+clean, and no fetch was needed — the worktrees share one object store. An **unchanged** worktree is
+also auto-cleaned, so a resumed agent can land in a real checkout, which is why the check is a hard
+stop rather than a warning.
+
 #### What isolation changes in the prompt
 
-1. **Where it builds and benchmarks.** The agent is *in* its worktree and runs the project's tooling from there. Never point it at the main checkout.
+1. **Where it builds and benchmarks — its own copy of the build script, by that copy's absolute
+   path.** The agent is *in* its worktree, and `scripts/dev.sh` derives `PROJECT_DIR` from the
+   script's own location: **the agent's copy mounts and builds the agent's tree**, while
+   `<main-checkout>/scripts/dev.sh` builds the main checkout and ignores the caller's directory —
+   which on this skill means benchmarking code that is not the code under review. Instruct the
+   agent by its own worktree's absolute path. (An earlier note claiming `dev.sh` "cannot build a
+   worktree" described an invocation of the *main* copy; it is wrong, and it misdirected a
+   fan-out.)
 2. **Where its findings go.** Its worktree is temporary and is cleaned up, so the findings file goes to an **absolute path in the main checkout's** `tmp/perf_review_<date>_<slug>/`. Each agent writes its own file.
 3. **What it may now do.** It has its own tree: it may apply a candidate fix and measure it rather than only proposing a measurement plan. Say so — a measured fix outranks a plan, and this is what buys it.
 
@@ -178,11 +201,15 @@ Each sub-agent prompt:
 > **Out of scope:** <list, with reasons>
 >
 > **Instructions:**
+> 0. **Re-point your worktree at the commit under review.** It was created from `main` and does
+>    not contain this branch's code. Run `git checkout --detach <sha>` in your own worktree root,
+>    then confirm <two branch-only files> exist. If either is missing, **stop and report** rather
+>    than measuring another checkout.
 > 1. Read `ai/skills/rust-performance-review/performance_review/<category>.md` for the rules to apply.
 > 2. Read `ai/skills/rust-performance-review/performance_review/_finding_format.md` for the severity rubric and finding format.
 > 3. Read each in-scope file.
 > 4. Apply each rule and produce findings in the specified format. For every candidate, propose the **measurement plan** (benchmark or profile that confirms the gain) and the **complexity cost** of the fix. Findings without a measurement plan are downgraded.
-> 5. **You are in your own isolated git worktree.** Build, benchmark and mutate freely *there* — nothing you do can collide with another agent. Where you can, go past proposing a measurement plan and **run it**: apply the candidate, measure baseline against variant *in this one worktree*, and report both numbers. A measured fix outranks a proposed one. Keep every ablation inside your own tree; a baseline timed in one worktree and a variant in another are not comparable.
+> 5. **You are in your own isolated git worktree.** Build, benchmark and mutate freely *there* — nothing you do can collide with another agent. Run the project's tooling **from your own worktree's copy, by its absolute path** (`<your-worktree>/scripts/dev.sh …`): the script builds whichever tree it lives in, so the main checkout's copy would measure the wrong code. Where you can, go past proposing a measurement plan and **run it**: apply the candidate, measure baseline against variant *in this one worktree*, and report both numbers. A measured fix outranks a proposed one. Keep every ablation inside your own tree; a baseline timed in one worktree and a variant in another are not comparable.
 > 6. Write findings to the **absolute path** `<main-checkout>/tmp/perf_review_<date>_<slug>/<category>.md` — outside your worktree, which is temporary and will be discarded. If no findings apply, write only the line `No findings.`
 > 7. Do not invent profile output, benchmark numbers, or call frequencies. Cite only what was provided in the prompt, what you read in the source, or what you measured yourself — and say which.
 > 8. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.
