@@ -112,19 +112,23 @@ pub(super) struct AlleleSupportStats {
 /// [`FoldedReadState`], resolving [`witness_of`] once against the **final**
 /// footprint.
 ///
-/// **Two counts rather than the per-read runs themselves, and only until B2.**
-/// `finalise` still returns production's [`PileupRecord`], which has nowhere to
-/// put a [`ReadWitness`]; B2 replaces the return with `SampleLocusObservations`,
-/// where each observation carries its own. What has to be true *before* that is the
-/// resolution point — coverage read at fold time is measured against a footprint
-/// the record may still outgrow — so A4 resolves it here and reports what it
-/// found, and B2 turns the same loop into observations.
+/// **Counts rather than the per-read runs themselves.** Since B2 the runs live on
+/// the emitted [`SampleLocusObservations`], one per observation, and these counts
+/// survive as the per-record census — both call sites in `genome_walk` discard
+/// them, and what reads them is this module's tests and `finalise`'s own
+/// `debug_assert`. What they pin is the **resolution point**: a witness read at
+/// fold time is measured against a footprint the record may still outgrow, so A4
+/// resolves it here, once, against the final one.
+///
+/// *Until the witness-representation review this doc said "only until B2 —
+/// `finalise` still returns production's `PileupRecord`". B2 landed, and the return
+/// has been `(SampleLocusObservations, RecordWitnessCounts)` since.*
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct RecordWitness {
+pub(super) struct RecordWitnessCounts {
     /// Folded reads that witnessed every position of the final footprint.
     pub reads_complete: u32,
     /// Folded reads that witnessed one contiguous run short of it.
-    pub reads_partially_observed: u32,
+    pub reads_partial: u32,
     /// Reads that covered this record and yielded **no observation at all** — their
     /// witnessed positions inside the footprint were non-contiguous, which one
     /// `Partial` run cannot describe honestly (spec §6). The size of
@@ -176,7 +180,7 @@ pub(super) struct RecordWitness {
 /// (owner, 2026-07-29).** The cap costs nothing real — a locus is at most ~100 bp, and a
 /// 5,000 bp record is already unreachable with Illumina reads, so the existing default is
 /// generous by fifty-fold and this ceiling by six hundred. Widening the run to `u32` would
-/// touch the shared locus type and the STR generator that also mints coverage, to buy a range
+/// touch the shared locus type and the STR generator that also mints witnesses, to buy a range
 /// no data can occupy. **This is the one knob where ng's constant is not simply production's**
 /// — inheriting it "by name" would inherit the hazard.
 ///
@@ -225,7 +229,7 @@ pub(super) fn witness_of(
 /// footprint that grows until the record closes (A4), so the fold keys its buckets on
 /// bases alone and the full identity is realised at `finalise` — which is where arch §1.2
 /// puts it. That is why observations are re-derived *per read* rather than read off the per-bucket
-/// totals: coverage and group are facts about a read, not about a bucket.
+/// totals: the witness and the group are facts about a read, not about a bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ObservationKey {
     pub bases: Vec<u8>,
@@ -244,7 +248,7 @@ pub(super) struct KeyedObservation {
     ///
     /// Production's rule is positional: `allele_index == 0`, the REF bucket. That named a
     /// unique observation while there was one observation per allele, and it no longer does — observations split by
-    /// coverage and by read group, so a reference-matching read can sit in a *partial* observation
+    /// witness and by read group, so a reference-matching read can sit in a *partial* observation
     /// whose bases are a prefix of the reference bytes and never compare equal to them.
     ///
     /// So the rule is stated **per read** instead: it is decidable at fold time from what
@@ -363,7 +367,7 @@ pub(super) struct OpenPileupRecord {
     /// answer and are recorded rather than solved: a read truncated where no record is open
     /// is unattributable to any locus, and a truncated read carrying a *deletion* would have
     /// widened a record — so dropping it changes the footprint, and with it every other
-    /// read's coverage.
+    /// read's witness.
     reads_discarded_by_cap: Vec<u32>,
 }
 
@@ -408,7 +412,7 @@ struct FoldedReadState {
     ///
     /// Held in **absolute reference coordinates**, not relative to the footprint:
     /// the bucket a read folds into is chosen from its bases, which are fixed at
-    /// fold time, while its coverage is relative to a footprint that is not.
+    /// fold time, while its witness is relative to a footprint that is not.
     /// Coverage is therefore resolved once, at `finalise()`, against the record's
     /// **final** footprint — by which time the read may be long gone, since
     /// `expire_passed` touches no open record (spec §4).
@@ -515,11 +519,11 @@ impl OpenPileupRecord {
     /// input in two processes: delete that sort and it fails; delete `finalise`'s *observation* sort
     /// and it stays green. No test inside one process can see any of this, because `ahash`
     /// seeds once per process.
-    fn observation_rows(&self, record_end_exclusive: u32) -> Vec<KeyedObservation> {
+    fn keyed_observations(&self, record_end_exclusive: u32) -> Vec<KeyedObservation> {
         let mut ids: Vec<u32> = self.folded_reads.keys().copied().collect();
         ids.sort_unstable();
 
-        let mut rows: Vec<KeyedObservation> = Vec::new();
+        let mut observations: Vec<KeyedObservation> = Vec::new();
         for read_id in ids {
             // PANIC-FREE: the id came from this map's own keys a few lines above, and
             // nothing between then and here mutates the map.
@@ -538,15 +542,15 @@ impl OpenPileupRecord {
             let read_witness = witness_of(state.witnessed, self.pos, record_end_exclusive);
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
-            let existing = rows.iter().position(|row| {
-                row.key.bases == bases
-                    && row.key.read_witness == read_witness
-                    && row.key.read_group == read_group
+            let existing = observations.iter().position(|observation| {
+                observation.key.bases == bases
+                    && observation.key.read_witness == read_witness
+                    && observation.key.read_group == read_group
             });
-            let row = match existing {
-                Some(index) => &mut rows[index],
+            let observation = match existing {
+                Some(index) => &mut observations[index],
                 None => {
-                    rows.push(KeyedObservation {
+                    observations.push(KeyedObservation {
                         key: ObservationKey {
                             bases: bases.to_vec(),
                             read_witness,
@@ -556,19 +560,19 @@ impl OpenPileupRecord {
                         chain_ids: Vec::new(),
                     });
                     // PANIC-FREE: pushed on the line above.
-                    rows.last_mut().expect("just pushed")
+                    observations.last_mut().expect("just pushed")
                 }
             };
-            add_contribution(&mut row.support, &state.contribution);
+            add_contribution(&mut observation.support, &state.contribution);
             if !agreed_with_reference {
-                row.chain_ids.push(state.chain_id);
+                observation.chain_ids.push(state.chain_id);
             }
         }
-        for row in &mut rows {
-            row.chain_ids.sort_unstable();
-            row.chain_ids.dedup();
+        for observation in &mut observations {
+            observation.chain_ids.sort_unstable();
+            observation.chain_ids.dedup();
         }
-        rows
+        observations
     }
 
     /// Convert into the finished locus ng emits: the region, the reference bytes under it,
@@ -590,15 +594,15 @@ impl OpenPileupRecord {
     /// `PileupRecord` boundary did, and this step removed that boundary. Nothing consumes
     /// it, and it is a pure function of the read's start against the anchor, so a later
     /// consumer re-derives it without changing the fold (spec §6).
-    pub fn finalise(self) -> (SampleLocusObservations, RecordWitness) {
+    pub fn finalise(self) -> (SampleLocusObservations, RecordWitnessCounts) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
         let chrom_id = self.chrom_id;
-        // Every field named, no `..Default::default()`: a field added to `RecordWitness`
+        // Every field named, no `..Default::default()`: a field added to `RecordWitnessCounts`
         // would otherwise compile here and arrive as a silent `0`.
-        let mut witness = RecordWitness {
+        let mut witness_counts = RecordWitnessCounts {
             reads_complete: 0,
-            reads_partially_observed: 0,
+            reads_partial: 0,
             reads_without_observation: self.reads_without_observation.len() as u32,
             // **Resolved here, not counted in the walk.** A read truncated at one position
             // of this footprint may have folded at another, and a read that folds does so
@@ -623,7 +627,7 @@ impl OpenPileupRecord {
         };
         // **A3's eviction, checked where the buckets still exist — and D1 is why it is
         // here.** The property is "no bucket survives that no read is folded into", and it
-        // is *invisible in the emitted locus*: `observation_rows` derives observations from
+        // is *invisible in the emitted locus*: `keyed_observations` derives observations from
         // `folded_reads`, so a stranded bucket produces no observation and leaves no trace. A parity
         // test asserted it on the emitted records, which was still meaningful while the walk
         // emitted `PileupRecord`s and stopped being so at B2; D1 mutated the code the test
@@ -645,28 +649,28 @@ impl OpenPileupRecord {
             self.alleles,
         );
         // **The observations come from the reads, not from the bucket totals** (B1). See
-        // `observation_rows` for why, and for what makes the two agree at one read group.
-        let mut rows = self.observation_rows(record_end_exclusive);
+        // `keyed_observations` for why, and for what makes the two agree at one read group.
+        let mut keyed = self.keyed_observations(record_end_exclusive);
         for state in self.folded_reads.values() {
             match witness_of(state.witnessed, record_pos, record_end_exclusive) {
-                ReadWitness::Complete => witness.reads_complete += 1,
-                ReadWitness::Partial { .. } => witness.reads_partially_observed += 1,
+                ReadWitness::Complete => witness_counts.reads_complete += 1,
+                ReadWitness::Partial { .. } => witness_counts.reads_partial += 1,
             }
         }
         // Every folded read is resolved exactly once and lands in exactly one of the two
         // classes; the no-observation set is disjoint from `folded_reads` by construction,
         // its members having been removed when they produced nothing.
         debug_assert_eq!(
-            witness.reads_complete + witness.reads_partially_observed,
+            witness_counts.reads_complete + witness_counts.reads_partial,
             self.folded_reads.len() as u32,
-            "every folded read resolves to exactly one coverage class",
+            "every folded read resolves to exactly one witness class",
         );
 
         // **Sorted into a canonical order — and this is *not* what makes the output
         // deterministic, which is worth stating because the first version of this comment
         // said it was.** Mutation-tested both ways: deleting this sort leaves
         // `ng_emits_the_same_bytes_in_a_second_process` green, while deleting
-        // `observation_rows`' `ids.sort_unstable()` fails it. Determinism is already won
+        // `keyed_observations`' `ids.sort_unstable()` fails it. Determinism is already won
         // upstream, by taking the reads in `read_id` order; first-seen observation order inherits it.
         //
         // What the sort buys is that observation order is a function of the observation's **own identity**
@@ -675,7 +679,7 @@ impl OpenPileupRecord {
         // present it the same way. That is what a consumer diffing output wants, and it is
         // what the STR generator sorts for. Belt and braces on determinism; the belt is
         // upstream.
-        rows.sort_by(|a, b| {
+        keyed.sort_by(|a, b| {
             a.key
                 .bases
                 .cmp(&b.key.bases)
@@ -685,9 +689,9 @@ impl OpenPileupRecord {
                 .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
         });
 
-        let observations = rows
+        let observations = keyed
             .into_iter()
-            .map(|row| {
+            .map(|observation| {
                 // Exhaustively destructured on the way out, in the direction that can lose
                 // information: a field added to ng's stats stops this compiling instead of
                 // being silently dropped at the boundary.
@@ -698,18 +702,18 @@ impl OpenPileupRecord {
                     placed_left,
                     mapq_sum,
                     mapq_sum_sq,
-                } = row.support;
+                } = observation.support;
                 SequenceObservation {
-                    bases: row.key.bases.into_boxed_slice(),
-                    read_witness: row.key.read_witness,
-                    read_group: row.key.read_group,
+                    bases: observation.key.bases.into_boxed_slice(),
+                    read_witness: observation.key.read_witness,
+                    read_group: observation.key.read_group,
                     num_obs,
                     num_fwd: fwd,
                     q_sum,
                     mapq_sum,
                     mapq_sum_sq,
                     placed_left,
-                    chain_ids: row.chain_ids,
+                    chain_ids: observation.chain_ids,
                 }
             })
             .collect();
@@ -734,11 +738,11 @@ impl OpenPileupRecord {
             },
             reference_bases,
             observations,
-            reads_without_observation: witness.reads_without_observation,
-            reads_discarded_by_cap: witness.reads_discarded_by_cap,
+            reads_without_observation: witness_counts.reads_without_observation,
+            reads_discarded_by_cap: witness_counts.reads_discarded_by_cap,
             kind: LocusKind::Generic,
         };
-        (locus, witness)
+        (locus, witness_counts)
     }
 }
 
@@ -930,7 +934,7 @@ impl OpenPileupRecordTable {
     /// Production re-folds only the contributors at the current walker position, so a read
     /// sitting inside its own deletion — live, in this record, no event anchored here —
     /// would otherwise keep an extent measured against a footprint the record has outgrown,
-    /// and A4 resolves coverage from exactly that.
+    /// and A4 resolves the witness from exactly that.
     ///
     /// Returns `true` when the record actually widened; `false` when `new_end_exclusive` was
     /// already covered (no-op). Callers use the bool to count real widen events without
@@ -1020,7 +1024,7 @@ impl OpenPileupRecordTable {
         // this record, and it does not re-fold. Production hides that by appending the
         // reference bases to every bucket; with REF-only widening it would leave the
         // read's `witnessed` extent pinned to the pre-widen footprint, and `finalise`
-        // resolves coverage from exactly that. The result would be a **wrong depth**, at
+        // resolves the witness from exactly that. The result would be a **wrong depth**, at
         // the long-deletion loci this port exists to fix, with no error.
         //
         // Spec §4 already asserts "a live read re-folds against the wider window"; this
@@ -2581,7 +2585,7 @@ mod tests {
 
         // `wide` matches every position 1..=25 except 11, where its base is `N` and the
         // cursor emits nothing — the interior hole, and a hole its *alignment span* is
-        // blind to, which is why coverage has to come from the events.
+        // blind to, which is why the witness has to come from the events.
         let mut wide_seq = contig.as_bytes().to_vec();
         wide_seq[10] = b'N';
         let reads = vec![
@@ -2617,7 +2621,11 @@ mod tests {
              not reach the path it exists for"
         );
 
-        let folded: u32 = widened.observations.iter().map(|row| row.num_obs).sum();
+        let folded: u32 = widened
+            .observations
+            .iter()
+            .map(|observation| observation.num_obs)
+            .sum();
         assert_eq!(
             folded, 2,
             "only `opener` and `widener` witnessed this record as one run; `wide` folded \
@@ -2928,7 +2936,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // A4 — coverage resolved at `finalise`, against the final footprint.
+    // A4 — the witness resolved at `finalise`, against the final footprint.
     // -----------------------------------------------------------------
 
     /// A witness that tiles the footprint is a complete one.
@@ -2944,32 +2952,32 @@ mod tests {
     /// which `is_flush_left` has to keep being able to read off the run.
     #[test]
     fn witness_of_a_witness_flush_left_reports_a_zero_offset() {
-        let coverage = witness_of(RefSpan { start: 5, end: 7 }, 5, 21);
+        let witness = witness_of(RefSpan { start: 5, end: 7 }, 5, 21);
         assert_eq!(
-            coverage,
+            witness,
             ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 3,
             }
         );
-        assert!(coverage.is_flush_left());
-        assert!(!coverage.is_flush_right(LocusLen::from_positions(16)));
+        assert!(witness.is_flush_left());
+        assert!(!witness.is_flush_right(LocusLen::from_positions(16)));
     }
 
     /// Flush with the right border — the suffix constraint, and the offset is derived
     /// rather than assumed.
     #[test]
     fn witness_of_a_witness_flush_right_reports_the_offset_it_starts_at() {
-        let coverage = witness_of(RefSpan { start: 18, end: 20 }, 5, 21);
+        let witness = witness_of(RefSpan { start: 18, end: 20 }, 5, 21);
         assert_eq!(
-            coverage,
+            witness,
             ReadWitness::Partial {
                 offset_in_locus: 13,
                 positions_covered: 3,
             }
         );
-        assert!(!coverage.is_flush_left());
-        assert!(coverage.is_flush_right(LocusLen::from_positions(16)));
+        assert!(!witness.is_flush_left());
+        assert!(witness.is_flush_right(LocusLen::from_positions(16)));
     }
 
     /// **A run flush with neither border**, which is what the generic path mints and
@@ -2978,16 +2986,16 @@ mod tests {
     /// knowable when this generator produced its first run.
     #[test]
     fn witness_of_an_interior_witness_is_flush_with_neither_border() {
-        let coverage = witness_of(RefSpan { start: 9, end: 12 }, 5, 21);
+        let witness = witness_of(RefSpan { start: 9, end: 12 }, 5, 21);
         assert_eq!(
-            coverage,
+            witness,
             ReadWitness::Partial {
                 offset_in_locus: 4,
                 positions_covered: 4,
             }
         );
-        assert!(!coverage.is_flush_left());
-        assert!(!coverage.is_flush_right(LocusLen::from_positions(16)));
+        assert!(!witness.is_flush_left());
+        assert!(!witness.is_flush_right(LocusLen::from_positions(16)));
     }
 
     /// **An extent reaching past either border is clamped into the footprint, not
@@ -3028,7 +3036,7 @@ mod tests {
     /// mutated it — exchanging `offset_in_locus` and `positions_covered` in the returned
     /// key — and **all 275 tests stayed green**, while a `panic!` in the same arm failed
     /// four of them: the arm runs, and nothing asserted what it returned. The test named
-    /// for the job, `parity::the_projection_orders_rows_as_the_walk_does`, sorts both
+    /// for the job, `parity::the_projection_orders_observations_as_the_walk_does`, sorts both
     /// sides with *this same function*, so it cannot fail on any change to it.
     ///
     /// The discriminating input is two runs whose components vary in **opposite**
@@ -3059,7 +3067,7 @@ mod tests {
 
     /// **A read that was a complete witness becomes `Partial` when the record widens
     /// under it, with nothing about the read having changed** — the whole reason
-    /// coverage is resolved at `finalise` and not at the fold (spec §4, plan A4).
+    /// the witness is resolved at `finalise` and not at the fold (spec §4, plan A4).
     ///
     /// `shortie` matches positions 5..=7 and stops. When the record spans 5..=7 that is
     /// every position it has. `widener`'s deletion then grows the record to 5..=20, and
@@ -3194,9 +3202,9 @@ mod tests {
         let (_record, witness) = record.finalise();
         assert_eq!(
             witness,
-            RecordWitness {
+            RecordWitnessCounts {
                 reads_complete: 1,
-                reads_partially_observed: 2,
+                reads_partial: 2,
                 reads_without_observation: 0,
                 reads_discarded_by_cap: 0,
             },
@@ -3206,7 +3214,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // B1 — the observation identity: bases, coverage, read group.
+    // B1 — the observation identity: bases, witness, read group.
     // -----------------------------------------------------------------
 
     /// A record at 7 spanning 7..=20, with `shortie` and `deleter` both showing the single
@@ -3216,7 +3224,7 @@ mod tests {
     ///
     /// The two share a *bucket*, because a bucket is keyed on bases alone. Whether they
     /// share an **observation** is what B1 decides.
-    fn same_bases_different_coverage() -> (OpenPileupRecordTable, ActiveReads) {
+    fn same_bases_different_witness() -> (OpenPileupRecordTable, ActiveReads) {
         let reference = fa(WIDEN_CONTIG);
         let (active, _ids) = admitted(vec![
             plain_read(
@@ -3254,8 +3262,8 @@ mod tests {
     /// reads and there are two, one of which saw one position of fourteen and is a lower
     /// bound on nothing more than that.
     #[test]
-    fn rows_split_a_complete_witness_from_a_partial_one_of_the_same_bases() {
-        let (open, _active) = same_bases_different_coverage();
+    fn observations_split_a_complete_witness_from_a_partial_one_of_the_same_bases() {
+        let (open, _active) = same_bases_different_witness();
         let record = open.records.get(&7).expect("the record at 7");
         assert_eq!(
             record.ref_span(),
@@ -3273,17 +3281,17 @@ mod tests {
             "and they share one bucket, which is the premise of this test"
         );
 
-        let mut rows = record.observation_rows(record.footprint_end_exclusive());
-        rows.sort_by_key(|row| match row.key.read_witness {
+        let mut observations = record.keyed_observations(record.footprint_end_exclusive());
+        observations.sort_by_key(|observation| match observation.key.read_witness {
             ReadWitness::Complete => 0u16,
             ReadWitness::Partial {
                 positions_covered, ..
             } => positions_covered,
         });
-        let split: Vec<_> = rows
+        let split: Vec<_> = observations
             .iter()
-            .filter(|row| row.key.bases == b"G")
-            .map(|row| (row.key.read_witness, row.support.num_obs))
+            .filter(|observation| observation.key.bases == b"G")
+            .map(|observation| (observation.key.read_witness, observation.support.num_obs))
             .collect();
         assert_eq!(
             split,
@@ -3297,8 +3305,8 @@ mod tests {
                     1
                 ),
             ],
-            "one bucket, two rows: the deleter witnessed all fourteen positions and the \
-             shortie one. Rows: {rows:?}"
+            "one bucket, two observations: the deleter witnessed all fourteen positions and the \
+             shortie one. Rows: {observations:?}"
         );
     }
 
@@ -3310,7 +3318,7 @@ mod tests {
     /// exactly — that is what makes the grain the *consumer's* choice rather than this
     /// step's guess.
     #[test]
-    fn rows_split_when_two_read_groups_support_one_sequence() {
+    fn observations_split_when_two_read_groups_support_one_sequence() {
         let reference = fa(WIDEN_CONTIG);
         // Two reads, identical in every way an observation's identity can see except the lane.
         let mut first = plain_read("lane0", 5, 5, vec![CigarOp::Match(1)], b"T".to_vec());
@@ -3323,13 +3331,16 @@ mod tests {
         process_position(&mut open, 5, 0, &contributors, &[], &active, &reference).expect("walks");
 
         let record = open.records.get(&5).expect("the record at 5");
-        let rows = record.observation_rows(record.footprint_end_exclusive());
-        let mut alt: Vec<_> = rows.iter().filter(|row| row.key.bases == b"T").collect();
-        alt.sort_by_key(|row| row.key.read_group.0);
+        let observations = record.keyed_observations(record.footprint_end_exclusive());
+        let mut alt: Vec<_> = observations
+            .iter()
+            .filter(|observation| observation.key.bases == b"T")
+            .collect();
+        alt.sort_by_key(|observation| observation.key.read_group.0);
         assert_eq!(
             alt.len(),
             2,
-            "one mismatched base from two lanes is two rows: {rows:?}"
+            "one mismatched base from two lanes is two observations: {observations:?}"
         );
         assert_eq!(
             (alt[0].key.read_group.0, alt[1].key.read_group.0),
@@ -3349,7 +3360,7 @@ mod tests {
         assert_eq!(
             alt[0].support.num_obs + alt[1].support.num_obs,
             bucket.support.num_obs,
-            "the two rows must sum to the single-group total, or the split loses evidence"
+            "the two observations must sum to the single-group total, or the split loses evidence"
         );
         assert_eq!(
             alt[0].support.mapq_sum + alt[1].support.mapq_sum,
@@ -3363,20 +3374,20 @@ mod tests {
     /// a test rather than as a hope (plan B1).
     ///
     /// The general fixture's reads all carry `ReadGroupId(0)`, so every split must come
-    /// from coverage, never from the group; and where coverage does not split either, the
+    /// from the witness, never from the group; and where the witness does not split either, the
     /// observation count equals the bucket count with equal support. This is the property that
     /// keeps the stage-1 differential green across B1.
     #[test]
-    fn rows_are_the_buckets_when_one_read_group_witnesses_completely() {
+    fn observations_are_the_buckets_when_one_read_group_witnesses_completely() {
         let (open, _active) = widened_record();
         let record = open.records.get(&5).expect("the record at 5");
-        let rows = record.observation_rows(record.footprint_end_exclusive());
+        let observations = record.keyed_observations(record.footprint_end_exclusive());
 
-        for row in &rows {
+        for observation in &observations {
             assert_eq!(
-                row.key.read_group,
+                observation.key.read_group,
                 crate::ng::types::ReadGroupId(0),
-                "this fixture has one lane, so no row may name another"
+                "this fixture has one lane, so no observation may name another"
             );
         }
         // Every bucket that supports a read has at least one observation, and the observations over a
@@ -3386,15 +3397,15 @@ mod tests {
             if allele.support.num_obs == 0 {
                 continue;
             }
-            let over_bucket: u32 = rows
+            let over_bucket: u32 = observations
                 .iter()
-                .filter(|row| row.key.bases == allele.seq)
-                .map(|row| row.support.num_obs)
+                .filter(|observation| observation.key.bases == allele.seq)
+                .map(|observation| observation.support.num_obs)
                 .sum();
             assert_eq!(
                 over_bucket,
                 allele.support.num_obs,
-                "bucket {:?} has {} observations but its rows carry {over_bucket}",
+                "bucket {:?} has {} observations but its observations carry {over_bucket}",
                 String::from_utf8_lossy(&allele.seq),
                 allele.support.num_obs,
             );
@@ -3407,12 +3418,12 @@ mod tests {
     ///
     /// `to_pileup_record` — the back-projection the suite used until Milestone D, now deleted —
     /// merged observations back together by bases before the two walkers were compared, so an
-    /// `observation_rows` that emitted one observation per read — every `num_obs == 1` — projected to
+    /// `keyed_observations` that emitted one observation per read — every `num_obs == 1` — projected to
     /// exactly the same `PileupRecord` and left the whole suite green, at 20,000 soak cases as
     /// well. The projection undoes precisely the
     /// defect. So the merge has to be asserted here, on ng's own type, or not at all.
     #[test]
-    fn rows_merge_the_reads_that_share_an_identity() {
+    fn observations_merge_the_reads_that_share_an_identity() {
         let reference = fa(WIDEN_CONTIG);
         // Three reads, same lane, same single mismatched base, all complete witnesses of a
         // one-base record: one identity, three reads.
@@ -3435,21 +3446,24 @@ mod tests {
             .expect("the fixture walks cleanly");
 
         let record = open.records.remove(&5).expect("the record at 5");
-        let rows = record.observation_rows(record.footprint_end_exclusive());
-        let alt: Vec<_> = rows.iter().filter(|row| row.key.bases == b"T").collect();
+        let observations = record.keyed_observations(record.footprint_end_exclusive());
+        let alt: Vec<_> = observations
+            .iter()
+            .filter(|observation| observation.key.bases == b"T")
+            .collect();
         assert_eq!(
             alt.len(),
             1,
-            "three reads with one identity are one row, not three: {rows:?}"
+            "three reads with one identity are one observation, not three: {observations:?}"
         );
         assert_eq!(
             alt[0].support.num_obs, 3,
-            "and the row carries all three, which is what a row *is*"
+            "and the observation carries all three, which is what a observation *is*"
         );
         assert_eq!(
             alt[0].chain_ids.len(),
             3,
-            "each read keeps its own identity inside the row it shares"
+            "each read keeps its own identity inside the observation it shares"
         );
     }
 
@@ -3523,30 +3537,33 @@ mod tests {
     /// are not the reference and it keeps its id.
     #[test]
     fn only_the_reads_that_departed_from_the_reference_carry_a_chain_id() {
-        let (open, active) = same_bases_different_coverage();
+        let (open, active) = same_bases_different_witness();
         let record = open.records.get(&7).expect("the record at 7");
-        let rows = record.observation_rows(record.footprint_end_exclusive());
+        let observations = record.keyed_observations(record.footprint_end_exclusive());
 
         // The shortie agreed with the reference across its one witnessed position; the
         // deleter's fourteen-position witness emits a single base that is not those
         // fourteen reference bytes.
-        let shortie_row = rows
+        let shortie_observation = observations
             .iter()
-            .find(|row| matches!(row.key.read_witness, ReadWitness::Partial { .. }))
-            .expect("the shortie's partial row");
-        let deleter_row = rows
+            .find(|observation| matches!(observation.key.read_witness, ReadWitness::Partial { .. }))
+            .expect("the shortie's partial observation");
+        let deleter_observation = observations
             .iter()
-            .find(|row| row.key.read_witness == ReadWitness::Complete && row.key.bases == b"G")
-            .expect("the deleter's complete row");
+            .find(|observation| {
+                observation.key.read_witness == ReadWitness::Complete
+                    && observation.key.bases == b"G"
+            })
+            .expect("the deleter's complete observation");
         assert_eq!(
-            shortie_row.chain_ids,
+            shortie_observation.chain_ids,
             Vec::new(),
             "the shortie agreed with the reference across everything it witnessed, so it \
              carries no id — production's positional rule would have given it one, because \
-             its partial row is not `alleles[0]`"
+             its partial observation is not `alleles[0]`"
         );
         assert_eq!(
-            deleter_row.chain_ids.len(),
+            deleter_observation.chain_ids.len(),
             1,
             "the deleter deleted thirteen reference bases, so it departed and keeps its id"
         );
@@ -3649,7 +3666,7 @@ mod tests {
     /// subsample of the depth, the other says a read covered the locus and said nothing
     /// usable.
     #[test]
-    fn a_read_that_lost_its_row_to_a_hole_is_not_also_counted_as_capped() {
+    fn a_read_that_lost_its_observation_to_a_hole_is_not_also_counted_as_capped() {
         let reference = fa(WIDEN_CONTIG);
         // `holey` matches 5..=9 with an `N` at 7, so it folds at 5 and then yields no
         // observation — A5's path. It is *also* named to the cap, which the walk would do
@@ -3684,7 +3701,7 @@ mod tests {
         let (locus, witness) = record.finalise();
         assert_eq!(
             witness.reads_without_observation, 1,
-            "the hole at 7 is why `holey` has no row"
+            "the hole at 7 is why `holey` has no observation"
         );
         assert_eq!(
             witness.reads_discarded_by_cap, 0,
@@ -3741,7 +3758,7 @@ mod tests {
         let reference = fa(WIDEN_CONTIG);
         // `ACNTA` over 5..=9: the reference reads `ACGTA` there, and the `N` at 7
         // makes the cursor emit nothing — a hole the read's *alignment span* is blind
-        // to, which is why coverage comes from the events.
+        // to, which is why the witness comes from the events.
         let (active, _ids) = admitted(vec![
             plain_read("holey", 5, 9, vec![CigarOp::Match(5)], b"ACNTA".to_vec()),
             plain_read(
@@ -3829,7 +3846,7 @@ mod tests {
                 .expect("the record at 5")
                 .folded_reads
                 .contains_key(&holed_id),
-            "before the widen `holed` witnessed 5..=7 as one run and has a row"
+            "before the widen `holed` witnessed 5..=7 as one run and has a observation"
         );
 
         let contributors = contributors_at(&active, 7);
@@ -3853,7 +3870,7 @@ mod tests {
         );
         assert!(
             !record.folded_reads.contains_key(&holed_id),
-            "and the read has no row left"
+            "and the read has no observation left"
         );
         let (emitted, witness) = record.finalise();
         assert_eq!(witness.reads_without_observation, 1);

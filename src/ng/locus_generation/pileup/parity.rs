@@ -1165,11 +1165,11 @@ fn ng_walk(case: &Case) -> WalkOutcome {
 /// `ObservationKey` and to order the emitted observations. So the walk is bit-for-bit the walk of
 /// `groups == 1`, and the only difference in the output is the split this class names —
 /// which is pinned in two places — **not** by a
-/// `two_read_groups_split_rows_without_moving_evidence`, which this comment cited until
+/// `two_read_groups_split_observations_without_moving_evidence`, which this comment cited until
 /// 2026-07-30 and which exists nowhere in the repository. What discharges it: this module's
 /// [`evidence_by_bases`] reconciliation, applied at **every** census locus, which groups the
 /// evidence by bases and so is blind to how many observations carry it; and the dump tool's
-/// `two_read_groups_split_one_allele_into_two_rows_that_sum_back`, which asserts the split
+/// `two_read_groups_split_one_allele_into_two_observations_that_sum_back`, which asserts the split
 /// observations' `num_obs` sum back to the one-group total on a committed fixture.
 fn ng_walk_in_groups(case: &Case, groups: u32) -> WalkOutcome {
     assert!(groups >= 1, "a walk has at least one read group");
@@ -1244,7 +1244,7 @@ const PROJECTED_READ_GROUP: crate::ng::types::ReadGroupId = PLACEHOLDER_READ_GRO
 ///   production's value against a structural zero would fail every locus. The difference
 ///   between this and the *oversight* it replaced is spelled out on [`RecordEvidence`].
 ///
-/// Rows come out in ng's emission order — [`sort_rows`] — so **class 5** (production's order
+/// Rows come out in ng's emission order — [`sort_observations`] — so **class 5** (production's order
 /// is bucket-creation order) is normalised here and counted by the census rather than
 /// tolerated silently.
 fn project(record: &PileupRecord) -> SampleLocusObservations {
@@ -1293,7 +1293,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         .into_boxed_slice();
 
     let mut drops = ProjectionDrops::default();
-    let mut rows: Vec<SequenceObservation> = Vec::with_capacity(alleles.len());
+    let mut observations: Vec<SequenceObservation> = Vec::with_capacity(alleles.len());
     for allele in alleles {
         // Exhaustive on the support too: `placed_start` is bound and dropped **by name**.
         let AlleleSupportStats {
@@ -1313,7 +1313,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         let mut chain_ids = allele.chain_ids.clone();
         chain_ids.sort_unstable();
         chain_ids.dedup();
-        rows.push(SequenceObservation {
+        observations.push(SequenceObservation {
             bases: allele.seq.clone().into_boxed_slice(),
             read_witness: ReadWitness::Complete,
             read_group: PROJECTED_READ_GROUP,
@@ -1326,9 +1326,9 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
             chain_ids,
         });
     }
-    let before = rows.clone();
-    sort_rows(&mut rows);
-    drops.reordered = before != rows;
+    let before = observations.clone();
+    sort_observations(&mut observations);
+    drops.reordered = before != observations;
 
     let locus = SampleLocusObservations {
         region: GenomeRegion {
@@ -1338,7 +1338,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
             end: Position(u64::from(*pos) + reference_bases.len() as u64 - 1),
         },
         reference_bases,
-        observations: rows,
+        observations,
         // Class 3 — production keeps neither per record.
         reads_without_observation: 0,
         reads_discarded_by_cap: 0,
@@ -1353,11 +1353,11 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
 /// (`open_record::witness_order`, lifted to `pub(super)` for this) rather than a second
 /// spelling here: `finalise` sorts `KeyedObservation`s and this sorts `SequenceObservation`s, so
 /// the loop cannot be shared, but the one piece that could silently drift is.
-/// `the_projection_orders_rows_as_the_walk_does` covers the rest, by asserting that sorting
+/// `the_projection_orders_observations_as_the_walk_does` covers the rest, by asserting that sorting
 /// an ng locus's observations with this function leaves them where the walk emitted them.
-fn sort_rows(rows: &mut [SequenceObservation]) {
+fn sort_observations(observations: &mut [SequenceObservation]) {
     use super::open_record::witness_order;
-    rows.sort_by(|a, b| {
+    observations.sort_by(|a, b| {
         a.bases
             .cmp(&b.bases)
             .then_with(|| witness_order(a.read_witness).cmp(&witness_order(b.read_witness)))
@@ -1453,7 +1453,7 @@ impl PartialEq for ComparableLocus {
         let SampleLocusObservations {
             region: our_region,
             reference_bases: our_bases,
-            observations: our_rows,
+            observations: our_observations,
             reads_without_observation: our_without,
             reads_discarded_by_cap: our_capped,
             kind: our_kind,
@@ -1461,7 +1461,7 @@ impl PartialEq for ComparableLocus {
         let SampleLocusObservations {
             region: their_region,
             reference_bases: their_bases,
-            observations: their_rows,
+            observations: their_observations,
             reads_without_observation: their_without,
             reads_discarded_by_cap: their_capped,
             kind: their_kind,
@@ -1471,31 +1471,34 @@ impl PartialEq for ComparableLocus {
             && our_without == their_without
             && our_capped == their_capped
             && our_kind == their_kind
-            && our_rows.len() == their_rows.len()
-            && our_rows.iter().zip(their_rows).all(|(ours, theirs)| {
-                let SequenceObservation {
-                    bases: our_row_bases,
-                    read_witness: our_witness,
-                    read_group: our_group,
-                    num_obs: our_obs,
-                    num_fwd: our_fwd,
-                    q_sum: our_q_sum,
-                    mapq_sum: our_mapq,
-                    mapq_sum_sq: our_mapq_sq,
-                    placed_left: our_placed_left,
-                    chain_ids: our_ids,
-                } = ours;
-                our_row_bases == &theirs.bases
-                    && our_witness == &theirs.read_witness
-                    && our_group == &theirs.read_group
-                    && our_obs == &theirs.num_obs
-                    && our_fwd == &theirs.num_fwd
-                    && our_mapq == &theirs.mapq_sum
-                    && our_mapq_sq == &theirs.mapq_sum_sq
-                    && our_placed_left == &theirs.placed_left
-                    && our_ids == &theirs.chain_ids
-                    && q_sum_close(*our_q_sum, theirs.q_sum)
-            })
+            && our_observations.len() == their_observations.len()
+            && our_observations
+                .iter()
+                .zip(their_observations)
+                .all(|(ours, theirs)| {
+                    let SequenceObservation {
+                        bases: our_observation_bases,
+                        read_witness: our_witness,
+                        read_group: our_group,
+                        num_obs: our_obs,
+                        num_fwd: our_fwd,
+                        q_sum: our_q_sum,
+                        mapq_sum: our_mapq,
+                        mapq_sum_sq: our_mapq_sq,
+                        placed_left: our_placed_left,
+                        chain_ids: our_ids,
+                    } = ours;
+                    our_observation_bases == &theirs.bases
+                        && our_witness == &theirs.read_witness
+                        && our_group == &theirs.read_group
+                        && our_obs == &theirs.num_obs
+                        && our_fwd == &theirs.num_fwd
+                        && our_mapq == &theirs.mapq_sum
+                        && our_mapq_sq == &theirs.mapq_sum_sq
+                        && our_placed_left == &theirs.placed_left
+                        && our_ids == &theirs.chain_ids
+                        && q_sum_close(*our_q_sum, theirs.q_sum)
+                })
     }
 }
 
@@ -1510,7 +1513,7 @@ impl std::fmt::Debug for ComparableLocus {
 /// rather than quietly matching nothing.
 fn comparable_exact_q_sum(locus: &SampleLocusObservations) -> SampleLocusObservations {
     let mut out = locus.clone();
-    sort_rows(&mut out.observations);
+    sort_observations(&mut out.observations);
     // **Class 3, zeroed on both sides.** Production keeps neither counter per record, so its
     // side is a structural zero; zeroing ng's too keeps the comparison symmetric, which is
     // the rule every projection here follows — neither side may be normalised in a way the
@@ -1643,7 +1646,7 @@ const SEEDS: [u64; 4] = [
 /// unlisted class getting triaged as a listed one.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 struct DivergenceClasses {
-    /// **Class 1** — a read that did not witness the whole footprint becomes an `Partial`
+    /// **Class 1** — a read that did not witness the whole footprint becomes a `Partial`
     /// observation whose bases are what it saw, where production folded a reference-filled
     /// haplotype into a bucket. *This is the deliverable* (spec §13.2).
     partial_witness: bool,
@@ -1651,7 +1654,7 @@ struct DivergenceClasses {
     /// at all, so any observation whose group is not the one [`project`] had to invent is in this
     /// class. The *split* — one allele carried by two groups becoming two observations — is the
     /// visible consequence and is counted separately
-    /// ([`DivergenceCensus::group_split_rows`]), because a class flag that only fired on
+    /// ([`DivergenceCensus::group_split_observations`]), because a class flag that only fired on
     /// the split would leave a locus whose single observation merely names a different group
     /// unclassified.
     group_split: bool,
@@ -1662,7 +1665,7 @@ struct DivergenceClasses {
     /// observation; the projection dropped it.
     unsupported_bucket: bool,
     /// **Class 5** — observation order: production's is bucket-creation order, ng's is sorted.
-    row_order: bool,
+    observation_order: bool,
     /// **Class 6 — the one spec §3's table does not list, found by D1 building the anchor.**
     ///
     /// Production's `widen` appends reference bases to every bucket and re-folds nothing;
@@ -1695,7 +1698,7 @@ impl DivergenceClasses {
             || self.group_split
             || self.counters
             || self.unsupported_bucket
-            || self.row_order
+            || self.observation_order
             || self.stale_widen
     }
 }
@@ -1711,13 +1714,13 @@ struct DivergenceCensus {
     group_split: usize,
     counters: usize,
     unsupported_bucket: usize,
-    row_order: usize,
+    observation_order: usize,
     stale_widen: usize,
     /// Loci where one allele really is carried by two read groups and so becomes two observations —
     /// class 2's *visible* consequence, and the check spec §13 asks for by name. Counted
     /// apart from the class flag because the flag fires on any non-projected group, which is
     /// a weaker event and would let this one go to zero unnoticed.
-    group_split_rows: usize,
+    group_split_observations: usize,
     /// Loci that agree only once `q_sum` is compared within [`Q_SUM_TOLERANCE`] — the
     /// accumulation-order class. A subset of the **exact** count, since `classify_locus`
     /// decides `exact` with [`comparable`], which applies the tolerance. Bounded above as
@@ -1753,27 +1756,27 @@ impl DivergenceCensus {
         self.group_split += usize::from(classes.group_split);
         self.counters += usize::from(classes.counters);
         self.unsupported_bucket += usize::from(classes.unsupported_bucket);
-        self.row_order += usize::from(classes.row_order);
+        self.observation_order += usize::from(classes.observation_order);
         self.stale_widen += usize::from(classes.stale_widen);
     }
 
     /// Add one locus's contribution to the fabrication measurement (spec §13.2), and to the
     /// tally of alleles genuinely split across read groups.
     fn measure_fabrication(&mut self, locus: &SampleLocusObservations) {
-        self.group_split_rows += usize::from(rows_split_by_group(locus));
+        self.group_split_observations += usize::from(observations_split_by_group(locus));
         let footprint = locus.region.len();
         let mut fabricating = false;
-        for row in &locus.observations {
+        for observation in &locus.observations {
             let ReadWitness::Partial {
                 positions_covered, ..
-            } = row.read_witness
+            } = observation.read_witness
             else {
                 continue;
             };
             fabricating = true;
-            self.fabricated_reads += u64::from(row.num_obs);
-            self.fabricated_ref_bases +=
-                footprint.saturating_sub(u64::from(positions_covered)) * u64::from(row.num_obs);
+            self.fabricated_reads += u64::from(observation.num_obs);
+            self.fabricated_ref_bases += footprint.saturating_sub(u64::from(positions_covered))
+                * u64::from(observation.num_obs);
         }
         self.fabricating_loci += usize::from(fabricating);
     }
@@ -1801,10 +1804,10 @@ impl DivergenceCensus {
         let ng_bases: BTreeSet<&[u8]> = ours
             .observations
             .iter()
-            .map(|row| row.bases.as_ref())
+            .map(|observation| observation.bases.as_ref())
             .collect();
-        for row in &theirs.observations {
-            let theirs_bases: &[u8] = &row.bases;
+        for observation in &theirs.observations {
+            let theirs_bases: &[u8] = &observation.bases;
             if ng_bases.contains(theirs_bases) {
                 continue;
             }
@@ -1828,14 +1831,14 @@ impl DivergenceCensus {
             let Some(shared) = longest_shared else {
                 debug_assert!(
                     false,
-                    "a class-6 locus has a production row no ng row explains: {:?}",
+                    "a class-6 locus has a production observation no ng observation explains: {:?}",
                     String::from_utf8_lossy(theirs_bases),
                 );
                 continue;
             };
-            self.stale_widen_reads += u64::from(row.num_obs);
+            self.stale_widen_reads += u64::from(observation.num_obs);
             self.stale_widen_ref_bases +=
-                (theirs_bases.len() - shared) as u64 * u64::from(row.num_obs);
+                (theirs_bases.len() - shared) as u64 * u64::from(observation.num_obs);
         }
     }
 }
@@ -1922,7 +1925,11 @@ impl PartialEq for LocusEvidence {
 }
 
 /// The evidence on one observation, so a caller can sum over whichever grouping it is reconciling.
-fn row_evidence(row: &SequenceObservation, totals: &mut LocusEvidence, q_sum: &mut f64) {
+fn observation_evidence(
+    observation: &SequenceObservation,
+    totals: &mut LocusEvidence,
+    q_sum: &mut f64,
+) {
     // The exhaustive destructure is the point — see the doc above.
     let SequenceObservation {
         // **Not summed, and each for its own reason.** `bases` is *what* the evidence says
@@ -1936,46 +1943,46 @@ fn row_evidence(row: &SequenceObservation, totals: &mut LocusEvidence, q_sum: &m
         read_group: _,
         num_obs,
         num_fwd,
-        q_sum: row_q_sum,
+        q_sum: observation_q_sum,
         mapq_sum,
         mapq_sum_sq,
         placed_left,
         // Chain ids are a *set*, not a scalar; they are checked separately and by subset —
         // see `locus_chain_ids` for the record that settles why subset and not equality.
         chain_ids: _,
-    } = row;
+    } = observation;
     totals.num_obs += num_obs;
     totals.fwd += num_fwd;
     totals.placed_left += placed_left;
     totals.mapq_sum += mapq_sum;
     totals.mapq_sum_sq += mapq_sum_sq;
-    *q_sum += row_q_sum;
+    *q_sum += observation_q_sum;
 }
 
 fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
     let mut totals = LocusEvidence::default();
     let mut q_sum = 0.0_f64;
-    for row in &locus.observations {
-        row_evidence(row, &mut totals, &mut q_sum);
+    for observation in &locus.observations {
+        observation_evidence(observation, &mut totals, &mut q_sum);
     }
     totals.q_sum = q_sum;
     totals
 }
 
 /// The same evidence, gathered per distinct `bases` — **spec §3's class-2 reconciliation**:
-/// "summing a locus's observations by `(bases, coverage)` must reproduce production's per-allele
+/// "summing a locus's observations by `(bases, witness)` must reproduce production's per-allele
 /// totals".
 ///
-/// Grouped by `bases` alone rather than by `(bases, coverage)`, and the difference is
-/// deliberate: coverage is class **1**, which moves the bases too, so a grouping that kept
-/// coverage in the key would answer "the observations differ" for the class it is not asking about.
+/// Grouped by `bases` alone rather than by `(bases, witness)`, and the difference is
+/// deliberate: the witness is class **1**, which moves the bases too, so a grouping that kept
+/// the witness in the key would answer "the observations differ" for the class it is not asking about.
 /// What this reconciles is the split — several observations where production has one allele — and
 /// the split is invisible to `bases`.
 fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, LocusEvidence> {
     let mut per_bases: BTreeMap<Vec<u8>, (LocusEvidence, f64)> = BTreeMap::new();
-    for row in &locus.observations {
-        let entry = per_bases.entry(row.bases.to_vec()).or_default();
-        row_evidence(row, &mut entry.0, &mut entry.1);
+    for observation in &locus.observations {
+        let entry = per_bases.entry(observation.bases.to_vec()).or_default();
+        observation_evidence(observation, &mut entry.0, &mut entry.1);
     }
     per_bases
         .into_iter()
@@ -2007,7 +2014,7 @@ fn locus_chain_ids(locus: &SampleLocusObservations) -> Vec<ChainId> {
     let mut ids: Vec<ChainId> = locus
         .observations
         .iter()
-        .flat_map(|row| row.chain_ids.iter().copied())
+        .flat_map(|observation| observation.chain_ids.iter().copied())
         .collect();
     ids.sort_unstable();
     ids.dedup();
@@ -2021,7 +2028,7 @@ fn locus_chain_ids(locus: &SampleLocusObservations) -> Vec<ChainId> {
 /// that *no evidence moved* — the reference bytes and the support totals — and never *which*
 /// observations differed or by how much. It could not, because the surface it compared on was
 /// production's type, where a partial witness has no spelling. Projecting forward gives
-/// coverage a name, so the class can be read off ng's own observations rather than inferred from a
+/// the witness a name, so the class can be read off ng's own observations rather than inferred from a
 /// difference.
 ///
 /// # What holds at every locus, class or no class
@@ -2100,14 +2107,14 @@ fn classify_locus(
         partial_witness: ours
             .observations
             .iter()
-            .any(|row| row.read_witness != ReadWitness::Complete),
+            .any(|observation| observation.read_witness != ReadWitness::Complete),
         group_split: ours
             .observations
             .iter()
-            .any(|row| row.read_group != PROJECTED_READ_GROUP),
+            .any(|observation| observation.read_group != PROJECTED_READ_GROUP),
         counters: ours.reads_without_observation > 0 || ours.reads_discarded_by_cap > 0,
         unsupported_bucket: drops.unsupported > 0,
-        row_order: drops.reordered,
+        observation_order: drops.reordered,
         // Filled below: unlike the other five, class 6 is not a fact about ng's observations — a
         // read production mis-folded looks, on ng's side, exactly like one it folded
         // correctly. It is recognised by its **shape**, and the shape is checked.
@@ -2126,7 +2133,7 @@ fn classify_locus(
     if !classes.partial_witness && !classes.counters && !stale_widen {
         assert!(
             bases_reconcile,
-            "{where_}: ng's rows do not sum back to production's per-allele totals, and \
+            "{where_}: ng's observations do not sum back to production's per-allele totals, and \
              none of a partial witness, a counted-out read or a stale widen explains it\n  \
              ng   {:?}\n  prod {:?}",
             evidence_by_bases(ours),
@@ -2174,7 +2181,8 @@ fn classify_locus(
 /// class 3 a claim rather than a shrug.
 ///
 /// A read folds into exactly one bucket per record on production's side, contributing
-/// exactly one observation. ng either emits it in an observation or removes it and counts it in
+/// exactly one to that bucket's `num_obs`. ng either folds it into an observation or
+/// removes it and counts it in
 /// `reads_without_observation` (A5) — so the two sides balance **exactly**, and any other
 /// arithmetic means evidence was created or lost rather than moved.
 ///
@@ -2187,12 +2195,20 @@ fn assert_reads_are_accounted_for(
     ours: &SampleLocusObservations,
     theirs: &SampleLocusObservations,
 ) {
-    let ours_obs: u32 = ours.observations.iter().map(|row| row.num_obs).sum();
-    let theirs_obs: u32 = theirs.observations.iter().map(|row| row.num_obs).sum();
+    let ours_obs: u32 = ours
+        .observations
+        .iter()
+        .map(|observation| observation.num_obs)
+        .sum();
+    let theirs_obs: u32 = theirs
+        .observations
+        .iter()
+        .map(|observation| observation.num_obs)
+        .sum();
     assert_eq!(
         ours_obs + ours.reads_without_observation,
         theirs_obs,
-        "{where_}: ng emitted {ours_obs} observations and counted \
+        "{where_}: ng's observations carry {ours_obs} reads and it counted \
          {} reads out, against production's {theirs_obs} — a read was created or lost, not \
          moved",
         ours.reads_without_observation,
@@ -2239,10 +2255,10 @@ fn stale_widen_shape(
     let ng_bases: BTreeSet<&[u8]> = ours
         .observations
         .iter()
-        .map(|row| row.bases.as_ref())
+        .map(|observation| observation.bases.as_ref())
         .collect();
-    for row in &theirs.observations {
-        let theirs_bases: &[u8] = &row.bases;
+    for observation in &theirs.observations {
+        let theirs_bases: &[u8] = &observation.bases;
         if ng_bases.contains(theirs_bases) {
             continue;
         }
@@ -2256,7 +2272,7 @@ fn stale_widen_shape(
         });
         if !explained {
             eprintln!(
-                "{where_}: production's row {:?} is not any ng row's bases plus a reference \
+                "{where_}: production's observation {:?} is not any ng observation's bases plus a reference \
                  tail — the stale-widen shape does not fit, so this is an unlisted class",
                 String::from_utf8_lossy(theirs_bases),
             );
@@ -2271,16 +2287,16 @@ fn stale_widen_shape(
 ///
 /// Two observations sharing `(bases, read_witness)` can only differ in the group, the three
 /// together being the whole observation identity.
-fn rows_split_by_group(locus: &SampleLocusObservations) -> bool {
-    /// An observation's identity **without** its read group: the bases, and the coverage run as the
+fn observations_split_by_group(locus: &SampleLocusObservations) -> bool {
+    /// An observation's identity **without** its read group: the bases, and the witness run as the
     /// walk's own total order gives it (`witness_order`).
-    type RowIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
+    type ObservationIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
 
-    let mut seen: BTreeSet<RowIdentityWithoutGroup<'_>> = BTreeSet::new();
-    for row in &locus.observations {
+    let mut seen: BTreeSet<ObservationIdentityWithoutGroup<'_>> = BTreeSet::new();
+    for observation in &locus.observations {
         if !seen.insert((
-            &row.bases,
-            super::open_record::witness_order(row.read_witness),
+            &observation.bases,
+            super::open_record::witness_order(observation.read_witness),
         )) {
             return true;
         }
@@ -2696,7 +2712,7 @@ fn every_read_witnessed_the_whole_footprint(locus: &SampleLocusObservations) -> 
         && locus
             .observations
             .iter()
-            .all(|row| row.read_witness == ReadWitness::Complete)
+            .all(|observation| observation.read_witness == ReadWitness::Complete)
 }
 
 /// **What A2 is allowed to change, and what it is not** — the comparison both the
@@ -2848,7 +2864,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         ("1 (a partial witness)", census.partial_witness),
         ("3 (a per-locus counter)", census.counters),
         ("4 (an unsupported bucket)", census.unsupported_bucket),
-        ("5 (row order)", census.row_order),
+        ("5 (observation order)", census.observation_order),
         ("6 (production's stale widen)", census.stale_widen),
         // Class 2's own two counts, from the pass that can produce them.
         (
@@ -2860,8 +2876,8 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         // weaker event of an observation merely naming a different group, so this would go to zero
         // unnoticed if the split ever stopped happening.
         (
-            "2's split, an allele in two rows",
-            two_groups.group_split_rows,
+            "2's split, an allele in two observations",
+            two_groups.group_split_observations,
         ),
     ] {
         assert!(
@@ -2876,7 +2892,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     // observations with an arbitrary group would look like the class working.
     assert_eq!(
         census.group_split, 0,
-        "class 2 fired on a one-read-group walk, where every row's group is the one the \
+        "class 2 fired on a one-read-group walk, where every observation's group is the one the \
          projection uses — so the class is firing on something other than the group",
     );
     // **A ceiling as well as a floor on the deliverable.** The floor alone makes this a
@@ -2938,7 +2954,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     assert!(
         census.stale_widen_reads > 0 && census.stale_widen_ref_bases > 0,
         "class 6 fired on {} loci but the stale-widen deliverable is {} reads / {} bases — a \
-         locus is class 6 because production holds a row that is an ng row plus a reference \
+         locus is class 6 because production holds a observation that is an ng observation plus a reference \
          tail, so both numbers are positive whenever the class is",
         census.stale_widen,
         census.stale_widen_reads,
@@ -2968,8 +2984,8 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
          projection, {diverged} differing, {} of the identical ones agreeing on `q_sum` only \
          within the 1e-9 relative tolerance.\n  \
          class 1 partial witness {}   class 3 counters {}   class 4 unsupported bucket {}   \
-         class 5 row order {}   class 6 stale widen {}\n  \
-         at two read groups: class 2 on {} loci, of which {} carry one allele in two rows.\n  \
+         class 5 observation order {}   class 6 stale widen {}\n  \
+         at two read groups: class 2 on {} loci, of which {} carry one allele in two observations.\n  \
          the deliverable: production credited {} reads over {} loci with {} reference bases \
          they never sequenced ({:.2} fabricated bases per fabricating locus).\n  \
          the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
@@ -2980,10 +2996,10 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         census.partial_witness,
         census.counters,
         census.unsupported_bucket,
-        census.row_order,
+        census.observation_order,
         census.stale_widen,
         two_groups.group_split,
-        two_groups.group_split_rows,
+        two_groups.group_split_observations,
         census.fabricated_reads,
         census.fabricating_loci,
         census.fabricated_ref_bases,
@@ -2995,9 +3011,9 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 }
 
 /// **The projection lays production's record out the way the walk lays out ng's** — the
-/// promise [`sort_rows`] makes, checked rather than commented.
+/// promise [`sort_observations`] makes, checked rather than commented.
 ///
-/// `finalise` sorts `KeyedObservation`s and [`sort_rows`] sorts `SequenceObservation`s, so the two
+/// `finalise` sorts `KeyedObservation`s and [`sort_observations`] sorts `SequenceObservation`s, so the two
 /// loops cannot be shared even though the `ReadWitness` comparator is (`witness_order`,
 /// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
 /// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted
@@ -3008,9 +3024,9 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 /// The fixture is the general one at two read groups, because a one-group walk cannot
 /// distinguish an order that considers the group from one that does not.
 #[test]
-fn the_projection_orders_rows_as_the_walk_does() {
+fn the_projection_orders_observations_as_the_walk_does() {
     let mut loci = 0usize;
-    let mut multi_row = 0usize;
+    let mut multi_observation = 0usize;
     let mut grouped = 0usize;
 
     for seed in SEEDS {
@@ -3022,13 +3038,13 @@ fn the_projection_orders_rows_as_the_walk_does() {
                 let Ok(locus) = item else { continue };
                 loci += 1;
                 if locus.observations.len() > 1 {
-                    multi_row += 1;
+                    multi_observation += 1;
                 }
-                if rows_split_by_group(locus) {
+                if observations_split_by_group(locus) {
                     grouped += 1;
                 }
                 let mut sorted = locus.observations.clone();
-                sort_rows(&mut sorted);
+                sort_observations(&mut sorted);
                 assert_eq!(
                     sorted, locus.observations,
                     "{where_}: locus {position} came out of the walk in an order this \
@@ -3039,9 +3055,9 @@ fn the_projection_orders_rows_as_the_walk_does() {
     }
 
     assert!(
-        multi_row * 10 > loci && grouped > 0,
-        "only {multi_row} of {loci} loci carry more than one row and {grouped} split by read \
-         group — an order test needs rows to order"
+        multi_observation * 10 > loci && grouped > 0,
+        "only {multi_observation} of {loci} loci carry more than one observation and {grouped} split by read \
+         group — an order test needs observations to order"
     );
 }
 
@@ -3191,10 +3207,10 @@ fn the_projection_says_everything_a_record_says() {
 ///
 /// What is left here is worth keeping and is a different claim: **`num_obs` is never zero on
 /// an emitted observation**, i.e. the re-derivation cannot mint an observation for nothing. That would fail if
-/// `observation_rows` ever created observations from the bucket table instead of from the reads —
+/// `keyed_observations` ever created observations from the bucket table instead of from the reads —
 /// which is precisely the B1 mistake it was written to avoid.
 #[test]
-fn every_emitted_row_carries_a_read() {
+fn every_emitted_observation_carries_a_read() {
     let mut records = 0usize;
     let mut multi_allele = 0usize;
 
@@ -3209,12 +3225,12 @@ fn every_emitted_row_carries_a_read() {
                 if locus.observations.len() > 2 {
                     multi_allele += 1;
                 }
-                for (index, row) in locus.observations.iter().enumerate() {
+                for (index, observation) in locus.observations.iter().enumerate() {
                     assert!(
-                        row.num_obs > 0,
-                        "{where_}: emitted locus {position} carries row {index} \
+                        observation.num_obs > 0,
+                        "{where_}: emitted locus {position} carries observation {index} \
                          ({:?}) with no supporting read: {locus:?}",
-                        String::from_utf8_lossy(&row.bases),
+                        String::from_utf8_lossy(&observation.bases),
                     );
                 }
             }
@@ -3225,12 +3241,12 @@ fn every_emitted_row_carries_a_read() {
     // the fixture never exercises a re-fold at all.
     assert!(
         multi_allele * 100 > records,
-        "only {multi_allele} of {records} emitted loci carry more than two rows — this \
+        "only {multi_allele} of {records} emitted loci carry more than two observations — this \
          fixture cannot exercise a read moving between buckets, so the property it asserts \
          is vacuous"
     );
     eprintln!(
-        "{records} emitted loci, {multi_allele} of them with more than two rows; every row \
+        "{records} emitted loci, {multi_allele} of them with more than two observations; every observation \
          carried at least one read"
     );
 }
@@ -3367,12 +3383,12 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
             .find(|locus| locus.region.start.get() == 19)
             .map(|locus| {
                 let reference = String::from_utf8_lossy(&locus.reference_bases).to_string();
-                let rows: Vec<String> = locus
+                let observations: Vec<String> = locus
                     .observations
                     .iter()
-                    .map(|row| String::from_utf8_lossy(&row.bases).to_string())
+                    .map(|observation| String::from_utf8_lossy(&observation.bases).to_string())
                     .collect();
-                (reference, rows)
+                (reference, observations)
             })
             .expect("pair9's deletion opens a record at 19")
     };
@@ -3960,7 +3976,7 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
         "real-data differential: {where_} — {} loci compared from {prepared_reads} prepared \
          reads; every region, reference sequence and counter identical.\n  \
          class 1 partial witness {}   class 2 group split {}   class 3 counters {}   \
-         class 4 unsupported bucket {}   class 5 row order {}   class 6 stale widen {}\n  \
+         class 4 unsupported bucket {}   class 5 observation order {}   class 6 stale widen {}\n  \
          the deliverable: production credited {} reads over {} loci ({:.2} % of them) with \
          {} reference bases they never sequenced.\n  \
          the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
@@ -3970,7 +3986,7 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
         census.group_split,
         census.counters,
         census.unsupported_bucket,
-        census.row_order,
+        census.observation_order,
         census.stale_widen,
         census.fabricated_reads,
         census.fabricating_loci,

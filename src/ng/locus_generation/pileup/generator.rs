@@ -70,7 +70,7 @@ const _: () = assert!(
 /// [`max_record_span`](Self::max_record_span) is capped at
 /// [`MAX_RECORD_SPAN_CEILING`] and [`check`](Self::check) rejects more.
 /// Production's `--max-record-span` is an unbounded `u32`; inheriting the knob by
-/// name would inherit a silent truncation ng's coverage runs cannot survive. The
+/// name would inherit a silent truncation ng's witness runs cannot survive. The
 /// cap is not a constraint in practice — production's own default of 5,000 is
 /// already unreachable with Illumina reads, and the ceiling is thirteen times
 /// that again (owner, 2026-07-29).
@@ -123,7 +123,7 @@ impl PileupGeneratorConfig {
     /// [`ReadWitness`]: crate::ng::locus_generation::ReadWitness
     pub fn check(&self) -> Result<(), PileupGeneratorConfigError> {
         if self.max_record_span > MAX_RECORD_SPAN_CEILING {
-            return Err(PileupGeneratorConfigError::RecordSpanExceedsCoverageRun {
+            return Err(PileupGeneratorConfigError::RecordSpanExceedsWitnessRun {
                 max_record_span: self.max_record_span,
                 ceiling: MAX_RECORD_SPAN_CEILING,
             });
@@ -178,18 +178,18 @@ impl PileupGeneratorConfig {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PileupGeneratorConfigError {
-    /// `max_record_span` is wider than a coverage run can describe, so a partial
+    /// `max_record_span` is wider than a witness run can describe, so a partial
     /// witness of a maximally-wide record would report a saturated
     /// `positions_covered` — silently, since [`LocusLen::from_positions`] clamps
     /// rather than failing.
     ///
     /// [`LocusLen::from_positions`]: crate::ng::locus_generation::LocusLen::from_positions
     #[error(
-        "max_record_span ({max_record_span}) exceeds the widest footprint a coverage run can \
+        "max_record_span ({max_record_span}) exceeds the widest footprint a witness run can \
          describe ({ceiling}): a partially-witnessed record that wide would report a truncated \
          positions_covered rather than an error"
     )]
-    RecordSpanExceedsCoverageRun { max_record_span: u32, ceiling: u32 },
+    RecordSpanExceedsWitnessRun { max_record_span: u32, ceiling: u32 },
     /// A knob set to zero. Each of the five means something the walk cannot do
     /// at all — fold no reads at a column, allow no active reads, keep no mate
     /// pending, allow no record span — and the walk's answer to each is either a
@@ -603,7 +603,7 @@ where
     /// `preparer` (per-read canonicalisation), with `config` checked before
     /// anything is held.
     ///
-    /// Fails only on a configuration a coverage run could not describe — see
+    /// Fails only on a configuration a witness run could not describe — see
     /// [`PileupGeneratorConfig::check`].
     pub fn new(
         reference: Arc<R>,
@@ -1247,7 +1247,7 @@ mod tests {
     /// `LocusLen` still reports the span it was given; one position past it, it
     /// reports a smaller number and no error.
     #[test]
-    fn a_span_one_past_the_ceiling_is_where_a_coverage_run_starts_lying() {
+    fn a_span_one_past_the_ceiling_is_where_a_witness_run_starts_lying() {
         let at_ceiling = u64::from(MAX_RECORD_SPAN_CEILING);
         assert_eq!(
             u64::from(LocusLen::from_positions(at_ceiling).get()),
@@ -1284,8 +1284,8 @@ mod tests {
         };
         let error = config
             .check()
-            .expect_err("a span wider than a coverage run must be rejected");
-        let PileupGeneratorConfigError::RecordSpanExceedsCoverageRun {
+            .expect_err("a span wider than a witness run must be rejected");
+        let PileupGeneratorConfigError::RecordSpanExceedsWitnessRun {
             max_record_span,
             ceiling,
         } = error
@@ -1360,7 +1360,7 @@ mod tests {
     /// **The rejection reaches the constructor**, which is the only door the
     /// generator has: a `check` nobody calls would leave the invariant a comment.
     #[test]
-    fn the_constructor_rejects_a_span_no_coverage_run_could_describe() {
+    fn the_constructor_rejects_a_span_no_witness_run_could_describe() {
         let error = a_generator(PileupGeneratorConfig {
             max_record_span: MAX_RECORD_SPAN_CEILING + 1,
             ..PileupGeneratorConfig::default()

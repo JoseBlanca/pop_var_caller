@@ -41,8 +41,8 @@
 //! from the review. D1 removed the differential's need for it by projecting production
 //! *forward* instead, and the same commit that answers Checkpoint D removed the suite's:
 //! the inherited tests now assert on ng's type through two accessors that **panic** where
-//! production's positional idiom has no ng answer (`tests::Locus::reference_row`,
-//! `first_alt_row`), so a test landing on one of those cases has to be rewritten rather
+//! production's positional idiom has no ng answer (`tests::Locus::reference_observation`,
+//! `first_alt_observation`), so a test landing on one of those cases has to be rewritten rather
 //! than quietly reinterpreted. `to_pileup_record` is deleted.
 //!
 //! **One file is renamed on the way in: `driver.rs` → [`genome_walk`]** — it is

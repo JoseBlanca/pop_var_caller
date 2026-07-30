@@ -58,7 +58,7 @@ impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
     /// A [`Complete`](ReadWitness::Complete) observation counts its `num_obs` at every
-    /// position; an [`Partial`](ReadWitness::Partial) run counts it over the stretch
+    /// position; a [`Partial`](ReadWitness::Partial) run counts it over the stretch
     /// it witnessed. The returned vector has exactly `region.len()` entries.
     ///
     /// This is *observation* depth and only exact per locus: it omits reads that
@@ -127,7 +127,8 @@ impl SampleLocusObservations {
     }
 }
 
-/// One distinct sequence the reads showed at a locus, with its support.
+/// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
+/// pooled support of every read that showed it.
 ///
 /// The fields between `num_obs` and `chain_ids` are the per-read moments the SNP
 /// filters read (strand bias, base-quality error, the MAPQ multi-mapper test); an STR
@@ -135,12 +136,12 @@ impl SampleLocusObservations {
 /// (`AlleleObservation` + `AlleleSupportStats`), minus `placed_start`, which no model
 /// consumes (spec §6).
 ///
-/// **This is a table of observations, not a table of sequences.** The identity is
-/// `(bases, read_witness, read_group)` — three axes, not one — so a consumer that
-/// wants per-allele totals must aggregate over coverage *and* group, and one that
-/// treats each entry as an allele will count the same allele several times. The
-/// aggregation is exact: every support field is additive, and the merged observations share
-/// their `bases` and `read_witness` by construction (spec §6).
+/// **One entry is not one allele.** The identity has three axes, not one —
+/// `(bases, read_witness, read_group)` — so a consumer that wants per-allele totals
+/// must aggregate over witness *and* group, and one that treats each entry as an
+/// allele will count the same allele several times. The aggregation is exact: every
+/// support field is additive, and the merged entries share their `bases` and
+/// `read_witness` by construction (spec §6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequenceObservation {
     /// The observed bases — allele content, in **read** coordinates.
@@ -320,7 +321,7 @@ impl ReadWitness {
     /// that witnessed every position is constrained from neither side — but it is not
     /// the pre-reshape answer, and the plan's stated equivalence
     /// `PartialRight(n) ⇔ Partial { len - n, n }` stops holding at `n = len`. Pinned by
-    /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
+    /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_observation`.
     pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Self {
         let covered = positions_covered.min(locus_len.get());
         Self::Partial {
@@ -967,7 +968,7 @@ mod tests {
         }
     }
 
-    /// An observation of `bases` with `num_obs` reads at a given coverage — the moment
+    /// An observation of `bases` with `num_obs` reads at a given witness — the moment
     /// fields are irrelevant to the depth derivation, so they are fixed.
     fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
@@ -1525,7 +1526,7 @@ mod tests {
         assert_ne!(complete.read_witness, partial.read_witness);
     }
 
-    /// Depth derives correctly from read-coverage (spec §13.5): the vector has
+    /// Depth derives correctly from the read witness (spec §13.5): the vector has
     /// `region.len()` entries; a `Complete` raises every position, a left-flush run of
     /// `n` only the leftmost `n`, a right-flush run of `n` only the rightmost `n`. A
     /// 10-position locus with one complete (×3), one left-partial reaching 4 (×2), one

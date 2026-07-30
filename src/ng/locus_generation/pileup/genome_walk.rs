@@ -638,7 +638,7 @@ impl WalkerState {
         // it; the backing `Vec` stays allocated and reusable.
         for open in self.drained_buf.drain(..) {
             // The witness tally is resolved at `finalise` and dropped here. **Resolved
-            // there** because coverage is a read's extent measured against the record's
+            // there** because a witness is a read's extent measured against the record's
             // *final* footprint, which only `finalise` knows and no later caller can
             // reconstruct — the reads may have expired. **Dropped here** because the two
             // counts it carries that the locus needs are already *on* the locus

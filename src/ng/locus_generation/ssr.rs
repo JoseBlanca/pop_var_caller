@@ -648,7 +648,7 @@ mod classify {
     pub(super) enum Classified {
         Observed {
             bases: Box<[u8]>,
-            witness: ReadWitness,
+            read_witness: ReadWitness,
             /// The read's base-quality error mass over the tract, `Σ ln(P_err)`, in log-error
             /// space (freebayes' `q_sum` convention). The **BQ** support moment the spec names
             /// (spec §3, "strand/BQ/MAPQ moments") — computed here because the tract base
@@ -767,7 +767,7 @@ mod classify {
         if passes_quality_gate(tract_qual, MIN_REGION_Q1, qual_buffer) {
             Classified::Observed {
                 bases: region_seq[tract].into(),
-                witness: ReadWitness::Complete,
+                read_witness: ReadWitness::Complete,
                 q_sum: ln_p_err_sum(tract_qual),
             }
         } else {
@@ -817,7 +817,7 @@ mod classify {
         let locus_len = LocusLen::from_positions(locus.segment.tract_len());
         Classified::Observed {
             bases: region_seq[tract.clone()].into(),
-            witness: match border {
+            read_witness: match border {
                 AnchoredBorder::Left => ReadWitness::from_left(reach, locus_len),
                 AnchoredBorder::Right => ReadWitness::from_right(reach, locus_len),
             },
@@ -886,7 +886,7 @@ mod classify {
             match classify(&read(FRAME, 40)) {
                 Classified::Observed {
                     bases,
-                    witness: ReadWitness::Complete,
+                    read_witness: ReadWitness::Complete,
                     q_sum,
                 } => {
                     assert_eq!(&*bases, b"CACACA");
@@ -917,7 +917,7 @@ mod classify {
             match classified {
                 Classified::Observed {
                     bases,
-                    witness:
+                    read_witness:
                         ReadWitness::Partial {
                             offset_in_locus,
                             positions_covered,
@@ -948,7 +948,7 @@ mod classify {
             match classify(&read) {
                 Classified::Observed {
                     bases,
-                    witness:
+                    read_witness:
                         ReadWitness::Partial {
                             offset_in_locus,
                             positions_covered,
@@ -986,7 +986,7 @@ mod classify {
             match classify(&read(b"GGGGGGCACACACACATTTTTT", 40)) {
                 Classified::Observed {
                     bases,
-                    witness: ReadWitness::Complete,
+                    read_witness: ReadWitness::Complete,
                     ..
                 } => assert_eq!(&*bases, b"CACACACACA"),
                 other => panic!("expected the recovered long allele, got {other:?}"),
@@ -1065,15 +1065,15 @@ mod tally {
             match outcome {
                 Classified::Observed {
                     bases,
-                    witness,
+                    read_witness,
                     q_sum,
                 } => {
-                    match witness {
+                    match read_witness {
                         ReadWitness::Complete => counts.observations_complete += 1,
                         ReadWitness::Partial { .. } => counts.observations_partial += 1,
                     }
                     let support = buckets
-                        .entry((bases, witness, read.read_group))
+                        .entry((bases, read_witness, read.read_group))
                         .or_default();
                     support.num_obs += 1;
                     if read.flag & FLAG_REVERSE_STRAND == 0 {
@@ -1188,10 +1188,10 @@ mod tally {
             }
         }
 
-        fn observed(bases: &[u8], witness: ReadWitness, q_sum: f64) -> Classified {
+        fn observed(bases: &[u8], read_witness: ReadWitness, q_sum: f64) -> Classified {
             Classified::Observed {
                 bases: bases.into(),
-                witness,
+                read_witness,
                 q_sum,
             }
         }
@@ -1201,7 +1201,7 @@ mod tally {
         /// (spec §6). This is the check that the split is *computed* and not defaulted — with
         /// `read_group` left at a constant both reads would merge into one observation of two.
         #[test]
-        fn one_allele_from_two_read_groups_is_two_rows_that_sum_back() {
+        fn one_allele_from_two_read_groups_is_two_observations_that_sum_back() {
             let rg0 = read_in_group(0, 10);
             let rg1 = read_in_group(1, 10);
             let outcomes = vec![
@@ -1210,20 +1210,32 @@ mod tally {
                 (&rg1, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, &mut counts).observations;
 
-            assert_eq!(rows.len(), 2, "one row per (allele, read group) cell");
+            assert_eq!(
+                observations.len(),
+                2,
+                "one observation per (allele, read group)"
+            );
             assert!(
-                rows.iter().all(|row| &*row.bases == b"CACACA"),
-                "both rows are the same allele"
+                observations
+                    .iter()
+                    .all(|observation| &*observation.bases == b"CACACA"),
+                "both observations are the same allele"
             );
             assert_eq!(
-                rows.iter().map(|row| row.read_group).collect::<Vec<_>>(),
+                observations
+                    .iter()
+                    .map(|observation| observation.read_group)
+                    .collect::<Vec<_>>(),
                 vec![ReadGroupId(0), ReadGroupId(1)],
                 "and they are ordered by group, which is what keeps the output deterministic"
             );
             assert_eq!(
-                rows.iter().map(|row| row.num_obs).sum::<u32>(),
+                observations
+                    .iter()
+                    .map(|observation| observation.num_obs)
+                    .sum::<u32>(),
                 3,
                 "collapsing the group axis recovers the single-group total exactly"
             );
@@ -1237,7 +1249,7 @@ mod tally {
         /// green CI most of the time. Enough observations that a wrong order cannot be a coin flip is
         /// the fix: six groups over two alleles, whose sorted order is fully determined.
         #[test]
-        fn rows_sort_by_group_within_an_allele_deterministically() {
+        fn observations_sort_by_group_within_an_allele_deterministically() {
             let reads: Vec<AlignedRead> = (0..6).map(|g| read_in_group(g, 10)).collect();
             let mut outcomes = Vec::new();
             for (i, r) in reads.iter().enumerate() {
@@ -1246,11 +1258,11 @@ mod tally {
                 outcomes.push((r, observed(bases, ReadWitness::Complete, -1.0)));
             }
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, &mut counts).observations;
 
-            let order: Vec<(&[u8], u32)> = rows
+            let order: Vec<(&[u8], u32)> = observations
                 .iter()
-                .map(|row| (row.bases.as_ref(), row.read_group.get()))
+                .map(|observation| (observation.bases.as_ref(), observation.read_group.get()))
                 .collect();
             assert_eq!(
                 order,
@@ -1281,7 +1293,7 @@ mod tally {
         /// `PartialRight(n) ⇔ Partial { len - n, n }` silently stops holding at `n = len`.
         /// Pinned here so it is a decision on the record rather than a surprise in a dump.
         #[test]
-        fn an_expanded_allele_merges_the_two_sides_into_one_row() {
+        fn an_expanded_allele_merges_the_two_sides_into_one_observation() {
             let locus_len = LocusLen::from_positions(6);
             let left = ReadWitness::from_left(9, locus_len);
             let right = ReadWitness::from_right(9, locus_len);
@@ -1296,14 +1308,14 @@ mod tally {
                 (&r, observed(b"CACACACACA", right, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 1, &mut counts).observations;
+            let observations = tally(outcomes, 1, &mut counts).observations;
 
             assert_eq!(
-                rows.len(),
+                observations.len(),
                 1,
-                "one row, not two — the sides are indistinguishable once the run saturates"
+                "one observation, not two — the sides are indistinguishable once the run saturates"
             );
-            assert_eq!(rows[0].num_obs, 2, "and both reads support it");
+            assert_eq!(observations[0].num_obs, 2, "and both reads support it");
             assert_eq!(
                 counts.observations_partial, 2,
                 "the run-level per-read tally is unaffected: two reads, two partials"
@@ -1327,12 +1339,16 @@ mod tally {
                 (&after, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 10, &mut counts).observations;
+            let observations = tally(outcomes, 10, &mut counts).observations;
 
-            assert_eq!(rows.len(), 1, "one allele, one group — one row");
-            assert_eq!(rows[0].num_obs, 3);
             assert_eq!(
-                rows[0].placed_left, 1,
+                observations.len(),
+                1,
+                "one allele, one group — one observation"
+            );
+            assert_eq!(observations[0].num_obs, 3);
+            assert_eq!(
+                observations[0].placed_left, 1,
                 "only the read starting at 9 is left of the anchor at 10"
             );
         }
@@ -1448,7 +1464,7 @@ mod tally {
         /// regardless of the order reads folded in (production's order-independence, extended to
         /// the witness tie-break).
         #[test]
-        fn observed_is_sorted_by_bases_then_coverage() {
+        fn observations_are_sorted_by_bases_then_witness() {
             let r = read(0, 60);
             let outcomes = vec![
                 (&r, observed(b"GG", ReadWitness::Complete, -1.0)),
@@ -1497,7 +1513,7 @@ mod tally {
         /// **Which of the tie-break's two components dominates** — the claim
         /// [`witness_order`]'s doc makes, and which the test above cannot check.
         ///
-        /// `observed_is_sorted_by_bases_then_coverage` builds both of its partials with the
+        /// `observations_are_sorted_by_bases_then_witness` builds both of its partials with the
         /// **same** `positions_covered` (`from_left(2, len 6)` = `{0,2}`,
         /// `from_right(2, len 6)` = `{4,2}`), so exchanging the two components of the sort key
         /// maps them to `(1,2,0)` and `(1,2,4)` and the asserted order survives by accident.
@@ -1803,9 +1819,11 @@ where
                 &mut self.align_scratch,
                 &mut self.qual_buffer,
             ) {
-                classify::Classified::Observed { bases, witness, .. } => {
-                    Some((witness, bases.into_vec()))
-                }
+                classify::Classified::Observed {
+                    bases,
+                    read_witness,
+                    ..
+                } => Some((read_witness, bases.into_vec())),
                 classify::Classified::NoObservation(_) => None,
             };
             delimited.push(ReadDelimitation {

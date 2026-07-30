@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(
             widened.observations.len(),
             3,
-            "the widened locus should carry a row each for the reference-matching read, the \
+            "the widened locus should carry a observation each for the reference-matching read, the \
              SNP read's haplotype and the deletion"
         );
 

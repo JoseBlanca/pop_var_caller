@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     /// **Fixture 1 — a read adaptor-masked over part of a multi-base record is `Partial`, not
-    /// `Complete`** (spec §12.1), *and* **fixture 1b — an `Partial` row is separate from a
+    /// `Complete`** (spec §12.1), *and* **fixture 1b — a `Partial` row is separate from a
     /// `Complete` one with the same bases** (spec §13).
     ///
     /// A span-derived implementation passes every other test in the suite and fails this one:
@@ -1185,9 +1185,9 @@ mod tests {
             .into_iter()
             .filter(|row| row.observed == two_bases)
             .collect();
-        let coverages: Vec<&str> = rows.iter().map(|row| row.read_witness.as_str()).collect();
+        let witnesses: Vec<&str> = rows.iter().map(|row| row.read_witness.as_str()).collect();
         assert_eq!(
-            coverages,
+            witnesses,
             vec!["complete", "observed:0+2"],
             "the same two bases must appear twice at locus 20 — once from a read that \
              witnessed all five positions and deleted three, once from a read that witnessed \

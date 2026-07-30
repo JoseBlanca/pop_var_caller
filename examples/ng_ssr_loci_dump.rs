@@ -799,10 +799,9 @@ mod tests {
         let collapse = |rows: &[ObservationRow]| {
             let mut totals: Vec<(Vec<u8>, &'static str, u32)> = Vec::new();
             for row in rows {
-                match totals
-                    .iter_mut()
-                    .find(|(bases, cov, _)| bases == &row.observed && *cov == row.read_witness)
-                {
+                match totals.iter_mut().find(|(bases, witness, _)| {
+                    bases == &row.observed && *witness == row.read_witness
+                }) {
                     Some((_, _, reads)) => *reads += row.reads,
                     None => totals.push((row.observed.clone(), row.read_witness, row.reads)),
                 }
