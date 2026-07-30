@@ -28,32 +28,54 @@ the top: **the §2.2 prerequisite survives the rewrite intact**, and **the read 
 whole copied walker plus the generator that wraps it. **Production is not edited** (spec §3): ng
 copies rather than reaches in, so no visibility lift and no field on a frozen type.
 
+**Thirteen files**, as built (this block is the tree at plan 3's completion, not the plan's
+forecast — see the correction note below):
+
 ```
 src/ng/locus_generation/pileup/
-  mod.rs                – PileupGenerator, its config and counts, the RefSeq→fetcher shim
+  mod.rs                – the module: mod declarations, the pub(crate) walker vocabulary the
+                          copies resolve through, this module's own pub surface, and
+                          mod walker_vocabulary_tests. It owns no type.
+  generator.rs          – PileupGenerator, PileupGeneratorConfig, PileupGeneratorCounts,
+                          MAX_RECORD_SPAN_CEILING, PileupGeneratorConfigError, the
+                          LocusGenerator impl  (ng's own, C1–C4)
   genome_walk.rs        – the walk along genome coordinates: advance the position, admit and
                           expire reads, reconcile mates, drive the fold  (production's driver.rs)
-  open_record.rs        – the open-record table + fold
+  open_record.rs        – the open-record table + fold, and refold_live_reads (ng's, A3)
   cigar_cursor.rs       – the per-op offset table + the adaptor mask
   decompose.rs          – ReadEvent + the indel base-quality proxy
-  active_read_set.rs    – the active set
+  active_read_set.rs    – the active set, + ever_contributed (ng's, D2)
   chain_id_allocator.rs – chain ids + mate pairing
   errors.rs             – WalkerError
-  tests.rs              – #[cfg(test)] production's own end-to-end walker suite, copied
-                          verbatim: Milestone A's gate (spec §12). Dies with plan 3.
-  copy_fidelity.rs      – #[cfg(test)] ng's own: the textual check that the eight copies
-                          are still production's, from outside the files it checks
+  tests.rs              – #[cfg(test)] production's own end-to-end walker suite. Started as a
+                          verbatim copy — Milestone A's gate (spec §12) — and is now ng's:
+                          released from copy_fidelity.rs at B2, and rewritten at Checkpoint D
+                          to assert on SampleLocusObservations directly.
+  mock_reference.rs     – #[cfg(test)] ng's own: ng's RefSeq over tests.rs's MockFasta, so
+                          production's copied suite can drive ng's walker (A0)
+  copy_fidelity.rs      – #[cfg(test)] ng's own: the textual check that the copies still
+                          listed in PAIRS are production's, from outside the files it checks
   parity.rs             – #[cfg(test)] the differential harness (spec §3)
 ```
 
-**Eight of those are copies** — `genome_walk` through `errors`, plus `tests.rs` — landing verbatim
-and changed only once the differential passes (spec §3). `mod.rs`, `copy_fidelity.rs` and `parity.rs`
-are ng's own.
+**Three files are still guarded copies**, not eight: `cigar_cursor.rs`, `decompose.rs` and
+`chain_id_allocator.rs` — the `PAIRS` array at
+[copy_fidelity.rs:102](../../../../src/ng/locus_generation/pileup/copy_fidelity.rs#L102) is the
+list, and it is authoritative because a released file is **deleted** from it rather than commented
+out. Five started as copies and have been released as ng changed them: three at A0, `tests.rs` at
+B2, `active_read_set.rs` at D2. `genome_walk.rs`, `open_record.rs` and `errors.rs` began as copies
+and carry ng's changes now; **`mod.rs`, `generator.rs`, `mock_reference.rs`, `copy_fidelity.rs` and
+`parity.rs` are ng's own** and never were copies.
 
-*(Inventory corrected 2026-07-29: `tests.rs` and `copy_fidelity.rs` were missing. `tests.rs` is not
-optional — A4's gate is production's suite green **against the copy**, which is only meaningful if it
-runs against ng's walker. `copy_fidelity.rs` cannot live inside `tests.rs`, because `tests.rs` is one
-of the files it checks.)*
+*(Inventory corrected twice. 2026-07-29: `tests.rs` and `copy_fidelity.rs` were missing —
+`tests.rs` is not optional, because A4's gate is production's suite green **against the copy**,
+which is only meaningful if it runs against ng's walker, and `copy_fidelity.rs` cannot live inside
+`tests.rs` because `tests.rs` is one of the files it checks. 2026-07-30, after plan 3 completed:
+`mod.rs` was credited with the generator and its config and counts — they are `generator.rs`'s, from
+C1 — and with a `RefSeq`→fetcher shim **deleted at A0**; `generator.rs` and `mock_reference.rs` were
+absent entirely; the copy count, `tests.rs`'s description and the ng's-own list were all stale. The
+lesson worth keeping: this block was written from the plan and then not re-read against the tree, so
+every milestone that added a file left it further behind.)*
 `src/ng/read/` gains the read type they all name:
 
 ```
@@ -89,18 +111,45 @@ copied file keeps its name.
 /// (`locus_generation.md` §2). Two reference accessors, not one: `preparer` carries its own
 /// (read preparation's rule), `reference` serves the walker's REF fetches (spec §2).
 /// **Neither is rebuilt per segment** — that is the ~564k-opens trap (spec §8).
-pub struct PileupGenerator<R: RefSeq, P: ReadPreparer> {
-    reference: R,
-    preparer: P,
-    prep_scratch: P::Scratch,
+/// **As built** (`generator.rs:500-556`), which differs from this doc's forecast in three ways
+/// worth naming: a **third** type parameter for the read-query accessor factory, `RawRefSeq`
+/// rather than `RefSeq` (the mismatch-fraction filter needs un-canonicalised bytes), and an
+/// `Option` around the allocator.
+pub struct PileupGenerator<R: RawRefSeq, MakeReference, P: ReadPreparer>
+where
+    MakeReference: FnMut() -> R,
+{
+    /// Built once for the run and handed to each walk as a shared handle. `Arc` and not `Rc`
+    /// deliberately — `ref_seq.rs:188` and the per-sample fan-out to come; the accessor being
+    /// `!Sync` is why one call site allows `clippy::arc_with_non_send_sync`.
+    reference: Arc<R>,
+    /// A **factory**, because the read query gives each of a sample's k files its own raw
+    /// accessor: they are stateful readers and sharing one would make k streams share a
+    /// cursor. Called once per file at every `begin_segment`, which is why the ~564k-opens
+    /// trap lives here (spec §8).
+    make_reference: MakeReference,
+    /// The preparer and its scratch, lent to each region's read stream. Shared because the
+    /// stream borrows it for the walk's lifetime; it also carries the declined tally and the
+    /// latched error `end_walk` takes.
+    preparation: Rc<RefCell<ReadPreparation<P>>>,
     /// Lives across segments so `next_id` never repeats — but `reset()` is called at every
     /// region end, which clears `pending_mates` and `active_count` while preserving the
     /// counter. Carrying those two across regions cross-pairs mates between contigs and leaks
     /// `active_count` toward `ActiveReadsExhausted` (spec §8).
-    chain_ids: ChainIdAllocator,
+    ///
+    /// **An `Option`, `None` exactly while a walk holds it** — a placeholder starting at zero
+    /// is the state the whole arrangement exists to avoid, and it would fail silently.
+    chain_ids: Option<ChainIdAllocator>,
     config: PileupGeneratorConfig,
     counts: PileupGeneratorCounts,
-    /* current region, current walk (§2.2), region clamp bounds */
+    /// The region being walked, and the walk itself (§2.2). `current_region` is cleared by
+    /// `end_walk`: left set, a `next_locus` after the walk drained re-opened the query and
+    /// re-emitted the whole region.
+    current_region: Option<GenomeRegion>,
+    walk: Option<RegionWalk<R, P>>,
+    /// The first error wins; a later one describes a run that is already over.
+    pending_failure: Option<LocusGenerationError>,
+    failed: bool,
 }
 
 /// This generator's knobs — owned, taken at construction (`locus_generation.md` §5). Every
@@ -125,8 +174,11 @@ up as a diff. **There is no sixth knob** — the walk is bounded by the region, 
 (§2.2), so nothing here tunes how far it reaches.
 
 ```rust
-/// Run-level counts, alongside the shared `LocusCounts`. The first seven mirror production's
-/// `RunSummary` field for field (spec §7); the last two are ng's.
+/// Run-level counts, alongside the shared `LocusCounts`. **Ten fields of three kinds** — the
+/// split matters because only the first two kinds come off a walk at all (spec §7):
+/// seven mirror production's `RunSummary` field for field (everything on it bar
+/// `records_emitted`); one mirrors ng's *own* ninth `RunSummary` field, which production has
+/// no counterpart for; two are the generator's, off no walk.
 pub struct PileupGeneratorCounts {
     pub reads_admitted: u64,
     pub record_widen_events: u64,
@@ -136,8 +188,15 @@ pub struct PileupGeneratorCounts {
     pub mate_lookup_evictions: u64,
     pub column_depth_truncations: u64,
     /// Reads silent over a whole record footprint — all-`N` or fully adaptor-masked, so never
-    /// contributors and invisible to the per-locus tally (spec §6).
+    /// contributors and invisible to the per-locus tally (spec §6). **ng's own `RunSummary`
+    /// field**, added at D2, which `parity.rs`'s counter comparison drops by name.
     pub reads_silent_over_footprint: u64,
+    /// Reads the **preparer** declined — `Ok(None)`, "no usable observation". Added at D2, and
+    /// it reads **zero on every real run**: no v1 preparer declines anything. It exists
+    /// because a declined read never reaches a walk, so `reads_admitted` cannot account for
+    /// it, and "no preparer declines today" is a fact a counter can state and a missing field
+    /// cannot.
+    pub reads_declined_by_preparer: u64,
     /// Records dropped by the region clamp. Observably zero-sum across neighbouring regions,
     /// which is how the gap-free tiling argument stays checkable (spec §7).
     pub records_outside_region: u64,
@@ -246,10 +305,17 @@ struct RefSeqFetcher<R: RefSeq>(R);
 ### 2.1 The generator
 
 ```rust
-impl<R: RefSeq, P: ReadPreparer> LocusGenerator<()> for PileupGenerator<R, P> {
+// As built (`generator.rs:868-872`): three parameters, `RawRefSeq`, and a `counts()` the
+// dispatcher needs because a boxed generator's own counters are otherwise unreachable (C4).
+impl<R: RawRefSeq, MakeReference, P: ReadPreparer> LocusGenerator<()>
+    for PileupGenerator<R, MakeReference, P>
+where
+    MakeReference: FnMut() -> R,
+{
     fn begin_segment(&mut self, region: GenomeRegion);
     fn next_locus(&mut self, segment: &(), reads: &SampleReads)
         -> Result<Option<SampleLocusObservations>, LocusGenerationError>;
+    fn counts(&self) -> Option<GeneratorCounts<'_>>;
 }
 ```
 
@@ -296,7 +362,14 @@ cheapest is the borrow.
 /// The walk over one region: **owns** its read stream, so nothing borrows `SampleReads` and
 /// nothing has to be materialised. One `PileupWalker` per region, built on the first
 /// `next_locus` and drained across the calls that follow (§2.1).
-struct RegionWalk<R: RefSeq> { /* PileupWalker<PreparedReads<R>, RefSeqFetcher<R>>, clamp bounds */ }
+// As built (`generator.rs:472-473`): the `RefSeqFetcher` shim is **gone** — A0 deleted it and
+// the walk fetches through ng's `RefSeq` directly — so the walker's reference parameter is the
+// shared handle itself.
+struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
+    walker: PileupWalker<PreparedRegionReads<R, P>, Arc<R>>,
+    region: GenomeRegion,
+    /* the allocator's counters as they stood when this walk took it (C3) */
+}
 ```
 
 This needs `reads_in_region` to hand back an owned stream, which is **two borrows, not a redesign** —
@@ -446,28 +519,38 @@ Every row read at the cited line (2026-07-27). Convergence, not new types.
 
 Tests live beside the code; `parity.rs` is `#[cfg(test)]`, the `delimit_parity` shape.
 
+**As built, the test surface is four files and one example**, which is worth stating because the
+weight is not where a reader would guess:
+
+| where | what it is |
+|---|---|
+| `parity.rs` | the differential: the forward projection, the permanent anchor, the six-class census, the determinism digest, and the `#[ignore]`d real-data run. The largest file in the module. |
+| `tests.rs` | production's end-to-end suite, now asserting on `SampleLocusObservations` through four test-only accessors rather than through a lossy projection (Checkpoint D) |
+| `generator.rs`'s own `mod tests` | the generator's knobs, counters, region walk, halo and stop rule |
+| `copy_fidelity.rs` | the textual guard over `PAIRS` |
+| `examples/ng_generic_loci_dump.rs` | the dump tool **and its ten asserted fixtures** — a `#[cfg(test)] mod` inside the example, so `cargo test --example ng_generic_loci_dump` is a second suite that `cargo test --lib` does not run |
+
+**Nothing in `benches/` drives this walker.** Both of plan 3's performance measurements came from
+throwaway probes that were deleted after use, so the next measurement starts from scratch. Carried
+since Checkpoint B.
+
 **Stage 1 is a gate, not a permanent test.** The verbatim copy is proven to emit `PileupRecord`
 streams equal to production's on one shared `PreparedRead` stream, plus `RunSummary` — and that
 harness dies when §1.2 lands, because the port then *deliberately* differs. It must therefore be
 shown to discriminate before it is retired: mutate mate overlap, adaptor masking, widening, the
 re-fold and the column cap in turn, and watch it fail (spec §12).
 
-**What survives is a narrower permanent differential**, and **this paragraph had it wrong twice**
-(corrected 2026-07-30):
+**What survives is a narrower permanent differential:** *every* locus of a fixture on which
+production fabricates nothing, with the complete-witness test riding on top as a tripwire for
+fixture drift. Loci outside it are the divergence, enumerated and counted, and that count is the
+deliverable. *Why, and the sixth divergence class that forces this shape:* spec §3; the deliverable:
+spec §12, §13.2.
 
-- It said "every folded read **spans** the final footprint". Spanning is an *alignment* test, and
-  spec §6's boxed warning is precisely that "a coverage tag derived from the alignment span is
-  therefore blind to all four" fabrication primitives. The property is what a read **witnessed**,
-  from its events — restating the anchor in span vocabulary re-introduces the confusion the whole
-  §1.2 change exists to remove.
-- It said such loci "must agree **forever**". They need not: a read can witness every position of
-  the final footprint and production still be wrong about it, through the stale widen that is spec
-  §3's sixth divergence class.
-
-The anchor is therefore **every** locus of a fixture on which production fabricates nothing — every
-read on a contig sharing one event set, so no read is left stale — and the complete-witness test
-rides on top as a tripwire for fixture drift (spec §3). Loci outside it are the divergence,
-enumerated and counted, and that count is the deliverable (spec §12).
+> **Corrected 2026-07-30.** This paragraph said the anchor was "loci where every folded read
+> **spans** the final footprint" and that they "must agree **forever**" — wrong twice, and both
+> errors matter to a coder. `spans` is an *alignment* test, the exact vocabulary spec §6's boxed
+> warning forbids; and the claim is false, because a read can witness every position and production
+> still be wrong about it.
 
 **The dump tool** `examples/ng_generic_loci_dump.rs` is the definition of done, asserted on a
 committed fixture — including a deletion long enough to widen a record past an already-expired read,
