@@ -2590,14 +2590,39 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
         "no record widened over {total} cases — the anchor covers only records that never \
          grew, which is the half of the property that was never in doubt"
     );
+    // **A ceiling on `float_only` — the quantity that *explains* the headline is the one that
+    // could move silently.** `float_only` counts the loci the `q_sum` tolerance rescued: the
+    // two sides differ on an exact comparison and agree within `Q_SUM_TOLERANCE`. Its stated
+    // purpose is that the tolerance "is shown to be doing work rather than quietly matching
+    // nothing", and until now it was printed and never asserted — so an arithmetic change
+    // could take the walk from "agrees" to "agrees only because the tolerance is wide" while
+    // this test reported a green anchor.
+    //
+    // **Measured, by injecting a uniform relative `q_sum` error into every emitted row**
+    // (review, 2026-07-30): at 5 × 10⁻¹⁰ every test stayed green and this count went
+    // **103 → 215,659 of 216,203**; at 2 × 10⁻⁹ three tests fail on the tolerance itself. So
+    // the window where the anchor holds and the explanation is nonsense is real, and this
+    // assertion closes it.
+    //
+    // One in ten, against a measured **103 of 216,203 (0.05 %)** at the default case count and
+    // **1,014 of 1,620,856 (0.06 %)** at `PVC_PARITY_CASES=3000` — a ratio stable across a 7.5×
+    // fixture, so the bound is a statement about the property and not about the case count.
+    // That leaves two orders of headroom below the 99.7 % the injection produces.
+    assert!(
+        float_only * 10 < compared,
+        "{float_only} of {compared} loci agree only within the `q_sum` tolerance — the \
+         tolerance is meant to absorb summation order, which touches a fraction of a percent \
+         of loci; at this rate the two walkers no longer agree on `q_sum` and the anchor is \
+         passing on the tolerance rather than on the arithmetic",
+    );
     eprintln!(
         "the anchor: {anchored} of {compared} loci ({:.1}%) had every read witness the whole \
          footprint, {anchored_multi_base} of them spanning more than one base, across \
          {widens} widened records; all identical to the projection, field for field. \
-         {float_only} loci agree only after `q_sum` is rounded to 1e-9 — the order the sum \
-         accumulates in, from two causes: A3's eviction recreating a bucket the reads return \
-         to, and B1 summing each read's contribution once where production accumulates into \
-         the bucket with a subtract-then-add per re-fold.",
+         {float_only} of them agree on `q_sum` only within the 1e-9 relative tolerance — the \
+         order the sum accumulates in, from two causes: A3's eviction recreating a bucket the \
+         reads return to, and B1 summing each read's contribution once where production \
+         accumulates into the bucket with a subtract-then-add per re-fold.",
         100.0 * anchored as f64 / compared as f64,
     );
 }
@@ -2850,6 +2875,23 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     //   whole production row, the tail is empty, and `ends_with(&[])` accepts it. That is not a
     //   corner case but the shape of D1's original counter-example, where production held eight
     //   bases against ng's nine.
+    // **The same ceiling on `float_only` as the anchor carries, and for the same reason.**
+    // Measured here at **863 of 256,974 loci (0.34 %)**, and **6,666 of 1,957,023 (0.34 %)** at
+    // `PVC_PARITY_CASES=3000` — the same fraction over a 7.5× fixture. The review's uniform
+    // 5 × 10⁻¹⁰ relative `q_sum` injection takes it to **253,143** while every class count and
+    // the headline hold. `float_only` is a subset of the **exact** count, not of `diverged`:
+    // `classify_locus` decides `exact` with `comparable`, which applies the tolerance, so a
+    // locus the tolerance rescued is reported as identical. That is what makes it able to
+    // move silently — nothing else in this census would change.
+    assert!(
+        census.float_only * 10 < census.loci,
+        "{} of {} loci agree only within the `q_sum` tolerance — the tolerance absorbs \
+         summation order, which touches a fraction of a percent of loci; at this rate the \
+         census's \"identical to the projection\" is carried by the tolerance rather than by \
+         the arithmetic",
+        census.float_only,
+        census.loci,
+    );
     assert!(
         census.stale_widen_reads > 0 && census.stale_widen_ref_bases > 0,
         "class 6 fired on {} loci but the stale-widen deliverable is {} reads / {} bases — a \
@@ -2861,8 +2903,8 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     );
     eprintln!(
         "the divergence census over {} loci (one read group): {} identical to the \
-         projection, {diverged} differing, {} of those agreeing once `q_sum` is rounded to \
-         1e-9.\n  \
+         projection, {diverged} differing, {} of the identical ones agreeing on `q_sum` only \
+         within the 1e-9 relative tolerance.\n  \
          class 1 partial witness {}   class 3 counters {}   class 4 unsupported bucket {}   \
          class 5 row order {}   class 6 stale widen {}\n  \
          at two read groups: class 2 on {} loci, of which {} carry one allele in two rows.\n  \
