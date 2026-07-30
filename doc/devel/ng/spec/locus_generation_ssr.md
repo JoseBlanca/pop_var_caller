@@ -123,23 +123,23 @@ this path is new rather than a port.
 |---|---|
 | `region` | the tract's coordinates, from the `SsrSegment` |
 | `reference_bases` | the reference tract — the REF sequence, the tract **only**, no flanks (those are in `SsrDetail`) |
-| `observed_sequences` | one entry per distinct `(bases, read_coverage)`, sorted by bytes |
+| `observations` | one entry per distinct `(bases, read_witness)`, sorted by bytes |
 | `kind` | `LocusKind::Ssr(SsrDetail { motif, left_flank, right_flank })` — the flanks split out of the fetched `tract_with_margin_bases`, the read model's alignment context |
 | `reads_without_observation` | reads that reached `align_read` and yielded nothing |
 | `reads_discarded_by_cap` | reads the reservoir dropped (§4) |
 
 Per-position depth is *not* a stored field — `num_obs_along_locus()` derives it from the observations'
-`read_coverage`, complete reads counting at every tract position and partials only where they reached
+`read_witness`, complete reads counting at every tract position and partials only where they reached
 (`locus_generation.md` §3). **But the read-coverage each observation carries must be counted before the
 cap**, over the reads that reached the tract — otherwise the derived depth is shaped by the reservoir
 rather than the sample, and the windowed statistics read a subsample as the truth. That is the one
 place this generator's read-coverage bookkeeping differs from "reads that produced an observation".
 
 **One table, tagged — not a separate table for partials.** The observations live in one list, each
-carrying its `read_coverage`. Two reads with the **same bases but different coverage are different
+carrying its `read_witness`. Two reads with the **same bases but different coverage are different
 evidence**: a `Complete` `ATATAT` says the allele *is* `ATATAT`, a `Partial` `ATATAT` says it is *at
-least* `ATATAT`. So the dedup key is `(bases, read_coverage)`, not bases alone, and the two stay
-separate rows — collapse them and the partial gets counted as an exact observation of `ATATAT`,
+least* `ATATAT`. So the dedup key is `(bases, read_witness)`, not bases alone, and the two stay
+separate observations — collapse them and the partial gets counted as an exact observation of `ATATAT`,
 claiming exact-length evidence it never gave. Two *partials* with the same bases and coverage do merge
 into one count: they are the identical constraint, so the count loses nothing.
 
@@ -149,18 +149,18 @@ it reached, which drives the derived depth. **This answers `read_preparation_ssr
 the carrying of partial observations to this spec.
 
 > **Fold-in, 2026-07-28 — the two side-tagged variants are gone; the dedup key gained a third
-> axis.** `ReadCoverage` is now `Complete` + one `Observed { offset_in_locus, positions_covered }`
+> axis.** `ReadWitness` is now `Complete` + one `Observed { offset_in_locus, positions_covered }`
 > run, and prefix-versus-suffix is a **derivation** (`offset_in_locus == 0` is flush left) rather
 > than a variant — the paragraph above is otherwise unchanged, since the *constraint* it describes
 > is exactly what the run still expresses. The key is now
-> `(bases, read_coverage, read_group)`: an allele seen from two read groups is two rows, and
-> **this path's rows therefore split on any multi-read-group sample**.
+> `(bases, read_witness, read_group)`: an allele seen from two read groups is two observations, and
+> **this path's observations therefore split on any multi-read-group sample**.
 >
 > *One case where the answer genuinely changed:* the STR mint measures its reach in **read** bases,
 > so an allele longer than the reference tract gives a reach past the locus length; the run then
 > saturates to the whole locus and a left-anchored and a right-anchored read of the same bases
-> **merge into one row**, where `PartialLeft(n)` and `PartialRight(n)` kept them apart. Recorded
-> rather than fixed — identical constraints arguably *are* one cell — and pinned by
+> **merge into one observation**, where `PartialLeft(n)` and `PartialRight(n)` kept them apart.
+> Recorded rather than fixed — identical constraints arguably *are* one observation — and pinned by
 > `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
 > Source: [locus_generation_pileup.md](locus_generation_pileup.md) §6,
 > [the prerequisites plan](../impl_plan/locus_generation_pileup_prerequisites.md) Milestone B.
@@ -168,7 +168,7 @@ the carrying of partial observations to this spec.
 **We store the observed sequence, not a repeat count.** Two alleles of the same length can differ by
 an interior substitution — an interrupted repeat — and a count cannot tell them apart.
 
-**Support: the shared type carries the moments, so STR fills what it already holds.** `ObservedSequence`
+**Support: the shared type carries the moments, so STR fills what it already holds.** `SequenceObservation`
 carries strand, base-quality and MAPQ moments beside the read count. The STR generator holds the
 `MappedRead`s, so filling them is a free by-product — no second pass, and few distinct observations per
 tract, so the bytes are negligible here (unlike the generic path's per-position scale). **Nothing
@@ -302,7 +302,7 @@ both are pinned: the seed derives only from the locus, and both tables are sorte
 | depth cap | [src/ssr/pileup/fetch_reads.rs:80](src/ssr/pileup/fetch_reads.rs#L80) | port `Reservoir` + `locus_seed` directly, with the seed trap (§4) |
 | margin fetch | [src/ng/ref_seq.rs:142](src/ng/ref_seq.rs#L142) | reuse as-is; replaces `Locus.ref_bytes` |
 | read alignment | `align_read` per `read_preparation_ssr.md` | call, do not reimplement |
-| tally | [src/ssr/pileup/locus_tally.rs:77](src/ssr/pileup/locus_tally.rs#L77) | model for filling `observed_sequences`; **extended** with partial observations and the support moments (§3) |
+| tally | [src/ssr/pileup/locus_tally.rs:77](src/ssr/pileup/locus_tally.rs#L77) | model for filling `observations`; **extended** with partial observations and the support moments (§3) |
 
 **Parity oracle:** production's `SsrLocusObs.observed`, on a shared fixture — every **complete**
 observation must match byte for byte, in bases and count. It covers only the complete class, only
@@ -367,7 +367,7 @@ ng_ssr_loci_dump <reference.fa> <sample.bam> [region]
 
 # ssr_loci=1284 zero_coverage=91 reads_capped=0 reads_without_observation=1662
 # obs_complete=35102 obs_partial=1447
-contig  start   end     motif  ref_tract   depth  read_coverage  observed      reads
+contig  start   end     motif  ref_tract   depth  read_witness   observed      reads
 chr1    10442   10461   AT     ATATATAT…   14     complete       ATATATATAT…   9
 chr1    10442   10461   AT     ATATATAT…   14     partial:left   ATATAT        2
 ```

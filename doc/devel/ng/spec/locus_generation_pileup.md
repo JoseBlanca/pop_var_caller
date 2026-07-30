@@ -120,7 +120,7 @@ possible; a candidate-only stream would force the cohort back into the per-sampl
 
 **The cost, stated plainly.** One `SampleLocusObservations` per covered base — order 10⁹ loci on a
 resequenced human sample, each owning a `GenomeRegion`, a `Box<[u8]>` of reference bases, and a
-`Vec<ObservedSequence>`. The streaming contract keeps one resident at a time
+`Vec<SequenceObservation>`. The streaming contract keeps one resident at a time
 (`locus_generation.md` §4), so this is a throughput cost, not a memory one — and there is no
 fallback design to fall back to (§7).
 
@@ -190,9 +190,9 @@ black-box option, rejected next.
 **Rejected outright: driving production's walker as a black box.** Calling the public
 `run(reads, fetcher, config)` and adapting each `PileupRecord` needs no lift at all — but it
 **cannot fill the locus type**. Three of `SampleLocusObservations`' six fields have no recoverable
-source in a `PileupRecord`: `read_coverage` is gone by `finalise()`, which consumes the per-read
+source in a `PileupRecord`: `read_witness` is gone by `finalise()`, which consumes the per-read
 fold state, and `reads_without_observation` / `reads_discarded_by_cap` exist only as run-level
-totals on `RunSummary`, never per record. Worse, the thing `read_coverage` exists to prevent is
+totals on `RunSummary`, never per record. Worse, the thing `read_witness` exists to prevent is
 already baked in: a read covering only part of a record's footprint has the rest filled from the
 reference ([open_record.rs:522-531](../../../../src/pileup/walker/open_record.rs#L522),
 [:568-573](../../../../src/pileup/walker/open_record.rs#L568)), folded as if it had witnessed bases
@@ -244,17 +244,17 @@ listed one, which would contaminate the measurement §12 exists to produce:
 
 | divergence | why | how it is checked |
 |---|---|---|
-| a read that did not witness the whole footprint becomes an `Observed` row whose bases are what it saw, where production folded a reference-filled haplotype into REF | production fabricates the unwitnessed bases (§4, §6) | the divergent loci are enumerated and each hand-verified against the read's CIGAR; **this count is the deliverable** |
-| an allele supported from several read groups is several rows | the group joins the key (§6); `project` cannot split a production row | row counts reconcile: summing a locus's rows by `(bases, coverage)` must reproduce production's per-allele totals |
+| a read that did not witness the whole footprint becomes an observation carrying an `Observed` witness, whose bases are what it saw, where production folded a reference-filled haplotype into REF | production fabricates the unwitnessed bases (§4, §6) | the divergent loci are enumerated and each hand-verified against the read's CIGAR; **this count is the deliverable** |
+| an allele supported from several read groups is several observations | the group joins the key (§6); `project` cannot split a production observation | observation counts reconcile: summing a locus's observations by `(bases, coverage)` must reproduce production's per-allele totals |
 | `reads_without_observation` / `reads_discarded_by_cap` are non-zero | production keeps neither per record | asserted against a hand-counted fixture, not against production |
-| production emits a REF bucket with `num_obs == 0`; ng emits no such row | production creates `alleles[0]` at record open regardless ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)); ng derives rows from reads that folded | the projection drops zero-support rows before comparing, and that drop is asserted to be the only one |
-| row **order** | production's is bucket-creation order; ng's is whatever the fold yields | ng **sorts** before emitting (below), so the comparison is against a sorted projection |
+| production emits a REF bucket with `num_obs == 0`; ng emits no such observation | production creates `alleles[0]` at record open regardless ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)); ng derives observations from reads that folded | the projection drops zero-support observations before comparing, and that drop is asserted to be the only one |
+| observation **order** | production's is bucket-creation order; ng's is whatever the fold yields | ng **sorts** before emitting (below), so the comparison is against a sorted projection |
 
-**Row order has to be specified, not left to the fold.** ng's rows are derived from a per-read map
+**Observation order has to be specified, not left to the fold.** ng's observations are derived from a per-read map
 (`folded_reads` is an `AHashMap`, [open_record.rs:90](../../../../src/pileup/walker/open_record.rs#L90)),
 whose iteration order is seeded per process — so emitting in fold order would make the output
 **non-deterministic run to run**, contradicting §7 and §13's byte-identity check. Sort by
-`(bases, read_coverage, read_group)` before emitting. The STR generator already sorts for exactly
+`(bases, read_witness, read_group)` before emitting. The STR generator already sorts for exactly
 this reason ([ssr.rs:1055-1075](../../../../src/ng/locus_generation/ssr.rs#L1055)); this is the same
 requirement on the same shared type.
 
@@ -328,7 +328,7 @@ incremented there multiplies by the footprint length — the same bug, on the on
 inherited test. It must be a per-record set of read ids, not a counter. Worse, a read can fold
 contiguously and *become* non-contiguous when the window widens right across an interior gap: the
 natural `continue` skips the subtract-then-add above it, leaving a live contribution in a bucket for
-a read that now has no row. That breaks `chain_ids.len() <= num_obs`, silently, and only on
+a read that now has no observation. That breaks `chain_ids.len() <= num_obs`, silently, and only on
 multi-base records.
 
 *Why absolute coordinates and not a bucket-time tag:* the bucket a read folds into is chosen from
@@ -354,7 +354,7 @@ today, `Observed { offset_in_locus: 0, positions_covered: 4 }` after the reshape
 path would have filled the same shared field with reference-padded bases: **one field, two
 incompatible meanings.** After it, both mean "what the read witnessed", and that is now a
 cross-generator invariant worth stating explicitly — `bases.len()` must be consistent with
-`read_coverage` on every observation, whichever generator minted it (§13).
+`read_witness` on every observation, whichever generator minted it (§13).
 
 **It also makes the step-7 scheme work as designed.** freebayes matches a partial's bases as a
 prefix or suffix of each candidate and splits its weight `1/k` across the candidates it cannot
@@ -387,7 +387,7 @@ Three things that code does not say on its face:
   whose records are one base wide.
 
 One consequence for the group split (§6): a zeroed mate still counts as an observation with no
-quality mass, in **its own** group's cell, and in the indel regime one group loses the read outright.
+quality mass, in **its own** group's observation, and in the indel regime one group loses the read outright.
 A per-group model therefore reads a slightly biased `(count, quality)` cross — the exact quantity the
 split exists to serve. Recorded, not corrected: attributing a reconciled pair to one group would
 invent an attribution the data does not have.
@@ -403,11 +403,11 @@ the paragraphs after it are where it is not.
 |---|---|
 | `region` | `pos ..= pos + alleles[0].seq.len() - 1` — `GenomeRegion` is 1-based **inclusive** ([types.rs:79](../../../../src/ng/types.rs#L79)), so the end is the last covered position, not one past it |
 | `reference_bases` | `alleles[0].seq` — the REF bucket's sequence *is* the record's reference bytes; there is no separate field ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)) |
-| `observed_sequences` | every `AlleleObservation`, REF bucket included |
+| `observations` | every `AlleleObservation`, REF bucket included |
 | `kind` | `LocusKind::Generic` |
-| `ObservedSequence.{bases, num_obs, num_fwd, q_sum, mapq_sum, mapq_sum_sq, chain_ids}` | `AlleleObservation.seq` / `AlleleSupportStats.{num_obs, fwd, q_sum, mapq_sum, mapq_sum_sq}` / `chain_ids` |
+| `SequenceObservation.{bases, num_obs, num_fwd, q_sum, mapq_sum, mapq_sum_sq, chain_ids}` | `AlleleObservation.seq` / `AlleleSupportStats.{num_obs, fwd, q_sum, mapq_sum, mapq_sum_sq}` / `chain_ids` |
 
-**`read_coverage` — the one that changes an answer, and the one production gets wrong.** Production
+**`read_witness` — the one that changes an answer, and the one production gets wrong.** Production
 folds a read into a record even when the read did not witness the whole footprint, filling what it
 did not witness from the reference
 ([open_record.rs:522-531](../../../../src/pileup/walker/open_record.rs#L522),
@@ -436,7 +436,7 @@ they are a finding about production, not rationale for this step, so they live t
 
 **What ng does.** The read's observation carries the bases it witnessed and an `Observed` coverage
 tag computed from its **events** against the record footprint (§4) — a lower bound, kept as a
-separate row from the complete ones, with `complete_observations()` keeping it away from a
+separate observation from the complete ones, with `complete_observations()` keeping it away from a
 likelihood that would score it as a short allele. **This step records; it does not weigh.** Whether a partial is *used*, and how, is the
 caller's — and that is now settled: step 7 adopts freebayes' partial-support scheme (owner,
 2026-07-27; §10). The division of labour is the point of the split — a weighting needs the candidate
@@ -448,13 +448,13 @@ re-reading this code:
 
 | freebayes uses | where it is in ng's output |
 |---|---|
-| the partial read's observed bases | `ObservedSequence.bases` |
-| which end the read ran off (the prefix-vs-suffix test) | `read_coverage`: `offset_in_locus == 0` is flush left (a prefix), `offset_in_locus + positions_covered == region.len()` is flush right (a suffix). An interior run is expressible too, which freebayes has no equivalent for |
+| the partial read's observed bases | `SequenceObservation.bases` |
+| which end the read ran off (the prefix-vs-suffix test) | `read_witness`: `offset_in_locus == 0` is flush left (a prefix), `offset_in_locus + positions_covered == region.len()` is flush right (a suffix). An interior run is expressible too, which freebayes has no equivalent for |
 | the count and quality to divide by `k` | `num_obs`, `q_sum` |
 | the candidate allele set (to compute `k`) | step 6's output, not this step's |
 | **read bases *outside* the locus window** | not on a single locus — see below |
 
-**The last row is reachable, and the REF-chain-id drop does not block it.** `assignPartialSupport`
+**The last observation is reachable, and the REF-chain-id drop does not block it.** `assignPartialSupport`
 extends a partial's sequence with the read's own bases beyond the window before testing
 prefix/suffix (`Sample.cpp:377-381` → `Allele::read5p`/`read3p`, `Allele.cpp:992-1020`). Because
 this generator emits **a locus per covered position** (§2), those bases are recorded at the
@@ -465,19 +465,19 @@ bases are `reference_bases`, already on the locus. Identity is only needed where
 the reference, and that is exactly where it is kept (§6). Coverage does not need marking either: an
 uncovered position emits **no locus at all** (§2), and a read that covered a locus and said nothing
 is counted in `reads_without_observation`. So the outward walk is well founded — locus present plus
-id absent means reference, and the read's own `read_coverage` pins the border it ran off.
+id absent means reference, and the read's own `read_witness` pins the border it ran off.
 
 **The size of production's defect is this port's to measure, not to assume** — stage 2 of the parity
 oracle counts it (§3, §13), and that number is what decides whether the research note's
 indel-deficit hypothesis is a result or is dead.
 
-**`ReadCoverage` becomes `Complete` + one `Observed` variant — decided (owner, 2026-07-28).** Three
+**`ReadWitness` becomes `Complete` + one `Observed` variant — decided (owner, 2026-07-28).** Three
 partial variants cannot describe what a read witnesses once the events, not the span, define it: a
 read can be blind in the middle of a footprint (an interior `N`, a ref-skip) or blind at either end,
 and a widened record can be wider than a read on both sides. One variant covers all of it:
 
 ```rust
-pub enum ReadCoverage {
+pub enum ReadWitness {
     /// The read witnessed every position of the locus.
     Complete,
     /// The stretch it did witness, in **locus positions** — the axis `bases` is not on
@@ -506,13 +506,13 @@ dropped-indel rule always truncate from one side, so they stay expressible — a
 side effect: it gives that counter a real population (below).
 
 **This is a change to a built ng module, and it is not small — a correction to an earlier estimate
-in this spec.** `ReadCoverage` is not `#[non_exhaustive]` and has **six** exhaustive match sites, not
+in this spec.** `ReadWitness` is not `#[non_exhaustive]` and has **six** exhaustive match sites, not
 one: `num_obs_along_locus` ([locus_generation/mod.rs:81-83](../../../../src/ng/locus_generation/mod.rs#L81)),
 the STR generator's complete/partial tally ([ssr.rs:1015](../../../../src/ng/locus_generation/ssr.rs#L1015))
 and its deterministic sort key ([ssr.rs:1072](../../../../src/ng/locus_generation/ssr.rs#L1072)),
 plus four dump tools that `--all-targets` builds. The STR generator also **mints** coverage in four
 places ([ssr.rs:713](../../../../src/ng/locus_generation/ssr.rs#L713), `:716`, `:889`, `:910`) — and
-two of those pass `ReadCoverage::PartialLeft`/`PartialRight` **as function values**, which a struct
+two of those pass `ReadWitness::PartialLeft`/`PartialRight` **as function values**, which a struct
 variant cannot be, so that helper is restructured rather than retyped. `locus_generation.md` §3 and
 `../arch/locus_generation.md` §1 carry the type and need the change folded in (§10).
 
@@ -548,7 +548,7 @@ owes (§10). *Unchanged by this:* `PreparedRead`'s home inside `pileup/walker/` 
 misplacement (preparation produces it, the pileup only consumes it) deferred to the port-back. ng
 copying the type neither pays that debt nor worsens it.
 
-**Why carry it — and the strongest reason is not this path's.** `ObservedSequence` is **shared with
+**Why carry it — and the strongest reason is not this path's.** `SequenceObservation` is **shared with
 the STR generator**, and the STR model is *already* parameterised per sample group: the stutter
 **level** is per group, the shape is per `(group, period)`, and the per-base error `ε` is a
 per-group value ([ssr_cohort_mark2.md:288-289](../../specs/ssr_cohort_mark2.md)). Its glossary makes
@@ -568,7 +568,7 @@ added later from a tally that merged the libraries together.
 **Why *split* the tally rather than attach counts.** Such a model needs the **allele × group cross
 with its quality moments**: how many reads from library X supported this allele, at what qualities.
 A per-group count beside one merged observation gives the first and loses the second. So the group
-joins the dedup key: an observation is one distinct `(bases, read_coverage, read_group)` cell.
+joins the dedup key: an observation is one distinct `(bases, read_witness, read_group)` combination.
 
 **At the finest grain — per `@RG` (owner, 2026-07-28).** `ReadGroupId`
 ([types.rs:178](../../../../src/ng/types.rs#L178)) identifies one `@RG`, i.e. one lane; the run's
@@ -581,11 +581,11 @@ grain is a modelling decision and this step is not the modeller.
 **And collapsing is exact, which is what makes the fine grain safe rather than merely
 conservative.** Every field an aggregation touches is additive — `num_obs`, `num_fwd`, `mapq_sum`,
 `mapq_sum_sq` sum; `q_sum` sums in log-error space; `chain_ids` union — and `bases` and
-`read_coverage` are identical across the cells being merged, since they are part of the key. So a
+`read_witness` are identical across the observations being merged, since they are part of the key. So a
 downstream fold from read group to library loses nothing a single-grain tally would have kept.
 
-**What it costs.** Nothing where a sample has one read group, which is most of them — the row count
-is unchanged. Where it has several, the rows at a locus multiply by the groups covering it, and at
+**What it costs.** Nothing where a sample has one read group, which is most of them — the observation count
+is unchanged. Where it has several, the observations at a locus multiply by the groups covering it, and at
 per-lane grain a four-lane library splits four ways. That cost is accepted as the price of not
 deciding for the consumer. **If it ever bites**, the answer is to aggregate at the point of
 consumption, or to mint a coarser id then — measuring it is cheap, and §13's dump is the
@@ -593,14 +593,14 @@ instrument.
 
 **One interaction with mate overlap, small but exactly on target.** Mates are detected by shared
 chain id, which is group-blind, so reconciliation itself is unaffected. But its *outcome* lands in
-group cells: in the match-only regime the zeroed mate stays a row in **its own** group's cell with
-`num_obs = 1` and no quality mass, and in the indel regime one group loses the read outright. So a
+group observations: in the match-only regime the zeroed mate stays an observation of **its own**
+group, with `num_obs = 1` and no quality mass; in the indel regime one group loses the read outright. So a
 per-group model reads a slightly biased `(count, quality)` cross — which is precisely the quantity
 the split exists to serve. Recorded, not corrected: the alternative is to attribute a reconciled
 pair to one group, which invents an attribution the data does not have.
 
-**Two consequences worth stating plainly.** First, `observed_sequences` is no longer a table of
-distinct *sequences* — `read_coverage` already made it a table of cells, and this widens the key
+**Two consequences worth stating plainly.** First, `observations` is no longer a table of
+distinct *sequences* — `read_witness` already made it a table of observations, and this widens the key
 again. **A consumer that wants per-allele totals must aggregate over coverage *and* group**, and one
 that treats each entry as an allele will now count the same allele several times. Second, the field
 lands on the **shared** type, so the STR generator fills it too and its observations split the same
@@ -666,7 +666,7 @@ every other read's coverage. That is exact and bounded, and it is the same membe
 non-contiguous class needs (above), so it is paid once.
 
 *Two consequences to record rather than discover.* The cap is applied before the fold, so a capped
-read never influences `read_coverage` — coverage describes the reads that folded, not the reads that
+read never influences `read_witness` — coverage describes the reads that folded, not the reads that
 covered. And with the read group in the key, a truncated column yields a **group-biased** subsample,
 since truncation is in admission order and says nothing about groups; a per-group model reading a
 capped locus is reading a biased cross. Neither is a defect to fix here, but a model that ignores
@@ -677,21 +677,21 @@ in the code being ported: `finalise()` skips `allele_index == 0`, so REF chain i
 materialised ([open_record.rs:150-160](../../../../src/pileup/walker/open_record.rs#L150)); the
 ~96.6%-of-all-chain-ids / ~31%-of-peak-live-heap figure is what that fix removed, and stale `.psp`
 files written before it still carry the cost. So the port inherits the fix — **provided it is not
-lost in the flattening**. ng's `observed_sequences` is a flat list with no "index 0 is REF"
+lost in the flattening**. ng's `observations` is a flat list with no "index 0 is REF"
 position, so the rule has to be restated in ng's own terms: **the observation whose `bases` equal
-`reference_bases` carries no chain ids** — restated below, because row splitting breaks that
+`reference_bases` carries no chain ids** — restated below, because observation splitting breaks that
 wording. The alternative — dropping chain ids entirely, since ng's only consumer would be
 a cohort merge that does not exist yet — was rejected because the allocator has to run regardless
 (§5) and the marginal cost is one empty `Vec` per REF observation.
 
-**The rule needs a per-read referent, not a per-row one.** "The row whose bases equal
-`reference_bases`" named a unique row while there was one row per allele. It no longer does: rows
-now split by coverage and by read group, so a reference-matching read can sit in a partial row whose
+**The rule needs a per-read referent, not a per-observation one.** "The observation whose bases equal
+`reference_bases`" named a unique observation while there was one observation per allele. It no longer does: observations
+now split by coverage and by read group, so a reference-matching read can sit in a partial observation whose
 bases are a *prefix* of `reference_bases` and never compare equal to it. Production's own rule is
 positional (`allele_index == 0`, [open_record.rs:158](../../../../src/pileup/walker/open_record.rs#L158))
 and equally unportable. **State it per read instead: a read contributes no chain id where it agreed
 with the reference across everything it witnessed.** That is decidable at fold time from what the
-read is, survives every split of the rows, and reduces to production's rule exactly when the rows
+read is, survives every split of the observations, and reduces to production's rule exactly when the observations
 are one-per-allele.
 
 **Why the REF drop is right, and not merely cheap.** Production justifies it by artifact size (~96.6%
@@ -710,7 +710,7 @@ freebayes capability**.
 
 **Nor does it conflate reference with absence at the locus level.** A position nobody covered emits
 no locus at all (§2), so a locus's existence already says it was covered; reads that covered it and
-said nothing are counted; and a read's own `read_coverage` pins where it stopped. Chain ids
+said nothing are counted; and a read's own `read_witness` pins where it stopped. Chain ids
 therefore carry one thing — *which non-reference haplotype* — and carry it only where there is
 something to say.
 
@@ -776,7 +776,7 @@ right yardstick because it does the same walk and writes an artifact per positio
 
 **The allele list gets longer, and that is the cost centre to watch.** Two of §4's changes multiply
 buckets. Under the no-fill rule, reads witnessing different extents of a multi-base record no longer
-share one REF bucket — each distinct extent is its own row, so the baseline count tracks distinct
+share one REF bucket — each distinct extent is its own observation, so the baseline count tracks distinct
 read starts rather than distinct alleles. And REF-only widening removes the property that makes a
 live read re-fold into its *existing* bucket: production appends the same bytes to every bucket
 precisely so the re-fold matches, a 25-line comment above the loop
@@ -824,8 +824,8 @@ production's.
 - **`bases.len()` is not `positions_covered`.** An insertion's footprint is 1 reference position but
   contributes several bases; a deletion's is `deleted_len + 1` and contributes one
   ([decompose.rs:55-61](../../../../src/pileup/walker/decompose.rs#L55)). The §13 consistency check
-  is *"no row claims more positions than its events account for"*, **not** an equality — an
-  implementer who makes it one will either fail it on every indel row or "fix" it by deriving the
+  is *"no observation claims more positions than its events account for"*, **not** an equality — an
+  implementer who makes it one will either fail it on every indel observation or "fix" it by deriving the
   extent from the byte length, which is the span-vs-events confusion all over again.
 - **Build the reference accessor once, not per segment.** It is a field on the generator;
   `begin_segment` must not replace it. A fresh accessor per region throws away the sliding buffer at
@@ -925,13 +925,13 @@ stage 2 through a projection with two named divergence classes (§3).
 - **Four changes to the shared locus type — schedule them as one pass, because they share one
   fixture rebaseline.** All four land on types both generators fill, so the STR generator's output
   moves with them; done separately they rebaseline its fixtures four times.
-  1. `ReadCoverage` → `Complete` + `Observed { offset_in_locus, positions_covered }` (§6). Six
+  1. `ReadWitness` → `Complete` + `Observed { offset_in_locus, positions_covered }` (§6). Six
      exhaustive match sites and four minting sites, two of which pass the variant as a function
      value.
-  2. `ObservedSequence` gains the **read group**, which splits its rows (§6). The STR path is the
+  2. `SequenceObservation` gains the **read group**, which splits its observations (§6). The STR path is the
      one with a model waiting for it, so this is a hand-off rather than a fold-in — whether it then
      replaces its inferred sample groups with declared ones is the STR cohort work's call.
-  3. `ObservedSequence` gains **`placed_left`** (§6). The type carries neither bias field today, so
+  3. `SequenceObservation` gains **`placed_left`** (§6). The type carries neither bias field today, so
      `locus_generation.md` §11's instruction to add both is half right: add `placed_left`, not
      `placed_start`. Left as-is, the value is computed, carried through the fold, and has nowhere to
      go at the last line of `finalise`.
@@ -942,8 +942,8 @@ stage 2 through a projection with two named divergence classes (§3).
 
   **Home: `locus_generation.md` §3 and `../arch/locus_generation.md` §1, plus the STR specs for (1)
   and (2).** Sequencing them before this generator's fixtures exist keeps the rebaseline to one.
-- **An aggregating accessor on the shared type** — with `read_coverage` and now the read group in
-  the key, `observed_sequences` is a cell table and per-allele totals need a fold over both axes
+- **An aggregating accessor on the shared type** — with `read_witness` and now the read group in
+  the key, `observations` splits by both, and per-allele totals need a fold over both axes
   (§6). `complete_observations()` is the precedent for putting that guard on the type rather than in
   every consumer. **Home: `locus_generation.md`**, when the first consumer needs it; noted so the
   need is not rediscovered as a bug.
@@ -982,7 +982,7 @@ stage 2 through a projection with two named divergence classes (§3).
   span (the span is blind to `N`, adaptor-masked, ref-skipped and dropped-indel positions); it is
   stored in absolute reference coordinates on `FoldedReadState`; and coverage is resolved once at
   `finalise()` against the final footprint. §4, §6.
-- **`ReadCoverage` becomes `Complete` + `Observed { offset_in_locus, positions_covered }` (owner,
+- **`ReadWitness` becomes `Complete` + `Observed { offset_in_locus, positions_covered }` (owner,
   2026-07-28).** One run in **locus** coordinates describes every case the events can produce —
   blind at either end, blind in the middle, or a record wider than the read on both sides. `Complete`
   is kept: it is the common case and keeps `complete_observations()` an equality test. A
@@ -1014,8 +1014,8 @@ stage 2 through a projection with two named divergence classes (§3).
   so the addition is source-compatible. No fork — recorded because it changes a shared ng type.
 - **The read group is carried at `@RG` grain (owner, 2026-07-28).** The finest grain available, so
   the consumer picks library, experiment or read group rather than inheriting this step's guess —
-  and the aggregation is exact, since every support field is additive and the merged cells share
-  their `bases` and `read_coverage` by construction. The cost is a row split per lane where a sample
+  and the aggregation is exact, since every support field is additive and the merged observations share
+  their `bases` and `read_witness` by construction. The cost is an observation split per lane where a sample
   has several, accepted deliberately. §6.
 - **The read group is carried and joins the observation's identity (owner, 2026-07-27/28).** Two
   reasons, the stronger one the STR path's: its stutter and `ε` are already fit **per sample group**,
@@ -1072,7 +1072,7 @@ positions emitting nothing; insertion and deletion record shape; the widen-event
 | `placed_left_and_placed_start_are_per_record` | `placed_start` is no longer carried (§6); the `placed_left` half stands |
 | `refold_after_widen_clears_chain_id_from_old_bucket` | `widen` now extends the REF bucket only (§4), so what a re-fold moves between buckets changes |
 | `chain_ids_persist_across_chromosome_boundaries` | ng's boundary is the **region**, and the allocator is `reset()` there (§8) — the property is the same, the fixture is not |
-| any test asserting allele order within a record | ng sorts rows before emitting (§3); production's order is bucket-creation order |
+| any test asserting allele order within a record | ng sorts observations before emitting (§3); production's order is bucket-creation order |
 
 *Must be **added**, because nothing existing covers them* — and this is the finding worth carrying:
 **no test in the suite exercises the defect the port exists to fix.** The two that come closest do
@@ -1091,7 +1091,7 @@ inherited suite to catch a regression here, and owes new fixtures:
 3. A record widened past an **already-expired** read — its bases must not have grown.
 4. A read witnessing an indel whose own anchor base was masked — the one residual where a reference
    base is still borrowed (§4); the test pins that it is one base and no more.
-5. Two read groups supporting one allele — two rows, summing to the single-group total.
+5. Two read groups supporting one allele — two observations, summing to the single-group total.
 6. A deletion at a region boundary whose footprint reaches into the next region — the halo case
    (§2); its support must match a single-region walk over the same span.
 
@@ -1123,15 +1123,15 @@ in the order they should be built.
      `reads_without_observation`, was discarded by the cap, or was silent over the whole footprint
      (§6).
    - **No observation carries a chain id for a read that agreed with the reference across
-     everything it witnessed** — §6's invariant, stated per read because row splitting means "the
-     REF row" is no longer a unique row. Checked rather than commented.
-   - **On a fixture with two read groups, an allele supported by both is two rows**, one per group,
+     everything it witnessed** — §6's invariant, stated per read because observation splitting means "the
+     REF observation" is no longer a unique observation. Checked rather than commented.
+   - **On a fixture with two read groups, an allele supported by both is two observations**, one per group,
      whose `num_obs` sum to the single-group total — the check that §6's split is computed and not
-     defaulted, and the measurement the grain question needs (§11). On a one-group fixture the row
+     defaulted, and the measurement the grain question needs (§11). On a one-group fixture the observation
      count must be **identical** to a run with the field ignored, which is what "free at one read
      group" has to mean in practice.
-   - `Observed` rows exist and are separate from `Complete` ones with the same bases — which is
-     what proves `read_coverage` is computed rather than defaulted.
+   - observations with an `Observed` witness exist and are separate from `Complete` ones with the same bases — which is
+     what proves `read_witness` is computed rather than defaulted.
    - **A read blind in the middle of a footprint yields no observation and is counted**, and a read
      adaptor-masked over part of a footprint is `Observed`, not `Complete` — the two checks that
      coverage comes from the **events** and not the alignment span (§4). A span-derived
@@ -1141,8 +1141,8 @@ in the order they should be built.
      bases the length it witnessed and not the footprint's — the check that the no-fabrication rule
      survived the port, and the one production cannot pass by construction. Needs a fixture with a
      deletion long enough to widen a record past a read that has already expired.
-   - **No row claims more locus positions than its events account for** — the consistency check
-     between `bases` and `read_coverage`, asserted globally because it is the invariant the whole §4
+   - **No observation claims more locus positions than its events account for** — the consistency check
+     between `bases` and `read_witness`, asserted globally because it is the invariant the whole §4
      change exists to establish. **Not an equality:** an insertion adds bases without positions, a
      deletion positions without bases (§8).
    - Loci from two adjacent `Generic` regions concatenate into a coordinate-sorted,

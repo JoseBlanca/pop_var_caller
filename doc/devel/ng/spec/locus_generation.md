@@ -116,7 +116,7 @@ pub struct SampleLocusObservations {
     pub reference_bases: Box<[u8]>,
     /// The distinct sequences the reads showed, each with its support. **Observations, not
     /// alleles** — they become alleles when something calls them.
-    pub observed_sequences: Vec<ObservedSequence>,
+    pub observations: Vec<SequenceObservation>,
     /// Reads that covered this locus and produced no observation at all. *No coverage* and
     /// *coverage that said nothing* are different states, and only one means "look at the
     /// mapping". The per-reason breakdown is the generator's to report; that they existed
@@ -161,15 +161,15 @@ pub struct SsrDetail {
 /// One distinct sequence the reads showed, with its support. The fields between `num_obs`
 /// and `chain_ids` are the per-read moments the SNP filters read; the STR model reads only
 /// `num_obs`.
-pub struct ObservedSequence {
+pub struct SequenceObservation {
     /// The observed bases — allele content, in read coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned — the whole thing, or only
     /// part (below). **Part of the identity**: a `Complete` `ATAT` and an `Observed` run of
     /// `ATAT` are different evidence and stay separate entries.
-    pub read_coverage: ReadCoverage,
+    pub read_witness: ReadWitness,
     /// Which read group (one `@RG`, i.e. one lane) these reads came from. **Part of the
-    /// identity**, so an allele supported from several groups is several rows.
+    /// identity**, so an allele supported from several groups is several observations.
     pub read_group: ReadGroupId,
     /// How many reads showed this sequence. The whole support on the STR path, and the one
     /// field every model on both paths reduces to.
@@ -195,7 +195,7 @@ pub struct ObservedSequence {
 /// How much of the locus a single read spanned. `Complete` = it reached **both** borders;
 /// otherwise the one run of locus positions it actually witnessed. (One read's span of the
 /// locus — not depth.)
-pub enum ReadCoverage {
+pub enum ReadWitness {
     Complete,
     Observed { offset_in_locus: u16, positions_covered: u16 },
 }
@@ -210,7 +210,7 @@ impl SampleLocusObservations {
     /// a lower bound and mis-scores as a short allele until step 7 models censoring
     /// ([locus_generation_ssr.md](locus_generation_ssr.md)), so reaching the partials is a
     /// deliberate act.
-    pub fn complete_observations(&self) -> impl Iterator<Item = &ObservedSequence> + '_;
+    pub fn complete_observations(&self) -> impl Iterator<Item = &SequenceObservation> + '_;
 }
 ```
 
@@ -238,7 +238,7 @@ The correspondence is fixed by which generator handles which region (§5), not b
 generator sets its output kind — but in practice it is `SsrSegment → Ssr`, `Generic → Generic`,
 `SsrBundle → SsrBundle`.
 
-**`read_coverage` carries two facts at once, and on the STR path they are the same fact.** Whether a read
+**`read_witness` carries two facts at once, and on the STR path they are the same fact.** Whether a read
 reached both borders of a tract or ran off its own end partway answers two questions together.
 *Censoring:* a partial observation is a **lower bound**, the sequence at least this long, and a
 likelihood scoring it as complete would read a long allele as short — `complete_observations()` is the
@@ -276,11 +276,11 @@ physical event.
 > worth paying for a number nothing yet reads. **Read the per-locus value as the subset it is**
 > ([locus_generation_pileup.md](locus_generation_pileup.md) §6, §11).
 
-> **Fold-in, 2026-07-28 — `observed_sequences` is a table of *cells*, not of sequences.** The
-> identity is now `(bases, read_coverage, read_group)`. **A consumer that wants per-allele totals
+> **Fold-in, 2026-07-28 — an entry is one observation, not one sequence.** The
+> identity is now `(bases, read_witness, read_group)`. **A consumer that wants per-allele totals
 > must aggregate over coverage *and* group**, and one that treats each entry as an allele will count
 > the same allele several times. The aggregation is exact: every support field is additive, and the
-> merged cells share their `bases` and `read_coverage` by construction. Two fields arrived together
+> merged observations share their `bases` and `read_witness` by construction. Two fields arrived together
 > (prerequisite B2):
 >
 > - **`read_group: ReadGroupId`**, at `@RG` grain — the finest available, so library and experiment
@@ -289,7 +289,7 @@ physical event.
 >   observation gives the first and loses the second. The near-term consumer is the STR path, whose
 >   stutter level and per-base `ε` are already fit per sample group — off groups it currently has to
 >   *infer* ("data-driven soft clusters") because the evidence did not carry the real one. Free where
->   a sample has one read group, which is most of them; where it has several, the rows multiply by
+>   a sample has one read group, which is most of them; where it has several, the observations multiply by
 >   the groups covering the locus, accepted as the price of not deciding for the consumer.
 > - **`placed_left: u32`** — the read-position-bias count `vcf/qual_refine.rs` turns into the penalty
 >   production subtracts from QUAL, so dropping it would forfeit QUAL parity. **`placed_start` is
@@ -484,7 +484,7 @@ implementations compete keeps its trait and every implementation side by side.
 
 ```
 src/ng/locus_generation/
-  mod.rs      – SampleLocusObservations, ObservedSequence, LocusGenerator, the dispatcher, NoLoci
+  mod.rs      – SampleLocusObservations, SequenceObservation, LocusGenerator, the dispatcher, NoLoci
   ssr.rs      – the STR generator (locus_generation_ssr.md)
   pileup/     – the generic generator (deferred, §11)
 ```
@@ -648,7 +648,7 @@ neither.
 
 - **The pileup generator** for `Generic` regions — `src/ng/locus_generation/pileup/`, its own spec. It also owns
   the `chain_ids` question of §3 (carry cross-locus read identifiers, or drop compound haplotypes) and
-  adds the read-position-bias fields (`placed_left`, `placed_start`) to `ObservedSequence` — generic-only,
+  adds the read-position-bias fields (`placed_left`, `placed_start`) to `SequenceObservation` — generic-only,
   omitted from the shared type because a tract makes them degenerate (§3).
 - **The windowed statistics** — mean depth and GC over a window centred on a locus, the paralog
   filter's inputs. Computed downstream by sliding a window over `num_obs_along_locus()` (§3), not
@@ -729,5 +729,5 @@ output. The STR generator's own test is in its spec.
    checked on a fixture mixing complete and partial observations, so §3's read-coverage-to-depth rule
    is exercised.
 6. **A partial and a complete of the same bases stay distinct.** Two observations with identical
-   `bases` but different `read_coverage` are separate entries — the check that a lower bound cannot be
+   `bases` but different `read_witness` are separate entries — the check that a lower bound cannot be
    silently folded into a called allele.
