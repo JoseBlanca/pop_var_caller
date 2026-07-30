@@ -346,7 +346,7 @@ impl PileupGeneratorCounts {
 /// scratch field exists to prevent (arch §1.1).
 ///
 /// One `RefCell` borrow per read, held only across `prepare_read`; the walk is
-/// single-threaded (arch §9) and nothing else touches the cell while a read is
+/// single-threaded (`locus_generation.md` §9) and nothing else touches the cell while a read is
 /// being prepared.
 struct ReadPreparation<P: ReadPreparer> {
     preparer: P,

@@ -348,15 +348,31 @@ fn run_dump<P: ReadPreparer + 'static>(
     let sample = SampleReads::open_only_sample(bams, &info, ReadFilterConfig::default(), true)?;
 
     // **An `Arc` around a type that is neither `Send` nor `Sync`, and clippy is right to
-    // notice.** `WindowedRefSeq` holds an open reader behind a `RefCell`, so it is
-    // single-threaded by construction — which the walk is too (arch §9). The `Arc` is
-    // `PileupGenerator::new`'s signature, chosen at C1 when the only accessor anyone had built
-    // one of was an in-memory one that *is* both. **An `Rc` would say what is true here**, and
-    // the first file-backed caller is this tool, so that is a finding for Checkpoint D rather
-    // than a change to make from an example.
+    // notice.** `WindowedRefSeq` holds an open reader behind a `RefCell`, so it is `!Sync`,
+    // and `Arc<T>` is only `Send` when `T: Send + Sync`.
+    //
+    // **The `Arc` stays, and an `Rc` would not say anything truer.** That was the carried
+    // finding and it was wrong on the decisive point: `Rc` and `Arc` are *equally* unable to
+    // cross a thread here, so swapping them buys no honesty — it only moves which pointer
+    // names the same single-threaded fact. What makes the signature right is that
+    // `PileupGenerator` is generic over the accessor: for an `InMemoryRefSeq`, which *is*
+    // `Send + Sync`, the `Arc` is meaningful, and it is `ref_seq.rs`'s recorded choice of
+    // `Arc` over `Rc` for the per-sample fan-out to come. This call site is the one where the
+    // accessor happens to be file-backed, so this is where the lint is allowed rather than
+    // where the signature changes. (Owner, 2026-07-30.)
+    //
+    // **What the fan-out will actually change is not this pointer, and the spec already says
+    // so.** `locus_generation.md` §9: *"a shared `WindowedRefSeq` is `Send` but not `Sync`, so
+    // each worker needs its own accessor"* — so the planned shape is one accessor per worker,
+    // never one shared handle, and no pointer type makes a shared one work. That is also what
+    // `with_shared_index` is for: `WindowedRefSeq` already holds `Arc<ContigList>` and
+    // `Arc<fai::Index>`, sharing the immutable index while keeping the reader per accessor,
+    // because k accessors over one index must still hold k cursors. Separately,
+    // `PileupGenerator` is already `!Send` through its `Rc<RefCell<ReadPreparation>>`, so the
+    // handle on the reference is not what stands between this and a worker.
     #[allow(
         clippy::arc_with_non_send_sync,
-        reason = "the generator's signature takes Arc; the accessor is single-threaded — see the comment above"
+        reason = "PileupGenerator::new is generic over the accessor and takes Arc, which is meaningful for the Send+Sync in-memory ones; this accessor is file-backed and single-threaded — see the comment above"
     )]
     let reference = Arc::new(WindowedRefSeq::with_shared_index(
         fasta.to_path_buf(),

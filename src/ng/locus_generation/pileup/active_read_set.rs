@@ -52,7 +52,7 @@ pub struct ActiveRead {
     /// through `iter()` (`&self`), and taking that loop to `&mut`
     /// would put a mutable borrow of the whole set across the
     /// cursor queries it makes. One `bool` of interior mutability is
-    /// the smaller change, and the walk is single-threaded (arch §9).
+    /// the smaller change, and the walk is single-threaded (`locus_generation.md` §9).
     ///
     /// **Set before the depth cap, deliberately.** A read the cap
     /// truncates *was* a contributor; it belongs in

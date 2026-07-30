@@ -629,7 +629,7 @@ impl LocusCounts {
 /// the `NoLoci` configuration kept as data, so plugging in a real generator is a one-line
 /// change at the set (spec §5).
 ///
-/// The trait object carries **no `Send` bound**: v1 is single-threaded (arch §9). If a
+/// The trait object carries **no `Send` bound**: v1 is single-threaded (`locus_generation.md` §9). If a
 /// `GeneratorSet` is ever moved onto a producer thread rather than built per thread, this
 /// becomes `dyn LocusGenerator<S> + Send` — a deliberate omission now, not an oversight.
 pub enum GeneratorSlot<S> {
