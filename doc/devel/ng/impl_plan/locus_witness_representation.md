@@ -127,6 +127,20 @@ expectations is a step that did more than rename.
 
 ## Milestone C — the fold (the behaviour change)
 
+- ✅ **C0 — added mid-milestone (owner, 2026-07-30), because C2 cannot be written without it.** The
+  STR path mints a partial witness covering **zero** locus positions, and
+  `WitnessedLocusPositions` has no way to spell one: an empty set carries no anchor, so flush-left
+  and flush-right collapse into one value. Measured before deciding: **6,704 such mints against
+  7,085 genuine partials** on chr01 of tomato `SRR7279503`, at a median window overlap of 16 bases
+  against a 30-base flank — reads that clip the locus *window* and never enter the tract, which the
+  delimiter reports as `FromLeft`/`FromRight` with an empty span. **Owner's decision: they are not
+  in the locus and the SNP/indel path owns their bases, so the STR path discards them and counts
+  them** (`NoObservationReason::OutsideTract`). Recorded in
+  [`locus_generation_ssr.md`](../spec/locus_generation_ssr.md) §3, which is the design's home. This
+  is the one step in the plan that **moves the STR dump**, and it moves it only by deleting rows —
+  see §7.1 of the spec for the rebaselined oracle. *Depends:* —. *Source:* owner decision;
+  measurement in the C implementation report.
+
 - ✅ **C1.** `apply_events_into` accumulates runs into a caller-owned buffer and returns
   `WitnessedRefPositions` — **and still returns `None` on a hole.** Byte-identical by construction;
   the §8 probe demonstrated this exact shape against the full suite. *Depends:* B3. *Source:*

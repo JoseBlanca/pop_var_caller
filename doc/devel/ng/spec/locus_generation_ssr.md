@@ -135,6 +135,25 @@ cap**, over the reads that reached the tract — otherwise the derived depth is 
 rather than the sample, and the windowed statistics read a subsample as the truth. That is the one
 place this generator's read-coverage bookkeeping differs from "reads that produced an observation".
 
+**A partial must have witnessed at least one tract position — decided (owner, 2026-07-30).** A read
+that anchors a flank and crosses **no** tract position is not a lower bound of zero; it is a read that
+never entered the repeat, and its bases are the SNP/indel path's to analyse. The STR path discards it
+and counts it, as `NoObservationReason::OutsideTract`.
+
+It reaches the delimiter at all because the fetch queries the tract **plus its margin** (§2), so a
+read clipping only the flank is delimited too; the aligner then reports `FromLeft`/`FromRight` with an
+empty span, the unanchored side having fallen back to the read's own edge. **It is not a corner:
+6,704 such reads against 7,085 genuine partials** on chr01 of tomato `SRR7279503`, at a median window
+overlap of 16 bases against a 30-base flank. Until this was classified they became observations with
+**empty bases** and a witness covering zero positions — 3,180 rows of §9's dump — carried in
+`obs_partial` and adding nothing to depth anywhere along the locus. Fixing it moved that dump once,
+and only by deleting those rows: `obs_partial` 13,789 → 7,085, `reads_without_observation`
+2,561 → 9,265, every complete observation and every locus unchanged.
+
+*Found by the witness-representation work* ([`locus_witness_representation.md`](locus_witness_representation.md)),
+which could not represent a witness of zero positions and so made a defect visible that the two `u16`s
+had been able to spell.
+
 **One table, tagged — not a separate table for partials.** The observations live in one list, each
 carrying its `read_witness`. Two reads with the **same bases but different coverage are different
 evidence**: a `Complete` `ATATAT` says the allele *is* `ATATAT`, a `Partial` `ATATAT` says it is *at
@@ -255,6 +274,9 @@ pub struct SsrGeneratorCounts {
     pub no_border_anchored: u64,
     pub low_quality: u64,
     pub window_truncated: u64,
+    /// Reads that anchored a flank but crossed no tract position — outside the
+    /// locus, and the largest of the four on real data (§3).
+    pub outside_tract: u64,
 }
 ```
 

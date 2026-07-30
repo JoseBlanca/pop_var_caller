@@ -323,6 +323,18 @@ than clamp — see §3.4.
 
 1. **The STR dump is byte-identical** across the change, on the committed fixture and on a tomato
    CRAM. The STR path mints only `Complete` and one flush run, so any movement is a defect.
+
+   **One exception, and it is a rebaseline rather than a hole in the oracle (owner, 2026-07-30).**
+   The STR path also minted a flush run covering **zero** positions — a read that clips the locus
+   *window* and never enters the tract, 6,704 times against 7,085 genuine partials on chr01 of
+   tomato `SRR7279503`. `WitnessedLocusPositions` cannot express it, which is how the
+   representation work found it. Those reads are not in the locus and the SNP/indel path owns their
+   bases, so the STR path now discards and counts them
+   ([`locus_generation_ssr.md`](locus_generation_ssr.md) §3). The dump moved **once**, before any
+   step of this spec's own change, and only by deleting rows: 3,180 gone, every one a partial
+   witness with empty bases; `obs_partial` 13,789 → 7,085, `reads_without_observation`
+   2,561 → 9,265; `obs_complete`, the locus count and every non-empty observation unchanged. Every
+   step from C1 on is byte-identical against **that** baseline.
 2. **The generic anchor stays green** and the census gains its new class, counted and floored — no
    divergence may be absorbed into an existing class.
 3. **A fixture per new capability, each written to fail the old representation:** a read blind in

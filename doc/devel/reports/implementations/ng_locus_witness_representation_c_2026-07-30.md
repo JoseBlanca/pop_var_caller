@@ -6,8 +6,9 @@ Design: [spec](../../ng/spec/locus_witness_representation.md) §1, §3.1, §4, �
 [arch](../../ng/arch/locus_witness_representation.md) §2. Branch `ng-pileup-generator`,
 worktree `pop_var_caller-ng-pileup`.*
 
-**Status: C1 complete. C2–C4 not started.** This report is extended per step and committed
-with each of them.
+**Status: C1 and C0 complete. C2–C4 not started.** This report is extended per step and
+committed with each of them. C0 was added mid-milestone by owner decision — see its section,
+which is at the end because that is when it was found, not where it sits in the order.
 
 ---
 
@@ -117,3 +118,108 @@ measures against the *footprint* rather than against the runs' own total. Both a
 
 No test expectation changed except the literal extents described above; no census counter
 moved.
+
+---
+
+## C0 — a partial witness must have witnessed something (added mid-milestone)
+
+### How it was found
+
+C2 swaps `ReadWitness::Partial`'s payload for a `WitnessedLocusPositions`, and that type has no
+empty representation. Writing it turned up a shape the spec, the arch and the plan had all
+assumed away: the STR path mints `Partial { offset_in_locus, positions_covered: 0 }`. Worse than
+unrepresentable — `Partial { 0, 0 }` and `Partial { len, 0 }` are *different values* today
+(flush-left against flush-right, different sort key, different bucket), and a set of positions
+cannot tell them apart, because both are the empty set.
+
+### What those reads are, measured before deciding anything
+
+A probe on the mint ([ssr.rs:816](../../../../src/ng/locus_generation/ssr.rs#L816)), over chr01 of
+tomato `SRR7279503` — 13,789 partial mints:
+
+| | `reach == 0` | `reach > 0` |
+|---|---|---|
+| count | **6,704** | 7,085 |
+| read's extracted region over the locus window | min 1, **median 16**, max 39 bases | min 2, **median 35**, max 128 |
+| region shorter than the 30-base flank | 6,440 of 6,704 (96 %) | 2,184 of 7,085 (31 %) |
+
+and their offsets are degenerate in exactly one way each — 3,446 `border=Left` with
+`tract_start == tract_end == region_len`, 3,258 `border=Right` with `tract_start == tract_end == 0`.
+
+**They are reads that overlap the locus window by less than the flank and never reach the tract.**
+A read whose slice over the window is 16 bases, against a 30-base left flank, cannot have entered
+the repeat; the aligner crosses the left junction at the region's own end, `anchor_firm`'s
+`if !right_anchored { tract_end = read_len }`
+([ssr_anchor_firm.rs:710-715](../../../../src/ng/alignment/ssr_anchor_firm.rs#L710)) puts the far end
+at the same offset, and the span comes out empty. The `Right` cases are the mirror image, entirely
+inside the right flank. The lower bound they supply is "the tract is at least **0** long".
+
+**A first framing of this was wrong and is recorded so it is not repeated.** It read the count as
+"half the reads are anchored on the flank but cover zero tract bases", which invited a decision
+about *representation*. The owner rejected the premise, the geometry above is what checking it
+produced, and the real question was never about the witness type: it is whether the STR generator
+should mint these observations at all.
+
+### The decision
+
+**Owner, 2026-07-30: they are not in the locus.** The locus is the tract; these reads are in the
+flank, and the SNP/indel path analyses those bases. The STR path discards them and counts them.
+
+`NoObservationReason::OutsideTract` and `SsrGeneratorCounts::outside_tract`, with the guard in
+`classify_read`: a `FromLeft`/`FromRight` span that is empty is no observation. `Between` with an
+empty tract is untouched — a fully deleted tract is a real measurement. Recorded in
+[`locus_generation_ssr.md`](../../ng/spec/locus_generation_ssr.md) §3, which is the design's home;
+the dump's `reads_without_observation` line now sums all four reasons, which is why the third
+smallest of them no longer stands for the whole.
+
+### The test, and the mutation it fails under
+
+`a_read_covering_only_a_flank_is_outside_the_tract`, asserting both borders because they arrive by
+mirror-image routes and a fix catching one would halve the population and look like it worked.
+Deleting the guard:
+
+```
+assertion `left == right` failed: a read that stops at the tract's first base witnessed no
+tract position
+  left: Observed { bases: [], read_witness: Partial { offset_in_locus: 0, positions_covered: 0 },
+                   q_sum: -0.0 }
+ right: NoObservation(OutsideTract)
+```
+
+which is the defect in its own words.
+
+### The oracle moved, once, and only by deletion
+
+This is the one step of the plan that changes the STR dump. On chr01 of tomato `SRR7279503`:
+
+| | before | after |
+|---|---|---|
+| dump rows | 11,318 | 8,138 |
+| `obs_partial` | 13,789 | 7,085 |
+| `reads_without_observation` | 2,561 | 9,265 |
+| `obs_complete` | 15,404 | 15,404 |
+| `ssr_loci` / `zero_coverage` | 213,344 / 211,277 | 213,344 / 211,277 |
+
+The arithmetic closes exactly: −6,704 partial observations, +6,704 reads without one, and
+**3,180 removed rows of which 3,180 are a partial witness with empty bases** — no complete
+observation, no locus and no non-empty observation moved. New baseline:
+`tmp/witness_baseline/ssr_dump_outside_tract.tsv`; every step from C1 on is byte-identical against
+it.
+
+### Validation
+
+| check | result |
+|---|---|
+| `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` | clean |
+| `cargo test --lib --bins --tests --examples --all-features` | **2,825** passed, 0 failed |
+| `ng::locus_generation` | **294** passed |
+| STR dump | moved as tabulated above, and only so |
+
+### What is left open
+
+The fetch queries the tract **plus its margin**, so the delimiter is still handed regions that
+cannot span the tract — 6,440 of the 6,704 were shorter than one flank. Classifying them at the
+output is correct and cheap; not handing them to the aligner at all would be cheaper. Not done
+here, because it is a change to the read fetch and this milestone is about the witness. **Home:**
+[`locus_generation_ssr.md`](../../ng/spec/locus_generation_ssr.md) §2, when someone measures what
+the aligner spends on them.

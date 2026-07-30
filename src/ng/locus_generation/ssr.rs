@@ -190,6 +190,12 @@ pub struct SsrGeneratorCounts {
     pub low_quality: u64,
     /// Reads whose allele stayed flank-truncated even after widening.
     pub window_truncated: u64,
+    /// Reads that anchored a flank but crossed **no** tract position — they overlap the
+    /// locus *window* and lie outside the repeat the locus is. Logged rather than merely
+    /// dropped, because it is a large population and the number is the evidence that the
+    /// fetch window is wider than the locus: **6,704 reads against 7,085 real partials** on
+    /// tomato chr01 of `SRR7279503` when this counter was added.
+    pub outside_tract: u64,
 }
 
 // ---------------------------------------------------------------------
@@ -640,6 +646,24 @@ mod classify {
         LowQuality,
         /// The allele stayed flank-truncated even after widening.
         WindowTruncated,
+        /// **The read is not in this locus.** It anchored a flank and crossed no tract
+        /// position at all, so the "lower bound" it would supply is *at least zero* — no
+        /// evidence about the repeat's length, on a read that never entered the repeat.
+        ///
+        /// It arises because the fetch queries the tract **plus its margin**, so a read
+        /// overlapping only the flank is delimited too; the aligner then reports
+        /// [`RepeatSpan::FromLeft`](crate::ng::alignment::RepeatSpan::FromLeft) or
+        /// `FromRight` with an empty span, the rejected side having fallen back to the
+        /// read's own edge. Measured on tomato chr01 of `SRR7279503`: **6,704 such reads
+        /// against 7,085 genuine partials**, at a median window overlap of 16 bases against
+        /// a 30-base flank.
+        ///
+        /// Those bases belong to the SNP/indel path, which analyses them; the STR path
+        /// discards them and counts them (owner, 2026-07-30). Before that decision they
+        /// became observations with **empty bases** and a witness covering zero locus
+        /// positions — 3,180 rows of the STR dump — contributing to `num_obs` while adding
+        /// nothing to depth anywhere along the locus.
+        OutsideTract,
     }
 
     /// What one read contributes to a locus: an observed tract (complete or partial), or a
@@ -721,6 +745,17 @@ mod classify {
             }
             RepeatSpan::Between(tract) => {
                 complete_or_low_quality(read, &region, &tract, qual_buffer)
+            }
+            // **An empty one-sided span is a read outside the locus, not a lower bound of
+            // zero.** The read anchored a flank and crossed no tract position: the
+            // delimiter's rejected side falls back to the read's own edge, so an alignment
+            // that never entered the repeat comes back as `tract_start == tract_end`. It
+            // says the repeat is *at least zero* long, which is no evidence, and it arrives
+            // in bulk — the fetch queries the tract plus its margin, so every read that
+            // clips the flank is delimited (see `NoObservationReason::OutsideTract` for the
+            // measurement). Those bases are the SNP/indel path's to analyse.
+            RepeatSpan::FromLeft(tract) | RepeatSpan::FromRight(tract) if tract.is_empty() => {
+                Classified::NoObservation(NoObservationReason::OutsideTract)
             }
             RepeatSpan::FromLeft(tract) => {
                 partial(read, &region, &tract, AnchoredBorder::Left, locus)
@@ -965,6 +1000,40 @@ mod classify {
             }
         }
 
+        /// **A read that stops at the tract's edge is outside the locus, not a partial of
+        /// length zero.**
+        ///
+        /// It covers the left flank and none of `CACACA`. The delimiter anchors the left
+        /// flank and, having no right anchor, falls the far end back to the read's own edge
+        /// — which is the same offset, so the span is empty. Before this was classified it
+        /// became an observation with **empty bases** and a witness covering zero positions,
+        /// and it was not a corner: 6,704 reads against 7,085 genuine partials on tomato
+        /// chr01 of `SRR7279503`, at a median window overlap of 16 bases against a 30-base
+        /// flank. Those bases belong to the SNP/indel path (owner, 2026-07-30).
+        ///
+        /// Both borders are asserted, because the two arrive by mirror-image routes — the
+        /// left case through `tract_start == region_len`, the right through
+        /// `tract_end == 0` — and a fix that caught only one would halve the population and
+        /// look like it worked.
+        #[test]
+        fn a_read_covering_only_a_flank_is_outside_the_tract() {
+            // The left flank alone: the read ends where the tract begins.
+            assert_eq!(
+                classify(&read(b"GGGGGG", 40)),
+                Classified::NoObservation(NoObservationReason::OutsideTract),
+                "a read that stops at the tract's first base witnessed no tract position",
+            );
+
+            // The right flank alone, mapped at the base just past the tract.
+            let mut right_only = read(b"TTTTTT", 40);
+            right_only.pos = 13;
+            assert_eq!(
+                classify(&right_only),
+                Classified::NoObservation(NoObservationReason::OutsideTract),
+                "and the mirror case, which arrives through the other end of the span",
+            );
+        }
+
         /// A read wholly inside the tract anchors neither flank — no per-read fact, so no
         /// observation.
         #[test]
@@ -1093,6 +1162,7 @@ mod tally {
                         NoObservationReason::NoBorderAnchored => counts.no_border_anchored += 1,
                         NoObservationReason::LowQuality => counts.low_quality += 1,
                         NoObservationReason::WindowTruncated => counts.window_truncated += 1,
+                        NoObservationReason::OutsideTract => counts.outside_tract += 1,
                     }
                 }
             }
