@@ -135,11 +135,11 @@ impl SampleLocusObservations {
 /// (`AlleleObservation` + `AlleleSupportStats`), minus `placed_start`, which no model
 /// consumes (spec §6).
 ///
-/// **This is a table of cells, not a table of sequences.** The identity is
+/// **This is a table of observations, not a table of sequences.** The identity is
 /// `(bases, read_witness, read_group)` — three axes, not one — so a consumer that
 /// wants per-allele totals must aggregate over coverage *and* group, and one that
 /// treats each entry as an allele will count the same allele several times. The
-/// aggregation is exact: every support field is additive, and the merged cells share
+/// aggregation is exact: every support field is additive, and the merged observations share
 /// their `bases` and `read_witness` by construction (spec §6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequenceObservation {
@@ -151,7 +151,7 @@ pub struct SequenceObservation {
     /// evidence and stay separate entries (spec §3).
     pub read_witness: ReadWitness,
     /// Which read group — one `@RG`, i.e. one lane — these reads came from. **Part of
-    /// the identity**, so an allele supported from several groups is several rows.
+    /// the identity**, so an allele supported from several groups is several observations.
     ///
     /// Carried because a per-chemistry model needs the allele × group cross **with its
     /// quality moments**: a per-group count beside one merged observation gives the
@@ -311,12 +311,12 @@ impl ReadWitness {
     /// 1. the run is reported as flush left by [`is_flush_left`](Self::is_flush_left);
     /// 2. every label derived from flushness calls it a *left* partial;
     /// 3. **it shares a bucket key with a left-flush run of the same bases, so the two
-    ///    merge into one row** — where `PartialLeft(n)` and `PartialRight(n)` kept them
+    ///    merge into one observation** — where `PartialLeft(n)` and `PartialRight(n)` kept them
     ///    apart.
     ///
     /// That is reachable on the STR path, where the reach is measured in *read* bases:
     /// an allele longer than the reference tract gives a reach past the locus length.
-    /// It is arguably the right answer — identical constraints are one cell, and a read
+    /// It is arguably the right answer — identical constraints are one observation, and a read
     /// that witnessed every position is constrained from neither side — but it is not
     /// the pre-reshape answer, and the plan's stated equivalence
     /// `PartialRight(n) ⇔ Partial { len - n, n }` stops holding at `n = len`. Pinned by
@@ -1634,8 +1634,8 @@ mod tests {
     /// Stated as a test because it is a real behaviour change, not a curiosity: on the STR
     /// path an expanded allele can give a reach longer than the reference tract, and a
     /// left-anchored and a right-anchored read of the *same bases* then land in the **same
-    /// tally cell** and merge into one row — where `PartialLeft(n)` and `PartialRight(n)`
-    /// kept them apart. See `ssr::tally::tests::an_expanded_allele_merges_the_two_sides`.
+    /// tally bucket** and merge into one observation — where `PartialLeft(n)` and
+    /// `PartialRight(n)` kept them apart. See `ssr::tally::tests::an_expanded_allele_merges_the_two_sides`.
     #[test]
     fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
         assert_eq!(

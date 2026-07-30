@@ -1139,7 +1139,7 @@ mod tests {
         loci.iter().map(|locus| locus.region.start.get()).collect()
     }
 
-    /// Total observations supporting a locus, across every row.
+    /// Total supporting reads at a locus, summed over its observations.
     fn total_obs(locus: &SampleLocusObservations) -> u32 {
         locus
             .observations
@@ -2120,7 +2120,7 @@ mod tests {
     /// thing to say about such a read was nothing at all.
     ///
     /// The neighbouring read is what makes the test discriminating: it proves the walk still
-    /// emits loci here, so "no rows" cannot be mistaken for "no coverage".
+    /// emits loci here, so "no observations" cannot be mistaken for "no coverage".
     #[test]
     fn a_read_silent_at_every_position_is_counted_rather_than_lost() {
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[

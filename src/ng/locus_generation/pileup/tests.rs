@@ -141,7 +141,7 @@ pub fn paired_snp_reads(
 ///
 /// Until this commit they ran through `to_pileup_record`, a back-projection onto production's
 /// `PileupRecord` — the adaptation spec §12 sanctions, taken at B2 as one reviewed function
-/// rather than 67 hand-edited assertions. But that projection **merged the rows ng splits** (by
+/// rather than 67 hand-edited assertions. But that projection **merged the observations ng splits** (by
 /// coverage and by read group) and dropped three fields production has no counterpart for, and at
 /// Milestone B its losses hid three live surfaces from the review. D1 removed the *differential's*
 /// need for it; this removes the suite's, so nothing in the module sees the emitted type through a
@@ -154,12 +154,12 @@ pub type Locus = crate::ng::locus_generation::SampleLocusObservations;
 /// **They panic rather than return an `Option`, deliberately.** These tests were written against
 /// a type where `alleles[0]` and `alleles[1]` always existed, and the two ways ng differs are
 /// exactly what a silent `None` would hide: a locus no read matched the reference at has **no**
-/// reference row (production creates the bucket regardless of support), and a locus whose
+/// reference observation (production creates the bucket regardless of support), and a locus whose
 /// reference-matching reads split by coverage or read group has **several**. A test that lands on
 /// either is asking a question ng's type does not answer, and should be rewritten to assert on the
-/// rows it means — so it fails loudly and names which case it hit.
+/// observations it means — so it fails loudly and names which case it hit.
 impl Locus {
-    /// The row for reads matching the reference across this locus — production's `alleles[0]`.
+    /// The observation for reads matching the reference across this locus — production's `alleles[0]`.
     pub fn reference_row(&self) -> &SequenceObservation {
         let matching: Vec<&SequenceObservation> = self
             .observations
@@ -188,13 +188,13 @@ impl Locus {
 
     /// How many reference positions the locus covers — production's `ref_span()`, which read it
     /// off `alleles[0].seq.len()`. ng carries the region, so this is the region's length and does
-    /// not depend on a row existing.
+    /// not depend on an observation existing.
     pub fn footprint_len(&self) -> u32 {
         u32::try_from(self.region.len()).expect("a fixture footprint fits u32")
     }
 
-    /// The first row whose bases are *not* the reference's, in emission order — production's
-    /// `alleles[1]`. Note ng sorts rows by bases, where production's order was bucket creation,
+    /// The first observation whose bases are *not* the reference's, in emission order — production's
+    /// `alleles[1]`. Note ng sorts observations by bases, where production's order was bucket creation,
     /// so "the first alt" is the alphabetically first, not the first seen.
     pub fn first_alt_row(&self) -> &SequenceObservation {
         self.observations
@@ -373,25 +373,25 @@ fn deletion_record_does_not_double_count_ref_reads() {
     assert_eq!(anchor.footprint_len(), 4, "anchor + 3 deleted = 4");
     // **`reference_row()`, not `observations[0]`** — the conversion at `dad9baf` used the
     // subscript here and it does not mean what production's `alleles[0]` meant. `finalise` sorts
-    // rows by `bases`, this locus holds `"C"` (r2's deletion) and `"CGTA"` (r1's reference
-    // match), and `"C"` sorts first — so index 0 was r2's row, the same row the `del` assertion
-    // below finds by name and checks again. The reference row was never inspected. Production's
+    // observations by `bases`, this locus holds `"C"` (r2's deletion) and `"CGTA"` (r1's reference
+    // match), and `"C"` sorts first — so index 0 was r2's observation, the same observation the `del` assertion
+    // below finds by name and checks again. The reference observation was never inspected. Production's
     // index 0 was positional and *was* the REF bucket; ng's is lexicographic — same subscript,
     // different meaning, no compiler error, which is why `reference_row()` exists and why
-    // nothing in this module should reach a row by index again.
+    // nothing in this module should reach an observation by index again.
     //
     // **What this assertion catches, measured, and what it does not.** It is live: adding each
-    // read's contribution to its row twice makes it read 2 against 1. But it does **not** catch
+    // read's contribution to its observation twice makes it read 2 against 1. But it does **not** catch
     // the bucket-accounting bug the test is named for, and neither did the version before this
     // fix — because that bug stopped being representable at B1. Rows are derived from
-    // `folded_reads`, one entry per read, each carrying `num_obs: 1`, so a row's `num_obs` is
+    // `folded_reads`, one entry per read, each carrying `num_obs: 1`, so an observation's `num_obs` is
     // the number of distinct reads folded into it and no error in the *buckets* can reach it.
     // Deleting the re-fold's `subtract_contribution` outright is caught by
     // `rows_are_the_buckets_when_one_read_group_witnesses_completely`, not here.
     //
     // So the name now over-promises: what is actually pinned is "one read, one observation in
-    // its row", plus `reference_row()`'s own demand that exactly one row carry the footprint's
-    // reference bases. The historical guard is B1's row derivation, structurally.
+    // its observation", plus `reference_row()`'s own demand that exactly one observation carry the footprint's
+    // reference bases. The historical guard is B1's observation derivation, structurally.
     let ref_allele = anchor.reference_row();
     assert_eq!(
         ref_allele.num_obs, 1,
@@ -634,7 +634,7 @@ fn paired_mates_with_overlapping_positions_share_chain_id() {
     // `alleles[0]` was an empty bucket. An empty bucket's chain-id list is empty whatever the
     // rule does, so the assertion held for free.
     //
-    // ng emits no reference row here, which is the honest statement of the same input, and the
+    // ng emits no reference observation here, which is the honest statement of the same input, and the
     // rule it was reaching for is checked where it can fail: `only_the_reads_that_departed_from_
     // the_reference_carry_a_chain_id` (in `open_record.rs`) and the dump's fixture of the same
     // name both put a genuinely reference-matching read beside a departing one.
@@ -1261,13 +1261,13 @@ fn column_depth_cap_keeps_first_n_of_admission_order() {
     // **Where this test changed, and it is the change spec §12 sanctioned.** Production kept
     // `alleles[0]` as a REF bucket with zero observations, because it creates that bucket at
     // record open whatever the evidence; the assertion here used to read
-    // `alleles[0].support.num_obs == 0`. ng derives rows from the reads that folded, and r3 —
-    // the only REF-matching read — was past the cap, so **there is no reference row at all.**
+    // `alleles[0].support.num_obs == 0`. ng derives observations from the reads that folded, and r3 —
+    // the only REF-matching read — was past the cap, so **there is no reference observation at all.**
     //
     // The two spellings say different things, and ng's is the stronger: "a bucket exists with
     // zero support" and "no read matched the reference here" are the same fact, but only the
     // second is unambiguous about the evidence. The reference bases are still on the locus, as a
-    // field, so nothing is lost by the row's absence.
+    // field, so nothing is lost by the observation's absence.
     assert_eq!(&*rec.reference_bases, b"A", "the locus's reference base");
     assert!(
         rec.observations
@@ -1297,9 +1297,9 @@ fn column_depth_cap_keeps_first_n_of_admission_order() {
         "r2 was past the cap and must not have folded",
     );
 
-    // **Two rows, not three.** Production counted its empty REF bucket here; ng emits a row per
+    // **Two observations, not three.** Production counted its empty REF bucket here; ng emits an observation per
     // read that folded, and the cap let exactly two through. The dropped third "bucket" was
-    // never evidence — see the reference-row assertion above.
+    // never evidence — see the reference-observation assertion above.
     assert_eq!(
         rec.observations.len(),
         2,

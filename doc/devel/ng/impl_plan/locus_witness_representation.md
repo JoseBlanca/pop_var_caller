@@ -88,7 +88,7 @@ expectations is a step that did more than rename.
   *Source:* spec §3.1, arch §3.
 - ✅ **A5.** `ObservationRow` → `KeyedObservation`; `ObservationKey` keeps its name. 26 uses across
   4 files. *Depends:* A1. *Source:* arch §3.
-- ☐ **A6.** The code's own doc comments: "row" and "cell" → "observation", where they name this
+- ✅ **A6.** The code's own doc comments: "row" and "cell" → "observation", where they name this
   type. **Leave the aligner's ~340 matrix rows and the dump tools' TSV rows alone** — those are
   real tables. *Depends:* A1–A5. *Source:* spec §6.
 

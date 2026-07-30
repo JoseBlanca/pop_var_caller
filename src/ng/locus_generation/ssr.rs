@@ -1035,9 +1035,9 @@ mod tally {
     /// Fold each kept read's classification into the locus tally.
     ///
     /// Observations dedup by **`(bases, read_witness, read_group)`** — a `Complete` and a
-    /// partial of the same bases are different evidence and stay separate rows, two identical
+    /// partial of the same bases are different evidence and stay separate observations, two identical
     /// partials from one read group merge, and the **same allele seen from two read groups is two
-    /// rows** (spec §3, §6). Each bucket accumulates the strand (`num_fwd` off the reverse-strand
+    /// observations** (spec §3, §6). Each bucket accumulates the strand (`num_fwd` off the reverse-strand
     /// flag), BQ (`q_sum`, off the read's tract error mass), MAPQ and `placed_left` moments;
     /// `chain_ids` stays empty because the STR path does not phase. `observations` is sorted
     /// by `(bases, witness, read_group)`, so — like production's `tally` — the bases, the counts
@@ -1117,7 +1117,7 @@ mod tally {
             )
             .collect();
         // The read group joins the sort key because it joined the bucket key: without it two
-        // cells differing only by group would tie, and `HashMap` iteration order is seeded per
+        // observations differing only by group would tie, and `HashMap` iteration order is seeded per
         // process — the output would be non-deterministic run to run on any multi-group sample.
         observations.sort_unstable_by(|a, b| {
             a.bases
@@ -1139,7 +1139,7 @@ mod tally {
     /// **This reproduces the pre-reshape order** — complete, then left partials, then right
     /// partials — without naming a side: a left-flush run has `offset_in_locus == 0` and so sorts
     /// ahead of every right-flush one, whose offset is `locus_len - covered`. The old key's
-    /// third component was the reach, and it never separated anything on this path (a row's
+    /// third component was the reach, and it never separated anything on this path (an observation's
     /// `bases` are the run, so equal bases already imply equal reach); ordering by offset then
     /// length keeps a total order without relying on that.
     fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
@@ -1197,9 +1197,9 @@ mod tally {
         }
 
         /// **The read group is part of the identity**: one allele seen from two read groups is
-        /// two rows, and their `num_obs` sum to what a single-group tally would have reported
+        /// two observations, and their `num_obs` sum to what a single-group tally would have reported
         /// (spec §6). This is the check that the split is *computed* and not defaulted — with
-        /// `read_group` left at a constant both reads would merge into one row of two.
+        /// `read_group` left at a constant both reads would merge into one observation of two.
         #[test]
         fn one_allele_from_two_read_groups_is_two_rows_that_sum_back() {
             let rg0 = read_in_group(0, 10);
@@ -1231,10 +1231,10 @@ mod tally {
 
         /// **The group tie-break is asserted on the sort key, not on a lucky fold order.**
         ///
-        /// The obvious form of this test — fold two groups and check the row order — rides on
+        /// The obvious form of this test — fold two groups and check the observation order — rides on
         /// `HashMap` iteration, which is seeded per process: with the `then_with` deleted it
         /// passes roughly six runs in ten, so the regression it exists to catch would reach a
-        /// green CI most of the time. Enough cells that a wrong order cannot be a coin flip is
+        /// green CI most of the time. Enough observations that a wrong order cannot be a coin flip is
         /// the fix: six groups over two alleles, whose sorted order is fully determined.
         #[test]
         fn rows_sort_by_group_within_an_allele_deterministically() {
@@ -1266,16 +1266,16 @@ mod tally {
             );
         }
 
-        /// **An expanded allele merges the two sides into one row, and that is a real
+        /// **An expanded allele merges the two sides into one observation, and that is a real
         /// behaviour change the reshape brought.**
         ///
         /// `reach` is measured in *read* bases; on an allele longer than the reference tract it
         /// exceeds the locus length, so `from_left` and `from_right` both clamp to the whole
         /// locus and produce the **same run**. Two reads anchored at opposite borders with the
         /// same bases then share a bucket key and merge — where `PartialLeft(n)` and
-        /// `PartialRight(n)` kept them as two rows.
+        /// `PartialRight(n)` kept them as two observations.
         ///
-        /// It is arguably the right answer (identical constraints are one cell) but it is not
+        /// It is arguably the right answer (identical constraints are one observation) but it is not
         /// the pre-reshape answer, it is invisible on any fixture whose reads are exact
         /// reference slices, and the plan's stated equivalence
         /// `PartialRight(n) ⇔ Partial { len - n, n }` silently stops holding at `n = len`.
@@ -1338,7 +1338,7 @@ mod tally {
         }
 
         /// A `Complete` and a partial run of the **same** bases are different evidence, so they
-        /// stay as two separate rows (spec §3) — the property the `(bases, read_witness, read_group)` dedup
+        /// stay as two separate observations (spec §3) — the property the `(bases, read_witness, read_group)` dedup
         /// key rests on.
         #[test]
         fn a_complete_and_a_partial_of_the_same_bases_stay_separate() {
@@ -1362,7 +1362,7 @@ mod tally {
         }
 
         /// Two identical partials (same bases, same witness) are the identical constraint, so
-        /// they merge into one row with `num_obs == 2` (spec §3).
+        /// they merge into one observation with `num_obs == 2` (spec §3).
         #[test]
         fn two_identical_partials_merge_into_one_count() {
             let fwd = read(0, 60);

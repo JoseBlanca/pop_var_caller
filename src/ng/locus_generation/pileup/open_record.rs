@@ -115,10 +115,10 @@ pub(super) struct AlleleSupportStats {
 /// **Two counts rather than the per-read runs themselves, and only until B2.**
 /// `finalise` still returns production's [`PileupRecord`], which has nowhere to
 /// put a [`ReadWitness`]; B2 replaces the return with `SampleLocusObservations`,
-/// where each row carries its own. What has to be true *before* that is the
+/// where each observation carries its own. What has to be true *before* that is the
 /// resolution point — coverage read at fold time is measured against a footprint
 /// the record may still outgrow — so A4 resolves it here and reports what it
-/// found, and B2 turns the same loop into rows.
+/// found, and B2 turns the same loop into observations.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct RecordWitness {
     /// Folded reads that witnessed every position of the final footprint.
@@ -213,7 +213,7 @@ pub(super) fn witness_of(
     }
 }
 
-/// **The identity of one emitted observation** — what makes two reads the same row.
+/// **The identity of one emitted observation** — what makes two reads the same observation.
 ///
 /// Three parts, and the two ng adds are the point (spec §6): the bases a read showed;
 /// **how much of the locus it witnessed**, because a complete witness and a partial one
@@ -224,7 +224,7 @@ pub(super) fn witness_of(
 /// **Only the bases are decidable while the record is open.** Coverage is relative to a
 /// footprint that grows until the record closes (A4), so the fold keys its buckets on
 /// bases alone and the full identity is realised at `finalise` — which is where arch §1.2
-/// puts it. That is why rows are re-derived *per read* rather than read off the per-bucket
+/// puts it. That is why observations are re-derived *per read* rather than read off the per-bucket
 /// totals: coverage and group are facts about a read, not about a bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ObservationKey {
@@ -233,23 +233,23 @@ pub(super) struct ObservationKey {
     pub read_group: ReadGroupId,
 }
 
-/// One row of a finished record, accumulated across the reads that share its
+/// One observation of a finished record, accumulated across the reads that share its
 /// [`ObservationKey`].
 #[derive(Debug, Clone)]
 pub(super) struct KeyedObservation {
     pub key: ObservationKey,
     pub support: AlleleSupportStats,
-    /// The chain ids of the reads in this row — **absent for a read that agreed with the
+    /// The chain ids of the reads in this observation — **absent for a read that agreed with the
     /// reference across everything it witnessed** (spec §6).
     ///
     /// Production's rule is positional: `allele_index == 0`, the REF bucket. That named a
-    /// unique row while there was one row per allele, and it no longer does — rows split by
-    /// coverage and by read group, so a reference-matching read can sit in a *partial* row
+    /// unique observation while there was one observation per allele, and it no longer does — observations split by
+    /// coverage and by read group, so a reference-matching read can sit in a *partial* observation
     /// whose bases are a prefix of the reference bytes and never compare equal to them.
     ///
     /// So the rule is stated **per read** instead: it is decidable at fold time from what
-    /// the read is, it survives every split of the rows, and it reduces to production's
-    /// exactly when the rows are one-per-allele. A chain id marks which haplotype a read
+    /// the read is, it survives every split of the observations, and it reduces to production's
+    /// exactly when the observations are one-per-allele. A chain id marks which haplotype a read
     /// came from, and the reference is the default — a default needs no tag.
     pub chain_ids: Vec<ChainId>,
 }
@@ -463,11 +463,11 @@ impl OpenPileupRecord {
     /// Whether this read **agreed with the reference across everything it witnessed** — the
     /// per-read form of production's `allele_index == 0` chain-id rule (spec §6).
     ///
-    /// Production's rule is positional and unportable once rows split: a reference-matching
-    /// read that witnessed only part of the footprint sits in a *partial* row whose bases
-    /// are a prefix of the reference bytes, so "the row whose bases equal
+    /// Production's rule is positional and unportable once observations split: a reference-matching
+    /// read that witnessed only part of the footprint sits in a *partial* observation whose bases
+    /// are a prefix of the reference bytes, so "the observation whose bases equal
     /// `reference_bases`" no longer names it. Asking the question of the **read** instead
-    /// works at every split, and reduces to production's rule exactly when the rows are
+    /// works at every split, and reduces to production's rule exactly when the observations are
     /// one-per-allele: a complete witness that agreed everywhere *is* the REF bucket.
     ///
     /// The comparison is against the reference **over the positions the read witnessed**,
@@ -487,18 +487,18 @@ impl OpenPileupRecord {
         self.alleles[state.allele_index].seq == reference[first..past_last]
     }
 
-    /// Re-derive this record's rows **per read**, keyed on the full [`ObservationKey`].
+    /// Re-derive this record's observations **per read**, keyed on the full [`ObservationKey`].
     ///
     /// # Why per read, when the buckets already hold the totals
     ///
-    /// Two of the three parts of a row's identity are facts about a *read*, not a bucket. A
+    /// Two of the three parts of an observation's identity are facts about a *read*, not a bucket. A
     /// bucket knows its bases; it does not know that one of its reads witnessed the whole
     /// footprint while another saw one position of fourteen, nor that they came from
-    /// different lanes. Reading rows off the bucket totals can only ever produce the merged
+    /// different lanes. Reading observations off the bucket totals can only ever produce the merged
     /// answer, which spec §6 says is not good enough.
     ///
     /// With one read group and every read a complete witness the result **is** the bucket
-    /// totals, row for row and sum for sum, because every read in a bucket then shares one
+    /// totals, observation for observation and sum for sum, because every read in a bucket then shares one
     /// key. That is what "free at one read group" means, and it is what keeps the stage-1
     /// differential green across B1.
     ///
@@ -512,7 +512,7 @@ impl OpenPileupRecord {
     /// `ids.sort_unstable()` below is what restores it.
     ///
     /// Pinned by `parity::ng_emits_the_same_bytes_in_a_second_process`, which walks the same
-    /// input in two processes: delete that sort and it fails; delete `finalise`'s *row* sort
+    /// input in two processes: delete that sort and it fails; delete `finalise`'s *observation* sort
     /// and it stays green. No test inside one process can see any of this, because `ahash`
     /// seeds once per process.
     fn observation_rows(&self, record_end_exclusive: u32) -> Vec<KeyedObservation> {
@@ -527,13 +527,13 @@ impl OpenPileupRecord {
                 .folded_reads
                 .get(&read_id)
                 .expect("the id came from this record's own fold state");
-            // The identity is compared **borrowed** and the bases cloned only when a row is
+            // The identity is compared **borrowed** and the bases cloned only when an observation is
             // genuinely new. Cloning into the key first and letting `find` compare owned
-            // values costs one allocation *per read* where the rows need one *per row* — the
+            // values costs one allocation *per read* where the observations need one *per observation* — the
             // only cost in this function that scales with depth, and measured at 2.2 % of
             // the milestone's 15.1 %. (The `Vec<u32>` and its sort are another 2.2 % and
             // stay: they are the determinism guarantee. The linear `find` itself measured
-            // 0 %, and hash-keying the rows measured *worse*.)
+            // 0 %, and hash-keying the observations measured *worse*.)
             let bases = self.alleles[state.allele_index].seq.as_slice();
             let read_witness = witness_of(state.witnessed, self.pos, record_end_exclusive);
             let read_group = state.read_group;
@@ -572,7 +572,7 @@ impl OpenPileupRecord {
     }
 
     /// Convert into the finished locus ng emits: the region, the reference bytes under it,
-    /// one [`SequenceObservation`] per row, and the two per-record counters.
+    /// one [`SequenceObservation`] per accumulated key, and the two per-record counters.
     ///
     /// **Coverage is resolved here, and here is the only place it can be.** A read's
     /// `witnessed` extent is absolute; what it *means* — complete witness, or one run short
@@ -581,10 +581,10 @@ impl OpenPileupRecord {
     /// re-fold would come back to correct it, because the read may have expired in between
     /// (spec §4).
     ///
-    /// Chain ids are emitted per row and **absent for a read that agreed with the reference
+    /// Chain ids are emitted per observation and **absent for a read that agreed with the reference
     /// across everything it witnessed** — see
     /// [`read_agreed_with_reference`](Self::read_agreed_with_reference) for why production's
-    /// positional rule does not survive rows that split.
+    /// positional rule does not survive observations that split.
     ///
     /// `placed_start` is **gone**, as A1 said it would be: ng's stats never carried it, the
     /// `PileupRecord` boundary did, and this step removed that boundary. Nothing consumes
@@ -606,7 +606,7 @@ impl OpenPileupRecord {
             // the end were actually discarded (spec §6).
             //
             // **And absent for the cap's reason, not for A5's.** "Not in `folded_reads`"
-            // has two causes: the cap kept the read out, or it folded and then lost its row
+            // has two causes: the cap kept the read out, or it folded and then lost its observation
             // when its witness turned out non-contiguous. Counting the second here reports
             // one read in *both* `reads_without_observation` and `reads_discarded_by_cap`,
             // which double-counts it and tells a model the support is a subsample when the
@@ -623,8 +623,8 @@ impl OpenPileupRecord {
         };
         // **A3's eviction, checked where the buckets still exist — and D1 is why it is
         // here.** The property is "no bucket survives that no read is folded into", and it
-        // is *invisible in the emitted locus*: `observation_rows` derives rows from
-        // `folded_reads`, so a stranded bucket produces no row and leaves no trace. A parity
+        // is *invisible in the emitted locus*: `observation_rows` derives observations from
+        // `folded_reads`, so a stranded bucket produces no observation and leaves no trace. A parity
         // test asserted it on the emitted records, which was still meaningful while the walk
         // emitted `PileupRecord`s and stopped being so at B2; D1 mutated the code the test
         // named — moving `evict_unsupported_alleles` above the contributor fold loop, which
@@ -644,7 +644,7 @@ impl OpenPileupRecord {
              after the fold loop that emptied it. {:?}",
             self.alleles,
         );
-        // **The rows come from the reads, not from the bucket totals** (B1). See
+        // **The observations come from the reads, not from the bucket totals** (B1). See
         // `observation_rows` for why, and for what makes the two agree at one read group.
         let mut rows = self.observation_rows(record_end_exclusive);
         for state in self.folded_reads.values() {
@@ -667,9 +667,9 @@ impl OpenPileupRecord {
         // said it was.** Mutation-tested both ways: deleting this sort leaves
         // `ng_emits_the_same_bytes_in_a_second_process` green, while deleting
         // `observation_rows`' `ids.sort_unstable()` fails it. Determinism is already won
-        // upstream, by taking the reads in `read_id` order; first-seen row order inherits it.
+        // upstream, by taking the reads in `read_id` order; first-seen observation order inherits it.
         //
-        // What the sort buys is that row order is a function of the row's **own identity**
+        // What the sort buys is that observation order is a function of the observation's **own identity**
         // rather than of which read happened to arrive first — so the emitted order does not
         // change when an unrelated read is added, and two loci with the same evidence
         // present it the same way. That is what a consumer diffing output wants, and it is
@@ -1377,7 +1377,7 @@ fn fold_read_into_record(
         // observation (spec §6). **The prior contribution has to come off first**, and
         // this is not a corner: a read that folded contiguously *becomes* non-contiguous
         // when the window widens right across an interior gap, so a bare early return
-        // would strand a live contribution in a bucket for a read that now has no row,
+        // would strand a live contribution in a bucket for a read that now has no observation,
         // breaking `chain_ids.len() <= num_obs` silently and only on multi-base records
         // (spec §4).
         if let Some(prev) = folded_reads.remove(&active.read_id) {
@@ -1515,7 +1515,7 @@ fn refold_live_reads(
             // why the read is recorded rather than merely dropped. **This is the
             // arrival that makes the case ordinary rather than a corner:** a read
             // folds contiguously, the record widens right across an interior gap, and
-            // the read that had a row a moment ago now has none.
+            // the read that had an observation a moment ago now has none.
             note_no_observation(reads_without_observation, read_id);
             folded_reads.remove(&read_id);
             subtract_contribution(
@@ -2538,7 +2538,7 @@ mod tests {
     /// whose witness *was* one run across the old footprint now has a hole inside the new
     /// one — so it stops having an observation, and the contribution it already made has to
     /// come off the bucket. A bare `continue` there leaves a live contribution behind for a
-    /// read that has no row, which is silent, only happens on multi-base records, and is
+    /// read that has no observation, which is silent, only happens on multi-base records, and is
     /// the failure spec §4 names.
     ///
     /// Nothing else in the suite catches it: the differential's census tolerates any
@@ -3169,7 +3169,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // B1 — the row identity: bases, coverage, read group.
+    // B1 — the observation identity: bases, coverage, read group.
     // -----------------------------------------------------------------
 
     /// A record at 7 spanning 7..=20, with `shortie` and `deleter` both showing the single
@@ -3178,7 +3178,7 @@ mod tests {
     /// runs to 20, so it witnessed every one of them and still emits one base.
     ///
     /// The two share a *bucket*, because a bucket is keyed on bases alone. Whether they
-    /// share a **row** is what B1 decides.
+    /// share an **observation** is what B1 decides.
     fn same_bases_different_coverage() -> (OpenPileupRecordTable, ActiveReads) {
         let reference = fa(WIDEN_CONTIG);
         let (active, _ids) = admitted(vec![
@@ -3209,10 +3209,10 @@ mod tests {
     }
 
     /// **A complete witness and a partial one of the same bases are different evidence, and
-    /// stay different rows** (spec §3, §6) — even though they share one allele bucket,
+    /// stay different observations** (spec §3, §6) — even though they share one allele bucket,
     /// because a bucket is keyed on bases alone and cannot tell them apart.
     ///
-    /// This is what "rows are re-derived per read, not read off the bucket totals" buys.
+    /// This is what "observations are re-derived per read, not read off the bucket totals" buys.
     /// Read the bucket and there is one observation of `G` with `num_obs == 2`; read the
     /// reads and there are two, one of which saw one position of fourteen and is a lower
     /// bound on nothing more than that.
@@ -3265,17 +3265,17 @@ mod tests {
         );
     }
 
-    /// **Two read groups supporting one sequence are two rows, and they sum to what one
+    /// **Two read groups supporting one sequence are two observations, and they sum to what one
     /// group would have shown** (spec §13.1, fixture 5).
     ///
     /// The sum is the half that matters: splitting is only free if nothing is lost, and a
-    /// per-group model reading these two rows must be able to recover the merged answer
+    /// per-group model reading these two observations must be able to recover the merged answer
     /// exactly — that is what makes the grain the *consumer's* choice rather than this
     /// step's guess.
     #[test]
     fn rows_split_when_two_read_groups_support_one_sequence() {
         let reference = fa(WIDEN_CONTIG);
-        // Two reads, identical in every way a row's identity can see except the lane.
+        // Two reads, identical in every way an observation's identity can see except the lane.
         let mut first = plain_read("lane0", 5, 5, vec![CigarOp::Match(1)], b"T".to_vec());
         let mut second = plain_read("lane1", 5, 5, vec![CigarOp::Match(1)], b"T".to_vec());
         first.read_group = crate::ng::types::ReadGroupId(0);
@@ -3322,12 +3322,12 @@ mod tests {
         );
     }
 
-    /// **At one read group the rows are the buckets** — "free at one read group" stated as
+    /// **At one read group the observations are the buckets** — "free at one read group" stated as
     /// a test rather than as a hope (plan B1).
     ///
     /// The general fixture's reads all carry `ReadGroupId(0)`, so every split must come
     /// from coverage, never from the group; and where coverage does not split either, the
-    /// row count equals the bucket count with equal support. This is the property that
+    /// observation count equals the bucket count with equal support. This is the property that
     /// keeps the stage-1 differential green across B1.
     #[test]
     fn rows_are_the_buckets_when_one_read_group_witnesses_completely() {
@@ -3342,7 +3342,7 @@ mod tests {
                 "this fixture has one lane, so no row may name another"
             );
         }
-        // Every bucket that supports a read has at least one row, and the rows over a
+        // Every bucket that supports a read has at least one observation, and the observations over a
         // bucket sum to it. Matched on **bases**, which is a bijection with the bucket —
         // `find_allele_index` never creates two buckets with the same bytes.
         for allele in record.alleles.iter() {
@@ -3364,13 +3364,13 @@ mod tests {
         }
     }
 
-    /// **Reads that share a row identity are merged into one row** — the half of B1 the
+    /// **Reads that share an observation identity are merged into one observation** — the half of B1 the
     /// three fixtures above do not test, and the half the differential is structurally
     /// blind to.
     ///
     /// `to_pileup_record` — the back-projection the suite used until Milestone D, now deleted —
-    /// merged rows back together by bases before the two walkers were compared, so an
-    /// `observation_rows` that emitted one row per read — every `num_obs == 1` — projected to
+    /// merged observations back together by bases before the two walkers were compared, so an
+    /// `observation_rows` that emitted one observation per read — every `num_obs == 1` — projected to
     /// exactly the same `PileupRecord` and left the whole suite green, at 20,000 soak cases as
     /// well. The projection undoes precisely the
     /// defect. So the merge has to be asserted here, on ng's own type, or not at all.
@@ -3469,18 +3469,18 @@ mod tests {
         );
     }
 
-    /// **A read that departed from the reference keeps its chain id even on a partial row,
-    /// and one that agreed carries none even when its row is not the REF row** — the
+    /// **A read that departed from the reference keeps its chain id even on a partial observation,
+    /// and one that agreed carries none even when its observation is not the REF observation** — the
     /// per-read rule B2 replaced production's positional one with.
     ///
     /// Asserted nowhere before this, and the reason is structural rather than a missing
     /// fixture: replacing the whole rule with production's `allele_index == 0` left 158/158
-    /// green at 10,000 cases, and so did making every partial row lose its ids. The
+    /// green at 10,000 cases, and so did making every partial observation lose its ids. The
     /// differential compares chain ids by equality only on the complete-reads fixture, where
-    /// the two rules coincide by construction, and the census that does see partial rows
+    /// the two rules coincide by construction, and the census that does see partial observations
     /// never looks at ids at all.
     ///
-    /// `shortie` matched positions 5..=7 and stopped, so its row is a *partial* one whose
+    /// `shortie` matched positions 5..=7 and stopped, so its observation is a *partial* one whose
     /// bases equal the reference over what it saw — production would give it an id, and ng
     /// must not. `deleter` witnessed the whole footprint through a deletion, so its bases
     /// are not the reference and it keeps its id.
@@ -3602,7 +3602,7 @@ mod tests {
         );
     }
 
-    /// **A read that folded and then lost its row to a hole is not counted twice.**
+    /// **A read that folded and then lost its observation to a hole is not counted twice.**
     ///
     /// "Absent from `folded_reads`" has two causes — the cap kept the read out, or its
     /// witness turned out non-contiguous and A5's path removed it — and counting the second
@@ -3756,7 +3756,7 @@ mod tests {
     /// Only [`refold_live_reads`] reaches it. `widener` then grows the record to
     /// 5..=20, which brings `holed`'s `N` at 11 inside the footprint and splits its
     /// witness in two. It leaves its bucket, and it has to leave a record of itself
-    /// behind: a read that had a row a moment ago now has none, and nothing else in
+    /// behind: a read that had an observation a moment ago now has none, and nothing else in
     /// the output says so.
     #[test]
     fn a_read_whose_witness_splits_at_a_widen_is_recorded_not_merely_dropped() {

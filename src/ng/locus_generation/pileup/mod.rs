@@ -36,7 +36,7 @@
 //! from B2 on**, not production's `PileupRecord` — and since Milestone D **nothing in this
 //! module sees it through anything else.** B2 adapted the 44 inherited tests through
 //! `to_pileup_record`, one reviewed back-projection rather than 67 hand-edited assertions
-//! (spec §12); that projection merged the rows ng splits and dropped the three fields
+//! (spec §12); that projection merged the observations ng splits and dropped the three fields
 //! production has no counterpart for, and at Milestone B its losses hid three live surfaces
 //! from the review. D1 removed the differential's need for it by projecting production
 //! *forward* instead, and the same commit that answers Checkpoint D removed the suite's:

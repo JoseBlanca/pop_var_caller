@@ -352,7 +352,7 @@ mod tests {
         // (`old_end` as a 1-based start) the direct-`fetch` tests never exercise.
         assert!(!records.is_empty(), "the fixture must emit records");
         // The reach check reads ng's own type (D1): the locus's reference bytes are a field,
-        // and a row per read that folded. It used to detour through the `PileupRecord`
+        // and an observation per read that folded. It used to detour through the `PileupRecord`
         // back-projection to say "REF is `alleles[0]`" — a statement about production's shape
         // that this walk has not produced since B2.
         let widened = records
