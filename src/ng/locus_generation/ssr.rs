@@ -918,7 +918,7 @@ mod classify {
                 Classified::Observed {
                     bases,
                     witness:
-                        ReadWitness::Observed {
+                        ReadWitness::Partial {
                             offset_in_locus,
                             positions_covered,
                         },
@@ -949,7 +949,7 @@ mod classify {
                 Classified::Observed {
                     bases,
                     witness:
-                        ReadWitness::Observed {
+                        ReadWitness::Partial {
                             offset_in_locus,
                             positions_covered,
                         },
@@ -1070,7 +1070,7 @@ mod tally {
                 } => {
                     match witness {
                         ReadWitness::Complete => counts.observations_complete += 1,
-                        ReadWitness::Observed { .. } => counts.observations_partial += 1,
+                        ReadWitness::Partial { .. } => counts.observations_partial += 1,
                     }
                     let support = buckets
                         .entry((bases, witness, read.read_group))
@@ -1145,7 +1145,7 @@ mod tally {
     fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
         match witness {
             ReadWitness::Complete => (0, 0, 0),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus,
                 positions_covered,
             } => (1, offset_in_locus, positions_covered),
@@ -1278,7 +1278,7 @@ mod tally {
         /// It is arguably the right answer (identical constraints are one cell) but it is not
         /// the pre-reshape answer, it is invisible on any fixture whose reads are exact
         /// reference slices, and the plan's stated equivalence
-        /// `PartialRight(n) ⇔ Observed { len - n, n }` silently stops holding at `n = len`.
+        /// `PartialRight(n) ⇔ Partial { len - n, n }` silently stops holding at `n = len`.
         /// Pinned here so it is a decision on the record rather than a surprise in a dump.
         #[test]
         fn an_expanded_allele_merges_the_two_sides_into_one_row() {

@@ -31,14 +31,14 @@ use super::{DEFAULT_MAX_ACTIVE_READS, WalkerConfig};
 /// The widest `max_record_span` this generator accepts: 65,535 reference
 /// positions, the widest footprint a [`ReadWitness`] run can describe.
 ///
-/// [`ReadWitness::Observed`] carries `offset_in_locus` and `positions_covered`
+/// [`ReadWitness::Partial`] carries `offset_in_locus` and `positions_covered`
 /// as `u16`s, minted through [`LocusLen::from_positions`], which **saturates**
 /// rather than failing. A record footprint wider than this therefore makes a
 /// partial witness report a *truncated* `positions_covered` — a wrong number, no
 /// error, at exactly the long-deletion loci this generator exists to get right.
 ///
 /// [`ReadWitness`]: crate::ng::locus_generation::ReadWitness
-/// [`ReadWitness::Observed`]: crate::ng::locus_generation::ReadWitness::Observed
+/// [`ReadWitness::Partial`]: crate::ng::locus_generation::ReadWitness::Partial
 /// [`LocusLen::from_positions`]: crate::ng::locus_generation::LocusLen::from_positions
 pub const MAX_RECORD_SPAN_CEILING: u32 = u16::MAX as u32;
 

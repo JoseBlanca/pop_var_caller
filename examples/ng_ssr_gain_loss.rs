@@ -128,7 +128,7 @@ fn is_complete(o: &Option<(ReadWitness, Vec<u8>)>) -> bool {
     matches!(o, Some((ReadWitness::Complete, _)))
 }
 fn is_partial(o: &Option<(ReadWitness, Vec<u8>)>) -> bool {
-    matches!(o, Some((ReadWitness::Observed { .. }, _)))
+    matches!(o, Some((ReadWitness::Partial { .. }, _)))
 }
 fn measured_len(o: &Option<(ReadWitness, Vec<u8>)>) -> Option<usize> {
     match o {

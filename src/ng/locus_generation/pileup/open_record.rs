@@ -127,7 +127,7 @@ pub(super) struct RecordWitness {
     pub reads_partially_observed: u32,
     /// Reads that covered this record and yielded **no observation at all** — their
     /// witnessed positions inside the footprint were non-contiguous, which one
-    /// `Observed` run cannot describe honestly (spec §6). The size of
+    /// `Partial` run cannot describe honestly (spec §6). The size of
     /// [`OpenPileupRecord::reads_without_observation`], which is a set of read ids
     /// precisely so this number cannot be inflated by the footprint's length.
     pub reads_without_observation: u32,
@@ -143,7 +143,7 @@ pub(super) struct RecordWitness {
 /// Resolved once, at [`finalise`](OpenPileupRecord::finalise), from the read's
 /// `witnessed` extent against the record's **final** footprint — never during the
 /// fold, when that footprint is not yet known. A read that was a complete witness
-/// when it folded becomes `Observed` after a later widen **with nothing about the
+/// when it folded becomes `Partial` after a later widen **with nothing about the
 /// read having changed**, and there is no re-fold that would notice: the read may
 /// have expired long before the record closed, since `expire_passed` touches no
 /// open record (spec §4, §6).
@@ -207,7 +207,7 @@ pub(super) fn witness_of(
     if first <= record_pos && past_last >= record_end_exclusive {
         return ReadWitness::Complete;
     }
-    ReadWitness::Observed {
+    ReadWitness::Partial {
         offset_in_locus: LocusLen::from_positions(u64::from(first - record_pos)).get(),
         positions_covered: LocusLen::from_positions(u64::from(past_last - first)).get(),
     }
@@ -263,7 +263,7 @@ pub(super) struct ObservationRow {
 pub(super) fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
     match witness {
         ReadWitness::Complete => (0, 0, 0),
-        ReadWitness::Observed {
+        ReadWitness::Partial {
             offset_in_locus,
             positions_covered,
         } => (1, offset_in_locus, positions_covered),
@@ -320,7 +320,7 @@ pub(super) struct OpenPileupRecord {
     folded_reads: AHashMap<u32, FoldedReadState>,
     /// The reads that covered this record and produced no observation: their
     /// witnessed positions inside the footprint were non-contiguous — an interior
-    /// `N`, a ref-skip — and `Observed` describes one run, so there is nothing
+    /// `N`, a ref-skip — and `Partial` describes one run, so there is nothing
     /// honest to emit (spec §6).
     ///
     /// **A set of read ids, and that is the whole point of the field (spec §4).**
@@ -650,7 +650,7 @@ impl OpenPileupRecord {
         for state in self.folded_reads.values() {
             match witness_of(state.witnessed, record_pos, record_end_exclusive) {
                 ReadWitness::Complete => witness.reads_complete += 1,
-                ReadWitness::Observed { .. } => witness.reads_partially_observed += 1,
+                ReadWitness::Partial { .. } => witness.reads_partially_observed += 1,
             }
         }
         // Every folded read is resolved exactly once and lands in exactly one of the two
@@ -1130,7 +1130,7 @@ impl OpenPileupRecordTable {
 /// # `None` means the witness is non-contiguous
 ///
 /// An interior `N`, or a ref-skip, leaves a hole in the middle of the run. One
-/// `Observed { offset_in_locus, positions_covered }` cannot describe two runs
+/// `Partial { offset_in_locus, positions_covered }` cannot describe two runs
 /// honestly, so the read yields **no observation** and is counted in
 /// `reads_without_observation` (spec §6). Rare by construction — adaptor masking
 /// and the dropped-indel rule always truncate from one side, so they stay
@@ -2390,7 +2390,7 @@ mod tests {
 
     /// **A hole in the middle yields no observation at all.** An interior `N` or a
     /// ref-skip leaves the read silent about positions inside a run it otherwise
-    /// witnessed, and one `Observed` run cannot describe two runs honestly (spec §6).
+    /// witnessed, and one `Partial` run cannot describe two runs honestly (spec §6).
     ///
     /// Production filled the hole from the reference and folded the read as a complete
     /// witness.
@@ -2947,7 +2947,7 @@ mod tests {
         let coverage = witness_of(RefSpan { start: 5, end: 7 }, 5, 21);
         assert_eq!(
             coverage,
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 3,
             }
@@ -2963,7 +2963,7 @@ mod tests {
         let coverage = witness_of(RefSpan { start: 18, end: 20 }, 5, 21);
         assert_eq!(
             coverage,
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 13,
                 positions_covered: 3,
             }
@@ -2981,7 +2981,7 @@ mod tests {
         let coverage = witness_of(RefSpan { start: 9, end: 12 }, 5, 21);
         assert_eq!(
             coverage,
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 4,
                 positions_covered: 4,
             }
@@ -3004,7 +3004,7 @@ mod tests {
         );
         assert_eq!(
             witness_of(RefSpan { start: 1, end: 7 }, 5, 21),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 3,
             },
@@ -3012,7 +3012,7 @@ mod tests {
         );
         assert_eq!(
             witness_of(RefSpan { start: 18, end: 40 }, 5, 21),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 13,
                 positions_covered: 3,
             },
@@ -3020,7 +3020,7 @@ mod tests {
         );
     }
 
-    /// **A read that was a complete witness becomes `Observed` when the record widens
+    /// **A read that was a complete witness becomes `Partial` when the record widens
     /// under it, with nothing about the read having changed** — the whole reason
     /// coverage is resolved at `finalise` and not at the fold (spec §4, plan A4).
     ///
@@ -3105,7 +3105,7 @@ mod tests {
                 record.pos,
                 record.footprint_end_exclusive()
             ),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 3,
             },
@@ -3239,7 +3239,7 @@ mod tests {
         let mut rows = record.observation_rows(record.footprint_end_exclusive());
         rows.sort_by_key(|row| match row.key.read_witness {
             ReadWitness::Complete => 0u16,
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 positions_covered, ..
             } => positions_covered,
         });
@@ -3253,7 +3253,7 @@ mod tests {
             vec![
                 (ReadWitness::Complete, 1),
                 (
-                    ReadWitness::Observed {
+                    ReadWitness::Partial {
                         offset_in_locus: 0,
                         positions_covered: 1,
                     },
@@ -3495,7 +3495,7 @@ mod tests {
         // fourteen reference bytes.
         let shortie_row = rows
             .iter()
-            .find(|row| matches!(row.key.read_witness, ReadWitness::Observed { .. }))
+            .find(|row| matches!(row.key.read_witness, ReadWitness::Partial { .. }))
             .expect("the shortie's partial row");
         let deleter_row = rows
             .iter()

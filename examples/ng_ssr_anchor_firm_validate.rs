@@ -42,7 +42,7 @@ fn class(obs: &Option<(ReadWitness, Vec<u8>)>) -> &'static str {
     match obs {
         None => "none",
         Some((ReadWitness::Complete, _)) => "complete",
-        Some((ReadWitness::Observed { .. }, _)) => "partial",
+        Some((ReadWitness::Partial { .. }, _)) => "partial",
     }
 }
 

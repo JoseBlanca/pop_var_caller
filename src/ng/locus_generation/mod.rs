@@ -58,7 +58,7 @@ impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
     /// A [`Complete`](ReadWitness::Complete) observation counts its `num_obs` at every
-    /// position; an [`Observed`](ReadWitness::Observed) run counts it over the stretch
+    /// position; an [`Partial`](ReadWitness::Partial) run counts it over the stretch
     /// it witnessed. The returned vector has exactly `region.len()` entries.
     ///
     /// This is *observation* depth and only exact per locus: it omits reads that
@@ -72,7 +72,7 @@ impl SampleLocusObservations {
         for obs in &self.observations {
             // **This clamp is the guard, not a second one.** An earlier comment here
             // called the bound "a producer invariant, enforced where `ReadWitness` is
-            // minted", which overstated it twice over: `Observed`'s fields are public, so
+            // minted", which overstated it twice over: `Partial`'s fields are public, so
             // a run need not have come from `from_left`/`from_right` at all; and even one
             // that did was clamped against *some* `LocusLen`, which nothing ties to the
             // locus it ends up on. `ReadWitness` cannot know its own locus, so the
@@ -85,7 +85,7 @@ impl SampleLocusObservations {
             // keeps the derivation total on any input.
             let (from, to) = match obs.read_witness {
                 ReadWitness::Complete => (0, len),
-                ReadWitness::Observed {
+                ReadWitness::Partial {
                     offset_in_locus,
                     positions_covered,
                 } => {
@@ -147,7 +147,7 @@ pub struct SequenceObservation {
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the
     /// identity**: a [`Complete`](ReadWitness::Complete) and an
-    /// [`Observed`](ReadWitness::Observed) run of the same `bases` are different
+    /// [`Partial`](ReadWitness::Partial) run of the same `bases` are different
     /// evidence and stay separate entries (spec §3).
     pub read_witness: ReadWitness,
     /// Which read group — one `@RG`, i.e. one lane — these reads came from. **Part of
@@ -198,7 +198,7 @@ pub struct SequenceObservation {
 /// coordinates (spec §3). A partial run is a *censored* observation: the sequence is
 /// at least this long, but not how long.
 ///
-/// **One `Observed` run replaces the earlier `PartialLeft`/`PartialRight` pair
+/// **One `Partial` run replaces the earlier `PartialLeft`/`PartialRight` pair
 /// (owner, 2026-07-28).** Two side-tagged variants cannot describe what a read
 /// witnesses once the *events*, not the alignment span, define it: a read can be blind
 /// in the **middle** of a footprint (an interior `N`, a ref-skip) or blind at either
@@ -216,6 +216,11 @@ pub enum ReadWitness {
     /// The stretch the read did witness, in **locus positions** — the axis `bases` is
     /// not on (that is allele content, in read coordinates).
     ///
+    /// **Named `Partial`, not `Observed`.** Next to `Complete`, "observed" is not a
+    /// contrast — a complete witness was observed too — and once the enum itself says
+    /// *witness*, the word adds nothing. `Partial` says the one thing that separates
+    /// the two (spec §3.1).
+    ///
     /// **The fields are public, and the clamping in [`from_left`](Self::from_left) /
     /// [`from_right`](Self::from_right) is therefore a convention rather than a type
     /// invariant.** Left that way deliberately (2026-07-28): private fields would prove
@@ -229,7 +234,7 @@ pub enum ReadWitness {
     /// constructor expresses, so the full constructor set — and with it the case for
     /// sealing the variant — is only knowable then. Building it now would be designing
     /// against one producer and guessing at the second.
-    Observed {
+    Partial {
         /// Locus positions between the locus's left border and the first one
         /// witnessed. `0` = flush with the left border, i.e. a prefix constraint.
         offset_in_locus: u16,
@@ -283,7 +288,7 @@ impl ReadWitness {
     /// reach can be measured in *read* bases, which diverge from locus positions under
     /// stutter; a run must never claim positions the locus does not have.
     pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Self {
-        Self::Observed {
+        Self::Partial {
             offset_in_locus: 0,
             positions_covered: positions_covered.min(locus_len.get()),
         }
@@ -314,11 +319,11 @@ impl ReadWitness {
     /// It is arguably the right answer — identical constraints are one cell, and a read
     /// that witnessed every position is constrained from neither side — but it is not
     /// the pre-reshape answer, and the plan's stated equivalence
-    /// `PartialRight(n) ⇔ Observed { len - n, n }` stops holding at `n = len`. Pinned by
+    /// `PartialRight(n) ⇔ Partial { len - n, n }` stops holding at `n = len`. Pinned by
     /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
     pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Self {
         let covered = positions_covered.min(locus_len.get());
-        Self::Observed {
+        Self::Partial {
             offset_in_locus: locus_len.get() - covered,
             positions_covered: covered,
         }
@@ -329,7 +334,7 @@ impl ReadWitness {
     pub fn is_flush_left(&self) -> bool {
         match self {
             Self::Complete => true,
-            Self::Observed {
+            Self::Partial {
                 offset_in_locus, ..
             } => *offset_in_locus == 0,
         }
@@ -340,7 +345,7 @@ impl ReadWitness {
     pub fn is_flush_right(&self, locus_len: LocusLen) -> bool {
         match self {
             Self::Complete => true,
-            Self::Observed {
+            Self::Partial {
                 offset_in_locus,
                 positions_covered,
             } => offset_in_locus.saturating_add(*positions_covered) >= locus_len.get(),
@@ -1608,14 +1613,14 @@ mod tests {
     fn from_right_places_the_run_against_the_right_border() {
         assert_eq!(
             ReadWitness::from_left(4, LocusLen::from_positions(10)),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 4
             }
         );
         assert_eq!(
             ReadWitness::from_right(4, LocusLen::from_positions(10)),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 6,
                 positions_covered: 4
             }
@@ -1635,7 +1640,7 @@ mod tests {
     fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
         assert_eq!(
             ReadWitness::from_left(9, LocusLen::from_positions(3)),
-            ReadWitness::Observed {
+            ReadWitness::Partial {
                 offset_in_locus: 0,
                 positions_covered: 3
             }
@@ -1670,7 +1675,7 @@ mod tests {
 
         // An interior run — flush with neither border. The STR path cannot mint one, but the
         // predicates are shared and the generic path will.
-        let interior = ReadWitness::Observed {
+        let interior = ReadWitness::Partial {
             offset_in_locus: 3,
             positions_covered: 4,
         };
@@ -1688,7 +1693,7 @@ mod tests {
             region(1, 10),
             vec![obs(
                 b"AAAA",
-                ReadWitness::Observed {
+                ReadWitness::Partial {
                     offset_in_locus: 3,
                     positions_covered: 4,
                 },

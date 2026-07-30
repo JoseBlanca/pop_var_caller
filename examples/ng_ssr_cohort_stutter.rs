@@ -161,7 +161,7 @@ fn witness_label(witness: ReadWitness, locus_len: LocusLen) -> &'static str {
     // let the compiler stop forcing these sites to be revisited.
     match witness {
         ReadWitness::Complete => "complete",
-        run @ ReadWitness::Observed { .. } => {
+        run @ ReadWitness::Partial { .. } => {
             match (run.is_flush_left(), run.is_flush_right(locus_len)) {
                 (true, _) => "partial_left",
                 (false, true) => "partial_right",

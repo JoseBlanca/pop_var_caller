@@ -1643,7 +1643,7 @@ const SEEDS: [u64; 4] = [
 /// unlisted class getting triaged as a listed one.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 struct DivergenceClasses {
-    /// **Class 1** — a read that did not witness the whole footprint becomes an `Observed`
+    /// **Class 1** — a read that did not witness the whole footprint becomes an `Partial`
     /// row whose bases are what it saw, where production folded a reference-filled
     /// haplotype into a bucket. *This is the deliverable* (spec §13.2).
     partial_witness: bool,
@@ -1683,7 +1683,7 @@ struct DivergenceClasses {
     ///
     /// **Which reads this is, and it is not the ones §13.2 originally named.** The gate below
     /// is `!classes.partial_witness`, so a read that had already **expired** before the widen
-    /// is *not* here — it leaves ng an `Observed` row, which makes the locus class 1, whose
+    /// is *not* here — it leaves ng an `Partial` row, which makes the locus class 1, whose
     /// triple counts it. This class is the other non-contributor: a read **still live** at the
     /// widening step but silent there. Spec §13.2 records that correction.
     stale_widen: bool,
@@ -1726,7 +1726,7 @@ struct DivergenceCensus {
     /// **The deliverable, one:** loci carrying at least one partial witness.
     fabricating_loci: usize,
     /// **The deliverable, two:** reads production credited with bases they never sequenced —
-    /// the observations sitting on `Observed` rows.
+    /// the observations sitting on `Partial` rows.
     fabricated_reads: u64,
     /// **The deliverable, three:** reference bases production credited to those reads —
     /// summed as (footprint − positions witnessed) × reads, which is exactly the count of
@@ -1764,7 +1764,7 @@ impl DivergenceCensus {
         let footprint = locus.region.len();
         let mut fabricating = false;
         for row in &locus.observations {
-            let ReadWitness::Observed {
+            let ReadWitness::Partial {
                 positions_covered, ..
             } = row.read_witness
             else {
@@ -2653,7 +2653,7 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
 /// Every row `Complete` says the reads that
 /// **produced** an observation each saw the whole footprint; `reads_without_observation`
 /// covers the reads that saw it in pieces and so produced none at all (A5) — those have no
-/// row to be `Observed`, and production folded them anyway, with the gaps filled.
+/// row to be `Partial`, and production folded them anyway, with the gaps filled.
 ///
 /// `reads_discarded_by_cap` is deliberately not part of it: the cap acts in the walk, before
 /// any record exists, so both walkers lose the same reads and the locus is still one where

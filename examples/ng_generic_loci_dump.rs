@@ -142,7 +142,7 @@ impl DumpReport {
     /// # The one invariant asserted here rather than in a test
     ///
     /// **No row claims a position the locus does not have, and no row claims zero** (spec §13):
-    /// every `Observed` row satisfies `offset_in_locus + positions_covered <= footprint` and
+    /// every `Partial` row satisfies `offset_in_locus + positions_covered <= footprint` and
     /// `positions_covered > 0`. Asserted on every locus of every run, including the tool's real
     /// ones, because a run over new data is where it would first be violated.
     ///
@@ -176,7 +176,7 @@ impl DumpReport {
                     self.rows_complete += 1;
                     self.reads_complete += u64::from(obs.num_obs);
                 }
-                ReadWitness::Observed {
+                ReadWitness::Partial {
                     offset_in_locus,
                     positions_covered,
                 } => {
@@ -297,7 +297,7 @@ impl DumpReport {
 fn witness_label(witness: ReadWitness) -> String {
     match witness {
         ReadWitness::Complete => "complete".to_string(),
-        ReadWitness::Observed {
+        ReadWitness::Partial {
             offset_in_locus,
             positions_covered,
         } => format!("observed:{offset_in_locus}+{positions_covered}"),
@@ -1147,8 +1147,8 @@ mod tests {
         ]
     }
 
-    /// **Fixture 1 — a read adaptor-masked over part of a multi-base record is `Observed`, not
-    /// `Complete`** (spec §12.1), *and* **fixture 1b — an `Observed` row is separate from a
+    /// **Fixture 1 — a read adaptor-masked over part of a multi-base record is `Partial`, not
+    /// `Complete`** (spec §12.1), *and* **fixture 1b — an `Partial` row is separate from a
     /// `Complete` one with the same bases** (spec §13).
     ///
     /// A span-derived implementation passes every other test in the suite and fails this one:

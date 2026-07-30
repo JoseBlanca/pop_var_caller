@@ -56,8 +56,8 @@ fn measurement(obs: &Option<(ReadWitness, Vec<u8>)>) -> Measurement {
         // Destructured rather than guarded on `_`, so a future variant is a compile error.
         let class = match cov {
             ReadWitness::Complete => "complete",
-            run @ ReadWitness::Observed { .. } if run.is_flush_left() => "partialL",
-            ReadWitness::Observed { .. } => "partialR",
+            run @ ReadWitness::Partial { .. } if run.is_flush_left() => "partialL",
+            ReadWitness::Partial { .. } => "partialR",
         };
         (class, bases.clone())
     })
