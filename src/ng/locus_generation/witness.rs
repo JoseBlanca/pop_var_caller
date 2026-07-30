@@ -1,36 +1,50 @@
 //! What one read saw of one locus — the witness vocabulary.
 //!
-//! [`ReadWitness`] is the answer to "how much of this locus did this read witness", and
-//! [`LocusLen`] is the axis it is measured on. They live in their own file rather than in
-//! `mod.rs` because the invariant that matters here — one set of witnessed positions has
-//! exactly one representation, so two reads that witnessed the same thing share one
-//! observation — fails *silently* when it fails, and a private field needs one module
-//! boundary to be private to (arch *Module home*).
+//! [`ReadWitness`] is the answer to "how much of this locus did this read witness",
+//! [`WitnessedLocusPositions`] is the set of positions that will replace its single run at
+//! Milestone C, and [`LocusLen`] is the axis both are measured on. [`canonicalise_runs`] is
+//! the one normaliser every witnessed-set type shares — including the fold's reference-axis
+//! `WitnessedRefPositions`, which lives with the walk.
 //!
-//! Re-exported from [`locus_generation`](super), so no consumer's import path names this
-//! module.
+//! They live in their own file rather than in `mod.rs` because
+//! `WitnessedLocusPositions`'s invariant — one set of witnessed positions has exactly one
+//! representation, so two reads that witnessed the same thing share one observation —
+//! fails *silently* when it fails, and a private field needs one module boundary to be
+//! private to (arch *Module home*).
+//!
+//! The three types are re-exported from [`locus_generation`](super), so no *external*
+//! consumer's import path names this module; `canonicalise_runs` is crate-internal and is
+//! imported by path, by `pileup::open_record`.
 
 use smallvec::{Array, SmallVec};
 
 use crate::ng::types::GenomeRegion;
 
-/// Sort and merge `runs` in place into the canonical form both witnessed-set types hold:
-/// sorted by start, non-empty, and separated by at least one position. Returns whether a
-/// set survives — `false` for an empty input or any empty run, which is the "no empty
-/// span" invariant both types carry.
+/// Sort and merge `runs` into the canonical form every witnessed-set type holds: sorted by
+/// start, non-empty, and separated by at least one position. `None` for an empty input or
+/// any empty run, which is the "no empty span" invariant every one of them carries.
 ///
-/// **One normaliser, two types.** The locus axis and the reference axis are deliberately
-/// separate types so the compiler refuses to mix them (arch §3), but the *canonical form*
-/// is one rule, and two copies of it could drift while both still compiled — which is
-/// exactly what happened to `witness_order` and cost Milestone A a review finding. The
-/// types stay distinct; the rule has one home.
-pub(in crate::ng::locus_generation) fn canonicalise_runs<T, A>(runs: &mut SmallVec<A>) -> bool
+/// **The buffer flows through the return value** so that ignoring the answer cannot
+/// compile. It reported success as a `bool` and canonicalised in place until the Milestone
+/// B review pointed out what that admits: `canonicalise_runs(&mut runs); Some(Self(runs))`
+/// builds a degenerate set — empty, or holding empty runs — and no lint says a word.
+/// Taking the buffer by value and handing it back closes that off, and the callers that
+/// reuse a buffer across reads swap it back (see `WitnessedRefPositions::refill_from`).
+///
+/// **One normaliser, several types.** The locus axis and the reference axis are
+/// deliberately separate types so the compiler refuses to mix them (arch §3), but the
+/// *canonical form* is one rule, and two copies of it could drift while both still
+/// compiled — which is exactly what happened to `witness_order` and cost Milestone A a
+/// review finding. The types stay distinct; the rule has one home.
+pub(in crate::ng::locus_generation) fn canonicalise_runs<T, A>(
+    mut runs: SmallVec<A>,
+) -> Option<SmallVec<A>>
 where
     T: Copy + Ord,
     A: Array<Item = (T, T)>,
 {
     if runs.is_empty() || runs.iter().any(|(start, end)| start >= end) {
-        return false;
+        return None;
     }
     runs.sort_unstable();
     // Merge left to right, writing back into the same buffer. `start <= open_end` covers
@@ -49,7 +63,7 @@ where
         }
     }
     runs.truncate(kept + 1);
-    true
+    Some(runs)
 }
 
 /// The locus positions one read witnessed — **a set, in locus coordinates**, and never
@@ -83,26 +97,39 @@ impl WitnessedLocusPositions {
     /// From runs in **any** order, normalised: sorted by start, then touching and
     /// overlapping runs merged.
     ///
-    /// Runs are half-open `[start, end)`. `None` when there is nothing to describe — an
-    /// empty iterator, or any run with `start >= end`, since a run of no positions is not
-    /// something a read can witness and silently dropping it would let a caller build a set
-    /// it did not mean.
-    pub fn new(runs: impl IntoIterator<Item = (u16, u16)>) -> Option<Self> {
-        let mut runs: SmallVec<[(u16, u16); 2]> = runs.into_iter().collect();
-        canonicalise_runs(&mut runs).then_some(Self(runs))
+    /// Runs are half-open `[start, end)` — which is what the name says, and it says it
+    /// because the type's other constructor speaks the other convention. `None` when there
+    /// is nothing to describe: an empty iterator, or any run with `start >= end`, since a
+    /// run of no positions is not something a read can witness and silently dropping it
+    /// would let a caller build a set it did not mean.
+    pub fn from_half_open_runs(runs: impl IntoIterator<Item = (u16, u16)>) -> Option<Self> {
+        canonicalise_runs(runs.into_iter().collect()).map(Self)
     }
 
-    /// The one-run case — what the STR path mints and the common generic one.
+    /// The one-run case — what the STR path mints and the common generic one — taking the
+    /// run as **the offset it starts at and how many positions it covers**.
     ///
-    /// Takes the run as the offset it starts at and how many positions it covers, which is
-    /// how both producers already measure a witness (and how [`ReadWitness::Partial`]
-    /// spells it), rather than as the half-open pair [`new`](Self::new) takes. `None` if it
-    /// covers no positions, or if it would end past `u16::MAX` — the out-of-range case the
-    /// spec asks to fail rather than clamp (§3.4), since a clamp here would silently
-    /// shorten a witness.
-    pub fn one_run(offset_in_locus: u16, positions_covered: u16) -> Option<Self> {
+    /// # Why the name carries the convention
+    ///
+    /// Both spellings are a pair of `u16` locus positions, and the misread is not rejected:
+    /// handing `from_half_open_runs` an offset/length pair produces a perfectly canonical
+    /// set that is silently the *wrong* set — `(4, 5)` covers one position where the caller
+    /// meant five. Only the reversed spelling errors. That is the hazard [`LocusLen`]'s own
+    /// doc says it was minted to remove ("two `u16`s in a row with no way to tell them
+    /// apart"), so the two constructors say which language they speak at every call site
+    /// (Milestone B review). Newtypes for the two components would close it completely, and
+    /// are the right move when `ReadWitness::Partial`'s fields are revisited — they are the
+    /// same two `u16`s, and sealing that variant is deferred (spec §6).
+    ///
+    /// `None` if the run covers no positions, or if it would end past `u16::MAX` — the
+    /// out-of-range case the spec asks to fail rather than clamp (§3.4), since a clamp here
+    /// would silently shorten a witness.
+    pub fn one_run_from_offset_and_length(
+        offset_in_locus: u16,
+        positions_covered: u16,
+    ) -> Option<Self> {
         let end = offset_in_locus.checked_add(positions_covered)?;
-        Self::new([(offset_in_locus, end)])
+        Self::from_half_open_runs([(offset_in_locus, end)])
     }
 
     /// The runs, in canonical order, half-open `[start, end)` in locus coordinates.
@@ -339,6 +366,7 @@ impl ReadWitness {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -360,24 +388,28 @@ mod tests {
     /// whole type exists to carry, so it is asserted beside the merge rather than trusted.
     #[test]
     fn adjacent_and_overlapping_runs_merge_and_a_gap_survives() {
-        let touching = WitnessedLocusPositions::new([(0, 4), (4, 9)]).expect("non-empty");
+        let touching =
+            WitnessedLocusPositions::from_half_open_runs([(0, 4), (4, 9)]).expect("non-empty");
         assert_eq!(
             runs_of(&touching),
             vec![(0, 9)],
             "runs that touch are one run"
         );
 
-        let overlapping = WitnessedLocusPositions::new([(0, 6), (3, 9)]).expect("non-empty");
+        let overlapping =
+            WitnessedLocusPositions::from_half_open_runs([(0, 6), (3, 9)]).expect("non-empty");
         assert_eq!(runs_of(&overlapping), vec![(0, 9)]);
 
-        let contained = WitnessedLocusPositions::new([(0, 9), (3, 5)]).expect("non-empty");
+        let contained =
+            WitnessedLocusPositions::from_half_open_runs([(0, 9), (3, 5)]).expect("non-empty");
         assert_eq!(
             runs_of(&contained),
             vec![(0, 9)],
             "a run inside another adds no positions and must not survive as a second run",
         );
 
-        let gapped = WitnessedLocusPositions::new([(0, 4), (5, 9)]).expect("non-empty");
+        let gapped =
+            WitnessedLocusPositions::from_half_open_runs([(0, 4), (5, 9)]).expect("non-empty");
         assert_eq!(
             runs_of(&gapped),
             vec![(0, 4), (5, 9)],
@@ -385,36 +417,90 @@ mod tests {
         );
     }
 
+    /// **`LocusLen` saturates, and until this test nothing said so** — replacing the
+    /// saturation with `positions as u16` left all 287 tests green (Milestone B review).
+    ///
+    /// The truncation is not a rounding error: a 65,536-position region would become
+    /// `LocusLen(0)`, on which *every* witness is flush-right and zero-long, so the depth
+    /// derivation reads zero everywhere and nothing panics. Saturating instead keeps the
+    /// derivation total, which is the documented choice — a locus that long is a satellite
+    /// the caller does not handle.
+    #[test]
+    fn locus_len_saturates_rather_than_truncating() {
+        assert_eq!(LocusLen::from_positions(9).get(), 9);
+        assert_eq!(
+            LocusLen::from_positions(u64::from(u16::MAX)).get(),
+            u16::MAX
+        );
+        assert_eq!(
+            LocusLen::from_positions(u64::from(u16::MAX) + 1).get(),
+            u16::MAX,
+            "one past the top saturates; a truncating cast would give 0",
+        );
+        assert_eq!(
+            LocusLen::from_positions(u64::MAX).get(),
+            u16::MAX,
+            "and so does anything above it",
+        );
+    }
+
+    /// `of_region` is `from_positions` over the region's own length — the one source a
+    /// consumer should use, so it is asserted to agree rather than assumed to.
+    #[test]
+    fn of_region_is_the_regions_length() {
+        let region = GenomeRegion {
+            contig: crate::ng::types::ContigId(0),
+            start: crate::ng::types::Position(10),
+            end: crate::ng::types::Position(20),
+        };
+        assert_eq!(region.len(), 11, "1-based, inclusive of both ends");
+        assert_eq!(LocusLen::of_region(region), LocusLen::from_positions(11));
+    }
+
     /// **A set nothing witnessed is not a set** — the "never empty" half of the invariant,
     /// and the run of no positions both `RefSpan` and `ReadWitness` document as not
     /// existing.
     #[test]
     fn an_empty_input_or_an_empty_run_is_rejected_rather_than_dropped() {
-        assert!(WitnessedLocusPositions::new([]).is_none());
+        assert!(WitnessedLocusPositions::from_half_open_runs([]).is_none());
         assert!(
-            WitnessedLocusPositions::new([(4, 4)]).is_none(),
+            WitnessedLocusPositions::from_half_open_runs([(4, 4)]).is_none(),
             "a half-open run with start == end covers nothing",
         );
         assert!(
-            WitnessedLocusPositions::new([(0, 4), (7, 7)]).is_none(),
+            WitnessedLocusPositions::from_half_open_runs([(0, 4), (7, 7)]).is_none(),
             "an empty run among good ones is rejected, not silently dropped — the caller \
              built a set it did not mean",
         );
-        assert!(WitnessedLocusPositions::one_run(3, 0).is_none());
         assert!(
-            WitnessedLocusPositions::one_run(u16::MAX, 1).is_none(),
+            WitnessedLocusPositions::from_half_open_runs([(9, 4)]).is_none(),
+            "and a reversed run is rejected too — `start >= end` covers both, which only a \
+             test with `start > end` actually says",
+        );
+        assert!(WitnessedLocusPositions::one_run_from_offset_and_length(3, 0).is_none());
+        assert!(
+            WitnessedLocusPositions::one_run_from_offset_and_length(u16::MAX, 1).is_none(),
             "a run ending past u16::MAX fails rather than clamping (spec §3.4)",
+        );
+        assert!(
+            WitnessedLocusPositions::one_run_from_offset_and_length(60_000, 10_000).is_none(),
+            "and an end that overflows mid-range fails too. **This is the case that \
+             discriminates**: at `u16::MAX + 1` the wrapped, saturated and checked sums all \
+             land `<= start`, so `start >= end` rejects the run whatever the addition does, \
+             and replacing `checked_add` with `saturating_add` left all 287 tests green \
+             (Milestone B review). Here saturation would return a set of 5,535 positions — \
+             the silent shortening the doc forbids",
         );
     }
 
-    /// `one_run` and `new` describe the same set through two different spellings — offset
-    /// plus length, and the half-open pair. A reader meeting both in one type is entitled
-    /// to know they agree.
+    /// `one_run_from_offset_and_length` and `from_half_open_runs` describe the same set
+    /// through the two spellings a caller must choose between. A reader meeting both in one
+    /// type is entitled to know they agree.
     #[test]
     fn one_run_is_the_half_open_pair_it_looks_like() {
         assert_eq!(
-            WitnessedLocusPositions::one_run(4, 5),
-            WitnessedLocusPositions::new([(4, 9)]),
+            WitnessedLocusPositions::one_run_from_offset_and_length(4, 5),
+            WitnessedLocusPositions::from_half_open_runs([(4, 9)]),
         );
     }
 
@@ -423,10 +509,11 @@ mod tests {
     /// wrong.
     #[test]
     fn positions_covered_counts_the_runs_and_not_the_gap_between_them() {
-        let gapped = WitnessedLocusPositions::new([(0, 3), (7, 9)]).expect("non-empty");
+        let gapped =
+            WitnessedLocusPositions::from_half_open_runs([(0, 3), (7, 9)]).expect("non-empty");
         assert_eq!(gapped.positions_covered(), 5);
         assert_eq!(
-            WitnessedLocusPositions::new([(0, 9)])
+            WitnessedLocusPositions::from_half_open_runs([(0, 9)])
                 .expect("non-empty")
                 .positions_covered(),
             9,
@@ -440,16 +527,37 @@ mod tests {
     fn flushness_is_read_off_the_first_and_last_run() {
         let len = LocusLen::from_positions(9);
 
-        let whole = WitnessedLocusPositions::new([(0, 9)]).expect("non-empty");
+        let whole = WitnessedLocusPositions::from_half_open_runs([(0, 9)]).expect("non-empty");
         assert!(whole.is_flush_left() && whole.is_flush_right(len));
 
-        let interior = WitnessedLocusPositions::new([(2, 3), (5, 7)]).expect("non-empty");
+        let interior =
+            WitnessedLocusPositions::from_half_open_runs([(2, 3), (5, 7)]).expect("non-empty");
         assert!(!interior.is_flush_left() && !interior.is_flush_right(len));
 
-        let both_ends_holed = WitnessedLocusPositions::new([(0, 2), (7, 9)]).expect("non-empty");
+        let both_ends_holed =
+            WitnessedLocusPositions::from_half_open_runs([(0, 2), (7, 9)]).expect("non-empty");
         assert!(
             both_ends_holed.is_flush_left() && both_ends_holed.is_flush_right(len),
             "a read blind only in the middle is constrained from both sides",
+        );
+    }
+
+    /// **The one-run predicate's addition must not wrap**, which nothing said until the
+    /// Milestone B review swapped `saturating_add` for `wrapping_add` and watched all 287
+    /// tests pass. `Partial`'s fields are public and its clamping is a convention rather
+    /// than a type invariant (see the variant's own doc), so an over-long run is reachable
+    /// without going through a constructor — and under wrapping it reports *not* flush
+    /// right, which reads as "this read is missing the locus's tail" when it covered
+    /// everything.
+    #[test]
+    fn a_run_whose_end_would_overflow_is_still_flush_right() {
+        let over_long = ReadWitness::Partial {
+            offset_in_locus: u16::MAX - 1,
+            positions_covered: 8,
+        };
+        assert!(
+            over_long.is_flush_right(LocusLen::from_positions(u64::from(u16::MAX))),
+            "the reach saturates at u16::MAX and still reaches the border",
         );
     }
 
@@ -461,9 +569,11 @@ mod tests {
     /// to prevent, on the exact path (a merge) that produces it.
     #[test]
     fn a_set_that_merged_down_to_two_runs_equals_the_same_two_built_directly() {
-        let merged = WitnessedLocusPositions::new([(0, 2), (5, 7), (1, 3), (6, 9), (2, 4)])
-            .expect("non-empty");
-        let direct = WitnessedLocusPositions::new([(0, 4), (5, 9)]).expect("non-empty");
+        let merged =
+            WitnessedLocusPositions::from_half_open_runs([(0, 2), (5, 7), (1, 3), (6, 9), (2, 4)])
+                .expect("non-empty");
+        let direct =
+            WitnessedLocusPositions::from_half_open_runs([(0, 4), (5, 9)]).expect("non-empty");
         assert_eq!(merged, direct);
         assert_eq!(hash_of(&merged), hash_of(&direct));
     }
@@ -478,10 +588,20 @@ mod tests {
         /// read_group)`, so a second representation of one set does not error, it splits one
         /// observation into two and inflates the count (spec §3.3).
         ///
-        /// **Mutation-checked in both directions**: delete `sort_unstable` and this fails on
-        /// a shuffled input; delete the merge and it fails on runs that touch. A fixture
-        /// would have caught neither reliably, because both mutations need an input order
-        /// the fixture happens not to use.
+        /// **Mutation-checked in three directions**: delete `sort_unstable` and this fails
+        /// on a shuffled input; stop merging runs that touch and it fails on those; and
+        /// truncate a containing run to the contained one — `open_end.max(end)` → `end` —
+        /// and the *position-set* assertion below fails. A fixture would have caught
+        /// neither of the first two reliably, because both need an input order the fixture
+        /// happens not to use.
+        ///
+        /// **The position-set assertion is not decoration.** The first version of this test
+        /// asserted only the canonical *shape* — sorted, disjoint, non-empty, and equal
+        /// across orderings — and the Milestone B review showed that a normaliser which
+        /// *loses witnessed positions* satisfies every one of them: sorting happens before
+        /// merging, so both orderings lose the same positions and order-independence still
+        /// holds. Shape is what the representation looks like; the positions are what it
+        /// means.
         #[test]
         fn a_set_is_the_same_set_whatever_order_its_runs_arrive_in(
             runs in prop::collection::vec((0u16..40, 1u16..8), 1..6),
@@ -498,8 +618,10 @@ mod tests {
                 permutation[(usize::from(run.0) + usize::from(run.1)) % permutation.len()]
             });
 
-            let first = WitnessedLocusPositions::new(half_open).expect("at least one run");
-            let second = WitnessedLocusPositions::new(shuffled).expect("at least one run");
+            let first = WitnessedLocusPositions::from_half_open_runs(half_open.clone())
+                .expect("at least one run");
+            let second = WitnessedLocusPositions::from_half_open_runs(shuffled)
+                .expect("at least one run");
 
             prop_assert_eq!(&first, &second, "one set, two orderings, one representation");
             prop_assert_eq!(hash_of(&first), hash_of(&second));
@@ -515,6 +637,27 @@ mod tests {
                 );
             }
             prop_assert!(canonical.iter().all(|(start, end)| start < end));
+
+            // **And it is the same *positions*, not merely the same shape.** Every position
+            // the input claimed, and no others.
+            let claimed: BTreeSet<u16> = half_open
+                .iter()
+                .flat_map(|(start, end)| *start..*end)
+                .collect();
+            let kept: BTreeSet<u16> = canonical
+                .iter()
+                .flat_map(|(start, end)| *start..*end)
+                .collect();
+            prop_assert_eq!(
+                kept,
+                claimed,
+                "canonicalising changed which positions are witnessed",
+            );
+            prop_assert_eq!(
+                first.positions_covered(),
+                u32::try_from(canonical.iter().map(|(s, e)| usize::from(*e - *s)).sum::<usize>())
+                    .expect("a locus is at most u16::MAX positions"),
+            );
         }
     }
 
