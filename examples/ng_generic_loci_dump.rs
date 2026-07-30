@@ -38,8 +38,23 @@
 //! over every footprint it touched, every base `N` or adaptor-masked. That last class is
 //! invisible to both per-locus counters and is `reads_silent_over_footprint`. A read the
 //! **preparer** declines never reaches the walk at all, and is `reads_declined_by_preparer`.
-//! Printing all of them is what makes "every fetched read is accounted for" a thing a reader
-//! can check rather than a claim (spec §13).
+//!
+//! **The header prints them on two lines because they are in two units, and this doc used to
+//! promise a sum that cannot exist.** It said printing all of them "makes 'every fetched read
+//! is accounted for' a thing a reader can check rather than a claim (spec §13)". It does not:
+//! `reads_admitted`, `reads_declined_by_preparer` and `reads_silent_over_footprint` are once
+//! per read for the whole run, while `reads_without_observation` and `reads_discarded_by_cap`
+//! are **per-locus** quantities summed over loci — a read is counted once per locus it was
+//! affected at, and a read can be in a row at one locus and unobserved at another. On the
+//! four-read accounting fixture with both depth caps at 1 the header reads `reads_admitted=4`
+//! beside `reads_discarded_by_cap=55`. The per-locus pair therefore carries a `locus_sum_`
+//! prefix on its own line.
+//!
+//! **What is actually checkable, and is checked:** `reads_complete + reads_observed` equals the
+//! summed `reads` column over every row, asserted below. The identity spec §13 asks for — every
+//! *fetched* read accounted for exactly once — needs a run-level "appeared in some row" flag
+//! beside `ever_contributed`, which the walk does not carry; until it does, the honest statement
+//! is the one above rather than a sum a reader would fail to reproduce.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -207,16 +222,24 @@ impl DumpReport {
             self.generic_region_bp,
             self.records_outside_region,
         );
+        // **Two lines, because these counters are in two units that do not add up.** They used
+        // to print on one, under a module doc telling the reader every admitted read is
+        // somewhere — and no arithmetic relates them: the three below are once per read for the
+        // run, while `reads_without_observation` and `reads_discarded_by_cap` are *per-locus*
+        // quantities summed over loci, so one read counts once per locus it was affected at.
+        // Measured on the accounting fixture with both depth caps forced to 1:
+        // `reads_admitted=4` beside `reads_discarded_by_cap=55`. The `locus_sum_` prefix and
+        // the split are what stop a reader trying to balance them.
         let _ = writeln!(
             out,
             "# reads_admitted={} reads_declined_by_preparer={} \
-             reads_silent_over_footprint={} reads_without_observation={} \
-             reads_discarded_by_cap={}",
-            self.reads_admitted,
-            self.reads_declined_by_preparer,
-            self.reads_silent_over_footprint,
-            self.reads_without_observation,
-            self.reads_discarded_by_cap,
+             reads_silent_over_footprint={}",
+            self.reads_admitted, self.reads_declined_by_preparer, self.reads_silent_over_footprint,
+        );
+        let _ = writeln!(
+            out,
+            "# locus_sum_reads_without_observation={} locus_sum_reads_discarded_by_cap={}",
+            self.reads_without_observation, self.reads_discarded_by_cap,
         );
         let _ = writeln!(
             out,

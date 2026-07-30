@@ -110,6 +110,30 @@ the divergence census over 256,974 loci (one read group): 255,149 identical, 1,8
   they never sequenced (5.55 fabricated bases per fabricating locus).
 ```
 
+**Class 6's own three numbers, added 2026-07-30** — §13.2 asks for the triple *twice* and this
+milestone shipped it once, so "production mis-folds reads at 264 loci" could not be turned into
+reads or bases:
+
+```
+the stale-widen deliverable (§13.2's second triple):
+  400 cases × 4 seeds:  267 reads over   264 loci,   544 reference bases appended
+  3,000 cases (soak):  1,909 reads over 1,892 loci, 4,036 reference bases appended
+```
+
+**So class 6 is a small, tight effect**, and the two case counts agree on its shape: **1.01 reads
+per affected locus** and **about 2.1 appended bases per read** at both scales. Set against class
+1's 1.88 reads and 2.96 bases per read, production's stale widen touches roughly one read at a
+time and gives it two reference bases — which is worth knowing precisely because the class was
+discovered late and could have been anything.
+
+The tail length is measured the way `stale_widen_shape` defines the class: the bytes of a
+production row past the longest prefix any ng row agrees with, times the reads carrying it. Two
+tighter floors were tried and **rejected as unsound**, recorded in the code so they are not added
+later — "at least one read per class-6 locus" fails when every production row matches an ng row and
+the divergence is in the counts, and "at least one appended base per read" fails when production's
+row is a strict *prefix* of ng's, which is the shape of D1's own counter-example (production 8
+bases, ng 9).
+
 Host-native soak, `PVC_PARITY_CASES=5000 cargo test --profile soak --lib …parity`, green:
 3,262,582 loci censused, 2,700,954 anchored, class 6 at 3,074, deliverable 34,549 reads /
 18,598 loci / 101,216 reference bases (5.44 per locus). Class 6's 264 at the default count is
@@ -428,9 +452,36 @@ ng   the same, output to /dev/null           32.59 s wall   461 MB peak RSS
 prod pop_var_caller pileup --threads 1       10.20 s wall   559 MB peak RSS   27 MB .psp
 ```
 
-**ng is 3.4× slower, or 3.2× discounting the TSV it writes and production does not.** Peak RSS is
-**lower** than production's, which is the memory property spec §7 asked for holding at
-chromosome scale.
+**ng is 3.4× slower, or 3.2× discounting the TSV it writes and production does not.**
+
+> **The RSS conclusion is withdrawn (review, 2026-07-30).** This paragraph said peak RSS was
+> "**lower** than production's, which is the memory property spec §7 asked for holding at
+> chromosome scale". **That does not follow from this number**, because the 461 MB is dominated by
+> the dump tool's own row buffer rather than by the generator.
+>
+> `DumpReport.rows` is a `Vec<ObservationRow>` that grows for the whole run, and `render()` then
+> materialises the entire TSV as one `String`, so both are live at peak. `ObservationRow` is
+> **152 bytes** with five heap allocations behind it — including a fresh `contig: String` and a
+> copy of `ref_bases` **per row**. This run emitted `generic_loci=1541788` and rows are at least
+> loci, so the vector's spine alone is **≥ 234 MB of the 461 MB**, before the per-row allocations
+> and before the 72 MB string.
+>
+> Worse than uninformative: that buffer is **region-length-shaped**, which is exactly what §7
+> forbids the generator to be ("everything this generator holds is bounded by depth, not by region
+> length"). So the measurement sizes the forbidden shape and reports the total as a pass. The
+> direction happening to be favourable is what made it easy to leave.
+>
+> **What is still true:** the wall-clock comparison, which the buffer does not affect, and
+> production's 559 MB.
+>
+> **The measurement is owed, and it needs a change first.** The tool must stop buffering: rows
+> rendered as they are pushed, `rows` kept only under `#[cfg(test)]` (the ten fixtures are its
+> only other readers, via `rows_at` / `row_at` / `end_of`). The wrinkle is that the `#`-prefixed
+> counts header carries **run** totals, so it cannot be written before the rows — spool the rows
+> to a temporary file during the walk and `io::copy` them after the header, which keeps the format
+> spec §12 asks for and makes the tool's own footprint constant. **Not done here:** the HG002 BAM
+> this run used is not on the machine (`benchmarks/ssr_hg002/bam/` is absent), so re-running chr1
+> was impossible and a number was not invented to replace the withdrawn one.
 
 ### Where the time goes, from the counters and one throwaway probe
 

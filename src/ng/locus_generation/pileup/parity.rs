@@ -1721,6 +1721,15 @@ struct DivergenceCensus {
     /// summed as (footprint − positions witnessed) × reads, which is exactly the count of
     /// bases `apply_events_to_ref_into` used to copy out of `ref_seq` on their behalf.
     fabricated_ref_bases: u64,
+    /// **The stale-widen deliverable, two** (spec §13.2's *second* triple): reads production
+    /// folded against a footprint it never revisited. `stale_widen` above is the loci; these
+    /// two are the reads and the bases, and without them the class this milestone *discovered*
+    /// was the one number nobody could size.
+    stale_widen_reads: u64,
+    /// **The stale-widen deliverable, three:** reference bases `widen` appended on those
+    /// reads' behalf — the tail of each production row past the point it stops matching any
+    /// ng row, times the reads carrying it.
+    stale_widen_ref_bases: u64,
 }
 
 impl DivergenceCensus {
@@ -1756,6 +1765,67 @@ impl DivergenceCensus {
                 footprint.saturating_sub(u64::from(positions_covered)) * u64::from(row.num_obs);
         }
         self.fabricating_loci += usize::from(fabricating);
+    }
+
+    /// Add one locus's contribution to the **stale-widen** measurement — spec §13.2's second
+    /// three-number deliverable, which until now was a locus count and nothing else.
+    ///
+    /// **The prefix logic is [`stale_widen_shape`]'s, deliberately duplicated in shape and not
+    /// in code path.** That function decides *whether* a locus is class 6 by asking that every
+    /// production row ng does not have is some ng row's bases followed by a reference tail;
+    /// this one measures *how long* those tails are. Reusing its `any(...)` would give a
+    /// boolean, not a length, so what is shared is the definition of the tail — the bytes past
+    /// the longest prefix any ng row agrees with. Where several ng rows explain a production
+    /// row, the **longest** shared prefix wins, which charges production the smallest tail
+    /// consistent with the class.
+    fn measure_stale_widen(
+        &mut self,
+        classes: DivergenceClasses,
+        ours: &SampleLocusObservations,
+        theirs: &SampleLocusObservations,
+    ) {
+        if !classes.stale_widen {
+            return;
+        }
+        let ng_bases: BTreeSet<&[u8]> = ours
+            .observed_sequences
+            .iter()
+            .map(|row| row.bases.as_ref())
+            .collect();
+        for row in &theirs.observed_sequences {
+            let theirs_bases: &[u8] = &row.bases;
+            if ng_bases.contains(theirs_bases) {
+                continue;
+            }
+            let longest_shared = ng_bases
+                .iter()
+                .filter_map(|ours_bases| {
+                    let shared = ours_bases
+                        .iter()
+                        .zip(theirs_bases)
+                        .take_while(|(a, b)| a == b)
+                        .count();
+                    // The same admissibility test `stale_widen_shape` applies, so a row it
+                    // would not have called explained cannot contribute a length here.
+                    (theirs_bases.len() >= shared
+                        && ours.reference_bases.ends_with(&theirs_bases[shared..]))
+                    .then_some(shared)
+                })
+                .max();
+            // `None` cannot happen on a locus `stale_widen_shape` accepted — it returns
+            // `false` unless every such row is explained — so this is the invariant, stated.
+            let Some(shared) = longest_shared else {
+                debug_assert!(
+                    false,
+                    "a class-6 locus has a production row no ng row explains: {:?}",
+                    String::from_utf8_lossy(theirs_bases),
+                );
+                continue;
+            };
+            self.stale_widen_reads += u64::from(row.num_obs);
+            self.stale_widen_ref_bases +=
+                (theirs_bases.len() - shared) as u64 * u64::from(row.num_obs);
+        }
     }
 }
 
@@ -2610,6 +2680,7 @@ fn assert_only_allele_bytes_moved(
                 let (classes, exact) = classify_locus(&at, ours, theirs, drops);
                 census.record(classes, exact);
                 census.measure_fabrication(ours);
+                census.measure_stale_widen(classes, ours, theirs);
             }
             (ours, theirs) => assert_eq!(
                 ours, theirs,
@@ -2755,6 +2826,39 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         census.loci,
         100.0 * census.fabricating_loci as f64 / census.loci as f64,
     );
+    // **The stale-widen triple needs its own floor, and for a sharper reason than symmetry.**
+    // The class flag is asserted non-zero below with the other five, so `stale_widen` cannot
+    // silently die. These two can: they are read off production's *rows* rather than off the
+    // classification, so a change that made every class-6 locus report a zero-length tail —
+    // or made `measure_stale_widen` skip every row — would leave the class count intact and
+    // the two numbers at zero, which reads as "production mis-folds reads but appends nothing
+    // on their behalf". That is not a state the class can be in: a locus is class 6 *because*
+    // a production row is an ng row plus a reference tail, so the tail has length.
+    // Mutation-verified: making `measure_stale_widen` return without measuring reports
+    // "264 loci, 0 reads, 0 bases" and fails here.
+    //
+    // **Two tighter assertions were tried and rejected as unsound**, recorded so nobody adds
+    // them later on the strength of the measured figures (267 reads and 544 bases over 264
+    // loci, so both ratios look safe):
+    //
+    // - `stale_widen_reads >= stale_widen` — one mis-folded read per class-6 locus — fails on a
+    //   locus where every production row *does* appear among ng's and `!bases_reconcile` comes
+    //   from the counts on matching bases instead. `stale_widen_shape`'s loop body never fires
+    //   there, so it returns `true` having measured nothing.
+    // - `stale_widen_ref_bases >= stale_widen_reads` — one appended base per mis-folded read —
+    //   fails when production's row is a strict **prefix** of an ng row: `shared` is then the
+    //   whole production row, the tail is empty, and `ends_with(&[])` accepts it. That is not a
+    //   corner case but the shape of D1's original counter-example, where production held eight
+    //   bases against ng's nine.
+    assert!(
+        census.stale_widen_reads > 0 && census.stale_widen_ref_bases > 0,
+        "class 6 fired on {} loci but the stale-widen deliverable is {} reads / {} bases — a \
+         locus is class 6 because production holds a row that is an ng row plus a reference \
+         tail, so both numbers are positive whenever the class is",
+        census.stale_widen,
+        census.stale_widen_reads,
+        census.stale_widen_ref_bases,
+    );
     eprintln!(
         "the divergence census over {} loci (one read group): {} identical to the \
          projection, {diverged} differing, {} of those agreeing once `q_sum` is rounded to \
@@ -2763,7 +2867,9 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
          class 5 row order {}   class 6 stale widen {}\n  \
          at two read groups: class 2 on {} loci, of which {} carry one allele in two rows.\n  \
          the deliverable: production credited {} reads over {} loci with {} reference bases \
-         they never sequenced ({:.2} fabricated bases per fabricating locus).",
+         they never sequenced ({:.2} fabricated bases per fabricating locus).\n  \
+         the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
+         over {} loci, appending {} reference bases on their behalf.",
         census.loci,
         census.exact,
         census.float_only,
@@ -2778,6 +2884,9 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         census.fabricating_loci,
         census.fabricated_ref_bases,
         census.fabricated_ref_bases as f64 / census.fabricating_loci.max(1) as f64,
+        census.stale_widen_reads,
+        census.stale_widen,
+        census.stale_widen_ref_bases,
     );
 }
 
@@ -3749,7 +3858,9 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
          class 1 partial witness {}   class 2 group split {}   class 3 counters {}   \
          class 4 unsupported bucket {}   class 5 row order {}   class 6 stale widen {}\n  \
          the deliverable: production credited {} reads over {} loci ({:.2} % of them) with \
-         {} reference bases they never sequenced.",
+         {} reference bases they never sequenced.\n  \
+         the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
+         over {} loci, appending {} reference bases on their behalf.",
         census.loci,
         census.partial_witness,
         census.group_split,
@@ -3761,6 +3872,9 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
         census.fabricating_loci,
         100.0 * census.fabricating_loci as f64 / census.loci.max(1) as f64,
         census.fabricated_ref_bases,
+        census.stale_widen_reads,
+        census.stale_widen,
+        census.stale_widen_ref_bases,
     );
 }
 
