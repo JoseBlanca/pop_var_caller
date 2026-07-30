@@ -118,7 +118,7 @@ expectations is a step that did more than rename.
   rather than failing. Its guard is the property test in the same commit: sets built from different
   orderings of the same runs compare and hash equal, over generated multisets. *Depends:* B1.
   *Source:* arch §1.1, spec §3.3, §8 (encoding).
-- ☐ **B3.** `WitnessedRefPositions`, `pub(super)`, the fold-axis counterpart: canonical runs in
+- ✅ **B3.** `WitnessedRefPositions`, `pub(super)`, the fold-axis counterpart: canonical runs in
   reference coordinates, never empty. Replaces `RefSpan`'s role but is not yet used by the fold.
   Carries `RefSpan`'s "no empty span" invariant verbatim. *Depends:* B2. *Source:* arch §2.
 

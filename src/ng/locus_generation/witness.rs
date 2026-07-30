@@ -10,9 +10,47 @@
 //! Re-exported from [`locus_generation`](super), so no consumer's import path names this
 //! module.
 
-use smallvec::SmallVec;
+use smallvec::{Array, SmallVec};
 
 use crate::ng::types::GenomeRegion;
+
+/// Sort and merge `runs` in place into the canonical form both witnessed-set types hold:
+/// sorted by start, non-empty, and separated by at least one position. Returns whether a
+/// set survives — `false` for an empty input or any empty run, which is the "no empty
+/// span" invariant both types carry.
+///
+/// **One normaliser, two types.** The locus axis and the reference axis are deliberately
+/// separate types so the compiler refuses to mix them (arch §3), but the *canonical form*
+/// is one rule, and two copies of it could drift while both still compiled — which is
+/// exactly what happened to `witness_order` and cost Milestone A a review finding. The
+/// types stay distinct; the rule has one home.
+pub(in crate::ng::locus_generation) fn canonicalise_runs<T, A>(runs: &mut SmallVec<A>) -> bool
+where
+    T: Copy + Ord,
+    A: Array<Item = (T, T)>,
+{
+    if runs.is_empty() || runs.iter().any(|(start, end)| start >= end) {
+        return false;
+    }
+    runs.sort_unstable();
+    // Merge left to right, writing back into the same buffer. `start <= open_end` covers
+    // both cases the invariant forbids: overlapping (`start < open_end`) and merely
+    // touching (`start == open_end`), which are one run of witnessed positions and must
+    // have one spelling.
+    let mut kept = 0usize;
+    for index in 1..runs.len() {
+        let (start, end) = runs[index];
+        let open_end = runs[kept].1;
+        if start <= open_end {
+            runs[kept].1 = open_end.max(end);
+        } else {
+            kept += 1;
+            runs[kept] = (start, end);
+        }
+    }
+    runs.truncate(kept + 1);
+    true
+}
 
 /// The locus positions one read witnessed — **a set, in locus coordinates**, and never
 /// empty (a read that witnessed nothing inside a footprint does not fold into it).
@@ -51,21 +89,7 @@ impl WitnessedLocusPositions {
     /// it did not mean.
     pub fn new(runs: impl IntoIterator<Item = (u16, u16)>) -> Option<Self> {
         let mut runs: SmallVec<[(u16, u16); 2]> = runs.into_iter().collect();
-        if runs.is_empty() || runs.iter().any(|(start, end)| start >= end) {
-            return None;
-        }
-        runs.sort_unstable();
-        // Merge left to right. `next.0 <= end` covers both cases the invariant forbids:
-        // overlapping (`next.0 < end`) and merely touching (`next.0 == end`), which are one
-        // run of witnessed positions and must have one spelling.
-        let mut canonical: SmallVec<[(u16, u16); 2]> = SmallVec::new();
-        for (start, end) in runs {
-            match canonical.last_mut() {
-                Some((_, open_end)) if start <= *open_end => *open_end = (*open_end).max(end),
-                _ => canonical.push((start, end)),
-            }
-        }
-        Some(Self(canonical))
+        canonicalise_runs(&mut runs).then_some(Self(runs))
     }
 
     /// The one-run case — what the STR path mints and the common generic one.

@@ -19,7 +19,9 @@
 use std::collections::BTreeMap;
 
 use ahash::AHashMap;
+use smallvec::SmallVec;
 
+use crate::ng::locus_generation::witness::canonicalise_runs;
 use crate::ng::ref_seq::RefSeq;
 use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 use crate::pileup_record::ChainId;
@@ -67,6 +69,71 @@ const RECORD_FOLDED_READS_INITIAL_CAPACITY: usize = 32;
 pub(super) struct RefSpan {
     pub start: u32,
     pub end: u32,
+}
+
+/// The reference positions one read witnessed inside a record — the fold-time counterpart
+/// of [`WitnessedLocusPositions`], and what replaces [`RefSpan`] at C1.
+///
+/// Canonical half-open runs in **reference** coordinates, sorted, non-empty, and separated
+/// by at least one position the read did not witness. It carries `RefSpan`'s invariant
+/// verbatim: **there is no empty set** — a read that witnessed nothing inside a record does
+/// not fold into it at all, so "no positions" is the absence of a `WitnessedRefPositions`,
+/// never a degenerate one.
+///
+/// # Two types, one per axis — and why this one is not in `witness.rs`
+///
+/// The fold works in reference coordinates and `finalise` resolves into locus coordinates
+/// against the record's **final** footprint. Those are two axes, and they get two types for
+/// the reason that minted `LocusLen`: same-shaped quantities that can be transposed get two
+/// types so the compiler refuses the mix (arch §3). This one is the *fold's*, `pub(super)`
+/// and private to the walk, so it lives with the walk; only the locus-axis vocabulary is
+/// public (arch *Module home*). The canonical form itself is shared — one
+/// [`canonicalise_runs`](crate::ng::locus_generation::witness::canonicalise_runs), so the
+/// two types cannot drift on what "canonical" means.
+///
+/// # Half-open, where `RefSpan` was inclusive
+///
+/// `RefSpan` is inclusive of both ends, matching `alignment_start`/`alignment_end`. A *set*
+/// is held half-open instead, because merging is where an off-by-one silently changes the
+/// answer: with half-open runs, "touching" is `start == end` and needs no `+ 1` anywhere,
+/// and the fold already accumulates half-open before converting on the way out
+/// (`apply_events_into`'s `witnessed` is `(start, end)` exclusive today). `witness_of` is
+/// the only conversion off this type, so the convention stays inside the walk.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WitnessedRefPositions(SmallVec<[(u32, u32); 2]>);
+
+// Removed at C1, which is where the fold starts returning this instead of a `RefSpan`.
+// `expect` rather than `allow` so that wiring it up *fails* until the attribute goes — the
+// type's own tests keep the struct itself live, so only the accessors need it.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "wired into the fold at C1; B3 is types-first")
+)]
+impl WitnessedRefPositions {
+    /// From runs in **any** order, normalised: sorted by start, then touching and
+    /// overlapping runs merged. Half-open `[start, end)`. `None` for an empty iterator or
+    /// any run with `start >= end`.
+    pub(super) fn new(runs: impl IntoIterator<Item = (u32, u32)>) -> Option<Self> {
+        let mut runs: SmallVec<[(u32, u32); 2]> = runs.into_iter().collect();
+        canonicalise_runs(&mut runs).then_some(Self(runs))
+    }
+
+    /// The runs, in canonical order, half-open `[start, end)` in reference coordinates.
+    pub(super) fn runs(&self) -> impl ExactSizeIterator<Item = (u32, u32)> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// The first witnessed position — the old `RefSpan::start`.
+    pub(super) fn start(&self) -> u32 {
+        // PANIC-FREE: the set is never empty, which `new` is the only way to build.
+        self.0.first().expect("a witnessed set is never empty").0
+    }
+
+    /// One past the last witnessed position — the old `RefSpan::end`, half-open.
+    pub(super) fn end_exclusive(&self) -> u32 {
+        // PANIC-FREE: as above.
+        self.0.last().expect("a witnessed set is never empty").1
+    }
 }
 
 /// The support one allele bucket has accumulated — **ng's own**, and production's
@@ -2919,6 +2986,64 @@ mod tests {
         assert!(
             record.alleles[1..].iter().all(|a| a.support.num_obs > 0),
             "every non-REF bucket must support a read: {buckets:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // B3 — the fold's witnessed set, in reference coordinates.
+    // -----------------------------------------------------------------
+
+    /// **`RefSpan`'s invariant, carried over verbatim: there is no empty set.** A read that
+    /// witnessed nothing inside a record does not fold into it, so "no positions" is the
+    /// absence of a `WitnessedRefPositions` and never a degenerate one — the same statement
+    /// `RefSpan`'s doc makes, on a type that now holds several runs.
+    #[test]
+    fn a_witnessed_ref_set_is_never_empty_and_never_holds_an_empty_run() {
+        assert!(WitnessedRefPositions::new([]).is_none());
+        assert!(
+            WitnessedRefPositions::new([(20, 20)]).is_none(),
+            "half-open, so start == end covers nothing",
+        );
+        assert!(
+            WitnessedRefPositions::new([(5, 9), (20, 20)]).is_none(),
+            "an empty run among good ones is rejected rather than dropped",
+        );
+    }
+
+    /// The reference axis normalises exactly as the locus axis does — same rule, one
+    /// implementation, asserted here so the *reference* type is not taken on trust.
+    #[test]
+    fn witnessed_ref_runs_sort_and_merge_and_keep_their_holes() {
+        let merged = WitnessedRefPositions::new([(20, 24), (5, 9), (9, 12)]).expect("non-empty");
+        assert_eq!(
+            merged.runs().collect::<Vec<_>>(),
+            vec![(5, 12), (20, 24)],
+            "out of order, and the two that touch at 9 are one run",
+        );
+        assert_eq!(merged.start(), 5, "the old RefSpan::start");
+        assert_eq!(
+            merged.end_exclusive(),
+            24,
+            "the old RefSpan::end, half-open — this is the +1 the set convention removes",
+        );
+    }
+
+    /// **A hole is what the type exists to hold**, and the reference axis is where the fold
+    /// first sees one: a spliced read's two exons, or an interior `N`. One run per exon,
+    /// not one span swallowing the intron.
+    #[test]
+    fn two_runs_with_a_hole_between_them_stay_two_runs() {
+        let spliced = WitnessedRefPositions::new([(100, 103), (118, 121)]).expect("non-empty");
+        assert_eq!(spliced.runs().len(), 2);
+        assert_eq!(
+            spliced.runs().collect::<Vec<_>>(),
+            vec![(100, 103), (118, 121)]
+        );
+        assert_eq!(
+            spliced.end_exclusive() - spliced.start(),
+            21,
+            "the span is 21 positions where only 6 were witnessed — which is why the fold \
+             cannot keep answering with a span",
         );
     }
 
