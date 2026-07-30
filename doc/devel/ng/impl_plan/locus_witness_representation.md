@@ -38,7 +38,7 @@ regression anchors — the canonicality property and the spliced fixture.
 ## Principles (how the order was chosen)
 
 - **The renames land first, alone, and behaviour-free.** They are by far the largest diff — 193 uses
-  of one type, 100 of one field — and entangling them with a behaviour change would make every
+  of one type, 102 of one field — and entangling them with a behaviour change would make every
   later diff unreadable and `git bisect` useless. Milestone A changes no bytes of output.
 - **Types first, then implementation**, within every milestone (project rule).
 - **Compute before you act.** C1 builds the witnessed set and *still* returns `None` on a hole, so
@@ -54,15 +54,19 @@ regression anchors — the canonicality property and the spliced fixture.
 
 ## Preconditions (already in place — the executor confirms these before A1)
 
-1. Branch `ng-generic` at Milestone D, with `cargo test --release --lib ng::locus_generation`
-   green (275 tests, including `ng_agrees_with_production_where_production_fabricated_nothing`
-   and `ng_emits_the_same_bytes_in_a_second_process`).
-2. The STR dump byte-identity oracle runs on the committed fixture and on a tomato CRAM.
-3. **The §8 measurement probe is reverted.** It was throwaway instrumentation in
-   `open_record.rs`, `cigar_cursor.rs`, `pileup/mod.rs` and `ng_generic_loci_dump.rs`; its numbers
-   live in spec §8 and its spliced fixture is rebuilt properly at D6. Starting from a probe-free
-   tree keeps A1's diff to the rename.
-4. The four specs and the arch doc are committed and use the new vocabulary, so the code is what is
+1. **Worktree `/Users/jose/devel/pop_var_caller-ng-pileup`, branch `ng-pileup-generator`.** It
+   carries both the docs and the generator code since the `ng-generic` merge, so no branch is
+   created and nothing is read out of the sibling worktree. Confirmed by the counts each step
+   cites, which were taken in this tree.
+2. `cargo test --release --lib ng::locus_generation` green — 275 tests, including
+   `ng_agrees_with_production_where_production_fabricated_nothing` and
+   `ng_emits_the_same_bytes_in_a_second_process`.
+3. The STR dump byte-identity oracle runs on the committed fixture and on a tomato CRAM.
+4. **No measurement probe in this tree.** The §8 instrumentation was throwaway and lives
+   uncommitted in the *other* worktree (`pop_var_caller-ng-generic`); its numbers are in spec §8
+   and its spliced fixture is rebuilt properly at D6. **Do not port it across** — a probe-free tree
+   is what keeps A1's diff to the rename.
+5. The four specs and the arch doc are committed and use the new vocabulary, so the code is what is
    out of step — not the docs.
 
 ---
@@ -74,7 +78,7 @@ expectations is a step that did more than rename.
 
 - ☐ **A1.** `ObservedSequence` → `SequenceObservation`, and the field
   `SampleLocusObservations::observed_sequences` → `observations`. 39 uses of the type across 7
-  files, 100 of the field. *Depends:* —. *Source:* spec §1, §4.
+  files, 102 of the field. *Depends:* —. *Source:* spec §1, §4.
 - ☐ **A2.** `ReadCoverage` → `ReadWitness`, and the field `read_coverage` → `read_witness`. 193 and
   91 uses across 12 files, including the `read_coverage` column in both dump tools' TSV output.
   *Depends:* A1. *Source:* arch §3.

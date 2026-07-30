@@ -2,7 +2,9 @@
 
 **Status:** draft, 2026-07-30. **No code yet — this settles the design.** Code-facing companion:
 [`../arch/locus_witness_representation.md`](../arch/locus_witness_representation.md) (the types and
-signatures); implementation plan not yet written. Changes the **shared** locus type
+signatures); build order in
+[`../impl_plan/locus_witness_representation.md`](../impl_plan/locus_witness_representation.md).
+Changes the **shared** locus type
 ([`locus_generation.md`](locus_generation.md)), so it moves both generators: the generic pileup one
 ([`locus_generation_pileup.md`](locus_generation_pileup.md)) and the STR one
 ([`locus_generation_ssr.md`](locus_generation_ssr.md)).
@@ -238,7 +240,7 @@ whatever the encoding, the out-of-range case is an error or an assertion, not a 
 
 | what | where | how it changes |
 |---|---|---|
-| the shared type and the field holding it | `mod.rs:145`, `mod.rs:44` | `ObservedSequence` → `SequenceObservation` (§1), and `observed_sequences` → `observations` — decided (owner, 2026-07-30). `SampleLocusObservations::observations` says the whole thing at the definition, so the field need not repeat "sequence"; `sequence_observations` was the alternative, exactly the plural of the element type and proof against drift, and it lost on length at 100 sites. Mechanical and wide: **39 uses of the type across 7 files, 100 of the field** |
+| the shared type and the field holding it | `mod.rs:145`, `mod.rs:44` | `ObservedSequence` → `SequenceObservation` (§1), and `observed_sequences` → `observations` — decided (owner, 2026-07-30). `SampleLocusObservations::observations` says the whole thing at the definition, so the field need not repeat "sequence"; `sequence_observations` was the alternative, exactly the plural of the element type and proof against drift, and it lost on length at 100 sites. Mechanical and wide: **39 uses of the type across 7 files, 102 of the field** |
 | the fold's own accumulator | `open_record.rs:237` | `ObservationRow` holds the same information as the public type in the fold's layout, so it needs a name that is not "row" once the public one is an observation. **26 uses with `ObservationKey` across 4 files.** Settled in the [arch doc](../arch/locus_witness_representation.md) §3: `KeyedObservation`, with `ObservationKey` keeping its name |
 | `ReadWitness` + constructors | `mod.rs:213-347` | `Observed` becomes `Partial` and its payload becomes a set; `from_left`/`from_right` keep their signatures and build single-run sets; a third constructor for an interior run, which is what the deferred note asked for. **The type is `ReadCoverage` today and is renamed here** — "coverage" reads as depth, which the type's own doc already has to correct; 193 uses of the type and 91 of the field across 12 files. Decision record in the [arch doc](../arch/locus_witness_representation.md) §3 |
 | `is_flush_left` / `is_flush_right` / `positions_covered` | `mod.rs:329-347` | derivations from the set; same signatures |
