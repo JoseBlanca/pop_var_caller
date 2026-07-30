@@ -98,7 +98,7 @@ expectations is a step that did more than rename.
 
 ## Milestone B — the witness types (types first, nothing wired)
 
-- ☐ **B1.** Create `src/ng/locus_generation/witness.rs` and **move** `ReadWitness` and `LocusLen`
+- ✅ **B1.** Create `src/ng/locus_generation/witness.rs` and **move** `ReadWitness` and `LocusLen`
   into it, re-exported from `locus_generation` so no import path changes. Pure move, no edits.
   *Depends:* A6. *Source:* arch *Module home*.
   **Two items the Milestone A review deferred here, because the move is where they cost
