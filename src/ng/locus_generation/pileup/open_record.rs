@@ -1147,6 +1147,15 @@ impl OpenPileupRecordTable {
 ///    REF base. The cursor's CIGAR walk satisfies this by
 ///    construction (the M op preceding an I/D op emits its last
 ///    Match before the I/D's anchored event).
+/// 4. Each event's **reach** — `anchor_pos() + footprint_span()`,
+///    the first position past what it witnesses — is
+///    non-decreasing. Preconditions 2 and 3 do *not* imply this:
+///    two `Deletion`s anchored at *a* with `deleted_len` 5 then 2
+///    satisfy both and reach *a+6* then *a+3*. The cursor's CIGAR
+///    walk cannot emit that — a read deletes a run once, and the
+///    op after a D op starts at the far end of it — so this is a
+///    demand on new callers rather than a property of the current
+///    ones, and it is what makes the run below grow monotonically.
 pub(super) fn apply_events_into(
     allele_seq: &mut Vec<u8>,
     record_pos: u32,
@@ -1163,6 +1172,19 @@ pub(super) fn apply_events_into(
             a <= b
         }),
         "apply_events_into: events must be sorted by (anchor, Match<Insertion<Deletion); got {events:?}",
+    );
+
+    // Precondition 4, asserted separately from the sort because sorting does not
+    // imply it: a longer deletion behind a shorter one at the same anchor is
+    // sorted and reaches backwards. This is the assertion the `run_end.max(…)`
+    // below defends against in release builds.
+    debug_assert!(
+        events.windows(2).all(|w| {
+            let a = w[0].anchor_pos().saturating_add(w[0].footprint_span());
+            let b = w[1].anchor_pos().saturating_add(w[1].footprint_span());
+            a <= b
+        }),
+        "apply_events_into: each event's reach (anchor + footprint_span) must be non-decreasing; got {events:?}",
     );
 
     // Skip indices already consumed by an event so an indel does not re-emit an
@@ -1202,6 +1224,16 @@ pub(super) fn apply_events_into(
                         allele_seq.clear();
                         return None;
                     }
+                    // `.max()`, not a plain `event_end`: under precondition 4 the
+                    // two are equal — which is why no test can tell them apart,
+                    // and why deleting the `.max()` fails nothing. It is the
+                    // release build's defence for the input that precondition
+                    // rules out (two deletions at one anchor, the longer first),
+                    // where a plain assignment would shrink the run below what
+                    // the read witnessed. It defends the **stated** precondition,
+                    // not the cursor's output: the cursor cannot produce that
+                    // input, so the debug assertion above is where a caller that
+                    // could learns so.
                     witnessed = Some((run_start, run_end.max(event_end)));
                 }
             }
@@ -2434,6 +2466,66 @@ mod tests {
                 end: 103
             },
             "the deleted positions are witnessed, so 103 continues the run"
+        );
+    }
+
+    // --- Precondition 4: the events' reach is non-decreasing -----
+    //
+    // Two `Deletion`s anchored at the same position, the longer
+    // first, satisfy the sort precondition and reach backwards:
+    // `deleted_len` 5 then 2 reach 106 then 103. The cursor cannot
+    // emit that — a read deletes a run once — which is why the
+    // `run_end.max(event_end)` that survives it is not reachable
+    // from any real input, and why nothing failed when a reviewer
+    // deleted the `.max()`. Both ends of the contract are pinned,
+    // as `subtract_contribution`'s pair below does: in debug the
+    // input trips the assertion, in release the `.max()` keeps the
+    // run at what the read witnessed.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "reach (anchor + footprint_span) must be non-decreasing")]
+    fn apply_events_two_deletions_at_one_anchor_trip_the_reach_assertion_in_debug() {
+        let ref_seq = b"ACGTACGTAC"; // positions 100..=109
+        let events = vec![
+            ReadEvent::Deletion {
+                anchor_ref_pos: 100,
+                deleted_len: 5,
+                bq_proxy: 30,
+            },
+            ReadEvent::Deletion {
+                anchor_ref_pos: 100,
+                deleted_len: 2,
+                bq_proxy: 30,
+            },
+        ];
+        let _ = apply_events(100, ref_seq, &events);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn apply_events_a_shorter_deletion_behind_a_longer_one_cannot_shrink_the_run_in_release() {
+        let ref_seq = b"ACGTACGTAC"; // positions 100..=109
+        let events = vec![
+            ReadEvent::Deletion {
+                anchor_ref_pos: 100,
+                deleted_len: 5,
+                bq_proxy: 30,
+            },
+            ReadEvent::Deletion {
+                anchor_ref_pos: 100,
+                deleted_len: 2,
+                bq_proxy: 30,
+            },
+        ];
+        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("one run");
+        assert_eq!(bases, b"A", "the anchor base once, from the first deletion");
+        assert_eq!(
+            witnessed,
+            RefSpan {
+                start: 100,
+                end: 105
+            },
+            "the run keeps the longer deletion's reach; a plain assignment would report 102",
         );
     }
 
