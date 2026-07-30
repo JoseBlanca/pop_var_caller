@@ -128,5 +128,11 @@ projection parity, the dump tool and its six new fixtures, and the throughput me
 
 **One thing to carry forward rather than rediscover:** the stage-1 differential **dies** when plan 3
 lands, because the two walkers then differ by design. What survives as a permanent regression anchor
-is narrower — loci where every folded read witnessed the whole footprint must agree with production
-forever (spec §3). Plan 3 builds that; this plan builds the thing it is derived from.
+is narrower (spec §3). Plan 3 builds that; this plan builds the thing it is derived from.
+
+> **Corrected 2026-07-30, after plan 3 built it.** This sentence used to say the anchor was "loci
+> where every folded read witnessed the whole footprint must agree with production forever". **That
+> is false**, and it is the sentence that told plan 3 what to build, so it is corrected here rather
+> than only downstream: a read can witness every position of the final footprint and production still
+> be wrong about it, via the stale widen that is now spec §3's sixth divergence class. The anchor is a
+> **fixture** on which production fabricates nothing, not a filter over one where it does.

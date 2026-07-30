@@ -239,8 +239,14 @@ HG002 and a tomato CRAM, under the `PVC_PARITY_CASES` convention.
 *Stage 2 — the ng-shaped output is a projection plus a named list of divergences.* Once the copy
 emits `SampleLocusObservations`, parity runs through a total `project(PileupRecord) ->
 SampleLocusObservations` in the test module. **An earlier draft claimed exactly two divergence
-classes; there are five**, and naming them all is the point — an unlisted class gets triaged as a
-listed one, which would contaminate the measurement §12 exists to produce:
+classes; there are six**, and naming them all is the point — an unlisted class gets triaged as a
+listed one, which would contaminate the measurement §12 exists to produce.
+
+The count has moved twice, and how the sixth was found is worth one sentence, because the same
+method is the only one that will find a seventh: **D1 built the permanent anchor, and the anchor
+failed on its first run.** Not a count arrived at by reading the two walkers — a count arrived at
+by asserting equality where equality was believed to hold and being shown a locus where it did
+not.
 
 | divergence | why | how it is checked |
 |---|---|---|
@@ -249,6 +255,34 @@ listed one, which would contaminate the measurement §12 exists to produce:
 | `reads_without_observation` / `reads_discarded_by_cap` are non-zero | production keeps neither per record | asserted against a hand-counted fixture, not against production |
 | production emits a REF bucket with `num_obs == 0`; ng emits no such row | production creates `alleles[0]` at record open regardless ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)); ng derives rows from reads that folded | the projection drops zero-support rows before comparing, and that drop is asserted to be the only one |
 | row **order** | production's is bucket-creation order; ng's is whatever the fold yields | ng **sorts** before emitting (below), so the comparison is against a sorted projection |
+| **production's stale widen**: a read folded before the record widened keeps a **reference tail** production appended on its behalf, where ng's row says what the read witnessed | see below — it is the one class that is *production being wrong*, not the two walkers describing the same evidence differently | `stale_widen_shape` ([parity.rs:2107](../../../../src/ng/locus_generation/pileup/parity.rs#L2107)): every production row ng does not have must be some ng row's bases plus a reference tail, with the per-`bases` evidence unmoved |
+
+**The sixth class, and the mechanism, because the obvious version of it is wrong.** It is tempting
+to say production's `widen` "re-folds nothing". It does not: `process_position` re-folds every
+**contributor** whose events overlap an affected record, subtract-then-add, and production's own
+comment argues that appending is equivalent to re-folding *"modulo the new bytes never being
+event-modified by this read"*
+([open_record.rs:405-410](../../../../src/pileup/walker/open_record.rs#L405)).
+
+**The reads that "modulo" excludes are the class.** `widen` appends the new reference bases to
+every allele's `seq` ([open_record.rs:416](../../../../src/pileup/walker/open_record.rs#L416)), and
+records not affected at a step are deliberately not re-folded, because folding again would
+double-count ([open_record.rs:658-661](../../../../src/pileup/walker/open_record.rs#L658)). So a
+read that is **not a contributor at the widening step** keeps that appended tail unrevised. Two
+kinds are: a read still live but silent there (an `N`, an adaptor mask, a ref skip), and a read
+that has already expired.
+
+ng answers each differently, and only the first is a function production lacks:
+`refold_live_reads` ([open_record.rs:1441](../../../../src/ng/locus_generation/pileup/open_record.rs#L1441))
+re-places the **live non-contributors** — it skips contributors precisely because the fold loop is
+about to re-fold them — and an **expired** read cannot be reached by either walker, its cursor
+having gone with it, so ng leaves its row saying what it saw where production leaves the tail.
+
+**It is not class 1 and must not be filed there.** Class 1 is "a read did not witness the whole
+footprint". Here the read may have witnessed every position of the final footprint and production
+is wrong about it anyway. Filing it under class 1 would put reads production **mis-folded** into
+the count of reads production **credited with bases they never sequenced** — and §13.2 asks for
+those two as separate three-number measurements.
 
 **Row order has to be specified, not left to the fold.** ng's rows are derived from a per-read map
 (`folded_reads` is an `AHashMap`, [open_record.rs:90](../../../../src/pileup/walker/open_record.rs#L90)),
@@ -262,7 +296,28 @@ requirement on the same shared type.
 proves the transcription and nothing about the two changes that reshape the output most — the
 witnessed-extent rule and the group split. Those are stage 2's, and stage 2 has no byte-identity to
 lean on. That asymmetry is why §12 requires stage 1 to be shown *discriminating* before it is retired,
-and why the permanent anchor is the narrower complete-reads differential rather than stage 1 itself.
+and why a **permanent anchor** has to replace it — some differential that keeps holding after stage 1
+is gone.
+
+**What that anchor is, corrected: a fixture, not a filter.** This spec used to say it was the
+narrower *complete-reads* differential — loci where every folded read witnessed the whole footprint
+had to agree with production forever. **That is false, and class 6 above is why:** a read can
+witness every position of the final footprint and production still be wrong about it, so filtering
+on complete reads does not select an agreeing set. D1 found the counter-example on the anchor's
+first run.
+
+The anchor is therefore built on a fixture where the *cause* is absent rather than a filter over one
+where it is not. `generate_uniform_events` gives every read on a contig **one shared event set**
+(one CIGAR, one start; bases, qualities, MAPQ, strand and pairing still vary), so every widening
+event is an event of every live read, every live read is a contributor at every widen, and none is
+left stale. Records still widen — an earlier draft asserted they would not and was contradicted at
+7 widens on its first case — so what the fixture removes is the *staleness*, not the widen.
+
+The property to state, then, is **"on a fabrication-free fixture the two walkers agree at every
+locus"**, and it is worth knowing that the complete-reads filter is retained on top of it and
+currently excludes **nothing**: measured, 216,203 of 216,203 loci qualify, because uniform events
+leave no way to be blind over part of a footprint. The filter is a tripwire for fixture drift, not
+the thing doing the work — and a reader of the test should not have to guess which.
 
 *One thing the harness must get right:* feed **the same** `PreparedRead` stream to both walkers.
 ng's read preparation uppercases the reference where production does not
@@ -1108,12 +1163,24 @@ in the order they should be built.
    must be shown to exercise mate overlap, adaptor masking, widening, re-folds, and the column cap,
    by mutating each and watching the differential fail.*
 2. **The ng-shaped output is a projection.** §3's stage-2 assertion, with every divergent locus
-   falling into one of the **five** named classes and counted, not excused. The count of
+   falling into one of the **six** named classes and counted, not excused. The count of
    partial-coverage divergences is **the deliverable, not a by-product**: how many loci, how many
    reads, and how many reference bases production credits to reads that never sequenced them — and,
-   separately, the same three numbers for the reads `widen` extended after they had already left the
-   active set (§6). That is the measurement that turns the indel-deficit hypothesis into a result or
-   kills it.
+   **separately, the same three numbers for the stale widen** (§3, class 6). That is the measurement
+   that turns the indel-deficit hypothesis into a result or kills it.
+
+   **Which reads the second triple is about — corrected, because the original wording named the
+   wrong population.** It used to say "the reads `widen` extended after they had already left the
+   active set". Those reads leave ng holding an `Observed` row, so the census files them under
+   **class 1**, whose triple already counts them: class 6 is gated on there being *no* partial
+   witness ([parity.rs:1999-2000](../../../../src/ng/locus_generation/pileup/parity.rs#L1999)).
+   The population the second triple is owed for is the other kind of non-contributor — a read
+   **still live** at the widening step but silent there — where ng re-places the read and
+   production keeps the reference tail. **Both numbers are still owed:** the census currently
+   carries class 6 as a locus count only, with no reads and no reference bases
+   ([parity.rs:1699](../../../../src/ng/locus_generation/pileup/parity.rs#L1699)), so at the
+   default case count it can say production mis-folds reads at 264 loci and cannot say how many
+   reads or how many bases moved.
 3. **A dump tool over a committed fixture** — `examples/ng_generic_loci_dump.rs`, following
    `examples/ng_ssr_loci_dump.rs`: a `#`-prefixed `key=value` counts header, then a TSV. Asserted,
    so it is a regression test and not a demo:

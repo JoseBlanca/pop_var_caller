@@ -100,8 +100,11 @@
 //! # This harness dies in plan 3, by design
 //!
 //! Plan 3 makes the two walkers differ on purpose — the no-fill haplotype builder,
-//! REF-only widening, the read-group split. What survives is narrower: loci where every
-//! folded read witnessed the whole footprint must agree forever. **So this is the last
+//! REF-only widening, the read-group split. What survives is narrower, and **narrower in a
+//! different way than this header used to claim**: not "loci where every folded read
+//! witnessed the whole footprint", which class 6 disproves — a read can witness every
+//! position and production still be wrong about it — but *every* locus of a fixture on which
+//! production fabricates nothing (`generate_uniform_events`; spec §3). **So this is the last
 //! moment the baseline can be banked**, and `the_generator_exercises_what_the_port_can_break`
 //! is what says the banking is worth anything: a differential that has never been shown
 //! to fail is a claim, not evidence.
@@ -1618,11 +1621,11 @@ const SEEDS: [u64; 4] = [
     0xDEAD_BEEF_CAFE,
 ];
 
-/// **The five divergence classes spec §3 names**, as the set present at one locus.
+/// **The six divergence classes spec §3 names**, as the set present at one locus.
 ///
 /// A locus may be in several at once — a widened record with two read groups and a blind
 /// read is in three — so this is a set of flags rather than an enum. The rule D1 enforces is
-/// not "at most one class" but **"no divergence outside the five"**: [`classify_locus`]
+/// not "at most one class" but **"no divergence outside the six"**: [`classify_locus`]
 /// panics when two loci differ and no class is present, which is the whole of "counted, not
 /// excused".
 ///
@@ -1667,9 +1670,14 @@ struct DivergenceClasses {
     /// and production is wrong about it anyway. Filing it under "a read did not witness the
     /// whole footprint" would put reads production mis-folded into the count of reads
     /// production credited with bases they never sequenced, which is the deliverable, and
-    /// spec §13.2 asks for the two numbers **separately** ("the same three numbers for the
-    /// reads `widen` extended after they had already left the active set"). §3's table
-    /// naming five is what this class corrects.
+    /// spec §13.2 asks for the two numbers **separately**. §3's table listed five until this
+    /// class was added to it; it now lists six, and §3 carries the mechanism.
+    ///
+    /// **Which reads this is, and it is not the ones §13.2 originally named.** The gate below
+    /// is `!classes.partial_witness`, so a read that had already **expired** before the widen
+    /// is *not* here — it leaves ng an `Observed` row, which makes the locus class 1, whose
+    /// triple counts it. This class is the other non-contributor: a read **still live** at the
+    /// widening step but silent there. Spec §13.2 records that correction.
     stale_widen: bool,
 }
 
@@ -1922,7 +1930,7 @@ fn locus_chain_ids(locus: &SampleLocusObservations) -> Vec<ChainId> {
     ids
 }
 
-/// **Whether ng's locus differs from the projection, and if so under which of the five
+/// **Whether ng's locus differs from the projection, and if so under which of the six
 /// classes — with every difference outside them a panic** (spec §3, §13.2).
 ///
 /// This replaces `classify_record`, whose own doc said what it was missing: it checked only
@@ -2036,7 +2044,7 @@ fn classify_locus(
     let exact = comparable(ours) == comparable(theirs);
     assert!(
         exact || classes.any(),
-        "{where_}: ng's locus differs from the projection and none of spec §3's five \
+        "{where_}: ng's locus differs from the projection and none of spec §3's six \
          classes is present — an unlisted divergence, which is the one thing this census \
          may not absorb.\n  ng   {:?}\n  prod {:?}",
         comparable(ours),
@@ -2524,10 +2532,20 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
     );
 }
 
-/// The anchor class, spec §3's own words: *loci where every folded read witnessed the whole
-/// footprint*.
+/// The **filter** the anchor applies on top of its fixture: *loci where every folded read
+/// witnessed the whole footprint*.
 ///
-/// Both halves are needed and neither is redundant. Every row `Complete` says the reads that
+/// **This is not the anchor's predicate** — spec §3 used to say it was, and class 6 disproves
+/// it. The anchor's guarantee comes from the fixture (`generate_uniform_events`, which leaves
+/// no read stale); this filter rides on top as a tripwire for fixture drift.
+///
+/// **And on that fixture it currently excludes nothing** — measured, 216,203 of 216,203 loci
+/// qualify, because uniform events leave no way to be blind over part of a footprint. So
+/// "both halves are needed" is *unverified* rather than false: neither half excludes a locus
+/// today, and both would start to if the fixture ever gained a partial witness. Each half is
+/// stated below so that whichever fires first is legible.
+///
+/// Every row `Complete` says the reads that
 /// **produced** an observation each saw the whole footprint; `reads_without_observation`
 /// covers the reads that saw it in pieces and so produced none at all (A5) — those have no
 /// row to be `Observed`, and production folded them anyway, with the gaps filled.
@@ -2551,7 +2569,7 @@ fn every_read_witnessed_the_whole_footprint(locus: &SampleLocusObservations) -> 
 /// length, at the same anchors, with the same REF bytes, the same error items and the same
 /// `RunSummary`. Anything else is a bug rather than a design.
 ///
-/// Returns the census: every locus classified, and every difference outside the five classes
+/// Returns the census: every locus classified, and every difference outside the six classes
 /// a panic ([`classify_locus`]).
 #[track_caller]
 fn assert_only_allele_bytes_moved(
@@ -2612,7 +2630,7 @@ fn assert_only_allele_bytes_moved(
     census.float_only += float_only_divergences(&ours.records, &theirs.records);
 }
 
-/// **Every divergence is one of the five, each is counted, and here is how big the first one
+/// **Every divergence is one of the six, each is counted, and here is how big the first one
 /// is** — spec §3's stage-2 assertion and §13.2's deliverable, in one pass.
 ///
 /// The general fixture — partial reads, adaptor boundaries, `N` bases, ref-skips — is where
@@ -2625,7 +2643,7 @@ fn assert_only_allele_bytes_moved(
 ///   bytes and the same `RunSummary`.
 /// - **No read is created or lost**, only moved — [`assert_reads_are_accounted_for`], at
 ///   every locus.
-/// - **A divergence outside the five classes is a panic, not a bucket.** That is the whole
+/// - **A divergence outside the six classes is a panic, not a bucket.** That is the whole
 ///   of "counted, not excused": [`classify_locus`] reads each class off ng's own rows and
 ///   the projection's drops, and fails on anything left over.
 /// - **Every class must fire.** A class counted zero for a whole census is a branch nothing
@@ -2634,8 +2652,11 @@ fn assert_only_allele_bytes_moved(
 ///
 /// The three numbers reported are the ones D3 re-measures on real data.
 ///
-/// **Six, not five.** Spec §3's table lists five; building the anchor found a sixth —
-/// production's `widen` re-folding nothing — that is not a special case of any of them. See
+/// **Six, and the sixth was found by this harness rather than by reading.** Spec §3's table
+/// listed five; building the anchor produced a locus none of them explained, and §3 now lists
+/// six with the mechanism. It is **not** "production's `widen` re-folds nothing" — production
+/// re-folds every *contributor* into an affected record. What it leaves unrevised is the
+/// appended reference tail on a read that was **not** a contributor at the widening step. See
 /// [`DivergenceClasses::stale_widen`].
 /// # Two passes, because one read group and two prove different things
 ///

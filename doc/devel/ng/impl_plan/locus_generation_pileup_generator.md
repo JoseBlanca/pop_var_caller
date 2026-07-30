@@ -34,8 +34,11 @@ whether the change was worth making (Milestone D).
   crashes — a mis-derived extent is a wrong depth, a mis-clamped walk is missing evidence. Each is
   **its own commit with its oracle green before and after**, so `git bisect` can find it.
 - **Verify against ground truth, then against a definition.** A's oracle is still production, on the
-  class ng does not change (reads that witnessed the whole footprint). Beyond that class there is no
-  oracle, so the new behaviour is pinned by fixtures written to fail the *wrong* implementation.
+  loci ng does not change. **That class is narrower than "reads that witnessed the whole footprint",
+  which this line used to name:** production can be wrong about a read that witnessed everything
+  (spec §3, class 6), so the oracle holds on a fixture where production fabricates nothing rather
+  than on a filter over one where it does. Beyond it there is no oracle, so the new behaviour is
+  pinned by fixtures written to fail the *wrong* implementation.
 - **Ungated / container builds.** All `cargo` via `./scripts/dev.sh`; a native host build at
   completion.
 
@@ -225,20 +228,27 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 ## Milestone D — prove it, then measure it
 
 - ✅ **D1 — stage-2 parity.** `project(PileupRecord) -> SampleLocusObservations` in the test module;
-  every divergence falls in one of the **five** named classes and is counted, not excused. Build the
-  **permanent** anchor here too — loci where every folded read witnessed the whole footprint must
-  agree with production forever; that is what replaces the stage-1 differential this plan retires.
-  *Depends:* C4. *Source:* spec §3.
+  every divergence falls in one of the **six** named classes and is counted, not excused. Build the
+  **permanent** anchor here too — *every* locus of a fixture on which production fabricates nothing;
+  that is what replaces the stage-1 differential this plan retires. *Depends:* C4. *Source:* spec §3.
+  **As written this step said "five" classes and defined the anchor as "loci where every folded read
+  witnessed the whole footprint"; D1 disproved both and spec §3 now carries the corrected form.**
 
   **Two findings changed the step, both recorded in the
   [D report](../../reports/implementations/ng_locus_generation_pileup_generator_d_2026-07-29.md):**
 
-  - **There are six classes, not five.** Production's `widen` appends reference bases to every
-    bucket and re-folds nothing — `refold_live_reads` is *ng's*, added by A3 — so a record that
-    widens after a read folded into it leaves production holding that read's haplotype against a
-    stale footprint. The read can be a **complete** witness and production still wrong about it, so
-    this is not class 1, and §13.2 wants the two counts separately. Spec §3's table needs the sixth
-    row; carried to Checkpoint D rather than edited in.
+  - **There are six classes, not five.** ✅ **Spec §3 now carries the sixth row and the
+    mechanism (2026-07-30).** Production's `widen` appends reference bases to every bucket, and a
+    read that was **not a contributor at the widening step** never has that tail revised — so
+    production holds that read's haplotype against a stale footprint. The read can be a
+    **complete** witness and production still wrong about it, so this is not class 1, and §13.2
+    wants the two counts separately.
+
+    **The mechanism as first written here was too strong and is corrected in §3:** production does
+    *not* "re-fold nothing" — `process_position` re-folds every contributor into an affected
+    record, and production's own comment argues the append is equivalent to a re-fold *"modulo the
+    new bytes never being event-modified by this read"*. `refold_live_reads` (ng's, A3) is what
+    covers the reads that modulo excludes.
   - **The anchor's predicate is insufficient**, for the same reason: "every folded read witnessed
     the whole footprint" does not select an agreeing class. The anchor is therefore built on a new
     fixture — every read on a contig sharing one event set, so every read is re-folded by its own

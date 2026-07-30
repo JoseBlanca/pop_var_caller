@@ -452,9 +452,21 @@ harness dies when §1.2 lands, because the port then *deliberately* differs. It 
 shown to discriminate before it is retired: mutate mate overlap, adaptor masking, widening, the
 re-fold and the column cap in turn, and watch it fail (spec §12).
 
-**What survives is a narrower permanent differential**: on loci where every folded read spans the
-final footprint, ng and production must agree **forever** — that set is untouched by every change in
-§1.2, so it is a real regression anchor rather than a snapshot. Loci outside it are the divergence,
+**What survives is a narrower permanent differential**, and **this paragraph had it wrong twice**
+(corrected 2026-07-30):
+
+- It said "every folded read **spans** the final footprint". Spanning is an *alignment* test, and
+  spec §6's boxed warning is precisely that "a coverage tag derived from the alignment span is
+  therefore blind to all four" fabrication primitives. The property is what a read **witnessed**,
+  from its events — restating the anchor in span vocabulary re-introduces the confusion the whole
+  §1.2 change exists to remove.
+- It said such loci "must agree **forever**". They need not: a read can witness every position of
+  the final footprint and production still be wrong about it, through the stale widen that is spec
+  §3's sixth divergence class.
+
+The anchor is therefore **every** locus of a fixture on which production fabricates nothing — every
+read on a contig sharing one event set, so no read is left stale — and the complete-witness test
+rides on top as a tripwire for fixture drift (spec §3). Loci outside it are the divergence,
 enumerated and counted, and that count is the deliverable (spec §12).
 
 **The dump tool** `examples/ng_generic_loci_dump.rs` is the definition of done, asserted on a
