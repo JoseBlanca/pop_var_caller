@@ -127,3 +127,58 @@ by reading.
 `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean;
 `cargo test --lib` **2,725 passed** (2,724 + the new test); the example's 10 tests green;
 `cargo doc --no-deps` still 12 pre-existing unresolved links.
+
+---
+
+# Checkpoint D's answers, applied
+
+**Date:** 2026-07-30. The owner answered the three carried items: the `to_pileup_record`
+conversion was left to my judgement, and the read-group grain is **settled — per-`@RG` stays**,
+because the statistical models for both SNP and STR calling need the evidence per library. No
+measurement was needed for that; the requirement is the reason.
+
+## `to_pileup_record` is deleted
+
+The 44 inherited tests now assert on `SampleLocusObservations` directly. Production's positional
+idiom is carried across by four accessors on the locus type, test-only:
+
+| production | ng |
+|---|---|
+| `pos` | `anchor()` |
+| `ref_span()` | `footprint_len()` — the region's length, not a row's |
+| `alleles[0].support.*`, `alleles[0].chain_ids` | `reference_row().*` |
+| `alleles[0].seq` | `reference_bases` — a field, not a row |
+| `alleles[1].*` | `first_alt_row().*` |
+| `alleles.len()` | `observed_sequences.len()` |
+
+**`reference_row` and `first_alt_row` panic rather than return an `Option`, and that is the point.**
+The two ways ng's rows differ from production's buckets are exactly what a silent `None` would
+hide: a locus no read matched the reference at has **no** reference row, where production created
+the bucket regardless of support; and a locus whose reference-matching reads split by coverage or
+read group has **several**, where production had one merged bucket. A test landing on either is
+asking a question ng's type does not answer, so it fails loudly and names which case it hit.
+
+**Three inherited tests changed meaning, and each was checking less than it appeared to.** All
+three are the same input class: every read carries a non-reference base, so production's
+`alleles[0]` was an empty bucket.
+
+- `column_depth_cap_keeps_first_n_of_admission_order` asserted `alleles[0].support.num_obs == 0`
+  ("no surviving read matched REF") and `alleles.len() == 3` ("REF + 2 surviving SNP buckets").
+  ng emits **two** rows and no reference row. The new assertions say the same fact about the
+  evidence without counting a bucket that held none.
+- `paired_mates_with_overlapping_positions_share_chain_id` asserted
+  `alleles[0].chain_ids.is_empty()` — "REF chain ids are dropped". **That held for free:** both
+  mates carry `C` over an `A` reference, so `alleles[0]` was empty, and an empty bucket's id list
+  is empty whatever the rule does. The chain-id rule is checked where it can fail — in
+  `only_the_reads_that_departed_from_the_reference_carry_a_chain_id` and the dump fixture of the
+  same name, both of which put a genuinely reference-matching read beside a departing one.
+
+That is a fourth assertion this milestone found unable to fail, and it was found by the
+conversion rather than by mutation: moving to a type that cannot represent an empty bucket made
+the vacuity visible.
+
+**Validation:** fmt clean; clippy `--all-targets --all-features -D warnings` clean;
+`cargo test --lib` **2,725 passed**; the example's 10 tests green; `cargo doc --no-deps` still 12
+pre-existing unresolved links. The `open_record.rs` fixture that used the projection now reads
+ng's type; the two doc comments that cited `to_pileup_record`'s losses as live facts now say it is
+deleted.

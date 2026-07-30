@@ -30,6 +30,7 @@ use super::PreparedRead;
 use super::WalkerConfig;
 use super::run;
 use crate::fasta::{ChromRefFetchError, MultiChromRefFetcher};
+use crate::ng::locus_generation::ObservedSequence;
 use crate::ng::types::ReadGroupId;
 
 // ---------------------------------------------------------------------
@@ -136,11 +137,80 @@ pub fn paired_snp_reads(
     (a, b)
 }
 
-/// Drive `run` on a fixed input list, collecting emitted records.
-pub fn drive_walker(
-    reads: Vec<PreparedRead>,
-    ref_fetcher: MockFasta,
-) -> Vec<crate::pileup_record::PileupRecord> {
+/// **ng's locus type, which these inherited tests now assert on directly.**
+///
+/// Until this commit they ran through `to_pileup_record`, a back-projection onto production's
+/// `PileupRecord` — the adaptation spec §12 sanctions, taken at B2 as one reviewed function
+/// rather than 67 hand-edited assertions. But that projection **merged the rows ng splits** (by
+/// coverage and by read group) and dropped three fields production has no counterpart for, and at
+/// Milestone B its losses hid three live surfaces from the review. D1 removed the *differential's*
+/// need for it; this removes the suite's, so nothing in the module sees the emitted type through a
+/// lossy view any more.
+pub type Locus = crate::ng::locus_generation::SampleLocusObservations;
+
+/// Production's positional allele idiom, said in ng's terms — the two accessors that carry the
+/// inherited assertions across.
+///
+/// **They panic rather than return an `Option`, deliberately.** These tests were written against
+/// a type where `alleles[0]` and `alleles[1]` always existed, and the two ways ng differs are
+/// exactly what a silent `None` would hide: a locus no read matched the reference at has **no**
+/// reference row (production creates the bucket regardless of support), and a locus whose
+/// reference-matching reads split by coverage or read group has **several**. A test that lands on
+/// either is asking a question ng's type does not answer, and should be rewritten to assert on the
+/// rows it means — so it fails loudly and names which case it hit.
+impl Locus {
+    /// The row for reads matching the reference across this locus — production's `alleles[0]`.
+    pub fn reference_row(&self) -> &ObservedSequence {
+        let matching: Vec<&ObservedSequence> = self
+            .observed_sequences
+            .iter()
+            .filter(|row| row.bases.as_ref() == self.reference_bases.as_ref())
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "the locus at {:?} has {} rows of reference bases, not one: with none, no read \
+             matched the reference here and production's zero-support REF bucket has no ng \
+             counterpart; with several, they differ by coverage or read group and there is no \
+             single REF row to ask for. Rows: {:?}",
+            self.region,
+            matching.len(),
+            self.observed_sequences,
+        );
+        matching[0]
+    }
+
+    /// The 1-based anchor — production's `pos`, narrowed back to the `u32` these assertions
+    /// compare against.
+    pub fn anchor(&self) -> u32 {
+        u32::try_from(self.region.start.get()).expect("a fixture anchor fits u32")
+    }
+
+    /// How many reference positions the locus covers — production's `ref_span()`, which read it
+    /// off `alleles[0].seq.len()`. ng carries the region, so this is the region's length and does
+    /// not depend on a row existing.
+    pub fn footprint_len(&self) -> u32 {
+        u32::try_from(self.region.len()).expect("a fixture footprint fits u32")
+    }
+
+    /// The first row whose bases are *not* the reference's, in emission order — production's
+    /// `alleles[1]`. Note ng sorts rows by bases, where production's order was bucket creation,
+    /// so "the first alt" is the alphabetically first, not the first seen.
+    pub fn first_alt_row(&self) -> &ObservedSequence {
+        self.observed_sequences
+            .iter()
+            .find(|row| row.bases.as_ref() != self.reference_bases.as_ref())
+            .unwrap_or_else(|| {
+                panic!(
+                    "the locus at {:?} carries no non-reference row: {:?}",
+                    self.region, self.observed_sequences,
+                )
+            })
+    }
+}
+
+/// Drive `run` on a fixed input list, collecting the emitted loci.
+pub fn drive_walker(reads: Vec<PreparedRead>, ref_fetcher: MockFasta) -> Vec<Locus> {
     drive_walker_with_summary(reads, ref_fetcher).0
 }
 
@@ -149,7 +219,7 @@ pub fn drive_walker(
 pub fn drive_walker_with_summary(
     reads: Vec<PreparedRead>,
     ref_fetcher: MockFasta,
-) -> (Vec<crate::pileup_record::PileupRecord>, super::RunSummary) {
+) -> (Vec<Locus>, super::RunSummary) {
     drive_walker_with_config(reads, ref_fetcher, &WalkerConfig::default())
 }
 
@@ -160,13 +230,10 @@ pub fn drive_walker_with_config(
     reads: Vec<PreparedRead>,
     ref_fetcher: MockFasta,
     config: &WalkerConfig,
-) -> (Vec<crate::pileup_record::PileupRecord>, super::RunSummary) {
+) -> (Vec<Locus>, super::RunSummary) {
     let mut walker = run(reads, &ref_fetcher, config);
-    // B2 changed what the walk emits; these inherited tests are the walk's regression
-    // floor and are adapted through one projection rather than 67 hand-edits — see
-    // `super::to_pileup_record` for what it can and cannot reproduce.
-    let records: Vec<crate::pileup_record::PileupRecord> = (&mut walker)
-        .map(|r| super::to_pileup_record(&r.expect("walker yielded error")))
+    let records: Vec<Locus> = (&mut walker)
+        .map(|r| r.expect("walker yielded error"))
         .collect();
     let summary = walker.summary();
     (records, summary)
@@ -186,9 +253,13 @@ fn pure_ref_pileup_emits_one_record_per_position_with_only_ref_allele() {
     let records = drive_walker(vec![r1, r2], fa);
     assert_eq!(records.len(), 5);
     for (i, rec) in records.iter().enumerate() {
-        assert_eq!(rec.pos, (i + 1) as u32);
-        assert_eq!(rec.alleles.len(), 1, "REF only at clean position");
-        assert_eq!(rec.alleles[0].support.num_obs, 2);
+        assert_eq!(rec.anchor(), (i + 1) as u32);
+        assert_eq!(
+            rec.observed_sequences.len(),
+            1,
+            "REF only at clean position"
+        );
+        assert_eq!(rec.reference_row().num_obs, 2);
     }
 }
 
@@ -201,14 +272,14 @@ fn snp_at_one_position_emits_record_with_two_alleles() {
     let records = drive_walker(vec![r1, r2], fa);
     assert_eq!(records.len(), 5);
     let rec_pos3 = &records[2];
-    assert_eq!(rec_pos3.pos, 3);
-    assert_eq!(rec_pos3.alleles.len(), 2, "REF + SNP");
+    assert_eq!(rec_pos3.anchor(), 3);
+    assert_eq!(rec_pos3.observed_sequences.len(), 2, "REF + SNP");
     // First is REF (G), supported by 1 read.
-    assert_eq!(rec_pos3.alleles[0].seq, b"G");
-    assert_eq!(rec_pos3.alleles[0].support.num_obs, 1);
+    assert_eq!(&*rec_pos3.reference_bases, b"G");
+    assert_eq!(rec_pos3.reference_row().num_obs, 1);
     // Second is SNP (T), supported by 1 read.
-    assert_eq!(rec_pos3.alleles[1].seq, b"T");
-    assert_eq!(rec_pos3.alleles[1].support.num_obs, 1);
+    assert_eq!(&*rec_pos3.first_alt_row().bases, b"T");
+    assert_eq!(rec_pos3.first_alt_row().num_obs, 1);
 }
 
 #[test]
@@ -237,16 +308,19 @@ fn deletion_record_has_extended_ref_span() {
     let records = drive_walker(vec![r], fa);
     let anchor = records
         .iter()
-        .find(|r| r.pos == 4)
+        .find(|r| r.anchor() == 4)
         .expect("must emit anchor at deletion's preceding base");
-    assert_eq!(anchor.ref_span(), 4, "anchor + 3 deleted = 4");
-    assert_eq!(anchor.alleles[0].seq, b"ATTT", "REF over the deletion span");
+    assert_eq!(anchor.footprint_len(), 4, "anchor + 3 deleted = 4");
+    assert_eq!(
+        &*anchor.reference_bases, b"ATTT",
+        "REF over the deletion span"
+    );
     let del = anchor
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.as_slice() == b"A")
+        .find(|a| a.bases.as_ref() == b"A")
         .expect("DEL allele = anchor only");
-    assert_eq!(del.support.num_obs, 1);
+    assert_eq!(del.num_obs, 1);
 }
 
 #[test]
@@ -298,22 +372,22 @@ fn deletion_record_does_not_double_count_ref_reads() {
     let records = drive_walker(vec![r1, r2], fa);
     let anchor = records
         .iter()
-        .find(|r| r.pos == 2)
+        .find(|r| r.anchor() == 2)
         .expect("anchor at deletion's preceding base");
-    assert_eq!(anchor.ref_span(), 4, "anchor + 3 deleted = 4");
-    let ref_allele = &anchor.alleles[0];
+    assert_eq!(anchor.footprint_len(), 4, "anchor + 3 deleted = 4");
+    let ref_allele = &anchor.observed_sequences[0];
     assert_eq!(
-        ref_allele.support.num_obs, 1,
+        ref_allele.num_obs, 1,
         "REF: 1 obs from r1 only; got {}",
-        ref_allele.support.num_obs
+        ref_allele.num_obs
     );
-    assert_eq!(ref_allele.support.fwd, 1, "REF: forward strand count = 1");
+    assert_eq!(ref_allele.num_fwd, 1, "REF: forward strand count = 1");
     let del = anchor
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.as_slice() == b"C")
+        .find(|a| a.bases.as_ref() == b"C")
         .expect("DEL allele = anchor base only");
-    assert_eq!(del.support.num_obs, 1, "DEL: 1 obs from r2");
+    assert_eq!(del.num_obs, 1, "DEL: 1 obs from r2");
 }
 
 #[test]
@@ -405,7 +479,7 @@ fn refold_after_widen_clears_chain_id_from_old_bucket() {
     let records = drive_walker(vec![r0, r1, r3], fa);
     let anchor = records
         .iter()
-        .find(|r| r.pos == 1)
+        .find(|r| r.anchor() == 1)
         .expect("anchor record at pos 1");
 
     // Universal invariant: in every emitted record, every
@@ -414,14 +488,14 @@ fn refold_after_widen_clears_chain_id_from_old_bucket() {
     // landed in this bucket; a chain id with no backing
     // observation is a leftover from a re-fold that the
     // walker forgot to clean up.
-    for allele in &anchor.alleles {
+    for allele in &anchor.observed_sequences {
         assert!(
-            allele.chain_ids.len() <= allele.support.num_obs as usize,
+            allele.chain_ids.len() <= allele.num_obs as usize,
             "allele {:?} has chain_ids={:?} but num_obs={} — \
              stale chain ids exceed observations",
-            std::str::from_utf8(&allele.seq).unwrap_or("<non-utf8>"),
+            std::str::from_utf8(&allele.bases).unwrap_or("<non-utf8>"),
             allele.chain_ids,
-            allele.support.num_obs,
+            allele.num_obs,
         );
     }
 }
@@ -448,15 +522,18 @@ fn insertion_record_has_alt_longer_than_ref() {
         mapq: 60,
     };
     let records = drive_walker(vec![r], fa);
-    let anchor = records.iter().find(|r| r.pos == 1).expect("anchor at 1");
-    let ins = anchor
-        .alleles
+    let anchor = records
         .iter()
-        .find(|a| a.seq.len() > anchor.ref_span() as usize);
+        .find(|r| r.anchor() == 1)
+        .expect("anchor at 1");
+    let ins = anchor
+        .observed_sequences
+        .iter()
+        .find(|a| a.bases.len() > anchor.footprint_len() as usize);
     assert!(ins.is_some(), "INS allele should be longer than REF");
     let ins = ins.unwrap();
-    assert_eq!(ins.seq, b"AXX", "anchor + 2 inserted bases");
-    assert_eq!(ins.support.num_obs, 1);
+    assert_eq!(&*ins.bases, b"AXX", "anchor + 2 inserted bases");
+    assert_eq!(ins.num_obs, 1);
 }
 
 #[test]
@@ -469,8 +546,8 @@ fn forward_strand_count_recorded_correctly() {
     r2.is_reverse_strand = true;
     let records = drive_walker(vec![r1, r2], fa);
     let rec = &records[0];
-    assert_eq!(rec.alleles[0].support.num_obs, 2);
-    assert_eq!(rec.alleles[0].support.fwd, 1);
+    assert_eq!(rec.reference_row().num_obs, 2);
+    assert_eq!(rec.reference_row().num_fwd, 1);
 }
 
 #[test]
@@ -492,18 +569,19 @@ fn placed_left_is_per_record() {
     let r1 = snp_read("r1", 1, b"ACGTA", &[30; 5]);
     let r2 = snp_read("r2", 3, b"GTA", &[30; 3]);
     let records = drive_walker(vec![r1, r2], fa);
-    let rec3 = records.iter().find(|r| r.pos == 3).unwrap();
-    assert_eq!(rec3.alleles[0].support.num_obs, 2);
-    assert_eq!(rec3.alleles[0].support.placed_left, 1);
+    let rec3 = records.iter().find(|r| r.anchor() == 3).unwrap();
+    assert_eq!(rec3.reference_row().num_obs, 2);
+    assert_eq!(rec3.reference_row().placed_left, 1);
     // **A real check, not arithmetic on the two lines above it.** The first version of
     // this substitution asserted `num_obs - placed_left == 1` right after asserting
     // `num_obs == 2` and `placed_left == 1`, which is true by construction whatever the
     // walk did — the "test that cannot fail" pattern, introduced while removing a genuine
     // assertion. What the deleted `placed_start` half actually pinned is that the counter
     // is **per record**: r1 starts left of *this* record's anchor and not of the one at 1.
-    let rec1 = records.iter().find(|r| r.pos == 1).unwrap();
+    let rec1 = records.iter().find(|r| r.anchor() == 1).unwrap();
     assert_eq!(
-        rec1.alleles[0].support.placed_left, 0,
+        rec1.reference_row().placed_left,
+        0,
         "at the record anchored on r1's own start, nothing is placed left of it"
     );
 }
@@ -516,7 +594,7 @@ fn uncovered_positions_produce_no_records() {
     let r1 = snp_read("r1", 1, b"ACG", &[30; 3]);
     let r2 = snp_read("r2", 7, b"GTA", &[30; 3]);
     let records = drive_walker(vec![r1, r2], fa);
-    let positions: Vec<u32> = records.iter().map(|r| r.pos).collect();
+    let positions: Vec<u32> = records.iter().map(|r| r.anchor()).collect();
     assert_eq!(positions, vec![1, 2, 3, 7, 8, 9]);
 }
 
@@ -532,13 +610,30 @@ fn paired_mates_with_overlapping_positions_share_chain_id() {
     let fa = MockFasta::new("AAAAA");
     let (m1, m2) = paired_snp_reads("pair", 1, 1, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
-    let rec1 = records.iter().find(|r| r.pos == 1).unwrap();
+    let rec1 = records.iter().find(|r| r.anchor() == 1).unwrap();
+    // **This assertion changed with the type, and the old one was checking nothing.** It read
+    // `alleles[0].chain_ids.is_empty()` — "REF chain ids are dropped" — but both mates here carry
+    // `C` over an `A` reference, so **no read matched the reference at all** and production's
+    // `alleles[0]` was an empty bucket. An empty bucket's chain-id list is empty whatever the
+    // rule does, so the assertion held for free.
+    //
+    // ng emits no reference row here, which is the honest statement of the same input, and the
+    // rule it was reaching for is checked where it can fail: `only_the_reads_that_departed_from_
+    // the_reference_carry_a_chain_id` (in `open_record.rs`) and the dump's fixture of the same
+    // name both put a genuinely reference-matching read beside a departing one.
     assert!(
-        rec1.alleles[0].chain_ids.is_empty(),
-        "REF chain ids are dropped"
+        rec1.observed_sequences
+            .iter()
+            .all(|row| row.bases.as_ref() != b"A"),
+        "neither mate matched the reference, so there is no reference row: {:?}",
+        rec1.observed_sequences,
     );
-    assert_eq!(rec1.alleles[1].seq, b"C");
-    assert_eq!(rec1.alleles[1].chain_ids, vec![0u64]);
+    assert_eq!(&*rec1.first_alt_row().bases, b"C");
+    assert_eq!(
+        rec1.first_alt_row().chain_ids,
+        vec![0u64],
+        "the two mates collapsed onto one chain id, which is what this test is about"
+    );
 }
 
 #[test]
@@ -559,11 +654,11 @@ fn paired_mates_within_lookup_window_share_chain_id_across_active_set_exit() {
     let fa = MockFasta::new("AAAAAAAAAAAAAAAAAAAA");
     let (m1, m2) = paired_snp_reads("pair", 1, 10, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
-    let rec1 = records.iter().find(|r| r.pos == 1).unwrap();
-    let rec10 = records.iter().find(|r| r.pos == 10).unwrap();
-    assert_eq!(rec1.alleles[1].chain_ids, vec![0u64]);
+    let rec1 = records.iter().find(|r| r.anchor() == 1).unwrap();
+    let rec10 = records.iter().find(|r| r.anchor() == 10).unwrap();
+    assert_eq!(rec1.first_alt_row().chain_ids, vec![0u64]);
     assert_eq!(
-        rec10.alleles[1].chain_ids,
+        rec10.first_alt_row().chain_ids,
         vec![0u64],
         "the two mates of a single pair must share one chain id"
     );
@@ -589,11 +684,11 @@ fn paired_mates_separated_beyond_lookup_window_get_distinct_chain_ids() {
     let fa = MockFasta::new(&"A".repeat(n));
     let (m1, m2) = paired_snp_reads("pair", 1, 12_001, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
-    let rec_a = records.iter().find(|r| r.pos == 1).unwrap();
-    let rec_b = records.iter().find(|r| r.pos == 12_001).unwrap();
-    assert_eq!(rec_a.alleles[1].chain_ids, vec![0u64]);
+    let rec_a = records.iter().find(|r| r.anchor() == 1).unwrap();
+    let rec_b = records.iter().find(|r| r.anchor() == 12_001).unwrap();
+    assert_eq!(rec_a.first_alt_row().chain_ids, vec![0u64]);
     assert_eq!(
-        rec_b.alleles[1].chain_ids,
+        rec_b.first_alt_row().chain_ids,
         vec![1u64],
         "beyond the lookup window the pair-tracking entry has been evicted; \
          the second mate gets a fresh id"
@@ -651,7 +746,7 @@ fn mate_overlap_bq_tie_prefers_first_mate_not_earlier_position() {
     // by stream order or alignment_start.
     let records = drive_walker(vec![m_second, m_first], fa);
     let rec = &records[0];
-    assert_eq!(rec.alleles[0].support.num_obs, 2);
+    assert_eq!(rec.reference_row().num_obs, 2);
     // Kept mate's contribution = max(ln_BQ(Q=30), -2.0) ≈ -2.0.
     // Zeroed mate contributes max(ln(1)=0, -10.0) = 0.
     // Sum ≈ -2.0. If the tie-break wrongly kept mate 2, sum would
@@ -662,9 +757,9 @@ fn mate_overlap_bq_tie_prefers_first_mate_not_earlier_position() {
     // Net q_sum ≈ -2.0, NOT ≈ -10.0 (which would be the case if
     // the tie-break wrongly kept mate 2).
     assert!(
-        rec.alleles[0].support.q_sum > -3.0 && rec.alleles[0].support.q_sum < -1.0,
+        rec.reference_row().q_sum > -3.0 && rec.reference_row().q_sum < -1.0,
         "q_sum ≈ -2.0 (first mate kept); got {}",
-        rec.alleles[0].support.q_sum
+        rec.reference_row().q_sum
     );
 }
 
@@ -682,7 +777,7 @@ fn mate_overlap_zeroes_lower_bq_contribution() {
     m2.bq_baq = vec![10; 3];
     let records = drive_walker(vec![m1, m2], fa);
     let rec = &records[0];
-    assert_eq!(rec.alleles[0].support.num_obs, 2, "both mates count");
+    assert_eq!(rec.reference_row().num_obs, 2, "both mates count");
     // q_sum at default mq_log_err = -3.0:
     //   keeper: max(ln_perr(40), -3.0) = -3.0  (MQ dominates)
     //   other:  max(ln(1)=0, -3.0)     = 0
@@ -690,9 +785,9 @@ fn mate_overlap_zeroes_lower_bq_contribution() {
     // (the BQ-summing change from S7 is invisible here because MQ
     // dominates; tests at low MQ_log_err pin the BQ math directly).
     assert!(
-        rec.alleles[0].support.q_sum > -4.0 && rec.alleles[0].support.q_sum < -2.0,
+        rec.reference_row().q_sum > -4.0 && rec.reference_row().q_sum < -2.0,
         "expected q_sum ≈ -3 (MQ-dominated), got {}",
-        rec.alleles[0].support.q_sum
+        rec.reference_row().q_sum
     );
 }
 
@@ -729,12 +824,12 @@ fn mate_overlap_agree_keeper_carries_summed_bq() {
     let records = drive_walker(vec![m1, m2], fa);
     assert_eq!(records.len(), 1);
     let rec = &records[0];
-    assert_eq!(rec.alleles[0].support.num_obs, 2);
+    assert_eq!(rec.reference_row().num_obs, 2);
     // Combined BQ = 40. ln_perr(40) = -40 * ln(10) / 10 ≈ -9.21.
     // Keeper contribution: max(-9.21, -100) = -9.21.
     // Other contribution: max(ln_perr(0)=0, -100) = 0.
     // Total q_sum ≈ -9.21. Pre-S7 (Q=20 unsummed): ≈ -4.61.
-    let q = rec.alleles[0].support.q_sum;
+    let q = rec.reference_row().q_sum;
     assert!(
         q < -8.5 && q > -10.0,
         "q_sum should reflect summed BQ (≈ ln_perr(40) ≈ -9.21), got {q}",
@@ -770,7 +865,7 @@ fn mate_overlap_agree_combined_bq_caps_at_200() {
     let m1 = make(true, 150);
     let m2 = make(false, 100);
     let records = drive_walker(vec![m1, m2], fa);
-    let q = records[0].alleles[0].support.q_sum;
+    let q = records[0].reference_row().q_sum;
     // ln_perr(200) ≈ -46.05. Without the cap it would be
     // ln_perr(250) ≈ -57.56.
     assert!(
@@ -812,27 +907,27 @@ fn mate_overlap_disagree_winner_bq_scaled_by_0_8() {
     let records = drive_walker(vec![m1, m2], fa);
     let rec = &records[0];
     let ref_allele = rec
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.as_slice() == b"A")
+        .find(|a| a.bases.as_ref() == b"A")
         .expect("REF allele present");
     let snp_allele = rec
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.as_slice() == b"G")
+        .find(|a| a.bases.as_ref() == b"G")
         .expect("SNP allele present");
-    assert_eq!(ref_allele.support.num_obs, 1);
-    assert_eq!(snp_allele.support.num_obs, 1);
+    assert_eq!(ref_allele.num_obs, 1);
+    assert_eq!(snp_allele.num_obs, 1);
     // Winner BQ = (30 * 0.8) as u8 = 24. ln_perr(24) ≈ -5.53.
     // Pre-S7 (Q=30 unscaled): ≈ -6.91.
-    let q_ref = ref_allele.support.q_sum;
+    let q_ref = ref_allele.q_sum;
     assert!(
         q_ref < -5.0 && q_ref > -6.0,
         "REF allele q_sum should reflect scaled BQ=24 (≈ -5.53), got {q_ref}",
     );
     // Loser BQ zeroed → ln_perr(0) = 0 → max(0, -100) = 0.
     assert_eq!(
-        snp_allele.support.q_sum, 0.0,
+        snp_allele.q_sum, 0.0,
         "SNP allele's BQ was zeroed; q_sum should be 0",
     );
 }
@@ -896,20 +991,20 @@ fn paired_mate_indel_overlap_yields_single_observation() {
     let records = drive_walker(vec![mate_a, mate_b], fa);
     let anchor = records
         .iter()
-        .find(|r| r.pos == 1)
+        .find(|r| r.anchor() == 1)
         .expect("anchor record at pos 1");
     let ins = anchor
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.len() > anchor.ref_span() as usize)
+        .find(|a| a.bases.len() > anchor.footprint_len() as usize)
         .expect("INS allele present");
     assert_eq!(
-        ins.support.num_obs, 1,
+        ins.num_obs, 1,
         "indel-overlap collapses to one observation; got {}",
-        ins.support.num_obs
+        ins.num_obs
     );
     // Forward-strand count should also reflect a single observation.
-    assert_eq!(ins.support.fwd, 1);
+    assert_eq!(ins.num_fwd, 1);
 }
 
 #[test]
@@ -929,7 +1024,7 @@ fn record_emits_in_coordinate_order_across_reads() {
     let records = drive_walker(reads, fa);
     // Emitted records' positions must be sorted ascending.
     for w in records.windows(2) {
-        assert!(w[0].pos <= w[1].pos, "out-of-order emission");
+        assert!(w[0].anchor() <= w[1].anchor(), "out-of-order emission");
     }
 }
 
@@ -978,15 +1073,15 @@ fn forward_chromosome_change_is_accepted() {
     r2.chrom_id = 1;
     let records = drive_walker(vec![r1, r2], fa);
     assert!(
-        records.iter().any(|r| r.chrom_id == 0),
+        records.iter().any(|r| r.region.contig.0 == 0),
         "chrom 0 records must be emitted",
     );
     assert!(
-        records.iter().any(|r| r.chrom_id == 1),
+        records.iter().any(|r| r.region.contig.0 == 1),
         "chrom 1 records must be emitted",
     );
     // And they must come in chrom order.
-    let chrom_ids: Vec<u32> = records.iter().map(|r| r.chrom_id).collect();
+    let chrom_ids: Vec<u32> = records.iter().map(|r| r.region.contig.0).collect();
     let mut sorted = chrom_ids.clone();
     sorted.sort();
     assert_eq!(chrom_ids, sorted, "records must emit in chrom_id order");
@@ -1010,7 +1105,11 @@ fn chain_ids_are_unique_and_monotonically_allocated() {
     // Collect every chain id from every allele observation.
     let mut all_ids: Vec<u64> = records
         .iter()
-        .flat_map(|r| r.alleles.iter().flat_map(|a| a.chain_ids.iter().copied()))
+        .flat_map(|r| {
+            r.observed_sequences
+                .iter()
+                .flat_map(|a| a.chain_ids.iter().copied())
+        })
         .collect();
     let n_total_observations = all_ids.len();
     all_ids.sort_unstable();
@@ -1035,7 +1134,11 @@ fn paired_mates_share_a_single_chain_id() {
     let records = drive_walker(vec![m1, m2], fa);
     let mut all_ids: Vec<u64> = records
         .iter()
-        .flat_map(|r| r.alleles.iter().flat_map(|a| a.chain_ids.iter().copied()))
+        .flat_map(|r| {
+            r.observed_sequences
+                .iter()
+                .flat_map(|a| a.chain_ids.iter().copied())
+        })
         .collect();
     all_ids.sort_unstable();
     all_ids.dedup();
@@ -1061,7 +1164,11 @@ fn chain_ids_persist_across_chromosome_boundaries() {
     let records = drive_walker(vec![r0, r1], fa);
     let mut all_ids: Vec<u64> = records
         .iter()
-        .flat_map(|r| r.alleles.iter().flat_map(|a| a.chain_ids.iter().copied()))
+        .flat_map(|r| {
+            r.observed_sequences
+                .iter()
+                .flat_map(|a| a.chain_ids.iter().copied())
+        })
         .collect();
     all_ids.sort_unstable();
     all_ids.dedup();
@@ -1093,12 +1200,12 @@ fn column_depth_cap_truncates_snp_only_column_when_over_cap() {
     assert_eq!(summary.column_depth_truncations, 5);
     // No column should report num_obs > cap.
     for rec in &records {
-        for allele in &rec.alleles {
+        for allele in &rec.observed_sequences {
             assert!(
-                allele.support.num_obs <= 3,
+                allele.num_obs <= 3,
                 "pos {}: num_obs {} should be capped at 3",
-                rec.pos,
-                allele.support.num_obs,
+                rec.anchor(),
+                allele.num_obs,
             );
         }
     }
@@ -1134,37 +1241,55 @@ fn column_depth_cap_keeps_first_n_of_admission_order() {
     assert_eq!(summary.column_depth_truncations, 1);
     let rec = &records[0];
 
-    // REF "A" survives as the alleles[0] entry but with zero
-    // observations, because r3 (the only REF-matching read) was
-    // past the cap.
-    assert_eq!(rec.alleles[0].seq, b"A", "alleles[0] is REF");
-    assert_eq!(
-        rec.alleles[0].support.num_obs, 0,
-        "no surviving read matched REF",
+    // **Where this test changed, and it is the change spec §12 sanctioned.** Production kept
+    // `alleles[0]` as a REF bucket with zero observations, because it creates that bucket at
+    // record open whatever the evidence; the assertion here used to read
+    // `alleles[0].support.num_obs == 0`. ng derives rows from the reads that folded, and r3 —
+    // the only REF-matching read — was past the cap, so **there is no reference row at all.**
+    //
+    // The two spellings say different things, and ng's is the stronger: "a bucket exists with
+    // zero support" and "no read matched the reference here" are the same fact, but only the
+    // second is unambiguous about the evidence. The reference bases are still on the locus, as a
+    // field, so nothing is lost by the row's absence.
+    assert_eq!(&*rec.reference_bases, b"A", "the locus's reference base");
+    assert!(
+        rec.observed_sequences
+            .iter()
+            .all(|row| row.bases.as_ref() != b"A"),
+        "no surviving read matched REF, so ng emits no reference row: {:?}",
+        rec.observed_sequences,
     );
 
     // r0's "C" and r1's "G" must be present with one observation each.
     let c = rec
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.as_slice() == b"C")
+        .find(|a| a.bases.as_ref() == b"C")
         .expect("r0's allele 'C' must survive");
-    assert_eq!(c.support.num_obs, 1);
+    assert_eq!(c.num_obs, 1);
     let g = rec
-        .alleles
+        .observed_sequences
         .iter()
-        .find(|a| a.seq.as_slice() == b"G")
+        .find(|a| a.bases.as_ref() == b"G")
         .expect("r1's allele 'G' must survive");
-    assert_eq!(g.support.num_obs, 1);
+    assert_eq!(g.num_obs, 1);
 
     // r2's "T" must be absent — past the cap.
     assert!(
-        rec.alleles.iter().all(|a| a.seq.as_slice() != b"T"),
+        rec.observed_sequences
+            .iter()
+            .all(|a| a.bases.as_ref() != b"T"),
         "r2 was past the cap and must not have folded",
     );
 
-    // Total buckets: REF + r0 + r1.
-    assert_eq!(rec.alleles.len(), 3, "REF + 2 surviving SNP buckets");
+    // **Two rows, not three.** Production counted its empty REF bucket here; ng emits a row per
+    // read that folded, and the cap let exactly two through. The dropped third "bucket" was
+    // never evidence — see the reference-row assertion above.
+    assert_eq!(
+        rec.observed_sequences.len(),
+        2,
+        "the two surviving reads, and nothing for the reference nobody matched"
+    );
 }
 
 #[test]
@@ -1227,9 +1352,10 @@ fn column_depth_cap_does_not_fire_below_threshold() {
     assert_eq!(summary.column_depth_truncations, 0);
     for rec in &records {
         assert_eq!(
-            rec.alleles[0].support.num_obs, 2,
+            rec.reference_row().num_obs,
+            2,
             "pos {}: both reads should fold (no truncation under default cap)",
-            rec.pos,
+            rec.anchor(),
         );
     }
 }
@@ -1271,9 +1397,10 @@ fn g1_walker_drops_match_observations_past_adaptor_boundary() {
         // removes the adaptor base from the contributor list before
         // overlap resolution sees it.
         assert_eq!(
-            rec.alleles[0].support.num_obs, 1,
+            rec.reference_row().num_obs,
+            1,
             "pos {}: exactly one mate is outside adaptor at this position",
-            rec.pos,
+            rec.anchor(),
         );
     }
 }

@@ -2508,26 +2508,25 @@ mod tests {
             ),
         ];
 
-        // Laid back out as `PileupRecord`s — this is one of the inherited-shape
-        // assertions B2 adapts through the projection rather than by hand.
+        // On ng's own locus type — the back-projection this used to go through is gone.
         let records: Vec<_> = run(reads, MockFasta::new(contig), &WalkerConfig::default())
-            .map(|record| super::super::to_pileup_record(&record.expect("the walk succeeds")))
+            .map(|record| record.expect("the walk succeeds"))
             .collect();
         let widened = records
             .iter()
-            .find(|record| record.pos == 5)
+            .find(|locus| locus.region.start.get() == 5)
             .expect("the opener's deletion opens a record at 5");
         assert_eq!(
-            widened.alleles[0].seq.len(),
+            widened.reference_bases.len(),
             16,
             "the widener's deletion must grow the record to 5..=20, or this fixture does \
              not reach the path it exists for"
         );
 
         let folded: u32 = widened
-            .alleles
+            .observed_sequences
             .iter()
-            .map(|allele| allele.support.num_obs)
+            .map(|row| row.num_obs)
             .sum();
         assert_eq!(
             folded, 2,
@@ -3279,10 +3278,11 @@ mod tests {
     /// three fixtures above do not test, and the half the differential is structurally
     /// blind to.
     ///
-    /// `to_pileup_record` merges rows back together by bases before the two walkers are
-    /// compared, so an `observation_rows` that emitted one row per read — every
-    /// `num_obs == 1` — projected to exactly the same `PileupRecord` and left the whole
-    /// suite green, at 20,000 soak cases as well. The projection undoes precisely the
+    /// `to_pileup_record` — the back-projection the suite used until Milestone D, now deleted —
+    /// merged rows back together by bases before the two walkers were compared, so an
+    /// `observation_rows` that emitted one row per read — every `num_obs == 1` — projected to
+    /// exactly the same `PileupRecord` and left the whole suite green, at 20,000 soak cases as
+    /// well. The projection undoes precisely the
     /// defect. So the merge has to be asserted here, on ng's own type, or not at all.
     #[test]
     fn rows_merge_the_reads_that_share_an_identity() {
@@ -3328,9 +3328,9 @@ mod tests {
 
     /// **The emitted region covers exactly the record's footprint, inclusive of both ends.**
     ///
-    /// Unpinned by anything before this: `to_pileup_record` carries the contig and the start
-    /// and **discards the end**, so the 44 inherited tests and the whole differential are
-    /// blind to it — dropping the `saturating_sub(1)`, or replacing the end with
+    /// Unpinned by anything before this: `to_pileup_record` — the back-projection the suite used
+    /// until Milestone D, now deleted — carried the contig and the start and **discarded the
+    /// end**, so the 44 inherited tests and the whole differential were blind to it — dropping the `saturating_sub(1)`, or replacing the end with
     /// `Position(0)`, left the entire library green. `region.len()` is what sizes
     /// `num_obs_along_locus`'s depth vector and what defines flush-right, so a wrong end is
     /// a wrong depth profile everywhere downstream.

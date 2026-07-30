@@ -6,7 +6,7 @@
 //! on a frozen type (`doc/devel/ng/spec/locus_generation_pileup.md` §3,
 //! `doc/devel/ng/arch/locus_generation_pileup.md` *Module home*).
 //!
-//! # Eight files were transcribed; four are still verbatim
+//! # Eight files were transcribed; three are still verbatim
 //!
 //! [`genome_walk`], [`open_record`], [`cigar_cursor`], [`decompose`],
 //! [`active_read_set`], [`chain_id_allocator`] and [`errors`] — plus `tests.rs`,
@@ -33,9 +33,17 @@
 //! `#[cfg(test)]` modules, so an intra-doc link to them breaks `cargo doc`.
 //!
 //! **The walk emits ng's own [`SampleLocusObservations`](crate::ng::locus_generation::SampleLocusObservations)
-//! from B2 on**, not production's `PileupRecord`. The inherited suite reaches it through
-//! `to_pileup_record`, a test-only projection whose losses are listed on it. (Named, not
-//! linked: it is `#[cfg(test)]`, and an intra-doc link to one breaks `cargo doc`.)
+//! from B2 on**, not production's `PileupRecord` — and since Milestone D **nothing in this
+//! module sees it through anything else.** B2 adapted the 44 inherited tests through
+//! `to_pileup_record`, one reviewed back-projection rather than 67 hand-edited assertions
+//! (spec §12); that projection merged the rows ng splits and dropped the three fields
+//! production has no counterpart for, and at Milestone B its losses hid three live surfaces
+//! from the review. D1 removed the differential's need for it by projecting production
+//! *forward* instead, and the same commit that answers Checkpoint D removed the suite's:
+//! the inherited tests now assert on ng's type through two accessors that **panic** where
+//! production's positional idiom has no ng answer (`tests::Locus::reference_row`,
+//! `first_alt_row`), so a test landing on one of those cases has to be rewritten rather
+//! than quietly reinterpreted. `to_pileup_record` is deleted.
 //!
 //! **One file is renamed on the way in: `driver.rs` → [`genome_walk`]** — it is
 //! the only one of the seven named for a *role* rather than for what it owns,
@@ -151,127 +159,6 @@ pub use generator::{
     PileupGeneratorCounts,
 };
 pub use genome_walk::{PileupWalker, RunSummary, run};
-
-/// Lay a finished locus back out as production's [`PileupRecord`] — **test-only, and the
-/// regression floor depends on it being read as what it is.**
-///
-/// # What D1 changed about this function's standing
-///
-/// It is **no longer the only thing that sees the emitted type.** That was the hazard, and it
-/// is the hazard that is retired rather than the function: at Milestone B this projection was
-/// the sole view of `SampleLocusObservations` in the whole suite, and its losses hid three
-/// live surfaces from the review. D1 turned the differential around — `parity.rs` now projects
-/// production **forward** into ng's type and compares there, over ~257,000 loci per run — so
-/// `read_coverage`, `read_group`, the region's end and the two per-locus counters are all
-/// under test on the type that carries them, and D2's dump tool asserts on them too.
-///
-/// What is left for this function is the job B2 gave it and no more: adapting the **44
-/// inherited tests**, whose subject is the *walk* — which reads folded where, with what
-/// evidence — and for which 67 hand-translated assertions would be 67 chances to re-express a
-/// test slightly weaker than it was. Its remaining callers are `tests.rs` and two fixtures in
-/// `open_record.rs`. Whether they too move to ng's type is a decision, not a cleanup, and it
-/// is carried to Checkpoint D.
-///
-/// B2 changed what the walk emits. The 44 inherited tests that came with the copy are the
-/// walk's regression floor, and spec §12 sanctions adapting them mechanically to the new
-/// type. Routing them through one projection *is* that adaptation, and it is the safer form
-/// of it: 67 hand-translated assertions are 67 chances to re-express a test slightly weaker
-/// than it was, which is the failure mode this branch has hit in six consecutive
-/// milestones. One function can be reviewed once.
-///
-/// # What it cannot reproduce, and why each is a deliberate change rather than a gap
-///
-/// - **`placed_start` comes back as `0`.** ng does not carry it at all from B2 on (spec §6);
-///   no model consumes it, and it is a pure function of the read's start against the anchor,
-///   so a later consumer re-derives it without touching the fold. The three inherited
-///   assertions on it change, which spec §12 already lists.
-/// - **Allele order is ng's**, which is sorted by `(bases, read_coverage, read_group)`,
-///   where production's is bucket-creation order. Spec §12 lists order-asserting tests as
-///   must-change. REF is placed first regardless, because `alleles[0] == REF` is an
-///   invariant of the type being projected onto, not an ordering preference.
-/// - **Chain ids follow ng's per-read rule**, so a read that agreed with the reference over
-///   everything it witnessed carries none even where production would have given it one.
-///
-/// - **Three locus-level fields are dropped whole**, having no `PileupRecord` counterpart:
-///   `region.end` (only the start survives, as `pos` — so nothing projected through this can
-///   see the footprint's extent), `reads_without_observation` and `reads_discarded_by_cap`.
-///   The first is why `the_emitted_region_covers_the_footprint_inclusively` asserts on ng's
-///   own type; the other two are asserted on theirs.
-///
-/// Rows that split by coverage or read group are **merged back together** here. That is the
-/// point: the inherited suite tests the *walk* — which reads folded where, with what
-/// evidence — not the shape of the emitted type, which has its own tests (`observation_rows`)
-/// and the differential.
-#[cfg(test)]
-pub(crate) fn to_pileup_record(
-    locus: &crate::ng::locus_generation::SampleLocusObservations,
-) -> crate::pileup_record::PileupRecord {
-    use crate::pileup_record::{AlleleObservation, AlleleSupportStats};
-
-    let mut alleles: Vec<AlleleObservation> = Vec::new();
-    // REF first and always present: production creates `alleles[0]` at record open
-    // regardless of support, and ng emits no row for a reference nobody witnessed.
-    alleles.push(AlleleObservation {
-        seq: locus.reference_bases.to_vec(),
-        support: AlleleSupportStats::default(),
-        chain_ids: Vec::new(),
-    });
-    for observation in &locus.observed_sequences {
-        // **Exhaustively destructured, because this is the direction that loses.**
-        // `finalise`'s own destructure catches a field added to ng's stats going *in*;
-        // nothing caught it never coming *out* until this did — a field added to
-        // `ObservedSequence` was silently dropped here and the whole suite stayed green,
-        // which is the `placed_start` failure mode one type down, on the type most likely
-        // to gain fields. The two the projection deliberately discards are named.
-        let crate::ng::locus_generation::ObservedSequence {
-            bases,
-            read_coverage: _,
-            read_group: _,
-            num_obs,
-            num_fwd,
-            q_sum,
-            mapq_sum,
-            mapq_sum_sq,
-            placed_left,
-            chain_ids,
-        } = observation;
-        let index = match alleles
-            .iter()
-            .position(|allele| allele.seq.as_slice() == bases.as_ref())
-        {
-            Some(index) => index,
-            None => {
-                alleles.push(AlleleObservation {
-                    seq: bases.to_vec(),
-                    support: AlleleSupportStats::default(),
-                    chain_ids: Vec::new(),
-                });
-                alleles.len() - 1
-            }
-        };
-        let support = &mut alleles[index].support;
-        support.num_obs += num_obs;
-        support.q_sum += q_sum;
-        support.fwd += num_fwd;
-        support.placed_left += placed_left;
-        support.mapq_sum += mapq_sum;
-        support.mapq_sum_sq += mapq_sum_sq;
-        alleles[index].chain_ids.extend_from_slice(chain_ids);
-    }
-    for allele in &mut alleles {
-        allele.chain_ids.sort_unstable();
-        allele.chain_ids.dedup();
-    }
-    crate::pileup_record::PileupRecord {
-        chrom_id: locus.region.contig.0,
-        pos: locus.region.start.get() as u32,
-        alleles,
-        // The walker cannot compute the centred window (it needs look-ahead); the
-        // pileup→psp seam fills these from the sliding-window accumulator before writing.
-        windowed_gc: f32::NAN,
-        windowed_coverage: f32::NAN,
-    }
-}
 
 // `walker_vocabulary_tests`, not `tests`: the copied `walker/tests.rs` lands as this
 // module's `tests` child (A4), and mirroring production's module names is what makes
