@@ -106,6 +106,7 @@ mod errors;
 mod generator;
 mod genome_walk;
 mod open_record;
+mod witnessed_ref;
 
 /// Production's own end-to-end suite, copied verbatim and run against the copy —
 /// Milestone A's gate (spec §12). `pub(crate)` because production's declaration is,
