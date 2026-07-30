@@ -328,7 +328,11 @@ fn split_generic(
     let mut pieces = Vec::new();
     let mut at = start;
     while at <= end {
-        let piece_end = (at + chunk - 1).min(end);
+        // `saturating_add`, because `chunk` comes from the environment: a plain `+` panics on
+        // `PVC_GENERIC_REGION_CHUNK_BP=18446744073709551615` in debug and wraps in release,
+        // where wrapping would make `piece_end` land *below* `at` and the loop never terminate.
+        // Saturating gives the honest answer for a chunk wider than the contig — one piece.
+        let piece_end = at.saturating_add(chunk - 1).min(end);
         pieces.push(Ok(TypedRegion {
             region: GenomeRegion {
                 contig,
@@ -362,9 +366,12 @@ fn run_dump<P: ReadPreparer + 'static>(
     preparer: P,
     config: PileupGeneratorConfig,
     chunk_bp: Option<u64>,
+    // **The caller's cache, not one of our own.** `main` has already read this FASTA to build
+    // the preparer's accessor; taking its cache makes this call a hit instead of a second read
+    // and a second verification of the same file.
+    cache: &Arc<ReferenceInfoCache>,
 ) -> Result<DumpReport, Box<dyn std::error::Error>> {
-    let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) = read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf())?;
     let contigs = Arc::new(info.contig_list());
     let index = WindowedRefSeq::read_index(fasta)?;
 
@@ -513,30 +520,74 @@ fn main() -> ExitCode {
     let fasta = PathBuf::from(&args[1]);
     let bam = PathBuf::from(&args[2]);
     let contig_filter = args.get(3).map(String::as_str);
-    let chunk_bp = std::env::var("PVC_GENERIC_REGION_CHUNK_BP")
-        .ok()
-        .and_then(|value| value.parse().ok());
+    // **Parsed strictly, because the old `.ok().and_then(|v| v.parse().ok())` turned off the
+    // check this knob exists for.** `0`, `-1`, `abc` and an out-of-range value all became
+    // `None`, which is "do not chunk" — so a typo silently produced a single-region run that
+    // still exits 0 and still prints a plausible report, and the region-boundary comparison the
+    // knob is for was simply not made. A knob whose misuse is indistinguishable from its absence
+    // is worse than no knob.
+    let chunk_bp = match std::env::var("PVC_GENERIC_REGION_CHUNK_BP") {
+        Err(_) => None,
+        Ok(value) => match value.parse::<u64>() {
+            Ok(0) => {
+                eprintln!(
+                    "error: PVC_GENERIC_REGION_CHUNK_BP=0 — a zero-width piece would not \
+                     advance; omit the variable to walk each Generic region whole"
+                );
+                return ExitCode::from(2);
+            }
+            Ok(bp) => Some(bp),
+            Err(error) => {
+                eprintln!(
+                    "error: PVC_GENERIC_REGION_CHUNK_BP={value:?} is not a base count: {error}"
+                );
+                return ExitCode::from(2);
+            }
+        },
+    };
 
     // ng's real read preparation: left-alignment over the canonical (uppercased) reference.
     // Its own reference accessor shares the parsed index with the generator's, for the reason
     // `run_dump` gives.
+    // **One cache, shared with `run_dump`, and the handle is joined rather than dropped.**
+    // Two defects lived here. `run_dump` builds its own `ReferenceInfoCache`, so the FASTA was
+    // read and verified **twice** from two caches — passing this one in makes the second call a
+    // cache hit, which is what a caller-held single-flight cache is for. And the
+    // `#[must_use] VerificationHandle` was bound to `_verify` and dropped, which printed
+    // *"verification handle dropped without join(); a possibly-pending reference-verification
+    // error went unobserved"* on every successful run — visibly, at the top of D3's own
+    // measurement output — and meant a stale `.fai` produced a silently wrong walk.
+    //
+    // Joined **after** the run, not before: verification hashes the whole FASTA on a background
+    // thread, and overlapping the walk with it is the entire point of the handle. Blocking here
+    // would trade a real defect for a slow tool.
     let cache = Arc::new(ReferenceInfoCache::new());
     let report = match read_reference_verifying_or_creating_fai(&cache, fasta.clone()) {
-        Ok((info, _verify)) => {
-            let contigs = Arc::new(info.contig_list().clone());
+        Ok((info, verify)) => {
+            let contigs = Arc::new(info.contig_list());
             match WindowedRefSeq::read_index(&fasta) {
                 Ok(index) => {
                     let preparer = LeftAlignPreparer::with_default_normalizer(
                         WindowedRefSeq::with_shared_index(fasta.clone(), contigs, index),
                     );
-                    run_dump(
+                    let walked = run_dump(
                         &fasta,
                         &[bam],
                         contig_filter,
                         preparer,
                         PileupGeneratorConfig::default(),
                         chunk_bp,
-                    )
+                        &cache,
+                    );
+                    match (walked, verify) {
+                        (Ok(report), Some(handle)) => handle
+                            .join()
+                            .map(|_verified| report)
+                            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+                        (Ok(report), None) => Ok(report),
+                        // The walk's own error wins: it happened first and describes the run.
+                        (Err(error), _) => Err(error),
+                    }
                 }
                 Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
             }
@@ -550,7 +601,17 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
+            // **The whole `#[source]` chain, because the top of it names nothing actionable.**
+            // A missing BAM printed only `error: reading the input files' read groups failed` —
+            // the path and the `No such file or directory` were both in the chain and both
+            // dropped, so the one message a user of this tool is most likely to see told them
+            // neither what was missing nor where it was looked for.
             eprintln!("error: {error}");
+            let mut source = error.source();
+            while let Some(cause) = source {
+                eprintln!("  caused by: {cause}");
+                source = cause.source();
+            }
             ExitCode::FAILURE
         }
     }
@@ -792,6 +853,9 @@ mod tests {
         chunk_bp: Option<u64>,
     ) -> DumpReport {
         let preparer = masking(fasta, boundaries);
+        // A cache of its own here, unlike `main`'s: these fixtures have no earlier read to
+        // share with, so a fresh one is the honest thing rather than a hit.
+        let cache = Arc::new(ReferenceInfoCache::new());
         run_dump(
             fasta,
             std::slice::from_ref(&bam.to_path_buf()),
@@ -799,6 +863,7 @@ mod tests {
             preparer,
             PileupGeneratorConfig::default(),
             chunk_bp,
+            &cache,
         )
         .expect("the dump succeeds")
     }
@@ -1378,6 +1443,37 @@ mod tests {
             groups.len(),
             2,
             "both groups must appear, or the fixture is not split at all"
+        );
+    }
+
+    /// **A chunk wider than the contig is one piece, not a panic or a hang.**
+    ///
+    /// `PVC_GENERIC_REGION_CHUNK_BP` reaches `chunk_typed_regions` straight from the
+    /// environment, where `at + chunk - 1` panicked with "attempt to add with overflow" in
+    /// debug and **wrapped** in release — and a wrapped `piece_end` lands below `at`, so the
+    /// `while at <= end` loop would never terminate. `saturating_add` gives the honest answer
+    /// instead: one piece covering the region.
+    ///
+    /// Asserted as **equality with the unchunked walk**, because that is the property a caller
+    /// of this knob relies on — the output is invariant to the region grain — and it is what a
+    /// silently-wrapped bound would break.
+    ///
+    /// Mutation: `at.saturating_add(chunk - 1)` → `at + chunk - 1` panics here in debug.
+    #[test]
+    fn a_chunk_wider_than_the_contig_is_one_piece() {
+        let reads = masking_fixture_reads();
+        let (_dir, fasta, bam) = fixture(&reads, &["rg0"]);
+        let whole = dump(&fasta, &bam, &[("masked", 22)], None);
+        let huge = dump(&fasta, &bam, &[("masked", 22)], Some(u64::MAX));
+        assert_eq!(
+            huge.generic_regions, whole.generic_regions,
+            "a chunk wider than the contig must not split it",
+        );
+        assert_eq!(
+            huge.render(),
+            whole.render(),
+            "the dump is invariant to the region grain, and a chunk wider than the contig is \
+             the degenerate case of that",
         );
     }
 
