@@ -375,7 +375,28 @@ fn deletion_record_does_not_double_count_ref_reads() {
         .find(|r| r.anchor() == 2)
         .expect("anchor at deletion's preceding base");
     assert_eq!(anchor.footprint_len(), 4, "anchor + 3 deleted = 4");
-    let ref_allele = &anchor.observed_sequences[0];
+    // **`reference_row()`, not `observed_sequences[0]`** — the conversion at `dad9baf` used the
+    // subscript here and it does not mean what production's `alleles[0]` meant. `finalise` sorts
+    // rows by `bases`, this locus holds `"C"` (r2's deletion) and `"CGTA"` (r1's reference
+    // match), and `"C"` sorts first — so index 0 was r2's row, the same row the `del` assertion
+    // below finds by name and checks again. The reference row was never inspected. Production's
+    // index 0 was positional and *was* the REF bucket; ng's is lexicographic — same subscript,
+    // different meaning, no compiler error, which is why `reference_row()` exists and why
+    // nothing in this module should reach a row by index again.
+    //
+    // **What this assertion catches, measured, and what it does not.** It is live: adding each
+    // read's contribution to its row twice makes it read 2 against 1. But it does **not** catch
+    // the bucket-accounting bug the test is named for, and neither did the version before this
+    // fix — because that bug stopped being representable at B1. Rows are derived from
+    // `folded_reads`, one entry per read, each carrying `num_obs: 1`, so a row's `num_obs` is
+    // the number of distinct reads folded into it and no error in the *buckets* can reach it.
+    // Deleting the re-fold's `subtract_contribution` outright is caught by
+    // `rows_are_the_buckets_when_one_read_group_witnesses_completely`, not here.
+    //
+    // So the name now over-promises: what is actually pinned is "one read, one observation in
+    // its row", plus `reference_row()`'s own demand that exactly one row carry the footprint's
+    // reference bases. The historical guard is B1's row derivation, structurally.
+    let ref_allele = anchor.reference_row();
     assert_eq!(
         ref_allele.num_obs, 1,
         "REF: 1 obs from r1 only; got {}",

@@ -2235,6 +2235,66 @@ mod tests {
         }
     }
 
+    /// **Each region folds its own declines once** — the `std::mem::take` in
+    /// [`end_walk`](PileupGenerator::end_walk), which had no test.
+    ///
+    /// `ReadPreparation` outlives every walk, so a tally left in its cell is folded
+    /// again at the next region's end. `end_walk` takes rather than reads, and says so
+    /// in a comment — and **the whole 2,725-test suite stayed green with the `take`
+    /// replaced by a plain read**, because the test above walks *one* region and one
+    /// region cannot see a fold that repeats.
+    ///
+    /// That is the third counter on this branch whose triangular-summing guard nothing
+    /// could see, after the allocator's `reset`/`summary` pair (Checkpoint C) and
+    /// `flush_all`'s `ever_contributed` (Milestone D's review). In all three the guard
+    /// was right and the comment above it named the trap; what was missing every time
+    /// was a **second region**. Any future counter folded at a region boundary wants a
+    /// test of this shape, not of the one above.
+    ///
+    /// **One region per contig, so the expected number depends on nothing else.** The
+    /// halo (`region.end + max_record_span`) covers the whole of a 100 bp fixture
+    /// contig, so a same-contig pair would make the count a function of the halo
+    /// reaching the second region's reads. Two contigs make each region's declines its
+    /// own: 2 on `chr1`, 1 on `chr2`.
+    ///
+    /// Mutation: `std::mem::take(&mut preparation.declined)` → `preparation.declined`
+    /// reports **5** instead of 3 — `chr1`'s 2 folded twice.
+    #[test]
+    fn each_regions_declined_reads_are_folded_once_and_not_again_at_the_next_region() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            // chr1, coordinate-ordered: two declined and one kept.
+            read_named_with_length("declined_1a", 0, 10, 30),
+            read_named_with_length("kept_1", 0, 10, 30),
+            read_named_with_length("declined_1b", 0, 40, 30),
+            // chr2: one declined and one kept.
+            read_named_with_length("declined_2", 1, 10, 30),
+            read_named_with_length("kept_2", 1, 10, 30),
+        ]);
+        let mut generator =
+            a_generator_with(PileupGeneratorConfig::default(), DeclinesRead("declined"))
+                .expect("the default config is valid");
+
+        let chr1_loci = loci_of(&mut generator, region(0, 1, 100), &reads);
+        let chr2_loci = loci_of(&mut generator, region(1, 1, 200), &reads);
+
+        assert_eq!(
+            generator.counts().reads_declined_by_preparer,
+            3,
+            "chr1 declines two and chr2 one; 5 means chr1's tally was folded again when \
+             chr2's walk ended"
+        );
+        assert_eq!(
+            generator.counts().reads_admitted,
+            2,
+            "one kept read per contig reached the walk — a zero here would make the \
+             count above vacuous"
+        );
+        assert!(
+            !chr1_loci.is_empty() && !chr2_loci.is_empty(),
+            "both regions yielded loci, so both walks ran and both ends folded"
+        );
+    }
+
     /// **The query is consumed as the walk advances, never up front.** Spec §7
     /// makes this the property a port can quietly destroy: collecting the query
     /// into a `Vec` to make an ownership problem go away turns a depth-shaped
