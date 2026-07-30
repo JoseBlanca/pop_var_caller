@@ -165,7 +165,7 @@ pub struct SequenceObservation {
     /// The observed bases — allele content, in read coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned — the whole thing, or only
-    /// part (below). **Part of the identity**: a `Complete` `ATAT` and an `Observed` run of
+    /// part (below). **Part of the identity**: a `Complete` `ATAT` and a `Partial` run of
     /// `ATAT` are different evidence and stay separate entries.
     pub read_witness: ReadWitness,
     /// Which read group (one `@RG`, i.e. one lane) these reads came from. **Part of the
@@ -197,12 +197,12 @@ pub struct SequenceObservation {
 /// locus — not depth.)
 pub enum ReadWitness {
     Complete,
-    Observed { offset_in_locus: u16, positions_covered: u16 },
+    Partial { offset_in_locus: u16, positions_covered: u16 },
 }
 
 impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**. A
-    /// `Complete` observation counts its `num_obs` at every position; an `Observed` run
+    /// `Complete` observation counts its `num_obs` at every position; a `Partial` run
     /// counts it over the stretch it witnessed. Length is `region.len()`.
     pub fn num_obs_along_locus(&self) -> Vec<u32>;
 
@@ -243,12 +243,14 @@ reached both borders of a tract or ran off its own end partway answers two quest
 *Censoring:* a partial observation is a **lower bound**, the sequence at least this long, and a
 likelihood scoring it as complete would read a long allele as short — `complete_observations()` is the
 guard (step 7 owns the censored term, [locus_generation_ssr.md](locus_generation_ssr.md)). *Depth:*
-summing each observation's covered positions — a `Complete` at every position, an `Observed` run over
+summing each observation's covered positions — a `Complete` at every position, a `Partial` run over
 the stretch it witnessed — gives `num_obs_along_locus()`, with nothing stored. The run is in **locus**
 coordinates, a separate axis from `bases` (the allele, in **read** coordinates); both are needed. On STR the two facts coincide cleanly because tracts do not overlap and a partial read is one
 physical event.
 
-> **Fold-in, 2026-07-28 — one `Observed` run, not a `PartialLeft`/`PartialRight` pair.** Two
+> **Fold-in, 2026-07-28 — one side-blind run, not a `PartialLeft`/`PartialRight` pair.** (The
+> variant that replaced them was called `Observed` then; it is `Partial` since 2026-07-30 —
+> [locus_witness_representation.md](locus_witness_representation.md) §3.1.) Two
 > side-tagged variants cannot describe what a read witnesses once the **events**, not the alignment
 > span, define it: a read can be blind in the *middle* of a footprint (an interior `N`, a ref-skip)
 > or blind at either end, and a widened record can be wider than the read on both sides.

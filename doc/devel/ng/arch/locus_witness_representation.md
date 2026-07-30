@@ -16,7 +16,7 @@ orders the work.
 ## Module home
 
 A new file, `src/ng/locus_generation/witness.rs`, holding **every type that answers "what did this
-read see"** — `ReadWitness`, `LocusLen`, `WitnessedLocusPositions`, `UnwitnessedBases` — and
+read see"** — `ReadWitness`, `LocusLen`, `WitnessedLocusPositions` — and
 re-exported from `locus_generation` so no consumer's import path changes.
 
 Why a file rather than more of `mod.rs`: the canonical-representation invariant (spec §3.3) is the
@@ -26,7 +26,7 @@ boundary to be private *to*. In a 1,700-line `mod.rs` it has no home.
 ```
 src/ng/locus_generation/
   mod.rs      – SampleLocusObservations, SequenceObservation, LocusGenerator, dispatcher, NoLoci
-  witness.rs  – ReadWitness, LocusLen, WitnessedLocusPositions, UnwitnessedBases   ← new
+  witness.rs  – ReadWitness, LocusLen, WitnessedLocusPositions   ← new
   ssr.rs      – the STR generator
   pileup/     – the generic generator
 ```
@@ -83,7 +83,7 @@ pub enum ReadWitness {
     /// The read reached both borders and witnessed every position between them.
     Complete,
     /// The positions it did witness — one run, or several.
-    Observed { positions: WitnessedLocusPositions },
+    Partial { positions: WitnessedLocusPositions },
 }
 
 impl ReadWitness {
@@ -105,48 +105,13 @@ clamp remains a convention rather than a type invariant, for the reason already 
 variant: a run clamped against *some* `LocusLen` proves nothing about the locus it is finally
 attached to, so the real check lives in `num_obs_along_locus`, where the region is in hand.
 
-### 1.2 Which bases the read did not supply, on the read axis
+### 1.2 `SequenceObservation` gains no field
 
-When an indel's anchor position has no `Match` event the fold takes that base from the reference so
-the indel has an anchor, and `bases` cannot currently say which base that was. It fires **once per
-indel event**, not once per observation, so this is a set and not a flag (spec §2).
-
-```rust
-/// Which entries of `bases` came from the reference rather than from the read —
-/// **indices into `bases`, the read axis**, not locus positions.
-///
-/// Empty is the common case and costs no allocation. *Invariant:* strictly ascending, so
-/// one set has one representation and `Eq`/`Hash` are derivable (spec §3.3).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct UnwitnessedBases(/* private; encoding OPEN, §4 */);
-
-impl UnwitnessedBases {
-    /// From indices in any order; deduplicated and sorted.
-    pub fn new(indices: impl IntoIterator<Item = u16>) -> Self;
-    /// The common case, and what `Default` gives.
-    pub fn none() -> Self;
-    pub fn is_empty(&self) -> bool;
-    pub fn contains(&self, index_into_bases: u16) -> bool;
-    pub fn indices(&self) -> impl ExactSizeIterator<Item = u16> + '_;
-}
-```
-
-**The field on the observation is not an `Option`.**
-
-```rust
-pub struct SequenceObservation {
-    pub bases: Box<[u8]>,
-    /// Which of `bases` the read did not supply. Empty on an observation the read
-    /// witnessed whole — the common case (spec §3.2).
-    pub unwitnessed_bases: UnwitnessedBases,
-    // … read_witness (renamed, §3), then unchanged: read_group, num_obs, num_fwd,
-    //   q_sum, mapq_sum, mapq_sum_sq, placed_left, chain_ids
-}
-```
-
-*Why the two live on different axes and are not one type:* `read_witness` is in locus positions,
-`bases` is allele content in read coordinates. An insertion adds bases without positions and a
-deletion positions without bases, so one index cannot address both (spec §3.2).
+Its only change is the rename of `read_coverage` to `read_witness` (§3). A borrowed anchor base
+stays indistinguishable from a sequenced one: the spec deferred that half on the measurement — **8
+borrowed bases in 225 million event-folds, never two in one observation** (spec §8) — and the
+design for it, when a measurement asks, is recorded in spec §6, not here. An arch doc that typed a
+field nobody is building would be the drift this one exists to prevent.
 
 ---
 
@@ -164,14 +129,14 @@ so the compiler refuses the mix.
 pub(super) struct WitnessedRefPositions(/* private */);
 
 /// The read's witness, or `None` only when it witnessed nothing inside the record at all.
-/// **A hole no longer yields `None`** — that is the second gap this change closes
-/// (spec §1, §4).
+/// **A hole no longer yields `None`** — that is the gap this change closes (spec §1, §3.1).
+/// The signature is otherwise today's: the two borrow sites are untouched, since that half
+/// is deferred (§1.2).
 pub(super) fn apply_events_into(
     allele_seq: &mut Vec<u8>,
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
-    unwitnessed: &mut UnwitnessedBases,   // the two borrow sites record into this
 ) -> Option<WitnessedRefPositions>;
 
 /// Resolve a witness against the **final** footprint — once, at `finalise`, never during
@@ -190,8 +155,8 @@ pub(super) fn witness_order(witness: &ReadWitness) -> impl Ord + '_;
 
 *Contract.* `apply_events_into` returns `None` only for a read with no witnessed position inside
 the record; every other read now yields a witness, and the drop path narrows to that one case
-(spec §4). `unwitnessed` is cleared by the callee, like `allele_seq`, so the caller reuses one
-buffer per fold rather than allocating per read.
+(spec §4). The runs are accumulated into a buffer the caller owns and the callee clears, like
+`allele_seq`, so a fold allocates nothing per read.
 
 **Errors: none new, and the out-of-range case is already unreachable.** A footprint wider than a
 `u16` run can describe is rejected at construction by
@@ -212,15 +177,17 @@ step still mints no error of its own ([`locus_generation.md`](locus_generation.m
   mechanical: the field `read_coverage` → `read_witness`, and `coverage_of` / `coverage_order` →
   `witness_of` / `witness_order`. **193 uses of the type, 91 of the field, across 12 files**, none
   of it behaviour. Not raised by the spec; it is this doc's call because it is a name.
-- **`ReadWitness::Observed` carries a set, not a run** — one shape for one run, two runs, N runs;
+- **`ReadWitness::Partial` carries a set, not a run** — one shape for one run, two runs, N runs;
   the flush predicates and `positions_covered` become derivations from it. *Rejected:* one
   observation per run (breaks `num_obs` as a read count and needs a read identity `chain_ids`
   cannot supply), and a bare `SmallVec` of runs on the variant (leaves `bases` a concatenation the
   read never showed as one sequence) — spec §3.1.
+- **The variant is `Partial`, not `Observed`** — "observed" is not a contrast with `Complete`,
+  since a complete witness was observed too, and once the enum says *witness* the word carries
+  nothing. `PartialLeft` / `PartialRight` were removed for being side-tagged; this payload is a set
+  of positions with no side, so the word is free again (spec §3.1).
 - **`Complete` stays a variant** — keeps `complete_observations` an equality test and the STR
-  path's call sites unmoved (spec §3.1). *Note:* the spec supports this with an observation count
-  that is not recorded in the Milestone D report; the decision stands on the call-site and
-  equality-test grounds, which are independent of it (§4).
+  path's call sites unmoved (spec §3.1).
 - **Canonicality is enforced at construction, so `Eq`/`Hash` are derived** — the spec asks for
   hand-written impls "not derived over a representation that admits duplicates" (§3.3); a private
   field with a normalising constructor removes the ambiguity at the source, after which derived
@@ -228,16 +195,17 @@ step still mints no error of its own ([`locus_generation.md`](locus_generation.m
 - **`witness_order` borrows instead of returning `(u8, u16, u16)`** — a total order over a set
   cannot be a fixed-width tuple. `ReadWitness` still gets no `Ord`, unchanged reasoning
   ([open_record.rs:255-259](../../../../src/ng/locus_generation/pileup/open_record.rs#L255)).
-- **`BaseProvenance` is named `UnwitnessedBases`** — "provenance" names the topic; the value is the
-  set of bases the read did not witness, which is what a consumer decides on. It also keeps one
-  term for one concept: positions witnessed on the locus axis, bases unwitnessed on the read axis.
-  *Live alternative:* `BorrowedBases`, the spec's own verb (§2), equally accurate; it lost on the
-  term-family point alone.
-- **The field is `UnwitnessedBases`, not `Option<UnwitnessedBases>`.** The spec's `Option` buys "8
-  bytes and no allocation" (§3.2) only for a heap-backed type; inline, an empty set already costs
-  no allocation and the `Option` adds a discriminant and a second spelling of "nothing". No tension
-  with `Option`-means-absent: an empty set is a set, not a sentinel. **Reopen if the encoding turns
-  out heap-backed** (§4).
+- **No field for the borrowed base — deferred on the measurement, not on the design** (spec §3.2,
+  §6). When it is built: named for what it holds (`UnwitnessedBases`, since "provenance" names a
+  topic; `BorrowedBases` was the equally accurate alternative), and **not** an `Option` — the
+  spec's "8 bytes and no allocation" argument holds only for a heap-backed type, and inline an
+  empty set already allocates nothing.
+- **`ObservationRow` becomes `KeyedObservation`; `ObservationKey` keeps its name.** The accumulator
+  holds the same information as the public type in the fold's layout — its key grouped rather than
+  flattened — so once the public one is an observation, "row" is the last place in the crate where
+  the word names something that is not a table. `KeyedObservation { key: ObservationKey, support,
+  chain_ids }` says what it is and what it is keyed by. The key was already named for what it is and
+  does not move. **26 uses across 4 files** (spec §4, which left this decision here).
 - **Two witness types, one per coordinate axis** — public for the locus, `pub(super)` for the
   fold's reference axis. The reasoning that minted `LocusLen`
   ([mod.rs:241-250](../../../../src/ng/locus_generation/mod.rs#L241)): same-shaped quantities that
@@ -252,17 +220,18 @@ the rename is local.
 
 ## 4. Open items
 
-- `OPEN:` **The encoding of both sets, and the inline bound.** Interface above is written so the
-  encoding is private and swappable: canonical runs behind `runs()`, ascending indices behind
-  `indices()`. Candidates are a `SmallVec` of runs (leaning — the common witness is one run and the
-  STR path never mints more) against a bitmask (`u128` covers 128 positions but pays 16 bytes to
-  say "positions 0..40"). **Settled by the distribution of runs per witness and of unwitnessed
-  bases per observation on real data — neither measured** (spec §8). Do not pin the field types
-  before those two counts exist.
+**The encoding is no longer open: runs, two inline.** Every witness in 225 million DNA-seq
+event-folds is one run, and the RNA-seq case that motivates the change is two (spec §8). A bitmask
+loses on that evidence — it would pay 16 bytes to say "positions 0..40" for a case that is one run
+in every observation measured. The encoding stays private behind `runs()` so it can still move.
+
+- `OPEN:` **How often the hole fires on real RNA-seq.** The spec's fixture proves reachability, not
+  frequency, and the aligner's junction behaviour decides it — some emit a short deletion where the
+  truth is a short intron, which is exactly the shape that widens a record across a junction. **Not
+  a design question**: the failure is demonstrated and the shape does not change with the rate. It
+  is the implementation plan's input, for ordering.
 - *Impl-time confirmations, not design items:* whether `runs()` returns `(u16, u16)` pairs or a
-  `Run` newtype (a newtype if any call site ever holds one loose); whether `UnwitnessedBases`
-  indexes `bases` as `u16` or `u32` (bounded by `bases.len()`, which an insertion can grow past a
-  footprint — check against the widest observed allele before pinning `u16`).
+  `Run` newtype (a newtype if any call site ever holds one loose).
 
 ---
 
@@ -275,15 +244,16 @@ existing types, not new types beside them.
 |---|---|---|
 | `ReadWitness` | `ReadCoverage` [mod.rs:213](../../../../src/ng/locus_generation/mod.rs#L213) | **rename** — 193 uses of the type and 91 of the field `read_coverage` across 12 files (§3) |
 | `WitnessedRefPositions` | `RefSpan` [open_record.rs:65](../../../../src/ng/locus_generation/pileup/open_record.rs#L65) | **replace** — same role (the fold's witnessed extent, reference coordinates, never empty), widened from one run to a set. Its "no empty span" invariant carries over verbatim |
-| `WitnessedLocusPositions` | `ReadCoverage::Observed { offset_in_locus, positions_covered }` [mod.rs:216-224](../../../../src/ng/locus_generation/mod.rs#L216) | **replace the payload** — the two `u16`s are the one-run case of the set |
+| `WitnessedLocusPositions` | `ReadCoverage::Observed { offset_in_locus, positions_covered }` [mod.rs:216-224](../../../../src/ng/locus_generation/mod.rs#L216) | **replace the payload**, and rename the variant to `Partial` — the two `u16`s are the one-run case of the set |
 | `is_flush_left` / `is_flush_right` | [mod.rs:327-348](../../../../src/ng/locus_generation/mod.rs#L327) | keep signatures; body derives from the first and last run |
 | `num_obs_along_locus`'s clamp | [mod.rs:69-104](../../../../src/ng/locus_generation/mod.rs#L69) | **keep** — the comment there explains why the bound is not expressible on the type, and a set does not change that; the loop iterates runs instead of one range |
 | `complete_observations` | [mod.rs:123](../../../../src/ng/locus_generation/mod.rs#L123) | unchanged — `Complete` is still a variant, still an equality test |
-| the two borrow sites | Insertion [open_record.rs:1217-1224](../../../../src/ng/locus_generation/pileup/open_record.rs#L1217), Deletion [:1228-1238](../../../../src/ng/locus_generation/pileup/open_record.rs#L1228) | each records the index it pushes into `UnwitnessedBases`; the `offset >= consumed_until` guard is already exactly "no `Match` emitted this position" |
+| the two borrow sites | Insertion [open_record.rs:1217-1224](../../../../src/ng/locus_generation/pileup/open_record.rs#L1217), Deletion [:1228-1238](../../../../src/ng/locus_generation/pileup/open_record.rs#L1228) | **unchanged** — deferred (§1.2). Recorded here because the guard `offset >= consumed_until` is already exactly "no `Match` emitted this position", so the day it is built, this is where |
 | the drop path | [open_record.rs:1335-1345](../../../../src/ng/locus_generation/pileup/open_record.rs#L1335) | **narrows** to "witnessed nothing"; the set-of-read-ids mechanism and the subtract-prior-contribution step survive untouched — a read still becomes non-contiguous when the window widens |
 | `witness_of` | `coverage_of` [open_record.rs:184-212](../../../../src/ng/locus_generation/pileup/open_record.rs#L184) | renamed with its type; resolves a set against the footprint. The both-ends clamp and the `Complete` short-circuit are kept |
 | `witness_order` | `coverage_order` [open_record.rs:261](../../../../src/ng/locus_generation/pileup/open_record.rs#L261) | renamed with its type; signature changes to borrow, and `pub(super)` for the differential stays |
-| the observation identity | `ObservationKey` [open_record.rs:228](../../../../src/ng/locus_generation/pileup/open_record.rs#L228) | same three fields; the witness one grows a set. Renamed with its sibling — spec §4 |
+| the observation identity | `ObservationKey` [open_record.rs:228](../../../../src/ng/locus_generation/pileup/open_record.rs#L228) | **name unchanged**; the witness field inside it grows a set |
+| `KeyedObservation` | `ObservationRow` [open_record.rs:237](../../../../src/ng/locus_generation/pileup/open_record.rs#L237) | **rename** — the fold's accumulator, same fields (§3) |
 | the out-of-range gate | `PileupGeneratorConfig::check` [generator.rs:123-131](../../../../src/ng/locus_generation/pileup/generator.rs#L123), `MAX_RECORD_SPAN_CEILING` [:43](../../../../src/ng/locus_generation/pileup/generator.rs#L43) | **reuse as-is** — already rejects a footprint wider than a run can describe, so §2 needs no new error |
 | the STR generator's mints | [ssr.rs:770](../../../../src/ng/locus_generation/ssr.rs#L770), [:821-822](../../../../src/ng/locus_generation/ssr.rs#L821), [:889](../../../../src/ng/locus_generation/ssr.rs#L889), [:989](../../../../src/ng/locus_generation/ssr.rs#L989) | **call sites unchanged** — `from_left`/`from_right` keep their signatures, which is why they keep them |
 
@@ -295,9 +265,16 @@ existing types, not new types beside them.
 `pileup/tests.rs`, the differential and the census in `pileup/parity.rs`. **No new bench** — no
 bake-off here, and the cost question is an allocation count, not a wall time.
 
-**Spec §7 lists the five acceptance checks; only one of them is this doc's to shape.** The
-canonicality property is the failure that is silent, so it needs a property test rather than a
-fixture: two `WitnessedLocusPositions` built from different orderings of the same runs compare
-equal and hash equal, for any generated multiset. Its mutation is the real check — remove the
-normalising step in the constructor and observation counts must inflate. Nothing else in the change
-fails quietly; the rest are fixtures the spec already enumerates.
+**Spec §7 lists the acceptance checks; two of them are this doc's to shape.**
+
+The **canonicality property** is the failure that is silent, so it needs a property test rather
+than a fixture: two `WitnessedLocusPositions` built from different orderings of the same runs
+compare equal and hash equal, for any generated multiset. Its mutation is the real check — remove
+the normalising step in the constructor and observation counts must inflate.
+
+The **spliced fixture** is the regression anchor for the change's whole purpose, and it exists
+already: spec §8's 15 bp intron with a 20 bp deletion widening the record across it. It belongs in
+`pileup/tests.rs` rather than in a dump example, because it asserts a fold outcome — the read
+appears with a two-run witness where today it is absent from the record. Keep the one-position
+sensitivity in the test's comment: at a 16 bp deletion the footprint stops short of exon 2 and the
+read is recorded normally, which is what makes the fixture a knife-edge rather than a decoration.

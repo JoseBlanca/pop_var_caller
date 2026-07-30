@@ -149,7 +149,7 @@ it reached, which drives the derived depth. **This answers `read_preparation_ssr
 the carrying of partial observations to this spec.
 
 > **Fold-in, 2026-07-28 — the two side-tagged variants are gone; the dedup key gained a third
-> axis.** `ReadWitness` is now `Complete` + one `Observed { offset_in_locus, positions_covered }`
+> axis.** `ReadWitness` is now `Complete` + one `Partial { offset_in_locus, positions_covered }`
 > run, and prefix-versus-suffix is a **derivation** (`offset_in_locus == 0` is flush left) rather
 > than a variant — the paragraph above is otherwise unchanged, since the *constraint* it describes
 > is exactly what the run still expresses. The key is now

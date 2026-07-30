@@ -250,7 +250,7 @@ not.
 
 | divergence | why | how it is checked |
 |---|---|---|
-| a read that did not witness the whole footprint becomes an observation carrying an `Observed` witness, whose bases are what it saw, where production folded a reference-filled haplotype into REF | production fabricates the unwitnessed bases (§4, §6) | the divergent loci are enumerated and each hand-verified against the read's CIGAR; **this count is the deliverable** |
+| a read that did not witness the whole footprint becomes an observation carrying a `Partial` witness, whose bases are what it saw, where production folded a reference-filled haplotype into REF | production fabricates the unwitnessed bases (§4, §6) | the divergent loci are enumerated and each hand-verified against the read's CIGAR; **this count is the deliverable** |
 | an allele supported from several read groups is several observations | the group joins the key (§6); `project` cannot split a production observation | observation counts reconcile: summing a locus's observations by `(bases, coverage)` must reproduce production's per-allele totals |
 | `reads_without_observation` / `reads_discarded_by_cap` are non-zero | production keeps neither per record | asserted against a hand-counted fixture, not against production |
 | production emits a REF bucket with `num_obs == 0`; ng emits no such observation | production creates `alleles[0]` at record open regardless ([open_record.rs:110-118](../../../../src/pileup/walker/open_record.rs#L110)); ng derives observations from reads that folded | the projection drops zero-support observations before comparing, and that drop is asserted to be the only one |
@@ -374,7 +374,7 @@ rule, and it replaces both the fill and the widen-extension:
   `{allele_index, contribution, chain_id}`
   ([open_record.rs:100-104](../../../../src/pileup/walker/open_record.rs#L100)). Coverage is then
   resolved **once, at `finalise()`**, by comparing that extent against the *final* footprint. A read
-  `Complete` when it folded becomes `Observed` after a widen with nothing about the read having
+  `Complete` when it folded becomes `Partial` after a widen with nothing about the read having
   changed, and no re-fold is needed to notice — the read may be long gone, since `expire_passed`
   touches no open record.
 
@@ -406,7 +406,7 @@ change it.
 **This converges the two generators, which is the outcome to protect.** The STR path already carries
 witnessed-only bases — a read running off mid-tract yields `bases = b"CACA"`, not the full tract
 ([ssr.rs:886-894](../../../../src/ng/locus_generation/ssr.rs#L886); it tags that `PartialLeft(4)`
-today, `Observed { offset_in_locus: 0, positions_covered: 4 }` after the reshape). Before this change the generic
+today, `Partial { offset_in_locus: 0, positions_covered: 4 }` after the reshape). Before this change the generic
 path would have filled the same shared field with reference-padded bases: **one field, two
 incompatible meanings.** After it, both mean "what the read witnessed", and that is now a
 cross-generator invariant worth stating explicitly — `bases.len()` must be consistent with
@@ -490,7 +490,7 @@ and why it should bias against calling deletions are in
 [pileup_partial_coverage_ref_fill_2026-07-27.md](../../reports/research/pileup_partial_coverage_ref_fill_2026-07-27.md);
 they are a finding about production, not rationale for this step, so they live there.
 
-**What ng does.** The read's observation carries the bases it witnessed and an `Observed` coverage
+**What ng does.** The read's observation carries the bases it witnessed and a `Partial` coverage
 tag computed from its **events** against the record footprint (§4) — a lower bound, kept as a
 separate observation from the complete ones, with `complete_observations()` keeping it away from a
 likelihood that would score it as a short allele. **This step records; it does not weigh.** Whether a partial is *used*, and how, is the
@@ -527,7 +527,7 @@ id absent means reference, and the read's own `read_witness` pins the border it 
 oracle counts it (§3, §13), and that number is what decides whether the research note's
 indel-deficit hypothesis is a result or is dead.
 
-**`ReadWitness` becomes `Complete` + one `Observed` variant — decided (owner, 2026-07-28).** Three
+**`ReadWitness` becomes `Complete` + one `Partial` variant — decided (owner, 2026-07-28).** Three
 partial variants cannot describe what a read witnesses once the events, not the span, define it: a
 read can be blind in the middle of a footprint (an interior `N`, a ref-skip) or blind at either end,
 and a widened record can be wider than a read on both sides. One variant covers all of it:
@@ -539,7 +539,7 @@ pub enum ReadWitness {
     /// The stretch it did witness, in **locus positions** — the axis `bases` is not on
     /// (that is allele content, in read coordinates). Derived from the read's *events*,
     /// never from its alignment span.
-    Observed {
+    Partial {
         /// Locus positions between the locus's left border and the first one witnessed.
         /// `0` = flush with the left border, i.e. a prefix constraint.
         offset_in_locus: u16,
@@ -549,13 +549,13 @@ pub enum ReadWitness {
 }
 ```
 
-**`Complete` is kept rather than folded into `Observed`.** It is the overwhelmingly common case, it
+**`Complete` is kept rather than folded into `Partial`.** It is the overwhelmingly common case, it
 keeps `complete_observations()` a cheap equality instead of arithmetic against the footprint, and it
 is exactly the STR path's "reached both borders". Prefix-versus-suffix survives as a derivation —
 `offset_in_locus == 0` is flush left, `offset_in_locus + positions_covered == region.len()` is flush
 right — so the STR path's "a prefix and a suffix are different constraints" is preserved, not lost.
 
-**A non-contiguous witness yields no observation, and the read is counted.** `Observed` describes one
+**A non-contiguous witness yields no observation, and the read is counted.** `Partial` describes one
 run, so a read blind in the middle cannot be summarised honestly and goes to
 `reads_without_observation` instead. That is rare by construction — adaptor masking and the
 dropped-indel rule always truncate from one side, so they stay expressible — and it has a useful
@@ -696,7 +696,7 @@ the obvious thing.
 
 Under the event-derived rule (§4) the counter means something: **a read whose witnessed
 positions inside the footprint are non-contiguous** — an interior `N`, a ref-skip — cannot be
-summarised by one `Observed` run, so it yields no observation and is counted here. Still counted
+summarised by one `Partial` run, so it yields no observation and is counted here. Still counted
 run-level rather than per record, because they are never contributors at all: reads whose bases over
 the *whole* footprint are `N` or adaptor-masked, in
 `PileupGeneratorCounts::reads_silent_over_footprint`. One consequence of that class worth knowing —
@@ -981,7 +981,7 @@ stage 2 through a projection with two named divergence classes (§3).
 - **Four changes to the shared locus type — schedule them as one pass, because they share one
   fixture rebaseline.** All four land on types both generators fill, so the STR generator's output
   moves with them; done separately they rebaseline its fixtures four times.
-  1. `ReadWitness` → `Complete` + `Observed { offset_in_locus, positions_covered }` (§6). Six
+  1. `ReadWitness` → `Complete` + `Partial { offset_in_locus, positions_covered }` (§6). Six
      exhaustive match sites and four minting sites, two of which pass the variant as a function
      value.
   2. `SequenceObservation` gains the **read group**, which splits its observations (§6). The STR path is the
@@ -1038,7 +1038,7 @@ stage 2 through a projection with two named divergence classes (§3).
   span (the span is blind to `N`, adaptor-masked, ref-skipped and dropped-indel positions); it is
   stored in absolute reference coordinates on `FoldedReadState`; and coverage is resolved once at
   `finalise()` against the final footprint. §4, §6.
-- **`ReadWitness` becomes `Complete` + `Observed { offset_in_locus, positions_covered }` (owner,
+- **`ReadWitness` becomes `Complete` + `Partial { offset_in_locus, positions_covered }` (owner,
   2026-07-28).** One run in **locus** coordinates describes every case the events can produce —
   blind at either end, blind in the middle, or a record wider than the read on both sides. `Complete`
   is kept: it is the common case and keeps `complete_observations()` an equality test. A
@@ -1139,7 +1139,7 @@ fabrication is untested in production, which is a large part of why it survived*
 "test that cannot fail" pattern this project has hit repeatedly. So the port cannot rely on the
 inherited suite to catch a regression here, and owes new fixtures:
 
-1. A multi-base record with a read **adaptor-masked over part of it** — must be `Observed`, not
+1. A multi-base record with a read **adaptor-masked over part of it** — must be `Partial`, not
    `Complete`, with its bases the length it witnessed. A span-derived implementation passes
    everything else and fails this.
 2. The same with an interior `N`, and with a ref-skip — the non-contiguous case, which must yield no
@@ -1172,7 +1172,7 @@ in the order they should be built.
 
    **Which reads the second triple is about — corrected, because the original wording named the
    wrong population.** It used to say "the reads `widen` extended after they had already left the
-   active set". Those reads leave ng holding an `Observed` row, so the census files them under
+   active set". Those reads leave ng holding a `Partial` row, so the census files them under
    **class 1**, whose triple already counts them: class 6 is gated on there being *no* partial
    witness ([parity.rs:1999-2000](../../../../src/ng/locus_generation/pileup/parity.rs#L1999)).
    The population the second triple is owed for is the other kind of non-contributor — a read
@@ -1198,19 +1198,19 @@ in the order they should be built.
      defaulted, and the measurement the grain question needs (§11). On a one-group fixture the observation
      count must be **identical** to a run with the field ignored, which is what "free at one read
      group" has to mean in practice.
-   - observations with an `Observed` witness exist and are separate from `Complete` ones with the same bases — which is
+   - observations with a `Partial` witness exist and are separate from `Complete` ones with the same bases — which is
      what proves `read_witness` is computed rather than defaulted.
    - **A read blind in the middle of a footprint yields no observation and is counted**, and a read
-     adaptor-masked over part of a footprint is `Observed`, not `Complete` — the two checks that
+     adaptor-masked over part of a footprint is `Partial`, not `Complete` — the two checks that
      coverage comes from the **events** and not the alignment span (§4). A span-derived
      implementation passes every other test in this list and fails these two, which is the point of
      them.
-   - **A locus whose record widened past a read's end shows that read as `Observed`**, with its
+   - **A locus whose record widened past a read's end shows that read as `Partial`**, with its
      bases the length it witnessed and not the footprint's — the check that the no-fabrication rule
      survived the port, and the one production cannot pass by construction. Needs a fixture with a
      deletion long enough to widen a record past a read that has already expired.
    - **No observation claims a position the locus does not have**, and none claims zero — every
-     observation with an `Observed` witness satisfies
+     observation with a `Partial` witness satisfies
      `offset_in_locus + positions_covered ≤ footprint` and `positions_covered > 0`, asserted
      globally, because a witness that reaches past the footprint it is measured against, or that
      witnessed nothing and still has an observation, is the shape §4's change exists to make

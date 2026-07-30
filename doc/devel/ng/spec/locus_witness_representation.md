@@ -51,15 +51,18 @@ crate and a matrix row in the aligner.
 
 ### Goals
 
-1. **An observation says, per base, whether the read witnessed it** — so a borrowed anchor base is
-   distinguishable from a sequenced one.
-2. **A read with a hole is an observation, not a tally** — its witnessed positions are recorded
-   rather than discarded, so step 7 has something to censor.
-3. **`reads_without_observation` narrows to what its name says**: reads that witnessed *nothing*
+1. **A read with a hole is an observation, not a tally** — its witnessed positions are recorded
+   rather than discarded, so step 7 has something to censor. **This is the goal RNA-seq makes
+   load-bearing** (§8): a spliced read whose junction falls inside a record widened across it is
+   discarded whole today.
+2. **`reads_without_observation` narrows to what its name says**: reads that witnessed *nothing*
    inside the footprint.
-4. **The STR path's output does not move.** It mints only `Complete` and one flush-left or
+3. **The STR path's output does not move.** It mints only `Complete` and one flush-left or
    flush-right run (`ssr.rs:770`, `:821-822`, `:889`, `:989`), all of which the new
    representation must express identically.
+
+*A fourth goal was here — "an observation says, per base, whether the read witnessed it" — and the
+measurement demoted it to deferred work (§3.2, §6). It is not abandoned; it is unpaid-for.*
 
 ### Non-goals
 
@@ -109,8 +112,10 @@ phenomenon.
 The condition is also broader than adaptor masking: it is *no `Match` at that position*, which is
 masking, an `N` base, or a position no `Match` covered.
 
-**Nobody has measured how often this fires**, on any data. It is a corner by construction and may
-be a rare one; see §8.
+**It has now been measured, and it is a corner in fact as well as by construction: 8 occurrences in
+225 million event-folds, never two in one observation** (§8). That is why the design for it is
+deferred (§3.2, §6) rather than built. The shape above still matters — it is what rules out the
+single-flag designs, the day a count arrives that asks for one.
 
 ### The drop path
 
@@ -138,11 +143,15 @@ re-running the dump is the only way to reproduce them.
 
 ---
 
-## 3. The design: one witnessed set, two places it is read
+## 3. The design: a witnessed set
 
-The two gaps are one gap. A read's witness is **a set of locus positions**, and its bases carry
-**which of them the read supplied**. Today the first is forced into one run and the second is
-assumed to be "all of them".
+**An earlier draft of this section opened "the two gaps are one gap", and the measurement in §8
+retired that claim.** They are two gaps. They sit on different axes — one in locus positions, one
+in read coordinates — they arise from different mechanisms, and they occur at rates four orders of
+magnitude apart. Bundling them made "is this worth building?" unanswerable, because the answer
+differs for each. So this section settles **one** of them: a read's witness is a set of locus
+positions, not one run. The other, which bases the read supplied, is deferred with its measurement
+(§6).
 
 ### 3.1 `ReadWitness::Observed` carries a witnessed set, not a run
 
@@ -150,10 +159,16 @@ assumed to be "all of them".
 pub enum ReadWitness {
     /// The read reached both borders and witnessed every position between them.
     Complete,
-    /// The positions the read witnessed, in locus coordinates.
-    Observed { witnessed: WitnessedPositions },
+    /// The positions the read witnessed, in locus coordinates — one run, or several.
+    Partial { positions: WitnessedLocusPositions },
 }
 ```
+
+**The variant is `Partial`, not `Observed`.** Next to `Complete`, "observed" is not a contrast — a
+complete witness was observed too — and once the enum itself says *witness*, the word adds nothing.
+`Partial` says the one thing that distinguishes it. The name was avoided while `PartialLeft` /
+`PartialRight` were recent, since those were removed for being side-tagged; the payload here is
+visibly a set of positions and carries no side, so the confusion does not arise.
 
 **`Complete` stays a variant.** It is the overwhelmingly common case — 1,646,289 of 1,647,161
 observations on the chr1 run — and keeping it makes `complete_observations` (`mod.rs:123`) a cheap
@@ -171,29 +186,19 @@ A set subsumes both: one run, two runs, N runs are one shape, and `is_flush_left
 `is_flush_right` / `positions_covered` become derivations from it, as they are already derivations
 from the run (`mod.rs:329-347`).
 
-### 3.2 `bases` carries per-base provenance
+### 3.2 What `bases` still cannot say — deferred, not solved
 
-```rust
-pub struct SequenceObservation {
-    pub bases: Box<[u8]>,
-    /// Which bases the read supplied. `None` = all of them, the common case.
-    pub base_provenance: Option<BaseProvenance>,
-    // … unchanged: read_witness, read_group, num_obs, num_fwd, q_sum,
-    //   mapq_sum, mapq_sum_sq, placed_left, chain_ids
-}
-```
+`SequenceObservation` gains no field here. A borrowed anchor base stays indistinguishable from a
+sequenced one, exactly as today, because the measurement says the case barely exists: **8 borrowed
+bases in 225 million event-folds, and never two in one observation** (§8). The design for it — a set
+of indices into `bases`, on the read axis — is recorded in §6 so it can be built the day a
+measurement asks for it.
 
-`Option` so the common observation costs 8 bytes and no allocation, and so "nothing was borrowed" is said
-by saying nothing. The same reasoning is already written on the generator's
-`chain_ids: Option<ChainIdAllocator>` (`generator.rs:539-546`): an `Option` rather than a
-placeholder, because "a placeholder starting at zero is the state this whole arrangement exists to
-avoid, and it would fail silently. Absent, it fails loudly."
-
-**Why not fold this into the coverage set.** The two live on different axes and the type says so
-today: `read_witness` is in **locus positions**, `bases` is *"allele content, in read
-coordinates"* (`mod.rs:216-217`). An insertion adds bases without positions and a deletion
-positions without bases, so one index cannot address both. Merging them is the mistake
-`locus_generation_pileup.md` §8 warns about in the other direction.
+Recording why it is a *separate* design and not part of the set above, since that is the thing this
+spec got wrong first: the two live on different axes and the type says so today. `read_witness` is
+in **locus positions**, `bases` is *"allele content, in read coordinates"* (`mod.rs:216-217`). An
+insertion adds bases without positions and a deletion positions without bases, so one index cannot
+address both.
 
 ### 3.3 The representation must be canonical — the trap
 
@@ -202,8 +207,8 @@ observations are merged by comparing it. **If two equal witnessed sets can have 
 representations, two reads with the same witness stop sharing an observation** — silently, as extra
 observations rather than as a wrong number. So:
 
-- `WitnessedPositions` and `BaseProvenance` are **validated newtypes with private fields**, one
-  representation per set (no trailing empty word, no unsorted runs if runs are the encoding);
+- `WitnessedLocusPositions` is a **validated newtype with a private field**, one representation per
+  set — runs sorted, non-empty, non-adjacent, non-overlapping;
 - `Eq` and `Hash` are the type's own, not derived over a representation that admits duplicates;
 - `open_record::witness_order` (`:261`, lifted to `pub(super)` at D1) must extend to a **total**
   order over sets, because `finalise` sorts observations with it and the output has to be deterministic
@@ -234,17 +239,17 @@ whatever the encoding, the out-of-range case is an error or an assertion, not a 
 | what | where | how it changes |
 |---|---|---|
 | the shared type and the field holding it | `mod.rs:145`, `mod.rs:44` | `ObservedSequence` → `SequenceObservation` (§1), and `observed_sequences` → `observations` — decided (owner, 2026-07-30). `SampleLocusObservations::observations` says the whole thing at the definition, so the field need not repeat "sequence"; `sequence_observations` was the alternative, exactly the plural of the element type and proof against drift, and it lost on length at 100 sites. Mechanical and wide: **39 uses of the type across 7 files, 100 of the field** |
-| the fold's own accumulator | `open_record.rs:237` | `ObservationRow` holds the same information as the public type in the fold's layout, so it needs a name that is not "row" once the public one is an observation. **26 uses with `ObservationKey` across 4 files.** The arch doc's call; leaning `KeyedObservation` |
-| `ReadWitness` + constructors | `mod.rs:213-347` | `Observed`'s payload; `from_left`/`from_right` keep their signatures and build single-run sets; a third constructor for an interior run, which is what the deferred note asked for. **The type is `ReadCoverage` today and is renamed here** — "coverage" reads as depth, which the type's own doc already has to correct; 193 uses of the type and 91 of the field across 12 files. Decision record in the [arch doc](../arch/locus_witness_representation.md) §3 |
+| the fold's own accumulator | `open_record.rs:237` | `ObservationRow` holds the same information as the public type in the fold's layout, so it needs a name that is not "row" once the public one is an observation. **26 uses with `ObservationKey` across 4 files.** Settled in the [arch doc](../arch/locus_witness_representation.md) §3: `KeyedObservation`, with `ObservationKey` keeping its name |
+| `ReadWitness` + constructors | `mod.rs:213-347` | `Observed` becomes `Partial` and its payload becomes a set; `from_left`/`from_right` keep their signatures and build single-run sets; a third constructor for an interior run, which is what the deferred note asked for. **The type is `ReadCoverage` today and is renamed here** — "coverage" reads as depth, which the type's own doc already has to correct; 193 uses of the type and 91 of the field across 12 files. Decision record in the [arch doc](../arch/locus_witness_representation.md) §3 |
 | `is_flush_left` / `is_flush_right` / `positions_covered` | `mod.rs:329-347` | derivations from the set; same signatures |
 | `num_obs_along_locus` | `mod.rs:69-104` | iterates the set instead of one run. **Its clamp stays** — the comment there explains why the bound is not expressible on the type, and a set does not change that |
 | `complete_observations` | `mod.rs:123` | unchanged (`Complete` is still a variant) |
-| the fold | `open_record.rs::apply_events_into` | returns the witnessed set instead of a `RefSpan`, and no longer returns `None` for a hole; the two borrow sites record provenance |
+| the fold | `open_record.rs::apply_events_into` | returns the witnessed set instead of a `RefSpan`, and no longer returns `None` for a hole. **The two borrow sites are untouched** — that half is deferred (§3.2) |
 | the drop path | `open_record.rs:1335-1345` | narrows to "witnessed nothing"; the set-of-read-ids mechanism and its reason survive |
 | `witness_of` (`coverage_of` today) | `open_record.rs:184-212` | resolves a set against the final footprint rather than a span |
 | the STR generator | `ssr.rs:770, 821-822, 889, 989` | call sites unchanged if the constructors keep their signatures — which is the point of keeping them |
-| both dump tools | `examples/ng_ssr_loci_dump.rs`, `examples/ng_generic_loci_dump.rs` | must **print** the set and the provenance, or this becomes another surface nobody reads |
-| the generic census | `pileup/parity.rs` | must **count** borrowed bases and holed witnesses, for the same reason |
+| both dump tools | `examples/ng_ssr_loci_dump.rs`, `examples/ng_generic_loci_dump.rs` | must **print** the set, or this becomes another surface nobody reads |
+| the generic census | `pileup/parity.rs` | must **count** holed witnesses and the positions inside them — the counters the §8 measurement used, kept rather than thrown away |
 
 **The parity oracles.** The STR dump's byte-identity is the oracle for "nothing moved on the STR
 path" — the same oracle that caught the `PartialLeft`/`PartialRight` reshape at plan 1's Milestone
@@ -258,10 +263,10 @@ rather than absorbing it into an existing one.
 ## 5. Cross-cutting concerns
 
 **Memory and speed.** The whole cost is per observation, and observations ≈ loci on real data (§2).
-The requirement is: **no third allocation on an observation that borrowed nothing and witnessed one
-run.** `Option<BaseProvenance>` gives that for provenance; the coverage set needs an inline encoding
-for the common sizes. Anything that allocates per observation should be rejected at review, not
-measured afterwards.
+The requirement is: **no third allocation on an observation that witnessed one run.** §8 measured
+that as every witness in 225 million event-folds of DNA-seq, and two runs in the RNA-seq case, so
+an encoding with two runs inline pays nothing on the common path. Anything that allocates per
+observation should be rejected at review, not measured afterwards.
 
 **Errors.** No new error type and no new fallible path. The one hazard is a set that cannot be
 represented (a locus past the inline bound, or past `u16::MAX`), and that must fail loudly rather
@@ -277,6 +282,18 @@ than clamp — see §3.4.
 
 ## 6. Deferred, with a recommended home
 
+- **Saying which bases the read supplied — deferred on measurement, design settled.** A borrowed
+  anchor base stays indistinguishable from a sequenced one. The design when it is wanted: a
+  validated newtype of **ascending indices into `bases`**, on the read axis, empty in the common
+  case, named for what it holds rather than for provenance (the arch doc's `UnwitnessedBases`). Not
+  an `Option` — an empty set already costs no allocation once the encoding is inline, so the
+  `Option` would only add a second spelling of "nothing".
+
+  **Why it is not built:** §8 measured **8 borrowed bases in 225 million event-folds**, across
+  human and tomato, and **never two in one observation**. The reachability argument stands — the
+  borrow is guarded per indel event, so a widened footprint holding two indels from one read can
+  borrow twice — but nothing in the data has ever asked for it. **Home: this spec.** Build it when
+  a measurement, or a data type not yet tried, produces a non-trivial count.
 - **The rename in the code's own doc comments.** The three sibling specs are done — 
   [`locus_generation.md`](locus_generation.md),
   [`locus_generation_pileup.md`](locus_generation_pileup.md) and
@@ -307,9 +324,10 @@ than clamp — see §3.4.
 2. **The generic anchor stays green** and the census gains its new class, counted and floored — no
    divergence may be absorbed into an existing class.
 3. **A fixture per new capability, each written to fail the old representation:** a read blind in
-   the middle whose two runs are both recorded; an observation that borrowed **two** anchor bases (the case
-   §2 shows is reachable and which no current test covers); a holed read that is *not* counted in
-   `reads_without_observation` any more.
+   the middle whose two runs are both recorded; a holed read that is *not* counted in
+   `reads_without_observation` any more. **The spliced fixture from §8 is the third and the most
+   valuable** — it is the only one drawn from a real failure rather than constructed to exercise a
+   branch, and under the old representation the read vanishes from the record entirely.
 4. **The observation-identity property:** two reads with the same witness share one observation.
    Mutation: perturb the set's canonical form and watch the observation count inflate — if nothing
    fails, §3.3's trap is unguarded.
@@ -318,26 +336,54 @@ than clamp — see §3.4.
 
 ---
 
-## 8. Open questions
+## 8. Resolved decisions & open questions
 
-- **How often does the borrowed base actually fire, and how many per observation?** *Leaning: rare, but
-  unmeasured — and the design does not depend on the answer, only its priority does.* Settled by
-  counting borrowed bases per observation over the parity soak and over the D3 real-data runs. **Do this
-  before writing the arch doc**: if the answer is zero on real data, this half of the change may
-  deserve a `debug_assert` and a note rather than a field.
-- **How much evidence does the current drop discard?** *Leaning: more than the borrow, because an
-  interior `N` or a ref-skip is ordinary.* Settled by the same three numbers D3 produced for the
-  fabrication — loci, reads, and witnessed positions inside the dropped runs — which turns "ng
-  forgets" into a size. **This is the number that says whether the change is worth making.**
-- **What inline bound, and what encoding?** Options: a bitmask (`u128` inline covers 128
-  positions), or a `SmallVec` of runs (two inline covers every case seen so far). *Leaning: runs,
-  because the common case is one run and the STR path only ever produces one — a bitmask pays 16
-  bytes to say "positions 0..40".* Settled by the distribution of runs per witness on real data,
-  from the same instrumentation.
-- **Does every consumer of `positions_covered` survive the move to a set?** Audit list:
-  `num_obs_along_locus`, the STR path's flush predicates, the paralog filter's depth derivation.
-  *No leaning — this is a read-the-code task for the arch doc, and if one consumer genuinely needs
-  a single run, that is a finding about the consumer.*
-- **Should the coverage set and the base provenance be one type?** §3.2 says no, on the axes
-  argument. *Leaning: keep them separate.* Confirm when the arch doc writes the two newtypes; if
-  they end up with identical shapes and one is always derivable from the other, revisit.
+Measured 2026-07-30 with a throwaway probe in `apply_events_into`, counting borrows and holes
+directly. It changed no behaviour — the 275 locus-generation tests, including the parity anchor and
+the byte-identity check, stayed green — and it was validated on the two shapes it exists to count
+before any number was trusted, because zero is also what a miswired probe reports.
+
+| run | event-folds | borrowed bases | holed witnesses | witnesses over one run |
+|---|---|---|---|---|
+| HG002 chr1, 30×, tandem-repeat tiers | 43,084,914 | 0 | 0 | 0 |
+| tomato SRR7279503 | 89,557,864 | 8 | 0 | 0 |
+| tomato SRR7279510 | 92,268,192 | 0 | 0 | 0 |
+
+- **How often does the borrowed base fire — resolved: 8 times in 225 million event-folds, never
+  twice in one observation.** Adaptor masking was live in all three runs (210 to 2,871 bases
+  silenced), so this is not "the trigger never happened": it happened and almost never coincided
+  with an indel anchor. **Consequence: that half is deferred** (§3.2, §6). The per-indel-event
+  finding in §2 stands as a description of the code; it just has no population.
+- **How much evidence does the current drop discard — resolved, and the answer differs by data
+  type.** On DNA-seq, nothing: zero holed witnesses in 225 million folds. The earlier leaning
+  ("an interior `N` or a ref-skip is ordinary") was wrong, and structurally so — a ref-skip is an
+  RNA-seq CIGAR op, and modern Illumina puts `N`s at read ends where they cannot make a hole.
+
+  **On RNA-seq it discards whole reads, and that is why §3.1 is being built.** Demonstrated on a
+  fixture: a spliced read with a 15 bp intron, plus a read whose 20 bp deletion widens the record
+  across it to positions 28–48. The spliced read witnessed **6 of those 21 positions** — three in
+  each exon, two runs — and is **absent from the record entirely**; the drop path fired 6 times for
+  that one read, once per position the record was affected at. With a 16 bp deletion the footprint
+  stops one position short of exon 2 and the same read is recorded normally. One base of footprint
+  width decides it.
+
+  **What gates the rate, and is not known:** an intron never widens a record on its own, because a
+  `Skip` emits no event (`cigar_cursor.rs:333`) and footprints grow from events
+  (`open_record.rs:1790`). The hole needs an indel allele spanning the intron. Whether that is
+  common depends on how the aligner treats short introns — some emit a deletion where the truth is
+  a splice. **Untested: no RNA-seq alignment was available.** It does not gate the design, since
+  the failure is demonstrated and the fix's shape does not change with the rate.
+- **What inline bound, and what encoding — resolved: runs, two inline.** Every witness in 225
+  million DNA-seq folds is one run; the RNA-seq case is two. A bitmask is out — it would pay 16
+  bytes to say "positions 0..40" for a case that is one run in every observation measured.
+- **Does every consumer of `positions_covered` survive the move to a set — resolved: yes, and the
+  audit is small.** Grepping `positions_covered` and `offset_in_locus` across `src/` and
+  `examples/` finds them only inside `src/ng/locus_generation/` and `examples/ng_generic_loci_dump.rs`.
+  The paralog filter, named in an earlier draft of this question, does not read them: it is
+  production code and ng's depth derivation is `num_obs_along_locus`, which iterates runs instead
+  of one range and keeps its clamp. The dump's own invariant check
+  (`offset_in_locus + positions_covered <= footprint`) becomes a check per run.
+- **How often does the hole fire on real RNA-seq?** *No leaning: the fixture proves reachability,
+  not frequency, and the aligner's junction behaviour decides it.* Settled by running the same
+  probe over one spliced BAM. Worth doing before the implementation plan orders the work, and not
+  worth blocking the design on.
