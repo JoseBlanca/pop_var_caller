@@ -197,3 +197,7 @@ harness = false
 name = "ng_ssr_delimiter_perf"
 harness = false
 
+[[bench]]
+name = "ng_generic_pileup_perf"
+harness = false
+

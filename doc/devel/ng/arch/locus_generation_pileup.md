@@ -551,9 +551,13 @@ weight is not where a reader would guess:
 | `copy_fidelity.rs` | the textual guard over `PAIRS` |
 | `examples/ng_generic_loci_dump.rs` | the dump tool **and its ten asserted fixtures** — a `#[cfg(test)] mod` inside the example, so `cargo test --example ng_generic_loci_dump` is a second suite that `cargo test --lib` does not run |
 
-**Nothing in `benches/` drives this walker.** Both of plan 3's performance measurements came from
-throwaway probes that were deleted after use, so the next measurement starts from scratch. Carried
-since Checkpoint B.
+**`benches/ng_generic_pileup_perf.rs` drives this generator** (2026-07-30), which closes the
+Checkpoint B carry — both of plan 3's measurements came from throwaway probes that were deleted
+after use, so every later question began by rebuilding one. It enters at `PileupGenerator` over a
+synthetic BAM in a temporary directory, because ng's `run` is `pub(crate)` and a bench is an
+external consumer; it sweeps coverage and region grain; and it asserts, before each timed set, that
+the walk emits one locus per position of the span **and** that the reads reached it, since a walk
+generating nothing measures as a fast walk.
 
 **Stage 1 is a gate, not a permanent test.** The verbatim copy is proven to emit `PileupRecord`
 streams equal to production's on one shared `PreparedRead` stream, plus `RunSummary` — and that
