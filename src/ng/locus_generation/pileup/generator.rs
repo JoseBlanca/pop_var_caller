@@ -2140,6 +2140,62 @@ mod tests {
         }
     }
 
+    /// **A read still active when the walk stops is judged on what it contributed, not on how it
+    /// left** — the `ever_contributed` guard in `ActiveReads::flush_all` (D2).
+    ///
+    /// # Why this needs its own test, and how the review found that out
+    ///
+    /// `reads_silent_over_footprint` is fed by the active set's **two** exits, and only one of
+    /// them was pinned. `expire_passed` is the ordinary one — a read whose `alignment_end` the
+    /// walker has passed — and
+    /// [`a_read_silent_at_every_position_is_counted_rather_than_lost`] covers it. `flush_all` is
+    /// the other, and on the generic path it is not an edge case at all: **a region walk stops at
+    /// `region.end` while the reads reaching into the halo are still active**, so every bounded
+    /// walk ends by flushing reads that never expired.
+    ///
+    /// Milestone D's review deleted the guard — making every read that leaves through `flush_all`
+    /// count as silent — and **the whole 2,724-test suite passed**. The counter would then have
+    /// over-reported on every region of every real run, which is the failure mode this whole
+    /// milestone exists to make impossible: a number nobody can see being wrong.
+    ///
+    /// **One silent read and *two* contributing ones, and the asymmetry is the point.** With one
+    /// of each, the correct guard and a guard *inverted* to count the contributors both yield a
+    /// total of 1, so the test could not tell them apart — which is this branch's recurring
+    /// defect, and it was in the first draft of this very test. Two contributors make the two
+    /// answers 1 and 2.
+    #[test]
+    fn a_read_still_active_when_the_walk_stops_is_counted_by_what_it_contributed() {
+        // The reads span 10..=39; the region stops at 20, so the walk ends with all three of
+        // them still in the active set — they leave through `flush_all`, never through
+        // `expire_passed`.
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("silent", 0, 10, 30),
+            read_named_with_length("speaks", 0, 10, 30),
+            read_named_with_length("speaks_too", 0, 10, 30),
+        ]);
+        let mut generator =
+            a_generator_with(PileupGeneratorConfig::default(), SilencesRead("silent"))
+                .expect("the default config is valid");
+
+        let loci = loci_of(&mut generator, region(0, 1, 20), &reads);
+
+        assert_eq!(
+            anchors(&loci),
+            (10..=20).collect::<Vec<u64>>(),
+            "the walk must stop at the region's end with the reads still active — if it ran to \
+             their ends instead they would expire, and this test would be covering the other \
+             exit"
+        );
+        assert_eq!(
+            generator.counts().reads_silent_over_footprint,
+            1,
+            "exactly the one read that contributed nowhere: the two speaking reads reached the \
+             fold at eleven positions each and must not be counted merely because the walk \
+             stopped under them, and `silent` must be counted even though it never expired. A \
+             guard that counted the contributors instead would say 2 here"
+        );
+    }
+
     /// **A read the preparer declines is counted** — `reads_declined_by_preparer` (D2).
     ///
     /// It never reaches the walk, so `reads_admitted` cannot account for it and no per-locus

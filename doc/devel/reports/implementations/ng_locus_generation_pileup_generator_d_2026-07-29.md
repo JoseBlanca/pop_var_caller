@@ -330,7 +330,7 @@ not.
 
 | mutation | before | after |
 |---|---|---|
-| `coverage_of` always returns `Complete` (a span-derived implementation) | fixtures 1 and 3 fail — as spec §13 requires | unchanged |
+| `coverage_of` always returns `Complete` (a span-derived implementation) | fixtures 1 and 3 fail — as spec §13 requires. *(Milestone D's review re-ran this and counted **four** failing dump fixtures, not two: the region-boundary and chain-id ones fail as well. Wider coverage than claimed, not narrower.)* | unchanged |
 | the chain-id rule becomes production's positional `allele_index == 0` | **all ten passed** | fixture rewritten; now fails |
 | the halo removed from the region query | **all ten passed** | fixture rewritten; now fails |
 | the read group dropped from the row key | fixture 5 fails | unchanged |

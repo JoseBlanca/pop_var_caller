@@ -2376,9 +2376,12 @@ fn the_determinism_digest_responds_to_the_evidence() {
 /// live read — so a record that widened after a read folded into it leaves production
 /// holding that read's haplotype against a stale footprint, whether or not the read went on
 /// to witness the whole thing. The fixture is what supplies the second half:
-/// [`generate_uniform_events`] gives every read on a contig the same event set, so **no
-/// record widens at all** — asserted here, on every case, rather than assumed. That is the
-/// class production genuinely cannot get wrong, and it is the one that must hold forever.
+/// [`generate_uniform_events`] gives every read on a contig the same event set, so **no widen
+/// leaves any read stale** — every read in a record carries its own copy of every widening
+/// event and is re-folded by it. Records widen here as often as anywhere else, and this test
+/// asserts that they do (`widens > 0`); what the shared event set removes is the *staleness*,
+/// not the widen. That is the class production genuinely cannot get wrong, and it is the one
+/// that must hold forever.
 ///
 /// The loci this leaves out are not unchecked: they are the census's, where the stale widen
 /// is a **named** class with its own count
