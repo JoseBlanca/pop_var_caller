@@ -20,7 +20,7 @@ mod witness;
 
 /// The witness vocabulary, re-exported so no consumer's import path names the file it
 /// lives in (arch *Module home*).
-pub use witness::{LocusLen, ReadWitness};
+pub use witness::{LocusLen, ReadWitness, WitnessedLocusPositions};
 
 use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;

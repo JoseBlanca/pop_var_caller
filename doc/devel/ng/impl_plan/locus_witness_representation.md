@@ -111,7 +111,7 @@ expectations is a step that did more than rename.
   the witness vocabulary through `super::super::` while two use the crate-absolute path, and in
   `open_record.rs` the same spelling resolves to two different modules — converting them here
   makes `grep crate::ng::locus_generation::witness` answer "who depends on this".
-- ☐ **B2.** `WitnessedLocusPositions`: private field, `new` normalising (sort, merge adjacent and
+- ✅ **B2.** `WitnessedLocusPositions`: private field, `new` normalising (sort, merge adjacent and
   overlapping), `one_run`, `runs`, `positions_covered`, `is_flush_left`, `is_flush_right`. Encoding
   is runs with two inline. Derived `Eq`/`Hash`, sound because construction canonicalises. **Own
   commit, do not bundle** — a non-canonical representation inflates observation counts silently

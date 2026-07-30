@@ -10,7 +10,113 @@
 //! Re-exported from [`locus_generation`](super), so no consumer's import path names this
 //! module.
 
+use smallvec::SmallVec;
+
 use crate::ng::types::GenomeRegion;
+
+/// The locus positions one read witnessed — **a set, in locus coordinates**, and never
+/// empty (a read that witnessed nothing inside a footprint does not fold into it).
+///
+/// Held as **canonical half-open runs**: sorted by start, each non-empty, and separated by
+/// at least one position the read did not witness. Two runs that touch or overlap are one
+/// run, always.
+///
+/// # The invariant is the whole point, and it fails silently
+///
+/// An observation's identity is `(bases, read_witness, read_group)`, and observations are
+/// merged by comparing it. **If two equal sets could have two representations, two reads
+/// with the same witness would stop sharing an observation** — not as an error, but as
+/// extra observations, i.e. a wrong number with nothing to catch it (spec §3.3). So the
+/// field is private, every constructor normalises, and `Eq`/`Hash` are derived over a
+/// representation that admits exactly one spelling per set. `SmallVec` compares and hashes
+/// as a slice, so a set that fits inline and the same set after a spill are equal.
+///
+/// # Two runs inline
+///
+/// Every witness in 225 million DNA-seq event-folds is one run, and the RNA-seq case this
+/// change exists for is two (spec §8), so the common path allocates nothing. A bitmask was
+/// rejected on the same evidence: it would pay 16 bytes to say "positions 0..40" for a case
+/// that is one run in every observation measured (arch §4). The encoding is private behind
+/// [`runs`](Self::runs) so it can still move.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WitnessedLocusPositions(SmallVec<[(u16, u16); 2]>);
+
+impl WitnessedLocusPositions {
+    /// From runs in **any** order, normalised: sorted by start, then touching and
+    /// overlapping runs merged.
+    ///
+    /// Runs are half-open `[start, end)`. `None` when there is nothing to describe — an
+    /// empty iterator, or any run with `start >= end`, since a run of no positions is not
+    /// something a read can witness and silently dropping it would let a caller build a set
+    /// it did not mean.
+    pub fn new(runs: impl IntoIterator<Item = (u16, u16)>) -> Option<Self> {
+        let mut runs: SmallVec<[(u16, u16); 2]> = runs.into_iter().collect();
+        if runs.is_empty() || runs.iter().any(|(start, end)| start >= end) {
+            return None;
+        }
+        runs.sort_unstable();
+        // Merge left to right. `next.0 <= end` covers both cases the invariant forbids:
+        // overlapping (`next.0 < end`) and merely touching (`next.0 == end`), which are one
+        // run of witnessed positions and must have one spelling.
+        let mut canonical: SmallVec<[(u16, u16); 2]> = SmallVec::new();
+        for (start, end) in runs {
+            match canonical.last_mut() {
+                Some((_, open_end)) if start <= *open_end => *open_end = (*open_end).max(end),
+                _ => canonical.push((start, end)),
+            }
+        }
+        Some(Self(canonical))
+    }
+
+    /// The one-run case — what the STR path mints and the common generic one.
+    ///
+    /// Takes the run as the offset it starts at and how many positions it covers, which is
+    /// how both producers already measure a witness (and how [`ReadWitness::Partial`]
+    /// spells it), rather than as the half-open pair [`new`](Self::new) takes. `None` if it
+    /// covers no positions, or if it would end past `u16::MAX` — the out-of-range case the
+    /// spec asks to fail rather than clamp (§3.4), since a clamp here would silently
+    /// shorten a witness.
+    pub fn one_run(offset_in_locus: u16, positions_covered: u16) -> Option<Self> {
+        let end = offset_in_locus.checked_add(positions_covered)?;
+        Self::new([(offset_in_locus, end)])
+    }
+
+    /// The runs, in canonical order, half-open `[start, end)` in locus coordinates.
+    pub fn runs(&self) -> impl ExactSizeIterator<Item = (u16, u16)> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// How many locus positions in total — what `num_obs_along_locus` sums over.
+    ///
+    /// **The positions, not the span.** Two runs with a gap between them cover fewer
+    /// positions than the distance from the first start to the last end, and the difference
+    /// is exactly what this type exists to record. `u32` because the runs can together
+    /// exceed a `u16` only if they overlap, which they never do — but the sum is taken
+    /// without that assumption.
+    pub fn positions_covered(&self) -> u32 {
+        self.0
+            .iter()
+            .map(|(start, end)| u32::from(*end) - u32::from(*start))
+            .sum()
+    }
+
+    /// Whether the witness starts at the locus's left border — a **prefix** constraint on
+    /// the allele, unchanged in meaning from the one-run form.
+    pub fn is_flush_left(&self) -> bool {
+        self.0.first().is_some_and(|(start, _)| *start == 0)
+    }
+
+    /// Whether the witness reaches the locus's right border — a **suffix** constraint.
+    ///
+    /// `>=` rather than `==` for the same reason the one-run predicate uses it: a producer's
+    /// reach is measured in read bases, which diverge from locus positions under stutter, so
+    /// a run may be handed a length the locus does not have.
+    pub fn is_flush_right(&self, locus_len: LocusLen) -> bool {
+        self.0
+            .last()
+            .is_some_and(|(_, end)| *end >= locus_len.get())
+    }
+}
 
 /// How much of a locus a single read spanned — **one read's span, not depth**.
 ///
@@ -208,6 +314,185 @@ impl ReadWitness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use proptest::prelude::*;
+
+    fn hash_of(positions: &WitnessedLocusPositions) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        positions.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn runs_of(positions: &WitnessedLocusPositions) -> Vec<(u16, u16)> {
+        positions.runs().collect()
+    }
+
+    /// **Touching and overlapping runs are one run** — the merge half of the invariant.
+    ///
+    /// A gap of even one position is a real gap and survives: that is the distinction the
+    /// whole type exists to carry, so it is asserted beside the merge rather than trusted.
+    #[test]
+    fn adjacent_and_overlapping_runs_merge_and_a_gap_survives() {
+        let touching = WitnessedLocusPositions::new([(0, 4), (4, 9)]).expect("non-empty");
+        assert_eq!(
+            runs_of(&touching),
+            vec![(0, 9)],
+            "runs that touch are one run"
+        );
+
+        let overlapping = WitnessedLocusPositions::new([(0, 6), (3, 9)]).expect("non-empty");
+        assert_eq!(runs_of(&overlapping), vec![(0, 9)]);
+
+        let contained = WitnessedLocusPositions::new([(0, 9), (3, 5)]).expect("non-empty");
+        assert_eq!(
+            runs_of(&contained),
+            vec![(0, 9)],
+            "a run inside another adds no positions and must not survive as a second run",
+        );
+
+        let gapped = WitnessedLocusPositions::new([(0, 4), (5, 9)]).expect("non-empty");
+        assert_eq!(
+            runs_of(&gapped),
+            vec![(0, 4), (5, 9)],
+            "one unwitnessed position at 4 is a hole, and a hole is the point",
+        );
+    }
+
+    /// **A set nothing witnessed is not a set** — the "never empty" half of the invariant,
+    /// and the run of no positions both `RefSpan` and `ReadWitness` document as not
+    /// existing.
+    #[test]
+    fn an_empty_input_or_an_empty_run_is_rejected_rather_than_dropped() {
+        assert!(WitnessedLocusPositions::new([]).is_none());
+        assert!(
+            WitnessedLocusPositions::new([(4, 4)]).is_none(),
+            "a half-open run with start == end covers nothing",
+        );
+        assert!(
+            WitnessedLocusPositions::new([(0, 4), (7, 7)]).is_none(),
+            "an empty run among good ones is rejected, not silently dropped — the caller \
+             built a set it did not mean",
+        );
+        assert!(WitnessedLocusPositions::one_run(3, 0).is_none());
+        assert!(
+            WitnessedLocusPositions::one_run(u16::MAX, 1).is_none(),
+            "a run ending past u16::MAX fails rather than clamping (spec §3.4)",
+        );
+    }
+
+    /// `one_run` and `new` describe the same set through two different spellings — offset
+    /// plus length, and the half-open pair. A reader meeting both in one type is entitled
+    /// to know they agree.
+    #[test]
+    fn one_run_is_the_half_open_pair_it_looks_like() {
+        assert_eq!(
+            WitnessedLocusPositions::one_run(4, 5),
+            WitnessedLocusPositions::new([(4, 9)]),
+        );
+    }
+
+    /// **Positions, not span.** The sum skips the hole, which is the number
+    /// `num_obs_along_locus` needs and the one a first-start-to-last-end subtraction gets
+    /// wrong.
+    #[test]
+    fn positions_covered_counts_the_runs_and_not_the_gap_between_them() {
+        let gapped = WitnessedLocusPositions::new([(0, 3), (7, 9)]).expect("non-empty");
+        assert_eq!(gapped.positions_covered(), 5);
+        assert_eq!(
+            WitnessedLocusPositions::new([(0, 9)])
+                .expect("non-empty")
+                .positions_covered(),
+            9,
+            "and the same span with nothing missing counts every position",
+        );
+    }
+
+    /// The flush predicates read off the first and last run, and mean what they meant on
+    /// the one-run form: a prefix constraint, and a suffix constraint.
+    #[test]
+    fn flushness_is_read_off_the_first_and_last_run() {
+        let len = LocusLen::from_positions(9);
+
+        let whole = WitnessedLocusPositions::new([(0, 9)]).expect("non-empty");
+        assert!(whole.is_flush_left() && whole.is_flush_right(len));
+
+        let interior = WitnessedLocusPositions::new([(2, 3), (5, 7)]).expect("non-empty");
+        assert!(!interior.is_flush_left() && !interior.is_flush_right(len));
+
+        let both_ends_holed = WitnessedLocusPositions::new([(0, 2), (7, 9)]).expect("non-empty");
+        assert!(
+            both_ends_holed.is_flush_left() && both_ends_holed.is_flush_right(len),
+            "a read blind only in the middle is constrained from both sides",
+        );
+    }
+
+    /// **The set is one representation whether it fits inline or spills to the heap.**
+    ///
+    /// The encoding keeps two runs inline; a third spills. If equality could see the
+    /// difference, a witness that arrived as three runs and merged down to two would stop
+    /// matching the same two runs built directly — the exact silent split this type exists
+    /// to prevent, on the exact path (a merge) that produces it.
+    #[test]
+    fn a_set_that_merged_down_to_two_runs_equals_the_same_two_built_directly() {
+        let merged = WitnessedLocusPositions::new([(0, 2), (5, 7), (1, 3), (6, 9), (2, 4)])
+            .expect("non-empty");
+        let direct = WitnessedLocusPositions::new([(0, 4), (5, 9)]).expect("non-empty");
+        assert_eq!(merged, direct);
+        assert_eq!(hash_of(&merged), hash_of(&direct));
+    }
+
+    proptest! {
+        /// **Two sets built from different orderings of the same runs compare and hash
+        /// equal** — the property the whole design rests on, over generated multisets
+        /// rather than a fixture.
+        ///
+        /// This is the guard the plan names for B2, and it is a *property* test because the
+        /// failure is silent: an observation's identity is `(bases, read_witness,
+        /// read_group)`, so a second representation of one set does not error, it splits one
+        /// observation into two and inflates the count (spec §3.3).
+        ///
+        /// **Mutation-checked in both directions**: delete `sort_unstable` and this fails on
+        /// a shuffled input; delete the merge and it fails on runs that touch. A fixture
+        /// would have caught neither reliably, because both mutations need an input order
+        /// the fixture happens not to use.
+        #[test]
+        fn a_set_is_the_same_set_whatever_order_its_runs_arrive_in(
+            runs in prop::collection::vec((0u16..40, 1u16..8), 1..6),
+            permutation in prop::collection::vec(any::<u8>(), 6),
+        ) {
+            let half_open: Vec<(u16, u16)> = runs
+                .iter()
+                .map(|(start, len)| (*start, start + len))
+                .collect();
+            // A cheap deterministic shuffle: sort the same runs by a generated key, so the
+            // second build sees an order the first did not.
+            let mut shuffled: Vec<(u16, u16)> = half_open.clone();
+            shuffled.sort_by_key(|run| {
+                permutation[(usize::from(run.0) + usize::from(run.1)) % permutation.len()]
+            });
+
+            let first = WitnessedLocusPositions::new(half_open).expect("at least one run");
+            let second = WitnessedLocusPositions::new(shuffled).expect("at least one run");
+
+            prop_assert_eq!(&first, &second, "one set, two orderings, one representation");
+            prop_assert_eq!(hash_of(&first), hash_of(&second));
+
+            // The canonical form itself, stated rather than assumed: sorted, non-empty,
+            // and separated by at least one unwitnessed position.
+            let canonical: Vec<(u16, u16)> = first.runs().collect();
+            for pair in canonical.windows(2) {
+                prop_assert!(
+                    pair[0].1 < pair[1].0,
+                    "runs {:?} touch or overlap, so they are one run",
+                    pair,
+                );
+            }
+            prop_assert!(canonical.iter().all(|(start, end)| start < end));
+        }
+    }
 
     /// **The sort key's two components, told apart** — and until this test nothing could
     /// tell them apart.
