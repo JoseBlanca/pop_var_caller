@@ -119,7 +119,9 @@ use crate::ng::read::PLACEHOLDER_READ_GROUP;
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
-use super::super::{LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation};
+use crate::ng::locus_generation::{
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+};
 use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
     run as production_run,
@@ -1349,18 +1351,17 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
 
 /// ng's emission order, applied to both sides — spec §3's class 5.
 ///
-/// The `ReadWitness` half of the comparator is **the walk's own**
-/// (`open_record::witness_order`, lifted to `pub(super)` for this) rather than a second
+/// The `ReadWitness` half of the comparator is **the type's own**
+/// ([`ReadWitness::sort_key`]) rather than a second
 /// spelling here: `finalise` sorts `KeyedObservation`s and this sorts `SequenceObservation`s, so
 /// the loop cannot be shared, but the one piece that could silently drift is.
 /// `the_projection_orders_observations_as_the_walk_does` covers the rest, by asserting that sorting
 /// an ng locus's observations with this function leaves them where the walk emitted them.
 fn sort_observations(observations: &mut [SequenceObservation]) {
-    use super::open_record::witness_order;
     observations.sort_by(|a, b| {
         a.bases
             .cmp(&b.bases)
-            .then_with(|| witness_order(a.read_witness).cmp(&witness_order(b.read_witness)))
+            .then_with(|| a.read_witness.sort_key().cmp(&b.read_witness.sort_key()))
             .then_with(|| a.read_group.0.cmp(&b.read_group.0))
     });
 }
@@ -2289,15 +2290,12 @@ fn stale_widen_shape(
 /// together being the whole observation identity.
 fn observations_split_by_group(locus: &SampleLocusObservations) -> bool {
     /// An observation's identity **without** its read group: the bases, and the witness run as the
-    /// walk's own total order gives it (`witness_order`).
+    /// type's own total order gives it ([`ReadWitness::sort_key`]).
     type ObservationIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
 
     let mut seen: BTreeSet<ObservationIdentityWithoutGroup<'_>> = BTreeSet::new();
     for observation in &locus.observations {
-        if !seen.insert((
-            &observation.bases,
-            super::open_record::witness_order(observation.read_witness),
-        )) {
+        if !seen.insert((&observation.bases, observation.read_witness.sort_key())) {
             return true;
         }
     }
@@ -3014,8 +3012,8 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 /// promise [`sort_observations`] makes, checked rather than commented.
 ///
 /// `finalise` sorts `KeyedObservation`s and [`sort_observations`] sorts `SequenceObservation`s, so the two
-/// loops cannot be shared even though the `ReadWitness` comparator is (`witness_order`,
-/// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
+/// loops cannot be shared even though the `ReadWitness` comparator is
+/// ([`ReadWitness::sort_key`]). What could still drift is the *rest* of the key — the
 /// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted
 /// observations with this function does not move them. If either spelling of the order changes, the
 /// projection stops being comparable to the walk and spec §3's class 5 stops being a

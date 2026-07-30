@@ -24,13 +24,13 @@ use crate::ng::ref_seq::RefSeq;
 use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 use crate::pileup_record::ChainId;
 
-use super::super::{
-    LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
-};
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
 use super::decompose::ReadEvent;
 use super::errors::WalkerError;
+use crate::ng::locus_generation::{
+    LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
+};
 
 /// Pre-allocated capacity for `OpenPileupRecord::folded_reads` —
 /// sized for typical WGS coverage so the per-record fold doesn't
@@ -256,22 +256,6 @@ pub(super) struct KeyedObservation {
     /// exactly when the observations are one-per-allele. A chain id marks which haplotype a read
     /// came from, and the reference is the default — a default needs no tag.
     pub chain_ids: Vec<ChainId>,
-}
-
-/// A total order over [`ReadWitness`], which is `Eq` but not `Ord` — the shared type has
-/// no natural ordering, and inventing an `Ord` impl on it would export this file's sorting
-/// convention to every other consumer.
-/// `pub(super)` for the differential: D1's projection has to lay production's alleles out in
-/// **ng's** emission order, and a second spelling of this comparator in `parity.rs` is a
-/// spelling that can drift from the one the walk actually uses.
-pub(super) fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
-    match witness {
-        ReadWitness::Complete => (0, 0, 0),
-        ReadWitness::Partial {
-            offset_in_locus,
-            positions_covered,
-        } => (1, offset_in_locus, positions_covered),
-    }
 }
 
 /// One in-flight allele bucket inside an `OpenPileupRecord`.
@@ -684,7 +668,10 @@ impl OpenPileupRecord {
                 .bases
                 .cmp(&b.key.bases)
                 .then_with(|| {
-                    witness_order(a.key.read_witness).cmp(&witness_order(b.key.read_witness))
+                    a.key
+                        .read_witness
+                        .sort_key()
+                        .cmp(&b.key.read_witness.sort_key())
                 })
                 .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
         });
@@ -3025,43 +3012,6 @@ mod tests {
                 positions_covered: 3,
             },
             "and it ends at the record's own end"
-        );
-    }
-
-    /// **The comparator's two components, told apart** — and until this test nothing
-    /// could tell them apart.
-    ///
-    /// [`witness_order`] is what makes the emitted order a function of an observation's
-    /// own identity rather than of read arrival order (see `finalise`'s sort). The review
-    /// mutated it — exchanging `offset_in_locus` and `positions_covered` in the returned
-    /// key — and **all 275 tests stayed green**, while a `panic!` in the same arm failed
-    /// four of them: the arm runs, and nothing asserted what it returned. The test named
-    /// for the job, `parity::the_projection_orders_observations_as_the_walk_does`, sorts both
-    /// sides with *this same function*, so it cannot fail on any change to it.
-    ///
-    /// The discriminating input is two runs whose components vary in **opposite**
-    /// directions, which no fixture in the suite produced: `{0, 9}` against `{4, 2}`. If
-    /// length outranked offset, the long left-flush run would sort second.
-    #[test]
-    fn witness_order_ranks_partials_by_offset_before_length() {
-        assert!(
-            witness_order(ReadWitness::Complete)
-                < witness_order(ReadWitness::Partial {
-                    offset_in_locus: 0,
-                    positions_covered: 1,
-                }),
-            "a complete witness sorts ahead of every run",
-        );
-        assert!(
-            witness_order(ReadWitness::Partial {
-                offset_in_locus: 0,
-                positions_covered: 9,
-            }) < witness_order(ReadWitness::Partial {
-                offset_in_locus: 4,
-                positions_covered: 2,
-            }),
-            "where a run starts outranks how far it runs, so a left-flush run precedes a \
-             right-flush one whatever their lengths",
         );
     }
 

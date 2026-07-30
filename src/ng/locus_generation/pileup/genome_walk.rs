@@ -25,7 +25,7 @@ use ahash::AHashMap;
 
 use crate::pileup_record::ChainId;
 
-use super::super::SampleLocusObservations;
+use crate::ng::locus_generation::SampleLocusObservations;
 
 use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};

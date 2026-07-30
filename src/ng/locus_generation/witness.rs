@@ -172,11 +172,83 @@ impl ReadWitness {
             } => offset_in_locus.saturating_add(*positions_covered) >= locus_len.get(),
         }
     }
+
+    /// A **total order over witnesses**: complete first, then partial runs by where they
+    /// sit in the locus and then by how far they run. Both generators sort their
+    /// observations by it, so two loci with the same evidence present it the same way.
+    ///
+    /// **A named key rather than an `Ord` impl**, so the convention is opt-in at the sort
+    /// site and a witness is not silently comparable everywhere. That much is unchanged;
+    /// what changed is *where it lives*. `pileup/open_record.rs` and `ssr.rs`'s tally each
+    /// had their own copy with byte-identical bodies, and `open_record`'s justified
+    /// withholding an `Ord` impl on the grounds that it "would export **this file's**
+    /// sorting convention to every other consumer" — which the STR copy refutes: two
+    /// independent producers wanted the identical convention, so it is the type's, not
+    /// either file's (Milestone A review, Mi11). One copy means C4 rewrites this order
+    /// once when the payload becomes a set, rather than twice with the two free to
+    /// disagree while both still compile.
+    ///
+    /// The order it produces is the pre-reshape one — complete, then left-flush partials,
+    /// then right-flush — without naming a side: a left-flush run has
+    /// `offset_in_locus == 0` and so sorts ahead of every right-flush one, whose offset is
+    /// `locus_len - covered`. Pinned by
+    /// `witness_order_ranks_partials_by_offset_before_length`, which is the test that
+    /// fails when the two components are exchanged.
+    pub fn sort_key(self) -> (u8, u16, u16) {
+        match self {
+            Self::Complete => (0, 0, 0),
+            Self::Partial {
+                offset_in_locus,
+                positions_covered,
+            } => (1, offset_in_locus, positions_covered),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The sort key's two components, told apart** — and until this test nothing could
+    /// tell them apart.
+    ///
+    /// [`sort_key`](ReadWitness::sort_key) is what makes the emitted order a function of
+    /// an observation's own identity rather than of read arrival order. The Milestone A
+    /// review mutated it — exchanging `offset_in_locus` and `positions_covered` in the
+    /// returned key — and **all 275 tests stayed green**, while a `panic!` in the same arm
+    /// failed four of them: the arm runs, and nothing asserted what it returned. The test
+    /// named for the job, `parity::the_projection_orders_observations_as_the_walk_does`,
+    /// sorts both sides with *this same key*, so it cannot fail on any change to it.
+    ///
+    /// The discriminating input is two runs whose components vary in **opposite**
+    /// directions, which no fixture in the suite produced: `{0, 9}` against `{4, 2}`. If
+    /// length outranked offset, the long left-flush run would sort second.
+    #[test]
+    fn witness_order_ranks_partials_by_offset_before_length() {
+        assert!(
+            ReadWitness::Complete.sort_key()
+                < ReadWitness::Partial {
+                    offset_in_locus: 0,
+                    positions_covered: 1,
+                }
+                .sort_key(),
+            "a complete witness sorts ahead of every run",
+        );
+        assert!(
+            ReadWitness::Partial {
+                offset_in_locus: 0,
+                positions_covered: 9,
+            }
+            .sort_key()
+                < ReadWitness::Partial {
+                    offset_in_locus: 4,
+                    positions_covered: 2,
+                }
+                .sort_key(),
+            "where a run starts outranks how far it runs, so a left-flush run precedes a \
+             right-flush one whatever their lengths",
+        );
+    }
 
     /// **The constructors place the run against their own border**, and the offset is
     /// derived from the *clamped* reach, never the raw one.

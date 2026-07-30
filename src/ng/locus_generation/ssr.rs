@@ -1122,33 +1122,13 @@ mod tally {
         observations.sort_unstable_by(|a, b| {
             a.bases
                 .cmp(&b.bases)
-                .then_with(|| witness_order(a.read_witness).cmp(&witness_order(b.read_witness)))
+                .then_with(|| a.read_witness.sort_key().cmp(&b.read_witness.sort_key()))
                 .then_with(|| a.read_group.cmp(&b.read_group))
         });
 
         SsrTally {
             observations,
             reads_without_observation,
-        }
-    }
-
-    /// A total order over `ReadWitness` (which is not `Ord`) for a deterministic tie-break when
-    /// two observations share bases: complete first, then partial runs by where they sit in the
-    /// locus and how far they run.
-    ///
-    /// **This reproduces the pre-reshape order** — complete, then left partials, then right
-    /// partials — without naming a side: a left-flush run has `offset_in_locus == 0` and so sorts
-    /// ahead of every right-flush one, whose offset is `locus_len - covered`. The old key's
-    /// third component was the reach, and it never separated anything on this path (an observation's
-    /// `bases` are the run, so equal bases already imply equal reach); ordering by offset then
-    /// length keeps a total order without relying on that.
-    fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
-        match witness {
-            ReadWitness::Complete => (0, 0, 0),
-            ReadWitness::Partial {
-                offset_in_locus,
-                positions_covered,
-            } => (1, offset_in_locus, positions_covered),
         }
     }
 
@@ -1511,7 +1491,7 @@ mod tally {
         }
 
         /// **Which of the tie-break's two components dominates** — the claim
-        /// [`witness_order`]'s doc makes, and which the test above cannot check.
+        /// [`ReadWitness::sort_key`]'s doc makes, and which the test above cannot check.
         ///
         /// `observations_are_sorted_by_bases_then_witness` builds both of its partials with the
         /// **same** `positions_covered` (`from_left(2, len 6)` = `{0,2}`,
