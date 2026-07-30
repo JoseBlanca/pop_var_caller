@@ -109,7 +109,7 @@ pub(super) struct AlleleSupportStats {
 
 /// How the reads folded into one finished record witnessed it — the tally
 /// [`OpenPileupRecord::finalise`] produces on its way past every
-/// [`FoldedReadState`], resolving [`coverage_of`] once against the **final**
+/// [`FoldedReadState`], resolving [`witness_of`] once against the **final**
 /// footprint.
 ///
 /// **Two counts rather than the per-read runs themselves, and only until B2.**
@@ -183,7 +183,7 @@ pub(super) struct RecordWitness {
 /// So the `debug_assert` below is the invariant's statement and **C1 is its enforcement**;
 /// until C1 lands, ng's walker is reachable only from tests and the default 5,000 leaves
 /// thirteen-fold headroom.
-pub(super) fn coverage_of(
+pub(super) fn witness_of(
     witnessed: RefSpan,
     record_pos: u32,
     record_end_exclusive: u32,
@@ -260,8 +260,8 @@ pub(super) struct ObservationRow {
 /// `pub(super)` for the differential: D1's projection has to lay production's alleles out in
 /// **ng's** emission order, and a second spelling of this comparator in `parity.rs` is a
 /// spelling that can drift from the one the walk actually uses.
-pub(super) fn coverage_order(coverage: ReadWitness) -> (u8, u16, u16) {
-    match coverage {
+pub(super) fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
+    match witness {
         ReadWitness::Complete => (0, 0, 0),
         ReadWitness::Observed {
             offset_in_locus,
@@ -535,7 +535,7 @@ impl OpenPileupRecord {
             // stay: they are the determinism guarantee. The linear `find` itself measured
             // 0 %, and hash-keying the rows measured *worse*.)
             let bases = self.alleles[state.allele_index].seq.as_slice();
-            let read_witness = coverage_of(state.witnessed, self.pos, record_end_exclusive);
+            let read_witness = witness_of(state.witnessed, self.pos, record_end_exclusive);
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
             let existing = rows.iter().position(|row| {
@@ -648,7 +648,7 @@ impl OpenPileupRecord {
         // `observation_rows` for why, and for what makes the two agree at one read group.
         let mut rows = self.observation_rows(record_end_exclusive);
         for state in self.folded_reads.values() {
-            match coverage_of(state.witnessed, record_pos, record_end_exclusive) {
+            match witness_of(state.witnessed, record_pos, record_end_exclusive) {
                 ReadWitness::Complete => witness.reads_complete += 1,
                 ReadWitness::Observed { .. } => witness.reads_partially_observed += 1,
             }
@@ -680,7 +680,7 @@ impl OpenPileupRecord {
                 .bases
                 .cmp(&b.key.bases)
                 .then_with(|| {
-                    coverage_order(a.key.read_witness).cmp(&coverage_order(b.key.read_witness))
+                    witness_order(a.key.read_witness).cmp(&witness_order(b.key.read_witness))
                 })
                 .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
         });
@@ -2933,9 +2933,9 @@ mod tests {
 
     /// A witness that tiles the footprint is a complete one.
     #[test]
-    fn coverage_of_a_witness_covering_the_whole_footprint_is_complete() {
+    fn witness_of_a_witness_covering_the_whole_footprint_is_complete() {
         assert_eq!(
-            coverage_of(RefSpan { start: 5, end: 20 }, 5, 21),
+            witness_of(RefSpan { start: 5, end: 20 }, 5, 21),
             ReadWitness::Complete
         );
     }
@@ -2943,8 +2943,8 @@ mod tests {
     /// Flush with the left border and short of the right — freebayes' prefix constraint,
     /// which `is_flush_left` has to keep being able to read off the run.
     #[test]
-    fn coverage_of_a_witness_flush_left_reports_a_zero_offset() {
-        let coverage = coverage_of(RefSpan { start: 5, end: 7 }, 5, 21);
+    fn witness_of_a_witness_flush_left_reports_a_zero_offset() {
+        let coverage = witness_of(RefSpan { start: 5, end: 7 }, 5, 21);
         assert_eq!(
             coverage,
             ReadWitness::Observed {
@@ -2959,8 +2959,8 @@ mod tests {
     /// Flush with the right border — the suffix constraint, and the offset is derived
     /// rather than assumed.
     #[test]
-    fn coverage_of_a_witness_flush_right_reports_the_offset_it_starts_at() {
-        let coverage = coverage_of(RefSpan { start: 18, end: 20 }, 5, 21);
+    fn witness_of_a_witness_flush_right_reports_the_offset_it_starts_at() {
+        let coverage = witness_of(RefSpan { start: 18, end: 20 }, 5, 21);
         assert_eq!(
             coverage,
             ReadWitness::Observed {
@@ -2977,8 +2977,8 @@ mod tests {
     /// [`ReadWitness`](super::super::ReadWitness)'s own note said would only be
     /// knowable when this generator produced its first run.
     #[test]
-    fn coverage_of_an_interior_witness_is_flush_with_neither_border() {
-        let coverage = coverage_of(RefSpan { start: 9, end: 12 }, 5, 21);
+    fn witness_of_an_interior_witness_is_flush_with_neither_border() {
+        let coverage = witness_of(RefSpan { start: 9, end: 12 }, 5, 21);
         assert_eq!(
             coverage,
             ReadWitness::Observed {
@@ -2996,14 +2996,14 @@ mod tests {
     /// `record_end` (spec §8). Unclamped, a deletion spanning the record would report an
     /// enormous `positions_covered`, or an `offset_in_locus` that underflowed.
     #[test]
-    fn coverage_of_clamps_an_extent_that_overruns_the_footprint() {
+    fn witness_of_clamps_an_extent_that_overruns_the_footprint() {
         assert_eq!(
-            coverage_of(RefSpan { start: 1, end: 40 }, 5, 21),
+            witness_of(RefSpan { start: 1, end: 40 }, 5, 21),
             ReadWitness::Complete,
             "a witness swallowing the footprint witnessed all of it, and nothing more"
         );
         assert_eq!(
-            coverage_of(RefSpan { start: 1, end: 7 }, 5, 21),
+            witness_of(RefSpan { start: 1, end: 7 }, 5, 21),
             ReadWitness::Observed {
                 offset_in_locus: 0,
                 positions_covered: 3,
@@ -3011,7 +3011,7 @@ mod tests {
             "the run starts at the record's own anchor, never before it"
         );
         assert_eq!(
-            coverage_of(RefSpan { start: 18, end: 40 }, 5, 21),
+            witness_of(RefSpan { start: 18, end: 40 }, 5, 21),
             ReadWitness::Observed {
                 offset_in_locus: 13,
                 positions_covered: 3,
@@ -3071,7 +3071,7 @@ mod tests {
                 .get(&shortie_id)
                 .expect("the shortie folded at 5");
             assert_eq!(
-                coverage_of(
+                witness_of(
                     state.witnessed,
                     record.pos,
                     record.footprint_end_exclusive()
@@ -3100,7 +3100,7 @@ mod tests {
             "the read saw exactly what it saw; a widen is not news about the read"
         );
         assert_eq!(
-            coverage_of(
+            witness_of(
                 state.witnessed,
                 record.pos,
                 record.footprint_end_exclusive()

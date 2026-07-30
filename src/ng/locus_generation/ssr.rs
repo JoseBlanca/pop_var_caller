@@ -1122,7 +1122,7 @@ mod tally {
         observations.sort_unstable_by(|a, b| {
             a.bases
                 .cmp(&b.bases)
-                .then_with(|| coverage_order(a.read_witness).cmp(&coverage_order(b.read_witness)))
+                .then_with(|| witness_order(a.read_witness).cmp(&witness_order(b.read_witness)))
                 .then_with(|| a.read_group.cmp(&b.read_group))
         });
 
@@ -1142,7 +1142,7 @@ mod tally {
     /// third component was the reach, and it never separated anything on this path (a row's
     /// `bases` are the run, so equal bases already imply equal reach); ordering by offset then
     /// length keeps a total order without relying on that.
-    fn coverage_order(witness: ReadWitness) -> (u8, u16, u16) {
+    fn witness_order(witness: ReadWitness) -> (u8, u16, u16) {
         match witness {
             ReadWitness::Complete => (0, 0, 0),
             ReadWitness::Observed {

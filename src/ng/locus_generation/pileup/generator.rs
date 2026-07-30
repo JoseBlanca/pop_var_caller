@@ -117,7 +117,7 @@ impl PileupGeneratorConfig {
     /// Reject a configuration a [`ReadWitness`] run could not describe.
     ///
     /// Called by [`PileupGenerator::new`], so a bad knob never reaches a locus.
-    /// `coverage_of` carries a `debug_assert` stating the same envelope; this is
+    /// `witness_of` carries a `debug_assert` stating the same envelope; this is
     /// what makes it provable rather than hopeful, in release builds too.
     ///
     /// [`ReadWitness`]: crate::ng::locus_generation::ReadWitness

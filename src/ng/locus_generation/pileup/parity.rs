@@ -1350,17 +1350,17 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
 /// ng's emission order, applied to both sides — spec §3's class 5.
 ///
 /// The `ReadWitness` half of the comparator is **the walk's own**
-/// (`open_record::coverage_order`, lifted to `pub(super)` for this) rather than a second
+/// (`open_record::witness_order`, lifted to `pub(super)` for this) rather than a second
 /// spelling here: `finalise` sorts `ObservationRow`s and this sorts `SequenceObservation`s, so
 /// the loop cannot be shared, but the one piece that could silently drift is.
 /// `the_projection_orders_rows_as_the_walk_does` covers the rest, by asserting that sorting
 /// an ng locus's rows with this function leaves them where the walk emitted them.
 fn sort_rows(rows: &mut [SequenceObservation]) {
-    use super::open_record::coverage_order;
+    use super::open_record::witness_order;
     rows.sort_by(|a, b| {
         a.bases
             .cmp(&b.bases)
-            .then_with(|| coverage_order(a.read_witness).cmp(&coverage_order(b.read_witness)))
+            .then_with(|| witness_order(a.read_witness).cmp(&witness_order(b.read_witness)))
             .then_with(|| a.read_group.0.cmp(&b.read_group.0))
     });
 }
@@ -2240,14 +2240,14 @@ fn stale_widen_shape(
 /// together being the whole row identity.
 fn rows_split_by_group(locus: &SampleLocusObservations) -> bool {
     /// A row's identity **without** its read group: the bases, and the coverage run as the
-    /// walk's own total order gives it (`coverage_order`).
+    /// walk's own total order gives it (`witness_order`).
     type RowIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
 
     let mut seen: BTreeSet<RowIdentityWithoutGroup<'_>> = BTreeSet::new();
     for row in &locus.observations {
         if !seen.insert((
             &row.bases,
-            super::open_record::coverage_order(row.read_witness),
+            super::open_record::witness_order(row.read_witness),
         )) {
             return true;
         }
@@ -2448,7 +2448,7 @@ fn the_determinism_digest_responds_to_the_evidence() {
 /// rare, and tolerated the ones that occurred anyway under `EvidenceIntact`: same reference
 /// bytes, same support totals, *some rows' bases differ*. Its own doc said what was missing:
 /// "It does not check which rows differ or by how much… the right filter is the spec's own
-/// definition of the anchor class, which needs A4's `coverage_of`."
+/// definition of the anchor class, which needs A4's `witness_of`."
 ///
 /// That filter is now readable straight off the emitted locus. A locus qualifies when every
 /// row is [`Complete`](ReadWitness::Complete) and no read was counted out — which *is*
@@ -2946,7 +2946,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 /// promise [`sort_rows`] makes, checked rather than commented.
 ///
 /// `finalise` sorts `ObservationRow`s and [`sort_rows`] sorts `SequenceObservation`s, so the two
-/// loops cannot be shared even though the `ReadWitness` comparator is (`coverage_order`,
+/// loops cannot be shared even though the `ReadWitness` comparator is (`witness_order`,
 /// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
 /// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted
 /// rows with this function does not move them. If either spelling of the order changes, the

@@ -644,7 +644,7 @@ impl WalkerState {
             // counts it carries that the locus needs are already *on* the locus
             // (`reads_without_observation`, `reads_discarded_by_cap`); what remains is the
             // complete/partial split, which nothing outside this module reads yet and which
-            // exists to pin `coverage_of` against the real walk.
+            // exists to pin `witness_of` against the real walk.
             let (record, _witness) = open.finalise();
             out.push_back(record);
             self.summary.records_emitted += 1;
