@@ -359,6 +359,18 @@ pub struct RunSummary {
     /// pathologically deep regions; QC pipelines may want to look
     /// at those samples / regions specifically.
     pub column_depth_truncations: u64,
+    /// **ng's, added by D2 — production's `RunSummary` has no counterpart.**
+    ///
+    /// Reads that were admitted and left the active set having never been a contributor
+    /// at any position: every base `N` or adaptor-masked, so the fold never heard of
+    /// them and *neither per-locus counter can see them* — they produced no observation,
+    /// but they also never reached the path that records `reads_without_observation`
+    /// (spec §6). Read off the active set, which is where a read leaves.
+    ///
+    /// Because production cannot state it, `parity.rs` binds this field by name and
+    /// drops it from the counter comparison; the exhaustive destructure there is what
+    /// forces that decision to be made rather than defaulted.
+    pub reads_silent_over_footprint: u64,
 }
 
 impl RunSummary {
@@ -537,6 +549,13 @@ impl WalkerState {
                 })
                 .unwrap_or(0);
 
+            // **ng's, added by D2.** Set here — before the mate-overlap collapse and
+            // before the depth cap — because both of those remove reads the walk plainly
+            // saw, and each has its own counter. What this flag exists to find is the read
+            // that reaches *no* contributor list anywhere: every base `N` or adaptor-masked,
+            // admitted and expired without the fold ever hearing of it, and so invisible to
+            // both per-locus counters (spec §6).
+            active_read.ever_contributed.set(true);
             contributors.push(ReadContribution {
                 read_id: active_read.read_id,
                 chain_id: active_read.chain_id,
@@ -714,8 +733,16 @@ impl WalkerState {
     }
 
     fn summary(&self) -> RunSummary {
-        self.summary
-            .merge_chain_id_counters(self.chain_ids.counters())
+        let mut summary = self
+            .summary
+            .merge_chain_id_counters(self.chain_ids.counters());
+        // Read off the active set at every ask rather than accumulated as the walk goes:
+        // the set is where a read *leaves*, and asking it means the number cannot drift
+        // from the exits that produced it. Reads still active have not left, so a summary
+        // taken mid-walk reports the reads that have — which is what every other counter
+        // here does too.
+        summary.reads_silent_over_footprint = self.active_reads.silent_exits();
+        summary
     }
 }
 

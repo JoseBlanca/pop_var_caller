@@ -211,3 +211,168 @@ suffix of the reference bases. A base corruption that does not fit is reported, 
 - Host-native soak at 5,000 cases per seed, `--profile soak`: green (§4).
 - `cargo test --all-targets --all-features` is not run: it panics in
   `benches/psp_writer_perf.rs:386` for reasons predating this branch.
+
+---
+
+# Milestone D — D2: the dump tool, and the two counters it forced
+
+**Date:** 2026-07-30 · same plan, spec and branch.
+
+D2's deliverable is `examples/ng_generic_loci_dump.rs` and the six fixtures spec §12 owes,
+"because no inherited test exercises the defect". Building it forced two counters into
+existence, released a fourth copied file, and found two of its own fixtures unable to fail.
+
+## 1. The tool
+
+Following `ng_ssr_loci_dump.rs`: a `#`-prefixed `key=value` counts header, a bare TSV column
+line, one row per observed sequence. The pipeline is the real one end to end — `ReferenceInfo`
+→ `SampleReads` → `TypedRegionIterator` → `GeneratorSet` with the **`Generic` slot filled** →
+`SampleLocusObservationsIterator`. It is driven through the *dispatcher*, not the generator
+directly, so the tool exercises the routing as well as the walk.
+
+```text
+# generic_loci=40 generic_regions=1 generic_region_bp=120 records_outside_region=0
+# reads_admitted=2 reads_declined_by_preparer=0 reads_silent_over_footprint=0 reads_without_observation=0 reads_discarded_by_cap=0
+# rows_complete=40 rows_observed=0 reads_complete=60 reads_observed=0
+# record_widen_events=0 column_depth_truncations=0 regions_in=1 regions_handled=1 loci_emitted=40
+contig  start  end  ref_bases  depth  read_coverage   read_group  observed  reads  chain_ids
+chr1    19     24   CCGTTA     2      observed:0+5    0           CCGTT     1
+```
+
+The three surfaces waiting for a first caller all have one now:
+
+- **`WindowedRefSeq::with_shared_index`** — the generator needs two accessors and calls the
+  factory at every region; a fresh `new` parses the whole `.fai` on its first fetch (189 µs on
+  a GRCh38-shaped reference against a ~120 µs per-region walk constant). The tool parses the
+  index once and shares it, which is the 19 µs path.
+- **`GeneratorSet::generic_counts()`** — the boxed generator's nine counters, read through the
+  dispatcher. The tool errors out if the slot reports `None`, so "the generic slot is the
+  filled one" is checked rather than assumed.
+- **The `#`-prefixed counts header** — four lines, and every one of them is what makes spec
+  §13's read accounting checkable.
+
+`read_coverage` prints the **run** (`observed:<offset>+<positions>`) rather than a side label:
+on the generic path a read can be blind in the *middle* of a footprint, where `partial:left`
+would be a lie.
+
+One knob, `PVC_GENERIC_REGION_CHUNK_BP=n`, splits each `Generic` region into *n*-bp pieces
+before generating. It is a real knob — in the pipeline the regions are handed in and their size
+is the caller's — and it is what makes the region-boundary fixture a comparison of two
+configurations over the *same* reads rather than two different fixtures.
+
+## 2. The two counters spec §13's read accounting forced
+
+Both were named in Milestone C's report as structurally zero. They are live now.
+
+- **`reads_silent_over_footprint`.** `ActiveRead` gains `ever_contributed: Cell<bool>`, set in
+  the contributor loop; `ActiveReads` tallies the reads that leave without it, at both exits;
+  `RunSummary` carries the total and `fold_region_walk` sums it. A `Cell` because the
+  contributor loop walks the set through `iter()` and queries each read's cursor inside that
+  borrow. Set **before** the mate-overlap collapse and before the depth cap, so a read either of
+  those removed is counted where it belongs and not here as well.
+
+  This is the read *neither* per-locus counter can see: every base `N` or adaptor-masked, so it
+  produced no observation and never reached the fold that records
+  `reads_without_observation`. Before the flag, the only honest thing to say about it was
+  nothing.
+
+- **`reads_declined_by_preparer`.** A counter on the shared `ReadPreparation` cell, taken by
+  `end_walk` like the shed error beside it. It reads **zero on every real run** — no v1 preparer
+  declines anything, the only step that could was BAQ, deferred — and that is why it exists: a
+  read the preparer declines never reaches the walk, so `reads_admitted` cannot account for it,
+  and "no preparer declines today" is a fact a counter can state and a missing field cannot.
+
+`active_read_set.rs` is therefore **released from `copy_fidelity.rs`** (the fourth of eight), in
+this commit, with the release recorded in its own header and in the guard's table — the pattern
+the plan set at A0. The guard caught the divergence on the first run, which is what it is for.
+
+## 3. The six fixtures
+
+Each is written so a **span-derived** or **fill-preserving** implementation fails it.
+
+| # | fixture | what only the events know |
+|---|---|---|
+| 1 | a read adaptor-masked over part of a five-position record | its alignment spans the whole footprint, so a span-derived coverage says `Complete` |
+| 1b | the same record carries `Complete` and `Observed` rows **with the same bases** | one read witnessed five positions and deleted three; the other witnessed two and was silenced — production cannot tell them apart |
+| 2 | an interior `N`, and a ref-skip, inside a footprint | the witness is non-contiguous, so there is no observation at all and the read is counted |
+| 3 | a record widened past an **expired** read | production appends the reference bases to a bucket whose read is gone; ng's row still says five |
+| 4 | an indel whose own anchor base was masked | the one recorded residual — exactly one borrowed reference base |
+| 5 | two read groups on one allele | two rows, summing back to the one-group total per locus |
+| 6 | a deletion across a region boundary | the halo, checked against the same fixture walked as one region |
+
+Plus the four whole-fixture properties: one locus per covered position and none for an uncovered
+one; the read accounting; the per-read chain-id rule; and byte-identity across runs. `push_locus`
+asserts the global consistency check on **every** run of the tool, not only in tests — no row
+claims more locus positions than its events account for, which is deliberately *not* an equality
+(an insertion adds bases without positions, a deletion the reverse).
+
+## 4. Three things the fixtures got wrong first, and how
+
+Worth recording because each is a way a fixture can look right and test nothing.
+
+**The real read filter drops reads under 30 bp.** The first draft's indel reads carried 26
+sequenced bases, so `reads_admitted` was 3 of 4 and two fixtures failed for a reason that had
+nothing to do with the walk. A read *aligned* over 30 positions cannot end inside a 16-position
+footprint either, which is why fixture 3's short read carries a 17-base soft clip: the minimum
+counts sequenced bases.
+
+**ng's real read preparation left-aligns the fixtures' deletions.** A deletion at 21..25 whose
+preceding base equals its last deleted base shifts to 20..24 — so the record opened one position
+earlier than the test asserted and there was nothing at all where it looked. Every deletion in
+these fixtures is now chosen so that `ref[anchor] != ref[anchor + len]`, which is the condition
+under which no left-shift is available; fixture 3 uses one deliberate shift and says so.
+
+**A hole outside every footprint costs a read nothing.** Fixture 2's first `N` sat at a position
+no record spanned, so `reads_without_observation` stayed zero while the test asserted it did
+not.
+
+## 5. Two of the fixtures could not fail, and mutation is what said so
+
+| mutation | before | after |
+|---|---|---|
+| `coverage_of` always returns `Complete` (a span-derived implementation) | fixtures 1 and 3 fail — as spec §13 requires | unchanged |
+| the chain-id rule becomes production's positional `allele_index == 0` | **all ten passed** | fixture rewritten; now fails |
+| the halo removed from the region query | **all ten passed** | fixture rewritten; now fails |
+| the read group dropped from the row key | fixture 5 fails | unchanged |
+| `ever_contributed` never set | the silent-read test fails | — |
+| the declined tally never incremented | the declined-read test fails | — |
+
+**The chain-id fixture** had a matching read and a deletion read — both whole-footprint
+witnesses, and the per-read rule and the positional rule *coincide* on those. The case that
+separates them is a **partial** row whose bases are a prefix of the footprint's reference bytes:
+ng gives it no id (it agreed with the reference across everything it witnessed) while the
+positional rule tags it, its row not being `alleles[0]`. The test now runs on the masking fixture
+and asserts that row directly, plus a whole-footprint match and a genuine departure.
+
+**The boundary fixture** chunked a read set that all started at 11 — inside the first piece —
+and a read overlapping the unwidened query span is fetched either way. The halo only matters for
+a read that begins **after** the region's end and still folds into a record anchored inside it,
+so the fixture now adds one starting one base past the boundary, and asserts its row is present
+before comparing the two configurations.
+
+That makes twelve tests on this branch that could not fail, three of them in this milestone.
+
+## 6. Recorded deviations
+
+- **The tool is generic over the preparer**; `main` uses ng's real `LeftAlignPreparer` and the
+  tests wrap it, setting an adaptor boundary on the incoming `AlignedRead` by qname. Deriving the
+  boundary from mate geometry *is* production's code, tested there; a BAM whose geometry happened
+  to land the boundary where a fixture needs it would make the fixture a test of that derivation
+  and would move whenever it changed. Everything after the boundary is the real preparation.
+- **One region stream for the whole run**, with the per-contig typed-region walks chained,
+  because the locus iterator owns the stream, the reads *and* the generator set — and the
+  generator must not be rebuilt per contig, its chain-id allocator being run-lifetime.
+- **`#[allow(clippy::arc_with_non_send_sync)]`** at the one site that wraps a `WindowedRefSeq`:
+  the generator's `new` takes `Arc<R>`, chosen at C1 when the only accessor anyone had was an
+  in-memory one that is `Send + Sync`. A file-backed accessor holds a reader behind a `RefCell`
+  and is neither, and the walk is single-threaded anyway (arch §9), so **`Rc` would say what is
+  true** — carried to Checkpoint D as a finding rather than changed from an example.
+
+## 7. Validation
+
+- `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo test --lib`: **2,724 passed** (2,722 after D1; +2 for the counters).
+- `cargo test --example ng_generic_loci_dump`: **10 passed**.
+- `cargo doc --no-deps`: still 12 pre-existing unresolved links.
+- Host-native soak, `PVC_PARITY_CASES=3000 --profile soak`: green — the walk's new `RunSummary`
+  field is dropped by name in `parity.rs`'s counter comparison, production having no counterpart.

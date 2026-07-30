@@ -247,7 +247,7 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 
   `to_pileup_record` is off the differential and off `mock_reference.rs`; its 44 inherited-test
   callers stay, which is a decision carried to Checkpoint D (report §8).
-- ☐ **D2 — the dump tool and the fixtures that must fail a wrong implementation.**
+- ✅ **D2 — the dump tool and the fixtures that must fail a wrong implementation.**
   `examples/ng_generic_loci_dump.rs`, following `ng_ssr_loci_dump.rs`. Six new fixtures, because
   **no inherited test exercises the defect**: a read adaptor-masked over part of a multi-base record
   (must be `Observed`, not `Complete`); an interior `N` and a ref-skip (no observation, counted); a
@@ -255,6 +255,15 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   was masked (the residual, pinned at one base); two read groups on one allele (two rows summing to
   the single-group total); and a deletion at a region boundary (support must match a single-region
   walk). *Depends:* D1. *Source:* spec §12, §13.
+
+  **It forced the two counters that were defined and never incremented**:
+  `reads_silent_over_footprint` (a per-read `ever_contributed` flag in the active set — which
+  released `active_read_set.rs` from `copy_fidelity.rs`, the fourth of eight) and
+  `reads_declined_by_preparer`, which reads zero on every real run because no v1 preparer
+  declines anything, and exists so that *is* a statement. **Two of the six fixtures could not
+  fail** and were rewritten: the chain-id one had only whole-footprint witnesses, where ng's
+  per-read rule and production's positional one coincide; the boundary one had no read starting
+  past the boundary, so removing the halo entirely changed nothing.
 - ☐ **D3 — the measurements.** Two numbers, both deliverables rather than by-products. **The size of
   production's defect:** how many loci, reads and reference bases production credits to reads that
   never sequenced them — the number that turns the indel-deficit hypothesis into a result or kills

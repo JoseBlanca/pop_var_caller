@@ -24,6 +24,7 @@
 //! |---|---|---|
 //! | A0 | `driver.rs` → `genome_walk.rs`, `open_record.rs`, `errors.rs` | the reference is reached through ng's `RefSeq`, not production's `MultiChromRefFetcher` |
 //! | B2 | `tests.rs` | the walk emits ng's `SampleLocusObservations`, so the inherited suite is adapted to it (spec §12) |
+//! | D2 | `active_read_set.rs` | a per-read "ever contributed" flag, so `reads_silent_over_footprint` can be counted — the read spec §13's accounting cannot otherwise place (spec §6) |
 //!
 //! Everything still listed in `PAIRS` is byte-for-byte production's, modulo the
 //! sanctioned additions below.
@@ -98,7 +99,7 @@ fn the_remaining_copies_are_still_productions() {
     // **A released file is deleted from this array, not commented out**, so a `git log`
     // on it shows the whole set that was ever guarded and the array itself shows only
     // what is guarded *now*. The release table in this module's header is the record.
-    let pairs: [(&str, &str, &str); 4] = [
+    let pairs: [(&str, &str, &str); 3] = [
         (
             "cigar_cursor.rs",
             include_str!("../../../pileup/walker/cigar_cursor.rs"),
@@ -108,11 +109,6 @@ fn the_remaining_copies_are_still_productions() {
             "decompose.rs",
             include_str!("../../../pileup/walker/decompose.rs"),
             include_str!("decompose.rs"),
-        ),
-        (
-            "active_read_set.rs",
-            include_str!("../../../pileup/walker/active_read_set.rs"),
-            include_str!("active_read_set.rs"),
         ),
         (
             "chain_id_allocator.rs",

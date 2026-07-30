@@ -231,12 +231,25 @@ pub struct PileupGeneratorCounts {
     /// adaptor-masked, so never a contributor at any position and invisible to
     /// the per-locus `reads_without_observation` tally (spec §6).
     ///
-    /// **Nothing increments this yet.** It needs a per-active-read "ever
-    /// contributed" flag in the walk, which no step through C4 adds; the dump
-    /// tool's read-accounting assertion (spec §13, plan D2) is what forces it.
-    /// Until then the field reads zero, which is not the same claim as "no read
-    /// was silent".
+    /// **Incremented since D2**, which is what spec §13's read-accounting
+    /// assertion forced: the walk's active set carries a per-read "ever
+    /// contributed" flag ([`ActiveRead::ever_contributed`](super::super::pileup))
+    /// and tallies the reads that leave without it. Set before the mate-overlap
+    /// collapse and before the depth cap, so a read either of those removed is
+    /// counted where it belongs and not here as well.
     pub reads_silent_over_footprint: u64,
+    /// Reads the **preparer** declined — `Ok(None)` from
+    /// [`ReadPreparer::prepare_read`](crate::ng::read::ReadPreparer::prepare_read),
+    /// "no usable observation", which ends nothing and is not an error.
+    ///
+    /// **Added by D2, and it reads zero for a reason that is not a bug:** no v1
+    /// preparer declines anything (the only step that could was BAQ, deferred to
+    /// spec §10). It exists because the read accounting has to balance —
+    /// `reads_admitted` counts what reached the walk, and a declined read never
+    /// does — and because "no preparer declines today" is a fact about today
+    /// that a counter can state and a missing field cannot. The counter is
+    /// exercised by a test preparer that declines.
+    pub reads_declined_by_preparer: u64,
     /// Records the region clamp dropped, because their anchor fell outside the
     /// region being walked. Observably zero-sum across neighbouring regions,
     /// which is how the gap-free tiling argument stays checkable (spec §7).
@@ -282,6 +295,7 @@ impl PileupGeneratorCounts {
             active_reads_high_water,
             mate_lookup_evictions,
             column_depth_truncations,
+            reads_silent_over_footprint,
         } = *summary;
         debug_assert!(
             chain_allocations >= chain_ids_at_open.chain_allocations
@@ -298,6 +312,9 @@ impl PileupGeneratorCounts {
         self.mate_lookup_evictions +=
             mate_lookup_evictions.saturating_sub(chain_ids_at_open.mate_lookup_evictions);
         self.column_depth_truncations += column_depth_truncations;
+        // A plain sum, like the walker's own counters: each region's walk owns its active
+        // set, so each reports only the reads that left *its* set (D2).
+        self.reads_silent_over_footprint += reads_silent_over_footprint;
     }
 }
 
@@ -330,6 +347,14 @@ struct ReadPreparation<P: ReadPreparer> {
     /// shed*s* two error types into one and because a locus generator has no
     /// business importing from the CLI.
     latched_error: Option<LocusGenerationError>,
+    /// Reads the preparer declined since the last fold — see
+    /// [`PileupGeneratorCounts::reads_declined_by_preparer`].
+    ///
+    /// It lives here, beside the latched error, for the same reason that does: the
+    /// stream is inside the walk and cannot reach the generator's counts, and this cell
+    /// is the one thing both hold. Taken by `end_walk`, so a region's tally is folded
+    /// with that region's walk rather than leaking into the next one.
+    declined: u64,
 }
 
 /// One region's read stream, prepared: the query's `AlignedRead`s canonicalised
@@ -374,16 +399,23 @@ impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
             // Split the borrow: `prepare_read` takes `&self` and `&mut
             // Self::Scratch`, which are two fields of the same cell.
             let ReadPreparation {
-                preparer, scratch, ..
+                preparer,
+                scratch,
+                declined,
+                ..
             } = &mut *preparation;
             match preparer.prepare_read(read, scratch) {
                 Ok(Some(prepared)) => return Some(prepared),
-                // "No usable observation" — the preparer declined this read and
-                // the run continues. **No v1 preparer returns it** (the only
-                // step that could decline was BAQ, deferred), so there is no
-                // tally for it yet; when a declining preparer lands, its count
-                // belongs beside `reads_silent_over_footprint`.
-                Ok(None) => continue,
+                // "No usable observation" — the preparer declined this read and the run
+                // continues. **No v1 preparer returns it** (the only step that could
+                // decline was BAQ, deferred), so this counter reads zero on every real
+                // run today; it is counted anyway, because a read that never reached the
+                // walk is missing from `reads_admitted` and the accounting has to say
+                // where it went (D2).
+                Ok(None) => {
+                    *declined += 1;
+                    continue;
+                }
                 Err(source) => {
                     drop(preparation);
                     // Matched exhaustively rather than through a catch-all:
@@ -564,6 +596,7 @@ where
                 preparer,
                 scratch: P::Scratch::default(),
                 latched_error: None,
+                declined: 0,
             })),
             chain_ids: Some(ChainIdAllocator::with_caps(
                 config.max_active_reads,
@@ -639,7 +672,11 @@ where
         let mut chain_ids = walk.walker.into_chain_ids();
         chain_ids.reset();
         self.chain_ids = Some(chain_ids);
-        if let Some(error) = self.preparation.borrow_mut().latched_error.take() {
+        let mut preparation = self.preparation.borrow_mut();
+        // Taken, not read: the cell outlives every walk, so a tally left in it would be
+        // folded again at the next region's end — the same shape as the shed error below.
+        self.counts.reads_declined_by_preparer += std::mem::take(&mut preparation.declined);
+        if let Some(error) = preparation.latched_error.take() {
             self.failed = true;
             // First error wins: a later one describes a run that is already over.
             self.pending_failure.get_or_insert(error);
@@ -895,6 +932,65 @@ mod tests {
         ) -> Result<Option<PreparedRead>, ReadPrepError> {
             self.prepared.set(self.prepared.get() + 1);
             PassthroughPreparer.prepare_read(read, scratch)
+        }
+    }
+
+    /// A preparer that **declines** the reads whose qname starts with `Self::0`, and passes
+    /// every other through.
+    ///
+    /// `Ok(None)` is the "no usable observation" answer the trait documents and **no v1
+    /// preparer gives** — the only step that could was BAQ, deferred (spec §10). So
+    /// `reads_declined_by_preparer` cannot be exercised by any real preparer, and a counter
+    /// nothing can move is indistinguishable from one that is wired to nothing. This is what
+    /// moves it.
+    struct DeclinesRead(&'static str);
+
+    impl ReadPreparer for DeclinesRead {
+        type Scratch = ();
+        fn prepare_read(
+            &self,
+            read: AlignedRead,
+            scratch: &mut Self::Scratch,
+        ) -> Result<Option<PreparedRead>, ReadPrepError> {
+            if read.qname.starts_with(self.0.as_bytes()) {
+                return Ok(None);
+            }
+            PassthroughPreparer.prepare_read(read, scratch)
+        }
+    }
+
+    /// A preparer that silences **every base** of the reads whose qname starts with
+    /// `Self::0`, by placing their adaptor boundary at their own first position.
+    ///
+    /// That is the shape of the read `reads_silent_over_footprint` exists for: admitted,
+    /// walked past, and never a contributor anywhere, because the G1 filter answers "in the
+    /// adaptor" at every position (`cigar_cursor::base_in_adaptor` — forward strand, so
+    /// `ref_pos >= boundary` is every base). An all-`N` read would do the same thing to the
+    /// walk but not reach it: against an all-`A` reference every base mismatches, and the
+    /// real read filter drops it before admission.
+    struct SilencesRead(&'static str);
+
+    impl ReadPreparer for SilencesRead {
+        type Scratch = ();
+        fn prepare_read(
+            &self,
+            read: AlignedRead,
+            scratch: &mut Self::Scratch,
+        ) -> Result<Option<PreparedRead>, ReadPrepError> {
+            let silence = read.qname.starts_with(self.0.as_bytes());
+            let prepared = PassthroughPreparer.prepare_read(read, scratch)?;
+            Ok(prepared.map(|mut read| {
+                if silence {
+                    debug_assert!(
+                        !read.is_reverse_strand,
+                        "the boundary is a forward-strand one; a reverse read would be \
+                         silenced by `ref_pos <= boundary` instead and this fixture would \
+                         silence nothing",
+                    );
+                    read.adaptor_boundary = Some(read.alignment_start);
+                }
+                read
+            }))
         }
     }
 
@@ -1948,6 +2044,8 @@ mod tests {
             active_reads_high_water: 5,
             mate_lookup_evictions: 6,
             column_depth_truncations: 8,
+            // ng's, and a plain sum — each region's walk owns its own active set (D2).
+            reads_silent_over_footprint: 2,
         };
 
         counts.fold_region_walk(&summary, baseline);
@@ -1982,6 +2080,103 @@ mod tests {
         );
         assert_eq!(counts.reads_admitted, 6, "per-walk counters add");
         assert_eq!(counts.column_depth_truncations, 16);
+        assert_eq!(
+            counts.reads_silent_over_footprint, 4,
+            "each walk owns its active set, so the silent exits add like the walker's own \
+             counters and not like the shared allocator's"
+        );
+    }
+
+    /// **A read that contributes nowhere is counted, not lost** — `reads_silent_over_footprint`
+    /// (D2), the counter spec §13's read accounting cannot do without.
+    ///
+    /// A read every base of which the G1 adaptor filter silences is admitted, walked past and
+    /// expired without ever appearing in a contributor list. **Both per-locus counters are
+    /// blind to it:** it produced no observation, but it never reached the fold that records
+    /// `reads_without_observation` either (spec §6), so before this counter the only honest
+    /// thing to say about such a read was nothing at all.
+    ///
+    /// The neighbouring read is what makes the test discriminating: it proves the walk still
+    /// emits loci here, so "no rows" cannot be mistaken for "no coverage".
+    #[test]
+    fn a_read_silent_at_every_position_is_counted_rather_than_lost() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("silent", 0, 10, 30),
+            read_named_with_length("speaks", 0, 10, 30),
+        ]);
+        let mut generator =
+            a_generator_with(PileupGeneratorConfig::default(), SilencesRead("silent"))
+                .expect("the default config is valid");
+
+        let loci = loci_of(&mut generator, region(0, 1, 100), &reads);
+
+        assert_eq!(
+            generator.counts().reads_admitted,
+            2,
+            "both reads reached the walk — silencing happens inside it, not at admission"
+        );
+        assert_eq!(
+            generator.counts().reads_silent_over_footprint,
+            1,
+            "the silenced read contributed at no position and must be counted as such"
+        );
+        assert!(!loci.is_empty(), "the speaking read still yields loci");
+        for locus in &loci {
+            assert_eq!(
+                total_obs(locus),
+                1,
+                "only the speaking read supports {:?} — the silent one contributes nothing",
+                locus.region,
+            );
+            assert_eq!(
+                (
+                    locus.reads_without_observation,
+                    locus.reads_discarded_by_cap
+                ),
+                (0, 0),
+                "and neither per-locus counter can see the silent read, which is why the \
+                 run-level one has to exist",
+            );
+        }
+    }
+
+    /// **A read the preparer declines is counted** — `reads_declined_by_preparer` (D2).
+    ///
+    /// It never reaches the walk, so `reads_admitted` cannot account for it and no per-locus
+    /// counter ever hears of it. No v1 preparer declines anything, so this counter reads zero
+    /// on every real run; [`DeclinesRead`] is what makes it move, because a counter nothing
+    /// can move is indistinguishable from one wired to nothing.
+    #[test]
+    fn a_read_the_preparer_declines_is_counted_and_never_admitted() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("declined", 0, 10, 30),
+            read_named_with_length("kept", 0, 10, 30),
+        ]);
+        let mut generator =
+            a_generator_with(PileupGeneratorConfig::default(), DeclinesRead("declined"))
+                .expect("the default config is valid");
+
+        let loci = loci_of(&mut generator, region(0, 1, 100), &reads);
+
+        assert_eq!(
+            generator.counts().reads_declined_by_preparer,
+            1,
+            "the declined read has to be accounted for somewhere, and this is where"
+        );
+        assert_eq!(
+            generator.counts().reads_admitted,
+            1,
+            "a declined read never reaches the walk, so it is not admitted"
+        );
+        assert!(!loci.is_empty(), "the kept read still yields loci");
+        for locus in &loci {
+            assert_eq!(
+                total_obs(locus),
+                1,
+                "only the kept read supports {:?}",
+                locus.region,
+            );
+        }
     }
 
     /// **The query is consumed as the walk advances, never up front.** Spec §7

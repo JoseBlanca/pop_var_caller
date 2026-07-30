@@ -23,7 +23,8 @@
 //! header, so the guard keeps protecting what is still a copy instead of being
 //! switched off wholesale at the first change. A0 released [`genome_walk`],
 //! [`open_record`] and [`errors`] — the reference adaptor's removal — and B2 released
-//! `tests.rs`, whose assertions had to move to ng's own locus type (spec §12). **Four are
+//! `tests.rs`, whose assertions had to move to ng's own locus type (spec §12), and D2
+//! released [`active_read_set`] for the per-read "ever contributed" flag. **Three are
 //! still guarded**, and `copy_fidelity.rs`'s release table is the list that stays true.
 //!
 //! What the copy was proven to *compute* is the stage-1 differential
