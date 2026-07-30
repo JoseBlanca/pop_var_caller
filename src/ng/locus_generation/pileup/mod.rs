@@ -152,13 +152,57 @@ pub(crate) use crate::pileup::walker::{CigarOp, DEFAULT_MAX_RECORD_SPAN, WalkerC
 pub(crate) use crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW;
 
 // This module's own surface, as against the vocabulary above.
-pub use chain_id_allocator::DEFAULT_MAX_ACTIVE_READS;
+//
+// **Audited by demoting each name in turn and rebuilding**, not by grepping: production
+// declares identically-named `WalkerError`, `PileupWalker`, `RunSummary`, `run` and
+// `DEFAULT_MAX_ACTIVE_READS`, so a bare-name search answers about the wrong crate. Four
+// of the ten were load-bearing (`E0603` on demotion), two have no build consumer but a
+// reason to stay, and four were surplus — the reverse of Checkpoint C's guess that nine
+// of ten had no consumer. The answering build is `cargo check --all-targets
+// --all-features` **without** `-D warnings`: demoting `PileupGenerator` makes the lib
+// target treat this module as dead, and that cascade stops cargo ever reaching the
+// example that actually consumes it.
+//
+// **Why the four went, and why `run` mattered most.** They put production's walker
+// vocabulary into ng's *public* API under production's own names — the thing the
+// vocabulary note above forbids, for the reason it gives: from plan 3 on, two live paths
+// to one name stop being harmless. And `run` had teeth. `to_walker_config` is
+// `pub(super)` precisely so every caller passes through
+// `PileupGeneratorConfig::check()` and its `MAX_RECORD_SPAN_CEILING`; with `run` public,
+// an external caller builds a `WalkerConfig` from production's `pub` `Default` and walks
+// straight past that. Measured from an external example before the change:
+// `max_record_span = 983_025`, **15× the ceiling `check()` enforces**.
+//
+// `generator.rs` imports `PileupWalker` and `RunSummary` from `genome_walk` directly, and
+// `parity.rs` now names `genome_walk::run` the same way, so nothing needed a replacement
+// binding.
 pub use errors::WalkerError;
 pub use generator::{
     MAX_RECORD_SPAN_CEILING, PileupGenerator, PileupGeneratorConfig, PileupGeneratorConfigError,
     PileupGeneratorCounts,
 };
-pub use genome_walk::{PileupWalker, RunSummary, run};
+
+// **Not `pub`: no consumer outside this module, and it is production's name.** Kept in
+// scope rather than deleted because `generator.rs` reaches it as
+// `super::DEFAULT_MAX_ACTIVE_READS` and this module's own doc links it — an intra-doc
+// link resolves against private imports, so demoting costs nothing while deleting would
+// make `cargo doc` gain a thirteenth error.
+use chain_id_allocator::DEFAULT_MAX_ACTIVE_READS;
+
+// **Demoted, not deleted, and `#[cfg(test)]` because every consumer is a test one.**
+// `run` and `RunSummary` are reached as `super::run` / `super::RunSummary` by four
+// `#[cfg(test)]` descendants (`tests.rs`, `open_record.rs`'s tests, `mock_reference.rs`,
+// `parity.rs`) — a private `use` still serves them, because privacy in Rust reaches
+// descendants. Non-test code does not go through here at all: `generator.rs` names
+// `super::genome_walk::{PileupWalker, RunSummary}` directly, which is why `PileupWalker`
+// is gone from this list rather than demoted into it.
+//
+// Ungated it would be an unused import in a non-test build — the same trap the
+// `DEFAULT_MATE_LOOKUP_WINDOW` note above records, and the reason it went unnoticed for
+// both: **a `pub` re-export is never reported unused**, so `pub` was hiding the fact that
+// nothing outside wanted these.
+#[cfg(test)]
+use genome_walk::{RunSummary, run};
 
 // `walker_vocabulary_tests`, not `tests`: the copied `walker/tests.rs` lands as this
 // module's `tests` child (A4), and mirroring production's module names is what makes

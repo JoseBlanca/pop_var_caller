@@ -202,11 +202,26 @@ pub enum PileupGeneratorConfigError {
 /// Run-level counts for this generator, kept alongside the shared
 /// [`LocusCounts`](super::super::LocusCounts) the dispatcher owns.
 ///
-/// The first seven mirror production's [`RunSummary`](super::RunSummary) field for
-/// field (spec §7); the last two are ng's. **`records_emitted` is deliberately not
-/// mirrored**: what a caller wants is loci *kept*, which is the walk's emissions
-/// minus [`records_outside_region`](Self::records_outside_region), and the kept
-/// count is already `LocusCounts::loci_emitted`.
+/// **Ten fields of three kinds**, and the kinds matter because only the first two come
+/// off a walk at all:
+///
+/// - **Seven mirror production's
+///   [`RunSummary`](crate::pileup::walker::RunSummary) field for field** (spec §7) —
+///   everything on it bar `records_emitted`.
+/// - **One mirrors ng's copy of `RunSummary` and has no production counterpart**:
+///   `reads_silent_over_footprint`, the ninth field D2 added, which `parity.rs`'s counter
+///   comparison drops by name for exactly that reason.
+/// - **Two are the generator's own, off the walk entirely**:
+///   `reads_declined_by_preparer` (a read the preparer refused never reaches a walk) and
+///   `records_outside_region` (the region clamp is the generator's, not the walker's).
+///
+/// The link is to **production's** type deliberately: this module's `RunSummary`
+/// re-export is `#[cfg(test)]`, and a `pub` item's doc must not link into a private one.
+///
+/// **`records_emitted` is deliberately not mirrored**: what a caller wants is loci
+/// *kept*, which is the walk's emissions minus
+/// [`records_outside_region`](Self::records_outside_region), and the kept count is
+/// already `LocusCounts::loci_emitted`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PileupGeneratorCounts {
     /// Reads the walk admitted, across every segment.
@@ -867,7 +882,7 @@ where
         PileupGenerator::next_locus(self, reads)
     }
 
-    /// **The only way these nine counters are reachable once the generator is boxed.**
+    /// **The only way these ten counters are reachable once the generator is boxed.**
     /// `GeneratorSlot` erases the type, so before this they had no reader that was not
     /// a test — and a walk that emitted nothing for a covered region counted the
     /// truncations explaining it into a struct nobody could see (Milestone C review).
