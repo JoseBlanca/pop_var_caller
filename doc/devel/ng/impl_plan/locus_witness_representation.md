@@ -130,10 +130,24 @@ expectations is a step that did more than rename.
 - ☐ **C1.** `apply_events_into` accumulates runs into a caller-owned buffer and returns
   `WitnessedRefPositions` — **and still returns `None` on a hole.** Byte-identical by construction;
   the §8 probe demonstrated this exact shape against the full suite. *Depends:* B3. *Source:*
-  arch §2.
+  arch §2. **B3 built the buffer API this needs**: accumulate into a `WitnessedRefRuns` owned by
+  `OpenPileupRecordTable` beside `allele_seq_buf`, then `WitnessedRefPositions::take_from` on the
+  first fold and `refill_from` on every re-fold — the latter *swaps*, so a witness of three or more
+  runs does not allocate per (read × widen), which `refold_live_reads` would otherwise make it do
+  ([review](../../reports/reviews/ng_locus_witness_representation_b_2026-07-30.md) M2). Removing
+  each accessor's `#[cfg_attr(not(test), expect(dead_code, …))]` is part of the step; the attributes
+  are per-method, so wiring one and forgetting another is a build failure rather than a silent
+  suppression.
 - ☐ **C2.** `witness_of` resolves a `WitnessedRefPositions` against the final footprint into a
   `ReadWitness`, keeping the both-ends clamp and the `Complete` short-circuit. Still one run in
-  practice, so still byte-identical. *Depends:* C1. *Source:* arch §2.
+  practice, so still byte-identical. *Depends:* C1. *Source:* arch §2. **Two off-by-one traps the B
+  review found, both silent:** the set is **half-open** where `RefSpan` was inclusive, so
+  `past_last`'s `witnessed.end.saturating_add(1)` loses its `+ 1` and the intersection
+  `debug_assert`'s `witnessed.end >= record_pos` becomes `>`. `start()`/`end_exclusive()` were
+  deleted for this reason — walk `runs()`, and clamp each run into the footprint rather than
+  clamping the enclosing span, or the hole is swallowed exactly as before. Also worth deciding here:
+  clamping a set can in principle empty it, and `witness_of` returns `ReadWitness`, not
+  `Option<ReadWitness>`.
 - ☐ **C3.** **Stop discarding a holed read.** `apply_events_into` returns `None` only when the read
   witnessed nothing inside the record; the drop path narrows to that case, keeping the
   set-of-read-ids mechanism and the subtract-prior-contribution step. **Own commit, do not
@@ -144,6 +158,10 @@ expectations is a step that did more than rename.
   *Depends:* C2. *Source:* spec §1 goal 1, §3.1, §4; arch §2.
 - ☐ **C4.** `witness_order` borrows instead of returning `(u8, u16, u16)`, and `finalise` sorts
   with it. `ReadWitness` still gets no `Ord` of its own. *Depends:* C3. *Source:* arch §2, §3.
+  **Now `ReadWitness::sort_key`, one copy on the type** (B1 absorbed the two that had drifted
+  apart), so this step rewrites one function — but note `parity.rs`'s
+  `ObservationIdentityWithoutGroup` hardcodes the `(u8, u16, u16)` tuple as a `BTreeSet` key and
+  moves with it.
 
 > **Checkpoint C: a read with a hole is recorded instead of discarded.** The spliced fixture
 > passes, output is deterministic across two processes, and the STR path has not moved. Pause for
