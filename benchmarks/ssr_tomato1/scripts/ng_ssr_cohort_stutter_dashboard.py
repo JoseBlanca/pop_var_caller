@@ -870,54 +870,63 @@ def _(DUP_CMAP, INK, Normalize, meta, mo, np, per_sample, plt):
 def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
     # SECTION 5 — the shape of the stutter, which is what a read model actually needs. Two claims
     # the STR model rests on are testable here: that slippage moves the tract by WHOLE motif units,
-    # and that the step distribution decays geometrically from ±1.
+    # and that the step distribution falls away from ±1.
+    #
+    # The **0 bar is included**, so each panel is the whole distribution of where reads land rather
+    # than the off-allele part alone: how much stutter there IS is then read off the same picture as
+    # what shape it has. That forces a log axis — agreement is ~99% and the far steps are near
+    # 1-in-10,000, four orders of magnitude a linear axis would flatten to a single spike and a row
+    # of nothing.
     def shape_figure():
-        off = comp[comp["off_mode"] != 0].copy()
-        off["whole_unit"] = off["off_mode"] % off["period"] == 0
-        wu = off[off["whole_unit"]].copy()
-        wu["units"] = (wu["off_mode"] // wu["period"]).astype(int)
+        # Denominator: reads that either match the allele or sit a whole number of units from it.
+        # Reads at a non-unit offset are excluded because they are not slippage at all — they are
+        # the residue the panel above measures, and mixing them in would make this neither a
+        # slippage distribution nor a complete one.
+        d = comp.copy()
+        d["whole_unit"] = (d["off_mode"] == 0) | (d["off_mode"] % d["period"] == 0)
+        d = d[d["whole_unit"]].copy()
+        d["units"] = (d["off_mode"] // d["period"]).astype(int)
 
-        periods = [p for p in sorted(off["period"].unique()) if p <= 6]
-        fig, axes = plt.subplots(2, 3, figsize=(13, 6.2), sharex=True)
-        steps = list(range(-4, 0)) + list(range(1, 5))
+        periods = [p for p in sorted(d["period"].unique()) if p <= 6]
+        fig, axes = plt.subplots(2, 3, figsize=(13, 6.4), sharex=True, sharey=True)
+        steps = list(range(-4, 5))
         for ax, period in zip(axes.flat, periods):
-            g = wu[wu["units"].isin(steps) & (wu["period"] == period)]
+            g = d[d["period"] == period]
             tot = g["reads"].sum()
             if tot <= 0:
                 ax.axis("off")
                 continue
             frac = [g.loc[g["units"] == u, "reads"].sum() / tot for u in steps]
-            # Blue for contractions, orange for expansions — the same sign convention the rest of
-            # this work uses, so a reader never has to re-learn which way is which.
-            colours = ["#2a78d6" if u < 0 else "#eb6834" for u in steps]
+            # Grey for "matches the allele", blue for contractions, orange for expansions — the same
+            # sign convention the rest of this work uses, so a reader never re-learns which is which.
+            colours = [GREY if u == 0 else ("#2a78d6" if u < 0 else "#eb6834") for u in steps]
             ax.bar(range(len(steps)), frac, color=colours, width=0.74)
-            whole = off[off["period"] == period]
-            w_frac = (
-                whole.loc[whole["whole_unit"], "reads"].sum() / whole["reads"].sum()
-                if whole["reads"].sum()
-                else float("nan")
-            )
-            note = " (1.0 by construction)" if period == 1 else ""
+            on_allele = frac[steps.index(0)]
             ax.set_title(
                 f"{PERIOD_NAME.get(period, period)} ({period} bp) — "
-                f"{w_frac:.0%} whole-unit{note}",
+                f"{1 - on_allele:.2%} of reads stutter",
                 fontsize=9.5,
             )
             ax.set_xticks(range(len(steps)))
-            ax.set_xticklabels([f"{u:+d}" for u in steps], fontsize=8)
+            ax.set_xticklabels([("0" if u == 0 else f"{u:+d}") for u in steps], fontsize=8)
             ax.grid(True, axis="y", alpha=0.25)
             ax.set_axisbelow(True)
+            # Top-left: the far-contraction bars are ~1e-4 while the axis runs to 2, so that corner
+            # is empty, whereas the bottom-left is exactly where those bars sit.
             ax.text(
-                0.02, 0.93, f"n={int(tot):,}", transform=ax.transAxes, fontsize=7.5, color=INK,
+                0.02, 0.95, f"n={int(tot):,}", transform=ax.transAxes, fontsize=7.5, color=INK,
                 va="top",
             )
         for ax in axes.flat[len(periods) :]:
             ax.axis("off")
+        for ax in axes.flat[: len(periods)]:
+            ax.set_yscale("log")
+            ax.set_ylim(1e-5, 2.0)
         for ax in axes[:, 0]:
-            ax.set_ylabel("fraction of whole-unit\noff-mode reads")
-        fig.supxlabel("step, in whole motif units (− = contraction)", y=-0.01)
+            ax.set_ylabel("fraction of reads\n(log scale)")
+        fig.supxlabel("read's distance from the allele, in whole motif units (− = shorter)", y=-0.01)
         fig.suptitle(
-            "The stutter kernel: whole-unit steps around the sample's own allele",
+            "Where reads land relative to the allele — the 0 bar is agreement",
             fontweight="bold",
         )
         fig.tight_layout()
@@ -966,12 +975,12 @@ def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
         [
             mo.md(
                 "## 5 · Is stutter whole-unit, and what shape is it?\n"
-                "The read model prices slippage in **whole motif units** and the stutter kernel is "
-                "a geometric over that step, so both are assumptions worth testing rather than "
-                "asserting. A read whose length difference is *not* a multiple of the period is "
-                "not slippage at all — it is an indel, an interruption, or a mis-delimited tract. "
-                "**Period 1 is 1.0 by construction** — every integer is a multiple of one — so it "
-                "is drawn in grey and carries no evidence either way."
+                "The read model prices slippage in **whole motif units**, and treats the chance of "
+                "slipping *k* units as falling off geometrically with *k*. Both are assumptions "
+                "worth testing rather than asserting. A read whose length difference is *not* a "
+                "multiple of the period is not slippage at all — it is an indel, an interruption, "
+                "or a mis-delimited tract. **Period 1 is 1.0 by construction** — every integer is "
+                "a multiple of one — so it is drawn in grey and carries no evidence either way."
             ),
             whole_unit_figure(),
             mo.md(
@@ -980,16 +989,24 @@ def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
                 "— single-base indels rather than slippage, which is what the remainder *should* look "
                 "like if the model is right about the rest. Both cells are thin, so treat the shortfall "
                 "as a flag for the synthetic validation to settle, not as a measured rate.\n\n"
-                "Given whole-unit steps, this is the kernel:"
+                "Given whole-unit steps, this is where reads actually land:"
             ),
             shape_figure(),
             mo.md(
-                "Read the bars as the kernel itself. Two things they show: the step distribution "
-                "falls away sharply from ±1, which is the geometric the model assumes; and it is "
-                "**asymmetric**, contractions outnumbering expansions by more and more as the "
-                "period grows. That asymmetry is not an artefact of what we can see — a censoring "
-                "explanation (long alleles being harder to span) would make it *grow* with tract "
-                "length, and it does not: it is already there at the shortest tracts."
+                "The **0 bar is the reads that agree with the allele**, so each panel carries both "
+                "halves of the question at once: how much stutter there is — the height of "
+                "everything that is *not* 0, quoted in each title — and what shape it takes. The "
+                "axis is logarithmic because those two live four orders of magnitude apart; on a "
+                "linear axis the 0 bar would be the only thing visible.\n\n"
+                "Three things to read off it. Agreement dominates: **over 99% of reads sit exactly "
+                "on the allele** at every period, so stutter is a small perturbation rather than a "
+                "pervasive one — but it is not small where it matters, since the grids above show "
+                "it concentrating in the long-tract cells this average hides. The fall-off from ±1 "
+                "is steep and roughly straight on a log axis, which is what a geometric looks like. "
+                "And it is **asymmetric**, contractions outnumbering expansions by more and more as "
+                "the period grows. That asymmetry is not an artefact of what we can see — a "
+                "censoring explanation (long alleles being harder to span) would make it *grow* "
+                "with tract length, and it does not: it is already there at the shortest tracts."
             ),
         ]
     )
