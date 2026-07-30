@@ -819,8 +819,11 @@ impl GeneratorSet {
 /// per-run swap lives in its trait-object slots, not in a type parameter.
 pub struct SampleLocusObservationsIterator<T> {
     regions: T,
-    // **`generators` is declared before `reads`, and the order is load-bearing**
-    // (C4, plan 3 — the choice the pileup generator's FIXME left to this step).
+    // **`generators` must be dropped before `reads`** (C4, plan 3 — the choice the
+    // pileup generator's FIXME left to this step). Declaring it first is no longer
+    // what enforces that: the `Drop` impl below releases it explicitly, so a future
+    // edit that reorders these fields cannot silently undo the property. The order
+    // is kept anyway, as the cheaper of the two mechanisms.
     //
     // Since 2026-07-28 a region stream owns its files by `Arc` rather than
     // borrowing them, so it may outlive the `SampleReads` that made it — and the
@@ -834,15 +837,11 @@ pub struct SampleLocusObservationsIterator<T> {
     // crash.
     //
     // The generator also ends its walk (and so drops its stream) when a region
-    // drains, so in a run driven to exhaustion nothing is held by then. This
-    // order is what covers the other case: an iterator dropped mid-region.
+    // drains, so in a run driven to exhaustion nothing is held by then. The
+    // release below covers the other case: an iterator dropped mid-region.
     //
-    // **Still owed: a test that keeps a second handle and asserts the tally
-    // landed** — see
-    // `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`
-    // for the shape. It needs a second view onto the same files, and
-    // `SampleReads` is deliberately not `Clone` and does not expose them, so
-    // writing it means widening that type — out of this step's scope.
+    // **No test can fail if this breaks, and that is a property of the types
+    // rather than an omission** — see the `Drop` impl for what it would take.
     generators: GeneratorSet,
     reads: SampleReads,
     /// Latched on clean exhaustion or a fatal error — the fused contract.
@@ -917,6 +916,37 @@ where
 impl<T> std::iter::FusedIterator for SampleLocusObservationsIterator<T> where
     T: Iterator<Item = Result<TypedRegion, TypedRegionError>>
 {
+}
+
+impl<T> Drop for SampleLocusObservationsIterator<T> {
+    /// **Release the generators while `reads` is still alive.** A generator holds
+    /// a region stream that owns its files by `Arc`, and that stream folds its
+    /// drop tally into an `AlignmentFile` on the way out; if `reads` — the only
+    /// other holder — has gone first, the tally lands in an object nobody can
+    /// read and is freed with it. Silent: no crash, no wrong locus, just a drop
+    /// rate under-reported by whatever the abandoned region had counted.
+    ///
+    /// Field order already gives this (Rust drops fields in declaration order,
+    /// and `generators` is declared first). This is here because that made the
+    /// property depend on a line's *position* in a struct, guarded by a comment —
+    /// and the failure is invisible, so a reorder would not announce itself. With
+    /// both, the order is an optimisation and this is the guarantee.
+    ///
+    /// **Nothing can test it, and the reason is worth stating rather than
+    /// leaving as an absence** (owner-facing decision, 2026-07-30). Observing the
+    /// tally after the drop needs a second handle onto the same files;
+    /// `SampleReads` is deliberately not `Clone` and does not expose them, so the
+    /// test costs a widening of that type — the shape is
+    /// `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`,
+    /// one layer down, where the handle exists. Deleting this impl fails no test;
+    /// it is a defence, not a checked invariant, and it is cheap because the
+    /// replacement set allocates nothing.
+    fn drop(&mut self) {
+        drop(std::mem::replace(
+            &mut self.generators,
+            GeneratorSet::all_unimplemented(),
+        ));
+    }
 }
 
 #[cfg(test)]
