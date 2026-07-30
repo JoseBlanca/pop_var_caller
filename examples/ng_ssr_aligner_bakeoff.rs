@@ -3,7 +3,7 @@
 //! dashboard (`ng_proposal.md` §step-3: *how much stuttering exists for different repeat sizes and
 //! lengths, and is there a difference between the aligners*).
 //!
-//! **⚠ Since 2026-07-28 a row is one `(bases, read_coverage, read_group)` CELL, not one allele.**
+//! **⚠ Since 2026-07-28 a row is one `(bases, read_witness, read_group)` CELL, not one allele.**
 //! `SequenceObservation` gained the read group as part of its identity, so on a sample declaring
 //! several `@RG`s one allele becomes several rows — and **this dump has no read-group column**, so
 //! those rows are indistinguishable in the output and the per-row counters count cells rather than
@@ -44,7 +44,7 @@ use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadWitness, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -181,7 +181,7 @@ fn push_locus(
     };
     for obs in &locus.observations {
         push(
-            coverage_label(obs.read_coverage, locus.locus_len()),
+            witness_label(obs.read_witness, locus.locus_len()),
             obs.bases.to_vec(),
             obs.num_obs,
         );
@@ -194,18 +194,18 @@ fn push_locus(
     }
 }
 
-/// The tag a read-coverage carries in the `coverage` column.
-fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
+/// The tag a witness carries in the `coverage` column.
+fn witness_label(witness: ReadWitness, locus_len: LocusLen) -> &'static str {
     // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
     // border is a prefix constraint, one flush with the right border a suffix. A run flush with
     // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
     // so it never appears here, but naming it keeps the label honest for the generic path.
-    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
+    // Destructured rather than guarded on `_`, so a future `ReadWitness` variant is a
     // compile error here. The guard form is what this migration used and it is exactly what
     // let the compiler stop forcing these sites to be revisited.
-    match coverage {
-        ReadCoverage::Complete => "complete",
-        run @ ReadCoverage::Observed { .. } => {
+    match witness {
+        ReadWitness::Complete => "complete",
+        run @ ReadWitness::Observed { .. } => {
             match (run.is_flush_left(), run.is_flush_right(locus_len)) {
                 (true, _) => "partial_left",
                 (false, true) => "partial_right",

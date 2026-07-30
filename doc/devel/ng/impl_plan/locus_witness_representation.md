@@ -79,7 +79,7 @@ expectations is a step that did more than rename.
 - ✅ **A1.** `ObservedSequence` → `SequenceObservation`, and the field
   `SampleLocusObservations::observed_sequences` → `observations`. 39 uses of the type across 7
   files, 102 of the field. *Depends:* —. *Source:* spec §1, §4.
-- ☐ **A2.** `ReadCoverage` → `ReadWitness`, and the field `read_coverage` → `read_witness`. 193 and
+- ✅ **A2.** `ReadCoverage` → `ReadWitness`, and the field `read_coverage` → `read_witness`. 193 and
   91 uses across 12 files, including the `read_coverage` column in both dump tools' TSV output.
   *Depends:* A1. *Source:* arch §3.
 - ☐ **A3.** `coverage_of` → `witness_of`, `coverage_order` → `witness_order`. Signatures unchanged

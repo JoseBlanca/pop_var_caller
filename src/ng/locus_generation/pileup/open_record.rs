@@ -25,7 +25,7 @@ use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 use crate::pileup_record::ChainId;
 
 use super::super::{
-    LocusKind, LocusLen, ReadCoverage, SampleLocusObservations, SequenceObservation,
+    LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
@@ -114,7 +114,7 @@ pub(super) struct AlleleSupportStats {
 ///
 /// **Two counts rather than the per-read runs themselves, and only until B2.**
 /// `finalise` still returns production's [`PileupRecord`], which has nowhere to
-/// put a [`ReadCoverage`]; B2 replaces the return with `SampleLocusObservations`,
+/// put a [`ReadWitness`]; B2 replaces the return with `SampleLocusObservations`,
 /// where each row carries its own. What has to be true *before* that is the
 /// resolution point — coverage read at fold time is measured against a footprint
 /// the record may still outgrow — so A4 resolves it here and reports what it
@@ -159,7 +159,7 @@ pub(super) struct RecordWitness {
 /// `record_pos` but never pushed down to `record_end_exclusive`, so an extent lying entirely
 /// right of the footprint yielded an `offset_in_locus` past the end of the locus paired with
 /// `positions_covered: 0` — a run of no positions, which both [`RefSpan`] and
-/// [`ReadCoverage`] document as not existing. Unreachable from the fold today, because a
+/// [`ReadWitness`] document as not existing. Unreachable from the fold today, because a
 /// read that witnessed nothing inside a record does not fold into it; the `debug_assert`
 /// says so, and the clamp means a future caller gets a truthful answer rather than that one.
 ///
@@ -187,7 +187,7 @@ pub(super) fn coverage_of(
     witnessed: RefSpan,
     record_pos: u32,
     record_end_exclusive: u32,
-) -> ReadCoverage {
+) -> ReadWitness {
     debug_assert!(
         record_end_exclusive.saturating_sub(record_pos) <= u32::from(u16::MAX),
         "record footprint {record_pos}..{record_end_exclusive} is wider than a `u16` run can \
@@ -205,9 +205,9 @@ pub(super) fn coverage_of(
         .saturating_add(1)
         .clamp(first, record_end_exclusive);
     if first <= record_pos && past_last >= record_end_exclusive {
-        return ReadCoverage::Complete;
+        return ReadWitness::Complete;
     }
-    ReadCoverage::Observed {
+    ReadWitness::Observed {
         offset_in_locus: LocusLen::from_positions(u64::from(first - record_pos)).get(),
         positions_covered: LocusLen::from_positions(u64::from(past_last - first)).get(),
     }
@@ -229,7 +229,7 @@ pub(super) fn coverage_of(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ObservationKey {
     pub bases: Vec<u8>,
-    pub read_coverage: ReadCoverage,
+    pub read_witness: ReadWitness,
     pub read_group: ReadGroupId,
 }
 
@@ -254,16 +254,16 @@ pub(super) struct ObservationRow {
     pub chain_ids: Vec<ChainId>,
 }
 
-/// A total order over [`ReadCoverage`], which is `Eq` but not `Ord` — the shared type has
+/// A total order over [`ReadWitness`], which is `Eq` but not `Ord` — the shared type has
 /// no natural ordering, and inventing an `Ord` impl on it would export this file's sorting
 /// convention to every other consumer.
 /// `pub(super)` for the differential: D1's projection has to lay production's alleles out in
 /// **ng's** emission order, and a second spelling of this comparator in `parity.rs` is a
 /// spelling that can drift from the one the walk actually uses.
-pub(super) fn coverage_order(coverage: ReadCoverage) -> (u8, u16, u16) {
+pub(super) fn coverage_order(coverage: ReadWitness) -> (u8, u16, u16) {
     match coverage {
-        ReadCoverage::Complete => (0, 0, 0),
-        ReadCoverage::Observed {
+        ReadWitness::Complete => (0, 0, 0),
+        ReadWitness::Observed {
             offset_in_locus,
             positions_covered,
         } => (1, offset_in_locus, positions_covered),
@@ -421,7 +421,7 @@ struct FoldedReadState {
     /// **A3 keeps it current across a widen** (owner, 2026-07-29): `refold_live_reads`
     /// re-places every live folded read and rewrites this field, so a read sitting inside
     /// its own deletion at the widening position no longer carries an extent measured
-    /// against a footprint the record has outgrown. A4 resolves `ReadCoverage` from it,
+    /// against a footprint the record has outgrown. A4 resolves `ReadWitness` from it,
     /// and would otherwise have reported a wrong depth with no error.
     witnessed: RefSpan,
 }
@@ -535,12 +535,12 @@ impl OpenPileupRecord {
             // stay: they are the determinism guarantee. The linear `find` itself measured
             // 0 %, and hash-keying the rows measured *worse*.)
             let bases = self.alleles[state.allele_index].seq.as_slice();
-            let read_coverage = coverage_of(state.witnessed, self.pos, record_end_exclusive);
+            let read_witness = coverage_of(state.witnessed, self.pos, record_end_exclusive);
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
             let existing = rows.iter().position(|row| {
                 row.key.bases == bases
-                    && row.key.read_coverage == read_coverage
+                    && row.key.read_witness == read_witness
                     && row.key.read_group == read_group
             });
             let row = match existing {
@@ -549,7 +549,7 @@ impl OpenPileupRecord {
                     rows.push(ObservationRow {
                         key: ObservationKey {
                             bases: bases.to_vec(),
-                            read_coverage,
+                            read_witness,
                             read_group,
                         },
                         support: AlleleSupportStats::default(),
@@ -649,8 +649,8 @@ impl OpenPileupRecord {
         let mut rows = self.observation_rows(record_end_exclusive);
         for state in self.folded_reads.values() {
             match coverage_of(state.witnessed, record_pos, record_end_exclusive) {
-                ReadCoverage::Complete => witness.reads_complete += 1,
-                ReadCoverage::Observed { .. } => witness.reads_partially_observed += 1,
+                ReadWitness::Complete => witness.reads_complete += 1,
+                ReadWitness::Observed { .. } => witness.reads_partially_observed += 1,
             }
         }
         // Every folded read is resolved exactly once and lands in exactly one of the two
@@ -680,7 +680,7 @@ impl OpenPileupRecord {
                 .bases
                 .cmp(&b.key.bases)
                 .then_with(|| {
-                    coverage_order(a.key.read_coverage).cmp(&coverage_order(b.key.read_coverage))
+                    coverage_order(a.key.read_witness).cmp(&coverage_order(b.key.read_witness))
                 })
                 .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
         });
@@ -701,7 +701,7 @@ impl OpenPileupRecord {
                 } = row.support;
                 SequenceObservation {
                     bases: row.key.bases.into_boxed_slice(),
-                    read_coverage: row.key.read_coverage,
+                    read_witness: row.key.read_witness,
                     read_group: row.key.read_group,
                     num_obs,
                     num_fwd: fwd,
@@ -2780,7 +2780,7 @@ mod tests {
     /// `opener` is inside its own deletion at position 7, so it is not a contributor
     /// there and the fold loop never revisits it. Without the live re-fold its extent
     /// would stay `5..=7`, measured against a footprint the record has outgrown — and
-    /// A4 resolves `ReadCoverage` from exactly that, so the read would be reported as
+    /// A4 resolves `ReadWitness` from exactly that, so the read would be reported as
     /// having seen three positions of sixteen when its deletion witnessed all of them.
     /// A wrong depth, with no error.
     #[test]
@@ -2936,7 +2936,7 @@ mod tests {
     fn coverage_of_a_witness_covering_the_whole_footprint_is_complete() {
         assert_eq!(
             coverage_of(RefSpan { start: 5, end: 20 }, 5, 21),
-            ReadCoverage::Complete
+            ReadWitness::Complete
         );
     }
 
@@ -2947,7 +2947,7 @@ mod tests {
         let coverage = coverage_of(RefSpan { start: 5, end: 7 }, 5, 21);
         assert_eq!(
             coverage,
-            ReadCoverage::Observed {
+            ReadWitness::Observed {
                 offset_in_locus: 0,
                 positions_covered: 3,
             }
@@ -2963,7 +2963,7 @@ mod tests {
         let coverage = coverage_of(RefSpan { start: 18, end: 20 }, 5, 21);
         assert_eq!(
             coverage,
-            ReadCoverage::Observed {
+            ReadWitness::Observed {
                 offset_in_locus: 13,
                 positions_covered: 3,
             }
@@ -2974,14 +2974,14 @@ mod tests {
 
     /// **A run flush with neither border**, which is what the generic path mints and
     /// neither `from_left` nor `from_right` can express — the case
-    /// [`ReadCoverage`](super::super::ReadCoverage)'s own note said would only be
+    /// [`ReadWitness`](super::super::ReadWitness)'s own note said would only be
     /// knowable when this generator produced its first run.
     #[test]
     fn coverage_of_an_interior_witness_is_flush_with_neither_border() {
         let coverage = coverage_of(RefSpan { start: 9, end: 12 }, 5, 21);
         assert_eq!(
             coverage,
-            ReadCoverage::Observed {
+            ReadWitness::Observed {
                 offset_in_locus: 4,
                 positions_covered: 4,
             }
@@ -2999,12 +2999,12 @@ mod tests {
     fn coverage_of_clamps_an_extent_that_overruns_the_footprint() {
         assert_eq!(
             coverage_of(RefSpan { start: 1, end: 40 }, 5, 21),
-            ReadCoverage::Complete,
+            ReadWitness::Complete,
             "a witness swallowing the footprint witnessed all of it, and nothing more"
         );
         assert_eq!(
             coverage_of(RefSpan { start: 1, end: 7 }, 5, 21),
-            ReadCoverage::Observed {
+            ReadWitness::Observed {
                 offset_in_locus: 0,
                 positions_covered: 3,
             },
@@ -3012,7 +3012,7 @@ mod tests {
         );
         assert_eq!(
             coverage_of(RefSpan { start: 18, end: 40 }, 5, 21),
-            ReadCoverage::Observed {
+            ReadWitness::Observed {
                 offset_in_locus: 13,
                 positions_covered: 3,
             },
@@ -3076,7 +3076,7 @@ mod tests {
                     record.pos,
                     record.footprint_end_exclusive()
                 ),
-                ReadCoverage::Complete,
+                ReadWitness::Complete,
                 "against a 5..=7 footprint the shortie witnessed everything"
             );
             state.witnessed
@@ -3105,7 +3105,7 @@ mod tests {
                 record.pos,
                 record.footprint_end_exclusive()
             ),
-            ReadCoverage::Observed {
+            ReadWitness::Observed {
                 offset_in_locus: 0,
                 positions_covered: 3,
             },
@@ -3237,23 +3237,23 @@ mod tests {
         );
 
         let mut rows = record.observation_rows(record.footprint_end_exclusive());
-        rows.sort_by_key(|row| match row.key.read_coverage {
-            ReadCoverage::Complete => 0u16,
-            ReadCoverage::Observed {
+        rows.sort_by_key(|row| match row.key.read_witness {
+            ReadWitness::Complete => 0u16,
+            ReadWitness::Observed {
                 positions_covered, ..
             } => positions_covered,
         });
         let split: Vec<_> = rows
             .iter()
             .filter(|row| row.key.bases == b"G")
-            .map(|row| (row.key.read_coverage, row.support.num_obs))
+            .map(|row| (row.key.read_witness, row.support.num_obs))
             .collect();
         assert_eq!(
             split,
             vec![
-                (ReadCoverage::Complete, 1),
+                (ReadWitness::Complete, 1),
                 (
-                    ReadCoverage::Observed {
+                    ReadWitness::Observed {
                         offset_in_locus: 0,
                         positions_covered: 1,
                     },
@@ -3495,11 +3495,11 @@ mod tests {
         // fourteen reference bytes.
         let shortie_row = rows
             .iter()
-            .find(|row| matches!(row.key.read_coverage, ReadCoverage::Observed { .. }))
+            .find(|row| matches!(row.key.read_witness, ReadWitness::Observed { .. }))
             .expect("the shortie's partial row");
         let deleter_row = rows
             .iter()
-            .find(|row| row.key.read_coverage == ReadCoverage::Complete && row.key.bases == b"G")
+            .find(|row| row.key.read_witness == ReadWitness::Complete && row.key.bases == b"G")
             .expect("the deleter's complete row");
         assert_eq!(
             shortie_row.chain_ids,

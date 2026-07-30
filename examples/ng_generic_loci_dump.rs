@@ -21,7 +21,7 @@
 //!
 //! # What the columns say that a `PileupRecord` could not
 //!
-//! - **`read_coverage`** is `complete` or `observed:<offset>+<positions>`. A partial witness
+//! - **`read_witness`** is `complete` or `observed:<offset>+<positions>`. A partial witness
 //!   is a *censored* observation — the sequence is at least this long — and production has no
 //!   way to say it: it fills the positions the read did not witness from the reference and
 //!   folds the result as if the read had seen them (spec §4, §6). This column is the whole
@@ -64,7 +64,7 @@ use std::sync::Arc;
 
 use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
-    GeneratorCounts, GeneratorSet, GeneratorSlot, LocusKind, ReadCoverage, SampleLocusObservations,
+    GeneratorCounts, GeneratorSet, GeneratorSlot, LocusKind, ReadWitness, SampleLocusObservations,
     SampleLocusObservationsIterator, UnhandledReason,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
@@ -91,7 +91,7 @@ struct ObservationRow {
     /// The locus's **complete**-observation depth, shown on every row of the locus so a
     /// partial row is read against the depth that actually pinned it.
     depth: u32,
-    read_coverage: String,
+    read_witness: String,
     read_group: u32,
     observed: Vec<u8>,
     reads: u32,
@@ -147,7 +147,7 @@ impl DumpReport {
     /// ones, because a run over new data is where it would first be violated.
     ///
     /// **This is a bound on positions, and it does not read `bases` — deliberately.** The
-    /// clause used to be worded as "the consistency check between `bases` and `read_coverage`",
+    /// clause used to be worded as "the consistency check between `bases` and `read_witness`",
     /// and that check cannot be written: `positions_covered` is *derived from* the read's
     /// events, so checking it against them is tautological, and §8's trap is that no inequality
     /// relates `bases.len()` to the footprint in general — an insertion adds bases without
@@ -171,12 +171,12 @@ impl DumpReport {
             locus.region,
         );
         for obs in &locus.observations {
-            match obs.read_coverage {
-                ReadCoverage::Complete => {
+            match obs.read_witness {
+                ReadWitness::Complete => {
                     self.rows_complete += 1;
                     self.reads_complete += u64::from(obs.num_obs);
                 }
-                ReadCoverage::Observed {
+                ReadWitness::Observed {
                     offset_in_locus,
                     positions_covered,
                 } => {
@@ -206,7 +206,7 @@ impl DumpReport {
                 end: locus.region.end.get(),
                 ref_bases: locus.reference_bases.to_vec(),
                 depth,
-                read_coverage: coverage_label(obs.read_coverage),
+                read_witness: witness_label(obs.read_witness),
                 read_group: obs.read_group.0,
                 observed: obs.bases.to_vec(),
                 reads: obs.num_obs,
@@ -264,7 +264,7 @@ impl DumpReport {
             self.loci_emitted,
         );
         out.push_str(
-            "contig\tstart\tend\tref_bases\tdepth\tread_coverage\tread_group\tobserved\treads\tchain_ids\n",
+            "contig\tstart\tend\tref_bases\tdepth\tread_witness\tread_group\tobserved\treads\tchain_ids\n",
         );
         for row in &self.rows {
             let ids: Vec<String> = row.chain_ids.iter().map(|id| id.to_string()).collect();
@@ -276,7 +276,7 @@ impl DumpReport {
                 row.end,
                 String::from_utf8_lossy(&row.ref_bases),
                 row.depth,
-                row.read_coverage,
+                row.read_witness,
                 row.read_group,
                 String::from_utf8_lossy(&row.observed),
                 row.reads,
@@ -287,17 +287,17 @@ impl DumpReport {
     }
 }
 
-/// The tag a coverage carries in the `read_coverage` column.
+/// The tag a witness carries in the `read_witness` column.
 ///
-/// Destructured rather than matched with `_`, so a future `ReadCoverage` variant is a compile
+/// Destructured rather than matched with `_`, so a future `ReadWitness` variant is a compile
 /// error here instead of a silently mislabelled row. The **run** is printed rather than a
 /// side label: on the generic path a read can be blind in the *middle* of a footprint, where
 /// "partial:left" would be a lie, and the offset is what a consumer needs to place the
 /// evidence anyway.
-fn coverage_label(coverage: ReadCoverage) -> String {
-    match coverage {
-        ReadCoverage::Complete => "complete".to_string(),
-        ReadCoverage::Observed {
+fn witness_label(witness: ReadWitness) -> String {
+    match witness {
+        ReadWitness::Complete => "complete".to_string(),
+        ReadWitness::Observed {
             offset_in_locus,
             positions_covered,
         } => format!("observed:{offset_in_locus}+{positions_covered}"),
@@ -900,7 +900,7 @@ mod tests {
                 .iter()
                 .map(|row| (
                     String::from_utf8_lossy(&row.observed).to_string(),
-                    row.read_coverage.clone(),
+                    row.read_witness.clone(),
                     row.read_group,
                 ))
                 .collect::<Vec<_>>(),
@@ -1052,7 +1052,7 @@ mod tests {
         //    the one production's positional rule gets wrong.**
         let partial = rows_at(&report, 20)
             .into_iter()
-            .find(|row| row.read_coverage == "observed:0+2")
+            .find(|row| row.read_witness == "observed:0+2")
             .expect("the masked read's partial row");
         assert_eq!(
             partial.observed,
@@ -1072,7 +1072,7 @@ mod tests {
             .find(|row| row.observed == vec![ref_base(20)])
             .expect("the opener's row: one base, having deleted the other four positions");
         assert_eq!(
-            departed.read_coverage, "complete",
+            departed.read_witness, "complete",
             "the opener witnessed all five positions — it deleted four of them"
         );
         assert!(
@@ -1117,7 +1117,7 @@ mod tests {
     /// silent about the rest. Production cannot tell them apart: it folds `masked` with the
     /// reference bases at 22, 23 and 24 appended, which lands it in `deleter2`'s bucket or the
     /// REF one depending on the bases. ng emits **two rows with the same bases** and different
-    /// `read_coverage`, which is what proves the field is computed rather than defaulted
+    /// `read_witness`, which is what proves the field is computed rather than defaulted
     /// (spec §13).
     /// **Every read here carries at least 30 sequenced bases, and that is a constraint of the
     /// real filter, not of the walk.** `ReadFilterConfig`'s `DEFAULT_MIN_READ_LENGTH` is 30, so
@@ -1168,7 +1168,7 @@ mod tests {
             .into_iter()
             .filter(|row| row.observed == two_bases)
             .collect();
-        let coverages: Vec<&str> = rows.iter().map(|row| row.read_coverage.as_str()).collect();
+        let coverages: Vec<&str> = rows.iter().map(|row| row.read_witness.as_str()).collect();
         assert_eq!(
             coverages,
             vec!["complete", "observed:0+2"],
@@ -1179,7 +1179,7 @@ mod tests {
                 .iter()
                 .map(|row| (
                     String::from_utf8_lossy(&row.observed).to_string(),
-                    row.read_coverage.clone()
+                    row.read_witness.clone()
                 ))
                 .collect::<Vec<_>>(),
         );
@@ -1188,7 +1188,7 @@ mod tests {
         // identify it.
         let masked_row = rows
             .iter()
-            .find(|row| row.read_coverage == "observed:0+2")
+            .find(|row| row.read_witness == "observed:0+2")
             .expect("the masked read's row");
         assert_ne!(
             masked_row.observed, locus_ref,
@@ -1324,13 +1324,13 @@ mod tests {
             report
                 .rows
                 .iter()
-                .map(|row| (row.start, row.end, row.read_coverage.clone()))
+                .map(|row| (row.start, row.end, row.read_witness.clone()))
                 .collect::<Vec<_>>(),
         );
         let short_bases = ref_span(19, 23);
         let row = row_at(&report, 19, &short_bases);
         assert_eq!(
-            row.read_coverage, "observed:0+5",
+            row.read_witness, "observed:0+5",
             "`short` witnessed positions 19..23 of a sixteen-position footprint"
         );
         assert_eq!(
@@ -1514,12 +1514,12 @@ mod tests {
             whole
                 .rows
                 .iter()
-                .any(|row| row.start == 20 && row.read_coverage == "observed:1+4"),
+                .any(|row| row.start == 20 && row.read_witness == "observed:1+4"),
             "`beyond` must fold into the record at 20 from outside it — without that row this \
              fixture cannot tell a halo from no halo. Rows at 20: {:?}",
             rows_at(&whole, 20)
                 .iter()
-                .map(|row| row.read_coverage.clone())
+                .map(|row| row.read_witness.clone())
                 .collect::<Vec<_>>(),
         );
         // 20 bp pieces put a boundary at 20|21, inside the footprint of the record anchored at

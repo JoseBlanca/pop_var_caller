@@ -57,8 +57,8 @@ pub struct SampleLocusObservations {
 impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
-    /// A [`Complete`](ReadCoverage::Complete) observation counts its `num_obs` at every
-    /// position; an [`Observed`](ReadCoverage::Observed) run counts it over the stretch
+    /// A [`Complete`](ReadWitness::Complete) observation counts its `num_obs` at every
+    /// position; an [`Observed`](ReadWitness::Observed) run counts it over the stretch
     /// it witnessed. The returned vector has exactly `region.len()` entries.
     ///
     /// This is *observation* depth and only exact per locus: it omits reads that
@@ -71,11 +71,11 @@ impl SampleLocusObservations {
         let mut depth = vec![0u32; len];
         for obs in &self.observations {
             // **This clamp is the guard, not a second one.** An earlier comment here
-            // called the bound "a producer invariant, enforced where `ReadCoverage` is
+            // called the bound "a producer invariant, enforced where `ReadWitness` is
             // minted", which overstated it twice over: `Observed`'s fields are public, so
             // a run need not have come from `from_left`/`from_right` at all; and even one
             // that did was clamped against *some* `LocusLen`, which nothing ties to the
-            // locus it ends up on. `ReadCoverage` cannot know its own locus, so the
+            // locus it ends up on. `ReadWitness` cannot know its own locus, so the
             // invariant is not expressible on the type — it can only be checked here,
             // against the region actually in hand.
             //
@@ -83,9 +83,9 @@ impl SampleLocusObservations {
             // over whole cohorts, and a debug-only guard compiles out of the release build
             // this repo actually runs (a trap it has recorded hitting twice). Clamping
             // keeps the derivation total on any input.
-            let (from, to) = match obs.read_coverage {
-                ReadCoverage::Complete => (0, len),
-                ReadCoverage::Observed {
+            let (from, to) = match obs.read_witness {
+                ReadWitness::Complete => (0, len),
+                ReadWitness::Observed {
                     offset_in_locus,
                     positions_covered,
                 } => {
@@ -103,7 +103,7 @@ impl SampleLocusObservations {
         depth
     }
 
-    /// This locus's length, for the [`ReadCoverage`] predicates that need it.
+    /// This locus's length, for the [`ReadWitness`] predicates that need it.
     ///
     /// **The one source a consumer should use.** The mint derives the same quantity from
     /// the segment it is building the locus from, before the locus exists; every reader
@@ -115,7 +115,7 @@ impl SampleLocusObservations {
     }
 
     /// The observations a likelihood may score directly — the
-    /// [`Complete`](ReadCoverage::Complete) ones.
+    /// [`Complete`](ReadWitness::Complete) ones.
     ///
     /// A partial is a lower bound that mis-scores as a *short* allele until a censored
     /// likelihood models it (step 7), so reaching the partials is a deliberate act:
@@ -123,7 +123,7 @@ impl SampleLocusObservations {
     pub fn complete_observations(&self) -> impl Iterator<Item = &SequenceObservation> + '_ {
         self.observations
             .iter()
-            .filter(|obs| obs.read_coverage == ReadCoverage::Complete)
+            .filter(|obs| obs.read_witness == ReadWitness::Complete)
     }
 }
 
@@ -136,20 +136,20 @@ impl SampleLocusObservations {
 /// consumes (spec §6).
 ///
 /// **This is a table of cells, not a table of sequences.** The identity is
-/// `(bases, read_coverage, read_group)` — three axes, not one — so a consumer that
+/// `(bases, read_witness, read_group)` — three axes, not one — so a consumer that
 /// wants per-allele totals must aggregate over coverage *and* group, and one that
 /// treats each entry as an allele will count the same allele several times. The
 /// aggregation is exact: every support field is additive, and the merged cells share
-/// their `bases` and `read_coverage` by construction (spec §6).
+/// their `bases` and `read_witness` by construction (spec §6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SequenceObservation {
     /// The observed bases — allele content, in **read** coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the
-    /// identity**: a [`Complete`](ReadCoverage::Complete) and an
-    /// [`Observed`](ReadCoverage::Observed) run of the same `bases` are different
+    /// identity**: a [`Complete`](ReadWitness::Complete) and an
+    /// [`Observed`](ReadWitness::Observed) run of the same `bases` are different
     /// evidence and stay separate entries (spec §3).
-    pub read_coverage: ReadCoverage,
+    pub read_witness: ReadWitness,
     /// Which read group — one `@RG`, i.e. one lane — these reads came from. **Part of
     /// the identity**, so an allele supported from several groups is several rows.
     ///
@@ -210,7 +210,7 @@ pub struct SequenceObservation {
 /// [`complete_observations`](SampleLocusObservations::complete_observations) a cheap
 /// equality instead of arithmetic against the footprint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReadCoverage {
+pub enum ReadWitness {
     /// The read reached both borders of the locus.
     Complete,
     /// The stretch the read did witness, in **locus positions** — the axis `bases` is
@@ -220,7 +220,7 @@ pub enum ReadCoverage {
     /// [`from_right`](Self::from_right) is therefore a convention rather than a type
     /// invariant.** Left that way deliberately (2026-07-28): private fields would prove
     /// only that a run had been clamped against *some* [`LocusLen`], and nothing ties
-    /// that length to the locus the run is finally attached to — `ReadCoverage` cannot
+    /// that length to the locus the run is finally attached to — `ReadWitness` cannot
     /// know its own locus. So the real check has to live where the region is in hand,
     /// which is `num_obs_along_locus`, and it does.
     ///
@@ -238,10 +238,10 @@ pub enum ReadCoverage {
     },
 }
 
-/// A locus's length in reference positions — the axis a [`ReadCoverage`] run lives on.
+/// A locus's length in reference positions — the axis a [`ReadWitness`] run lives on.
 ///
 /// **A newtype because the alternative is silently wrong.** Every constructor and
-/// predicate on `ReadCoverage` takes a covered extent *and* a locus length, both counts
+/// predicate on `ReadWitness` takes a covered extent *and* a locus length, both counts
 /// of locus positions and both formerly `u16` — so `from_left(10, 4)` and
 /// `from_left(4, 10)` each compiled, and the clamping the constructors do for their own
 /// good would then hide the transposition rather than surface it. Two `u16`s in a row
@@ -275,7 +275,7 @@ impl LocusLen {
     }
 }
 
-impl ReadCoverage {
+impl ReadWitness {
     /// A run flush with the locus's **left** border, `positions_covered` long — the
     /// old `PartialLeft(n)`.
     ///
@@ -964,10 +964,10 @@ mod tests {
 
     /// An observation of `bases` with `num_obs` reads at a given coverage — the moment
     /// fields are irrelevant to the depth derivation, so they are fixed.
-    fn obs(bases: &[u8], read_coverage: ReadCoverage, num_obs: u32) -> SequenceObservation {
+    fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
         SequenceObservation {
             bases: Box::from(bases),
-            read_coverage,
+            read_witness,
             read_group: ReadGroupId(0),
             num_obs,
             num_fwd: 0,
@@ -1451,7 +1451,7 @@ mod tests {
             reference_bases: Box::from(&b"A"[..]),
             observations: vec![SequenceObservation {
                 bases: Box::from(&b"T"[..]),
-                read_coverage: ReadCoverage::Complete,
+                read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 9,
                 num_fwd: 5,
@@ -1496,13 +1496,13 @@ mod tests {
     }
 
     /// A complete and a partial observation of the *same* bases are distinct evidence,
-    /// so they must not compare equal — the property the `(bases, read_coverage)`
+    /// so they must not compare equal — the property the `(bases, read_witness)`
     /// dedup key rests on (spec §3).
     #[test]
-    fn same_bases_differ_by_read_coverage() {
+    fn same_bases_differ_by_read_witness() {
         let complete = SequenceObservation {
             bases: Box::from(&b"ATATAT"[..]),
-            read_coverage: ReadCoverage::Complete,
+            read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 1,
             num_fwd: 1,
@@ -1513,11 +1513,11 @@ mod tests {
             chain_ids: Vec::new(),
         };
         let partial = SequenceObservation {
-            read_coverage: ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+            read_witness: ReadWitness::from_left(6, LocusLen::from_positions(6)),
             ..complete.clone()
         };
         assert_ne!(complete, partial);
-        assert_ne!(complete.read_coverage, partial.read_coverage);
+        assert_ne!(complete.read_witness, partial.read_witness);
     }
 
     /// Depth derives correctly from read-coverage (spec §13.5): the vector has
@@ -1526,19 +1526,19 @@ mod tests {
     /// 10-position locus with one complete (×3), one left-partial reaching 4 (×2), one
     /// right-partial reaching 3 (×5).
     #[test]
-    fn depth_derives_from_read_coverage() {
+    fn depth_derives_from_read_witness() {
         let l = locus(
             region(1, 10),
             vec![
-                obs(b"AAAAAAAAAA", ReadCoverage::Complete, 3),
+                obs(b"AAAAAAAAAA", ReadWitness::Complete, 3),
                 obs(
                     b"AAAA",
-                    ReadCoverage::from_left(4, LocusLen::from_positions(10)),
+                    ReadWitness::from_left(4, LocusLen::from_positions(10)),
                     2,
                 ),
                 obs(
                     b"AAA",
-                    ReadCoverage::from_right(3, LocusLen::from_positions(10)),
+                    ReadWitness::from_right(3, LocusLen::from_positions(10)),
                     5,
                 ),
             ],
@@ -1557,8 +1557,8 @@ mod tests {
         let l = locus(
             region(42, 42),
             vec![
-                obs(b"A", ReadCoverage::Complete, 7),
-                obs(b"T", ReadCoverage::Complete, 2),
+                obs(b"A", ReadWitness::Complete, 7),
+                obs(b"T", ReadWitness::Complete, 2),
             ],
         );
         assert_eq!(l.num_obs_along_locus(), vec![9]);
@@ -1590,7 +1590,7 @@ mod tests {
             region(1, 3),
             vec![obs(
                 b"AAA",
-                ReadCoverage::from_left(9, LocusLen::from_positions(3)),
+                ReadWitness::from_left(9, LocusLen::from_positions(3)),
                 4,
             )],
         );
@@ -1607,15 +1607,15 @@ mod tests {
     #[test]
     fn from_right_places_the_run_against_the_right_border() {
         assert_eq!(
-            ReadCoverage::from_left(4, LocusLen::from_positions(10)),
-            ReadCoverage::Observed {
+            ReadWitness::from_left(4, LocusLen::from_positions(10)),
+            ReadWitness::Observed {
                 offset_in_locus: 0,
                 positions_covered: 4
             }
         );
         assert_eq!(
-            ReadCoverage::from_right(4, LocusLen::from_positions(10)),
-            ReadCoverage::Observed {
+            ReadWitness::from_right(4, LocusLen::from_positions(10)),
+            ReadWitness::Observed {
                 offset_in_locus: 6,
                 positions_covered: 4
             }
@@ -1634,15 +1634,15 @@ mod tests {
     #[test]
     fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
         assert_eq!(
-            ReadCoverage::from_left(9, LocusLen::from_positions(3)),
-            ReadCoverage::Observed {
+            ReadWitness::from_left(9, LocusLen::from_positions(3)),
+            ReadWitness::Observed {
                 offset_in_locus: 0,
                 positions_covered: 3
             }
         );
         assert_eq!(
-            ReadCoverage::from_right(9, LocusLen::from_positions(3)),
-            ReadCoverage::from_left(9, LocusLen::from_positions(3))
+            ReadWitness::from_right(9, LocusLen::from_positions(3)),
+            ReadWitness::from_left(9, LocusLen::from_positions(3))
         );
     }
 
@@ -1650,18 +1650,18 @@ mod tests {
     /// prefix-versus-suffix, since the reshape dropped the side-tagged variants.
     ///
     /// Both `Complete` arms are asserted here because no call site reaches them: every
-    /// `coverage_label` matches `Complete` first, so inverting either arm to `false` would
+    /// `witness_label` matches `Complete` first, so inverting either arm to `false` would
     /// otherwise change nothing anywhere in the tree.
     #[test]
     fn flushness_is_derived_from_where_the_run_sits() {
-        assert!(ReadCoverage::Complete.is_flush_left());
-        assert!(ReadCoverage::Complete.is_flush_right(LocusLen::from_positions(10)));
+        assert!(ReadWitness::Complete.is_flush_left());
+        assert!(ReadWitness::Complete.is_flush_right(LocusLen::from_positions(10)));
 
-        let left = ReadCoverage::from_left(4, LocusLen::from_positions(10));
+        let left = ReadWitness::from_left(4, LocusLen::from_positions(10));
         assert!(left.is_flush_left(), "a prefix constraint");
         assert!(!left.is_flush_right(LocusLen::from_positions(10)));
 
-        let right = ReadCoverage::from_right(4, LocusLen::from_positions(10));
+        let right = ReadWitness::from_right(4, LocusLen::from_positions(10));
         assert!(!right.is_flush_left());
         assert!(
             right.is_flush_right(LocusLen::from_positions(10)),
@@ -1670,7 +1670,7 @@ mod tests {
 
         // An interior run — flush with neither border. The STR path cannot mint one, but the
         // predicates are shared and the generic path will.
-        let interior = ReadCoverage::Observed {
+        let interior = ReadWitness::Observed {
             offset_in_locus: 3,
             positions_covered: 4,
         };
@@ -1688,7 +1688,7 @@ mod tests {
             region(1, 10),
             vec![obs(
                 b"AAAA",
-                ReadCoverage::Observed {
+                ReadWitness::Observed {
                     offset_in_locus: 3,
                     positions_covered: 4,
                 },
@@ -1707,16 +1707,16 @@ mod tests {
         let l = locus(
             region(1, 6),
             vec![
-                obs(b"ATATAT", ReadCoverage::Complete, 4),
+                obs(b"ATATAT", ReadWitness::Complete, 4),
                 obs(
                     b"ATATAT",
-                    ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+                    ReadWitness::from_left(6, LocusLen::from_positions(6)),
                     2,
                 ),
-                obs(b"ATGTAT", ReadCoverage::Complete, 3),
+                obs(b"ATGTAT", ReadWitness::Complete, 3),
                 obs(
                     b"ATAT",
-                    ReadCoverage::from_right(4, LocusLen::from_positions(6)),
+                    ReadWitness::from_right(4, LocusLen::from_positions(6)),
                     1,
                 ),
             ],

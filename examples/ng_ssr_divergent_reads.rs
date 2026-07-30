@@ -27,7 +27,7 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::locus_generation::LocusGenerator;
-use pop_var_caller::ng::locus_generation::ReadCoverage;
+use pop_var_caller::ng::locus_generation::ReadWitness;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
@@ -46,7 +46,7 @@ use pop_var_caller::ng::types::{Bp, ContigId};
 /// `None` = the read anchored no border / was gated out.
 type Measurement = Option<(&'static str, Vec<u8>)>;
 
-fn measurement(obs: &Option<(ReadCoverage, Vec<u8>)>) -> Measurement {
+fn measurement(obs: &Option<(ReadWitness, Vec<u8>)>) -> Measurement {
     obs.as_ref().map(|(cov, bases)| {
         // The side is a derivation since the reshape: a run flush with the left border is a
         // prefix. On this path a partial always anchors one border, so "not flush left" is
@@ -55,9 +55,9 @@ fn measurement(obs: &Option<(ReadCoverage, Vec<u8>)>) -> Measurement {
         //
         // Destructured rather than guarded on `_`, so a future variant is a compile error.
         let class = match cov {
-            ReadCoverage::Complete => "complete",
-            run @ ReadCoverage::Observed { .. } if run.is_flush_left() => "partialL",
-            ReadCoverage::Observed { .. } => "partialR",
+            ReadWitness::Complete => "complete",
+            run @ ReadWitness::Observed { .. } if run.is_flush_left() => "partialL",
+            ReadWitness::Observed { .. } => "partialR",
         };
         (class, bases.clone())
     })

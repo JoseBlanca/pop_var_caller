@@ -119,7 +119,7 @@ use crate::ng::read::PLACEHOLDER_READ_GROUP;
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
-use super::super::{LocusKind, ReadCoverage, SampleLocusObservations, SequenceObservation};
+use super::super::{LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation};
 use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
     run as production_run,
@@ -1206,7 +1206,7 @@ const PROJECTED_READ_GROUP: crate::ng::types::ReadGroupId = PLACEHOLDER_READ_GRO
 /// This is the direction D1 exists to reverse. Until now the differential ran the other way,
 /// laying ng's locus back out as a `PileupRecord` through `to_pileup_record` — and a
 /// back-projection can only ever compare what the *older, smaller* type can hold. Every
-/// field B2 added (`read_coverage`, `read_group`, the two per-record counters, the region's
+/// field B2 added (`read_witness`, `read_group`, the two per-record counters, the region's
 /// end) was merged or dropped on the way out, which is why Milestone B's review found three
 /// live surfaces the suite could not see. Projecting **forward** makes each of them visible:
 /// production has no way to say them, so each shows up as a difference with a name.
@@ -1227,7 +1227,7 @@ const PROJECTED_READ_GROUP: crate::ng::types::ReadGroupId = PLACEHOLDER_READ_GRO
 ///   regardless and A3's widen strands empty non-REF buckets, while ng derives rows from
 ///   reads that folded. `dropped_unsupported` on the returned census says how many, and
 ///   the caller asserts nothing supported was ever dropped.
-/// - `read_coverage` is **`Complete` on every projected row. Class 1:** production has no
+/// - `read_witness` is **`Complete` on every projected row. Class 1:** production has no
 ///   notion of a read that witnessed part of a footprint — that is the defect, and this is
 ///   where it becomes visible instead of being merged away.
 /// - `read_group` is [`PROJECTED_READ_GROUP`] on every projected row. **Class 2:** the
@@ -1315,7 +1315,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         chain_ids.dedup();
         rows.push(SequenceObservation {
             bases: allele.seq.clone().into_boxed_slice(),
-            read_coverage: ReadCoverage::Complete,
+            read_witness: ReadWitness::Complete,
             read_group: PROJECTED_READ_GROUP,
             num_obs,
             num_fwd: fwd,
@@ -1349,7 +1349,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
 
 /// ng's emission order, applied to both sides — spec §3's class 5.
 ///
-/// The `ReadCoverage` half of the comparator is **the walk's own**
+/// The `ReadWitness` half of the comparator is **the walk's own**
 /// (`open_record::coverage_order`, lifted to `pub(super)` for this) rather than a second
 /// spelling here: `finalise` sorts `ObservationRow`s and this sorts `SequenceObservation`s, so
 /// the loop cannot be shared, but the one piece that could silently drift is.
@@ -1360,7 +1360,7 @@ fn sort_rows(rows: &mut [SequenceObservation]) {
     rows.sort_by(|a, b| {
         a.bases
             .cmp(&b.bases)
-            .then_with(|| coverage_order(a.read_coverage).cmp(&coverage_order(b.read_coverage)))
+            .then_with(|| coverage_order(a.read_witness).cmp(&coverage_order(b.read_witness)))
             .then_with(|| a.read_group.0.cmp(&b.read_group.0))
     });
 }
@@ -1475,7 +1475,7 @@ impl PartialEq for ComparableLocus {
             && our_rows.iter().zip(their_rows).all(|(ours, theirs)| {
                 let SequenceObservation {
                     bases: our_row_bases,
-                    read_coverage: our_coverage,
+                    read_witness: our_witness,
                     read_group: our_group,
                     num_obs: our_obs,
                     num_fwd: our_fwd,
@@ -1486,7 +1486,7 @@ impl PartialEq for ComparableLocus {
                     chain_ids: our_ids,
                 } = ours;
                 our_row_bases == &theirs.bases
-                    && our_coverage == &theirs.read_coverage
+                    && our_witness == &theirs.read_witness
                     && our_group == &theirs.read_group
                     && our_obs == &theirs.num_obs
                     && our_fwd == &theirs.num_fwd
@@ -1764,9 +1764,9 @@ impl DivergenceCensus {
         let footprint = locus.region.len();
         let mut fabricating = false;
         for row in &locus.observations {
-            let ReadCoverage::Observed {
+            let ReadWitness::Observed {
                 positions_covered, ..
-            } = row.read_coverage
+            } = row.read_witness
             else {
                 continue;
             };
@@ -1927,12 +1927,12 @@ fn row_evidence(row: &SequenceObservation, totals: &mut LocusEvidence, q_sum: &m
     let SequenceObservation {
         // **Not summed, and each for its own reason.** `bases` is *what* the evidence says
         // rather than how much of it there is — it is the thing class 1 moves, and summing
-        // it would be the excuse this census exists to refuse. `read_coverage` and
+        // it would be the excuse this census exists to refuse. `read_witness` and
         // `read_group` are the two halves of the row identity production cannot state
         // (classes 1 and 2): including them would make every split locus differ here, where
         // the question this function asks is only "did a read go missing".
         bases: _,
-        read_coverage: _,
+        read_witness: _,
         read_group: _,
         num_obs,
         num_fwd,
@@ -2067,7 +2067,7 @@ fn classify_locus(
         partial_witness: ours
             .observations
             .iter()
-            .any(|row| row.read_coverage != ReadCoverage::Complete),
+            .any(|row| row.read_witness != ReadWitness::Complete),
         group_split: ours
             .observations
             .iter()
@@ -2236,7 +2236,7 @@ fn stale_widen_shape(
 /// Whether any allele at this locus is carried by more than one read group — spec §3's
 /// class 2, read off ng's own rows.
 ///
-/// Two rows sharing `(bases, read_coverage)` can only differ in the group, the three
+/// Two rows sharing `(bases, read_witness)` can only differ in the group, the three
 /// together being the whole row identity.
 fn rows_split_by_group(locus: &SampleLocusObservations) -> bool {
     /// A row's identity **without** its read group: the bases, and the coverage run as the
@@ -2247,7 +2247,7 @@ fn rows_split_by_group(locus: &SampleLocusObservations) -> bool {
     for row in &locus.observations {
         if !seen.insert((
             &row.bases,
-            super::open_record::coverage_order(row.read_coverage),
+            super::open_record::coverage_order(row.read_witness),
         )) {
             return true;
         }
@@ -2451,7 +2451,7 @@ fn the_determinism_digest_responds_to_the_evidence() {
 /// definition of the anchor class, which needs A4's `coverage_of`."
 ///
 /// That filter is now readable straight off the emitted locus. A locus qualifies when every
-/// row is [`Complete`](ReadCoverage::Complete) and no read was counted out — which *is*
+/// row is [`Complete`](ReadWitness::Complete) and no read was counted out — which *is*
 /// "every folded read witnessed the whole footprint" — and on those loci the comparison is
 /// **equality**, not evidence-preservation. The tolerated class is gone rather than
 /// counted: a locus that once landed in `EvidenceIntact` now fails the predicate and is
@@ -2663,7 +2663,7 @@ fn every_read_witnessed_the_whole_footprint(locus: &SampleLocusObservations) -> 
         && locus
             .observations
             .iter()
-            .all(|row| row.read_coverage == ReadCoverage::Complete)
+            .all(|row| row.read_witness == ReadWitness::Complete)
 }
 
 /// **What A2 is allowed to change, and what it is not** — the comparison both the
@@ -2946,7 +2946,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 /// promise [`sort_rows`] makes, checked rather than commented.
 ///
 /// `finalise` sorts `ObservationRow`s and [`sort_rows`] sorts `SequenceObservation`s, so the two
-/// loops cannot be shared even though the `ReadCoverage` comparator is (`coverage_order`,
+/// loops cannot be shared even though the `ReadWitness` comparator is (`coverage_order`,
 /// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
 /// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted
 /// rows with this function does not move them. If either spelling of the order changes, the
@@ -3094,7 +3094,7 @@ fn the_projection_says_everything_a_record_says() {
         vec![
             SequenceObservation {
                 bases: Box::from(&b"AAGT"[..]),
-                read_coverage: ReadCoverage::Complete,
+                read_witness: ReadWitness::Complete,
                 read_group: PROJECTED_READ_GROUP,
                 num_obs: 2,
                 num_fwd: 1,
@@ -3106,7 +3106,7 @@ fn the_projection_says_everything_a_record_says() {
             },
             SequenceObservation {
                 bases: Box::from(&b"ACGT"[..]),
-                read_coverage: ReadCoverage::Complete,
+                read_witness: ReadWitness::Complete,
                 read_group: PROJECTED_READ_GROUP,
                 num_obs: 7,
                 num_fwd: 3,

@@ -29,16 +29,16 @@ use super::genome_walk::{PileupWalker, RunSummary};
 use super::{DEFAULT_MAX_ACTIVE_READS, WalkerConfig};
 
 /// The widest `max_record_span` this generator accepts: 65,535 reference
-/// positions, the widest footprint a [`ReadCoverage`] run can describe.
+/// positions, the widest footprint a [`ReadWitness`] run can describe.
 ///
-/// [`ReadCoverage::Observed`] carries `offset_in_locus` and `positions_covered`
+/// [`ReadWitness::Observed`] carries `offset_in_locus` and `positions_covered`
 /// as `u16`s, minted through [`LocusLen::from_positions`], which **saturates**
 /// rather than failing. A record footprint wider than this therefore makes a
 /// partial witness report a *truncated* `positions_covered` — a wrong number, no
 /// error, at exactly the long-deletion loci this generator exists to get right.
 ///
-/// [`ReadCoverage`]: crate::ng::locus_generation::ReadCoverage
-/// [`ReadCoverage::Observed`]: crate::ng::locus_generation::ReadCoverage::Observed
+/// [`ReadWitness`]: crate::ng::locus_generation::ReadWitness
+/// [`ReadWitness::Observed`]: crate::ng::locus_generation::ReadWitness::Observed
 /// [`LocusLen::from_positions`]: crate::ng::locus_generation::LocusLen::from_positions
 pub const MAX_RECORD_SPAN_CEILING: u32 = u16::MAX as u32;
 
@@ -51,7 +51,7 @@ pub const MAX_RECORD_SPAN_CEILING: u32 = u16::MAX as u32;
 /// and the divergence becomes a decision rather than a runtime surprise.
 const _: () = assert!(
     crate::pileup::walker::DEFAULT_MAX_RECORD_SPAN <= MAX_RECORD_SPAN_CEILING,
-    "production's default max_record_span no longer fits a ReadCoverage run: ng must either \
+    "production's default max_record_span no longer fits a ReadWitness run: ng must either \
      widen the run or stop inheriting the default",
 );
 
@@ -114,13 +114,13 @@ impl Default for PileupGeneratorConfig {
 }
 
 impl PileupGeneratorConfig {
-    /// Reject a configuration a [`ReadCoverage`] run could not describe.
+    /// Reject a configuration a [`ReadWitness`] run could not describe.
     ///
     /// Called by [`PileupGenerator::new`], so a bad knob never reaches a locus.
     /// `coverage_of` carries a `debug_assert` stating the same envelope; this is
     /// what makes it provable rather than hopeful, in release builds too.
     ///
-    /// [`ReadCoverage`]: crate::ng::locus_generation::ReadCoverage
+    /// [`ReadWitness`]: crate::ng::locus_generation::ReadWitness
     pub fn check(&self) -> Result<(), PileupGeneratorConfigError> {
         if self.max_record_span > MAX_RECORD_SPAN_CEILING {
             return Err(PileupGeneratorConfigError::RecordSpanExceedsCoverageRun {

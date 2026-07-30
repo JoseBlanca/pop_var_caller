@@ -16,7 +16,7 @@
 //! `SsrSegment` into one locus.
 
 use super::{
-    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage,
+    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, ReadWitness,
     SampleLocusObservations, SsrDetail,
 };
 #[cfg(test)]
@@ -625,7 +625,7 @@ mod classify {
     use crate::ng::alignment::{
         ReadBases, RepeatContext, RepeatGeometry, RepeatSpan, StutterModel,
     };
-    use crate::ng::locus_generation::{LocusLen, ReadCoverage};
+    use crate::ng::locus_generation::{LocusLen, ReadWitness};
     use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::Bp;
     use std::ops::Range;
@@ -648,7 +648,7 @@ mod classify {
     pub(super) enum Classified {
         Observed {
             bases: Box<[u8]>,
-            coverage: ReadCoverage,
+            witness: ReadWitness,
             /// The read's base-quality error mass over the tract, `Σ ln(P_err)`, in log-error
             /// space (freebayes' `q_sum` convention). The **BQ** support moment the spec names
             /// (spec §3, "strand/BQ/MAPQ moments") — computed here because the tract base
@@ -767,7 +767,7 @@ mod classify {
         if passes_quality_gate(tract_qual, MIN_REGION_Q1, qual_buffer) {
             Classified::Observed {
                 bases: region_seq[tract].into(),
-                coverage: ReadCoverage::Complete,
+                witness: ReadWitness::Complete,
                 q_sum: ln_p_err_sum(tract_qual),
             }
         } else {
@@ -787,7 +787,7 @@ mod classify {
     /// Which border of the tract a partial read held — the half of `RepeatSpan`'s answer that
     /// decides where the witnessed run sits inside the locus.
     ///
-    /// A plain marker, **not** a `ReadCoverage` constructor passed by value: since the reshape
+    /// A plain marker, **not** a `ReadWitness` constructor passed by value: since the reshape
     /// (spec §6) the run is a struct variant, which cannot be used as a function, and building it
     /// needs the locus length as well as the reach.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -810,16 +810,16 @@ mod classify {
         let tract = to_usize(tract);
         // `reach` is the observed tract length in **read** coordinates, which diverge from locus
         // positions under stutter — an expanded allele reaches further in read bases than the
-        // reference tract has positions. `ReadCoverage`'s constructors clamp it to the locus, so
+        // reference tract has positions. `ReadWitness`'s constructors clamp it to the locus, so
         // the stored run never claims positions the locus does not have (a long partial correctly
         // saturates to full coverage).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
         let locus_len = LocusLen::from_positions(locus.segment.tract_len());
         Classified::Observed {
             bases: region_seq[tract.clone()].into(),
-            coverage: match border {
-                AnchoredBorder::Left => ReadCoverage::from_left(reach, locus_len),
-                AnchoredBorder::Right => ReadCoverage::from_right(reach, locus_len),
+            witness: match border {
+                AnchoredBorder::Left => ReadWitness::from_left(reach, locus_len),
+                AnchoredBorder::Right => ReadWitness::from_right(reach, locus_len),
             },
             // Partials are kept without the quality gate (spec §3), but still carry the BQ moment.
             q_sum: ln_p_err_sum(&region_qual[tract]),
@@ -886,7 +886,7 @@ mod classify {
             match classify(&read(FRAME, 40)) {
                 Classified::Observed {
                     bases,
-                    coverage: ReadCoverage::Complete,
+                    witness: ReadWitness::Complete,
                     q_sum,
                 } => {
                     assert_eq!(&*bases, b"CACACA");
@@ -917,8 +917,8 @@ mod classify {
             match classified {
                 Classified::Observed {
                     bases,
-                    coverage:
-                        ReadCoverage::Observed {
+                    witness:
+                        ReadWitness::Observed {
                             offset_in_locus,
                             positions_covered,
                         },
@@ -948,8 +948,8 @@ mod classify {
             match classify(&read) {
                 Classified::Observed {
                     bases,
-                    coverage:
-                        ReadCoverage::Observed {
+                    witness:
+                        ReadWitness::Observed {
                             offset_in_locus,
                             positions_covered,
                         },
@@ -986,7 +986,7 @@ mod classify {
             match classify(&read(b"GGGGGGCACACACACATTTTTT", 40)) {
                 Classified::Observed {
                     bases,
-                    coverage: ReadCoverage::Complete,
+                    witness: ReadWitness::Complete,
                     ..
                 } => assert_eq!(&*bases, b"CACACACACA"),
                 other => panic!("expected the recovered long allele, got {other:?}"),
@@ -997,7 +997,7 @@ mod classify {
 
 // ---------------------------------------------------------------------
 // D2c — the tally: fold each kept read's `Classified` into the locus's observed sequences,
-// deduping by `(bases, read_coverage)`, accumulating the support moments, and counting the
+// deduping by `(bases, read_witness)`, accumulating the support moments, and counting the
 // no-observation reasons. A port of production's `tally` (`src/ssr/pileup/locus_tally.rs`),
 // extended with partial observations and the strand/BQ/MAPQ moments the shared type carries
 // (spec §3, §6). Consumed by the generator (D3).
@@ -1006,7 +1006,7 @@ mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
     use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
-    use crate::ng::locus_generation::{ReadCoverage, SequenceObservation};
+    use crate::ng::locus_generation::{ReadWitness, SequenceObservation};
     use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::ReadGroupId;
     use std::collections::HashMap;
@@ -1020,7 +1020,7 @@ mod tally {
         pub(super) reads_without_observation: u32,
     }
 
-    /// Accumulated support for one distinct `(bases, read_coverage, read_group)` bucket — the moments summed
+    /// Accumulated support for one distinct `(bases, read_witness, read_group)` bucket — the moments summed
     /// as reads fold in, materialised into a [`SequenceObservation`] at the end.
     #[derive(Default)]
     struct Support {
@@ -1034,13 +1034,13 @@ mod tally {
 
     /// Fold each kept read's classification into the locus tally.
     ///
-    /// Observations dedup by **`(bases, read_coverage, read_group)`** — a `Complete` and a
+    /// Observations dedup by **`(bases, read_witness, read_group)`** — a `Complete` and a
     /// partial of the same bases are different evidence and stay separate rows, two identical
     /// partials from one read group merge, and the **same allele seen from two read groups is two
     /// rows** (spec §3, §6). Each bucket accumulates the strand (`num_fwd` off the reverse-strand
     /// flag), BQ (`q_sum`, off the read's tract error mass), MAPQ and `placed_left` moments;
     /// `chain_ids` stays empty because the STR path does not phase. `observations` is sorted
-    /// by `(bases, coverage, read_group)`, so — like production's `tally` — the bases, the counts
+    /// by `(bases, witness, read_group)`, so — like production's `tally` — the bases, the counts
     /// and the integer moments are independent of the order reads were folded. `q_sum` is the one
     /// exception: it sums in `f64`, which is commutative but not associative, so a bucket's
     /// `q_sum` can differ in its low bits under a different fold order. That is immaterial while
@@ -1059,21 +1059,21 @@ mod tally {
         locus_start: u64,
         counts: &mut SsrGeneratorCounts,
     ) -> SsrTally {
-        let mut buckets: HashMap<(Box<[u8]>, ReadCoverage, ReadGroupId), Support> = HashMap::new();
+        let mut buckets: HashMap<(Box<[u8]>, ReadWitness, ReadGroupId), Support> = HashMap::new();
         let mut reads_without_observation = 0u32;
         for (read, outcome) in reads_and_outcomes {
             match outcome {
                 Classified::Observed {
                     bases,
-                    coverage,
+                    witness,
                     q_sum,
                 } => {
-                    match coverage {
-                        ReadCoverage::Complete => counts.observations_complete += 1,
-                        ReadCoverage::Observed { .. } => counts.observations_partial += 1,
+                    match witness {
+                        ReadWitness::Complete => counts.observations_complete += 1,
+                        ReadWitness::Observed { .. } => counts.observations_partial += 1,
                     }
                     let support = buckets
-                        .entry((bases, coverage, read.read_group))
+                        .entry((bases, witness, read.read_group))
                         .or_default();
                     support.num_obs += 1;
                     if read.flag & FLAG_REVERSE_STRAND == 0 {
@@ -1101,9 +1101,9 @@ mod tally {
         let mut observations: Vec<SequenceObservation> = buckets
             .into_iter()
             .map(
-                |((bases, read_coverage, read_group), support)| SequenceObservation {
+                |((bases, read_witness, read_group), support)| SequenceObservation {
                     bases,
-                    read_coverage,
+                    read_witness,
                     read_group,
                     num_obs: support.num_obs,
                     num_fwd: support.num_fwd,
@@ -1122,7 +1122,7 @@ mod tally {
         observations.sort_unstable_by(|a, b| {
             a.bases
                 .cmp(&b.bases)
-                .then_with(|| coverage_order(a.read_coverage).cmp(&coverage_order(b.read_coverage)))
+                .then_with(|| coverage_order(a.read_witness).cmp(&coverage_order(b.read_witness)))
                 .then_with(|| a.read_group.cmp(&b.read_group))
         });
 
@@ -1132,7 +1132,7 @@ mod tally {
         }
     }
 
-    /// A total order over `ReadCoverage` (which is not `Ord`) for a deterministic tie-break when
+    /// A total order over `ReadWitness` (which is not `Ord`) for a deterministic tie-break when
     /// two observations share bases: complete first, then partial runs by where they sit in the
     /// locus and how far they run.
     ///
@@ -1142,10 +1142,10 @@ mod tally {
     /// third component was the reach, and it never separated anything on this path (a row's
     /// `bases` are the run, so equal bases already imply equal reach); ordering by offset then
     /// length keeps a total order without relying on that.
-    fn coverage_order(coverage: ReadCoverage) -> (u8, u16, u16) {
-        match coverage {
-            ReadCoverage::Complete => (0, 0, 0),
-            ReadCoverage::Observed {
+    fn coverage_order(witness: ReadWitness) -> (u8, u16, u16) {
+        match witness {
+            ReadWitness::Complete => (0, 0, 0),
+            ReadWitness::Observed {
                 offset_in_locus,
                 positions_covered,
             } => (1, offset_in_locus, positions_covered),
@@ -1188,10 +1188,10 @@ mod tally {
             }
         }
 
-        fn observed(bases: &[u8], coverage: ReadCoverage, q_sum: f64) -> Classified {
+        fn observed(bases: &[u8], witness: ReadWitness, q_sum: f64) -> Classified {
             Classified::Observed {
                 bases: bases.into(),
-                coverage,
+                witness,
                 q_sum,
             }
         }
@@ -1205,9 +1205,9 @@ mod tally {
             let rg0 = read_in_group(0, 10);
             let rg1 = read_in_group(1, 10);
             let outcomes = vec![
-                (&rg0, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
-                (&rg0, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
-                (&rg1, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
+                (&rg0, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&rg0, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&rg1, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let rows = tally(outcomes, 10, &mut counts).observations;
@@ -1243,7 +1243,7 @@ mod tally {
             for (i, r) in reads.iter().enumerate() {
                 // Alternate the alleles so group order and fold order disagree.
                 let bases: &[u8] = if i % 2 == 0 { b"AA" } else { b"CC" };
-                outcomes.push((r, observed(bases, ReadCoverage::Complete, -1.0)));
+                outcomes.push((r, observed(bases, ReadWitness::Complete, -1.0)));
             }
             let mut counts = SsrGeneratorCounts::default();
             let rows = tally(outcomes, 10, &mut counts).observations;
@@ -1283,8 +1283,8 @@ mod tally {
         #[test]
         fn an_expanded_allele_merges_the_two_sides_into_one_row() {
             let locus_len = LocusLen::from_positions(6);
-            let left = ReadCoverage::from_left(9, locus_len);
-            let right = ReadCoverage::from_right(9, locus_len);
+            let left = ReadWitness::from_left(9, locus_len);
+            let right = ReadWitness::from_right(9, locus_len);
             assert_eq!(
                 left, right,
                 "the two sides denote the same run once saturated"
@@ -1322,9 +1322,9 @@ mod tally {
             let on = read_in_group(0, 10);
             let after = read_in_group(0, 11);
             let outcomes = vec![
-                (&before, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
-                (&on, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
-                (&after, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
+                (&before, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&on, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&after, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let rows = tally(outcomes, 10, &mut counts).observations;
@@ -1338,18 +1338,18 @@ mod tally {
         }
 
         /// A `Complete` and a partial run of the **same** bases are different evidence, so they
-        /// stay as two separate rows (spec §3) — the property the `(bases, read_coverage, read_group)` dedup
+        /// stay as two separate rows (spec §3) — the property the `(bases, read_witness, read_group)` dedup
         /// key rests on.
         #[test]
         fn a_complete_and_a_partial_of_the_same_bases_stay_separate() {
             let fwd = read(0, 60);
             let outcomes = vec![
-                (&fwd, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
+                (&fwd, observed(b"CACACA", ReadWitness::Complete, -1.0)),
                 (
                     &fwd,
                     observed(
                         b"CACACA",
-                        ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(6, LocusLen::from_positions(6)),
                         -1.0,
                     ),
                 ),
@@ -1361,7 +1361,7 @@ mod tally {
             assert_eq!(counts.observations_partial, 1);
         }
 
-        /// Two identical partials (same bases, same coverage) are the identical constraint, so
+        /// Two identical partials (same bases, same witness) are the identical constraint, so
         /// they merge into one row with `num_obs == 2` (spec §3).
         #[test]
         fn two_identical_partials_merge_into_one_count() {
@@ -1371,7 +1371,7 @@ mod tally {
                     &fwd,
                     observed(
                         b"CACA",
-                        ReadCoverage::from_left(4, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(4, LocusLen::from_positions(6)),
                         -1.0,
                     ),
                 ),
@@ -1379,7 +1379,7 @@ mod tally {
                     &fwd,
                     observed(
                         b"CACA",
-                        ReadCoverage::from_left(4, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(4, LocusLen::from_positions(6)),
                         -1.0,
                     ),
                 ),
@@ -1398,8 +1398,8 @@ mod tally {
             let fwd = read(0, 60);
             let rev = read(FLAG_REVERSE_STRAND, 30);
             let outcomes = vec![
-                (&fwd, observed(b"CACACA", ReadCoverage::Complete, -2.0)),
-                (&rev, observed(b"CACACA", ReadCoverage::Complete, -3.0)),
+                (&fwd, observed(b"CACACA", ReadWitness::Complete, -2.0)),
+                (&rev, observed(b"CACACA", ReadWitness::Complete, -3.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
@@ -1444,58 +1444,58 @@ mod tally {
             assert_eq!(counts.window_truncated, 1);
         }
 
-        /// `observations` is sorted by bytes, then by coverage — so the record is identical
+        /// `observations` is sorted by bytes, then by witness — so the record is identical
         /// regardless of the order reads folded in (production's order-independence, extended to
-        /// the coverage tie-break).
+        /// the witness tie-break).
         #[test]
         fn observed_is_sorted_by_bases_then_coverage() {
             let r = read(0, 60);
             let outcomes = vec![
-                (&r, observed(b"GG", ReadCoverage::Complete, -1.0)),
+                (&r, observed(b"GG", ReadWitness::Complete, -1.0)),
                 (
                     &r,
                     observed(
                         b"AA",
-                        ReadCoverage::from_right(2, LocusLen::from_positions(6)),
+                        ReadWitness::from_right(2, LocusLen::from_positions(6)),
                         -1.0,
                     ),
                 ),
-                (&r, observed(b"AA", ReadCoverage::Complete, -1.0)),
+                (&r, observed(b"AA", ReadWitness::Complete, -1.0)),
                 (
                     &r,
                     observed(
                         b"AA",
-                        ReadCoverage::from_left(2, LocusLen::from_positions(6)),
+                        ReadWitness::from_left(2, LocusLen::from_positions(6)),
                         -1.0,
                     ),
                 ),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
-            let order: Vec<(&[u8], ReadCoverage)> = result
+            let order: Vec<(&[u8], ReadWitness)> = result
                 .observations
                 .iter()
-                .map(|o| (o.bases.as_ref(), o.read_coverage))
+                .map(|o| (o.bases.as_ref(), o.read_witness))
                 .collect();
             assert_eq!(
                 order,
                 vec![
-                    (b"AA".as_ref(), ReadCoverage::Complete),
+                    (b"AA".as_ref(), ReadWitness::Complete),
                     (
                         b"AA".as_ref(),
-                        ReadCoverage::from_left(2, LocusLen::from_positions(6))
+                        ReadWitness::from_left(2, LocusLen::from_positions(6))
                     ),
                     (
                         b"AA".as_ref(),
-                        ReadCoverage::from_right(2, LocusLen::from_positions(6))
+                        ReadWitness::from_right(2, LocusLen::from_positions(6))
                     ),
-                    (b"GG".as_ref(), ReadCoverage::Complete),
+                    (b"GG".as_ref(), ReadWitness::Complete),
                 ]
             );
         }
 
         /// The integer moments of a **multi-read bucket** are order-independent: the same reads
-        /// (differing strand and MAPQ) folded into one `(bases, coverage)` bucket in two orders
+        /// (differing strand and MAPQ) folded into one `(bases, witness)` bucket in two orders
         /// give the same `num_obs` / `num_fwd` / `mapq_sum` / `mapq_sum_sq`. This is the case the
         /// singleton buckets of `tally_is_order_independent` never exercise, and it isolates
         /// `q_sum` as the sole order-sensitive field (its f64 sum is not asserted here).
@@ -1511,12 +1511,12 @@ mod tally {
                 (o.num_obs, o.num_fwd, o.mapq_sum, o.mapq_sum_sq)
             };
             let forward_first = moments(vec![
-                (&fwd, observed(b"CACACA", ReadCoverage::Complete, -2.0)),
-                (&rev, observed(b"CACACA", ReadCoverage::Complete, -3.0)),
+                (&fwd, observed(b"CACACA", ReadWitness::Complete, -2.0)),
+                (&rev, observed(b"CACACA", ReadWitness::Complete, -3.0)),
             ]);
             let reverse_first = moments(vec![
-                (&rev, observed(b"CACACA", ReadCoverage::Complete, -3.0)),
-                (&fwd, observed(b"CACACA", ReadCoverage::Complete, -2.0)),
+                (&rev, observed(b"CACACA", ReadWitness::Complete, -3.0)),
+                (&fwd, observed(b"CACACA", ReadWitness::Complete, -2.0)),
             ]);
             assert_eq!(forward_first, reverse_first);
             assert_eq!(forward_first, (2, 1, 90, 60 * 60 + 30 * 30));
@@ -1535,8 +1535,8 @@ mod tally {
                 (result.observations, counts)
             };
             let a = run(vec![
-                (&r, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
-                (&r, observed(b"CACA", ReadCoverage::Complete, -1.0)),
+                (&r, observed(b"CACACA", ReadWitness::Complete, -1.0)),
+                (&r, observed(b"CACA", ReadWitness::Complete, -1.0)),
                 (
                     &r,
                     Classified::NoObservation(NoObservationReason::LowQuality),
@@ -1547,8 +1547,8 @@ mod tally {
                     &r,
                     Classified::NoObservation(NoObservationReason::LowQuality),
                 ),
-                (&r, observed(b"CACA", ReadCoverage::Complete, -1.0)),
-                (&r, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
+                (&r, observed(b"CACA", ReadWitness::Complete, -1.0)),
+                (&r, observed(b"CACACA", ReadWitness::Complete, -1.0)),
             ]);
             assert_eq!(a, b);
         }
@@ -1767,9 +1767,9 @@ where
                 &mut self.align_scratch,
                 &mut self.qual_buffer,
             ) {
-                classify::Classified::Observed {
-                    bases, coverage, ..
-                } => Some((coverage, bases.into_vec())),
+                classify::Classified::Observed { bases, witness, .. } => {
+                    Some((witness, bases.into_vec()))
+                }
                 classify::Classified::NoObservation(_) => None,
             };
             delimited.push(ReadDelimitation {
@@ -1802,7 +1802,7 @@ pub struct ReadDelimitation {
     pub read_seq: Vec<u8>,
     /// The measured tract bases and how the read covered the tract, or `None` for a no-observation
     /// (anchored no border, or quality-gated out).
-    pub observation: Option<(ReadCoverage, Vec<u8>)>,
+    pub observation: Option<(ReadWitness, Vec<u8>)>,
 }
 
 /// Every kept read's delimitation for one segment, plus the locus reference context a bake-off reads
@@ -2677,7 +2677,7 @@ mod tests {
             SsrFlatGapAligner, ViterbiScratch as NgViterbiScratch,
         };
         use crate::ng::alignment::{PerQualityEmission, StutterModel};
-        use crate::ng::locus_generation::ReadCoverage;
+        use crate::ng::locus_generation::ReadWitness;
         use crate::ng::read::aligned_read::AlignedRead;
         use crate::pileup::walker::CigarOp;
         // Frozen production oracle (called test-only, as the reservoir parity test does; ng does not
@@ -2756,7 +2756,7 @@ mod tests {
         let ng_complete: Vec<(Vec<u8>, u32)> = ng
             .observations
             .iter()
-            .filter(|obs| obs.read_coverage == ReadCoverage::Complete)
+            .filter(|obs| obs.read_witness == ReadWitness::Complete)
             .map(|obs| (obs.bases.to_vec(), obs.num_obs))
             .collect();
 
