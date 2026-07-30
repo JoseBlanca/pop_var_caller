@@ -141,16 +141,23 @@ impl DumpReport {
     ///
     /// # The one invariant asserted here rather than in a test
     ///
-    /// **No row claims more locus positions than its events account for** (spec §13). It is
-    /// asserted on every locus of every run, including the tool's real ones, because it is the
-    /// consistency check between `bases` and `read_coverage` that the whole no-fabrication
-    /// change exists to establish — and a run of the tool over new data is exactly where it
-    /// would first be violated.
+    /// **No row claims a position the locus does not have, and no row claims zero** (spec §13):
+    /// every `Observed` row satisfies `offset_in_locus + positions_covered <= footprint` and
+    /// `positions_covered > 0`. Asserted on every locus of every run, including the tool's real
+    /// ones, because a run over new data is where it would first be violated.
     ///
-    /// **Not an equality**, and that is the trap spec §8 names: an insertion adds bases
-    /// without positions and a deletion positions without bases, so the two counts are related
-    /// by the read's events and not by `==`. What is checked is the direction that cannot
-    /// happen honestly: a row cannot witness more positions than the locus has.
+    /// **This is a bound on positions, and it does not read `bases` — deliberately.** The
+    /// clause used to be worded as "the consistency check between `bases` and `read_coverage`",
+    /// and that check cannot be written: `positions_covered` is *derived from* the read's
+    /// events, so checking it against them is tautological, and §8's trap is that no inequality
+    /// relates `bases.len()` to the footprint in general — an insertion adds bases without
+    /// positions, a deletion positions without bases, so a row's byte count may exceed or fall
+    /// short of its position count either way. Spec §13 now asks for what is checkable
+    /// (corrected 2026-07-30); the code here did not change.
+    ///
+    /// What ties the bases to the coverage is construction, not an assertion: both come out of
+    /// one `apply_events_into` call, which returns the bases and the witnessed extent together
+    /// and returns `None` rather than a run it cannot describe honestly (spec §6).
     fn push_locus(&mut self, locus: &SampleLocusObservations, contig: &str) {
         self.generic_loci += 1;
         let footprint = locus.region.len();

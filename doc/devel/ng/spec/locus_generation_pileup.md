@@ -1208,10 +1208,26 @@ in the order they should be built.
      bases the length it witnessed and not the footprint's — the check that the no-fabrication rule
      survived the port, and the one production cannot pass by construction. Needs a fixture with a
      deletion long enough to widen a record past a read that has already expired.
-   - **No row claims more locus positions than its events account for** — the consistency check
-     between `bases` and `read_coverage`, asserted globally because it is the invariant the whole §4
-     change exists to establish. **Not an equality:** an insertion adds bases without positions, a
-     deletion positions without bases (§8).
+   - **No row claims a position the locus does not have**, and no row claims zero — every emitted
+     `Observed` row satisfies `offset_in_locus + positions_covered ≤ footprint` and
+     `positions_covered > 0`, asserted globally, because a witness that reaches past the footprint
+     it is measured against, or that witnessed nothing and still has a row, is the shape §4's
+     change exists to make impossible.
+
+     > **Corrected 2026-07-30.** This clause used to ask for *"the consistency check between
+     > `bases` and `read_coverage`"*, and the dump tool's doc restated it verbatim above an
+     > assertion that never reads `bases`. **The check as worded cannot be written.**
+     > `positions_covered` is *derived from* the read's events, so checking it against them is
+     > tautological; and §8's own trap is that no inequality relates `bases.len()` to the footprint
+     > in general — an insertion adds bases without positions, a deletion positions without bases,
+     > so a row's byte count may exceed or fall short of its position count either way. What is
+     > checkable is the bound on the *positions*, which is what the tool has always asserted. The
+     > weakening is in the wording, not in the code: nothing was checked before that is unchecked
+     > now.
+
+     The evidence that `bases` and `read_coverage` agree is carried elsewhere and by construction:
+     both come from the same `apply_events_into` call, which returns the bases and the witnessed
+     extent together and returns `None` rather than a run it cannot describe honestly (§6).
    - Loci from two adjacent `Generic` regions concatenate into a coordinate-sorted,
      duplicate-free stream with no gap at the join (§2).
    - Output is byte-identical across repeated runs.
