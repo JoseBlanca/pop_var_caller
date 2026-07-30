@@ -29,16 +29,18 @@ sequenced**, not of the genome. This step measures them.
 3. Share the **estimation machinery** across both paths — sum over the genotype, stratify, pool
    thin strata, grid-search — while keeping **two noise models**, because the two paths are noisy
    in different ways (§3.1).
-4. Emit parameters the cohort caller can consume as frozen inputs, so genotyping stays a pure
+4. Gather what the **inbreeding coefficient `F`** needs in the same pass (§5.1), because the walk
+   over the reads is the expensive part and doing it twice is not affordable.
+5. Emit parameters the cohort caller can consume as frozen inputs, so genotyping stays a pure
    function of (reads, parameters).
 
 **Non-goals.**
 
 - **Genotyping.** Nothing here calls a variant. The estimator sums over genotypes precisely so it
   never has to pick one.
-- **Replacing `F`.** The inbreeding coefficient is estimated today as `1 − Hobs/Hexp`. The research
-  note argues for a runs-of-homozygosity estimator instead; that is a separate piece of work and is
-  deferred with a home (§9).
+- **Choosing the `F` estimator.** Today it is `1 − Hobs/Hexp`; the research note argues for a
+  runs-of-homozygosity estimator. That choice is deferred (§10). What is **not** deferred is the
+  data it needs — the pass happens once, so the accumulator has to be decided now (§5.1).
 - **Long-allele recovery.** GangSTR profiles insert size, coverage, GC and read length before
   genotyping. Those pay off only for alleles longer than a read, which our STR path does not
   attempt. Deferred (§9).
@@ -47,8 +49,9 @@ sequenced**, not of the genome. This step measures them.
 
 - decide which loci exist (that is region typing, step 3);
 - change anything in `src/ssr/` or `src/pileup/` — production is frozen;
-- estimate anything per *sample* where a sample holds several read groups. The unit is the read
-  group (§4).
+- estimate **chemistry** per sample. Error and slippage are properties of the library, so their
+  unit is the read group (§4). `F` is the deliberate exception: inbreeding belongs to the
+  individual, so it pools a sample's read groups (§5.1).
 
 ---
 
@@ -188,10 +191,11 @@ does not guess: it fits at whatever grain it is handed.
 
 **What Stage-1 accumulates, per read group:**
 
-| path | accumulated | why this shape |
-|---|---|---|
-| generic | a histogram of `(depth, alt-count)` cells | the sufficient statistic for §3; **including `k = 0` cells**, which is what production discards |
-| STR | per `(period, repeat count)`: a histogram of `(reads on the modal length, reads at each whole-repeat offset, reads at a non-repeat offset)` | the sufficient statistic for the stutter model, stratified on the axis §6 shows is the right one |
+| accumulator | grain | accumulated | why this shape |
+|---|---|---|---|
+| generic noise | read group | a histogram of `(depth, alt-count)` cells | the sufficient statistic for §3; **including `k = 0` cells**, which is what production discards |
+| STR noise | read group | per `(period, repeat count)`: a histogram of `(reads on the modal length, reads at each whole-repeat offset, reads at a non-repeat offset)` | the sufficient statistic for the stutter model, stratified on the axis §6 shows is the right one |
+| inbreeding | **sample** | the generic histogram again, keyed additionally by genomic window | §5.1 — a different grain and a different key, from the same reads |
 
 Both are smaller objects than what production keeps today: three counters become a histogram, but
 the histogram is sparse and bounded by depth.
@@ -217,6 +221,41 @@ qualities become a covariate, not the answer.
 Reference bias means they are not. The note recommends Bryc et al.'s reference-bias term, which
 replaces `½` with a fitted per-read-group constant. **Leaning: adopt it**, since it costs one
 parameter and this step already fits a grid — but it is not measured on our data (§10).
+
+### 5.1 Inbreeding rides the same pass, at a different grain
+
+`F` says how much of an individual's genome is homozygous because its parents were related. It is
+needed by the cohort genotype prior, and it is **not** chemistry: it belongs to the individual, so
+it is estimated **per sample**, pooling that sample's read groups. Same reads, same walk, different
+key.
+
+**Why it cannot wait for its own spec.** The walk over the reads is what this step costs; the
+arithmetic afterwards is free. Estimating `F` in a second pass would roughly double the expensive
+half to gain nothing, so the *accumulator* has to be settled here even though the *estimator* need
+not be.
+
+**What to accumulate: the generic histogram of §4, keyed additionally by genomic window** (~1 Mb).
+That one object serves both candidate estimators, which is what lets the choice stay open:
+
+- `1 − Hobs/Hexp` sums the windows and ignores the key;
+- a runs-of-homozygosity estimator runs a two-state HMM (in-run / out-of-run) **across** the
+  windows. The research note prices this at "forward–backward over a two-state HMM on ~1 Mb windows
+  of het counts. A few hundred lines, no new data."
+
+**Why the window key and not the runs themselves.** Accumulating windowed counts keeps accumulation
+**associative**: a region-sharded walk merges by summing on the window key, and no shard needs to
+know what its neighbour saw. Accumulating runs directly would not — a run crossing a shard boundary
+would have to be stitched, which is the kind of seam that produces a bug found six months later.
+The HMM is then a single sequential pass over a few thousand windows, run once, after the merge.
+
+**Trap: do not accumulate hard-called hets per window.** That would reintroduce §2.1's bias into the
+one number this whole spec exists to de-bias. The window holds the same `(depth, alt-count)`
+sufficient statistic as everything else; the expected het count is derived from it *after* `ε` and
+`π` are fitted.
+
+**Open: the window size and how coarsely to bin depth inside it.** ~1 Mb is the note's figure,
+inherited from ROHan and not tested here. Memory is the constraint — one histogram per window per
+sample — and coarse depth bins are the obvious lever (§10).
 
 ---
 
@@ -315,8 +354,11 @@ read groups holds 50 of them — kilobytes, not the gigabytes the observation st
 stratum (§3.1) and is marked as having done so, because a parameter that came from a neighbour is
 softer than one fitted in place and the consumer should be able to tell.
 
-**Concurrency.** Accumulation is per read group and therefore embarrassingly parallel; the fit is a
-cohort-wide gather, run once, single-threaded. No shared mutable state on the hot path.
+**Concurrency.** Every accumulator is keyed — by read group, by stratum, by window — and keyed
+accumulation is associative, so a region-sharded walk merges by summing and needs no communication
+between shards. The fits are cohort-wide gathers run once afterwards, single-threaded. The only
+sequential step is the inbreeding HMM, which walks a few thousand windows in order (§5.1) and is
+irrelevant to the walk's cost.
 
 **Determinism.** The grid search must be deterministic given the same accumulated histograms —
 same grid, same order, no floating-point reduction whose result depends on thread count. `ε` is
@@ -341,11 +383,10 @@ agreeing with it would be failure. §11 says how correctness is shown instead.
 
 ## 9. Deferred, with a recommended home
 
-- **`F` from runs of homozygosity.** `1 − Hobs/Hexp` applies one cohort-wide `Hexp` to every
-  sample regardless of ancestry, and a uniform floor of false hets biases every sample downward.
-  F_ROH is closer to the definition for a selfing crop. **Home:** its own spec — it is a
-  per-genome-structure estimator, not a per-read-group chemistry one, and mixing them would make
-  both harder to read.
+- **The `F` estimator itself** — the HMM, or the ratio, or something else. The accumulator it reads
+  is settled here (§5.1); only the arithmetic on top is deferred. **Home:** its own spec, which can
+  be written and rewritten without touching Stage-1, precisely because the windowed histogram
+  serves every candidate.
 - **Insert size, coverage, GC and read-length profiling.** Needed only for alleles longer than a
   read. **Home:** whichever spec takes on long-allele recovery.
 - **HDplot and other cohort artifact signals.** A cohort-level signal for collapsed paralogs.
@@ -373,12 +414,20 @@ agreeing with it would be failure. §11 says how correctness is shown instead.
 4. **Adopt the reference-bias term in place of `½`?** — OPEN. *Leaning:* yes; costs one parameter.
    **Settled by:** whether the fitted value departs from ½ by more than its standard error on real
    data.
-5. **Why do hexamers put more mass at −3 than at −1?** — OPEN, and unexplained. Either a real
+5. **Which `F` estimator, and at what window size?** — OPEN. The accumulator serves all candidates
+   (§5.1), so this is genuinely free to defer. *Leaning:* the runs-of-homozygosity HMM, because a
+   uniform floor of false hets raises the fitted het rate of both HMM states and largely cancels
+   out of the fraction, whereas it goes straight into `obs_het` today. It also says whether a
+   sample's excess heterozygosity is uniform (artifact) or segmental (a real outcross) — which is
+   exactly the pathology the tomato baseline recorded and no read-quality heuristic could reach.
+   **Settled by:** running both on the tomato cohort and checking which one separates that sample
+   from the rest.
+6. **Why do hexamers put more mass at −3 than at −1?** — OPEN, and unexplained. Either a real
    long-tract behaviour or an artefact of tract delimitation. It breaks the geometric assumption
    for that period alone. **Settled by:** the synthetic validation
    ([`synthetic_validation.md`](synthetic_validation.md)), which can inject known hexamer alleles
    and see whether the delimiter reproduces them.
-6. **Is the low whole-repeat fraction at tetra and penta real?** 62% and 53% in tomato, on 464 and
+7. **Is the low whole-repeat fraction at tetra and penta real?** 62% and 53% in tomato, on 464 and
    131 reads. Both are thin and both are dominated by 3-copy tracts, which §6.4 would route
    elsewhere anyway. *Leaning:* it disappears once the copy floor rises. **Settled by:** re-running
    §6.1 with the floors of §6.4 applied.
