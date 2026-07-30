@@ -264,13 +264,26 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
   fail** and were rewritten: the chain-id one had only whole-footprint witnesses, where ng's
   per-read rule and production's positional one coincide; the boundary one had no read starting
   past the boundary, so removing the halo entirely changed nothing.
-- ☐ **D3 — the measurements.** Two numbers, both deliverables rather than by-products. **The size of
+- ✅ **D3 — the measurements.** Two numbers, both deliverables rather than by-products. **The size of
   production's defect:** how many loci, reads and reference bases production credits to reads that
   never sequenced them — the number that turns the indel-deficit hypothesis into a result or kills
   it. **Throughput:** the dump over one human chromosome against production's `pileup` on the same
   CRAM. There is no candidate-only fallback, so a bad number is a performance problem to solve, not a
   design to reconsider — and the allele-list growth (spec §7) is the first place to look.
   *Depends:* D2. *Source:* spec §7, §13.
+
+  **The defect:** on HG002 at 300×, chr1:1–6 Mb, production credited **871 reads over 162 loci
+  (0.33 %) with 1,550 reference bases they never sequenced**; a 10× window over the same
+  coordinates gives **zero**, and a tomato CRAM 6 reads over 4 loci. Class 6 (production's stale
+  widen) is **zero on real data**. **Throughput:** chr1, same 30× BAM, single-threaded both
+  sides — ng **34.7 s / 461 MB** against production's **10.2 s / 559 MB**, so **3.4× slower with
+  lower peak memory**. Region typing (a pass production does not make) is 5.9 s of it; the
+  regions average **391 bp** and 36 % of the records the walk finalised are discarded at the
+  clamp, so **the first lever is the region grain, not the fold** — `column_depth_truncations` is
+  0 and the allele list never grows here. **And the measurement found the differential's own
+  `q_sum` tolerance wrong**: a fixed 1e-9 *absolute* grain, which 300× depth (`q_sum ≈ −3,360`)
+  reported as an unlisted divergence one grain wide. Now a *relative* tolerance, and a tolerance
+  rather than a rounding.
 
 > **Checkpoint D: the generic path mints loci, the defect is measured, and the cost is known.**
 > Pause for review — and for the decision whether the read-group grain stays per-`@RG`.
@@ -286,8 +299,8 @@ A0 is a pure refactor with no behaviour change; A1–A5 are the reason this step
 | B | one-read-group row counts unchanged; output byte-identical across repeated runs (the sort) |
 | C | loci from two adjacent regions concatenate coordinate-sorted with no gap at the join; `records_outside_region` zero-sum across neighbours |
 | D1 | every divergence in one of **six** named classes (D1 found the sixth); the fabrication-free fixture green as a permanent anchor |
-| D2 | six fixtures, each written so a span-derived or fill-preserving implementation fails it |
-| D3 | the defect size reported; throughput measured against production's `pileup` |
+| D2 | six fixtures, each written so a span-derived or fill-preserving implementation fails it — **mutation-verified**, and two of them rewritten after passing the mutation they were written for |
+| D3 | the defect size reported on two organisms and two depths; throughput measured against production's `pileup` at 3.4× with lower peak RSS, and the cost attributed |
 
 ## Out of scope (next work)
 

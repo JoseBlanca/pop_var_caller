@@ -1371,50 +1371,132 @@ fn sort_rows(rows: &mut [ObservedSequence]) {
 ///    against a structural zero could be.
 ///
 /// Applied to **both** sides, so neither can hide a difference the other does not have.
-fn comparable(locus: &SampleLocusObservations) -> SampleLocusObservations {
-    let mut out = comparable_exact_q_sum(locus);
-    for row in &mut out.observed_sequences {
-        row.q_sum = round_q_sum(row.q_sum);
-    }
-    out
+fn comparable(locus: &SampleLocusObservations) -> ComparableLocus {
+    ComparableLocus(comparable_exact_q_sum(locus))
 }
 
-/// Q_SUM_GRAIN: the granularity `q_sum` is compared at — see [`round_q_sum`].
-const Q_SUM_GRAIN: f64 = 1e9;
-
-/// Round `q_sum` to ~1e-9, because ng changed the **order** its accumulation happens in
-/// and nothing else.
+/// **The relative tolerance `q_sum` is compared at, and the reason it is relative.**
 ///
-/// `q_sum` is an `f64` running sum, and `f64` addition is not associative. **Two changes
-/// reorder it, and the count below moved sharply when the second landed** — 521 records at
-/// A5, 5,368 at B1, over the same 20,000 cases:
+/// `q_sum` is an `f64` running sum and `f64` addition is not associative. Two changes reorder
+/// it, and neither moves any evidence:
 ///
 /// - **A3's eviction.** Production keeps a bucket alive at `num_obs == 0` and keeps
 ///   accumulating into it, so a read that leaves and returns leaves `+q -q +q` behind; ng
-///   evicts the empty bucket and recreates it, so the same read's sum starts from `0.0` and
-///   is *exactly* `q`. Production's `-2.999999999999999` against ng's `-3.0` is this.
-/// - **B1's per-read re-derivation.** Production's bucket total is accumulated during the
-///   walk, with a subtract-then-add on every re-fold; ng's row sums each read's contribution
-///   **once**, in `read_id` order. Same addends, different order — and ng's is the more
-///   accurate of the two, since nothing cancels.
+///   evicts the empty bucket and recreates it, so the same read's sum starts from `0.0` and is
+///   *exactly* `q`. Production's `-2.999999999999999` against ng's `-3.0` is this.
+/// - **B1's per-read re-derivation.** Production's bucket total is accumulated during the walk
+///   with a subtract-then-add on every re-fold; ng's row sums each read's contribution **once**,
+///   in `read_id` order. Same addends, different order — and ng's is the more accurate of the
+///   two, since nothing cancels.
 ///
-/// Neither is a difference in evidence: no read moved, no base changed, and the two numbers
-/// differ in the last representable bits. **It is a named divergence class rather than an
-/// absorbed one** — spec §3 lists five and warns that an unlisted one gets triaged as a
-/// listed one and contaminates the measurement.
+/// # It was a fixed 1e-9 grain, and real data at 300× broke it
 ///
-/// The grain is nine decimal places on values of order `-3` to `-50`, where the smallest
-/// *real* difference is a whole read's `ln` contribution — order 1. So a genuine divergence
-/// cannot hide under it, and `float_only_divergences` counts how often it fires so it can be
-/// seen rather than assumed.
+/// The original comparison rounded both sides to nine decimal places, on the argument that
+/// "the grain is nine decimal places on values of order −3 to −50, where the smallest *real*
+/// difference is a whole read's `ln` contribution — order 1". The premise is a statement about
+/// **depth**: a locus's `q_sum` is order −3 only when a handful of reads support it. D3's first
+/// real-data run — HG002 at **300×**, chr1 — hit a locus with 414 observations and
+/// `q_sum ≈ −3360.39`, where 1e-9 *absolute* is 3.4 × 10¹² grains and one reordered
+/// accumulation lands a single grain apart:
 ///
-fn round_q_sum(q_sum: f64) -> f64 {
-    (q_sum * Q_SUM_GRAIN).round() / Q_SUM_GRAIN
+/// ```text
+/// ng   … q_sum_rounded: -3360392684715
+/// prod … q_sum_rounded: -3360392684716
+/// ```
+///
+/// The census reported it as an **unlisted divergence**, which is exactly what it is supposed
+/// to do with a difference it cannot name — and the thing that could not be named was the
+/// tolerance, not the walk.
+///
+/// So the comparison is a **relative** one, and it is a tolerance rather than a rounding.
+/// Rounding decides equality by which side of a grain boundary each value falls, so two values
+/// one ulp apart can round apart however fine the grain — at millions of loci that happens.
+/// A tolerance cannot: `|a − b| ≤ ε · max(1, |a|, |b|)` is true for every pair that close.
+///
+/// At `ε = 1e-9` the allowance at that locus is 3.4 × 10⁻⁶, and the smallest *real* difference
+/// is still a whole read's contribution — order 1. Six orders of magnitude of headroom, at any
+/// depth, which is what the fixed grain only had at low ones.
+const Q_SUM_TOLERANCE: f64 = 1e-9;
+
+/// Whether two `q_sum`s differ by no more than accumulation order can explain — see
+/// [`Q_SUM_TOLERANCE`].
+fn q_sum_close(ours: f64, theirs: f64) -> bool {
+    let scale = ours.abs().max(theirs.abs()).max(1.0);
+    (ours - theirs).abs() <= Q_SUM_TOLERANCE * scale
 }
 
-/// The projection itself, minus the `q_sum` rounding [`comparable`] adds — so a caller can
-/// count how many records agree **only** because of the rounding, and it is shown to be
-/// doing work rather than quietly matching nothing.
+/// A locus compared the way this differential means to compare loci: **every field exactly,
+/// except `q_sum`, which is compared within [`Q_SUM_TOLERANCE`]**.
+///
+/// A newtype because `SampleLocusObservations`' own `PartialEq` is derived and compares `f64`s
+/// exactly — which is right for the shared type, and wrong for a differential whose whole
+/// subject is two implementations accumulating the same addends in different orders.
+struct ComparableLocus(SampleLocusObservations);
+
+impl PartialEq for ComparableLocus {
+    fn eq(&self, other: &Self) -> bool {
+        let (ours, theirs) = (&self.0, &other.0);
+        // Exhaustive destructure on both sides: a field added to the locus type stops this
+        // compiling rather than going silently uncompared, which is the same rule
+        // `LocusEvidence` and `project` follow.
+        let SampleLocusObservations {
+            region: our_region,
+            reference_bases: our_bases,
+            observed_sequences: our_rows,
+            reads_without_observation: our_without,
+            reads_discarded_by_cap: our_capped,
+            kind: our_kind,
+        } = ours;
+        let SampleLocusObservations {
+            region: their_region,
+            reference_bases: their_bases,
+            observed_sequences: their_rows,
+            reads_without_observation: their_without,
+            reads_discarded_by_cap: their_capped,
+            kind: their_kind,
+        } = theirs;
+        our_region == their_region
+            && our_bases == their_bases
+            && our_without == their_without
+            && our_capped == their_capped
+            && our_kind == their_kind
+            && our_rows.len() == their_rows.len()
+            && our_rows.iter().zip(their_rows).all(|(ours, theirs)| {
+                let ObservedSequence {
+                    bases: our_row_bases,
+                    read_coverage: our_coverage,
+                    read_group: our_group,
+                    num_obs: our_obs,
+                    num_fwd: our_fwd,
+                    q_sum: our_q_sum,
+                    mapq_sum: our_mapq,
+                    mapq_sum_sq: our_mapq_sq,
+                    placed_left: our_placed_left,
+                    chain_ids: our_ids,
+                } = ours;
+                our_row_bases == &theirs.bases
+                    && our_coverage == &theirs.read_coverage
+                    && our_group == &theirs.read_group
+                    && our_obs == &theirs.num_obs
+                    && our_fwd == &theirs.num_fwd
+                    && our_mapq == &theirs.mapq_sum
+                    && our_mapq_sq == &theirs.mapq_sum_sq
+                    && our_placed_left == &theirs.placed_left
+                    && our_ids == &theirs.chain_ids
+                    && q_sum_close(*our_q_sum, theirs.q_sum)
+            })
+    }
+}
+
+impl std::fmt::Debug for ComparableLocus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// The normalisation [`comparable`] wraps, with `q_sum` left exact — so a caller can count the
+/// loci that agree **only** within the tolerance, and the tolerance is shown to be doing work
+/// rather than quietly matching nothing.
 fn comparable_exact_q_sum(locus: &SampleLocusObservations) -> SampleLocusObservations {
     let mut out = locus.clone();
     sort_rows(&mut out.observed_sequences);
@@ -1429,7 +1511,7 @@ fn comparable_exact_q_sum(locus: &SampleLocusObservations) -> SampleLocusObserva
     out
 }
 
-/// Loci that agree after the `q_sum` rounding and disagree before it.
+/// Loci that agree within the `q_sum` tolerance and disagree on an exact comparison.
 fn float_only_divergences(
     ours: &[Result<SampleLocusObservations, String>],
     theirs: &[Result<SampleLocusObservations, String>],
@@ -1711,14 +1793,40 @@ impl DivergenceCensus {
 /// ng's row type stops this file compiling; the two fields this sum deliberately excludes
 /// are bound and dropped **by name**, at one site, with this comment attached. An oversight
 /// cannot look like this.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 struct LocusEvidence {
     num_obs: u32,
     fwd: u32,
     placed_left: u32,
     mapq_sum: u32,
     mapq_sum_sq: u64,
-    q_sum_rounded: i64,
+    q_sum: f64,
+}
+
+/// Every integer field exactly; `q_sum` within [`Q_SUM_TOLERANCE`], for the reason given there
+/// — and it is the reason this is a hand-written impl rather than a derive over a scaled
+/// integer. A grain decides equality by which side of a boundary each value falls on, so two
+/// sums one ulp apart can land in different grains; at 300× depth and millions of loci, they
+/// do. That is the failure D3's first real-data run produced.
+impl PartialEq for LocusEvidence {
+    fn eq(&self, other: &Self) -> bool {
+        // Exhaustive destructure: a field added to this struct stops the comparison compiling
+        // rather than going uncompared.
+        let Self {
+            num_obs,
+            fwd,
+            placed_left,
+            mapq_sum,
+            mapq_sum_sq,
+            q_sum,
+        } = self;
+        num_obs == &other.num_obs
+            && fwd == &other.fwd
+            && placed_left == &other.placed_left
+            && mapq_sum == &other.mapq_sum
+            && mapq_sum_sq == &other.mapq_sum_sq
+            && q_sum_close(*q_sum, other.q_sum)
+    }
 }
 
 /// The evidence on one row, so a caller can sum over whichever grouping it is reconciling.
@@ -1758,7 +1866,7 @@ fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
     for row in &locus.observed_sequences {
         row_evidence(row, &mut totals, &mut q_sum);
     }
-    totals.q_sum_rounded = (q_sum * Q_SUM_GRAIN).round() as i64;
+    totals.q_sum = q_sum;
     totals
 }
 
@@ -1780,7 +1888,7 @@ fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, Locus
     per_bases
         .into_iter()
         .map(|(bases, (mut totals, q_sum))| {
-            totals.q_sum_rounded = (q_sum * Q_SUM_GRAIN).round() as i64;
+            totals.q_sum = q_sum;
             (bases, totals)
         })
         .collect()

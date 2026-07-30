@@ -376,3 +376,132 @@ That makes twelve tests on this branch that could not fail, three of them in thi
 - `cargo doc --no-deps`: still 12 pre-existing unresolved links.
 - Host-native soak, `PVC_PARITY_CASES=3000 --profile soak`: green — the walk's new `RunSummary`
   field is dropped by name in `parity.rs`'s counter comparison, production having no counterpart.
+
+---
+
+# Milestone D — D3: the two measurements
+
+**Date:** 2026-07-30 · same plan, spec and branch. Both numbers are deliverables, not
+by-products (plan D3), and both are taken **host-native in release** — the parity harness's
+environment variables do not reach the container, and production's reachable `debug_assert!` on
+overlapping mates carrying deletions would abort a debug walk almost immediately.
+
+## 1. The size of production's defect, on real reads
+
+Run through the parity module's `#[ignore]`d real-data differential, which since D1 prints the
+six-class census and the three-number deliverable over the same code path the synthetic census
+uses.
+
+| data | region | loci | reads | production credited … |
+|---|---|---|---|---|
+| GIAB HG002 **300×** BAM | chr1:1,000,000–6,000,000 | 48,905 | 55,054 prepared | **871 reads over 162 loci (0.33 %) with 1,550 reference bases they never sequenced** |
+| GIAB HG002 **10×** BAM | chr1:1,000,000–1,200,000 | 1,390 | 75 prepared | 0 — the window carries no partial witness at all |
+| tomato **CRAM** (SRR7279481) | SL4.0ch01:1,000,000–6,000,000 | 96,260 | 4,616 prepared | 6 reads over 4 loci (0.00 %) with 58 reference bases |
+
+Class counts on the 300× run: partial witness 162, group split 0 (one read group), counters 35,
+unsupported bucket 60, row order 9,561, **stale widen 0**.
+
+**What the number says.** The defect is real and it is *small* on this data: about one locus in
+300 at 300×, and 9.6 reference bases per affected locus. It is also concentrated exactly where
+the port predicted — the loci with long deletions — and the 10× row is the important control:
+a shallow window over the same coordinates produces **zero**, because a partial witness needs a
+read that stops inside a multi-position footprint, and at 10× over a tandem-repeat benchmark
+there are barely any multi-position footprints to stop inside.
+
+**On the indel-deficit hypothesis, this is not yet a verdict.** The measurement the hypothesis
+needs is over the loci where production's indel calls go missing, and this is a 5 Mb window of
+one chromosome of a tandem-repeat benchmark. What D3 establishes is the *method* and an order of
+magnitude: the fabrication exists, it is countable, and at 0.33 % of loci it is a candidate
+contributor rather than an obvious cause. Class 6 being **zero** on real data is worth as much:
+production's stale widen, which the synthetic census fires 264 times in 257,000 loci, needs a
+record to widen *after* a read folded into it, and real 300× data over 5 Mb produced none.
+
+## 2. Throughput against production's `pileup`, one human chromosome
+
+Same reference, same BAM (HG002 TR 30×, so both walk the same reads), chr1, **single-threaded on
+both sides** (`--threads 1`; ng's parallelism is deferred whole, so the comparison would
+otherwise be against four workers).
+
+```
+ng   ng_generic_loci_dump … chr1 > file      34.70 s wall   461 MB peak RSS   72 MB of TSV
+ng   the same, output to /dev/null           32.59 s wall   461 MB peak RSS
+prod pop_var_caller pileup --threads 1       10.20 s wall   559 MB peak RSS   27 MB .psp
+```
+
+**ng is 3.4× slower, or 3.2× discounting the TSV it writes and production does not.** Peak RSS is
+**lower** than production's, which is the memory property spec §7 asked for holding at
+chromosome scale.
+
+### Where the time goes, from the counters and one throwaway probe
+
+The dump's own header decomposes the run:
+
+```
+generic_loci=1541788  generic_regions=613682  generic_region_bp=240227974  records_outside_region=883083
+reads_admitted=374437  record_widen_events=2514  column_depth_truncations=0
+```
+
+- **Region typing is 5.92 s of the 32.59 s (18 %) — a pass production does not make at all.**
+  Measured with a throwaway probe that drives `TypedRegionIterator` over chr1 and counts,
+  nothing else; deleted, per this branch's practice. It types 1,227,363 regions, 613,682 of them
+  `Generic`.
+- **The regions average 391 bp**, and Milestone C's review measured a region at ~0.12 ms to set
+  up — *290 loci of walking*, with the conclusion that **regions under ~300 bp cost more to open
+  than to walk.** This run is squarely in that regime. (The 0.12 ms constant was measured before
+  `with_shared_index`; at 26.7 s of non-typing time over 613,682 regions the real figure here is
+  ~43 µs per region *including* its walk, so the fix landed at C's review is already paying.)
+- **883,083 records — 36 % of the 2.42 M the walk finalised — are discarded at the region
+  clamp.** That is halo work: with a 391 bp region and a 5,000 bp halo, every region walks far
+  past its own end, and the stop rule keeps that bounded rather than free.
+- **The allele list is not the problem on this data**, which is worth saying because spec §7
+  named it as the first place to look: `column_depth_truncations` is 0 and `record_widen_events`
+  is 2,514 over 1.5 M loci, so records are essentially never deep and essentially never widen.
+
+**So the first lever is the region grain, not the fold.** Spec §7's rule applies — a bad number
+is a performance problem to solve, not a design to reconsider — and the two candidate fixes are
+both outside this plan: hand the generator **fewer, larger** `Generic` regions (their size is the
+caller's choice, and the dump's `PVC_GENERIC_REGION_CHUNK_BP` already shows the output is
+invariant to it), and stop re-entering a region for work the previous one's halo already did.
+Parallelism, deferred whole, is a third: production's default is four workers, where this
+comparison used one.
+
+## 3. What the measurement found in the differential itself
+
+**The `q_sum` comparison's tolerance was a fixed absolute grain, and 300× data broke it.** The
+first deep run failed as an *unlisted divergence* — the census doing its job — on a locus with
+414 observations:
+
+```
+locus 919: ng's rows do not sum back to production's per-allele totals, and none of a
+partial witness, a counted-out read or a stale widen explains it
+  ng   {[84]: … q_sum_rounded: -3360392684715 }
+  prod {[84]: … q_sum_rounded: -3360392684716 }
+```
+
+One grain apart. The comparison rounded both sides to 1e-9 **absolute**, on an argument that was
+really a statement about depth: "the grain is nine decimal places on values of order −3 to −50,
+where the smallest real difference is a whole read's `ln` contribution — order 1". At 300× a
+locus's `q_sum` is order −3,400, where 1e-9 absolute is 3.4 × 10¹² grains and a reordered
+accumulation lands one apart.
+
+Fixed twice over:
+
+- **Relative, not absolute.** `Q_SUM_TOLERANCE = 1e-9` is now a *relative* allowance,
+  `|a − b| ≤ ε · max(1, |a|, |b|)`, so the headroom against a real one-read difference stays six
+  orders of magnitude at any depth instead of only at low ones.
+- **A tolerance, not a rounding.** Rounding decides equality by which side of a grain boundary
+  each value falls on, so two sums one ulp apart can round *apart* however fine the grain — at
+  millions of loci that happens. `ComparableLocus` and `LocusEvidence` now carry hand-written
+  `PartialEq`s: every integer field exactly, `q_sum` within the tolerance, and both destructure
+  exhaustively so a field added to either type stops the comparison compiling.
+
+Both loci types' comparisons therefore no longer use `SampleLocusObservations`' derived
+`PartialEq`, which compares `f64`s bit for bit — right for the shared type, wrong for a
+differential whose subject is two implementations summing the same addends in different orders.
+
+## 4. Validation
+
+- `cargo fmt --check` clean; `cargo clippy --all-targets --all-features -- -D warnings` clean.
+- `cargo test --lib`: **2,724 passed**, unchanged by the tolerance fix.
+- The three real-data runs above are the measurement; the perf artefacts and the typing probe
+  are deleted, the numbers living here.
