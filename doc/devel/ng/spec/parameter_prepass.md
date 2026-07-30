@@ -26,8 +26,9 @@ sequenced**, not of the genome. This step measures them.
    group**, from Stage-1 data alone.
 2. Do it **without first calling genotypes and keeping the confident ones**, which is what
    production does and what biases it (§2).
-3. Use **one estimator for both paths**, differing only in how sites are stratified. The generic
-   path stratifies by nothing; the STR path by motif period and repeat count (§6).
+3. Share the **estimation machinery** across both paths — sum over the genotype, stratify, pool
+   thin strata, grid-search — while keeping **two noise models**, because the two paths are noisy
+   in different ways (§3.1).
 4. Emit parameters the cohort caller can consume as frozen inputs, so genotyping stays a pure
    function of (reads, parameters).
 
@@ -127,9 +128,41 @@ carries a per-locus allele-frequency model we do not need at this step, whereas 
 likelihood above gives us the two numbers we came for and nothing else. If §10's first open
 question resolves against the marginal estimator, HipSTR's EM is the fallback.
 
-**The architectural payoff.** One estimator serves both paths, differing only in the stratification
-axis. That is the "SNP, indel and STR at one level" property the proposal asks for, arriving at the
-step where production is most duplicated.
+### 3.1 What the two paths share, and what they do not
+
+The likelihood above is the **generic path's**. The STR path does not use it, and it is worth being
+exact about why, because the research note this design starts from says the estimator "applies
+unchanged" to the STR path — true of DRAGstr, which collapses all slippage into a single
+indel-error rate per stratum and models neither its direction nor its size. §6 shows both of those
+are real and worth fitting, so we need a richer noise model than DRAGstr's and the likelihood
+cannot be the same one.
+
+**A read at an STR locus is noisy in two independent ways.** The tract can slip, changing its
+**length** by whole copies; and bases can be misread, changing its **composition** without changing
+its length. Mark-2 relies on exactly that separation to keep the two identifiable —
+"`θ` changes length in whole units, `ε` changes composition via substitutions"
+([`../../specs/ssr_cohort_mark2.md`](../../specs/ssr_cohort_mark2.md) line 289). So the STR noise
+model **contains** the generic one and adds slippage:
+
+| | generic path | STR path |
+|---|---|---|
+| observation | reads supporting the alternative, out of depth | reads at each whole-repeat offset from the allele, out of depth |
+| genotype summed over | hom-ref / het / hom-alt | the pair of allele lengths |
+| noise parameters | `ε` (substitution) | `ε` (substitution) **and** slippage: a direction split and a fall-off, per stratum |
+| stratified by | nothing | motif period × repeat count (§6.3) |
+
+What *is* shared is everything around the likelihood, and it is the part that carries the bias this
+spec exists to remove:
+
+- the genotype is summed over, never chosen;
+- a sufficient statistic is accumulated per stratum per read group;
+- thin strata borrow from their neighbours instead of being fitted on noise;
+- parameters are found by grid search over a small space;
+- the output is frozen before genotyping.
+
+So `SampleSummarizer` and `CohortEstimator` have **one implementation of the procedure and two
+noise models behind it**, chosen by marker type. That is a weaker claim than "one estimator", and
+it is the one the design can actually keep.
 
 ---
 
@@ -188,6 +221,14 @@ parameter and this step already fits a grid — but it is not measured on our da
 ---
 
 ## 6. The STR path — what stutter actually looks like
+
+The STR path fits **three** things per read group, not one: the substitution error `ε` of §5, which
+it needs for the same reason the generic path does, plus the two that describe slippage — how often
+a read moves down rather than up, and how far it moves when it does. `ε` and slippage stay
+separable because they disturb different properties of the read: slippage changes the tract's
+length in whole copies, substitution changes its composition at fixed length
+([`../../specs/ssr_cohort_mark2.md`](../../specs/ssr_cohort_mark2.md) line 289). This section is
+about the slippage half; §5 covers `ε`.
 
 Measured on 51 tomato read groups (8.1M observations) and on HG002 (whole genome), both with ng's
 default delimiter. All figures are against each unit's own modal allele.
