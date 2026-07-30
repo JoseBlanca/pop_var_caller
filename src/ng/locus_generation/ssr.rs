@@ -1494,6 +1494,42 @@ mod tally {
             );
         }
 
+        /// **Which of the tie-break's two components dominates** — the claim
+        /// [`witness_order`]'s doc makes, and which the test above cannot check.
+        ///
+        /// `observed_is_sorted_by_bases_then_coverage` builds both of its partials with the
+        /// **same** `positions_covered` (`from_left(2, len 6)` = `{0,2}`,
+        /// `from_right(2, len 6)` = `{4,2}`), so exchanging the two components of the sort key
+        /// maps them to `(1,2,0)` and `(1,2,4)` and the asserted order survives by accident.
+        /// The review made exactly that mutation and the whole suite stayed green.
+        ///
+        /// Here the long run is the left-flush one and the short run the right-flush one, so
+        /// "offset outranks length" and "shortest first" disagree — which is the only shape
+        /// that can fail. It matters because on the STR path the two are different genetic
+        /// constraints, a prefix and a suffix, and their emission order is what a cohort merge
+        /// reads.
+        #[test]
+        fn tally_orders_two_partials_of_one_sequence_by_offset_before_length() {
+            let r = read(0, 60);
+            let len = LocusLen::from_positions(6);
+            let outcomes = vec![
+                (&r, observed(b"AA", ReadWitness::from_right(2, len), -1.0)),
+                (&r, observed(b"AA", ReadWitness::from_left(4, len), -1.0)),
+            ];
+            let mut counts = SsrGeneratorCounts::default();
+            let result = tally(outcomes, 1, &mut counts);
+            let order: Vec<ReadWitness> =
+                result.observations.iter().map(|o| o.read_witness).collect();
+            assert_eq!(
+                order,
+                vec![
+                    ReadWitness::from_left(4, len),
+                    ReadWitness::from_right(2, len),
+                ],
+                "a left-flush run must precede a right-flush one whatever their lengths",
+            );
+        }
+
         /// The integer moments of a **multi-read bucket** are order-independent: the same reads
         /// (differing strand and MAPQ) folded into one `(bases, witness)` bucket in two orders
         /// give the same `num_obs` / `num_fwd` / `mapq_sum` / `mapq_sum_sq`. This is the case the

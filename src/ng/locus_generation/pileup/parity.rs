@@ -2063,6 +2063,39 @@ fn classify_locus(
     );
     assert_reads_are_accounted_for(where_, ours, theirs);
 
+    // **A partial run has at least one position and lies inside its own locus** — an
+    // assertion, not a divergence class, because a run outside its locus is not a
+    // difference from production, it is ng being wrong on its own terms. `RefSpan` and
+    // `ReadWitness` both document that a run of no positions does not exist
+    // ([`open_record::witness_of`]'s clamp comment), and nothing checked it on real data.
+    //
+    // **Why it is here rather than in a unit test.** The witness-representation review
+    // transposed `ReadWitness::Partial`'s two fields at their construction site and all
+    // three anchors stayed green: this census's fixture yields no partial witness at all,
+    // the determinism digest compares two children of one binary (deterministic corruption
+    // hashes equal in both), and `classify_locus` itself excuses the difference — once
+    // `partial_witness` is set on mere *presence*, the reconciliation below is skipped, the
+    // chain-id equality is skipped, and `exact || classes.any()` accepts anything. A wrong
+    // payload was its own alibi. Placed at every locus of both census passes, this is the
+    // one thing that fails on it: a flush-left run `{0, k}` becomes `{k, 0}`, and a run of
+    // no positions is caught by name and locus.
+    for observation in &ours.observations {
+        if let ReadWitness::Partial {
+            offset_in_locus,
+            positions_covered,
+        } = observation.read_witness
+        {
+            assert!(
+                positions_covered > 0
+                    && u64::from(offset_in_locus) + u64::from(positions_covered)
+                        <= ours.region.len(),
+                "{where_}: a partial run {offset_in_locus}+{positions_covered} is empty or \
+                 reaches past its own locus of {} positions",
+                ours.region.len(),
+            );
+        }
+    }
+
     let mut classes = DivergenceClasses {
         partial_witness: ours
             .observations
@@ -2910,6 +2943,25 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         census.stale_widen,
         census.stale_widen_reads,
         census.stale_widen_ref_bases,
+    );
+    // **The fabrication triple needs the same floor, and it did not have one** (review of the
+    // witness-representation Milestone A). The argument above applies to it word for word:
+    // `fabricated_reads` and `fabricated_ref_bases` are read off production's observations
+    // rather than off the classification, so a `measure_fabrication` that stopped measuring —
+    // or that reported a zero-length tail everywhere — would leave `partial_witness` intact
+    // and both numbers at zero, which reads as "production fabricates nothing". Class 1 says
+    // otherwise by definition: a partial witness covers strictly fewer positions than its
+    // footprint, so every fabricating read is credited with at least one base it never
+    // sequenced. Only a *ceiling* existed here (on `fabricating_loci`, above), which is the
+    // asymmetry the class-6 comment already argued against.
+    assert!(
+        census.fabricated_reads > 0 && census.fabricated_ref_bases >= census.fabricated_reads,
+        "class 1 fired on {} loci but the fabrication deliverable is {} reads / {} bases — a \
+         partial witness covers strictly fewer positions than its footprint, so production \
+         fabricated at least one base per fabricating read",
+        census.partial_witness,
+        census.fabricated_reads,
+        census.fabricated_ref_bases,
     );
     eprintln!(
         "the divergence census over {} loci (one read group): {} identical to the \

@@ -3020,6 +3020,43 @@ mod tests {
         );
     }
 
+    /// **The comparator's two components, told apart** — and until this test nothing
+    /// could tell them apart.
+    ///
+    /// [`witness_order`] is what makes the emitted order a function of an observation's
+    /// own identity rather than of read arrival order (see `finalise`'s sort). The review
+    /// mutated it — exchanging `offset_in_locus` and `positions_covered` in the returned
+    /// key — and **all 275 tests stayed green**, while a `panic!` in the same arm failed
+    /// four of them: the arm runs, and nothing asserted what it returned. The test named
+    /// for the job, `parity::the_projection_orders_rows_as_the_walk_does`, sorts both
+    /// sides with *this same function*, so it cannot fail on any change to it.
+    ///
+    /// The discriminating input is two runs whose components vary in **opposite**
+    /// directions, which no fixture in the suite produced: `{0, 9}` against `{4, 2}`. If
+    /// length outranked offset, the long left-flush run would sort second.
+    #[test]
+    fn witness_order_ranks_partials_by_offset_before_length() {
+        assert!(
+            witness_order(ReadWitness::Complete)
+                < witness_order(ReadWitness::Partial {
+                    offset_in_locus: 0,
+                    positions_covered: 1,
+                }),
+            "a complete witness sorts ahead of every run",
+        );
+        assert!(
+            witness_order(ReadWitness::Partial {
+                offset_in_locus: 0,
+                positions_covered: 9,
+            }) < witness_order(ReadWitness::Partial {
+                offset_in_locus: 4,
+                positions_covered: 2,
+            }),
+            "where a run starts outranks how far it runs, so a left-flush run precedes a \
+             right-flush one whatever their lengths",
+        );
+    }
+
     /// **A read that was a complete witness becomes `Partial` when the record widens
     /// under it, with nothing about the read having changed** — the whole reason
     /// coverage is resolved at `finalise` and not at the fold (spec §4, plan A4).

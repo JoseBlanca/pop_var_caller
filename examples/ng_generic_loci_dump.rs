@@ -1101,6 +1101,23 @@ mod tests {
             first.starts_with("# generic_loci="),
             "the counts header comes first, `#`-prefixed (spec §13):\n{first}"
         );
+        // **The column line is output, and until this assertion nothing observed it.** The
+        // two `render()` tests in this file compare a render against another render — this
+        // one against a second run, `chunking_does_not_change_the_dump` against the whole
+        // contig — so both pass whatever the header says. The witness-representation
+        // Milestone A renamed this column and the whole suite stayed green; the sibling STR
+        // dump caught its own rename only because it pins its header
+        // (`ng_ssr_loci_dump::render_emits_the_spec_9_header_and_tsv_rows`). Milestones B–E
+        // rewrite what `read_witness` renders, so the column line needs the same pin.
+        let column_line = first
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .expect("the counts header, then the column line");
+        assert_eq!(
+            column_line,
+            "contig\tstart\tend\tref_bases\tdepth\tread_witness\tread_group\tobserved\treads\tchain_ids",
+            "the TSV column line is this tool's contract with anything diffing its output",
+        );
     }
 
     // ---------------------------------------------------------------------
