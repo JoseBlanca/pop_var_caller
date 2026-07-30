@@ -16,8 +16,8 @@
 //! `SsrSegment` into one locus.
 
 use super::{
-    LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage, SampleLocusObservations,
-    SsrDetail,
+    GeneratorCounts, LocusGenerationError, LocusGenerator, LocusKind, ReadCoverage,
+    SampleLocusObservations, SsrDetail,
 };
 #[cfg(test)]
 use crate::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
@@ -328,13 +328,26 @@ pub fn fetch_capped_reads<R: RawRefSeq>(
     max_reads_per_locus: Option<u32>,
     make_reference: impl FnMut() -> R,
 ) -> Result<CappedReads, LocusGenerationError> {
-    let stream = reads.reads_in_region(query_span, make_reference)?;
+    // **The region these failures are attributed to is the span queried**, this
+    // function knowing no other: it is handed a tract-plus-margin span, not the
+    // segment it came from. Every other attachment in this module names the
+    // segment's own region (`LocusGenerationError`'s doc).
+    let stream = reads
+        .reads_in_region(query_span, make_reference)
+        .map_err(|source| LocusGenerationError::OpenReadQuery {
+            region: query_span,
+            source,
+        })?;
+    let read_failed = |source| LocusGenerationError::Reads {
+        region: query_span,
+        source,
+    };
     let mut fetched = 0u64;
     let kept = match max_reads_per_locus {
         Some(cap) => {
             let mut reservoir = Reservoir::new(cap as usize, seed);
             for read in stream {
-                reservoir.offer(read?);
+                reservoir.offer(read.map_err(read_failed)?);
                 fetched += 1;
             }
             reservoir.into_held()
@@ -342,7 +355,7 @@ pub fn fetch_capped_reads<R: RawRefSeq>(
         None => {
             let mut all = Vec::new();
             for read in stream {
-                all.push(read?);
+                all.push(read.map_err(read_failed)?);
                 fetched += 1;
             }
             all
@@ -1726,7 +1739,8 @@ where
             segment.clone(),
             self.config.flank_bp,
             &mut self.margin_buffer,
-        )?;
+        )
+        .map_err(|source| LocusGenerationError::Reference { region, source })?;
         let margin_start = locus.margin_start.get();
         let margin_len = locus.tract_with_margin_bases.len() as u64;
         let query_span = GenomeRegion {
@@ -1815,6 +1829,14 @@ where
         self.produced = false;
     }
 
+    /// The STR counts, reachable through a boxed generator — the same need the generic
+    /// generator's nine had. This tool-driven path reads them off the concrete type
+    /// ([`SsrGenerator::counts`]); a dispatcher-driven one cannot, and now does not have
+    /// to.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        Some(GeneratorCounts::Ssr(SsrGenerator::counts(self)))
+    }
+
     fn next_locus(
         &mut self,
         segment: &SsrSegment,
@@ -1850,7 +1872,8 @@ where
             segment.clone(),
             self.config.flank_bp,
             &mut self.margin_buffer,
-        )?;
+        )
+        .map_err(|source| LocusGenerationError::Reference { region, source })?;
 
         // (2) Fetch the reads over the tract-plus-margin query span, admitting on relevance
         // (overlap, which `SampleReads` applies) — not spanning — and depth-cap them.

@@ -406,6 +406,42 @@ pub trait LocusGenerator<S> {
         segment: &S,
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError>;
+
+    /// What this generator has counted so far, beside the shared [`LocusCounts`] — or
+    /// `None` if it counts nothing of its own.
+    ///
+    /// Readable at any point; final once the run is drained. **This exists because a
+    /// boxed generator's own counters were otherwise unreachable**: `GeneratorSlot`
+    /// erases the type, so the generic generator's nine counts had no reader that was
+    /// not a test, and a walk that emitted nothing for a covered region counted the
+    /// truncations that explained it into a struct nobody could see (Milestone C
+    /// review).
+    ///
+    /// Defaulted to `None` so a generator with nothing to report — [`NoLoci`], a test
+    /// fake — says so by saying nothing.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        None
+    }
+}
+
+/// What a generator counted, tagged by which generator counted it.
+///
+/// **The same shape [`LocusKind`] uses**, and for the same reason: a common surface
+/// with a per-kind payload, where the payload's type is the kind's own. A trait
+/// method cannot return an associated type through `dyn`, and a downcast would move
+/// a compile-time question to run time — so the kinds are enumerated here, exactly as
+/// this module already enumerates them for loci ([`LocusKind::Ssr`] carrying
+/// [`SsrDetail`]) and for slots ([`GeneratorSet`] has one named field per kind).
+///
+/// Borrowed, not owned: a caller reads a running tally rather than taking a snapshot
+/// it then has to keep fresh.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum GeneratorCounts<'a> {
+    /// The generic (SNP/indel) pileup generator's run-level counts.
+    Pileup(&'a pileup::PileupGeneratorCounts),
+    /// The STR generator's run-level counts.
+    Ssr(&'a ssr::SsrGeneratorCounts),
 }
 
 /// A generator that produces no loci and reports why.
@@ -452,19 +488,94 @@ impl<S> LocusGenerator<S> for NoLoci {
 /// the upstream walk ([`TypedRegion`](Self::TypedRegion)) or a generator's own fetch
 /// ([`Reference`](Self::Reference)) — and they stay distinct because they fail in different
 /// places.
+///
+/// # Every generator failure names the region it happened over (owner, 2026-07-29)
+///
+/// A region is the unit of this whole step: it is what `begin_segment` takes, what the
+/// counters are keyed to, and what the clamp and the halo reason about. An error that did not
+/// name one could be *believed of the wrong region*, and that is not hypothetical — the
+/// generic generator shipped exactly that defect, a failed read charged to the next region
+/// after it had emitted all of its own loci, and the missing region is why nobody noticed
+/// ([Milestone C review](../../../doc/devel/reports/reviews/ng_locus_generation_pileup_generator_c_2026-07-29.md)).
+///
+/// So the four generator-raised variants carry a [`GenomeRegion`] and **none of them has a
+/// `#[from]` conversion**. That is the enforcement, not an oversight: with a blanket `From`, a
+/// bare `?` compiles and silently produces an error with no region, which is the state this
+/// change exists to make unreachable. Attaching at the `?` site costs one `map_err` and is the
+/// only moment the region is known for certain.
+///
+/// [`TypedRegion`](Self::TypedRegion) is the exception and carries none, because the region
+/// *stream* is what failed — there is no region to name, that being the point.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LocusGenerationError {
     /// The upstream typed-region walk failed.
     #[error("typed-region walk failed during locus generation")]
     TypedRegion(#[from] TypedRegionError),
-    /// A read query failed mid-stream, or the alignment input was malformed (the open
-    /// already succeeded upstream; this fires while a generator pulls reads).
-    #[error("read access failed during locus generation")]
-    Reads(#[from] IngestError),
+    /// The read query for a region could not be **opened** — a missing or unreadable
+    /// index, a contig the file does not have, a region the planner rejects.
+    ///
+    /// Split from [`Reads`](Self::Reads) because the two are different operational
+    /// problems: "the index query for this region could not be opened" is a broken
+    /// input or a bad request, "the record stream broke 40 kb in" is a truncated or
+    /// corrupt file. One variant rendered them identically, and its own doc used to
+    /// deny that the first could happen at all.
+    #[error("the read query for {region} could not be opened")]
+    OpenReadQuery {
+        region: GenomeRegion,
+        #[source]
+        source: IngestError,
+    },
+    /// A read query failed **mid-stream**, or the alignment input was malformed: the
+    /// open already succeeded and reads were flowing.
+    #[error("read access over {region} failed during locus generation")]
+    Reads {
+        region: GenomeRegion,
+        #[source]
+        source: IngestError,
+    },
     /// A reference fetch failed — a broken reference, or a region past a contig end.
-    #[error("reference fetch failed during locus generation")]
-    Reference(#[from] RefSeqError),
+    #[error("reference fetch over {region} failed during locus generation")]
+    Reference {
+        region: GenomeRegion,
+        #[source]
+        source: RefSeqError,
+    },
+    /// The pileup walk failed: a malformed read, reads out of coordinate order, a
+    /// record wider than the span cap, or an exhausted chain-id space. Fatal and
+    /// terminal for the walk that raised it
+    /// (`locus_generation_pileup.md` §7).
+    ///
+    /// None of the variants above covers it — they name the *inputs* failing, and this
+    /// names the walk over inputs it already accepted.
+    #[error("the pileup walk over {region} failed")]
+    Walker {
+        region: GenomeRegion,
+        #[source]
+        source: pileup::WalkerError,
+    },
+}
+
+impl LocusGenerationError {
+    /// The region the failure is attributed to, or `None` for a failure of the region
+    /// *stream* itself.
+    ///
+    /// The region a generator attaches is **the one it was working over** — the segment
+    /// it was given, not the wider span it queried, since the segment is the unit a
+    /// caller can act on. The one exception is a helper that only ever knows a span
+    /// (the STR read fetch), which says so where it attaches.
+    ///
+    /// Here so a consumer — a log line, a per-region tally — can ask without matching
+    /// every variant, which is what would rot the moment a variant is added.
+    pub fn region(&self) -> Option<GenomeRegion> {
+        match self {
+            LocusGenerationError::TypedRegion(_) => None,
+            LocusGenerationError::OpenReadQuery { region, .. }
+            | LocusGenerationError::Reads { region, .. }
+            | LocusGenerationError::Reference { region, .. }
+            | LocusGenerationError::Walker { region, .. } => Some(*region),
+        }
+    }
 }
 
 /// The running tally — "no silent caps": every region and every base is accounted for, so
@@ -518,7 +629,7 @@ impl LocusCounts {
 /// the `NoLoci` configuration kept as data, so plugging in a real generator is a one-line
 /// change at the set (spec §5).
 ///
-/// The trait object carries **no `Send` bound**: v1 is single-threaded (arch §9). If a
+/// The trait object carries **no `Send` bound**: v1 is single-threaded (`locus_generation.md` §9). If a
 /// `GeneratorSet` is ever moved onto a producer thread rather than built per thread, this
 /// becomes `dyn LocusGenerator<S> + Send` — a deliberate omission now, not an oversight.
 pub enum GeneratorSlot<S> {
@@ -555,6 +666,15 @@ impl<S> GeneratorSlot<S> {
         match self {
             GeneratorSlot::Generator(generator) => generator.next_locus(segment, reads),
             GeneratorSlot::Unfilled(_) => Ok(None),
+        }
+    }
+
+    /// What the generator in this slot has counted, or `None` — for an unfilled slot,
+    /// or a generator that counts nothing of its own.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        match self {
+            GeneratorSlot::Generator(generator) => generator.counts(),
+            GeneratorSlot::Unfilled(_) => None,
         }
     }
 }
@@ -605,6 +725,27 @@ impl GeneratorSet {
     /// The running tally — readable at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         &self.counts
+    }
+
+    /// What the **STR** generator has counted, if one is filled and counts anything.
+    pub fn ssr_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.ssr.counts()
+    }
+
+    /// What the **generic** generator has counted, if one is filled and counts anything.
+    ///
+    /// One accessor per slot rather than one keyed by [`RegionKind`]: the kinds are
+    /// already three named fields here, and a key would have to carry a payload
+    /// (`RegionKind::SsrSegment` holds a segment) that has nothing to do with reading a
+    /// tally.
+    pub fn generic_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.generic.counts()
+    }
+
+    /// What the **`SsrBundle`** generator has counted, if one is filled and counts
+    /// anything. `None` today: the slot has no generator (spec §10).
+    pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.ssr_bundle.counts()
     }
 
     /// Begin a region: count it, and ready its generator if one is filled. Every region is
@@ -678,32 +819,31 @@ impl GeneratorSet {
 /// per-run swap lives in its trait-object slots, not in a type parameter.
 pub struct SampleLocusObservationsIterator<T> {
     regions: T,
-    // FIXME(pileup-generator): the field order below loses a step-1 tally as
-    // soon as a generator holds a read stream across `next_locus` calls —
-    // which is exactly what the generic (pileup) locus generator is being
-    // built to do. **Delete this comment once it is fixed.**
+    // **`generators` must be dropped before `reads`** (C4, plan 3 — the choice the
+    // pileup generator's FIXME left to this step). Declaring it first is no longer
+    // what enforces that: the `Drop` impl below releases it explicitly, so a future
+    // edit that reorders these fields cannot silently undo the property. The order
+    // is kept anyway, as the cheaper of the two mechanisms.
     //
     // Since 2026-07-28 a region stream owns its files by `Arc` rather than
-    // borrowing them (`read/input/`, the generic generator's Milestone A), so
-    // it may outlive the `SampleReads` that made it. Rust drops fields in
-    // declaration order, so `reads` dies here *before* `generators` — and any
-    // stream a generator is still holding then folds its drop tally into an
-    // `AlignmentFile` that only that stream owns, and which is freed in the
-    // same breath. The reads already emitted are unaffected and the pooled
-    // reader still goes back; what is lost is the ability to *read* that
-    // query's tally through `SampleReads::counts`, so the failure is a silent
-    // under-report of drop rates, not a crash.
+    // borrowing them, so it may outlive the `SampleReads` that made it — and the
+    // generic generator holds one such stream across `next_locus` calls. Rust
+    // drops fields in declaration order: with `reads` first, a stream a
+    // generator was still holding would fold its drop tally into an
+    // `AlignmentFile` that only that stream owns and that is freed in the same
+    // breath. The reads already emitted are unaffected and the pooled reader
+    // still goes back; what is lost is the ability to *read* that query's tally
+    // through `SampleReads::counts` — a silent under-report of drop rates, not a
+    // crash.
     //
-    // Two fixes, both cheap, and the choice belongs with whoever writes the
-    // generic generator: declare `generators` before `reads` so the streams
-    // drop first, or have the generator drop its held stream at the end of
-    // each segment. Whichever is taken, it wants a test that keeps a second
-    // `Arc` and asserts the tally landed — see
-    // `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`
-    // for the shape, since a tally folded into an unreachable file is
-    // indistinguishable from one never folded at all.
-    reads: SampleReads,
+    // The generator also ends its walk (and so drops its stream) when a region
+    // drains, so in a run driven to exhaustion nothing is held by then. The
+    // release below covers the other case: an iterator dropped mid-region.
+    //
+    // **No test can fail if this breaks, and that is a property of the types
+    // rather than an omission** — see the `Drop` impl for what it would take.
     generators: GeneratorSet,
+    reads: SampleReads,
     /// Latched on clean exhaustion or a fatal error — the fused contract.
     done: bool,
 }
@@ -724,6 +864,15 @@ impl<T> SampleLocusObservationsIterator<T> {
     /// The running tally — current at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         self.generators.counts()
+    }
+
+    /// The generator set, for the per-generator counts the shared tally does not carry
+    /// ([`GeneratorSet::generic_counts`] and its siblings).
+    ///
+    /// The whole set rather than three more forwarding methods: it is handed out by
+    /// `&`, so a caller can read every slot's tally and change none of them.
+    pub fn generators(&self) -> &GeneratorSet {
+        &self.generators
     }
 }
 
@@ -767,6 +916,37 @@ where
 impl<T> std::iter::FusedIterator for SampleLocusObservationsIterator<T> where
     T: Iterator<Item = Result<TypedRegion, TypedRegionError>>
 {
+}
+
+impl<T> Drop for SampleLocusObservationsIterator<T> {
+    /// **Release the generators while `reads` is still alive.** A generator holds
+    /// a region stream that owns its files by `Arc`, and that stream folds its
+    /// drop tally into an `AlignmentFile` on the way out; if `reads` — the only
+    /// other holder — has gone first, the tally lands in an object nobody can
+    /// read and is freed with it. Silent: no crash, no wrong locus, just a drop
+    /// rate under-reported by whatever the abandoned region had counted.
+    ///
+    /// Field order already gives this (Rust drops fields in declaration order,
+    /// and `generators` is declared first). This is here because that made the
+    /// property depend on a line's *position* in a struct, guarded by a comment —
+    /// and the failure is invisible, so a reorder would not announce itself. With
+    /// both, the order is an optimisation and this is the guarantee.
+    ///
+    /// **Nothing can test it, and the reason is worth stating rather than
+    /// leaving as an absence** (owner-facing decision, 2026-07-30). Observing the
+    /// tally after the drop needs a second handle onto the same files;
+    /// `SampleReads` is deliberately not `Clone` and does not expose them, so the
+    /// test costs a widening of that type — the shape is
+    /// `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`,
+    /// one layer down, where the handle exists. Deleting this impl fails no test;
+    /// it is a defence, not a checked invariant, and it is cheap because the
+    /// replacement set allocates nothing.
+    fn drop(&mut self) {
+        drop(std::mem::replace(
+            &mut self.generators,
+            GeneratorSet::all_unimplemented(),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1111,7 +1291,10 @@ mod tests {
                 self.emitted = true;
                 return Ok(Some(locus(region(1, 1), Vec::new())));
             }
-            Err(LocusGenerationError::Reads(IngestError::NoFiles))
+            Err(LocusGenerationError::Reads {
+                region: region(1, 1),
+                source: IngestError::NoFiles,
+            })
         }
     }
 
@@ -1220,7 +1403,7 @@ mod tests {
             "the one locus before the failure"
         );
         match iterator.next() {
-            Some(Err(LocusGenerationError::Reads(_))) => {}
+            Some(Err(LocusGenerationError::Reads { .. })) => {}
             other => panic!("expected a fatal generator error, got {other:?}"),
         }
         assert!(

@@ -61,6 +61,34 @@ lto = false
 codegen-units = 16
 debug = true
 
+# Soak runs: release-speed walks with the assertions still armed.
+#
+# `[profile.release]` deliberately leaves `debug-assertions` off, so a randomised
+# soak run — which is the only thing that walks millions of records — proves the
+# two walkers *diverge* in the same places and proves nothing about the
+# invariants the code asserts along the way. Those are not decoration: the port's
+# own history includes a `debug_assert!` that turned out reachable on a legal read
+# stream, silently wrong in release and caught only because a debug run panicked.
+#
+# So the soak gets its own profile rather than arming the shipping binary, whose
+# hot loops would pay for checks the caller cannot act on. `overflow-checks` is on
+# for the same reason the assertions are: this walker is dense with `as` casts and
+# saturating arithmetic over coordinates, and a wrap there is a wrong number
+# rather than a crash. Fat LTO is dropped because a soak is a correctness run, not
+# a measurement — link time is the dominant cost otherwise.
+#
+#     PVC_PARITY_CASES=5000 cargo test --profile soak --lib ng::locus_generation::pileup::parity
+#
+# Host-native: `scripts/dev.sh` forwards only `CARGO_TARGET_DIR` and `HOME`, so
+# `PVC_PARITY_CASES` does not reach the container and a soak run through it
+# silently walks the default case count in under a second.
+[profile.soak]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug-assertions = true
+overflow-checks = true
+
 [dependencies]
 ahash = "0.8.12"
 anyhow = "1.0.102"
@@ -167,5 +195,9 @@ harness = false
 
 [[bench]]
 name = "ng_ssr_delimiter_perf"
+harness = false
+
+[[bench]]
+name = "ng_generic_pileup_perf"
 harness = false
 

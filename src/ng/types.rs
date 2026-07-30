@@ -107,6 +107,27 @@ impl GenomeRegion {
     }
 }
 
+/// `contig 3:940-1100` — the shape an error message wants.
+///
+/// **It says `contig 3` and not `chr4` because the type holds an id, not a
+/// name.** Rendering the id as though it were a name is a lossy translation this
+/// codebase has made before and recorded as a defect
+/// (`locus_generation_pileup.md` — A0 deleted one), so the word `contig` is
+/// there to stop a reader taking the number for a chromosome. A caller holding
+/// the reference's contig table ([`ContigTable`](crate::ng::ref_seq::ContigTable))
+/// can do better and should.
+impl std::fmt::Display for GenomeRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "contig {}:{}-{}",
+            self.contig.get(),
+            self.start.get(),
+            self.end.get()
+        )
+    }
+}
+
 // ---------------------------------------------------------------------
 // Scalar newtypes — the domain quantities cross-step code speaks. Seeded
 // here with only the scalars read filtering (ng step 1) touches; the rest
