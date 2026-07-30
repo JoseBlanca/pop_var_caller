@@ -1004,9 +1004,10 @@ mod tests {
             report.reads_silent_over_footprint, 1,
             "`silent` contributed at no position, and neither per-locus counter can see it"
         );
-        assert!(
-            report.reads_without_observation > 0,
-            "`blind`'s hole must cost it its row at the loci whose footprint spans it"
+        assert_eq!(
+            report.reads_without_observation, 0,
+            "since C3 `blind`'s hole costs it nothing — it gets a row whose witness names \
+             both runs — and no other read on this fixture witnessed nothing at all"
         );
         // Every row's reads, plus the reads counted out, must be the observations the walk
         // made. `reads_admitted` is not that number — a read contributes at many positions —
@@ -1226,33 +1227,60 @@ mod tests {
         );
     }
 
-    /// **Fixture 2 — an interior `N`, and a ref-skip: no observation, and counted**
+    /// **Fixture 2 — an interior `N`, and a ref-skip: a row with a hole in its witness**
     /// (spec §12.2).
     ///
-    /// The witness is *non-contiguous*, which is the one case that yields no row at all: a
-    /// sequence with a hole in it is not an observation of anything, and A5's answer is to drop
-    /// the row and record the read. Both spellings are checked because they reach it by
-    /// different routes — an `N` base emits no `Match` event, a ref-skip consumes reference
-    /// without emitting one — and a fill-preserving implementation reports both as reference
-    /// matches with no hole at all.
+    /// Both spellings are checked because they reach the hole by different routes — an `N`
+    /// base emits no `Match` event, a ref-skip consumes reference without emitting one — and
+    /// a fill-preserving implementation reports both as reference matches with no hole at
+    /// all.
+    ///
+    /// **Until C3 this asserted the opposite**, and the assertion was
+    /// `reads_without_observation > 0`: a witness with a hole was the one case that yielded
+    /// no row, because one `Partial` run could not describe two stretches honestly, so the
+    /// read was dropped and counted out. C3 gives it a row whose witness names both runs.
+    ///
+    /// The check that has not moved is the one that matters most: **no row splices the two
+    /// sides of the hole into one claimed sequence**. The bases either side are still
+    /// concatenated in `observed` — they are what the read showed — but the witness says
+    /// which positions they came from, and no row claims the reference base at 22 that the
+    /// read never saw. That distinction is the whole difference between this and
+    /// production's fill.
     #[test]
-    fn a_read_blind_inside_a_footprint_yields_no_observation_and_is_counted() {
+    fn a_read_blind_inside_a_footprint_is_recorded_with_a_hole_in_its_witness() {
         use noodles_sam::alignment::record::cigar::op::Kind;
-        for (label, blind) in [
-            ("an interior N", {
-                let mut seq = contig()[10..40].to_vec();
-                seq[11] = b'N'; // position 22
-                read("blind", 11, &[(Kind::Match, 30)], seq)
-            }),
-            ("a ref-skip", {
-                // Matched 11..21, skips 22..23, matched 24..42 — the skip witnesses nothing.
-                read(
-                    "blind",
-                    11,
-                    &[(Kind::Match, 11), (Kind::Skip, 2), (Kind::Match, 19)],
-                    [contig()[10..21].to_vec(), contig()[23..42].to_vec()].concat(),
-                )
-            }),
+        // The two spellings leave **different** holes, and the expectations say so rather
+        // than being softened to what both satisfy: the `N` silences one position, the
+        // ref-skip two. A single loose assertion over both would pass on either read's
+        // geometry applied to the other.
+        for (label, blind, expected_witness, expected_observed) in [
+            (
+                "an interior N",
+                {
+                    let mut seq = contig()[10..40].to_vec();
+                    seq[11] = b'N'; // position 22
+                    read("blind", 11, &[(Kind::Match, 30)], seq)
+                },
+                // 20-21 and 23-24 of a record anchored at 20; 22 is in neither run.
+                "observed:0+2,3+2",
+                [ref_span(20, 21), ref_span(23, 24)].concat(),
+            ),
+            (
+                "a ref-skip",
+                {
+                    // Matched 11..21, skips 22..23, matched 24..42 — the skip witnesses
+                    // nothing.
+                    read(
+                        "blind",
+                        11,
+                        &[(Kind::Match, 11), (Kind::Skip, 2), (Kind::Match, 19)],
+                        [contig()[10..21].to_vec(), contig()[23..42].to_vec()].concat(),
+                    )
+                },
+                // 20-21 and 24; both 22 and 23 are skipped.
+                "observed:0+2,4+1",
+                [ref_span(20, 21), ref_span(24, 24)].concat(),
+            ),
         ] {
             // The masking fixture's two indel reads (which open and shape the record at 20)
             // without its masked read, plus the blind one. Rebuilt rather than filtered, so
@@ -1263,20 +1291,36 @@ mod tests {
             let (_dir, fasta, bam) = fixture(&reads, &["rg0"]);
             let report = dump(&fasta, &bam, &[], None);
 
-            assert!(
-                report.reads_without_observation > 0,
-                "{label}: the blind read's witness is non-contiguous over the record at 20, \
-                 so it must yield no row and be counted"
+            assert_eq!(
+                report.reads_without_observation, 0,
+                "{label}: the blind read's witness has a hole over the record at 20, which \
+                 since C3 is something the row says rather than a reason to drop it"
             );
-            // The hole is at 22, inside the record at 20..=24, so no row may claim to have
-            // witnessed the whole footprint on this read's behalf.
-            let blind_bases = [ref_span(20, 21), ref_span(23, 24)].concat();
-            assert!(
+            // The hole is at 22, inside the record at 20..=24. The row names two runs and
+            // skips it: `observed:<offset>+<positions>` per run, comma separated.
+            let holed: Vec<&ObservationRow> = rows_at(&report, 20)
+                .into_iter()
+                .filter(|row| row.read_witness.contains(','))
+                .collect();
+            assert_eq!(
+                holed.len(),
+                1,
+                "{label}: exactly one row carries a witness of several runs — got {:?}",
                 rows_at(&report, 20)
                     .iter()
-                    .all(|row| row.observed != blind_bases),
-                "{label}: a row spliced the two sides of the hole together, which claims a \
-                 sequence the read never witnessed as one run"
+                    .map(|row| row.read_witness.clone())
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                holed[0].read_witness, expected_witness,
+                "{label}: the runs either side of the hole, in locus offsets",
+            );
+            // The bases either side are concatenated, which is what the read showed — but
+            // nothing claims the reference bases in the hole, which is what production
+            // filled.
+            assert_eq!(
+                holed[0].observed, expected_observed,
+                "{label}: the bases of both runs and nothing from the hole",
             );
         }
     }

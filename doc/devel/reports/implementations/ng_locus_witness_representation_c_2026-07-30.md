@@ -330,3 +330,90 @@ reads the wrong end of the set.
 The generic dump's `read_witness` column renders one `<offset>+<positions>` per run, comma
 separated — identical for the one-run witnesses the generic path mints today. **D4 still owns
 what that column finally says**, and the label drift across the three STR dumps with it.
+
+---
+
+## C3 — a read with a hole is recorded instead of discarded
+
+**This is the milestone's point, and it is its own commit** because it fails silently: a read
+appears in a record it was absent from, and the failure mode is a wrong number rather than a
+crash.
+
+### The change
+
+One branch. When an event opens a gap against the run in hand, `apply_events_into` pushes the
+closed run and opens a new one, where it used to clear `allele_seq` and answer "nothing
+witnessed":
+
+```rust
+if event_start > run_end {
+    witnessed_runs.push((run_start, run_end));
+    witnessed = Some((event_start, event_end));
+} else { … }
+```
+
+With that, `false` means the read witnessed **nothing** inside the record and nothing else —
+so `reads_without_observation` narrows to what its name says (spec §1 goal 2). It is now hard
+to reach at all: a caller filters an empty event window before folding, and every event that
+overlaps the window contributes a non-empty clipped run.
+
+The drop path itself — the set of read ids, the subtract-prior-contribution step — is **kept**,
+not trimmed with the case that motivated it. What it prevents is a live contribution stranded
+in a bucket for a read with no observation, breaking `chain_ids.len() <= num_obs` silently;
+C3 makes that state unreachable rather than harmless.
+
+### One decision C1 deferred here: `read_agreed_with_reference`
+
+A holed witness names no single reference slice to compare against. Comparing the extent that
+*encloses* its runs asks whether the read's bases equal the reference **including the positions
+it was blind to** — the same fabrication in a different hat. Comparing run by run is not
+available either, for the reason spec §3.2 gives: `bases` is in read coordinates, where an
+insertion adds bytes no position accounts for and a deletion removes positions no byte does,
+so the two axes cannot be indexed against each other.
+
+**So a multi-run witness answers `false` and the read keeps its chain id.** Conservative (an id
+is added, never withheld), it holds `chain_ids.len() <= num_obs`, and it is honest — a spliced
+read's allele string does depart from the reference across the span it sits in. Unreachable on
+DNA-seq: zero holed witnesses in 225 million event-folds. **Recorded rather than escalated**;
+if the ids matter to a consumer, this is the line to revisit.
+
+### Seven tests flipped, and that is the evidence
+
+No test was added. Seven already asserted the old behaviour on fixtures built for it, and each
+now asserts the new one — which is a stronger record than a new fixture would be, because the
+before and after are the same input:
+
+| test | was | is |
+|---|---|---|
+| `apply_events_a_hole_in_the_middle_is_recorded_as_two_runs` | `is_none()` | `b"AT"`, runs `(100,101),(103,104)` |
+| `a_read_whose_witness_splits_when_the_record_widens_stays_in_it` | `folded == 2` | `folded == 3`, `wide` at runs `(0,6),(7,16)` |
+| `a_read_whose_witness_splits_at_a_widen_keeps_its_observation` (the `refold_live_reads` path) | `reads_without_observation == [holed]` | still folded, two runs, observations 1 → 2 |
+| `a_read_folding_at_four_positions_of_one_record_is_one_observation` | one *absence* recorded, not four | one *observation* from four folds |
+| `a_read_with_a_hole_is_counted_neither_as_capped_nor_as_witnessing_nothing` | `reads_without_observation == 1` | `0`, and `reads_partial == 1` |
+| `a_read_blind_inside_a_footprint_is_recorded_with_a_hole_in_its_witness` | no row, counted out | `observed:0+2,3+2` (`N`) and `observed:0+2,4+1` (ref-skip) |
+| `every_read_the_walk_saw_is_accounted_for` | `reads_without_observation > 0` | `== 0`, identity still holds |
+
+The last one gained something in the flip: the two blind spellings leave **different** holes —
+the `N` silences one position, the ref-skip two — and the expectations now say so per spelling
+instead of being softened to what both satisfy.
+
+**Mutation: put the discard back.** Restore `allele_seq.clear(); return false;` in the gap
+branch and **seven tests fail** — five in `ng::locus_generation`, two in the generic dump — with
+everything else, including the STR dump, still green. That is what makes the change bisectable.
+
+### What did not move
+
+| check | result |
+|---|---|
+| `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` | clean |
+| `cargo test --lib --bins --tests --examples --all-features` | **2,831** passed, 0 failed — unchanged, since tests flipped rather than were added |
+| STR dump vs the C0 baseline | **byte-identical** |
+| `ng_agrees_with_production_where_production_fabricated_nothing` | green |
+| `ng_emits_the_same_bytes_in_a_second_process` | green |
+| `every_divergence_from_production_is_one_of_the_six_named_classes` | green, **no new class needed** |
+
+The census gaining a class was listed as a C3 oracle; it did not, and that is the expected
+answer rather than a gap. A divergence needs a hole, and the §8 probe measured **zero** holed
+witnesses in 225 million DNA-seq event-folds — so on every input the census runs over, C3
+changes nothing. The class becomes worth counting when a spliced BAM is available (E4), and D5
+owns the counters.

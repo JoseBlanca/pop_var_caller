@@ -165,7 +165,7 @@ expectations is a step that did more than rename.
   clamping the enclosing span, or the hole is swallowed exactly as before. Also worth deciding here:
   clamping a set can in principle empty it, and `witness_of` returns `ReadWitness`, not
   `Option<ReadWitness>`.
-- ☐ **C3.** **Stop discarding a holed read.** `apply_events_into` returns `None` only when the read
+- ✅ **C3.** **Stop discarding a holed read.** `apply_events_into` returns `None` only when the read
   witnessed nothing inside the record; the drop path narrows to that case, keeping the
   set-of-read-ids mechanism and the subtract-prior-contribution step. **Own commit, do not
   bundle** — this is the step where a read appears in a record it was absent from, and the failure

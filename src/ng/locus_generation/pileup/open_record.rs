@@ -114,11 +114,13 @@ pub(super) struct RecordWitnessCounts {
     pub reads_complete: u32,
     /// Folded reads that witnessed one contiguous run short of it.
     pub reads_partial: u32,
-    /// Reads that covered this record and yielded **no observation at all** — their
-    /// witnessed positions inside the footprint were non-contiguous, which one
-    /// `Partial` run cannot describe honestly (spec §6). The size of
+    /// Reads that covered this record and yielded **no observation at all** — they
+    /// witnessed nothing inside the footprint (spec §1 goal 2). The size of
     /// [`OpenPileupRecord::reads_without_observation`], which is a set of read ids
     /// precisely so this number cannot be inflated by the footprint's length.
+    ///
+    /// **C3 narrowed it**: a read whose witness had a hole used to land here and now
+    /// arrives as an observation carrying two runs.
     pub reads_without_observation: u32,
     /// Reads a depth cap truncated at **every** position of this record's footprint where
     /// they had events, so they folded nowhere — see
@@ -323,10 +325,15 @@ pub(super) struct OpenPileupRecord {
     /// `ref_span` (B1 in `ia/reviews/pileup_2026-05-06.md`).
     ///
     folded_reads: AHashMap<u32, FoldedReadState>,
-    /// The reads that covered this record and produced no observation: their
-    /// witnessed positions inside the footprint were non-contiguous — an interior
-    /// `N`, a ref-skip — and `Partial` describes one run, so there is nothing
-    /// honest to emit (spec §6).
+    /// The reads that covered this record and witnessed **nothing** inside it — every
+    /// position of their window masked, `N`, or otherwise silent, so there is no
+    /// observation to emit (spec §1 goal 2).
+    ///
+    /// **Narrowed to that at C3, and the field's name became true.** It also held reads
+    /// whose witness had a *hole* in it — an interior `N`, a ref-skip — because one
+    /// `Partial` run could not describe two stretches honestly. Those reads are now
+    /// recorded with a two-run witness instead of discarded, which is the change this
+    /// milestone exists for; what stays here is the class the name always described.
     ///
     /// **A set of read ids, and that is the whole point of the field (spec §4).**
     /// The no-observation path is reached at *every* position the record is affected
@@ -335,16 +342,19 @@ pub(super) struct OpenPileupRecord {
     /// mechanism exists to prevent, on the one path with no inherited test to catch
     /// it. Membership is idempotent; the count is taken at `finalise`.
     ///
-    /// A `Vec` rather than a hash set because the population is tiny by construction
-    /// — adaptor masking and the dropped-indel rule always truncate from one side,
-    /// so they stay expressible as a run, and only an interior hole lands here — and
-    /// an empty `Vec` costs no allocation on a path that runs once per covered base.
+    /// A `Vec` rather than a hash set because the population is tiny by construction and,
+    /// since C3, tiny by an even shorter argument: a caller filters an empty event window
+    /// before folding, and every event that overlaps the window contributes a non-empty
+    /// clipped run — so an empty `Vec` costs no allocation on a path that runs once per
+    /// covered base and almost never fills.
     ///
-    /// *Invariant: membership is monotone.* The window's left edge is the record's
-    /// anchor and never moves; widening only extends the right. A hole inside the
-    /// footprint therefore stays a hole, so a read recorded here can never fold
-    /// successfully later — asserted in `fold_read_into_record` rather than handled,
-    /// because a removal path would be code no input can reach.
+    /// *Invariant: membership is monotone.* The window's left edge is the record's anchor
+    /// and never moves; widening only extends the right, so a read's event window over the
+    /// record only grows. A read that witnessed nothing therefore cannot start witnessing
+    /// something on a re-fold — asserted in `fold_read_into_record` rather than handled,
+    /// because a removal path would be code no input can reach. (Before C3 the same
+    /// invariant was argued the other way round: a *hole* inside the footprint stays a hole.
+    /// The conclusion is unchanged; the reason is now the simpler one.)
     reads_without_observation: Vec<u32>,
     /// The reads a depth cap truncated at some position of this record's footprint —
     /// **candidates for `reads_discarded_by_cap`, not the count itself** (spec §6).
@@ -491,21 +501,29 @@ impl OpenPileupRecord {
     /// than the run it covers, which simply means it cannot equal the reference slice, and
     /// the read keeps its id. Correct, and for the right reason.
     ///
-    /// **It reads the enclosing extent of the witness, and C3 is what makes that a
-    /// question.** Every set reaching here holds exactly one run — `apply_events_into`
-    /// still answers "nothing" for a witness with a hole — so the enclosing extent *is*
-    /// the run. Once C3 lets a holed read through, "the reference over the positions the
-    /// read witnessed" stops being one slice, and `bases` cannot be cut per run anyway: it
-    /// is in read coordinates, where an insertion adds bytes no position accounts for. C3
-    /// owns that decision; C1 must not pre-empt it, so the extent is read here exactly as
-    /// the inclusive `RefSpan` was.
+    /// # A witness with a hole is never claimed to have agreed — decided at C3
+    ///
+    /// The question needs one slice of the reference to compare against, and a holed witness
+    /// does not name one. Comparing against the extent that *encloses* its runs would ask
+    /// whether the read's bases equal the reference **including the positions it was blind
+    /// to**, which is the fabrication this milestone removes, wearing a different hat. And
+    /// the runs cannot be compared one at a time either, for the reason spec §3.2 gives:
+    /// `bases` is in **read** coordinates, where an insertion adds bytes no locus position
+    /// accounts for and a deletion removes positions no byte does, so the two axes cannot be
+    /// indexed against each other.
+    ///
+    /// So a multi-run witness answers `false` — the read keeps its chain id. That is the
+    /// conservative direction (an id is added, never withheld), it holds
+    /// `chain_ids.len() <= num_obs`, and it is honest: a spliced read's allele string does
+    /// depart from the reference across the span it sits in. On DNA-seq it is also
+    /// unreachable — zero holed witnesses in 225 million event-folds (spec §8).
     fn read_agreed_with_reference(&self, state: &FoldedReadState) -> bool {
         let reference = &self.alleles[0].seq;
         let mut runs = state.witnessed.runs();
-        let (start, mut end) = runs.next().expect("a witnessed set is never empty");
-        for (_, run_end) in runs {
-            end = run_end;
+        if runs.len() != 1 {
+            return false;
         }
+        let (start, end) = runs.next().expect("exactly one run, checked a line above");
         let first = start.saturating_sub(self.pos) as usize;
         // Half-open on the way in since C1, where the inclusive `RefSpan` needed a `+ 1`.
         let past_last = (end.saturating_sub(self.pos) as usize).min(reference.len());
@@ -1175,20 +1193,26 @@ impl OpenPileupRecordTable {
 /// covered — an insertion adds bases without positions, a deletion positions
 /// without bases (spec §8, §13).
 ///
-/// # `false` means the read gets no observation, and C3 narrows what puts it there
+/// # `false` means the read witnessed **nothing** inside the record — and nothing else
 ///
-/// Two shapes answer `false` today. One is a read that witnessed **nothing** inside the
-/// record. The other is a witness with a **hole** in it — an interior `N`, or a ref-skip —
-/// which one `Partial { offset_in_locus, positions_covered }` cannot describe honestly, so
-/// the read yields no observation and is counted in `reads_without_observation` (spec §6).
-/// Rare by construction on DNA-seq: adaptor masking and the dropped-indel rule always
-/// truncate from one side, so they stay expressible, and the §8 probe saw **zero** holes in
-/// 225 million event-folds.
+/// Since C3 that is the only shape that answers `false`. A witness with a **hole** in it —
+/// an interior `N`, a ref-skip — used to answer it too: one
+/// `Partial { offset_in_locus, positions_covered }` could not describe two runs honestly, so
+/// the read was discarded whole and counted in `reads_without_observation`. It now comes
+/// back as two runs, which is this milestone's whole point (spec §1 goal 1).
 ///
-/// **C3 removes the second shape**, which is this milestone's whole point: the runs
-/// accumulate into `witnessed_runs` either way, and a hole stops being a reason to throw
-/// them away. C1 keeps the discard so the change is provably byte-identical — the hole
-/// branch below is the one line C3 deletes.
+/// **What that changes, and where it does not.** On DNA-seq, nothing: the §8 probe measured
+/// **zero** holed witnesses in 225 million event-folds, because adaptor masking and the
+/// dropped-indel rule always truncate from one side and modern Illumina puts `N`s at read
+/// ends. On RNA-seq it is the difference between a spliced read being recorded and vanishing:
+/// a `Skip` emits no event, so an intron cannot widen a record on its own, but an indel
+/// allele spanning it can — and then the junction falls inside the footprint and the read
+/// witnessed two exons (spec §8).
+///
+/// With the second shape gone, `reads_without_observation` narrows to what its name says
+/// (spec §1 goal 2). It is now hard to reach at all: every caller filters an empty event
+/// window before folding, and every event that overlaps the window contributes a non-empty
+/// clipped run.
 ///
 /// # Where the runs go
 ///
@@ -1294,32 +1318,29 @@ pub(super) fn apply_events_into(
                 None => witnessed = Some((event_start, event_end)),
                 Some((run_start, run_end)) => {
                     if event_start > run_end {
-                        // A hole: the read said nothing about the positions in
-                        // between. One run cannot describe that honestly.
-                        //
-                        // **C3 deletes this branch** and pushes the closed run instead,
-                        // so the read keeps both stretches. Until then the discard stays,
-                        // which is what makes C1 byte-identical.
-                        //
-                        // `witnessed_runs` needs no clearing here: it was emptied on entry
-                        // and the single run is only pushed on the way out, so the
-                        // "`false` means the buffer is empty" contract already holds. C3
-                        // is where the run starts being pushed inside this loop, and it
-                        // takes the contract with it.
-                        allele_seq.clear();
-                        return false;
+                        // **A hole: the run in hand is finished, and another begins.**
+                        // The read said nothing about the positions between them, and
+                        // since C3 that is something the witness can *say* rather than a
+                        // reason to throw the read away. Until C3 this branch cleared
+                        // `allele_seq` and answered "nothing witnessed", so a spliced read
+                        // whose junction fell inside a widened record vanished from it
+                        // entirely — the failure this milestone exists to fix (spec §1
+                        // goal 1, §8).
+                        witnessed_runs.push((run_start, run_end));
+                        witnessed = Some((event_start, event_end));
+                    } else {
+                        // `.max()`, not a plain `event_end`: under precondition 4 the
+                        // two are equal — which is why no test can tell them apart,
+                        // and why deleting the `.max()` fails nothing. It is the
+                        // release build's defence for the input that precondition
+                        // rules out (two deletions at one anchor, the longer first),
+                        // where a plain assignment would shrink the run below what
+                        // the read witnessed. It defends the **stated** precondition,
+                        // not the cursor's output: the cursor cannot produce that
+                        // input, so the debug assertion above is where a caller that
+                        // could learns so.
+                        witnessed = Some((run_start, run_end.max(event_end)));
                     }
-                    // `.max()`, not a plain `event_end`: under precondition 4 the
-                    // two are equal — which is why no test can tell them apart,
-                    // and why deleting the `.max()` fails nothing. It is the
-                    // release build's defence for the input that precondition
-                    // rules out (two deletions at one anchor, the longer first),
-                    // where a plain assignment would shrink the run below what
-                    // the read witnessed. It defends the **stated** precondition,
-                    // not the cursor's output: the cursor cannot produce that
-                    // input, so the debug assertion above is where a caller that
-                    // could learns so.
-                    witnessed = Some((run_start, run_end.max(event_end)));
                 }
             }
         }
@@ -1362,9 +1383,15 @@ pub(super) fn apply_events_into(
         }
     }
 
-    // Half-open in and half-open out since C1 — the inclusive `RefSpan` this used to
-    // return was the one place the two conventions met, and its `- 1` here paired with a
-    // `+ 1` in `witness_of`. A set is held half-open so merging needs neither.
+    // The run still open when the events ran out. Half-open in and half-open out since C1 —
+    // the inclusive `RefSpan` this used to return was the one place the two conventions met,
+    // and its `- 1` here paired with a `+ 1` in `witness_of`. A set is held half-open so
+    // merging needs neither.
+    //
+    // The runs are pushed in the order the events arrive, which precondition 4 makes
+    // ascending and non-overlapping — so `take_from` / `refill_from` canonicalise a set that
+    // is already canonical. They still run: the precondition is a demand on callers, and a
+    // caller that breaks it should get a merged set rather than a witness that lies.
     match witnessed {
         Some(run) => {
             witnessed_runs.push(run);
@@ -1472,13 +1499,17 @@ fn fold_read_into_record(
         // every position the record is affected at, so a counter here would multiply
         // by the footprint length (spec §4).
         note_no_observation(reads_without_observation, active.read_id);
-        // A non-contiguous witness — an interior `N`, or a ref-skip — yields no
-        // observation (spec §6). **The prior contribution has to come off first**, and
-        // this is not a corner: a read that folded contiguously *becomes* non-contiguous
-        // when the window widens right across an interior gap, so a bare early return
-        // would strand a live contribution in a bucket for a read that now has no observation,
-        // breaking `chain_ids.len() <= num_obs` silently and only on multi-base records
-        // (spec §4).
+        // **The read witnessed nothing inside this record**, which since C3 is the only way
+        // to reach here — a witness with a hole now arrives as two runs rather than as
+        // nothing at all.
+        //
+        // **The prior contribution still has to come off first**, and the mechanism is kept
+        // rather than trimmed with the case that motivated it: a bare early return would
+        // strand a live contribution in a bucket for a read that has no observation, breaking
+        // `chain_ids.len() <= num_obs` silently. The arrival that made it ordinary — a read
+        // folding contiguously and then splitting when the window widened — is gone, and what
+        // remains is a defence for a state no input reaches, which is worth its four lines
+        // because the failure is a wrong number rather than a crash (spec §4).
         if let Some(prev) = folded_reads.remove(&active.read_id) {
             subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
         }
@@ -1486,13 +1517,15 @@ fn fold_read_into_record(
     }
 
     // PANIC-FREE, and the assert states the invariant rather than defending against it:
-    // the record's left edge is its anchor and never moves, and a widen only extends the
-    // right, so a hole inside the footprint stays a hole. A read that once yielded no
-    // observation cannot fold successfully later — which is why nothing removes it from
-    // the set, and why a removal path would be code no input can reach.
+    // the record's left edge is its anchor and never moves and a widen only extends the
+    // right, so a read's event window over the record only grows — a read that witnessed
+    // nothing cannot start witnessing something on a re-fold. That is why nothing removes it
+    // from the set, and why a removal path would be code no input can reach. (Before C3 the
+    // same conclusion followed from "a hole inside the footprint stays a hole"; the reason is
+    // now the simpler one.)
     debug_assert!(
         !reads_without_observation.contains(&active.read_id),
-        "read {} folded after having been recorded as witnessing nothing contiguous",
+        "read {} folded after having been recorded as witnessing nothing at all",
         active.read_id,
     );
 
@@ -1640,12 +1673,15 @@ fn refold_live_reads(
             &alleles[0].seq,
             &window,
         ) {
-            // The wider window opened a hole in what was one run — see
-            // `fold_read_into_record` for why the contribution has to come off, and
-            // why the read is recorded rather than merely dropped. **This is the
-            // arrival that makes the case ordinary rather than a corner:** a read
-            // folds contiguously, the record widens right across an interior gap, and
-            // the read that had an observation a moment ago now has none.
+            // **Unreachable since C3, and kept as the invariant's statement.** This was
+            // the arrival that made the drop ordinary rather than a corner: a read folded
+            // contiguously, the record widened right across an interior gap, and the read
+            // that had an observation a moment ago had none. A hole is now two runs, and a
+            // widening window only *adds* events to a read already folded here — so a read
+            // reaching this branch would have to have witnessed nothing, having witnessed
+            // something a moment ago. The removal and the subtraction stay because the
+            // failure they prevent is a live contribution stranded in a bucket, which is a
+            // wrong number rather than a crash (see `fold_read_into_record`).
             note_no_observation(reads_without_observation, read_id);
             folded_reads.remove(&read_id);
             subtract_contribution(
@@ -2571,14 +2607,21 @@ mod tests {
         assert_eq!(witnessed, ref_run(100, 101));
     }
 
-    /// **A hole in the middle yields no observation at all.** An interior `N` or a
-    /// ref-skip leaves the read silent about positions inside a run it otherwise
-    /// witnessed, and one `Partial` run cannot describe two runs honestly (spec §6).
+    /// **A hole in the middle is two runs — since C3, where it used to be no observation at
+    /// all.**
     ///
-    /// Production filled the hole from the reference and folded the read as a complete
-    /// witness.
+    /// An interior `N` or a ref-skip leaves the read silent about positions inside a
+    /// stretch it otherwise witnessed. Production filled the hole from the reference and
+    /// folded the read as a *complete* witness; ng answered "nothing witnessed" and
+    /// discarded the read whole, which on RNA-seq loses a spliced read entirely (spec §8).
+    /// It now says what happened: two runs, and the bases of both.
+    ///
+    /// **The bases are the concatenation of what the read showed**, and that is not the
+    /// fill in a new costume: production emitted a base for position 101 and 102 that no
+    /// read had seen, where these four bytes are all sequenced and the witness says which
+    /// positions they came from.
     #[test]
-    fn apply_events_a_hole_in_the_middle_yields_no_observation() {
+    fn apply_events_a_hole_in_the_middle_is_recorded_as_two_runs() {
         let ref_seq = b"ACGTA";
         let events = vec![
             ReadEvent::Match {
@@ -2593,7 +2636,18 @@ mod tests {
                 bq_baq: 30,
             },
         ];
-        assert!(apply_events(100, ref_seq, &events).is_none());
+        let (bases, witnessed) = apply_events(100, ref_seq, &events).expect("two runs");
+        assert_eq!(bases, b"AT", "both bases the read showed, and no third");
+        assert_eq!(
+            witnessed.runs().collect::<Vec<_>>(),
+            vec![(100, 101), (103, 104)],
+            "the hole at 101..103 is held, not bridged",
+        );
+        assert_eq!(
+            witnessed.positions_covered(),
+            2,
+            "two positions witnessed across a four-position span",
+        );
     }
 
     /// **Adjacent is not a hole.** The gap check is `event_start > run_end` on a
@@ -2702,17 +2756,24 @@ mod tests {
         );
     }
 
-    /// **A read that folded contiguously and then became non-contiguous is taken back
-    /// out of the record it had folded into.**
+    /// **A read whose witness splits in two when the record widens now stays in it — this
+    /// is C3, and this fixture is the before/after.**
     ///
-    /// The `None` path is not reached only on first contact. A record widens, and a read
-    /// whose witness *was* one run across the old footprint now has a hole inside the new
-    /// one — so it stops having an observation, and the contribution it already made has to
-    /// come off the bucket. A bare `continue` there leaves a live contribution behind for a
-    /// read that has no observation, which is silent, only happens on multi-base records, and is
-    /// the failure spec §4 names.
+    /// Until C3 the read was taken back out: its witness *was* one run across the old
+    /// footprint, the widen opened a hole inside the new one, and one `Partial` run could
+    /// not describe two stretches honestly, so the read lost its observation and the
+    /// contribution it had already made was subtracted back off the bucket. **This exact
+    /// test asserted `folded == 2` on that behaviour, with `wide` absent.** It now asserts
+    /// three, with `wide` present carrying a two-run witness — which is the whole change
+    /// (spec §1 goal 1).
     ///
-    /// Nothing else in the suite catches it: the differential's census tolerates any
+    /// **What is *not* being tested away.** The subtract-then-remove path survives C3 and
+    /// still matters: a bare `continue` would leave a live contribution behind for a read
+    /// with no observation, breaking `chain_ids.len() <= num_obs` silently and only on
+    /// multi-base records (spec §4). C3 makes the path unreachable rather than wrong, and
+    /// `finalise`'s own `debug_assert` is what pins it now.
+    ///
+    /// Nothing else in the suite sees this: the differential's census tolerates any
     /// difference in the allele lists by design, and the inherited tests never widen a
     /// record across a read's interior gap. So it is built by hand.
     ///
@@ -2725,9 +2786,9 @@ mod tests {
     ///
     /// `wide` folds at position 5 over the three-base record (5, 6, 7 — one run). At
     /// position 7 `widener`'s deletion grows that record to sixteen bases, and `wide`'s
-    /// witness over it is now `5..=10` and `12..=20`: two runs, so no observation.
+    /// witness over it is now `5..=10` and `12..=20`: two runs, which the record keeps.
     #[test]
-    fn a_read_that_becomes_non_contiguous_when_the_record_widens_leaves_its_bucket() {
+    fn a_read_whose_witness_splits_when_the_record_widens_stays_in_it() {
         use super::super::{CigarOp, MateRole, PreparedRead, WalkerConfig, run};
         use crate::ng::types::ReadGroupId;
         use std::sync::Arc;
@@ -2794,10 +2855,40 @@ mod tests {
             .map(|observation| observation.num_obs)
             .sum();
         assert_eq!(
-            folded, 2,
-            "only `opener` and `widener` witnessed this record as one run; `wide` folded \
-             into it before the widen and must have been subtracted back out when its \
-             witness split in two. Record: {widened:?}"
+            folded, 3,
+            "all three reads are recorded: `opener` and `widener` as one run each, and \
+             `wide` as two — where before C3 it was subtracted back out and this number \
+             was 2. Record: {widened:?}"
+        );
+        assert_eq!(
+            widened.reads_without_observation, 0,
+            "and it is not counted out either — the tally means 'witnessed nothing' now, \
+             and `wide` witnessed nineteen of the record's sixteen... positions on both \
+             sides of its N. Record: {widened:?}"
+        );
+
+        // The `N` at reference position 11 is the hole, so `wide` witnessed 5..=10 and
+        // 12..=20 — locus offsets 0..6 and 7..16 against a record anchored at 5.
+        let holed = widened
+            .observations
+            .iter()
+            .find(|observation| match &observation.read_witness {
+                ReadWitness::Complete => false,
+                ReadWitness::Partial { positions } => positions.runs().len() == 2,
+            })
+            .unwrap_or_else(|| panic!("`wide`'s two-run observation. Record: {widened:?}"));
+        let ReadWitness::Partial { positions } = &holed.read_witness else {
+            unreachable!("matched on Partial a line above");
+        };
+        assert_eq!(
+            positions.runs().collect::<Vec<_>>(),
+            vec![(0, 6), (7, 16)],
+            "one run per side of the silent `N`, and the position it sits on in neither",
+        );
+        assert_eq!(
+            positions.positions_covered(),
+            15,
+            "fifteen of the footprint's sixteen positions — the sixteenth is the hole",
         );
     }
 
@@ -3824,17 +3915,22 @@ mod tests {
         );
     }
 
-    /// **A read that folded and then lost its observation to a hole is not counted twice.**
+    /// **A read with a hole is not counted out as capped, because it is not counted out at
+    /// all** — the same fixture that once produced the double count, read after C3.
     ///
-    /// "Absent from `folded_reads`" has two causes — the cap kept the read out, or its
-    /// witness turned out non-contiguous and A5's path removed it — and counting the second
-    /// here reported one read in *both* `reads_without_observation` and
-    /// `reads_discarded_by_cap`. Measured at 240 records in ~506,000 before the exclusion.
-    /// The two counters mean different things to a model: one says the support is a
-    /// subsample of the depth, the other says a read covered the locus and said nothing
-    /// usable.
+    /// "Absent from `folded_reads`" used to have two causes: the cap kept the read out, or
+    /// its witness turned out non-contiguous and the A5 path removed it. Counting the second
+    /// as the first reported one read in *both* `reads_without_observation` and
+    /// `reads_discarded_by_cap` — 240 records in ~506,000 — and the exclusion in `finalise`
+    /// is what stopped it.
+    ///
+    /// **C3 removed the cause rather than the symptom.** `holey` is here named to the cap at
+    /// every position *and* holed at 7, which before C3 was exactly the collision; it now
+    /// folds, so it is absent from both counters for the plainest possible reason. The
+    /// exclusion clause survives as a defence — the second cause is no longer reachable, and
+    /// its `!contains` is the statement of that rather than a live filter.
     #[test]
-    fn a_read_that_lost_its_observation_to_a_hole_is_not_also_counted_as_capped() {
+    fn a_read_with_a_hole_is_counted_neither_as_capped_nor_as_witnessing_nothing() {
         let reference = fa(WIDEN_CONTIG);
         // `holey` matches 5..=9 with an `N` at 7, so it folds at 5 and then yields no
         // observation — A5's path. It is *also* named to the cap, which the walk would do
@@ -3868,16 +3964,21 @@ mod tests {
         let record = open.records.remove(&5).expect("the record at 5");
         let (locus, witness) = record.finalise();
         assert_eq!(
-            witness.reads_without_observation, 1,
-            "the hole at 7 is why `holey` has no observation"
+            witness.reads_without_observation, 0,
+            "since C3 the hole at 7 costs `holey` nothing — it is recorded with two runs, \
+             where it used to be counted out here"
         );
         assert_eq!(
             witness.reads_discarded_by_cap, 0,
-            "and it must not *also* be reported as discarded by the cap — one read, one \
-             reason, or a model reads the support as a subsample when it is not"
+            "and it must not be reported as discarded by the cap either — it folded, so \
+             the support is not a subsample"
         );
-        assert_eq!(locus.reads_without_observation, 1);
+        assert_eq!(locus.reads_without_observation, 0);
         assert_eq!(locus.reads_discarded_by_cap, 0);
+        assert_eq!(
+            witness.reads_partial, 1,
+            "`holey` is a partial witness of this footprint, not an absence from it"
+        );
     }
 
     /// **A read the cap removed at one position but not another is *not* discarded** — the
@@ -3911,18 +4012,24 @@ mod tests {
     // A5 — the no-observation path: which reads, as a set.
     // -----------------------------------------------------------------
 
-    /// **A read that witnesses nothing contiguous is recorded once, not once per
-    /// position** — the reason the field is a set of read ids and not a counter
-    /// (spec §4).
+    /// **A read folding at four positions of one record is one observation, not four** —
+    /// the once-per-record-not-once-per-position property, on the fixture that used to
+    /// prove it from the other side.
     ///
-    /// The path is reached at *every* position the record is affected at. `holey`
-    /// matches 5..=9 with an `N` at 7, so it is a contributor at four of the record's
-    /// five positions and yields no observation at every one of them. A counter
-    /// incremented there would report **four** reads without an observation where
-    /// there is one — a number multiplied by the footprint's length, on the one path
-    /// with no inherited test to catch it.
+    /// `holey` matches 5..=9 with an `N` at 7, so it is a contributor at four of the
+    /// record's five positions. Until C3 it yielded *no* observation at every one of them,
+    /// and this test asserted that `reads_without_observation` counted **one** rather than
+    /// four — the reason that field is a set of read ids and not a counter (spec §4).
+    ///
+    /// C3 made the read fold instead, so the same fixture now exercises the same property
+    /// through the mechanism that always carried it: the subtract-then-add in
+    /// `fold_read_into_record`, which is what makes "each (record, read) pair folds exactly
+    /// once over the record's lifetime" true. Four folds, `num_obs == 1`. The set-not-a-
+    /// counter statement it used to make is now vacuous by construction — nothing on this
+    /// walk reaches the no-observation path at all, which is what
+    /// `reads_without_observation == 0` asserts below.
     #[test]
-    fn a_read_witnessing_nothing_contiguous_is_recorded_once_not_once_per_position() {
+    fn a_read_folding_at_four_positions_of_one_record_is_one_observation() {
         let reference = fa(WIDEN_CONTIG);
         // `ACNTA` over 5..=9: the reference reads `ACGTA` there, and the `N` at 7
         // makes the cursor emit nothing — a hole the read's *alignment span* is blind
@@ -3953,35 +4060,55 @@ mod tests {
             "the opener's deletion must open the record at 5..=9, or the hole at 7 is \
              not inside the footprint and the fixture reaches nothing"
         );
-        assert_eq!(
-            record.reads_without_observation.len(),
-            1,
-            "the same read at four positions is one read: {:?}",
+        assert!(
+            record.reads_without_observation.is_empty(),
+            "since C3 the hole at 7 is two runs, so nothing on this walk reaches the \
+             no-observation path: {:?}",
             record.reads_without_observation
         );
-        let (_record, witness) = record.finalise();
-        assert_eq!(
-            witness.reads_without_observation, 1,
-            "a counter incremented on the path would report one per affected position"
-        );
+        let (locus, witness) = record.finalise();
+        assert_eq!(witness.reads_without_observation, 0);
         assert_eq!(
             witness.reads_complete, 1,
             "the opener's deletion witnessed the whole footprint"
         );
+        assert_eq!(
+            witness.reads_partial, 1,
+            "and `holey` witnessed four of its five positions"
+        );
+
+        let holey_observation = locus
+            .observations
+            .iter()
+            .find(|observation| match &observation.read_witness {
+                ReadWitness::Complete => false,
+                ReadWitness::Partial { positions } => positions.runs().len() == 2,
+            })
+            .unwrap_or_else(|| panic!("`holey`'s two-run observation: {locus:?}"));
+        assert_eq!(
+            holey_observation.num_obs, 1,
+            "**one** observation from four folds — the subtract-then-add is what makes \
+             that true, and a six-base footprint would otherwise count a spanning read \
+             once per position: {locus:?}"
+        );
     }
 
-    /// **A read whose witness splits when the record widens is recorded, not merely
-    /// dropped.**
+    /// **A read whose witness splits when the record widens keeps its observation — on the
+    /// re-fold path, which is the one the fold loop never reaches.**
     ///
     /// `holed`'s deletion covers 6 and 7, so it witnesses 5..=7 as one run and — being
-    /// inside that deletion at the widening position — is not a contributor there.
-    /// Only [`refold_live_reads`] reaches it. `widener` then grows the record to
-    /// 5..=20, which brings `holed`'s `N` at 11 inside the footprint and splits its
-    /// witness in two. It leaves its bucket, and it has to leave a record of itself
-    /// behind: a read that had an observation a moment ago now has none, and nothing else in
-    /// the output says so.
+    /// inside that deletion at the widening position — is **not** a contributor there. Only
+    /// [`refold_live_reads`] reaches it. `widener` then grows the record to 5..=20, which
+    /// brings `holed`'s `N` at 11 inside the footprint and splits its witness in two.
+    ///
+    /// Until C3 it left its bucket at that point and was recorded in
+    /// `reads_without_observation` — a read that had an observation a moment ago suddenly
+    /// had none, and this test asserted exactly that. It now stays, with both runs. The two
+    /// paths that can split a witness are covered separately on purpose: the fold loop's is
+    /// `a_read_whose_witness_splits_when_the_record_widens_stays_in_it`, and a fix applied
+    /// to one of them only would leave the other silently dropping reads.
     #[test]
-    fn a_read_whose_witness_splits_at_a_widen_is_recorded_not_merely_dropped() {
+    fn a_read_whose_witness_splits_at_a_widen_keeps_its_observation() {
         let reference = fa(WIDEN_CONTIG);
         // Match(1) at 5, deletion over 6..=7, then matches from 8. Position 11 is the
         // fifth of those matched bases and is `N`.
@@ -4031,26 +4158,33 @@ mod tests {
             16,
             "the record must have widened to 5..=20"
         );
-        assert_eq!(
-            record.reads_without_observation,
-            vec![holed_id],
-            "the widen brought the hole at 11 inside the footprint"
-        );
         assert!(
-            !record.folded_reads.contains_key(&holed_id),
-            "and the read has no observation left"
+            record.reads_without_observation.is_empty(),
+            "the widen brought the hole at 11 inside the footprint, and since C3 that is \
+             something the witness says rather than a reason to drop the read: {:?}",
+            record.reads_without_observation
+        );
+        let holed_state = record
+            .folded_reads
+            .get(&holed_id)
+            .expect("`holed` is still folded, with a witness in two runs");
+        assert_eq!(
+            holed_state.witnessed.runs().len(),
+            2,
+            "the `N` at 11 is a hole in reference coordinates: {:?}",
+            holed_state.witnessed,
         );
         let (emitted, witness) = record.finalise();
-        assert_eq!(witness.reads_without_observation, 1);
+        assert_eq!(witness.reads_without_observation, 0);
         assert_eq!(
             emitted
                 .observations
                 .iter()
                 .map(|observation| observation.num_obs)
                 .sum::<u32>(),
-            1,
-            "only `widener` still supports this record — `holed`'s contribution came \
-             off the bucket it was in: {emitted:?}"
+            2,
+            "both `widener` and `holed` support this record — before C3 `holed`'s \
+             contribution came off the bucket it was in and this was 1: {emitted:?}"
         );
     }
 
