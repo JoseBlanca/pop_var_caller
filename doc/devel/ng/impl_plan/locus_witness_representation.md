@@ -76,7 +76,7 @@ regression anchors — the canonicality property and the spliced fixture.
 Every step here is mechanical and must leave output byte-identical. Any test that changes
 expectations is a step that did more than rename.
 
-- ☐ **A1.** `ObservedSequence` → `SequenceObservation`, and the field
+- ✅ **A1.** `ObservedSequence` → `SequenceObservation`, and the field
   `SampleLocusObservations::observed_sequences` → `observations`. 39 uses of the type across 7
   files, 102 of the field. *Depends:* —. *Source:* spec §1, §4.
 - ☐ **A2.** `ReadCoverage` → `ReadWitness`, and the field `read_coverage` → `read_witness`. 193 and

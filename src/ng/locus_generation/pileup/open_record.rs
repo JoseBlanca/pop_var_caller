@@ -24,7 +24,9 @@ use crate::ng::ref_seq::RefSeq;
 use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
 use crate::pileup_record::ChainId;
 
-use super::super::{LocusKind, LocusLen, ObservedSequence, ReadCoverage, SampleLocusObservations};
+use super::super::{
+    LocusKind, LocusLen, ReadCoverage, SampleLocusObservations, SequenceObservation,
+};
 use super::DEFAULT_MAX_RECORD_SPAN;
 use super::active_read_set::ActiveReads;
 use super::decompose::ReadEvent;
@@ -570,7 +572,7 @@ impl OpenPileupRecord {
     }
 
     /// Convert into the finished locus ng emits: the region, the reference bytes under it,
-    /// one [`ObservedSequence`] per row, and the two per-record counters.
+    /// one [`SequenceObservation`] per row, and the two per-record counters.
     ///
     /// **Coverage is resolved here, and here is the only place it can be.** A read's
     /// `witnessed` extent is absolute; what it *means* — complete witness, or one run short
@@ -683,7 +685,7 @@ impl OpenPileupRecord {
                 .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
         });
 
-        let observed_sequences = rows
+        let observations = rows
             .into_iter()
             .map(|row| {
                 // Exhaustively destructured on the way out, in the direction that can lose
@@ -697,7 +699,7 @@ impl OpenPileupRecord {
                     mapq_sum,
                     mapq_sum_sq,
                 } = row.support;
-                ObservedSequence {
+                SequenceObservation {
                     bases: row.key.bases.into_boxed_slice(),
                     read_coverage: row.key.read_coverage,
                     read_group: row.key.read_group,
@@ -731,7 +733,7 @@ impl OpenPileupRecord {
                 end: Position(u64::from(record_end_exclusive.saturating_sub(1))),
             },
             reference_bases,
-            observed_sequences,
+            observations,
             reads_without_observation: witness.reads_without_observation,
             reads_discarded_by_cap: witness.reads_discarded_by_cap,
             kind: LocusKind::Generic,
@@ -2615,11 +2617,7 @@ mod tests {
              not reach the path it exists for"
         );
 
-        let folded: u32 = widened
-            .observed_sequences
-            .iter()
-            .map(|row| row.num_obs)
-            .sum();
+        let folded: u32 = widened.observations.iter().map(|row| row.num_obs).sum();
         assert_eq!(
             folded, 2,
             "only `opener` and `widener` witnessed this record as one run; `wide` folded \
@@ -3824,7 +3822,7 @@ mod tests {
         assert_eq!(witness.reads_without_observation, 1);
         assert_eq!(
             emitted
-                .observed_sequences
+                .observations
                 .iter()
                 .map(|observation| observation.num_obs)
                 .sum::<u32>(),

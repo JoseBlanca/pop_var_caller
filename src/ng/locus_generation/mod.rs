@@ -41,7 +41,7 @@ pub struct SampleLocusObservations {
     pub reference_bases: Box<[u8]>,
     /// The distinct sequences the reads showed, each with its support. **Observations,
     /// not alleles** — they become alleles when something calls them.
-    pub observed_sequences: Vec<ObservedSequence>,
+    pub observations: Vec<SequenceObservation>,
     /// Reads that covered this locus but produced no observation at all. A scalar with
     /// no positions: *no coverage* and *coverage that said nothing* are different
     /// states, and only one means "look at the mapping" (spec §3).
@@ -69,7 +69,7 @@ impl SampleLocusObservations {
     pub fn num_obs_along_locus(&self) -> Vec<u32> {
         let len = self.region.len() as usize;
         let mut depth = vec![0u32; len];
-        for obs in &self.observed_sequences {
+        for obs in &self.observations {
             // **This clamp is the guard, not a second one.** An earlier comment here
             // called the bound "a producer invariant, enforced where `ReadCoverage` is
             // minted", which overstated it twice over: `Observed`'s fields are public, so
@@ -120,8 +120,8 @@ impl SampleLocusObservations {
     /// A partial is a lower bound that mis-scores as a *short* allele until a censored
     /// likelihood models it (step 7), so reaching the partials is a deliberate act:
     /// this iterator is the guard (spec §3).
-    pub fn complete_observations(&self) -> impl Iterator<Item = &ObservedSequence> + '_ {
-        self.observed_sequences
+    pub fn complete_observations(&self) -> impl Iterator<Item = &SequenceObservation> + '_ {
+        self.observations
             .iter()
             .filter(|obs| obs.read_coverage == ReadCoverage::Complete)
     }
@@ -142,7 +142,7 @@ impl SampleLocusObservations {
 /// aggregation is exact: every support field is additive, and the merged cells share
 /// their `bases` and `read_coverage` by construction (spec §6).
 #[derive(Debug, Clone, PartialEq)]
-pub struct ObservedSequence {
+pub struct SequenceObservation {
     /// The observed bases — allele content, in **read** coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the
@@ -964,8 +964,8 @@ mod tests {
 
     /// An observation of `bases` with `num_obs` reads at a given coverage — the moment
     /// fields are irrelevant to the depth derivation, so they are fixed.
-    fn obs(bases: &[u8], read_coverage: ReadCoverage, num_obs: u32) -> ObservedSequence {
-        ObservedSequence {
+    fn obs(bases: &[u8], read_coverage: ReadCoverage, num_obs: u32) -> SequenceObservation {
+        SequenceObservation {
             bases: Box::from(bases),
             read_coverage,
             read_group: ReadGroupId(0),
@@ -979,11 +979,11 @@ mod tests {
         }
     }
 
-    fn locus(region: GenomeRegion, observed: Vec<ObservedSequence>) -> SampleLocusObservations {
+    fn locus(region: GenomeRegion, observed: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
             region,
             reference_bases: Box::from(&b""[..]),
-            observed_sequences: observed,
+            observations: observed,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
             kind: LocusKind::Generic,
@@ -1449,7 +1449,7 @@ mod tests {
         let generic = SampleLocusObservations {
             region: region(100, 100),
             reference_bases: Box::from(&b"A"[..]),
-            observed_sequences: vec![ObservedSequence {
+            observations: vec![SequenceObservation {
                 bases: Box::from(&b"T"[..]),
                 read_coverage: ReadCoverage::Complete,
                 read_group: ReadGroupId(0),
@@ -1466,12 +1466,12 @@ mod tests {
             kind: LocusKind::Generic,
         };
         assert_eq!(generic.region.len(), 1);
-        assert_eq!(generic.observed_sequences[0].num_obs, 9);
+        assert_eq!(generic.observations[0].num_obs, 9);
 
         let ssr = SampleLocusObservations {
             region: region(10_442, 10_461),
             reference_bases: Box::from(&b"ATATATATATATATATATAT"[..]),
-            observed_sequences: Vec::new(),
+            observations: Vec::new(),
             reads_without_observation: 3,
             reads_discarded_by_cap: 0,
             kind: LocusKind::Ssr(SsrDetail {
@@ -1481,13 +1481,13 @@ mod tests {
             }),
         };
         // Zero coverage is a real observation: the locus exists with an empty table.
-        assert!(ssr.observed_sequences.is_empty());
+        assert!(ssr.observations.is_empty());
         assert!(matches!(ssr.kind, LocusKind::Ssr(_)));
 
         let bundle = SampleLocusObservations {
             region: region(200, 260),
             reference_bases: Box::from(&b"N"[..]),
-            observed_sequences: Vec::new(),
+            observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
             kind: LocusKind::SsrBundle,
@@ -1500,7 +1500,7 @@ mod tests {
     /// dedup key rests on (spec §3).
     #[test]
     fn same_bases_differ_by_read_coverage() {
-        let complete = ObservedSequence {
+        let complete = SequenceObservation {
             bases: Box::from(&b"ATATAT"[..]),
             read_coverage: ReadCoverage::Complete,
             read_group: ReadGroupId(0),
@@ -1512,7 +1512,7 @@ mod tests {
             placed_left: 0,
             chain_ids: Vec::new(),
         };
-        let partial = ObservedSequence {
+        let partial = SequenceObservation {
             read_coverage: ReadCoverage::from_left(6, LocusLen::from_positions(6)),
             ..complete.clone()
         };

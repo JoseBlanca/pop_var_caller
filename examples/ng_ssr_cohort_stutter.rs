@@ -2,7 +2,7 @@
 //! the *same* microsatellite tracts, emitting one tidy row per (sample, locus, observation).
 //!
 //! **⚠ Since 2026-07-28 a row is one `(bases, read_coverage, read_group)` CELL, not one allele.**
-//! `ObservedSequence` gained the read group as part of its identity, so on a sample declaring
+//! `SequenceObservation` gained the read group as part of its identity, so on a sample declaring
 //! several `@RG`s one allele becomes several rows — and **this dump has no read-group column**, so
 //! those rows are indistinguishable in the output and the per-row counters below count cells
 //! rather than alleles. Single-read-group samples are unaffected, which is every fixture here so
@@ -94,7 +94,7 @@ fn write_locus<W: Write>(
     locus: &SampleLocusObservations,
     segment: &SsrSegment,
 ) -> std::io::Result<()> {
-    let has_reads = !locus.observed_sequences.is_empty()
+    let has_reads = !locus.observations.is_empty()
         || locus.reads_without_observation > 0
         || locus.reads_discarded_by_cap > 0;
     if !has_reads {
@@ -120,7 +120,7 @@ fn write_locus<W: Write>(
         )
     };
 
-    for obs in &locus.observed_sequences {
+    for obs in &locus.observations {
         let label = coverage_label(obs.read_coverage, locus.locus_len());
         match obs.read_coverage {
             ReadCoverage::Complete => {

@@ -1142,7 +1142,7 @@ mod tests {
     /// Total observations supporting a locus, across every row.
     fn total_obs(locus: &SampleLocusObservations) -> u32 {
         locus
-            .observed_sequences
+            .observations
             .iter()
             .map(|observation| observation.num_obs)
             .sum()
@@ -1932,7 +1932,7 @@ mod tests {
         let ids_of = |loci: &[SampleLocusObservations]| -> Vec<ChainId> {
             let mut ids: Vec<ChainId> = loci
                 .iter()
-                .flat_map(|locus| locus.observed_sequences.iter())
+                .flat_map(|locus| locus.observations.iter())
                 .flat_map(|observation| observation.chain_ids.iter().copied())
                 .collect();
             ids.sort_unstable();

@@ -93,7 +93,7 @@ impl DumpReport {
         self.ssr_loci += 1;
         // Zero coverage is "no read reached the tract" — distinct from "reads reached it and said
         // nothing" (that is `reads_without_observation`) and from "the cap dropped them all".
-        if locus.observed_sequences.is_empty()
+        if locus.observations.is_empty()
             && locus.reads_without_observation == 0
             && locus.reads_discarded_by_cap == 0
         {
@@ -107,7 +107,7 @@ impl DumpReport {
             LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
             _ => Vec::new(),
         };
-        for obs in &locus.observed_sequences {
+        for obs in &locus.observations {
             self.rows.push(ObservationRow {
                 contig: segment.chrom().to_string(),
                 start: locus.region.start.get(),

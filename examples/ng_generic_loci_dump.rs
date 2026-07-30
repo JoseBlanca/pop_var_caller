@@ -170,7 +170,7 @@ impl DumpReport {
             "the generic generator emitted a locus of another kind at {:?}",
             locus.region,
         );
-        for obs in &locus.observed_sequences {
+        for obs in &locus.observations {
             match obs.read_coverage {
                 ReadCoverage::Complete => {
                     self.rows_complete += 1;

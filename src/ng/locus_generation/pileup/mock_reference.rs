@@ -360,7 +360,7 @@ mod tests {
             .find(|locus| locus.reference_bases.len() > 1)
             .expect("the deletion must widen a record, or `widen` is not on the walk");
         assert_eq!(
-            widened.observed_sequences.len(),
+            widened.observations.len(),
             3,
             "the widened locus should carry a row each for the reference-matching read, the \
              SNP read's haplotype and the deletion"

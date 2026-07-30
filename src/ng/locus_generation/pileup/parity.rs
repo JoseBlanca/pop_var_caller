@@ -119,7 +119,7 @@ use crate::ng::read::PLACEHOLDER_READ_GROUP;
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
-use super::super::{LocusKind, ObservedSequence, ReadCoverage, SampleLocusObservations};
+use super::super::{LocusKind, ReadCoverage, SampleLocusObservations, SequenceObservation};
 use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
     run as production_run,
@@ -1222,7 +1222,7 @@ const PROJECTED_READ_GROUP: crate::ng::types::ReadGroupId = PLACEHOLDER_READ_GRO
 ///   bucket's length; ng carries it explicitly. Nothing projected *back* could see it.
 /// - `alleles[0].seq` becomes `reference_bases` — the REF bucket's bytes *are* the record's
 ///   reference sequence, which is why ng does not store the two separately.
-/// - each allele with `num_obs > 0` becomes one [`ObservedSequence`]. **Class 4:** the ones
+/// - each allele with `num_obs > 0` becomes one [`SequenceObservation`]. **Class 4:** the ones
 ///   with no support are dropped, because production creates `alleles[0]` at record open
 ///   regardless and A3's widen strands empty non-REF buckets, while ng derives rows from
 ///   reads that folded. `dropped_unsupported` on the returned census says how many, and
@@ -1293,7 +1293,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         .into_boxed_slice();
 
     let mut drops = ProjectionDrops::default();
-    let mut rows: Vec<ObservedSequence> = Vec::with_capacity(alleles.len());
+    let mut rows: Vec<SequenceObservation> = Vec::with_capacity(alleles.len());
     for allele in alleles {
         // Exhaustive on the support too: `placed_start` is bound and dropped **by name**.
         let AlleleSupportStats {
@@ -1313,7 +1313,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
         let mut chain_ids = allele.chain_ids.clone();
         chain_ids.sort_unstable();
         chain_ids.dedup();
-        rows.push(ObservedSequence {
+        rows.push(SequenceObservation {
             bases: allele.seq.clone().into_boxed_slice(),
             read_coverage: ReadCoverage::Complete,
             read_group: PROJECTED_READ_GROUP,
@@ -1338,7 +1338,7 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
             end: Position(u64::from(*pos) + reference_bases.len() as u64 - 1),
         },
         reference_bases,
-        observed_sequences: rows,
+        observations: rows,
         // Class 3 — production keeps neither per record.
         reads_without_observation: 0,
         reads_discarded_by_cap: 0,
@@ -1351,11 +1351,11 @@ fn project_counting_drops(record: &PileupRecord) -> (SampleLocusObservations, Pr
 ///
 /// The `ReadCoverage` half of the comparator is **the walk's own**
 /// (`open_record::coverage_order`, lifted to `pub(super)` for this) rather than a second
-/// spelling here: `finalise` sorts `ObservationRow`s and this sorts `ObservedSequence`s, so
+/// spelling here: `finalise` sorts `ObservationRow`s and this sorts `SequenceObservation`s, so
 /// the loop cannot be shared, but the one piece that could silently drift is.
 /// `the_projection_orders_rows_as_the_walk_does` covers the rest, by asserting that sorting
 /// an ng locus's rows with this function leaves them where the walk emitted them.
-fn sort_rows(rows: &mut [ObservedSequence]) {
+fn sort_rows(rows: &mut [SequenceObservation]) {
     use super::open_record::coverage_order;
     rows.sort_by(|a, b| {
         a.bases
@@ -1453,7 +1453,7 @@ impl PartialEq for ComparableLocus {
         let SampleLocusObservations {
             region: our_region,
             reference_bases: our_bases,
-            observed_sequences: our_rows,
+            observations: our_rows,
             reads_without_observation: our_without,
             reads_discarded_by_cap: our_capped,
             kind: our_kind,
@@ -1461,7 +1461,7 @@ impl PartialEq for ComparableLocus {
         let SampleLocusObservations {
             region: their_region,
             reference_bases: their_bases,
-            observed_sequences: their_rows,
+            observations: their_rows,
             reads_without_observation: their_without,
             reads_discarded_by_cap: their_capped,
             kind: their_kind,
@@ -1473,7 +1473,7 @@ impl PartialEq for ComparableLocus {
             && our_kind == their_kind
             && our_rows.len() == their_rows.len()
             && our_rows.iter().zip(their_rows).all(|(ours, theirs)| {
-                let ObservedSequence {
+                let SequenceObservation {
                     bases: our_row_bases,
                     read_coverage: our_coverage,
                     read_group: our_group,
@@ -1510,7 +1510,7 @@ impl std::fmt::Debug for ComparableLocus {
 /// rather than quietly matching nothing.
 fn comparable_exact_q_sum(locus: &SampleLocusObservations) -> SampleLocusObservations {
     let mut out = locus.clone();
-    sort_rows(&mut out.observed_sequences);
+    sort_rows(&mut out.observations);
     // **Class 3, zeroed on both sides.** Production keeps neither counter per record, so its
     // side is a structural zero; zeroing ng's too keeps the comparison symmetric, which is
     // the rule every projection here follows — neither side may be normalised in a way the
@@ -1763,7 +1763,7 @@ impl DivergenceCensus {
         self.group_split_rows += usize::from(rows_split_by_group(locus));
         let footprint = locus.region.len();
         let mut fabricating = false;
-        for row in &locus.observed_sequences {
+        for row in &locus.observations {
             let ReadCoverage::Observed {
                 positions_covered, ..
             } = row.read_coverage
@@ -1799,11 +1799,11 @@ impl DivergenceCensus {
             return;
         }
         let ng_bases: BTreeSet<&[u8]> = ours
-            .observed_sequences
+            .observations
             .iter()
             .map(|row| row.bases.as_ref())
             .collect();
-        for row in &theirs.observed_sequences {
+        for row in &theirs.observations {
             let theirs_bases: &[u8] = &row.bases;
             if ng_bases.contains(theirs_bases) {
                 continue;
@@ -1854,11 +1854,11 @@ impl DivergenceCensus {
 /// it went. 2,542 wrong records absorbed. Only an inherited test from production's own suite
 /// noticed.
 ///
-/// So the sum is taken by **destructuring [`ObservedSequence`] exhaustively**: a field added
+/// So the sum is taken by **destructuring [`SequenceObservation`] exhaustively**: a field added
 /// to ng's row type stops this file compiling instead of being silently left out of the
 /// oracle. D1 turns the comparison around — the sum is now taken over ng's rows on both
 /// sides, production's having been projected into them — and the guard has to turn with it,
-/// or a field added to `ObservedSequence` would go uncompared exactly as `placed_start` did.
+/// or a field added to `SequenceObservation` would go uncompared exactly as `placed_start` did.
 /// (`AlleleSupportStats` is still destructured exhaustively, in [`project`], which is the
 /// one place production's type is now read.)
 ///
@@ -1922,9 +1922,9 @@ impl PartialEq for LocusEvidence {
 }
 
 /// The evidence on one row, so a caller can sum over whichever grouping it is reconciling.
-fn row_evidence(row: &ObservedSequence, totals: &mut LocusEvidence, q_sum: &mut f64) {
+fn row_evidence(row: &SequenceObservation, totals: &mut LocusEvidence, q_sum: &mut f64) {
     // The exhaustive destructure is the point — see the doc above.
-    let ObservedSequence {
+    let SequenceObservation {
         // **Not summed, and each for its own reason.** `bases` is *what* the evidence says
         // rather than how much of it there is — it is the thing class 1 moves, and summing
         // it would be the excuse this census exists to refuse. `read_coverage` and
@@ -1955,7 +1955,7 @@ fn row_evidence(row: &ObservedSequence, totals: &mut LocusEvidence, q_sum: &mut 
 fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
     let mut totals = LocusEvidence::default();
     let mut q_sum = 0.0_f64;
-    for row in &locus.observed_sequences {
+    for row in &locus.observations {
         row_evidence(row, &mut totals, &mut q_sum);
     }
     totals.q_sum = q_sum;
@@ -1973,7 +1973,7 @@ fn locus_evidence(locus: &SampleLocusObservations) -> LocusEvidence {
 /// the split is invisible to `bases`.
 fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, LocusEvidence> {
     let mut per_bases: BTreeMap<Vec<u8>, (LocusEvidence, f64)> = BTreeMap::new();
-    for row in &locus.observed_sequences {
+    for row in &locus.observations {
         let entry = per_bases.entry(row.bases.to_vec()).or_default();
         row_evidence(row, &mut entry.0, &mut entry.1);
     }
@@ -2005,7 +2005,7 @@ fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, Locus
 /// no part of this change is allowed to do.
 fn locus_chain_ids(locus: &SampleLocusObservations) -> Vec<ChainId> {
     let mut ids: Vec<ChainId> = locus
-        .observed_sequences
+        .observations
         .iter()
         .flat_map(|row| row.chain_ids.iter().copied())
         .collect();
@@ -2065,11 +2065,11 @@ fn classify_locus(
 
     let mut classes = DivergenceClasses {
         partial_witness: ours
-            .observed_sequences
+            .observations
             .iter()
             .any(|row| row.read_coverage != ReadCoverage::Complete),
         group_split: ours
-            .observed_sequences
+            .observations
             .iter()
             .any(|row| row.read_group != PROJECTED_READ_GROUP),
         counters: ours.reads_without_observation > 0 || ours.reads_discarded_by_cap > 0,
@@ -2154,12 +2154,8 @@ fn assert_reads_are_accounted_for(
     ours: &SampleLocusObservations,
     theirs: &SampleLocusObservations,
 ) {
-    let ours_obs: u32 = ours.observed_sequences.iter().map(|row| row.num_obs).sum();
-    let theirs_obs: u32 = theirs
-        .observed_sequences
-        .iter()
-        .map(|row| row.num_obs)
-        .sum();
+    let ours_obs: u32 = ours.observations.iter().map(|row| row.num_obs).sum();
+    let theirs_obs: u32 = theirs.observations.iter().map(|row| row.num_obs).sum();
     assert_eq!(
         ours_obs + ours.reads_without_observation,
         theirs_obs,
@@ -2208,11 +2204,11 @@ fn stale_widen_shape(
         return false;
     }
     let ng_bases: BTreeSet<&[u8]> = ours
-        .observed_sequences
+        .observations
         .iter()
         .map(|row| row.bases.as_ref())
         .collect();
-    for row in &theirs.observed_sequences {
+    for row in &theirs.observations {
         let theirs_bases: &[u8] = &row.bases;
         if ng_bases.contains(theirs_bases) {
             continue;
@@ -2248,7 +2244,7 @@ fn rows_split_by_group(locus: &SampleLocusObservations) -> bool {
     type RowIdentityWithoutGroup<'a> = (&'a [u8], (u8, u16, u16));
 
     let mut seen: BTreeSet<RowIdentityWithoutGroup<'_>> = BTreeSet::new();
-    for row in &locus.observed_sequences {
+    for row in &locus.observations {
         if !seen.insert((
             &row.bases,
             super::open_record::coverage_order(row.read_coverage),
@@ -2665,7 +2661,7 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
 fn every_read_witnessed_the_whole_footprint(locus: &SampleLocusObservations) -> bool {
     locus.reads_without_observation == 0
         && locus
-            .observed_sequences
+            .observations
             .iter()
             .all(|row| row.read_coverage == ReadCoverage::Complete)
 }
@@ -2949,7 +2945,7 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
 /// **The projection lays production's record out the way the walk lays out ng's** — the
 /// promise [`sort_rows`] makes, checked rather than commented.
 ///
-/// `finalise` sorts `ObservationRow`s and [`sort_rows`] sorts `ObservedSequence`s, so the two
+/// `finalise` sorts `ObservationRow`s and [`sort_rows`] sorts `SequenceObservation`s, so the two
 /// loops cannot be shared even though the `ReadCoverage` comparator is (`coverage_order`,
 /// lifted to `pub(super)` for this). What could still drift is the *rest* of the key — the
 /// bases, then the group — so this walks a fixture and asserts that sorting ng's own emitted
@@ -2973,16 +2969,16 @@ fn the_projection_orders_rows_as_the_walk_does() {
             for (position, item) in ng_walk_in_groups(&case, 2).records.iter().enumerate() {
                 let Ok(locus) = item else { continue };
                 loci += 1;
-                if locus.observed_sequences.len() > 1 {
+                if locus.observations.len() > 1 {
                     multi_row += 1;
                 }
                 if rows_split_by_group(locus) {
                     grouped += 1;
                 }
-                let mut sorted = locus.observed_sequences.clone();
+                let mut sorted = locus.observations.clone();
                 sort_rows(&mut sorted);
                 assert_eq!(
-                    sorted, locus.observed_sequences,
+                    sorted, locus.observations,
                     "{where_}: locus {position} came out of the walk in an order this \
                      projection would not have produced, so the two orders have drifted",
                 );
@@ -3094,9 +3090,9 @@ fn the_projection_says_everything_a_record_says() {
         }
     );
     assert_eq!(
-        locus.observed_sequences,
+        locus.observations,
         vec![
-            ObservedSequence {
+            SequenceObservation {
                 bases: Box::from(&b"AAGT"[..]),
                 read_coverage: ReadCoverage::Complete,
                 read_group: PROJECTED_READ_GROUP,
@@ -3108,7 +3104,7 @@ fn the_projection_says_everything_a_record_says() {
                 placed_left: 1,
                 chain_ids: vec![4, 9],
             },
-            ObservedSequence {
+            SequenceObservation {
                 bases: Box::from(&b"ACGT"[..]),
                 read_coverage: ReadCoverage::Complete,
                 read_group: PROJECTED_READ_GROUP,
@@ -3158,10 +3154,10 @@ fn every_emitted_row_carries_a_read() {
             for (position, item) in ng_walk(&case).records.iter().enumerate() {
                 let Ok(locus) = item else { continue };
                 records += 1;
-                if locus.observed_sequences.len() > 2 {
+                if locus.observations.len() > 2 {
                     multi_allele += 1;
                 }
-                for (index, row) in locus.observed_sequences.iter().enumerate() {
+                for (index, row) in locus.observations.iter().enumerate() {
                     assert!(
                         row.num_obs > 0,
                         "{where_}: emitted locus {position} carries row {index} \
@@ -3320,7 +3316,7 @@ fn a_deletion_anchored_before_its_record_contributes_none_of_the_bases_it_delete
             .map(|locus| {
                 let reference = String::from_utf8_lossy(&locus.reference_bases).to_string();
                 let rows: Vec<String> = locus
-                    .observed_sequences
+                    .observations
                     .iter()
                     .map(|row| String::from_utf8_lossy(&row.bases).to_string())
                     .collect();
@@ -3436,7 +3432,7 @@ fn the_generator_exercises_what_the_port_can_break() {
                         // one" counts loci where the reads disagreed — which is what this
                         // number always meant, production's unsupported `alleles[0]` having
                         // been the reason the old spelling needed the `> 1`.
-                        if locus.observed_sequences.len() > 1 {
+                        if locus.observations.len() > 1 {
                             multi_allele_records += 1;
                         }
                     }

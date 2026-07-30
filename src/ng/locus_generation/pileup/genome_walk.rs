@@ -1104,7 +1104,7 @@ mod tests {
         }
         for locus in &loci {
             let folded: u32 = locus
-                .observed_sequences
+                .observations
                 .iter()
                 .map(|observation| observation.num_obs)
                 .sum();

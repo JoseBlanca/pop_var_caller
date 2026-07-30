@@ -653,7 +653,7 @@ mod classify {
             /// space (freebayes' `q_sum` convention). The **BQ** support moment the spec names
             /// (spec §3, "strand/BQ/MAPQ moments") — computed here because the tract base
             /// qualities are already sliced, a free by-product; the tally folds it into
-            /// [`ObservedSequence::q_sum`](crate::ng::locus_generation::ObservedSequence). MAPQ
+            /// [`SequenceObservation::q_sum`](crate::ng::locus_generation::SequenceObservation). MAPQ
             /// is carried separately, off the [`AlignedRead`], in the tally. **Soft** — filled,
             /// unconsumed today.
             q_sum: f64,
@@ -1006,7 +1006,7 @@ mod tally {
     use super::SsrGeneratorCounts;
     use super::classify::{Classified, NoObservationReason};
     use crate::bam::alignment_input::FLAG_REVERSE_STRAND;
-    use crate::ng::locus_generation::{ObservedSequence, ReadCoverage};
+    use crate::ng::locus_generation::{ReadCoverage, SequenceObservation};
     use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::ReadGroupId;
     use std::collections::HashMap;
@@ -1016,12 +1016,12 @@ mod tally {
     /// (`reads_fetched` / `reads_discarded_by_cap` are the caller's to set — they come from the
     /// cap, not the outcomes.)
     pub(super) struct SsrTally {
-        pub(super) observed_sequences: Vec<ObservedSequence>,
+        pub(super) observations: Vec<SequenceObservation>,
         pub(super) reads_without_observation: u32,
     }
 
     /// Accumulated support for one distinct `(bases, read_coverage, read_group)` bucket — the moments summed
-    /// as reads fold in, materialised into an [`ObservedSequence`] at the end.
+    /// as reads fold in, materialised into a [`SequenceObservation`] at the end.
     #[derive(Default)]
     struct Support {
         num_obs: u32,
@@ -1039,7 +1039,7 @@ mod tally {
     /// partials from one read group merge, and the **same allele seen from two read groups is two
     /// rows** (spec §3, §6). Each bucket accumulates the strand (`num_fwd` off the reverse-strand
     /// flag), BQ (`q_sum`, off the read's tract error mass), MAPQ and `placed_left` moments;
-    /// `chain_ids` stays empty because the STR path does not phase. `observed_sequences` is sorted
+    /// `chain_ids` stays empty because the STR path does not phase. `observations` is sorted
     /// by `(bases, coverage, read_group)`, so — like production's `tally` — the bases, the counts
     /// and the integer moments are independent of the order reads were folded. `q_sum` is the one
     /// exception: it sums in `f64`, which is commutative but not associative, so a bucket's
@@ -1098,10 +1098,10 @@ mod tally {
             }
         }
 
-        let mut observed_sequences: Vec<ObservedSequence> = buckets
+        let mut observations: Vec<SequenceObservation> = buckets
             .into_iter()
             .map(
-                |((bases, read_coverage, read_group), support)| ObservedSequence {
+                |((bases, read_coverage, read_group), support)| SequenceObservation {
                     bases,
                     read_coverage,
                     read_group,
@@ -1119,7 +1119,7 @@ mod tally {
         // The read group joins the sort key because it joined the bucket key: without it two
         // cells differing only by group would tie, and `HashMap` iteration order is seeded per
         // process — the output would be non-deterministic run to run on any multi-group sample.
-        observed_sequences.sort_unstable_by(|a, b| {
+        observations.sort_unstable_by(|a, b| {
             a.bases
                 .cmp(&b.bases)
                 .then_with(|| coverage_order(a.read_coverage).cmp(&coverage_order(b.read_coverage)))
@@ -1127,7 +1127,7 @@ mod tally {
         });
 
         SsrTally {
-            observed_sequences,
+            observations,
             reads_without_observation,
         }
     }
@@ -1210,7 +1210,7 @@ mod tally {
                 (&rg1, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 10, &mut counts).observed_sequences;
+            let rows = tally(outcomes, 10, &mut counts).observations;
 
             assert_eq!(rows.len(), 2, "one row per (allele, read group) cell");
             assert!(
@@ -1246,7 +1246,7 @@ mod tally {
                 outcomes.push((r, observed(bases, ReadCoverage::Complete, -1.0)));
             }
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 10, &mut counts).observed_sequences;
+            let rows = tally(outcomes, 10, &mut counts).observations;
 
             let order: Vec<(&[u8], u32)> = rows
                 .iter()
@@ -1296,7 +1296,7 @@ mod tally {
                 (&r, observed(b"CACACACACA", right, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 1, &mut counts).observed_sequences;
+            let rows = tally(outcomes, 1, &mut counts).observations;
 
             assert_eq!(
                 rows.len(),
@@ -1327,7 +1327,7 @@ mod tally {
                 (&after, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
             ];
             let mut counts = SsrGeneratorCounts::default();
-            let rows = tally(outcomes, 10, &mut counts).observed_sequences;
+            let rows = tally(outcomes, 10, &mut counts).observations;
 
             assert_eq!(rows.len(), 1, "one allele, one group — one row");
             assert_eq!(rows[0].num_obs, 3);
@@ -1356,7 +1356,7 @@ mod tally {
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
-            assert_eq!(result.observed_sequences.len(), 2);
+            assert_eq!(result.observations.len(), 2);
             assert_eq!(counts.observations_complete, 1);
             assert_eq!(counts.observations_partial, 1);
         }
@@ -1386,8 +1386,8 @@ mod tally {
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
-            assert_eq!(result.observed_sequences.len(), 1);
-            assert_eq!(result.observed_sequences[0].num_obs, 2);
+            assert_eq!(result.observations.len(), 1);
+            assert_eq!(result.observations[0].num_obs, 2);
         }
 
         /// The strand, BQ and MAPQ moments accumulate across the reads folded into a bucket:
@@ -1403,7 +1403,7 @@ mod tally {
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
-            let obs = &result.observed_sequences[0];
+            let obs = &result.observations[0];
             assert_eq!(obs.num_obs, 2);
             assert_eq!(obs.num_fwd, 1, "one forward, one reverse");
             assert_eq!(obs.q_sum, -5.0, "the BQ masses sum");
@@ -1437,14 +1437,14 @@ mod tally {
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
-            assert!(result.observed_sequences.is_empty());
+            assert!(result.observations.is_empty());
             assert_eq!(result.reads_without_observation, 4);
             assert_eq!(counts.no_border_anchored, 1);
             assert_eq!(counts.low_quality, 2);
             assert_eq!(counts.window_truncated, 1);
         }
 
-        /// `observed_sequences` is sorted by bytes, then by coverage — so the record is identical
+        /// `observations` is sorted by bytes, then by coverage — so the record is identical
         /// regardless of the order reads folded in (production's order-independence, extended to
         /// the coverage tie-break).
         #[test]
@@ -1473,7 +1473,7 @@ mod tally {
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
             let order: Vec<(&[u8], ReadCoverage)> = result
-                .observed_sequences
+                .observations
                 .iter()
                 .map(|o| (o.bases.as_ref(), o.read_coverage))
                 .collect();
@@ -1505,7 +1505,7 @@ mod tally {
             let rev = read(FLAG_REVERSE_STRAND, 30);
             let moments = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
-                let obs = tally(outcomes, 1, &mut counts).observed_sequences;
+                let obs = tally(outcomes, 1, &mut counts).observations;
                 assert_eq!(obs.len(), 1, "all reads share one bucket");
                 let o = &obs[0];
                 (o.num_obs, o.num_fwd, o.mapq_sum, o.mapq_sum_sq)
@@ -1532,7 +1532,7 @@ mod tally {
             let run = |outcomes: Vec<(&AlignedRead, Classified)>| {
                 let mut counts = SsrGeneratorCounts::default();
                 let result = tally(outcomes, 1, &mut counts);
-                (result.observed_sequences, counts)
+                (result.observations, counts)
             };
             let a = run(vec![
                 (&r, observed(b"CACACA", ReadCoverage::Complete, -1.0)),
@@ -1931,7 +1931,7 @@ where
                 end: Position(segment.end()),
             },
             reference_bases: bases[left..left + tract_len].into(),
-            observed_sequences: tallied.observed_sequences,
+            observations: tallied.observations,
             reads_without_observation: tallied.reads_without_observation,
             reads_discarded_by_cap: reads_discarded_by_cap as u32,
             kind: LocusKind::Ssr(SsrDetail {
@@ -2401,7 +2401,7 @@ mod tests {
             &b"AAAAAAAAAA"[..],
             "the tract only"
         );
-        assert!(locus.observed_sequences.is_empty(), "no read covered it");
+        assert!(locus.observations.is_empty(), "no read covered it");
         assert_eq!(locus.reads_without_observation, 0);
         assert_eq!(locus.reads_discarded_by_cap, 0);
         match locus.kind {
@@ -2455,7 +2455,7 @@ mod tests {
 
         let fetched = generator.counts().reads_fetched;
         assert_eq!(fetched, 4, "all four overlapping reads reached the tract");
-        let supported: u32 = locus.observed_sequences.iter().map(|obs| obs.num_obs).sum();
+        let supported: u32 = locus.observations.iter().map(|obs| obs.num_obs).sum();
         assert_eq!(
             supported as u64 + locus.reads_without_observation as u64,
             fetched,
@@ -2493,12 +2493,8 @@ mod tests {
             .expect("no fetch error")
             .expect("one locus");
 
-        let supporting: u32 = locus.observed_sequences.iter().map(|obs| obs.num_obs).sum();
-        let placed_left: u32 = locus
-            .observed_sequences
-            .iter()
-            .map(|obs| obs.placed_left)
-            .sum();
+        let supporting: u32 = locus.observations.iter().map(|obs| obs.num_obs).sum();
+        let placed_left: u32 = locus.observations.iter().map(|obs| obs.placed_left).sum();
 
         assert!(
             supporting > 0,
@@ -2535,11 +2531,7 @@ mod tests {
             .expect("no fetch error")
             .expect("one locus");
 
-        let placed_left: u32 = locus
-            .observed_sequences
-            .iter()
-            .map(|obs| obs.placed_left)
-            .sum();
+        let placed_left: u32 = locus.observations.iter().map(|obs| obs.placed_left).sum();
         assert_eq!(
             placed_left, 0,
             "strictly left, so the read starting *on* the anchor does not count — this is what \
@@ -2762,7 +2754,7 @@ mod tests {
             &mut counts,
         );
         let ng_complete: Vec<(Vec<u8>, u32)> = ng
-            .observed_sequences
+            .observations
             .iter()
             .filter(|obs| obs.read_coverage == ReadCoverage::Complete)
             .map(|obs| (obs.bases.to_vec(), obs.num_obs))
