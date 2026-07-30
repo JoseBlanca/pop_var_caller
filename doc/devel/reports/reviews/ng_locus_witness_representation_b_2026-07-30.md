@@ -56,13 +56,19 @@ mutation or a probe in an isolated worktree, with its output quoted.
 
 ## 4. Open questions
 
-1. **Should `WitnessedRefPositions` live with the fold at all?** Its field is private to a
-   ~3,100-line module, and the C1 fold will be written *inside* that module — so direct
-   construction, bypassing `canonicalise_runs`, is available exactly where the risk is. That
-   contradicts the rationale `witness.rs` was created under ("a private field needs one module
-   boundary to be private to"), while the arch's *Module home* list puts only the three public
-   types in `witness.rs`. **Not resolved here** — it is the arch's call, and it is the one
-   item this review leaves open. Raised at Checkpoint B.
+1. **Should `WitnessedRefPositions` live with the fold at all?** Its field was private to
+   `open_record.rs` — 2,167 lines of non-test code holding `apply_events_into`,
+   `fold_read_into_record`, `finalise` and `witness_of` — so direct construction, bypassing
+   `canonicalise_runs`, was available exactly where the risk is. That contradicted the
+   rationale `witness.rs` was created under ("a private field needs one module boundary to be
+   private to"), while the arch's *Module home* list puts only the three public types in
+   `witness.rs`.
+   **✅ Resolved (owner, 2026-07-30): its own file under `pileup/`** — `witnessed_ref.rs`,
+   still `pub(super)`, in `5790914`. The boundary becomes real without widening visibility to
+   `locus_generation` (which would have exposed the fold's reference axis to `ssr.rs`) and
+   without contradicting the arch's module list. Verified: the same direct construction from
+   `open_record.rs` now fails with `error[E0603]: tuple struct constructor
+   `WitnessedRefPositions` is private`.
 2. **Is `pub(super)` still the right visibility for the walk's internals?** Milestone A's
    review proposed demoting three of them and the resolution cited `open_record::witness_order`
    as the load-bearing contrast — which B1 has since **deleted**. Recommended: settle it once
