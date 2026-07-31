@@ -88,20 +88,48 @@ pub enum ReadWitness {
 
 impl ReadWitness {
     /// Unchanged signatures, now building a one-run set. Still clamp-then-derive.
-    pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Self;
-    pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Self;
-    /// **New** — the interior run neither constructor could express, which is what the
-    /// deferred note on the variant asked for (spec §1).
-    pub fn from_run(offset_in_locus: u16, positions_covered: u16, locus_len: LocusLen) -> Self;
+    pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Option<Self>;
+    pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Option<Self>;
+    /// **New** — the positions witnessed, which subsumes the interior run neither of the
+    /// two could express (spec §1), and the only constructor that may answer `Complete`.
+    pub fn from_witnessed_runs(
+        runs: impl IntoIterator<Item = (u16, u16)>,
+        locus_len: LocusLen,
+    ) -> Option<Self>;
 
     pub fn is_flush_left(&self) -> bool;
     pub fn is_flush_right(&self, locus_len: LocusLen) -> bool;
 }
 ```
 
-*Contract.* All three constructors clamp into `locus_len` and return `Complete` when the result
-covers the whole locus — so a run reaching both borders can never masquerade as partial. The
-clamp remains a convention rather than a type invariant, for the reason already recorded on the
+*Contract — **revised at D3 (owner, 2026-07-31)**. This paragraph asked for a third constructor
+`from_run(offset, covered, locus_len)` and for **all** constructors to return `Complete` when the
+clamped run covers the whole locus. Both were replaced, by a split on **what the caller claims**:*
+
+- ***A reach*** *—* `from_left` */* `from_right`*: "the read got at least this far from this
+  border". A lower bound, and on the STR path it is counted in* **read** *bases against a locus
+  measured in* **reference** *positions (`ssr.rs`'s `reach` against `locus.segment.tract_len()`),
+  two rulers that diverge under stutter. A reach at or past the locus length therefore says the
+  read* ran out of read*, not that it reached the far border, so these never answer `Complete` —
+  which matters because `Complete` gates `complete_observations`, i.e. what a likelihood may score
+  as an* exact *length. Implementing the original contract would have scored a lower bound as a
+  measurement, and moved two columns of the STR byte-identity oracle while doing it.*
+- ***A witnessed set*** *—* `from_witnessed_runs`*: "these are the positions the read witnessed",
+  on the locus's own ruler. Completeness is then arithmetic rather than inference, decided on the*
+  total *positions covered and never on the outer edges (a set flush at both borders can still
+  have a hole). The precondition is that ruler and it is the caller's to keep; the shape is what
+  protects it, since a producer holding a reach and a border cannot build locus-coordinate runs by
+  accident.*
+- `from_run` *is* not *built: an interior run is* `from_witnessed_runs([(3, 7)], len)`*, and two
+  spellings of one run differing only in whether they decide completeness is a coin-flip for the
+  caller.*
+- `Complete` *stays a* bare *variant a caller writes when it knows structurally — the STR
+  delimiter reporting both borders of the tract anchored in this read. It gains no payload: a
+  stored span would be a claim about a locus the type cannot see (below), and 1,646,289 of
+  1,647,161 observations on the chr1 run are `Complete`, so every one of them would build, compare
+  and hash a run that says nothing new.*
+
+The clamp remains a convention rather than a type invariant, for the reason already recorded on the
 variant: a run clamped against *some* `LocusLen` proves nothing about the locus it is finally
 attached to, so the real check lives in `num_obs_along_locus`, where the region is in hand.
 
@@ -140,7 +168,10 @@ pub(super) fn apply_events_into(
 ) -> Option<WitnessedRefPositions>;
 
 /// Resolve a witness against the **final** footprint — once, at `finalise`, never during
-/// the fold. Clamps into the footprint at both ends before measuring.
+/// the fold. Clamps into the footprint at both ends before measuring, rebases the runs from
+/// reference onto locus coordinates, and hands them to `ReadWitness::from_witnessed_runs`,
+/// which owns the `Complete` decision (D3): this is the caller that states positions rather
+/// than a reach, and the footprint's width is the emitted locus's length exactly.
 pub(super) fn witness_of(
     witnessed: &WitnessedRefPositions,
     record_pos: u32,

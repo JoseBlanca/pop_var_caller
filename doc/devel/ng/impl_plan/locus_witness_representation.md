@@ -195,9 +195,20 @@ expectations is a step that did more than rename.
   that. *Depends:* C4. *Source:* spec §4, arch §5.
 - ✅ **D2 — landed at C2.** `is_flush_left` / `is_flush_right` derive from the first and last run; signatures
   unchanged. *Depends:* D1. *Source:* arch §1.1.
-- ☐ **D3.** `ReadWitness::from_run`, the interior-run constructor the deferred note on the variant
-  asked for. `from_left` / `from_right` keep their signatures, so the STR generator's four call
-  sites do not move. *Depends:* D2. *Source:* arch §1.1, spec §1 goal 3.
+- ✅ **D3 — reshaped by owner decision, 2026-07-31.** The step asked for
+  `ReadWitness::from_run(offset, covered, locus_len)`, the interior-run constructor the deferred
+  note on the variant asked for. What landed instead is **`from_witnessed_runs(runs, locus_len)`**,
+  which subsumes it — an interior run is `from_witnessed_runs([(3, 7)], len)` — and which is the
+  **one constructor allowed to answer `Complete`**. The constructors now split by *what the caller
+  claims*: `from_left`/`from_right` take a **reach** (a lower bound, measured in read bases on the
+  STR path) and never decide completeness; `from_witnessed_runs` takes **the positions witnessed**
+  on the locus's own ruler and decides it on their total. `witness_of` keeps the reference→locus
+  clamp and rebase and delegates the decision, so the rule has one home. Arch §1.1's "all three
+  constructors return `Complete`" contract is **replaced**, not merely left unimplemented, and the
+  reason is correctness rather than output movement — see the revised §1.1 and the note on
+  `ReadWitness`. `from_left`/`from_right` keep their signatures, so the STR generator's call sites
+  do not move and the dump is byte-identical. *Depends:* D2. *Source:* arch §1.1 (revised),
+  spec §1 goal 3; owner decision.
 - ☐ **D4.** Both dump tools print the set rather than one run, and the generic dump's invariant
   check (`offset_in_locus + positions_covered <= footprint`) becomes a check per run. *Depends:*
   D3. *Source:* spec §4, §8. **Deferred here by the Milestone A review** (Mi15): `witness_label`

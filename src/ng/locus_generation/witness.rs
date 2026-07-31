@@ -240,14 +240,17 @@ impl WitnessedLocusPositions {
 /// their consumer. `witness_of` decides `Complete` on total coverage rather than on the
 /// outermost edges for exactly this reason.
 ///
-/// **This is also why the constructors do not return `Complete` when the clamped run covers
-/// the whole locus**, which arch §1.1's contract asks for and this type deliberately does not
-/// implement. The implementation report justified the departure on the STR dump moving; the
-/// stronger reason is the one above — a read that ran out of read has not reached the second
-/// border, and `Complete` gates `complete_observations`, i.e. what a likelihood may score as
-/// an exact length. Implementing the contract would score a lower bound as a measurement.
-/// **Flagged for the owner at plan step D3**, which owns the constructor set (Milestone C
-/// review, F10).
+/// **This is also why the *reach* constructors never return `Complete`** — a read that ran out
+/// of read has not reached the second border, and `Complete` gates `complete_observations`,
+/// i.e. what a likelihood may score as an exact length, so returning it there would score a
+/// lower bound as a measurement. Arch §1.1 asked every constructor to answer `Complete` when
+/// the clamped run covers the whole locus; **D3 replaced that with a split by what the caller
+/// claims** (owner, 2026-07-31): a reach cannot decide completeness, a witnessed set can, and
+/// the two live in [`from_left`](Self::from_left)/[`from_right`](Self::from_right) and
+/// [`from_witnessed_runs`](Self::from_witnessed_runs) respectively. `Complete` itself stays a
+/// bare variant a caller writes when it knows structurally — the STR delimiter reporting both
+/// borders of the tract anchored in this read — since a stored span would be a claim about a
+/// locus this type cannot see, which is the same reason the run is not sealed (below).
 ///
 /// **Not `Copy` since C2**, because `Partial` carries a set. Every consumer either matches on
 /// it or clones it, and the one place that mattered — the fold's per-read state — took the
@@ -333,7 +336,11 @@ impl ReadWitness {
     ///
     /// `locus_len` clamps the run into the locus. It is needed because a producer's
     /// reach can be measured in *read* bases, which diverge from locus positions under
-    /// stutter; a run must never claim positions the locus does not have.
+    /// stutter; a run must never claim positions the locus does not have. It is **only** a
+    /// clamp: a reach that saturates says the read ran out, so this answers `Partial` even
+    /// when the clamped run covers everything — the split is on
+    /// [`from_witnessed_runs`](Self::from_witnessed_runs), which is the constructor that may
+    /// decide completeness.
     ///
     /// **`None` when the clamped run covers no position** — the caller is describing a read
     /// that witnessed nothing of this locus, which is not a witness. C2 made that
@@ -354,7 +361,8 @@ impl ReadWitness {
     /// Clamped first, then the offset derived, so the subtraction cannot underflow:
     /// computing `locus_len - positions_covered` on an over-long reach would wrap to a
     /// huge offset, or — with a saturating subtraction — silently relabel a
-    /// right-anchored read as a left-anchored one.
+    /// right-anchored read as a left-anchored one. A reach, so never `Complete`, for the
+    /// reason [`from_left`](Self::from_left) gives.
     ///
     /// **One consequence of the encoding, and it reaches further than labelling.** A run
     /// that covers the whole locus is flush with *both* borders, so once
@@ -382,6 +390,67 @@ impl ReadWitness {
         let covered = positions_covered.min(locus_len.get());
         WitnessedLocusPositions::one_run_from_offset_and_length(locus_len.get() - covered, covered)
             .map(|positions| Self::Partial { positions })
+    }
+
+    /// **The positions the read witnessed**, half-open `[start, end)` and in any order — and
+    /// the one constructor that answers [`Complete`](Self::Complete), because it is the one
+    /// whose caller states positions rather than a reach.
+    ///
+    /// Each run is clamped into `locus_len` and a run left covering nothing is dropped, so a
+    /// caller may hand over runs that reach past the locus without building a witness claiming
+    /// positions the locus does not have. `None` when nothing survives — an empty input, or
+    /// runs lying wholly outside the locus — which is a read that witnessed nothing of it, and
+    /// not a witness (the reason [`from_left`](Self::from_left) gives).
+    ///
+    /// # Two families of constructor, and only this one may decide completeness
+    ///
+    /// The constructors split by **what the caller is claiming**, which is the rule that
+    /// replaced arch §1.1's "every constructor returns `Complete` when the clamped run covers
+    /// the whole locus" (owner, 2026-07-31):
+    ///
+    /// - [`from_left`](Self::from_left) / [`from_right`](Self::from_right) take a **reach** —
+    ///   *the read got at least this far from this border*. A lower bound, and on the STR path
+    ///   it is counted in **read** bases against a locus measured in **reference** positions
+    ///   (`ssr.rs`, `reach` against `locus.segment.tract_len()`), two rulers that diverge under
+    ///   stutter. A reach at or past the locus length therefore says the read *ran out of
+    ///   read*, not that it reached the far border, so those two never answer `Complete`.
+    /// - This one takes **the set of positions witnessed**, on the locus's own ruler.
+    ///   Completeness is then arithmetic and not an inference: do they add up to the locus?
+    ///
+    /// **The precondition is that ruler**, and it is the caller's to keep — runs measured with
+    /// anything but locus positions can produce a wrong `Complete` here. The shape is what
+    /// protects it: a caller has to build runs in locus coordinates to reach this function,
+    /// which a producer holding a reach and a border cannot do by accident.
+    ///
+    /// # It decides on the total, never on the outer edges
+    ///
+    /// A witness may start at the left border and end at the right one and still have missed
+    /// the middle — `[(0,3), (7,10)]` on a 10-position locus is flush both ways and covers 6.
+    /// Deciding on flushness, or on [`span`](WitnessedLocusPositions::span), would call that
+    /// read complete and hand a likelihood a spliced read as an exact measurement. See the
+    /// type-level note on `ReadWitness` for why flush is not pinned.
+    ///
+    /// This subsumes the interior-run constructor the deferred note on the variant asked for
+    /// (`from_witnessed_runs([(3, 7)], len)` is a run flush with neither border), which is why
+    /// there is no `from_run`: two spellings of one run differing only in whether they decide
+    /// completeness is a coin-flip for the caller.
+    pub fn from_witnessed_runs(
+        runs: impl IntoIterator<Item = (u16, u16)>,
+        locus_len: LocusLen,
+    ) -> Option<Self> {
+        let inside_the_locus = runs.into_iter().filter_map(|(start, end)| {
+            let start = start.min(locus_len.get());
+            let end = end.min(locus_len.get());
+            (start < end).then_some((start, end))
+        });
+        let positions = WitnessedLocusPositions::from_half_open_runs(inside_the_locus)?;
+        // The runs are disjoint and inside the locus, so their total is exactly "every
+        // position of it". `positions_covered` can never exceed the length here, so this is an
+        // equality rather than a `>=`.
+        if positions.positions_covered() == u32::from(locus_len.get()) {
+            return Some(Self::Complete);
+        }
+        Some(Self::Partial { positions })
     }
 
     /// Whether the run starts at the locus's left border — a **prefix** constraint on
@@ -923,6 +992,89 @@ mod tests {
         assert_eq!(
             ReadWitness::from_right(9, LocusLen::from_positions(3)),
             ReadWitness::from_left(9, LocusLen::from_positions(3))
+        );
+    }
+
+    /// **A witnessed set covering every position is `Complete`; the same borders with a hole
+    /// between them are not** — the one decision D3 gave a constructor, and the one place it
+    /// can go wrong quietly.
+    ///
+    /// The holed case is the discriminating one and it is drawn from the change's whole
+    /// purpose: a spliced read witnessing three positions in each exon of a 10-position record
+    /// is flush **both** ways (it starts at 0 and ends at 10) while covering 6. Deciding on
+    /// flushness — or on `span()`, which reads 10 here — calls that read complete and hands a
+    /// likelihood a spliced read as an exact measurement. Either mutation fails this test;
+    /// the whole-locus case alone passes under both.
+    #[test]
+    fn a_set_covering_every_position_is_complete_and_a_hole_is_not() {
+        let len = LocusLen::from_positions(10);
+        assert_eq!(
+            ReadWitness::from_witnessed_runs([(0, 10)], len),
+            Some(ReadWitness::Complete),
+        );
+
+        let spliced = ReadWitness::from_witnessed_runs([(0, 3), (7, 10)], len)
+            .expect("two runs inside the locus");
+        assert!(
+            spliced.is_flush_left() && spliced.is_flush_right(len),
+            "the case only discriminates while it is flush at both borders",
+        );
+        assert_eq!(
+            spliced,
+            ReadWitness::Partial {
+                positions: WitnessedLocusPositions::from_half_open_runs([(0, 3), (7, 10)])
+                    .expect("two runs"),
+            },
+            "6 of 10 positions witnessed is partial, whatever the outer edges say",
+        );
+    }
+
+    /// **A run touching neither border** — the shape the deferred note on the variant asked
+    /// for, which `from_left`/`from_right` cannot express and `from_witnessed_runs` subsumes
+    /// (there is no `from_run`; D3, owner).
+    #[test]
+    fn an_interior_run_is_flush_with_neither_border() {
+        let len = LocusLen::from_positions(10);
+        let interior = ReadWitness::from_witnessed_runs([(3, 7)], len).expect("one interior run");
+        assert_eq!(interior, partial_run(3, 4));
+        assert!(
+            !interior.is_flush_left() && !interior.is_flush_right(len),
+            "a run at 3..7 of a 10-position locus touches neither border",
+        );
+    }
+
+    /// **Runs are clamped into the locus, and a run left covering nothing is dropped** — so a
+    /// caller reaching past the locus builds a shorter witness rather than one claiming
+    /// positions the locus does not have. Deleting either `.min(locus_len.get())` fails the
+    /// first assertion; dropping the `start < end` filter fails the second by rejecting the
+    /// whole set over a run that contributes nothing.
+    #[test]
+    fn runs_are_clamped_into_the_locus_and_empty_ones_dropped() {
+        let len = LocusLen::from_positions(10);
+        assert_eq!(
+            ReadWitness::from_witnessed_runs([(8, 40)], len),
+            Some(partial_run(8, 2)),
+        );
+        assert_eq!(
+            ReadWitness::from_witnessed_runs([(2, 5), (12, 20)], len),
+            Some(partial_run(2, 3)),
+            "a run wholly past the locus contributes nothing and does not sink the set",
+        );
+    }
+
+    /// **Nothing inside the locus is not a witness** — the same `None` the reach constructors
+    /// answer, for the same reason: a read that witnessed no position of this locus has no
+    /// witness to record.
+    #[test]
+    fn a_set_with_nothing_inside_the_locus_answers_none() {
+        let len = LocusLen::from_positions(10);
+        assert_eq!(ReadWitness::from_witnessed_runs([], len), None);
+        assert_eq!(ReadWitness::from_witnessed_runs([(12, 20)], len), None);
+        assert_eq!(ReadWitness::from_witnessed_runs([(5, 5)], len), None);
+        assert_eq!(
+            ReadWitness::from_witnessed_runs([(0, 4)], LocusLen::from_positions(0)),
+            None,
+            "a locus with no positions has none to witness",
         );
     }
 

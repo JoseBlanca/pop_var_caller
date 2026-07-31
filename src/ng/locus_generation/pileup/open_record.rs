@@ -31,7 +31,7 @@ use super::decompose::ReadEvent;
 use super::errors::WalkerError;
 use super::witnessed_ref::{WitnessedRefPositions, WitnessedRefRuns};
 use crate::ng::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
+    LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
 };
 
 /// Pre-allocated capacity for `OpenPileupRecord::folded_reads` —
@@ -251,22 +251,29 @@ pub(super) fn witness_of(
     //
     // The message names the runs and the footprint, because the bare invariant does not tell
     // a maintainer *which* of the two is wrong (Milestone C review, F4).
-    let positions = WitnessedLocusPositions::from_half_open_runs(clamped).unwrap_or_else(|| {
+    //
+    // **`Complete` versus `Partial` is `ReadWitness`'s decision, not this function's** (D3).
+    // This is the caller that states *positions* rather than a reach, so it is the one allowed
+    // to ask for the completeness test — and the test itself lives on the type, in one place,
+    // beside the reach constructors that must never make it. What stays here is the part that
+    // is genuinely the fold's: intersecting each run with the footprint and rebasing reference
+    // positions onto the locus. The constructor's own clamp is then a no-op on this input,
+    // since the loop above has already put every run inside `0..width`.
+    //
+    // **The `LocusLen` is honest, and this is not F3 coming back.** That finding was about
+    // narrowing run *offsets* through a type that means "a locus length"; the width of a
+    // finalised footprint **is** this locus's length — `finalise` emits the region
+    // `record_pos ..= record_end_exclusive - 1`, whose `len()` is exactly this difference — so
+    // the two are the same quantity and the assertions above are what make the narrowing
+    // total.
+    let locus_len = LocusLen::from_positions(u64::from(record_end_exclusive - record_pos));
+    ReadWitness::from_witnessed_runs(clamped, locus_len).unwrap_or_else(|| {
         panic!(
             "every run of {witnessed:?} fell outside the footprint \
              {record_pos}..{record_end_exclusive}, but a read that witnessed nothing inside a \
              record does not fold into it",
         )
-    });
-
-    // **`Complete` is decided on the set, not on its outermost edges.** A witness whose first
-    // run starts at the border and whose last ends at the other one can still have a hole in
-    // the middle; only covering every position makes it complete. The runs are disjoint and
-    // inside the locus, so their total says exactly that.
-    if positions.positions_covered() == record_end_exclusive - record_pos {
-        return ReadWitness::Complete;
-    }
-    ReadWitness::Partial { positions }
+    })
 }
 
 /// **The identity of one emitted observation** — what makes two reads the same observation.
@@ -2274,7 +2281,7 @@ pub(super) struct ReadContribution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::LocusLen;
+    use crate::ng::locus_generation::WitnessedLocusPositions;
     use crate::ng::locus_generation::pileup::tests::MockFasta;
 
     fn fa(s: &str) -> MockFasta {
