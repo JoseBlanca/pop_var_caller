@@ -9,13 +9,23 @@
 //! tick may emit 0, 1, or many records; the iterator buffers them
 //! in a small `VecDeque` and drains across successive `next()`
 //! calls.
+//!
+//! **No longer a verbatim copy — A0 (plan 3).** Copied from
+//! `src/pileup/walker/driver.rs`, then changed in one respect: the reference
+//! accessor is bound by ng's [`RefSeq`] rather than production's
+//! `MultiChromRefFetcher`, and the field and parameters carrying it are named
+//! `reference` rather than `ref_fetcher` — there is no fetcher any more.
+//! `copy_fidelity.rs` released this file in that commit; the walk itself is
+//! untouched.
 
 use std::collections::VecDeque;
 use std::iter::Peekable;
 
 use ahash::AHashMap;
 
-use crate::pileup_record::{ChainId, PileupRecord};
+use crate::pileup_record::ChainId;
+
+use crate::ng::locus_generation::SampleLocusObservations;
 
 use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
@@ -25,7 +35,7 @@ use super::open_record::{
     OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
 };
 use super::{PreparedRead, ReadLengthError, WalkerConfig};
-use crate::fasta::MultiChromRefFetcher;
+use crate::ng::ref_seq::RefSeq;
 
 /// Construct a [`PileupWalker`] over a coordinate-sorted stream of
 /// prepared reads. The walker is an `Iterator<Item = Result<PileupRecord,
@@ -38,12 +48,12 @@ use crate::fasta::MultiChromRefFetcher;
 /// have `(chrom_id, alignment_start)` non-decreasing relative to
 /// the previous one. A regression is a hard error — stale or
 /// malformed input shouldn't pass silently.
-pub fn run<R, F>(reads: R, ref_fetcher: F, config: &WalkerConfig) -> PileupWalker<R::IntoIter, F>
+pub fn run<R, F>(reads: R, reference: F, config: &WalkerConfig) -> PileupWalker<R::IntoIter, F>
 where
     R: IntoIterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    PileupWalker::new(reads.into_iter(), ref_fetcher, config)
+    PileupWalker::new(reads.into_iter(), reference, config)
 }
 
 /// Pull-shaped walker over a coordinate-sorted stream of prepared
@@ -51,29 +61,46 @@ where
 pub struct PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
     reads: Peekable<I>,
-    ref_fetcher: F,
+    reference: F,
     state: WalkerState,
     /// Records produced by walker ticks but not yet consumed by
     /// `Iterator::next`. A single tick may emit 0–many records
     /// (e.g. a wide deletion at an earlier anchor unblocks several
     /// narrower records simultaneously); they're appended here in
     /// emission order and drained via `pop_front`.
-    pending: VecDeque<PileupRecord>,
+    pending: VecDeque<SampleLocusObservations>,
     /// `true` once end-of-input has been flushed *or* a `next()`
     /// call has returned an error. Both terminal states stop the
     /// iterator from doing further work.
     done: bool,
+    /// The last position worth walking, or `None` for production's
+    /// unbounded walk — **ng's addition, C2 (plan 3).**
+    ///
+    /// A region walk queries a halo of `max_record_span` past the region's
+    /// end, so a record anchored inside the region still sees the reads that
+    /// fold into it from beyond the boundary (spec §2). Querying the halo is
+    /// not enough: the walk has no right bound of its own, so it would walk
+    /// all 5,000 halo positions at full depth, finalise every record in them
+    /// and throw them away at the region clamp — a tax that, with regions
+    /// tiling the genome, can exceed the region interiors.
+    ///
+    /// So the walk stops once it is past this position **and nothing anchored
+    /// at or before it is still open**. The second half is what makes the stop
+    /// safe rather than merely early: a record anchored inside the region can
+    /// have a footprint running far past the boundary, and it is not finished
+    /// until the walker has passed all of it.
+    stop_after: Option<u32>,
 }
 
 impl<I, F> PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    pub fn new(reads: I, ref_fetcher: F, config: &WalkerConfig) -> Self {
+    pub fn new(reads: I, reference: F, config: &WalkerConfig) -> Self {
         let mut reads = reads.peekable();
         let mut state = WalkerState::new(*config);
         // Initial chromosome anchor: the first peeked read sets
@@ -86,11 +113,91 @@ where
         }
         Self {
             reads,
-            ref_fetcher,
+            reference,
             state,
             pending: VecDeque::new(),
             done: false,
+            stop_after: None,
         }
+    }
+
+    /// Stop the walk once it is past `pos` and no record anchored at or
+    /// before `pos` is still open — the region walk's right bound
+    /// ([`stop_after`](Self::stop_after)).
+    ///
+    /// Consuming, so a bounded walk reads as one expression at the call site
+    /// and an unbounded one needs no argument at all: production's `run` is
+    /// unchanged, which is what keeps the stage-1 differential comparing like
+    /// with like.
+    ///
+    /// `#[must_use]`, because a consuming builder called as a bare statement
+    /// compiles, discards the walker and bounds nothing.
+    #[must_use]
+    pub fn stopping_after(mut self, pos: u32) -> Self {
+        self.stop_after = Some(pos);
+        self
+    }
+
+    /// Walk with a chain-id allocator handed in from outside, replacing the one
+    /// [`new`](Self::new) built — **ng's addition, C3 (plan 3).**
+    ///
+    /// Production builds a walker per chromosome, so its allocator can be the
+    /// walker's own. ng walks one *region* at a time, and a fresh allocator per
+    /// region would give two fragments of two regions the same chain id, which a
+    /// later phasing step would chain together (spec §8). So the allocator lives
+    /// on the generator and is lent to each walk; [`into_chain_ids`](Self::into_chain_ids)
+    /// is how it comes back.
+    ///
+    /// Must be called before the walk starts — the walker is lazy, so "before
+    /// the first `next()`" is all that means, and the assert says so in the
+    /// build that can check it. Swapped in **mid-walk** it discards the ids
+    /// already issued for the reads still active, and the allocations they
+    /// represent go missing from the summary: one fragment, two identities,
+    /// which is the corruption a run-lifetime allocator exists to prevent
+    /// (review).
+    ///
+    /// `#[must_use]`, because a consuming builder called as a bare statement
+    /// compiles, discards the walker and adopts nothing.
+    #[must_use]
+    pub fn adopting_chain_ids(mut self, chain_ids: ChainIdAllocator) -> Self {
+        debug_assert!(
+            self.state.summary.reads_admitted == 0,
+            "adopting_chain_ids after {} reads: the ids already issued for the active reads \
+             would be discarded",
+            self.state.summary.reads_admitted,
+        );
+        self.state.chain_ids = chain_ids;
+        self
+    }
+
+    /// Take the chain-id allocator back out at the end of a region's walk, so
+    /// the next region continues the same `next_id` sequence.
+    ///
+    /// Consuming rather than swapping: a swap needs a placeholder allocator, and
+    /// a placeholder that starts at zero is exactly the state this exists to
+    /// avoid ever being in.
+    pub fn into_chain_ids(self) -> ChainIdAllocator {
+        self.state.chain_ids
+    }
+
+    /// Whether the walk has passed its right bound with nothing left that
+    /// could still belong to the region.
+    ///
+    /// **Both halves matter.** `walker_pos > stop` alone would cut a record
+    /// anchored inside the region short of its own footprint — the long
+    /// deletions the halo exists for are exactly the records still open here.
+    /// The open-record table is keyed by anchor, so "anything anchored at or
+    /// before `stop`" is its first key.
+    fn reached_stop(&self) -> bool {
+        let Some(stop) = self.stop_after else {
+            return false;
+        };
+        self.state.walker_pos > stop
+            && self
+                .state
+                .open_records
+                .first_open_anchor()
+                .is_none_or(|anchor| anchor > stop)
     }
 
     /// Cumulative counters for the run so far. Safe to call
@@ -105,6 +212,18 @@ where
     /// the remaining chromosome and sets `done = true`.
     fn fill_pending(&mut self) -> Result<(), WalkerError> {
         loop {
+            // Terminal condition (ng's, C2): the walk is past its right bound
+            // and nothing anchored at or before it is still open. Flushed the
+            // same way end-of-input is — the records still open are anchored
+            // past the bound, so the region clamp discards them, but they are
+            // emitted rather than dropped on the floor so the clamp can count
+            // them.
+            if self.reached_stop() {
+                self.state.flush_chromosome_into(&mut self.pending)?;
+                self.done = true;
+                return Ok(());
+            }
+
             // Terminal condition: no more reads to pull and the
             // active set is empty. Stopping at "reads empty" alone
             // would leak open records whose anchors sit ahead of
@@ -177,7 +296,7 @@ where
             // ordering also keeps the active-read count accurate
             // when an emitted record's footprint coincides with a
             // read's `alignment_end`.
-            self.state.process_position(&self.ref_fetcher)?;
+            self.state.process_position(&self.reference)?;
             self.state.expire_passed_reads()?;
             self.state.close_aged_records_into(&mut self.pending);
 
@@ -197,9 +316,9 @@ where
 impl<I, F> Iterator for PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    type Item = Result<PileupRecord, WalkerError>;
+    type Item = Result<SampleLocusObservations, WalkerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(record) = self.pending.pop_front() {
@@ -240,6 +359,38 @@ pub struct RunSummary {
     /// pathologically deep regions; QC pipelines may want to look
     /// at those samples / regions specifically.
     pub column_depth_truncations: u64,
+    /// **ng's, added by D2 — production's `RunSummary` has no counterpart.**
+    ///
+    /// Reads that were admitted and left the active set having never been a contributor
+    /// at any position: every base `N` or adaptor-masked, so the fold never heard of
+    /// them and *neither per-locus counter can see them* — they produced no observation,
+    /// but they also never reached the path that records `reads_without_observation`
+    /// (spec §6). Read off the active set, which is where a read leaves.
+    ///
+    /// Because production cannot state it, `parity.rs` binds this field by name and
+    /// drops it from the counter comparison; the exhaustive destructure there is what
+    /// forces that decision to be made rather than defaulted.
+    pub reads_silent_over_footprint: u64,
+    /// **ng's, and production has no counterpart** — folded reads whose witness is more
+    /// than one run, i.e. reads blind in the *middle* of a record's footprint. A spliced
+    /// read across a record widened over its intron is the case that produces one, and
+    /// recording it instead of discarding it is what this whole representation exists for.
+    ///
+    /// **Why it is on the walk's own summary and not only on the parity census.** The
+    /// census counts the same thing, but it lives behind `#[cfg(test)]` and only measures
+    /// loci where *production's* walker also produced a record — so it can never answer
+    /// "how often does this fire on a real spliced BAM", which is the open measurement the
+    /// change was made for (spec §8). Here, any BAM the generator is pointed at reports it,
+    /// and the dump tool prints it (owner, 2026-07-31).
+    ///
+    /// Expected to read **zero on DNA-seq**, structurally: a ref-skip emits no event, so an
+    /// intron cannot widen a record on its own, and modern Illumina puts `N`s at read ends
+    /// where they cannot make a hole.
+    pub reads_with_holed_witness: u64,
+    /// The positions inside those holes, summed over the reads — what a holed read was
+    /// blind over, which is the quantity that says how much evidence the old drop threw
+    /// away rather than merely how many reads it threw away.
+    pub hole_positions: u64,
 }
 
 impl RunSummary {
@@ -253,35 +404,17 @@ impl RunSummary {
         self
     }
 
-    /// Total `other`'s per-region tallies into `self`. Counts add;
-    /// `active_reads_high_water` takes the **max** — regions are walked
-    /// one at a time, so the peak concurrent active-read count for the
-    /// whole run is the largest single region's peak, not the sum.
-    pub fn merge(&mut self, other: &RunSummary) {
-        // Exhaustive destructure (no `..`): a new RunSummary field is a
-        // compile error here until it is explicitly folded in — important
-        // because the fold is not uniform (`active_reads_high_water` takes
-        // the max, the rest add), so a copy-paste `+=` on a new field
-        // would be silently wrong (review M3).
-        let RunSummary {
-            reads_admitted,
-            records_emitted,
-            record_widen_events,
-            mate_overlap_positions,
-            chain_allocations,
-            active_reads_high_water,
-            mate_lookup_evictions,
-            column_depth_truncations,
-        } = *other;
-        self.reads_admitted += reads_admitted;
-        self.records_emitted += records_emitted;
-        self.record_widen_events += record_widen_events;
-        self.mate_overlap_positions += mate_overlap_positions;
-        self.chain_allocations += chain_allocations;
-        self.active_reads_high_water = self.active_reads_high_water.max(active_reads_high_water);
-        self.mate_lookup_evictions += mate_lookup_evictions;
-        self.column_depth_truncations += column_depth_truncations;
-    }
+    // **Production's `merge` is deliberately not copied here — deleted at the
+    // Milestone C review.** It totals one region's summary into another, which is
+    // right for production (a fresh walker, and so a fresh chain-id allocator,
+    // per region) and **wrong for ng**: ng shares one allocator across regions and
+    // `reset()` preserves its counters, so summing region summaries
+    // triangular-sums `chain_allocations` and `mate_lookup_evictions` (spec §8).
+    // It had no ng caller, and a `pub fn merge` sitting on the type that
+    // `PileupGeneratorCounts::fold_region_walk` exists to fold *correctly* is a
+    // trap name-completion offers first. The exhaustive-destructure idiom it
+    // carried lives on in `fold_region_walk` and in `parity.rs`'s summary
+    // comparison.
 }
 
 /// A genomic locus: a position on a specific chromosome. The
@@ -315,6 +448,10 @@ struct WalkerState {
     /// allocated once and reused via `clear()` between steps. L6
     /// in `ia/reviews/perf_pileup_2026-05-10.md`.
     contributors_buf: Vec<ReadContribution>,
+    /// Reusable per-step buffer for the read ids the column-depth cap removed. Hoisted for
+    /// the same reason as `contributors_buf`: this runs once per covered reference base,
+    /// and a truncated column is rare, so the buffer is usually empty and never grows.
+    truncated_read_ids_buf: Vec<u32>,
     /// Reusable per-step buffer for `close_aged_records`'s drained
     /// records. Paired with `OpenPileupRecordTable::closing_keys_buf`;
     /// together they remove the two per-walker-step `Vec` allocations
@@ -339,6 +476,7 @@ impl WalkerState {
             summary: RunSummary::default(),
             config,
             contributors_buf: Vec::new(),
+            truncated_read_ids_buf: Vec::new(),
             drained_buf: Vec::new(),
         }
     }
@@ -401,10 +539,7 @@ impl WalkerState {
         Ok(())
     }
 
-    fn process_position<F: MultiChromRefFetcher>(
-        &mut self,
-        ref_fetcher: &F,
-    ) -> Result<(), WalkerError> {
+    fn process_position<F: RefSeq>(&mut self, reference: &F) -> Result<(), WalkerError> {
         // Step 1: query each active read's cursor for events
         // anchored at walker_pos. Reads with no event here are
         // silent (deletion interior or N-skip), so they are not
@@ -434,14 +569,18 @@ impl WalkerState {
                 })
                 .unwrap_or(0);
 
+            // **ng's, added by D2.** Set here — before the mate-overlap collapse and
+            // before the depth cap — because both of those remove reads the walk plainly
+            // saw, and each has its own counter. What this flag exists to find is the read
+            // that reaches *no* contributor list anywhere: every base `N` or adaptor-masked,
+            // admitted and expired without the fold ever hearing of it, and so invisible to
+            // both per-locus counters (spec §6).
+            active_read.ever_contributed.set(true);
             contributors.push(ReadContribution {
                 read_id: active_read.read_id,
                 chain_id: active_read.chain_id,
                 events_at_pos,
                 bq_baq_at_walker_pos: bq_at_walker,
-                mq_log_err: active_read.read.mq_log_err,
-                mapq: active_read.read.mapq,
-                is_reverse_strand: active_read.read.is_reverse_strand,
                 alignment_start: active_read.read.alignment_start,
                 mate_role: active_read.read.mate_role,
                 bq_zero_in_window: false,
@@ -469,8 +608,17 @@ impl WalkerState {
         // truncate-to-first-N is approximately unbiased and avoids
         // the random-sample machinery a per-allele clip would
         // require.
+        //
+        // **The ids the cap removes are kept** (B3). The locus type reports reads a cap
+        // discarded *per record*, and this is the only moment they are knowable: truncation
+        // happens before step 3, so a truncated read opens and widens nothing and is
+        // invisible to every record it would have reached. They are candidates rather than
+        // a count — see `OpenPileupRecord::reads_discarded_by_cap`.
         let cap = column_depth_cap(contributors, &self.config);
+        self.truncated_read_ids_buf.clear();
         if contributors.len() > cap {
+            self.truncated_read_ids_buf
+                .extend(contributors[cap..].iter().map(|contrib| contrib.read_id));
             contributors.truncate(cap);
             self.summary.column_depth_truncations += 1;
         }
@@ -486,8 +634,9 @@ impl WalkerState {
             walker_pos,
             self.chrom_id,
             contributors,
+            &self.truncated_read_ids_buf,
             &self.active_reads,
-            ref_fetcher,
+            reference,
         )?;
         self.summary.record_widen_events += outcome.widen_count;
 
@@ -498,7 +647,7 @@ impl WalkerState {
     /// the walker and append them to `out` in emission order.
     /// Returns without touching `out` if there are no aged records
     /// to drain.
-    fn close_aged_records_into(&mut self, out: &mut VecDeque<PileupRecord>) {
+    fn close_aged_records_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
         self.open_records
             .drain_aged_into(self.walker_pos, &mut self.drained_buf);
         if self.drained_buf.is_empty() {
@@ -508,7 +657,17 @@ impl WalkerState {
         // we drain the hoisted buffer rather than `into_iter()`ing
         // it; the backing `Vec` stays allocated and reusable.
         for open in self.drained_buf.drain(..) {
-            out.push_back(open.finalise());
+            // The witness tally is resolved at `finalise`. **Resolved there** because a
+            // witness is a read's extent measured against the record's *final* footprint,
+            // which only `finalise` knows and no later caller can reconstruct — the reads may
+            // have expired. Two of its counts the locus already carries
+            // (`reads_without_observation`, `reads_discarded_by_cap`) and the complete/partial
+            // split is read only by tests; the **holed** pair is kept, because nothing else in
+            // a non-test build can state how often a read was blind in the middle of a record.
+            let (record, witness) = open.finalise();
+            self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+            self.summary.hole_positions += u64::from(witness.hole_positions);
+            out.push_back(record);
             self.summary.records_emitted += 1;
         }
     }
@@ -563,13 +722,17 @@ impl WalkerState {
     /// emission order.
     fn flush_chromosome_into(
         &mut self,
-        out: &mut VecDeque<PileupRecord>,
+        out: &mut VecDeque<SampleLocusObservations>,
     ) -> Result<(), WalkerError> {
         // Drain remaining open records (anything that was still
         // open at end-of-chromosome is by definition ready to
         // close — there are no future reads on this chromosome).
         for open in self.open_records.drain_all() {
-            out.push_back(open.finalise());
+            // Same as `close_aged_records_into` — see the note there.
+            let (record, witness) = open.finalise();
+            self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+            self.summary.hole_positions += u64::from(witness.hole_positions);
+            out.push_back(record);
             self.summary.records_emitted += 1;
         }
         // Release any active-set reads so the active-count
@@ -593,8 +756,16 @@ impl WalkerState {
     }
 
     fn summary(&self) -> RunSummary {
-        self.summary
-            .merge_chain_id_counters(self.chain_ids.counters())
+        let mut summary = self
+            .summary
+            .merge_chain_id_counters(self.chain_ids.counters());
+        // Read off the active set at every ask rather than accumulated as the walk goes:
+        // the set is where a read *leaves*, and asking it means the number cannot drift
+        // from the exits that produced it. Reads still active have not left, so a summary
+        // taken mid-walk reports the reads that have — which is what every other counter
+        // here does too.
+        summary.reads_silent_over_footprint = self.active_reads.silent_exits();
+        summary
     }
 }
 
@@ -918,6 +1089,55 @@ mod tests {
     use super::super::cigar_cursor::EventsAt;
     use super::*;
 
+    /// **The cap's discarded read ids reach the record** — the plumbing B3 adds, end to
+    /// end through `run` rather than through `process_position`.
+    ///
+    /// Worth its own test because the per-record fixtures drive the fold directly and hand
+    /// it the truncated ids themselves, so they cannot see the walk failing to *collect*
+    /// them. Deleting the collection leaves every one of those fixtures green.
+    ///
+    /// Six reads at one position with a cap of two: four are truncated, none of them folds
+    /// anywhere, and the record they would have reached says so.
+    #[test]
+    fn reads_the_column_cap_removed_are_reported_on_the_record() {
+        use crate::ng::locus_generation::pileup::tests::{MockFasta, snp_read};
+
+        let config = WalkerConfig {
+            max_snp_column_depth: 2,
+            ..WalkerConfig::default()
+        };
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let loci: Vec<_> = run(reads, &MockFasta::new("ACG"), &config)
+            .map(|item| item.expect("the walk succeeds"))
+            .collect();
+
+        assert!(!loci.is_empty(), "the fixture must emit loci");
+        // **The count, per locus — not `> 0` summed.** Summing and asserting non-zero
+        // survives an off-by-one in the slice the walk collects (`contributors[cap + 1..]`
+        // reports three where there are four and still passes), which leaves the very
+        // number B3 exists to get right unpinned on every record that left the walker.
+        for locus in &loci {
+            assert_eq!(
+                locus.reads_discarded_by_cap, 4,
+                "six reads at a cap of two truncates four, and none of them folded \
+                 anywhere: {locus:?}"
+            );
+        }
+        for locus in &loci {
+            let folded: u32 = locus
+                .observations
+                .iter()
+                .map(|observation| observation.num_obs)
+                .sum();
+            assert_eq!(
+                folded, 2,
+                "each column folds exactly the cap's worth, or the fixture is not capping"
+            );
+        }
+    }
+
     fn contribution(
         bq: u8,
         is_first_mate: bool,
@@ -929,9 +1149,6 @@ mod tests {
             chain_id: 0,
             events_at_pos: events,
             bq_baq_at_walker_pos: bq,
-            mq_log_err: -3.0,
-            mapq: 60,
-            is_reverse_strand: false,
             alignment_start,
             mate_role: if is_first_mate {
                 super::super::MateRole::FirstOfPair

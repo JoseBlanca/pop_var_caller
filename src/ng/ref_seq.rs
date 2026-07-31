@@ -27,10 +27,12 @@ use crate::fasta::{ChromRefFetchError, ContigEntry, ContigList};
 use crate::ng::raw_chrom_reader::RawChromReader;
 use crate::ng::types::ContigId;
 use noodles_fasta::Repository;
+use noodles_fasta::fai;
 use std::cell::RefCell;
 use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Errors from a reference fetch. `#[non_exhaustive]` so matchers must accept future
 /// variants; the shape mirrors the production `fasta::fetcher::ChromRefFetchError`.
@@ -553,7 +555,18 @@ fn map_chrom_error(contig: ContigId, err: ChromRefFetchError) -> RefSeqError {
 /// capability. `Send` but not `Sync` (per-worker ownership, like the production fetchers).
 pub struct WindowedRefSeq {
     fasta_path: PathBuf,
-    contigs: ContigList,
+    /// Shared, because a per-query factory hands one to every accessor it builds and
+    /// this table is 2,580 `String`s on GRCh38 — **34 µs per accessor to clone**,
+    /// measured, and the second cost the `.fai` parse was hiding.
+    contigs: Arc<ContigList>,
+    /// The `.fai`, parsed once and shared — `None` when this accessor parses it itself
+    /// at every contig open ([`new`](Self::new) vs
+    /// [`with_shared_index`](Self::with_shared_index)).
+    ///
+    /// It is the *index* that is shared here and never the reader: k accessors over one
+    /// index still hold k cursors and k windows, which is the property a per-file read
+    /// query depends on.
+    index: Option<Arc<fai::Index>>,
     /// **One reader, holding RAW bases** ([`RawChromReader`]) — ng's copy of
     /// production's windowed fetcher, minus the canonicalisation.
     ///
@@ -575,12 +588,55 @@ pub struct WindowedRefSeq {
 impl WindowedRefSeq {
     /// Build over a FASTA path (its sibling `<path>.fai` is used) and the contig table. No
     /// contig is resident until the first fetch.
+    ///
+    /// **The `.fai` is parsed at every contig open**, and that parse is the whole cost of
+    /// opening one: ~188 µs on a GRCh38-shaped index (2,580 records), measured. For an
+    /// accessor built **once per run** that is paid once per contig and does not matter.
+    /// An accessor built per region, or per file per region — which is what a read query's
+    /// factory does — should use [`with_shared_index`](Self::with_shared_index) instead.
     pub fn new(fasta_path: PathBuf, contigs: ContigList) -> Self {
         Self {
             fasta_path,
-            contigs,
+            contigs: Arc::new(contigs),
+            index: None,
             current: RefCell::new(None),
         }
+    }
+
+    /// The same accessor, over an index parsed **once** and shared by every accessor
+    /// built from it.
+    ///
+    /// This is the shape a per-query factory wants: each call still yields its *own*
+    /// reader — its own file cursor and its own window, which is why
+    /// [`SampleReads::reads_in_region`](crate::ng::read::input::SampleReads::reads_in_region)
+    /// takes a factory rather than one shared accessor — but the index behind them is
+    /// parsed once for the run. Sharing one *accessor* across k streams would collapse
+    /// them onto one cursor; sharing the *index* costs nothing and collapses nothing.
+    ///
+    /// **Both** the index and the contig table are shared, because fixing only the
+    /// first exposes the second: on a GRCh38-shaped reference a per-accessor cost of
+    /// 189 µs falls to 52 µs with the index shared, of which **34 µs is cloning the
+    /// 2,580-entry table**. Sharing both leaves ~18 µs, which is the `open(2)` that
+    /// giving each stream its own cursor actually means.
+    pub fn with_shared_index(
+        fasta_path: PathBuf,
+        contigs: Arc<ContigList>,
+        index: Arc<fai::Index>,
+    ) -> Self {
+        Self {
+            fasta_path,
+            contigs,
+            index: Some(index),
+            current: RefCell::new(None),
+        }
+    }
+
+    /// Parse `<fasta_path>.fai` once, for handing to
+    /// [`with_shared_index`](Self::with_shared_index).
+    pub fn read_index(fasta_path: &std::path::Path) -> std::io::Result<Arc<fai::Index>> {
+        let mut fai_path = fasta_path.as_os_str().to_os_string();
+        fai_path.push(".fai");
+        fai::fs::read(PathBuf::from(fai_path)).map(Arc::new)
     }
 }
 
@@ -630,8 +686,13 @@ impl WindowedRefSeq {
         let mut current = self.current.borrow_mut();
         let needs_rebuild = !matches!(&*current, Some((resident, _)) if *resident == contig);
         if needs_rebuild {
-            let reader = RawChromReader::for_contig(&self.fasta_path, &entry.name)
-                .map_err(|e| map_chrom_error(contig, e))?;
+            let reader = match &self.index {
+                Some(index) => {
+                    RawChromReader::for_contig_with_index(&self.fasta_path, index, &entry.name)
+                }
+                None => RawChromReader::for_contig(&self.fasta_path, &entry.name),
+            }
+            .map_err(|e| map_chrom_error(contig, e))?;
             *current = Some((contig, reader));
         }
         let (_, reader) = current.as_mut().expect("current set above");
@@ -1144,6 +1205,56 @@ mod tests {
     fn windowed() -> (tempfile::TempDir, WindowedRefSeq) {
         let (dir, path, contigs) = build_fasta(FASTA_CONTIGS);
         (dir, WindowedRefSeq::new(path, contigs))
+    }
+
+    /// **A shared index changes what it costs to open a reader and nothing else.**
+    ///
+    /// The whole justification for [`WindowedRefSeq::with_shared_index`] is that the
+    /// `.fai` a caller parses once says exactly what the `.fai` each reader would have
+    /// parsed for itself says. If that is ever untrue the accessor reads from the
+    /// wrong file offsets — wrong bases, no error — so it is asserted over every
+    /// contig of the fixture, raw *and* canonical, rather than assumed from the fact
+    /// that both call the same parser.
+    ///
+    /// The fixture matters: `chr0` is `acgtNRYK`, soft-mask and IUPAC codes, so a
+    /// difference between the two paths in *either* direction shows up in the bytes.
+    #[test]
+    fn a_shared_index_serves_the_same_bytes_as_a_self_parsed_one() {
+        let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
+        let own = WindowedRefSeq::new(path.clone(), contigs.clone());
+        let shared = WindowedRefSeq::with_shared_index(
+            path.clone(),
+            Arc::new(contigs.clone()),
+            WindowedRefSeq::read_index(&path).expect("the fixture has a .fai"),
+        );
+
+        for (index, entry) in contigs.entries.iter().enumerate() {
+            let contig = ContigId(index as u32);
+            for start in 1..=entry.length {
+                let length = entry.length - start + 1;
+                assert_eq!(
+                    own.fetch(contig, start, length).expect("fetch"),
+                    shared.fetch(contig, start, length).expect("fetch"),
+                    "canonical bytes differ at {contig:?}:{start}+{length}"
+                );
+                let mut own_raw = Vec::new();
+                let mut shared_raw = Vec::new();
+                own.fetch_raw_into(contig, start, length, &mut own_raw)
+                    .expect("raw fetch");
+                shared
+                    .fetch_raw_into(contig, start, length, &mut shared_raw)
+                    .expect("raw fetch");
+                assert_eq!(
+                    own_raw, shared_raw,
+                    "raw bytes differ at {contig:?}:{start}+{length}"
+                );
+            }
+        }
+        assert_eq!(
+            own.contigs(),
+            shared.contigs(),
+            "and the table they report is the same one"
+        );
     }
 
     /// **B3: raw from the windowed impl — the YAGNI `ref_seq.md` parked, now spent.**

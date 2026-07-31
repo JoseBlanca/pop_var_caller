@@ -1,0 +1,356 @@
+# ng — what a locus observation says a read witnessed: implementation plan
+
+**Status:** draft, 2026-07-30. The build order for the witness representation: the vocabulary
+renames, the `witness.rs` module, the two witnessed-set types, the fold change that stops
+discarding a holed read, and the consumers that follow. Design is settled in
+[`../spec/locus_witness_representation.md`](../spec/locus_witness_representation.md) (spec) and
+[`../arch/locus_witness_representation.md`](../arch/locus_witness_representation.md) (types &
+interfaces). **This plan turns that design into order; it is not a place for new design** — every
+open question is resolved in the spec §8, and the one item still `OPEN:` in the arch doc (how often
+the hole fires on real RNA-seq) is an input to *ordering*, not to any step's content.
+
+Follows the generic locus generator's plan
+([`locus_generation_pileup_generator.md`](locus_generation_pileup_generator.md)), complete through
+its Milestone D, whose measurements are what made this design decidable.
+
+---
+
+## Scope
+
+**In:** the crate-wide rename of the observation and witness vocabulary; a new
+`src/ng/locus_generation/witness.rs`; `WitnessedLocusPositions` and `WitnessedRefPositions`;
+`apply_events_into` returning a set instead of a span and no longer discarding a holed read; the
+narrowed drop path; `witness_of` and `witness_order`; the interior-run constructor (which landed
+as `from_witnessed_runs`, not `from_run` — see D3); the consumers
+(`num_obs_along_locus`, the flush predicates, both dump tools, the divergence census); and the two
+regression anchors — the canonicality property and the spliced fixture.
+
+**Out (with a home, nothing dropped):**
+
+- **Saying which bases the read supplied** (`UnwitnessedBases`) — deferred on the measurement,
+  design recorded in **spec §6**. 8 borrowed bases in 225 million event-folds.
+- **Consuming partial evidence** — step 7's censored likelihood, owned by
+  [`locus_generation_pileup.md`](../spec/locus_generation_pileup.md) §10.
+- **Sealing `ReadWitness`'s fields** — spec §6, revisit with a later arch pass.
+- **Whether `reads_without_observation` survives at all** — spec §6; it needs comparing against
+  `reads_silent_over_footprint` first.
+- **Parallelism** — deferred whole (`locus_generation.md` §9).
+
+## Principles (how the order was chosen)
+
+- **The renames land first, alone, and behaviour-free.** They are by far the largest diff — 193 uses
+  of one type, 102 of one field — and entangling them with a behaviour change would make every
+  later diff unreadable and `git bisect` useless. Milestone A changes no bytes of output.
+- **Types first, then implementation**, within every milestone (project rule).
+- **Compute before you act.** C1 builds the witnessed set and *still* returns `None` on a hole, so
+  it is provably byte-identical; only C3 changes what the walk emits. This split is not
+  hypothetical: the §8 measurement probe did exactly C1's work and all 275 locus-generation tests
+  stayed green, which is the evidence that the shape is behaviour-neutral.
+- **Isolate the silent failures.** Two steps here fail quietly rather than loudly — B2
+  (a non-canonical set inflates observation counts instead of erroring) and C3 (a read appears or
+  vanishes from a record). Each is **its own commit with its oracle green before and after**.
+- **Verify against ground truth, not self-consistency.** The STR dump's byte-identity and the
+  generic parity anchor are external oracles; the spliced fixture is drawn from a real failure.
+- **Incremental, with pauses.** One milestone, then stop.
+
+## Preconditions (already in place — the executor confirms these before A1)
+
+1. **Worktree `/Users/jose/devel/pop_var_caller-ng-pileup`, branch `ng-pileup-generator`.** It
+   carries both the docs and the generator code since the `ng-generic` merge, so no branch is
+   created and nothing is read out of the sibling worktree. Confirmed by the counts each step
+   cites, which were taken in this tree.
+2. `cargo test --release --lib ng::locus_generation` green — 275 tests, including
+   `ng_agrees_with_production_where_production_fabricated_nothing` and
+   `ng_emits_the_same_bytes_in_a_second_process`.
+3. The STR dump byte-identity oracle runs on the committed fixture and on a tomato CRAM.
+4. **No measurement probe in this tree.** The §8 instrumentation was throwaway and lives
+   uncommitted in the *other* worktree (`pop_var_caller-ng-generic`); its numbers are in spec §8
+   and its spliced fixture is rebuilt properly at D6. **Do not port it across** — a probe-free tree
+   is what keeps A1's diff to the rename.
+5. The four specs and the arch doc are committed and use the new vocabulary, so the code is what is
+   out of step — not the docs.
+
+---
+
+## Milestone A — the vocabulary (no behaviour change)
+
+Every step here is mechanical and must leave output byte-identical. Any test that changes
+expectations is a step that did more than rename.
+
+- ✅ **A1.** `ObservedSequence` → `SequenceObservation`, and the field
+  `SampleLocusObservations::observed_sequences` → `observations`. 39 uses of the type across 7
+  files, 102 of the field. *Depends:* —. *Source:* spec §1, §4.
+- ✅ **A2.** `ReadCoverage` → `ReadWitness`, and the field `read_coverage` → `read_witness`. 193 and
+  91 uses across 12 files, including the `read_coverage` column in both dump tools' TSV output.
+  *Depends:* A1. *Source:* arch §3.
+- ✅ **A3.** `coverage_of` → `witness_of`, `coverage_order` → `witness_order`. Signatures unchanged
+  at this point. *Depends:* A2. *Source:* arch §3.
+- ✅ **A4.** The variant `ReadWitness::Observed` → `Partial`. 55 match sites. *Depends:* A2.
+  *Source:* spec §3.1, arch §3.
+- ✅ **A5.** `ObservationRow` → `KeyedObservation`; `ObservationKey` keeps its name. 26 uses across
+  4 files. *Depends:* A1. *Source:* arch §3.
+- ✅ **A6.** The code's own doc comments: "row" and "cell" → "observation", where they name this
+  type. **Leave the aligner's ~340 matrix rows and the dump tools' TSV rows alone** — those are
+  real tables. *Depends:* A1–A5. *Source:* spec §6.
+
+> **Checkpoint A: the vocabulary is one word, and nothing moved.** The STR dump is byte-identical
+> apart from its renamed column header; the generic parity anchor and the second-process
+> byte-identity test are green. Pause for review.
+
+## Milestone B — the witness types (types first, nothing wired)
+
+- ✅ **B1.** Create `src/ng/locus_generation/witness.rs` and **move** `ReadWitness` and `LocusLen`
+  into it, re-exported from `locus_generation` so no import path changes. Pure move, no edits.
+  *Depends:* A6. *Source:* arch *Module home*.
+  **Two items the Milestone A review deferred here, because the move is where they cost
+  nothing** ([review](../../reports/reviews/ng_locus_witness_representation_a_2026-07-30.md)
+  Mi11, Mi13): (a) `witness_order` exists **twice**, byte-identical, in `pileup/open_record.rs`
+  and in `ssr.rs`'s tally — `open_record`'s comment justifies withholding an `Ord` impl because
+  it "would export *this file's* sorting convention", which the STR copy refutes, so the move
+  should absorb the comparator rather than carry two copies across (a reviewer verified that
+  deriving `Ord` and reducing both call sites leaves 275 tests passing); (b) three files import
+  the witness vocabulary through `super::super::` while two use the crate-absolute path, and in
+  `open_record.rs` the same spelling resolves to two different modules — converting them here
+  makes `grep crate::ng::locus_generation::witness` answer "who depends on this".
+- ✅ **B2.** `WitnessedLocusPositions`: private field, `new` normalising (sort, merge adjacent and
+  overlapping), `one_run`, `runs`, `positions_covered`, `is_flush_left`, `is_flush_right`. Encoding
+  is runs with two inline. Derived `Eq`/`Hash`, sound because construction canonicalises. **Own
+  commit, do not bundle** — a non-canonical representation inflates observation counts silently
+  rather than failing. Its guard is the property test in the same commit: sets built from different
+  orderings of the same runs compare and hash equal, over generated multisets. *Depends:* B1.
+  *Source:* arch §1.1, spec §3.3, §8 (encoding).
+- ✅ **B3.** `WitnessedRefPositions`, `pub(super)`, the fold-axis counterpart: canonical runs in
+  reference coordinates, never empty. Replaces `RefSpan`'s role but is not yet used by the fold.
+  Carries `RefSpan`'s "no empty span" invariant verbatim. *Depends:* B2. *Source:* arch §2.
+
+> **Checkpoint B: both set types exist, canonical, unused.** Their own tests pass; the walk is
+> untouched and every oracle from Checkpoint A is still green. Pause for review.
+
+## Milestone C — the fold (the behaviour change)
+
+- ✅ **C0 — added mid-milestone (owner, 2026-07-30), because C2 cannot be written without it.** The
+  STR path mints a partial witness covering **zero** locus positions, and
+  `WitnessedLocusPositions` has no way to spell one: an empty set carries no anchor, so flush-left
+  and flush-right collapse into one value. Measured before deciding: **6,704 such mints against
+  7,085 genuine partials** on chr01 of tomato `SRR7279503`, at a median window overlap of 16 bases
+  against a 30-base flank — reads that clip the locus *window* and never enter the tract, which the
+  delimiter reports as `FromLeft`/`FromRight` with an empty span. **Owner's decision: they are not
+  in the locus and the SNP/indel path owns their bases, so the STR path discards them and counts
+  them** (`NoObservationReason::OutsideTract`). Recorded in
+  [`locus_generation_ssr.md`](../spec/locus_generation_ssr.md) §3, which is the design's home. This
+  is the one step in the plan that **moves the STR dump**, and it moves it only by deleting rows —
+  see §7.1 of the spec for the rebaselined oracle. *Depends:* —. *Source:* owner decision;
+  measurement in the C implementation report.
+
+- ✅ **C1.** `apply_events_into` accumulates runs into a caller-owned buffer and returns
+  `WitnessedRefPositions` — **and still returns `None` on a hole.** Byte-identical by construction;
+  the §8 probe demonstrated this exact shape against the full suite. *Depends:* B3. *Source:*
+  arch §2. **B3 built the buffer API this needs**: accumulate into a `WitnessedRefRuns` owned by
+  `OpenPileupRecordTable` beside `allele_seq_buf`, then `WitnessedRefPositions::take_from` on the
+  first fold and `refill_from` on every re-fold — the latter *swaps*, so a witness of three or more
+  runs does not allocate per (read × widen), which `refold_live_reads` would otherwise make it do
+  ([review](../../reports/reviews/ng_locus_witness_representation_b_2026-07-30.md) M2). Removing
+  each accessor's `#[cfg_attr(not(test), expect(dead_code, …))]` is part of the step; the attributes
+  are per-method, so wiring one and forgetting another is a build failure rather than a silent
+  suppression.
+- ✅ **C2** — and it absorbed **C4**, **D1** and **D2** (owner, 2026-07-30): `ReadWitness::Partial`
+  cannot carry a set without `sort_key` borrowing, `num_obs_along_locus` iterating runs and the
+  flush predicates delegating, all in the commit that has to compile. C3 is unaffected and still
+  lands alone. **C2.** `witness_of` resolves a `WitnessedRefPositions` against the final footprint into a
+  `ReadWitness`, keeping the both-ends clamp and the `Complete` short-circuit. Still one run in
+  practice, so still byte-identical. *Depends:* C1. *Source:* arch §2. **Two off-by-one traps the B
+  review found, both silent:** the set is **half-open** where `RefSpan` was inclusive, so
+  `past_last`'s `witnessed.end.saturating_add(1)` loses its `+ 1` and the intersection
+  `debug_assert`'s `witnessed.end >= record_pos` becomes `>`. `start()`/`end_exclusive()` were
+  deleted for this reason — walk `runs()`, and clamp each run into the footprint rather than
+  clamping the enclosing span, or the hole is swallowed exactly as before. Also worth deciding here:
+  clamping a set can in principle empty it, and `witness_of` returns `ReadWitness`, not
+  `Option<ReadWitness>`.
+- ✅ **C3.** **Stop discarding a holed read.** `apply_events_into` returns `None` only when the read
+  witnessed nothing inside the record; the drop path narrows to that case, keeping the
+  set-of-read-ids mechanism and the subtract-prior-contribution step. **Own commit, do not
+  bundle** — this is the step where a read appears in a record it was absent from, and the failure
+  mode is a wrong number rather than a crash. Its oracles: the spliced fixture (D6) flips from
+  "read absent" to "read present with a two-run witness", the STR dump stays byte-identical, and
+  the generic census gains its own class rather than absorbing the change into an existing one.
+  *Depends:* C2. *Source:* spec §1 goal 1, §3.1, §4; arch §2.
+- ✅ **C4 — landed at C2.** `witness_order` borrows instead of returning `(u8, u16, u16)`, and `finalise` sorts
+  with it. `ReadWitness` still gets no `Ord` of its own. *Depends:* C3. *Source:* arch §2, §3.
+  **Now `ReadWitness::sort_key`, one copy on the type** (B1 absorbed the two that had drifted
+  apart), so this step rewrites one function — but note `parity.rs`'s
+  `ObservationIdentityWithoutGroup` hardcodes the `(u8, u16, u16)` tuple as a `BTreeSet` key and
+  moves with it.
+
+> **Checkpoint C: a read with a hole is recorded instead of discarded. ✅ Reached and reviewed
+> (2026-07-31).** Output is deterministic across two processes and the STR path has not moved
+> against the C0 baseline. The spliced fixture is D6's; C3 is anchored instead by **seven
+> existing tests flipping** — the same inputs, the opposite assertion — and by putting the
+> discard back, which fails exactly those seven. Three category reviews, sequential because four
+> parallel container VMs cannot start at once;
+> [report](../../reports/reviews/ng_locus_witness_representation_c_2026-07-31.md).
+
+## Milestone D — consumers and surfaces
+
+- ✅ **D1 — landed at C2.** `num_obs_along_locus` iterates the runs instead of one range. **Its clamp stays** — the
+  comment there explains why the bound is not expressible on the type, and a set does not change
+  that. *Depends:* C4. *Source:* spec §4, arch §5.
+- ✅ **D2 — landed at C2.** `is_flush_left` / `is_flush_right` derive from the first and last run; signatures
+  unchanged. *Depends:* D1. *Source:* arch §1.1.
+- ✅ **D3 — reshaped by owner decision, 2026-07-31.** The step asked for
+  `ReadWitness::from_run(offset, covered, locus_len)`, the interior-run constructor the deferred
+  note on the variant asked for. What landed instead is **`from_witnessed_runs(runs, locus_len)`**,
+  which subsumes it — an interior run is `from_witnessed_runs([(3, 7)], len)` — and which is the
+  **one constructor allowed to answer `Complete`**. The constructors now split by *what the caller
+  claims*: `from_left`/`from_right` take a **reach** (a lower bound, measured in read bases on the
+  STR path) and never decide completeness; `from_witnessed_runs` takes **the positions witnessed**
+  on the locus's own ruler and decides it on their total. `witness_of` keeps the reference→locus
+  clamp and rebase and delegates the decision, so the rule has one home. Arch §1.1's "all three
+  constructors return `Complete`" contract is **replaced**, not merely left unimplemented, and the
+  reason is correctness rather than output movement — see the revised §1.1 and the note on
+  `ReadWitness`. `from_left`/`from_right` keep their signatures, so the STR generator's call sites
+  do not move and the dump is byte-identical. *Depends:* D2. *Source:* arch §1.1 (revised),
+  spec §1 goal 3; owner decision.
+- ✅ **D4.** Both dump tools print the set rather than one run, and the generic dump's invariant
+  check (`offset_in_locus + positions_covered <= footprint`) becomes a check per run. *Depends:*
+  D3. *Source:* spec §4, §8. **What landed:** the generic dump already printed one
+  `<offset>+<positions>` per run (C2) and already checked per run — so D4's work there was the
+  **tag**, `observed:` → `partial:`, and the counters `rows_observed`/`reads_observed` →
+  `rows_partial`/`reads_partial`, the last user-visible uses of the variant name spec §3.1
+  retired. The per-run bound was **asserted by nothing**: every locus the walk produces satisfies
+  it, so a hand-built locus witnessing `[(0,2), (4,12)]` of 10 positions now aims at it — the
+  pre-C2 formula passes that (`0 + 10 <= 10`) while the second run runs two positions past the
+  locus. The three STR dumps' side derivation moved into `examples/shared/witness_side.rs`
+  (`#[path]`, one body, three declarations) and **the drift was decided rather than inherited**:
+  every tool now spells the colon form. `ng_ssr_loci_dump` already did, so the byte-identity
+  oracle did not move; `ng_ssr_cohort_stutter` and `ng_ssr_aligner_bakeoff` emit `partial:left` /
+  `partial:right` where they emitted `partial_left` / `partial_right`, and the one downstream
+  consumer of those strings — `ng_ssr_aligner_bakeoff_dashboard.py`'s label map — follows, with
+  an assertion so an unmapped label stops being a silent `NaN` every count drops. **Deferred here
+  by the Milestone A review** (Mi15): `witness_label`
+  exists in **three** example dumps, identical down to a shared seven-line comment, and the three
+  have already drifted — `ng_ssr_loci_dump` emits `partial:left`/`partial:right` where the other
+  two emit `partial_left`/`partial_right` but keep `partial:interior`. The two research dumps'
+  labels are their own output and must not move by accident, so D4 should share the *derivation*
+  and let each tool spell its own strings — deciding the drift rather than inheriting it. D4 also
+  owns the generic dump's `observed:<offset>+<positions>` value label and its
+  `rows_observed`/`reads_observed` counter keys, the last user-visible uses of A4's retired
+  variant name.
+- ✅ **D5.** The divergence census counts holed witnesses and the positions inside them — the
+  counters the §8 measurement used, kept this time rather than thrown away. *Depends:* D4.
+  *Source:* spec §4. **`holed_witness_reads` and `hole_positions` on `DivergenceCensus`**, both
+  weighted by the reads sharing an observation, the positions being `span() - positions_covered()`
+  — the pair of accessors the C review added so the gap is not open-coded as "last end minus first
+  start". **Floored on the synthetic census like every other deliverable, and printed unfloored on
+  the real-data one.** D5 first shipped unfloored, on the claim that both counters read 0 on every
+  run this repo can make; the Milestone D behaviour review ran the census and read **400 reads /
+  528 positions**, because the synthetic corpus emits `CigarOp::Skip` and therefore contains
+  spliced reads. Where zero genuinely is expected is real DNA-seq (spec §8 — 0 holed witnesses in
+  225 million folds), and that census is the `#[ignore]`d one, which prints and asserts nothing.
+  Beside the floor, a positive control says the numbers are the *right* numbers: a hand-built
+  locus whose read witnesses `[(0,3), (6,10)]` of 10 positions must report 4 holed reads and 12
+  hole positions, and a one-run partial beside it must report neither while still counting as
+  fabricating — so "holed" cannot collapse into a second spelling of "partial".
+- ✅ **D6.** The spliced fixture as a permanent test in `pileup/tests.rs`: a 15 bp intron plus a
+  20 bp deletion widening the record across it, asserting the read appears with a two-run witness.
+  Its comment records the knife-edge. *Depends:* C3. *Source:* spec §7, §8; arch §6. **Two tests,
+  one geometry:** a `3M 15N 3M` read from 28 (exons 28–30 and 46–48) beside a `3M 20D 3M` read
+  from 26, which anchors the record at 28 and widens it to `28..=48`. The spliced read is present
+  with `[(0,3), (18,21)]` — six positions of twenty-one, the intron a hole — and
+  `reads_without_observation` is 0. **The knife-edge is one deleted base, and it is asserted from
+  both sides:** at 17 the footprint ends at 45, one short of exon 2, and the witness is one run;
+  at 18 it reaches 46 and the read is holed. *(The plan said 16 — that was the throwaway probe's
+  geometry, and this fixture's own numbers are the ones recorded here.)* Restoring C3's discard
+  fails **both** new tests, alongside C3's five.
+
+- ✅ **D7 — added at Checkpoint D (owner, 2026-07-31).** The same two counts on **the walk's own
+  summary**, not only on the divergence census: `reads_with_holed_witness` and `hole_positions` on
+  `RunSummary` → `PileupGeneratorCounts`, printed in `ng_generic_loci_dump`'s header. *Why:* the
+  census is `#[cfg(test)]` and only measures loci where **production's** walker also produced a
+  record, so it can never answer spec §8's open question — how often a read sees a locus in two
+  pieces on real RNA-seq — which is the measurement this representation was built for. Now
+  pointing the dump at a spliced BAM answers it. Pinned end to end by D6's own fixture through the
+  real walk: **1 holed read, 15 blind positions** at a 20-base deletion, and **0 / 0** at 17,
+  where the footprint stops before the second exon — the second half being what stops a counter
+  that simply counted every partial read from passing. *Depends:* D6. *Source:* owner; spec §8.
+
+- ✅ **D8 — added at Checkpoint D (owner, 2026-07-31).** A fourth label, `partial:both`, and the
+  convention that justifies the clamp behind it.
+
+  **The label.** `WitnessSide` gained `BothBorders`, and the border match lost its `(true, _)`
+  wildcard — which is what had been swallowing the case. A partial witness touching both borders
+  is now spelled apart from a left-edge prefix in all three STR dumps. Two different reads land
+  there and neither measured the allele: a repeat read that anchored one flank and ran out with a
+  reach at or past the tract length, and a read blind in the middle. **This moves the STR oracle,
+  deliberately and for the second time in the plan** — verified line by line: 2,530 of 8,135 rows,
+  every one in the `read_witness` column alone, every transition `partial:left` → `partial:both`,
+  headers/`depth`/order untouched. New baseline
+  `tmp/witness_baseline/ssr_dump_partial_both.tsv`; the bake-off dashboard maps the new label.
+
+  **The convention.** *Lay the read's repeat down from the border it anchored* — left flank held,
+  start at the left border; right flank held, end at the right border; bases past the far border
+  are extra copies rather than positions. The same rule indel left-alignment uses, with the
+  anchored side choosing the direction. It was implicit in the constructors' clamp and is now
+  written where the repeat caller turns a read length into a witness, and on the constructors
+  themselves. It **changes no behaviour** — it says why the existing clamp is right rather than a
+  saturation artefact. *Depends:* D7. *Source:* owner.
+
+> **Checkpoint D: every consumer reads the set, and the surfaces show it.** Pause for review.
+
+## Milestone E — verification at scale
+
+- ✅ **E1.** STR dump byte-identity on the committed fixture and a tomato CRAM, across the whole
+  change. *Depends:* D6. *Source:* spec §7.1. **Every difference from the plan's first commit to
+  its last is accounted for**, by aligning the two dumps row by row with the label column blanked:
+  3,180 rows deleted (C0) and **every one carries no observed bases**; 2,530 rows relabelled (D8)
+  and **every one only in the `read_witness` column**; three header/column lines (the A2 rename and
+  C0's two counters). **Zero rows appeared, zero were reordered, and no surviving row differs in
+  any other column.** The committed-fixture half is the ten tests in `ng_ssr_loci_dump`, green on
+  every gate.
+- ✅ **E2.** The generic parity anchor green on real data, and the census's new class counted and
+  floored on the HG002 and tomato runs from spec §8. *Depends:* E1. *Source:* spec §7.2. Three
+  runs — HG002 30× and 300×, tomato SRR7279503, each chr1:1–6 Mb — all *"every region, reference
+  sequence and counter identical"*. **The 300× run reproduces the generic generator's own
+  Milestone D deliverable digit for digit: 871 reads over 162 loci (0.33 %) with 1,550 reference
+  bases**, measured before this change existed. The hole class reads 0 on all three, which is spec
+  §8's structural prediction confirmed rather than a missing measurement.
+- ⚠ **E3 — measured, and it turned up a cost that needs the owner's word.** *Depends:* E2.
+  *Source:* spec §5, §7.5. **The requirement is met**: a one-run and a two-run witness are held
+  inline and allocate nothing, pinned by
+  `a_witness_of_one_or_two_runs_holds_them_inline_and_allocates_nothing`, with three runs asserted
+  to spill so the boundary is stated. **The chr1 counts reproduce exactly** — 1,541,788 loci,
+  1,647,161 observations, wall time unchanged. **But peak resident memory grew about 68 %**
+  (B3 501/523 MB → C2 892/876 MB → head 859 MB, like for like, each point run twice), all of it
+  appearing at C2, **per row** (the RSS slope doubles over the same rows in the same wall time)
+  and worth about 240 bytes per observation. It is not the dump tool, not more rows, and not the
+  row struct's shape. **The mechanism is not identified**, and the instrument cannot identify it:
+  this measures a tool whose peak is its own whole-run row buffer, and ng has no committed heap
+  profile. See the report; the recommendation is to build the `dhat` harness or accept the cost
+  with its size stated, rather than record it as fine.
+- ☐ **E4.** **When a spliced BAM is available:** run the same probe over it and record the hole
+  rate. This does not gate any step — it is the number that tells us how much the change bought.
+  *Depends:* E3. *Source:* spec §8 (open), arch §4 (`OPEN:`). **Still not run — no spliced
+  alignment is available.** D7 turned it into a one-command answer over any BAM, and the counter
+  reads 0 on all three DNA-seq runs (the prediction) against 400 / 528 on the synthetic corpus
+  (the control).
+
+> **Checkpoint E: the change is proven at scale.** Pause for review.
+
+---
+
+## Verification summary
+
+| milestone | proven by |
+|---|---|
+| A — vocabulary | STR dump byte-identical apart from its renamed column; generic parity anchor green; second-process byte-identity green. A test whose expectations change means the step did more than rename |
+| B — the set types | the canonicality property test over generated multisets, plus its mutation: remove the normalising step and observation counts inflate |
+| C — the fold | C1/C2 byte-identical against the full suite; C3 against the spliced fixture (read absent → present with two runs), the STR dump, and a census class that is counted rather than absorbed |
+| D — consumers | `num_obs_along_locus` on a fixture mixing complete and multi-run witnesses; the dumps' per-run invariant asserted on every locus of every run |
+| E — at scale | STR byte-identity on a tomato CRAM; the generic anchor on HG002 chr1 and two tomato samples; allocations per observation against the 461 MB baseline |
+
+## Out of scope (next plans)
+
+- **`UnwitnessedBases`** — spec §6 holds the design and the measurement that deferred it. It gets a
+  plan when a count asks for one.
+- **Step 7's censored likelihood** — the first real consumer of a partial witness, and the reason
+  this evidence is being kept. Home: the step 7 spec.
+- **Sealing `ReadWitness`'s fields** and **the fate of `reads_without_observation`** — spec §6.

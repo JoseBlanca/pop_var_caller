@@ -3,8 +3,31 @@
 //! ng owns this file outright — it is not one of the eight copies, and it exists so
 //! the copies can be checked from outside themselves (a test living inside
 //! `tests.rs` cannot compare `tests.rs` against its original, because it is part of
-//! it). Keeping it here also keeps the boundary a **file** boundary: everything in
-//! `pileup/` is either a verbatim copy or ng's own, and no file is both.
+//! it). Keeping it here also keeps the boundary a **file** boundary: every file in
+//! `pileup/` is either ng's own, a *still*-verbatim copy, or a copy this plan has
+//! **released** and begun changing.
+//!
+//! That third state is the one the wording used to deny — "no file is both" was
+//! written when there were only two — and A0 created it three lines below, in
+//! `genome_walk.rs`, `open_record.rs` and `errors.rs`. A released file is no longer
+//! guarded here and no longer claims to be production's; the release table below is
+//! the record of which are which.
+//!
+//! # Narrowed file by file, never retired wholesale
+//!
+//! Plan 3 changes the copies on purpose, and each step releases **the file it
+//! changes** from the set below — in the same commit, and recorded in that file's
+//! own module header. Switching the guard off at the first divergence would throw
+//! away a working check on every file that is still a copy, which is most of them.
+//!
+//! | released at | files | why |
+//! |---|---|---|
+//! | A0 | `driver.rs` → `genome_walk.rs`, `open_record.rs`, `errors.rs` | the reference is reached through ng's `RefSeq`, not production's `MultiChromRefFetcher` |
+//! | B2 | `tests.rs` | the walk emits ng's `SampleLocusObservations`, so the inherited suite is adapted to it (spec §12) |
+//! | D2 | `active_read_set.rs` | a per-read "ever contributed" flag, so `reads_silent_over_footprint` can be counted — the read spec §13's accounting cannot otherwise place (spec §6) |
+//!
+//! Everything still listed in `PAIRS` is byte-for-byte production's, modulo the
+//! sanctioned additions below.
 //!
 //! # Why the copies carry no "do not edit" banner (owner, 2026-07-29)
 //!
@@ -20,7 +43,7 @@
 //! not be edited. A failing build is a stronger signal than a comment, and it cannot be
 //! skimmed past.
 
-/// **"These eight files are production's, verbatim" — asserted, not claimed.**
+/// **"These files are still production's, verbatim" — asserted, not claimed.**
 ///
 /// That property is what the whole port rests on: it is the baseline every later
 /// change is measured against, and `locus_generation_pileup.md` §3's rule is
@@ -49,12 +72,8 @@
 ///
 /// *(That reordering is how this test earned its keep on its first run: it is a real
 /// divergence, introduced by A3's `cargo fmt` and not recorded anywhere until now.)*
-///
-/// `driver.rs` → `genome_walk.rs` is the pairing that cannot be inferred from the
-/// filenames, which is the other reason this belongs in the tree rather than in a
-/// scratch file.
 #[test]
-fn the_eight_copies_are_still_productions() {
+fn the_remaining_copies_are_still_productions() {
     /// One ng line that is allowed to have no counterpart in production's file.
     fn is_ng_addition(line: &str) -> bool {
         let line = line.trim();
@@ -76,17 +95,11 @@ fn the_eight_copies_are_still_productions() {
     // (label, production source, ng copy). `include_str!` resolves relative to this
     // file, so both sides are pinned at compile time — a deleted file is a build error,
     // not a silently skipped case.
-    let pairs: [(&str, &str, &str); 8] = [
-        (
-            "driver.rs -> genome_walk.rs",
-            include_str!("../../../pileup/walker/driver.rs"),
-            include_str!("genome_walk.rs"),
-        ),
-        (
-            "open_record.rs",
-            include_str!("../../../pileup/walker/open_record.rs"),
-            include_str!("open_record.rs"),
-        ),
+    //
+    // **A released file is deleted from this array, not commented out**, so a `git log`
+    // on it shows the whole set that was ever guarded and the array itself shows only
+    // what is guarded *now*. The release table in this module's header is the record.
+    let pairs: [(&str, &str, &str); 3] = [
         (
             "cigar_cursor.rs",
             include_str!("../../../pileup/walker/cigar_cursor.rs"),
@@ -98,24 +111,9 @@ fn the_eight_copies_are_still_productions() {
             include_str!("decompose.rs"),
         ),
         (
-            "active_read_set.rs",
-            include_str!("../../../pileup/walker/active_read_set.rs"),
-            include_str!("active_read_set.rs"),
-        ),
-        (
             "chain_id_allocator.rs",
             include_str!("../../../pileup/walker/chain_id_allocator.rs"),
             include_str!("chain_id_allocator.rs"),
-        ),
-        (
-            "errors.rs",
-            include_str!("../../../pileup/walker/errors.rs"),
-            include_str!("errors.rs"),
-        ),
-        (
-            "tests.rs",
-            include_str!("../../../pileup/walker/tests.rs"),
-            include_str!("tests.rs"),
         ),
     ];
 

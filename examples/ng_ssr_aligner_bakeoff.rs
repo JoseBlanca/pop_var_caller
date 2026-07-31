@@ -3,8 +3,8 @@
 //! dashboard (`ng_proposal.md` §step-3: *how much stuttering exists for different repeat sizes and
 //! lengths, and is there a difference between the aligners*).
 //!
-//! **⚠ Since 2026-07-28 a row is one `(bases, read_coverage, read_group)` CELL, not one allele.**
-//! `ObservedSequence` gained the read group as part of its identity, so on a sample declaring
+//! **⚠ Since 2026-07-28 a row is one `(bases, read_witness, read_group)` CELL, not one allele.**
+//! `SequenceObservation` gained the read group as part of its identity, so on a sample declaring
 //! several `@RG`s one allele becomes several rows — and **this dump has no read-group column**, so
 //! those rows are indistinguishable in the output and the per-row counters count cells rather than
 //! alleles. Single-read-group samples are unaffected, which is every fixture here so far. Adding
@@ -25,7 +25,7 @@
 //!
 //! Output: a `#`-prefixed run-level counts header (one line per aligner), a bare TSV column line,
 //! then one row per observation. Each covered locus contributes, per aligner, one row per distinct
-//! observed sequence (tagged `complete` / `partial_left` / `partial_right`) plus, when non-zero, a
+//! observed sequence (tagged `complete` / `partial:left` / `partial:right`) plus, when non-zero, a
 //! synthetic `no_border` row (reads that reached the aligner and anchored nothing) and a `capped`
 //! row (reads the depth cap discarded). Zero-coverage loci are omitted — they carry no reads and are
 //! aligner-independent. The dashboard derives period = `len(motif)`, tract length = `len(ref_tract)`,
@@ -40,11 +40,13 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
+#[cfg(test)]
+use pop_var_caller::ng::locus_generation::WitnessedLocusPositions;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadWitness, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -56,6 +58,12 @@ use pop_var_caller::ng::reference_info::{
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
 use pop_var_caller::ng::types::{Bp, ContigId, GenomeRegion};
+
+/// The side derivation, shared with the other two STR dumps so the three cannot drift apart
+/// again (D4). Each tool keeps its own strings — see `witness_label`.
+#[path = "shared/witness_side.rs"]
+mod witness_side;
+use witness_side::{WitnessSide, witness_side};
 
 /// The three delimiters, and the tag each carries in the `aligner` column.
 const FLAT_GAP: &str = "flat_gap"; // algorithm 3 — the production-parity flat-gap port
@@ -154,7 +162,7 @@ fn push_locus(
     locus: &SampleLocusObservations,
     segment: &SsrSegment,
 ) {
-    let has_reads = !locus.observed_sequences.is_empty()
+    let has_reads = !locus.observations.is_empty()
         || locus.reads_without_observation > 0
         || locus.reads_discarded_by_cap > 0;
     if !has_reads {
@@ -180,9 +188,9 @@ fn push_locus(
             reads,
         });
     };
-    for obs in &locus.observed_sequences {
+    for obs in &locus.observations {
         push(
-            coverage_label(obs.read_coverage, locus.locus_len()),
+            witness_label(&obs.read_witness, locus.locus_len()),
             obs.bases.to_vec(),
             obs.num_obs,
         );
@@ -195,24 +203,18 @@ fn push_locus(
     }
 }
 
-/// The tag a read-coverage carries in the `coverage` column.
-fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
-    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
-    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
-    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
-    // so it never appears here, but naming it keeps the label honest for the generic path.
-    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
-    // compile error here. The guard form is what this migration used and it is exactly what
-    // let the compiler stop forcing these sites to be revisited.
-    match coverage {
-        ReadCoverage::Complete => "complete",
-        run @ ReadCoverage::Observed { .. } => {
-            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
-                (true, _) => "partial_left",
-                (false, true) => "partial_right",
-                (false, false) => "partial:interior",
-            }
-        }
+/// The tag a witness carries in the `coverage` column.
+fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
+    // The derivation is shared (`shared/witness_side.rs`); the spelling is this tool's. **These
+    // two strings moved at D4**: `partial_left` / `partial_right` became `partial:left` /
+    // `partial:right`, because this function already said `partial:interior` beside them, so a
+    // consumer grepping `partial:` got this tool's interiors and none of its sides.
+    match witness_side(witness, locus_len) {
+        WitnessSide::Complete => "complete",
+        WitnessSide::Left => "partial:left",
+        WitnessSide::Right => "partial:right",
+        WitnessSide::BothBorders => "partial:both",
+        WitnessSide::Interior => "partial:interior",
     }
 }
 
@@ -373,8 +375,10 @@ fn run_bakeoff(
         counts.reads_capped = gen_counts.reads_discarded_by_cap;
         counts.obs_complete = gen_counts.observations_complete;
         counts.obs_partial = gen_counts.observations_partial;
-        counts.reads_without_observation =
-            gen_counts.no_border_anchored + gen_counts.low_quality + gen_counts.window_truncated;
+        // The sum lives on the counts type, behind an exhaustive destructure. This tool did
+        // sum the reasons itself and was the one left out when C0 added a fourth, under-
+        // reporting by 6,704 reads of ~9,265 on tomato chr01 (Milestone C review, F5).
+        counts.reads_without_observation = gen_counts.reads_without_observation();
         report.counts.push((tag, *counts));
     }
 
@@ -406,5 +410,46 @@ fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The four strings this tool prints in its `coverage` column**, pinned — see the identical
+    /// test in `ng_ssr_cohort_stutter` for why (D4's rename, and the Milestone D reliability
+    /// review finding that a binary with no tests notices neither a rename nor a mutation
+    /// labelling every partial `complete`).
+    ///
+    /// This tool's column is the sharper case: `ng_ssr_aligner_bakeoff_dashboard.py` maps it into
+    /// outcome classes, and an unmapped label becomes a `NaN` that every downstream count drops.
+    /// The notebook now asserts on an unknown label; this asserts the labels it is given.
+    #[test]
+    fn the_coverage_column_spells_the_four_cases_the_dashboard_maps() {
+        let len = LocusLen::from_positions(10);
+        let partial = |runs: &[(u16, u16)]| {
+            witness_label(
+                &ReadWitness::Partial {
+                    positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                        .expect("a non-empty set of runs"),
+                },
+                len,
+            )
+        };
+        assert_eq!(witness_label(&ReadWitness::Complete, len), "complete");
+        assert_eq!(partial(&[(0, 4)]), "partial:left");
+        assert_eq!(partial(&[(6, 10)]), "partial:right");
+        assert_eq!(partial(&[(3, 7)]), "partial:interior");
+        assert_eq!(
+            partial(&[(0, 10)]),
+            "partial:both",
+            "a repeat read that ran out covers the tract end to end without measuring it",
+        );
+        assert_eq!(
+            partial(&[(0, 3), (7, 10)]),
+            "partial:both",
+            "so does a read blind in the middle — neither is a measurement",
+        );
     }
 }

@@ -75,6 +75,13 @@ than reaches in (spec §3).
 - ✅ **A3 — the reference shim.** `RefSeqFetcher<R: RefSeq>` implementing `MultiChromRefFetcher`.
   Semantically empty: both contracts are canonical uppercase `{A,C,G,T,N}`, verified in the
   implementation and not just the doc. *Depends:* A2. *Source:* arch §1.3.
+
+  > **Deleted 2026-07-29 by plan 3's A0** — the shim, its error translation and both of that
+  > translation's lossy spots. It existed because the copies' signatures were production's, which
+  > was a consequence of transcribing verbatim and never a design choice; ng's `open_record.rs`
+  > now takes a `RefSeq` directly. The step stays ✅ and stays described as built, because this
+  > plan's gate (A4's inherited suite) ran against the shim — but a reader arriving here looking
+  > for the type will not find it.
 - ✅ **A4 — the copied suite is green.** All **113** inherited tests (44 end-to-end + 69 inline) pass **unmodified**. Anything needing
   a touch here is a transcription error, not a design change — spec §12 is explicit that this is the
   gate. *Depends:* A3. *Source:* spec §12.
@@ -128,5 +135,11 @@ projection parity, the dump tool and its six new fixtures, and the throughput me
 
 **One thing to carry forward rather than rediscover:** the stage-1 differential **dies** when plan 3
 lands, because the two walkers then differ by design. What survives as a permanent regression anchor
-is narrower — loci where every folded read witnessed the whole footprint must agree with production
-forever (spec §3). Plan 3 builds that; this plan builds the thing it is derived from.
+is narrower (spec §3). Plan 3 builds that; this plan builds the thing it is derived from.
+
+> **Corrected 2026-07-30, after plan 3 built it.** This sentence used to say the anchor was "loci
+> where every folded read witnessed the whole footprint must agree with production forever". **That
+> is false**, and it is the sentence that told plan 3 what to build, so it is corrected here rather
+> than only downstream: a read can witness every position of the final footprint and production still
+> be wrong about it, via the stale widen that is now spec §3's sixth divergence class. The anchor is a
+> **fixture** on which production fabricates nothing, not a filter over one where it does.

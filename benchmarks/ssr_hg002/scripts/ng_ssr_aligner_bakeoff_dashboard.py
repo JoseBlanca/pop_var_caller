@@ -233,14 +233,36 @@ def _(df, len_band):
     # One tidy frame the plot cells share: every row tagged with its period/length cell.
     cells = df.copy()
     cells["len_band"] = len_band(cells["ref_len"])
+    # The dump's side labels became `partial:left` / `partial:right` at D4 of the locus witness
+    # representation — the three STR dumps had drifted into two spellings, two of them mixing
+    # both inside one function. The old keys stay, so a dashboard run over a TSV produced before
+    # that change still classifies; `partial:interior` is unreachable from the STR path (it
+    # anchors a border or emits nothing) and is mapped so a future one is not silently dropped.
     cells["cls"] = cells["coverage"].map(
         {
             "complete": "complete",
+            "partial:left": "partial",
+            "partial:right": "partial",
+            # A read that anchored one flank and whose repeat, in read bases, reached or passed
+            # the reference tract's length: laid down from the anchored border it covers the
+            # tract end to end, so it touches both borders — and it still did not measure the
+            # allele, because the allele can run past what the read showed. 41% of partial
+            # observations on tomato chromosome 1. It was labelled "partial:left" until
+            # 2026-07-31, including when the read was anchored on the *right*.
+            "partial:both": "partial",
+            "partial:interior": "partial",
             "partial_left": "partial",
             "partial_right": "partial",
             "no_border": "no_border",
             "capped": "capped",
         }
+    )
+    # An unmapped label used to become a silent NaN that every downstream count dropped, which is
+    # how a renamed tag would cost a whole outcome class without the plot looking wrong.
+    _unknown = sorted(cells.loc[cells["cls"].isna(), "coverage"].unique())
+    assert not _unknown, (
+        f"the dump emitted coverage labels this notebook does not know: {_unknown} — the tool's "
+        "`witness_label` moved and the mapping above did not follow it"
     )
     return (cells,)
 

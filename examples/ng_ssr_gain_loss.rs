@@ -23,7 +23,7 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::ng::locus_generation::LocusGenerator;
-use pop_var_caller::ng::locus_generation::ReadCoverage;
+use pop_var_caller::ng::locus_generation::ReadWitness;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
@@ -125,15 +125,15 @@ fn oracle(read: &[u8], left_flank: &[u8], right_flank: &[u8]) -> Truth {
     }
 }
 
-fn is_complete(o: &Option<(ReadCoverage, Vec<u8>)>) -> bool {
-    matches!(o, Some((ReadCoverage::Complete, _)))
+fn is_complete(o: &Option<(ReadWitness, Vec<u8>)>) -> bool {
+    matches!(o, Some((ReadWitness::Complete, _)))
 }
-fn is_partial(o: &Option<(ReadCoverage, Vec<u8>)>) -> bool {
-    matches!(o, Some((ReadCoverage::Observed { .. }, _)))
+fn is_partial(o: &Option<(ReadWitness, Vec<u8>)>) -> bool {
+    matches!(o, Some((ReadWitness::Partial { .. }, _)))
 }
-fn measured_len(o: &Option<(ReadCoverage, Vec<u8>)>) -> Option<usize> {
+fn measured_len(o: &Option<(ReadWitness, Vec<u8>)>) -> Option<usize> {
     match o {
-        Some((ReadCoverage::Complete, b)) => Some(b.len()),
+        Some((ReadWitness::Complete, b)) => Some(b.len()),
         _ => None,
     }
 }

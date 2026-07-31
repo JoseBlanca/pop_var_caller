@@ -290,6 +290,21 @@ pub struct LocusCounts {
   case to absorb, and §4's fatal-error model is never at risk from one. Supersedes spec §8 item 4 /
   §12's "zero reads" lean.
 
+- **The iterator releases its generators before its reads, in an explicit `Drop` — decided
+  2026-07-30.** A generator holds a region stream that owns its files by `Arc` and folds a drop
+  tally into an `AlignmentFile` on the way out, so if `reads` dies first that tally lands where
+  nobody can read it: a drop rate silently under-reported, on the one path that reaches it — an
+  iterator dropped **mid-region**. Field declaration order already gives this (`generators` first),
+  and that was the whole enforcement from C4 until now, guarded by a comment. The `Drop` impl
+  ([locus_generation/mod.rs](../../../../src/ng/locus_generation/mod.rs)) makes the order an
+  optimisation rather than the guarantee, so a reorder cannot silently undo it. *Rejected:* leaving
+  the order alone (the failure is invisible, so the comment is the only thing standing between a
+  reorder and a wrong number). **No test can fail either way, and that is a property of the types:**
+  observing the tally after the drop needs a second handle onto the same files, and `SampleReads` is
+  deliberately not `Clone` and does not expose them — the falsifiable version costs a widening of
+  that type, and its shape already exists one layer down in `open_bam`'s
+  `a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`.
+
 ## 7. Open items
 
 - `OPEN:` **One locus type carrying N samples vs. a single-sample type the cohort composes** —

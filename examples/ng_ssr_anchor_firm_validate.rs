@@ -25,7 +25,7 @@ use pop_var_caller::ng::alignment::ssr_noise_robust::SsrNoiseRobustAligner;
 use pop_var_caller::ng::alignment::ssr_robust_indel::SsrRobustIndelAligner;
 use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::ng::locus_generation::LocusGenerator;
-use pop_var_caller::ng::locus_generation::ReadCoverage;
+use pop_var_caller::ng::locus_generation::ReadWitness;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
@@ -39,11 +39,11 @@ use pop_var_caller::ng::reference_info::{
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
 use pop_var_caller::ng::types::{Bp, ContigId};
 
-fn class(obs: &Option<(ReadCoverage, Vec<u8>)>) -> &'static str {
+fn class(obs: &Option<(ReadWitness, Vec<u8>)>) -> &'static str {
     match obs {
         None => "none",
-        Some((ReadCoverage::Complete, _)) => "complete",
-        Some((ReadCoverage::Observed { .. }, _)) => "partial",
+        Some((ReadWitness::Complete, _)) => "complete",
+        Some((ReadWitness::Partial { .. }, _)) => "partial",
     }
 }
 
