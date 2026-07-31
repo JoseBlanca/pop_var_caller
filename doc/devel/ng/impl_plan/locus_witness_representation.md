@@ -262,6 +262,17 @@ expectations is a step that did more than rename.
   geometry, and this fixture's own numbers are the ones recorded here.)* Restoring C3's discard
   fails **both** new tests, alongside C3's five.
 
+- ✅ **D7 — added at Checkpoint D (owner, 2026-07-31).** The same two counts on **the walk's own
+  summary**, not only on the divergence census: `reads_with_holed_witness` and `hole_positions` on
+  `RunSummary` → `PileupGeneratorCounts`, printed in `ng_generic_loci_dump`'s header. *Why:* the
+  census is `#[cfg(test)]` and only measures loci where **production's** walker also produced a
+  record, so it can never answer spec §8's open question — how often a read sees a locus in two
+  pieces on real RNA-seq — which is the measurement this representation was built for. Now
+  pointing the dump at a spliced BAM answers it. Pinned end to end by D6's own fixture through the
+  real walk: **1 holed read, 15 blind positions** at a 20-base deletion, and **0 / 0** at 17,
+  where the footprint stops before the second exon — the second half being what stops a counter
+  that simply counted every partial read from passing. *Depends:* D6. *Source:* owner; spec §8.
+
 > **Checkpoint D: every consumer reads the set, and the surfaces show it.** Pause for review.
 
 ## Milestone E — verification at scale

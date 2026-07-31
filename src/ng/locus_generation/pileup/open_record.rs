@@ -127,6 +127,14 @@ pub(super) struct RecordWitnessCounts {
     /// [`OpenPileupRecord::reads_discarded_by_cap`] for why that is the quantity rather
     /// than "how often this record's columns were truncated".
     pub reads_discarded_by_cap: u32,
+    /// Folded reads whose witness is **more than one run** — a read blind in the middle of
+    /// this footprint, which is the case C3 stopped discarding and the whole reason for the
+    /// witnessed-set representation. A subset of `reads_partial`.
+    pub reads_with_holed_witness: u32,
+    /// The positions inside those holes, summed over the reads: for each holed read, the
+    /// distance from its first witnessed position to its last, minus what it actually
+    /// witnessed.
+    pub hole_positions: u32,
 }
 
 /// How much of the finished record a read witnessed, in **locus positions**.
@@ -712,6 +720,8 @@ impl OpenPileupRecord {
         let mut witness_counts = RecordWitnessCounts {
             reads_complete: 0,
             reads_partial: 0,
+            reads_with_holed_witness: 0,
+            hole_positions: 0,
             reads_without_observation: self.reads_without_observation.len() as u32,
             // **Resolved here, not counted in the walk.** A read truncated at one position
             // of this footprint may have folded at another, and a read that folds does so
@@ -770,7 +780,26 @@ impl OpenPileupRecord {
         for state in self.folded_reads.values() {
             match witness_of(&state.witnessed, record_pos, record_end_exclusive) {
                 ReadWitness::Complete => witness_counts.reads_complete += 1,
-                ReadWitness::Partial { .. } => witness_counts.reads_partial += 1,
+                ReadWitness::Partial { positions } => {
+                    witness_counts.reads_partial += 1;
+                    // **The holed reads, counted where the walk can report them** (owner,
+                    // 2026-07-31). The divergence census counts the same thing, but it is
+                    // `#[cfg(test)]` and only measures loci where *production's* walker also
+                    // produced a record — so it cannot answer "how often does this fire on a
+                    // spliced BAM", which is the measurement the change was made for (spec §8,
+                    // open). These two ride the walk's own summary instead, so any BAM handed
+                    // to the generator reports them.
+                    //
+                    // `span` is first-position-to-last, `positions_covered` is what the runs
+                    // cover, so the difference is the positions between them the read was blind
+                    // over — non-zero exactly when the witness has more than one run, since
+                    // canonical runs are separated by at least one position.
+                    let blind = positions.span() - positions.positions_covered();
+                    if blind > 0 {
+                        witness_counts.reads_with_holed_witness += 1;
+                        witness_counts.hole_positions += blind;
+                    }
+                }
             }
         }
         // Every folded read is resolved exactly once and lands in exactly one of the two
@@ -3589,11 +3618,13 @@ mod tests {
             RecordWitnessCounts {
                 reads_complete: 1,
                 reads_partial: 2,
+                reads_with_holed_witness: 0,
+                hole_positions: 0,
                 reads_without_observation: 0,
                 reads_discarded_by_cap: 0,
             },
             "the opener's deletion witnessed 5..=20 whole; the shortie stopped at 7 and \
-             the widener started there"
+             the widener started there — both partials are one run, so neither is holed"
         );
     }
 

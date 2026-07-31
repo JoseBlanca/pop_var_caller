@@ -348,3 +348,61 @@ steps. `parity::ng_agrees_with_production_where_production_fabricated_nothing`,
 
 **Counts:** `ng::locus_generation` 309 → **311**; the suite 2,842 → **2,844**. `cargo fmt --check`
 and `cargo clippy --all-targets --all-features -- -D warnings` clean.
+
+---
+
+## D7 — the hole counters where a real BAM can reach them (added at Checkpoint D)
+
+### What the step is, and why it was not already done
+
+D5 put the two hole counts on the divergence census. The Milestone D structure review pointed out
+what that costs and the owner called it: the census is `#[cfg(test)]`, and it only measures loci
+where **production's** walker also produced a record. So it can never answer the one question this
+whole representation was built to answer — how often a read sees a locus in two pieces on real
+RNA-seq (spec §8, open; plan E4).
+
+The same two counts now ride the walk's own `RunSummary` → `PileupGeneratorCounts`, and
+`ng_generic_loci_dump` prints them in its header line. Pointing that tool at a spliced BAM answers
+the question, with no probe and no comparison against the old caller.
+
+### Where they are counted
+
+In `finalise`, in the loop that already resolves each folded read's witness against the final
+footprint — so the walk pays one subtraction per partial read and nothing per complete one. A read
+is holed when `span() - positions_covered()` is non-zero, which is exactly "more than one run",
+since canonical runs are separated by at least one unwitnessed position.
+
+Two exhaustive destructures made the wiring self-checking rather than hopeful: adding the fields
+to `RunSummary` failed the build at `PileupGeneratorCounts::fold_region_walk` and at `parity.rs`'s
+`ng_counters`, which is where the decision "production has no counterpart, so bind and drop by
+name" had to be made explicitly. That is the third counter to take that route.
+
+### How we know it works
+
+The end-to-end test is **D6's own fixture through the real walk**, and its numbers are exact
+rather than "greater than zero":
+
+- at a 20-base deletion — the record widened across the intron — **1 holed read, 15 blind
+  positions**, the intron being 31–45;
+- at a 17-base deletion — the footprint stopping one position before exon 2 — **0 and 0**.
+
+The second half is what makes the first discriminating: a counter that simply counted every
+partial read would pass the first assertion and fail the second.
+
+**Counts:** `ng::locus_generation` 312 → **313**; the suite 2,847 → **2,848**. STR dump
+byte-identical to the C0 baseline; `cargo fmt --check` and
+`cargo clippy --all-targets --all-features -- -D warnings` clean.
+
+### And a measurement the owner's question asked for
+
+`ReadWitness` stores locus positions — reference coordinates relative to the locus start — so
+nothing is held in read coordinates. Read coordinates enter only as the repeat's *length in the
+read*, which the delimiter returns (`RepeatSpan`, a read-space range) and which the STR path turns
+into how far into the tract the read reached.
+
+On chr01 of tomato `SRR7279503`, **2,530 of 6,216 partial rows (41%)** are reads whose repeat, in
+read bases, reached or passed the reference tract's length. Their stored witness covers the tract
+end to end and is honest — the read did see every reference position — and they are correctly not
+`Complete`, because the read ran out and so did not measure the allele. What collapses is the
+printed label: all 2,530 render as a left-edge partial, including the reads anchored on the right.
+Recorded in spec §8; the decision on a fourth label is the owner's.

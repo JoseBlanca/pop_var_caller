@@ -371,6 +371,26 @@ pub struct RunSummary {
     /// drops it from the counter comparison; the exhaustive destructure there is what
     /// forces that decision to be made rather than defaulted.
     pub reads_silent_over_footprint: u64,
+    /// **ng's, and production has no counterpart** — folded reads whose witness is more
+    /// than one run, i.e. reads blind in the *middle* of a record's footprint. A spliced
+    /// read across a record widened over its intron is the case that produces one, and
+    /// recording it instead of discarding it is what this whole representation exists for.
+    ///
+    /// **Why it is on the walk's own summary and not only on the parity census.** The
+    /// census counts the same thing, but it lives behind `#[cfg(test)]` and only measures
+    /// loci where *production's* walker also produced a record — so it can never answer
+    /// "how often does this fire on a real spliced BAM", which is the open measurement the
+    /// change was made for (spec §8). Here, any BAM the generator is pointed at reports it,
+    /// and the dump tool prints it (owner, 2026-07-31).
+    ///
+    /// Expected to read **zero on DNA-seq**, structurally: a ref-skip emits no event, so an
+    /// intron cannot widen a record on its own, and modern Illumina puts `N`s at read ends
+    /// where they cannot make a hole.
+    pub reads_with_holed_witness: u64,
+    /// The positions inside those holes, summed over the reads — what a holed read was
+    /// blind over, which is the quantity that says how much evidence the old drop threw
+    /// away rather than merely how many reads it threw away.
+    pub hole_positions: u64,
 }
 
 impl RunSummary {
@@ -637,15 +657,16 @@ impl WalkerState {
         // we drain the hoisted buffer rather than `into_iter()`ing
         // it; the backing `Vec` stays allocated and reusable.
         for open in self.drained_buf.drain(..) {
-            // The witness tally is resolved at `finalise` and dropped here. **Resolved
-            // there** because a witness is a read's extent measured against the record's
-            // *final* footprint, which only `finalise` knows and no later caller can
-            // reconstruct — the reads may have expired. **Dropped here** because the two
-            // counts it carries that the locus needs are already *on* the locus
-            // (`reads_without_observation`, `reads_discarded_by_cap`); what remains is the
-            // complete/partial split, which nothing outside this module reads yet and which
-            // exists to pin `witness_of` against the real walk.
-            let (record, _witness) = open.finalise();
+            // The witness tally is resolved at `finalise`. **Resolved there** because a
+            // witness is a read's extent measured against the record's *final* footprint,
+            // which only `finalise` knows and no later caller can reconstruct — the reads may
+            // have expired. Two of its counts the locus already carries
+            // (`reads_without_observation`, `reads_discarded_by_cap`) and the complete/partial
+            // split is read only by tests; the **holed** pair is kept, because nothing else in
+            // a non-test build can state how often a read was blind in the middle of a record.
+            let (record, witness) = open.finalise();
+            self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+            self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);
             self.summary.records_emitted += 1;
         }
@@ -708,7 +729,9 @@ impl WalkerState {
         // close — there are no future reads on this chromosome).
         for open in self.open_records.drain_all() {
             // Same as `close_aged_records_into` — see the note there.
-            let (record, _witness) = open.finalise();
+            let (record, witness) = open.finalise();
+            self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+            self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);
             self.summary.records_emitted += 1;
         }

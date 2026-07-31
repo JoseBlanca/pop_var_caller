@@ -821,10 +821,12 @@ fn production_counters(summary: crate::pileup::walker::RunSummary) -> SummaryCou
 /// nominally distinct and Rust cannot bound on field access — and writing it twice is what
 /// makes *both* exhaustive.
 ///
-/// **One field is ng's alone and is dropped by name.** `reads_silent_over_footprint` (D2)
-/// counts reads that were admitted and never contributed anywhere; production has no
-/// counterpart, so there is nothing to compare and comparing it against a structural zero
-/// would fail every walk. It is bound and dropped here, at one site, with this comment — the
+/// **Three fields are ng's alone and are dropped by name.** `reads_silent_over_footprint` (D2)
+/// counts reads that were admitted and never contributed anywhere; `reads_with_holed_witness`
+/// and `hole_positions` count reads blind in the middle of a record, which production cannot
+/// represent at all — that is what this whole change is about. Production has no counterpart to
+/// any of the three, so there is nothing to compare and comparing them against a structural zero
+/// would fail every walk. They are bound and dropped here, at one site, with this comment — the
 /// same treatment `placed_start` gets in [`project`], and the reason the destructure is
 /// exhaustive is so that treatment has to be *chosen*.
 fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
@@ -838,6 +840,8 @@ fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
         mate_lookup_evictions,
         column_depth_truncations,
         reads_silent_over_footprint: _,
+        reads_with_holed_witness: _,
+        hole_positions: _,
     } = summary;
     SummaryCounters {
         reads_admitted,

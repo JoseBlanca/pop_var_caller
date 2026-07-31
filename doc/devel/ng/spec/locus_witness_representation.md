@@ -417,3 +417,19 @@ before any number was trusted, because zero is also what a miswired probe report
   not frequency, and the aligner's junction behaviour decides it.* Settled by running the same
   probe over one spliced BAM. Worth doing before the implementation plan orders the work, and not
   worth blocking the design on.
+
+  **The counter that answers it now exists and needs no probe (owner, 2026-07-31).**
+  `reads_with_holed_witness` and `hole_positions` are on the walk's own `RunSummary` and on
+  `PileupGeneratorCounts`, and `ng_generic_loci_dump` prints them in its header — so pointing that
+  tool at a spliced BAM answers this question directly. They were first put only on the divergence
+  census, which cannot answer it: that census is `#[cfg(test)]` and compares against production's
+  walker, so it only measures loci where **production** also produced a record.
+
+- **How much STR evidence is a partial witness that touches both edges of the tract?** *Measured
+  2026-07-31, on chr01 of tomato `SRR7279503`:* **2,530 of 6,216 partial rows, 41%.** These are
+  reads anchored at **one** border whose repeat, counted in read bases, reached or passed the
+  reference tract's length — so the trimmed run covers the tract end to end. They are honest as
+  *witnesses* (the read did see every reference position) and they are correctly **not**
+  `Complete` (the read ran out, so it did not measure the allele). What collapses is the *label*:
+  every one of them prints as a left-edge partial, including the reads anchored on the right. The
+  open decision is whether the dumps should spell this case separately.

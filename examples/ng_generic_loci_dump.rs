@@ -132,6 +132,13 @@ struct DumpReport {
     reads_admitted: u64,
     reads_declined_by_preparer: u64,
     reads_silent_over_footprint: u64,
+    /// Reads that witnessed a locus in more than one run — blind in the middle of it. **The
+    /// measurement this whole representation was built for** (spec §8's open question): zero
+    /// on DNA-seq for a structural reason, and unknown on RNA-seq because no spliced
+    /// alignment has been run through it. Printed here so pointing this tool at a spliced BAM
+    /// answers it.
+    reads_with_holed_witness: u64,
+    hole_positions: u64,
     record_widen_events: u64,
     records_outside_region: u64,
     column_depth_truncations: u64,
@@ -251,8 +258,12 @@ impl DumpReport {
         let _ = writeln!(
             out,
             "# reads_admitted={} reads_declined_by_preparer={} \
-             reads_silent_over_footprint={}",
-            self.reads_admitted, self.reads_declined_by_preparer, self.reads_silent_over_footprint,
+             reads_silent_over_footprint={} reads_with_holed_witness={} hole_positions={}",
+            self.reads_admitted,
+            self.reads_declined_by_preparer,
+            self.reads_silent_over_footprint,
+            self.reads_with_holed_witness,
+            self.hole_positions,
         );
         let _ = writeln!(
             out,
@@ -521,6 +532,8 @@ fn run_dump<P: ReadPreparer + 'static>(
     report.reads_admitted = generic.reads_admitted;
     report.reads_declined_by_preparer = generic.reads_declined_by_preparer;
     report.reads_silent_over_footprint = generic.reads_silent_over_footprint;
+    report.reads_with_holed_witness = generic.reads_with_holed_witness;
+    report.hole_positions = generic.hole_positions;
     report.record_widen_events = generic.record_widen_events;
     report.records_outside_region = generic.records_outside_region;
     report.column_depth_truncations = generic.column_depth_truncations;

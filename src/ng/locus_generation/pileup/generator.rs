@@ -277,6 +277,24 @@ pub struct PileupGeneratorCounts {
     /// region being walked. Observably zero-sum across neighbouring regions,
     /// which is how the gap-free tiling argument stays checkable (spec §7).
     pub records_outside_region: u64,
+    /// Reads that witnessed a locus in **more than one run** — blind in the
+    /// middle of it — summed over the run. The case the witnessed-set
+    /// representation exists for: a spliced read crossing a record widened over
+    /// its intron used to be discarded whole, and is now recorded with both of
+    /// its pieces.
+    ///
+    /// **Expected to read zero on DNA-seq**, structurally: a ref-skip emits no
+    /// event, so an intron cannot widen a record by itself, and modern Illumina
+    /// puts `N`s at read ends where they cannot make a hole. The number worth
+    /// having is RNA-seq's, and this is the counter that can state it for any
+    /// BAM — the divergence census counts the same thing but is `#[cfg(test)]`
+    /// and only measures where production's walker also produced a record
+    /// (owner, 2026-07-31).
+    pub reads_with_holed_witness: u64,
+    /// The locus positions inside those holes, summed over the reads — how much
+    /// evidence the old discard threw away, rather than how many reads it threw
+    /// away.
+    pub hole_positions: u64,
 }
 
 impl PileupGeneratorCounts {
@@ -319,6 +337,8 @@ impl PileupGeneratorCounts {
             mate_lookup_evictions,
             column_depth_truncations,
             reads_silent_over_footprint,
+            reads_with_holed_witness,
+            hole_positions,
         } = *summary;
         debug_assert!(
             chain_allocations >= chain_ids_at_open.chain_allocations
@@ -338,6 +358,10 @@ impl PileupGeneratorCounts {
         // A plain sum, like the walker's own counters: each region's walk owns its active
         // set, so each reports only the reads that left *its* set (D2).
         self.reads_silent_over_footprint += reads_silent_over_footprint;
+        // Plain sums for the same reason: each region's walk finalises its own records, so a
+        // holed read is counted by exactly the walk whose record it folded into.
+        self.reads_with_holed_witness += reads_with_holed_witness;
+        self.hole_positions += hole_positions;
     }
 }
 
@@ -2069,6 +2093,9 @@ mod tests {
             column_depth_truncations: 8,
             // ng's, and a plain sum — each region's walk owns its own active set (D2).
             reads_silent_over_footprint: 2,
+            // Not folded by this test's subject; named so the destructure stays exhaustive.
+            reads_with_holed_witness: 0,
+            hole_positions: 0,
         };
 
         counts.fold_region_walk(&summary, baseline);

@@ -1957,3 +1957,38 @@ fn one_more_deleted_base_is_what_turns_the_spliced_read_into_a_holed_one() {
          runs with a fifteen-position hole between them",
     );
 }
+
+/// **The walk's own counter sees the spliced read, which is what makes the number obtainable
+/// from a real BAM** (owner, 2026-07-31).
+///
+/// The same two counts exist on the parity census, but that lives behind `#[cfg(test)]` and only
+/// measures loci where *production's* walker also produced a record — so it can never answer "how
+/// often does a read see a locus in two pieces on real RNA-seq", which is the one open
+/// measurement this representation was built for (spec §8). These ride the walk's `RunSummary`,
+/// so pointing the generic dump at any BAM reports them.
+///
+/// The numbers are the fixture's, and they are exact rather than "greater than zero": **one**
+/// holed read, blind over **15** positions — the intron at 31–45, which is the gap between the
+/// two exons the read did see.
+#[test]
+fn the_walks_summary_counts_the_spliced_read_and_the_positions_it_was_blind_over() {
+    let (_records, summary) =
+        drive_walker_with_summary(spliced_and_deleting_reads(20), MockFasta::new(SPLICED_REF));
+    assert_eq!(
+        (summary.reads_with_holed_witness, summary.hole_positions),
+        (1, 15),
+        "one read saw the locus in two pieces and was blind over the 15-base intron between \
+         them; the deletion read beside it witnessed the whole footprint and is not holed",
+    );
+
+    // The other side of the knife-edge: at 17 deleted bases the footprint stops before exon 2,
+    // so the same read witnesses one contiguous piece and the counter must stay at zero. Without
+    // this half, a counter that simply counted every partial read would pass the assertion above.
+    let (_records, unholed) =
+        drive_walker_with_summary(spliced_and_deleting_reads(17), MockFasta::new(SPLICED_REF));
+    assert_eq!(
+        (unholed.reads_with_holed_witness, unholed.hole_positions),
+        (0, 0),
+        "a partial witness of one run is not a hole",
+    );
+}
