@@ -1022,9 +1022,17 @@ mod tests {
             "since C3 `blind`'s hole costs it nothing — it gets a row whose witness names \
              both runs — and no other read on this fixture witnessed nothing at all"
         );
-        // Every row's reads, plus the reads counted out, must be the observations the walk
-        // made. `reads_admitted` is not that number — a read contributes at many positions —
-        // so the identity is per class, which is why all five counters are printed.
+        // **A bookkeeping check, and it is worth saying which — because it is not the
+        // accounting identity the header promises.** `push_locus` adds `obs.num_obs` to
+        // `reads_complete` or `reads_observed` and pushes a row carrying the same number, in
+        // one loop iteration, so this sum holds over *any* input: the Milestone C behaviour
+        // review pointed out it cannot fail. What it does catch is the two drifting apart —
+        // a class added to the match, or a row emitted outside it.
+        //
+        // The identity a reader wants — every admitted read is somewhere — cannot be
+        // asserted from this report: `reads_admitted` counts reads and the row totals count
+        // (read × locus) incidences, which is exactly why the header prints its counters on
+        // two lines and the module doc says so.
         assert_eq!(
             report.reads_complete + report.reads_observed,
             report
@@ -1032,7 +1040,7 @@ mod tests {
                 .iter()
                 .map(|row| u64::from(row.reads))
                 .sum::<u64>(),
-            "the per-class read totals are the rows' reads, split by coverage"
+            "every row's reads are in exactly one per-class total, and vice versa"
         );
     }
 

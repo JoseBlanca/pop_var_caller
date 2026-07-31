@@ -2892,7 +2892,7 @@ mod tests {
         assert_eq!(
             widened.reads_without_observation, 0,
             "and it is not counted out either — the tally means 'witnessed nothing' now, \
-             and `wide` witnessed nineteen of the record's sixteen... positions on both \
+             and `wide` witnessed fifteen of this record's sixteen positions, on both \
              sides of its N. Record: {widened:?}"
         );
 
@@ -4057,6 +4057,41 @@ mod tests {
             witness.reads_partial, 1,
             "`holey` is a partial witness of this footprint, not an absence from it"
         );
+    }
+
+    /// **The exclusion that keeps one read out of two counters, on the state the walk can no
+    /// longer reach.**
+    ///
+    /// `finalise` counts a read as discarded-by-cap only when it is absent from
+    /// `folded_reads` **and** absent from `reads_without_observation`. The second clause was
+    /// added because 240 records in ~506,000 reported one read under both, which tells a
+    /// model the support is a subsample when the truth is that a read said nothing usable.
+    ///
+    /// **C3 removed the cause, and left the clause unfalsifiable.** A read now reaches
+    /// `reads_without_observation` only by witnessing nothing at all, which no walk produces
+    /// — so deleting `&& !self.reads_without_observation.contains(read_id)` left the whole
+    /// suite green (Milestone C behaviour review, F1). A guard nothing can fail is a guard
+    /// nobody can refactor safely, so this reaches the state directly: the record is built by
+    /// hand with one read id in **both** lists, which is exactly the shape the exclusion
+    /// exists for and exactly the shape `process_position` no longer makes.
+    #[test]
+    fn a_read_counted_out_and_also_named_to_the_cap_is_not_reported_as_capped() {
+        let mut record = OpenPileupRecord::new(0, 5, b"ACGTA".to_vec());
+        note_no_observation(&mut record.reads_without_observation, 7);
+        record.reads_discarded_by_cap.push(7);
+        // A second read the cap really did keep out, so the counter is not merely zero.
+        record.reads_discarded_by_cap.push(9);
+
+        let (locus, witness) = record.finalise();
+        assert_eq!(
+            witness.reads_discarded_by_cap, 1,
+            "read 9 folded nowhere and the cap is why; read 7 folded nowhere because it \
+             witnessed nothing, and reporting it here would count one read twice under two \
+             counters that mean different things to a model",
+        );
+        assert_eq!(witness.reads_without_observation, 1);
+        assert_eq!(locus.reads_discarded_by_cap, 1);
+        assert_eq!(locus.reads_without_observation, 1);
     }
 
     /// **A read the cap removed at one position but not another is *not* discarded** — the

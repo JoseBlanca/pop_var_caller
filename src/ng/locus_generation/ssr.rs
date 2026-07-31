@@ -839,6 +839,19 @@ mod classify {
         border: AnchoredBorder,
         locus: &SsrLocus,
     ) -> Classified {
+        // **The span has to be ordered, and only a `debug_assert` upstream says so.**
+        // `classify`'s own ordering check (`ssr_best_path_flat_gap.rs`) is debug-only on a
+        // struct with public fields — kept public for the delimiter parity harness — and
+        // this repo has recorded twice that debug-only guards compile out of the build it
+        // actually runs. An inverted span underflows `tract.end - tract.start` below: a
+        // panic in debug, and in release a wrap that clamps to `u16::MAX` and then dies on
+        // the slice index, naming neither the cause nor the read. The `tract.is_empty()`
+        // guard removed from `classify_read` used to swallow this shape too, since
+        // `Range::is_empty` is `start >= end` (Milestone C review).
+        debug_assert!(
+            tract.start <= tract.end,
+            "inverted tract span {tract:?} reached `partial`",
+        );
         let region_seq = &read.seq[region.clone()];
         let region_qual = &read.qual[region.clone()];
         let tract = to_usize(tract);
