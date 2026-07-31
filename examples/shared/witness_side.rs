@@ -35,28 +35,49 @@
 //! case and this enum carries it through; what it cannot carry is the difference between a
 //! partial that is flush at both borders because it holds a hole and one that is flush at both
 //! because an STR reach counted in read bases saturated — both land in `Left`, since `(true, _)`
-//! matches first, exactly as the three copies did. `Complete` is the only "the length is pinned"
-//! test. See the note on `ReadWitness` itself, and the Checkpoint D open item asking whether
-//! this enum should grow a fourth case for it.
+//! matched first. **That is what [`WitnessSide::BothBorders`] fixed** (owner, 2026-07-31): the
+//! case now has a name, so a tool has to spell it and a consumer has to handle it. `Complete`
+//! remains the only "the length is pinned" test. See the note on `ReadWitness` itself.
 
 use pop_var_caller::ng::locus_generation::{LocusLen, ReadWitness};
 
 /// The border constraint a witness carries, once the side is a **derivation** rather than a
 /// variant: a run flush with the left border is a prefix constraint on the allele, one flush
-/// with the right border a suffix, one flush with neither is interior.
+/// with the right border a suffix, one flush with neither is interior — and one flush with
+/// **both** that is still not `Complete` is the case below, which used to be reported as a
+/// prefix.
 ///
 /// `Interior` is unreachable from the STR path, which anchors a border or yields no observation
 /// at all — it is named because the generic path can mint one, and because a label that cannot
 /// say "neither" would quietly report it as a prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WitnessSide {
-    /// The read reached both borders and witnessed every position between them.
+    /// The read reached both borders and witnessed every position between them — **the only
+    /// case that measured the locus.**
     Complete,
-    /// Flush with the left border — **including** a witness flush with both, which is what a
-    /// reach covering the whole locus builds.
+    /// Flush with the left border only — a prefix constraint on the allele.
     Left,
-    /// Flush with the right border only.
+    /// Flush with the right border only — a suffix constraint.
     Right,
+    /// **Flush with both borders and still not a measurement** (owner, 2026-07-31).
+    ///
+    /// Two different reads land here, and neither pinned the allele's length:
+    ///
+    /// - **A repeat read that ran out.** It anchored **one** flank, and its repeat — counted in
+    ///   read bases — reached or passed the reference tract's length, so laying it down from the
+    ///   anchored border covers the tract end to end. It covered every reference position and
+    ///   still did not measure the allele, because the allele can run on past what the read
+    ///   showed. On chromosome 1 of a tomato sample this is **2,530 of 6,216 partial
+    ///   observations, 41 %** — and before this case existed, every one of them was labelled a
+    ///   left-edge prefix, including the reads anchored on the *right*.
+    /// - **A read blind in the middle.** It reached both borders with a hole between them, which
+    ///   is what the generic path mints for a spliced read across a widened record.
+    ///
+    /// Keeping them together is deliberate: what a consumer must not do is read either as a
+    /// measurement, and `Complete` is the test that separates measurement from lower bound.
+    /// Telling the two apart *within* this case is `positions_covered` against the locus length,
+    /// which the label does not need.
+    BothBorders,
     /// Flush with neither.
     Interior,
 }
@@ -65,13 +86,16 @@ pub enum WitnessSide {
 ///
 /// Destructured rather than guarded on `_`, so a future `ReadWitness` variant is a compile error
 /// here — the guard form is exactly what let the compiler stop forcing these sites to be
-/// revisited during the rename.
+/// revisited during the rename. **The border pair is exhaustive too, for the same reason**: it
+/// was `(true, _)` until the both-borders case was given a name, and that wildcard is precisely
+/// what swallowed it.
 pub fn witness_side(witness: &ReadWitness, locus_len: LocusLen) -> WitnessSide {
     match witness {
         ReadWitness::Complete => WitnessSide::Complete,
         run @ ReadWitness::Partial { .. } => {
             match (run.is_flush_left(), run.is_flush_right(locus_len)) {
-                (true, _) => WitnessSide::Left,
+                (true, true) => WitnessSide::BothBorders,
+                (true, false) => WitnessSide::Left,
                 (false, true) => WitnessSide::Right,
                 (false, false) => WitnessSide::Interior,
             }

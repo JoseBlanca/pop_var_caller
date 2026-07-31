@@ -891,9 +891,36 @@ mod classify {
         let tract = to_usize(tract);
         // `reach` is the observed tract length in **read** coordinates, which diverge from locus
         // positions under stutter — an expanded allele reaches further in read bases than the
-        // reference tract has positions. `ReadWitness`'s constructors clamp it to the locus, so
-        // the stored run never claims positions the locus does not have (a long partial correctly
-        // saturates to full coverage).
+        // reference tract has positions.
+        //
+        // # The convention that turns a read length into reference positions (owner, 2026-07-31)
+        //
+        // A witness is a set of **reference** positions, so `reach` has to be placed on the
+        // reference before it can be stored, and inside a repeat that placement needs a rule:
+        // if a read shows 12 repeat bases where the reference tract has 10 positions, *which*
+        // two are the extra copies is not determined by the sequence.
+        //
+        // **The rule is: lay the read's repeat down from the border it anchored.** A read that
+        // held the left flank starts its repeat at the tract's left border; one that held the
+        // right flank ends its repeat at the right border. Bases beyond the tract's far border
+        // are then extra copies — an insertion — rather than positions of the tract. It is the
+        // same rule indel left-alignment uses, with the anchored side choosing the direction.
+        //
+        // Two consequences, and the clamp in `ReadWitness::from_left` / `from_right` is exactly
+        // this rule implemented:
+        //
+        // 1. a reach **shorter** than the tract covers that many positions from the anchored
+        //    border, which is what the constructors build directly;
+        // 2. a reach **at or past** the tract length covers the tract end to end — every
+        //    reference position — with the surplus falling outside as inserted copies. That is
+        //    what the clamp produces, and it is correct rather than a saturation artefact.
+        //
+        // **Covering every position is still not a measurement.** The read anchored one border
+        // and then ran out; the allele can continue past what it showed, so the evidence stays a
+        // lower bound. That is why this path builds a *partial* witness in both cases and only a
+        // read holding **both** flanks is `Complete` — and why the dumps spell case 2
+        // `partial:both` rather than folding it into `partial:left` (spec §8; 2,530 of 6,216
+        // partial observations on chr01 of tomato SRR7279503).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
         let locus_len = LocusLen::from_positions(locus.segment.tract_len());
         // **The read is outside the locus, and this is where that is decided.** The

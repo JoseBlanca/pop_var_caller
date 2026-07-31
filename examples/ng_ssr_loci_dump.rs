@@ -175,6 +175,7 @@ fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
         WitnessSide::Complete => "complete",
         WitnessSide::Left => "partial:left",
         WitnessSide::Right => "partial:right",
+        WitnessSide::BothBorders => "partial:both",
         WitnessSide::Interior => "partial:interior",
     }
 }

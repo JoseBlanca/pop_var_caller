@@ -243,6 +243,13 @@ def _(df, len_band):
             "complete": "complete",
             "partial:left": "partial",
             "partial:right": "partial",
+            # A read that anchored one flank and whose repeat, in read bases, reached or passed
+            # the reference tract's length: laid down from the anchored border it covers the
+            # tract end to end, so it touches both borders — and it still did not measure the
+            # allele, because the allele can run past what the read showed. 41% of partial
+            # observations on tomato chromosome 1. It was labelled "partial:left" until
+            # 2026-07-31, including when the read was anchored on the *right*.
+            "partial:both": "partial",
             "partial:interior": "partial",
             "partial_left": "partial",
             "partial_right": "partial",

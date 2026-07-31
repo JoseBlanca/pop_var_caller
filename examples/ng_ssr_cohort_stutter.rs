@@ -168,6 +168,7 @@ fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
         WitnessSide::Complete => "complete",
         WitnessSide::Left => "partial:left",
         WitnessSide::Right => "partial:right",
+        WitnessSide::BothBorders => "partial:both",
         WitnessSide::Interior => "partial:interior",
     }
 }
@@ -462,5 +463,15 @@ mod tests {
         assert_eq!(partial(&[(0, 4)]), "partial:left");
         assert_eq!(partial(&[(6, 10)]), "partial:right");
         assert_eq!(partial(&[(3, 7)]), "partial:interior");
+        assert_eq!(
+            partial(&[(0, 10)]),
+            "partial:both",
+            "a repeat read that ran out covers the tract end to end without measuring it",
+        );
+        assert_eq!(
+            partial(&[(0, 3), (7, 10)]),
+            "partial:both",
+            "so does a read blind in the middle — neither is a measurement",
+        );
     }
 }

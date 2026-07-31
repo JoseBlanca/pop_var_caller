@@ -346,6 +346,16 @@ than clamp — see §3.4.
    witness with empty bases; `obs_partial` 13,789 → 7,085, `reads_without_observation`
    2,561 → 9,265; `obs_complete`, the locus count and every non-empty observation unchanged. Every
    step from C1 on is byte-identical against **that** baseline.
+
+   **A second deliberate move, at the end of Milestone D (owner, 2026-07-31), and this one is one
+   column of one label.** The dumps gained a fourth label, `partial:both`, for a partial witness
+   that touches both borders of the tract — a read that anchored one flank and whose repeat, laid
+   down from that flank, covers the tract end to end without measuring the allele. It was
+   previously reported as `partial:left`, *including for reads anchored on the right*. Verified
+   line by line against the previous baseline: **2,530 of 8,135 observation rows differ, every one
+   of them in the `read_witness` column alone, and every transition is `partial:left` →
+   `partial:both`.** The two header lines, the `depth` column, the row order and every other field
+   are unchanged. New baseline `tmp/witness_baseline/ssr_dump_partial_both.tsv`.
 2. **The generic anchor stays green** and the census gains its new class, counted and floored — no
    divergence may be absorbed into an existing class.
 3. **A fixture per new capability, each written to fail the old representation:** a read blind in

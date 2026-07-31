@@ -336,11 +336,21 @@ impl ReadWitness {
     ///
     /// `locus_len` clamps the run into the locus. It is needed because a producer's
     /// reach can be measured in *read* bases, which diverge from locus positions under
-    /// stutter; a run must never claim positions the locus does not have. It is **only** a
-    /// clamp: a reach that saturates says the read ran out, so this answers `Partial` even
-    /// when the clamped run covers everything — the split is on
-    /// [`from_witnessed_runs`](Self::from_witnessed_runs), which is the constructor that may
-    /// decide completeness.
+    /// stutter; a run must never claim positions the locus does not have.
+    ///
+    /// **The clamp is a placement rule, not a repair** (owner, 2026-07-31). A reach is a length
+    /// in the read, and putting it on the reference inside a repeat needs a convention, because
+    /// which copies are the extra ones is not determined by the sequence. The convention is: lay
+    /// the repeat down **from the border the read anchored** — left here, right in
+    /// [`from_right`](Self::from_right) — so bases past the far border are extra copies rather
+    /// than positions of the locus. A reach at or past `locus_len` therefore covers every
+    /// position, which is what the clamp produces. The STR path's own comment carries the
+    /// worked version.
+    ///
+    /// It is **only** a placement: a reach that saturates says the read ran out, so this still
+    /// answers `Partial` when the clamped run covers everything. Completeness is decided by
+    /// [`from_witnessed_runs`](Self::from_witnessed_runs), the constructor whose caller states
+    /// positions rather than a reach.
     ///
     /// **`None` when the clamped run covers no position** — the caller is describing a read
     /// that witnessed nothing of this locus, which is not a witness. C2 made that

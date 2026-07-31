@@ -406,3 +406,78 @@ end to end and is honest — the read did see every reference position — and t
 `Complete`, because the read ran out and so did not measure the allele. What collapses is the
 printed label: all 2,530 render as a left-edge partial, including the reads anchored on the right.
 Recorded in spec §8; the decision on a fourth label is the owner's.
+
+---
+
+## D8 — a fourth label, and the convention that justifies the clamp (added at Checkpoint D)
+
+### The question that produced it
+
+The owner asked why a witness is not simply stored in reference coordinates, given the caller
+always has an alignment. The answer is that it already is — a witness is a set of locus positions,
+which are reference positions counted from the locus start. Read coordinates enter at one place
+only, as a *length*: the tract delimiter returns the repeat's span in the read's own sequence
+(`RepeatSpan`, a read-space range), and the repeat caller turns that length into how far into the
+tract the read reached.
+
+The owner's follow-up settled the part that had been recorded as unresolvable. I had written that
+placing a read's extra repeat copies on the reference is arbitrary; it is not, once the anchored
+side is allowed to choose the direction.
+
+### The convention, now written down
+
+**Lay the read's repeat down from the border it anchored.** A read that held the left flank starts
+its repeat at the tract's left border; one that held the right flank ends its repeat at the right
+border. Bases past the far border are extra copies — an insertion — rather than positions of the
+tract. It is the same rule indel left-alignment uses, with the anchored side choosing the
+direction.
+
+Two consequences, and **the existing clamp is exactly this rule implemented**:
+
+1. a reach shorter than the tract covers that many positions from the anchored border;
+2. a reach at or past the tract length covers the tract **end to end**, with the surplus outside as
+   inserted copies.
+
+So this step changes no behaviour. What it changes is the justification: the clamp reads as a
+placement rule rather than as a saturation artefact. Written where the repeat caller computes the
+reach, and on `from_left` / `from_right`.
+
+### The label, and why case 2 needed one
+
+Covering every position is still not a measurement. The read anchored **one** border and then ran
+out, so the allele can continue past what it showed and the evidence stays a lower bound. The
+representation had this right — those reads are `Partial`, never `Complete`. What did not have it
+right was the label, which asked "does it touch the left border?" first and answered *left* for
+every one of them, **including the reads anchored on the right**.
+
+`WitnessSide` gained `BothBorders` and the border match lost its `(true, _)` wildcard — that
+wildcard is what had been swallowing the case. All three STR dumps spell it `partial:both`.
+
+**It is not a corner:** on chromosome 1 of tomato `SRR7279503`, **2,530 of 6,216 partial
+observations, 41 %**, are reads whose repeat reached or passed the reference tract's length.
+
+### The rebaseline, verified rather than asserted
+
+The STR dump moved on purpose, for the second time in this plan. Compared line by line against the
+previous baseline rather than by `diff` block counts:
+
+```
+lines differing at the same line number: 2530
+which column indexes differ: {(6,): 2530}
+label transitions: {('partial:left', 'partial:both'): 2530}
+```
+
+Every changed row differs in the `read_witness` column **and nothing else**; the two header lines,
+the `depth` column, the row order and every other field are unchanged. New baseline
+`tmp/witness_baseline/ssr_dump_partial_both.tsv`.
+
+*(A plain `diff | grep -c '^<'` reports 2,536, which is block alignment around the changed rows and
+not six extra changes — the line-by-line comparison above is the one to trust.)*
+
+**The downstream consumer follows:** the bake-off dashboard maps `partial:both` into its partial
+class. It would otherwise have failed loudly rather than silently, on the unknown-label assertion
+added during the Milestone D review.
+
+**Counts:** the label tests in all three STR dumps gained the new case; the suite is **2,848**,
+`ng::locus_generation` **313**, both unchanged by this step since the new assertions live in
+existing tests.

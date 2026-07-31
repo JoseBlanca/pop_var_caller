@@ -273,6 +273,27 @@ expectations is a step that did more than rename.
   where the footprint stops before the second exon — the second half being what stops a counter
   that simply counted every partial read from passing. *Depends:* D6. *Source:* owner; spec §8.
 
+- ✅ **D8 — added at Checkpoint D (owner, 2026-07-31).** A fourth label, `partial:both`, and the
+  convention that justifies the clamp behind it.
+
+  **The label.** `WitnessSide` gained `BothBorders`, and the border match lost its `(true, _)`
+  wildcard — which is what had been swallowing the case. A partial witness touching both borders
+  is now spelled apart from a left-edge prefix in all three STR dumps. Two different reads land
+  there and neither measured the allele: a repeat read that anchored one flank and ran out with a
+  reach at or past the tract length, and a read blind in the middle. **This moves the STR oracle,
+  deliberately and for the second time in the plan** — verified line by line: 2,530 of 8,135 rows,
+  every one in the `read_witness` column alone, every transition `partial:left` → `partial:both`,
+  headers/`depth`/order untouched. New baseline
+  `tmp/witness_baseline/ssr_dump_partial_both.tsv`; the bake-off dashboard maps the new label.
+
+  **The convention.** *Lay the read's repeat down from the border it anchored* — left flank held,
+  start at the left border; right flank held, end at the right border; bases past the far border
+  are extra copies rather than positions. The same rule indel left-alignment uses, with the
+  anchored side choosing the direction. It was implicit in the constructors' clamp and is now
+  written where the repeat caller turns a read length into a witness, and on the constructors
+  themselves. It **changes no behaviour** — it says why the existing clamp is right rather than a
+  saturation artefact. *Depends:* D7. *Source:* owner.
+
 > **Checkpoint D: every consumer reads the set, and the surfaces show it.** Pause for review.
 
 ## Milestone E — verification at scale
