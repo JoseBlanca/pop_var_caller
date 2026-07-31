@@ -209,9 +209,23 @@ expectations is a step that did more than rename.
   `ReadWitness`. `from_left`/`from_right` keep their signatures, so the STR generator's call sites
   do not move and the dump is byte-identical. *Depends:* D2. *Source:* arch §1.1 (revised),
   spec §1 goal 3; owner decision.
-- ☐ **D4.** Both dump tools print the set rather than one run, and the generic dump's invariant
+- ✅ **D4.** Both dump tools print the set rather than one run, and the generic dump's invariant
   check (`offset_in_locus + positions_covered <= footprint`) becomes a check per run. *Depends:*
-  D3. *Source:* spec §4, §8. **Deferred here by the Milestone A review** (Mi15): `witness_label`
+  D3. *Source:* spec §4, §8. **What landed:** the generic dump already printed one
+  `<offset>+<positions>` per run (C2) and already checked per run — so D4's work there was the
+  **tag**, `observed:` → `partial:`, and the counters `rows_observed`/`reads_observed` →
+  `rows_partial`/`reads_partial`, the last user-visible uses of the variant name spec §3.1
+  retired. The per-run bound was **asserted by nothing**: every locus the walk produces satisfies
+  it, so a hand-built locus witnessing `[(0,2), (4,12)]` of 10 positions now aims at it — the
+  pre-C2 formula passes that (`0 + 10 <= 10`) while the second run runs two positions past the
+  locus. The three STR dumps' side derivation moved into `examples/shared/witness_side.rs`
+  (`#[path]`, one body, three declarations) and **the drift was decided rather than inherited**:
+  every tool now spells the colon form. `ng_ssr_loci_dump` already did, so the byte-identity
+  oracle did not move; `ng_ssr_cohort_stutter` and `ng_ssr_aligner_bakeoff` emit `partial:left` /
+  `partial:right` where they emitted `partial_left` / `partial_right`, and the one downstream
+  consumer of those strings — `ng_ssr_aligner_bakeoff_dashboard.py`'s label map — follows, with
+  an assertion so an unmapped label stops being a silent `NaN` every count drops. **Deferred here
+  by the Milestone A review** (Mi15): `witness_label`
   exists in **three** example dumps, identical down to a shared seven-line comment, and the three
   have already drifted — `ng_ssr_loci_dump` emits `partial:left`/`partial:right` where the other
   two emit `partial_left`/`partial_right` but keep `partial:interior`. The two research dumps'

@@ -44,6 +44,12 @@ use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
 use pop_var_caller::ng::types::{Bp, ContigId};
 
+/// The side derivation, shared with the other two STR dumps so the three cannot drift apart
+/// again (D4). Each tool keeps its own strings — see `witness_label`.
+#[path = "shared/witness_side.rs"]
+mod witness_side;
+use witness_side::{WitnessSide, witness_side};
+
 /// One TSV row: an observed tract sequence at a locus, with its support.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservationRow {
@@ -161,22 +167,15 @@ impl DumpReport {
 
 /// The tag a witness carries in the `read_witness` column.
 fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
-    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
-    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
-    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
-    // so it never appears here, but naming it keeps the label honest for the generic path.
-    // Destructured rather than guarded on `_`, so a future `ReadWitness` variant is a
-    // compile error here. The guard form is what this migration used and it is exactly what
-    // let the compiler stop forcing these sites to be revisited.
-    match witness {
-        ReadWitness::Complete => "complete",
-        run @ ReadWitness::Partial { .. } => {
-            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
-                (true, _) => "partial:left",
-                (false, true) => "partial:right",
-                (false, false) => "partial:interior",
-            }
-        }
+    // The derivation is shared (`shared/witness_side.rs`); **the spelling is this tool's**, and
+    // it is the one the three STR dumps converged on at D4 because it was already internally
+    // consistent — one separator for all three cases. These four strings are the byte-identity
+    // oracle's `read_witness` column, so they do not move.
+    match witness_side(witness, locus_len) {
+        WitnessSide::Complete => "complete",
+        WitnessSide::Left => "partial:left",
+        WitnessSide::Right => "partial:right",
+        WitnessSide::Interior => "partial:interior",
     }
 }
 

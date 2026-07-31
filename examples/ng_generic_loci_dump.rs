@@ -22,7 +22,7 @@
 //! # What the columns say that a `PileupRecord` could not
 //!
 //! - **`read_witness`** is `complete`, or one `<offset>+<positions>` per run the read
-//!   witnessed: `observed:0+2` for a single run, `observed:0+2,3+2` for a witness with a
+//!   witnessed: `partial:0+2` for a single run, `partial:0+2,3+2` for a witness with a
 //!   hole in the middle. A partial witness is a *censored* observation — the sequence is at
 //!   least this long — and production has no way to say it: it fills the positions the read
 //!   did not witness from the reference and folds the result as if the read had seen them
@@ -52,7 +52,7 @@
 //! beside `reads_discarded_by_cap=55`. The per-locus pair therefore carries a `locus_sum_`
 //! prefix on its own line.
 //!
-//! **What is actually checkable, and is checked:** `reads_complete + reads_observed` equals the
+//! **What is actually checkable, and is checked:** `reads_complete + reads_partial` equals the
 //! summed `reads` column over every row, asserted below. The identity spec §13 asks for — every
 //! *fetched* read accounted for exactly once — needs a run-level "appeared in some row" flag
 //! beside `ever_contributed`, which the walk does not carry; until it does, the honest statement
@@ -69,6 +69,8 @@ use pop_var_caller::ng::locus_generation::{
     GeneratorCounts, GeneratorSet, GeneratorSlot, LocusKind, ReadWitness, SampleLocusObservations,
     SampleLocusObservationsIterator, UnhandledReason,
 };
+#[cfg(test)]
+use pop_var_caller::ng::locus_generation::{SequenceObservation, WitnessedLocusPositions};
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::ReadPreparer;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -80,6 +82,8 @@ use pop_var_caller::ng::reference_info::{
 use pop_var_caller::ng::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, TypedRegionError, TypedRegionIterator,
 };
+#[cfg(test)]
+use pop_var_caller::ng::types::ReadGroupId;
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
 /// One TSV row: an observed sequence at a locus, with its support.
@@ -116,9 +120,9 @@ struct DumpReport {
     /// emitted shape and "reads" about the evidence, and the read-group split moves one
     /// without moving the other.
     rows_complete: u64,
-    rows_observed: u64,
+    rows_partial: u64,
     reads_complete: u64,
-    reads_observed: u64,
+    reads_partial: u64,
     /// Summed over loci: reads that covered a locus and produced nothing (A5), and reads a
     /// depth cap discarded (B3).
     reads_without_observation: u64,
@@ -185,8 +189,8 @@ impl DumpReport {
                     self.reads_complete += u64::from(obs.num_obs);
                 }
                 ReadWitness::Partial { positions } => {
-                    self.rows_observed += 1;
-                    self.reads_observed += u64::from(obs.num_obs);
+                    self.rows_partial += 1;
+                    self.reads_partial += u64::from(obs.num_obs);
                     // **Per run since C2.** A witness is a set, so checking the extent that
                     // encloses its runs would wave through an interior run reaching past the
                     // locus, and would say nothing at all about the holes between them.
@@ -257,8 +261,8 @@ impl DumpReport {
         );
         let _ = writeln!(
             out,
-            "# rows_complete={} rows_observed={} reads_complete={} reads_observed={}",
-            self.rows_complete, self.rows_observed, self.reads_complete, self.reads_observed,
+            "# rows_complete={} rows_partial={} reads_complete={} reads_partial={}",
+            self.rows_complete, self.rows_partial, self.reads_complete, self.reads_partial,
         );
         let _ = writeln!(
             out,
@@ -309,12 +313,19 @@ fn witness_label(witness: &ReadWitness) -> String {
         // C3 — so this column has not moved; the comma is what a holed witness will need.
         // **D4 owns what this column finally says**, along with the drift between the three
         // dumps' own labels; this is the smallest form that can express the new shape.
+        // **One `<offset>+<positions>` per run, comma-separated** — so a witness with a hole
+        // renders as the two runs it is (`partial:0+3,7+3`) rather than as the span that would
+        // swallow the gap. A one-run witness renders as it always did apart from the tag.
+        //
+        // **`observed:` became `partial:` at D4.** It was the last user-visible use of the
+        // variant name spec §3.1 retired: next to `complete`, "observed" is not a contrast — a
+        // complete witness was observed too — and the tag now matches the variant it prints.
         ReadWitness::Partial { positions } => {
             let runs: Vec<String> = positions
                 .runs()
                 .map(|(start, end)| format!("{start}+{}", end - start))
                 .collect();
-            format!("observed:{}", runs.join(","))
+            format!("partial:{}", runs.join(","))
         }
     }
 }
@@ -1024,7 +1035,7 @@ mod tests {
         );
         // **A bookkeeping check, and it is worth saying which — because it is not the
         // accounting identity the header promises.** `push_locus` adds `obs.num_obs` to
-        // `reads_complete` or `reads_observed` and pushes a row carrying the same number, in
+        // `reads_complete` or `reads_partial` and pushes a row carrying the same number, in
         // one loop iteration, so this sum holds over *any* input: the Milestone C behaviour
         // review pointed out it cannot fail. What it does catch is the two drifting apart —
         // a class added to the match, or a row emitted outside it.
@@ -1034,7 +1045,7 @@ mod tests {
         // (read × locus) incidences, which is exactly why the header prints its counters on
         // two lines and the module doc says so.
         assert_eq!(
-            report.reads_complete + report.reads_observed,
+            report.reads_complete + report.reads_partial,
             report
                 .rows
                 .iter()
@@ -1081,7 +1092,7 @@ mod tests {
         //    the one production's positional rule gets wrong.**
         let partial = rows_at(&report, 20)
             .into_iter()
-            .find(|row| row.read_witness == "observed:0+2")
+            .find(|row| row.read_witness == "partial:0+2")
             .expect("the masked read's partial row");
         assert_eq!(
             partial.observed,
@@ -1217,7 +1228,7 @@ mod tests {
         let witnesses: Vec<&str> = rows.iter().map(|row| row.read_witness.as_str()).collect();
         assert_eq!(
             witnesses,
-            vec!["complete", "observed:0+2"],
+            vec!["complete", "partial:0+2"],
             "the same two bases must appear twice at locus 20 — once from a read that \
              witnessed all five positions and deleted three, once from a read that witnessed \
              two and was silenced over the rest. Rows: {:?}",
@@ -1234,7 +1245,7 @@ mod tests {
         // identify it.
         let masked_row = rows
             .iter()
-            .find(|row| row.read_witness == "observed:0+2")
+            .find(|row| row.read_witness == "partial:0+2")
             .expect("the masked read's row");
         assert_ne!(
             masked_row.observed, locus_ref,
@@ -1283,7 +1294,7 @@ mod tests {
                     read("blind", 11, &[(Kind::Match, 30)], seq)
                 },
                 // 20-21 and 23-24 of a record anchored at 20; 22 is in neither run.
-                "observed:0+2,3+2",
+                "partial:0+2,3+2",
                 [ref_span(20, 21), ref_span(23, 24)].concat(),
             ),
             (
@@ -1299,7 +1310,7 @@ mod tests {
                     )
                 },
                 // 20-21 and 24; both 22 and 23 are skipped.
-                "observed:0+2,4+1",
+                "partial:0+2,4+1",
                 [ref_span(20, 21), ref_span(24, 24)].concat(),
             ),
         ] {
@@ -1419,7 +1430,7 @@ mod tests {
         let short_bases = ref_span(19, 23);
         let row = row_at(&report, 19, &short_bases);
         assert_eq!(
-            row.read_witness, "observed:0+5",
+            row.read_witness, "partial:0+5",
             "`short` witnessed positions 19..23 of a sixteen-position footprint"
         );
         assert_eq!(
@@ -1603,7 +1614,7 @@ mod tests {
             whole
                 .rows
                 .iter()
-                .any(|row| row.start == 20 && row.read_witness == "observed:1+4"),
+                .any(|row| row.start == 20 && row.read_witness == "partial:1+4"),
             "`beyond` must fold into the record at 20 from outside it — without that row this \
              fixture cannot tell a halo from no halo. Rows at 20: {:?}",
             rows_at(&whole, 20)
@@ -1646,6 +1657,74 @@ mod tests {
         assert_eq!(
             anchors, sorted,
             "the concatenated stream must be coordinate-sorted and duplicate-free"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The per-run invariant (D4)
+    // ---------------------------------------------------------------------
+
+    /// One hand-built locus, so `push_locus`'s guard can be aimed at rather than waited for.
+    fn locus_witnessing(runs: &[(u16, u16)], footprint: u64) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                // 1-based inclusive, so a `footprint`-position locus ends at `footprint`.
+                end: Position(footprint),
+            },
+            reference_bases: vec![b'A'; footprint as usize].into_boxed_slice(),
+            observations: vec![SequenceObservation {
+                bases: vec![b'A'; runs.iter().map(|(s, e)| usize::from(e - s)).sum()]
+                    .into_boxed_slice(),
+                read_witness: ReadWitness::Partial {
+                    positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                        .expect("a non-empty set of runs"),
+                },
+                read_group: ReadGroupId(0),
+                num_obs: 1,
+                num_fwd: 1,
+                q_sum: 0.0,
+                mapq_sum: 60,
+                mapq_sum_sq: 3600,
+                placed_left: 0,
+                chain_ids: Vec::new(),
+            }],
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// **The bound is checked per run, and this is the case that tells the two readings apart.**
+    ///
+    /// A witness of `[(0,2), (4,12)]` on a 10-position locus covers 2 + 8 = 10 positions and
+    /// starts at 0, so the pre-C2 formula the plan names — `offset_in_locus + positions_covered
+    /// <= footprint`, i.e. `0 + 10 <= 10` — **passes it**, while its second run genuinely runs
+    /// two positions past the locus. Only walking the runs catches that.
+    ///
+    /// Written because the guard C2 made per-run had nothing aimed at it: every locus the walk
+    /// produces satisfies it, so replacing the loop with either enclosing formula left the whole
+    /// suite green. `from_half_open_runs` is the way in — it canonicalises but does not clamp,
+    /// which is the documented split (the clamp belongs to `num_obs_along_locus`, where the
+    /// region is in hand).
+    #[test]
+    #[should_panic(expected = "claims positions 4..12 of a 10-position locus")]
+    fn a_run_reaching_past_the_footprint_is_caught_even_when_the_totals_fit() {
+        let mut report = DumpReport::default();
+        report.push_locus(&locus_witnessing(&[(0, 2), (4, 12)], 10), "chr");
+    }
+
+    /// The same guard's other half: a witness whose runs all sit inside the locus passes, so the
+    /// test above is failing on the overrun and not on the fixture's shape.
+    #[test]
+    fn runs_inside_the_footprint_pass_the_per_run_bound() {
+        let mut report = DumpReport::default();
+        report.push_locus(&locus_witnessing(&[(0, 2), (4, 10)], 10), "chr");
+        assert_eq!(report.rows_partial, 1);
+        assert_eq!(
+            report.rows[0].read_witness, "partial:0+2,4+6",
+            "the label prints one run per witnessed stretch, not the span that swallows the hole",
         );
     }
 }

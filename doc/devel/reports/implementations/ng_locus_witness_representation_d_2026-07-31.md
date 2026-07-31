@@ -6,8 +6,8 @@ Design: [spec](../../ng/spec/locus_witness_representation.md) §1, §4, §8;
 [arch](../../ng/arch/locus_witness_representation.md) §1.1, §2. Branch `ng-pileup-generator`,
 worktree `pop_var_caller-ng-pileup`.*
 
-**Status: D3 complete. D4–D6 not started.** This report is extended per step and committed with
-each of them. D1 and D2 landed inside C2, which could not compile without them.
+**Status: D3 and D4 complete. D5–D6 not started.** This report is extended per step and committed
+with each of them. D1 and D2 landed inside C2, which could not compile without them.
 
 **The baseline this milestone starts from**, re-measured rather than inherited: `cargo fmt
 --check` and `cargo clippy --all-targets --all-features -- -D warnings` clean, `cargo test --lib
@@ -139,3 +139,89 @@ moved. `parity::ng_agrees_with_production_where_production_fabricated_nothing`,
 
 **Counts:** `ng::locus_generation` 304 → **308**; the suite 2,835 → **2,839**. `cargo fmt --check`
 and `cargo clippy --all-targets --all-features -- -D warnings` clean.
+
+---
+
+## D4 — the surfaces: one derivation, four spellings decided, and a guard that could not fail
+
+### What was already done, and what was left
+
+The plan asks for two things here, and C2 had already delivered part of one. The generic dump
+**already** printed one `<offset>+<positions>` per run (`partial:0+2,4+6` renders a hole as the
+two runs it is, not as the span that swallows it) and **already** checked its invariant per run.
+So D4's work was: the tag, the label drift, and — the part nobody had — making the per-run check
+falsifiable.
+
+### The retired variant name, finally out of the output
+
+`observed:<offset>+<positions>` became `partial:<offset>+<positions>`, and the counters
+`rows_observed` / `reads_observed` became `rows_partial` / `reads_partial` (9 sites, including the
+header line the dump prints and the module doc's accounting identity). These were the last
+user-visible uses of the name spec §3.1 retired: next to `complete`, "observed" is not a contrast,
+because a complete witness was observed too.
+
+### The label drift, decided rather than inherited
+
+Three STR dumps carried the side derivation with a **byte-identical seven-line comment** and had
+drifted: `ng_ssr_loci_dump` emitted `partial:left` / `partial:right`, while
+`ng_ssr_cohort_stutter` and `ng_ssr_aligner_bakeoff` emitted `partial_left` / `partial_right` —
+and all three said `partial:interior`, so two of them mixed both separators **inside one
+function**. A consumer grepping `partial:` got one tool's sides and another tool's interiors.
+
+The derivation now lives once, in `examples/shared/witness_side.rs`, reached by
+`#[path = "shared/witness_side.rs"] mod witness_side;` in each of the three (cargo discovers
+`examples/*.rs` and `examples/*/main.rs`, so a plain file in a subdirectory is compiled only where
+an example asks for it). It returns a `WitnessSide` enum; **each tool keeps its own strings**,
+because a dump's output is its own contract and must not move because a sibling's did — which is
+the plan's instruction, and it is what let the drift be *decided*: every tool now spells the colon
+form, the one that was already internally consistent.
+
+**Exactly which bytes moved.** `ng_ssr_loci_dump` — **none**; it already spelled the colon form,
+which is why the byte-identity oracle is intact. `ng_ssr_cohort_stutter` and
+`ng_ssr_aligner_bakeoff` — two string literals each, in the `coverage` column: `partial_left` →
+`partial:left`, `partial_right` → `partial:right`. `complete`, `partial:interior`, `no_border` and
+`capped` unchanged; no other column, count or header touched. Neither tool has tests or a
+committed baseline, so there is nothing to rebaseline — but they do have a downstream consumer.
+
+**The consumer, found by grepping for the old strings rather than assumed absent.**
+`benchmarks/ssr_hg002/scripts/ng_ssr_aligner_bakeoff_dashboard.py` maps the `coverage` column into
+outcome classes, and its map was keyed on `partial_left` / `partial_right`. An unmapped label
+becomes `NaN`, which every downstream count silently drops — so the rename would have cost the
+notebook its whole *partial* class with no error and no visibly wrong plot. The map now carries
+both spellings (old TSVs still classify) plus `partial:interior`, and an assertion turns an
+unknown label into a named failure. The other dashboard that reads this column,
+`benchmarks/ssr_tomato1/scripts/ng_ssr_cohort_stutter_dashboard.py`, filters only
+`coverage == "complete"` (`:172`) and is unaffected.
+
+### The per-run bound had nothing aimed at it
+
+C2 made the generic dump's invariant a check per run, correctly, and **no test could tell it from
+either enclosing formula** — every locus the walk produces satisfies all of them. Two tests now
+build a locus by hand (`SampleLocusObservations`' fields are public, and
+`WitnessedLocusPositions::from_half_open_runs` canonicalises without clamping, which is the
+documented split — the clamp belongs to `num_obs_along_locus`, where the region is in hand):
+
+- a witness of `[(0,2), (4,12)]` on a 10-position locus **must panic**. It is the case that
+  discriminates: it covers 2 + 8 = 10 positions starting at 0, so the pre-C2 formula the plan
+  names — `offset_in_locus + positions_covered <= footprint`, i.e. `0 + 10 <= 10` — *passes* it,
+  while its second run genuinely runs two positions past the locus;
+- a witness of `[(0,2), (4,10)]` passes, and renders `partial:0+2,4+6`, so the first test is
+  failing on the overrun rather than on the fixture's shape.
+
+### How we know it works
+
+**Three mutations, each failing the test that names it:**
+
+| mutation | result |
+|---|---|
+| replace the per-run loop with the enclosing formula (`first_run().0 + positions_covered()`) | `a_run_reaching_past_the_footprint_is_caught_even_when_the_totals_fit` — *"test did not panic as expected"* |
+| swap `Left` and `Right` in the **shared** derivation | `ng_ssr_loci_dump`'s `the_fixtures_partials_are_asymmetric_and_so_can_catch_a_side_swap` fails (`left: 1, right: 2`) — so the one body is under test on behalf of all three tools, which is the second thing sharing it bought |
+| put `observed:` back on the generic dump | 7 tests fail |
+
+**The oracles.** The STR dump on tomato `SRR7279503` chr01 is **byte-identical** to
+`ssr_dump_outside_tract.tsv` (8,138 lines, zero diff) — the label unification landed on that
+tool's own spelling, so the oracle did not move. The three parity anchors are green.
+
+**Counts:** the suite 2,839 → **2,841**; `ng::locus_generation` unchanged at 308 (D4 is all
+example-side). `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings`
+clean.

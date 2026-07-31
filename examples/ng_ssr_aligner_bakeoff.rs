@@ -25,7 +25,7 @@
 //!
 //! Output: a `#`-prefixed run-level counts header (one line per aligner), a bare TSV column line,
 //! then one row per observation. Each covered locus contributes, per aligner, one row per distinct
-//! observed sequence (tagged `complete` / `partial_left` / `partial_right`) plus, when non-zero, a
+//! observed sequence (tagged `complete` / `partial:left` / `partial:right`) plus, when non-zero, a
 //! synthetic `no_border` row (reads that reached the aligner and anchored nothing) and a `capped`
 //! row (reads the depth cap discarded). Zero-coverage loci are omitted — they carry no reads and are
 //! aligner-independent. The dashboard derives period = `len(motif)`, tract length = `len(ref_tract)`,
@@ -55,6 +55,12 @@ use pop_var_caller::ng::reference_info::{
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
 use pop_var_caller::ng::types::{Bp, ContigId, GenomeRegion};
+
+/// The side derivation, shared with the other two STR dumps so the three cannot drift apart
+/// again (D4). Each tool keeps its own strings — see `witness_label`.
+#[path = "shared/witness_side.rs"]
+mod witness_side;
+use witness_side::{WitnessSide, witness_side};
 
 /// The three delimiters, and the tag each carries in the `aligner` column.
 const FLAT_GAP: &str = "flat_gap"; // algorithm 3 — the production-parity flat-gap port
@@ -196,22 +202,15 @@ fn push_locus(
 
 /// The tag a witness carries in the `coverage` column.
 fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
-    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
-    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
-    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
-    // so it never appears here, but naming it keeps the label honest for the generic path.
-    // Destructured rather than guarded on `_`, so a future `ReadWitness` variant is a
-    // compile error here. The guard form is what this migration used and it is exactly what
-    // let the compiler stop forcing these sites to be revisited.
-    match witness {
-        ReadWitness::Complete => "complete",
-        run @ ReadWitness::Partial { .. } => {
-            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
-                (true, _) => "partial_left",
-                (false, true) => "partial_right",
-                (false, false) => "partial:interior",
-            }
-        }
+    // The derivation is shared (`shared/witness_side.rs`); the spelling is this tool's. **These
+    // two strings moved at D4**: `partial_left` / `partial_right` became `partial:left` /
+    // `partial:right`, because this function already said `partial:interior` beside them, so a
+    // consumer grepping `partial:` got this tool's interiors and none of its sides.
+    match witness_side(witness, locus_len) {
+        WitnessSide::Complete => "complete",
+        WitnessSide::Left => "partial:left",
+        WitnessSide::Right => "partial:right",
+        WitnessSide::Interior => "partial:interior",
     }
 }
 
