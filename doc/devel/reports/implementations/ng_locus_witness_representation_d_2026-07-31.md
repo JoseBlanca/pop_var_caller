@@ -481,3 +481,161 @@ added during the Milestone D review.
 **Counts:** the label tests in all three STR dumps gained the new case; the suite is **2,848**,
 `ng::locus_generation` **313**, both unchanged by this step since the new assertions live in
 existing tests.
+
+---
+---
+
+# Milestone E — verification at scale
+
+*Same report, continued. The milestone asks four questions of the finished change: did the STR
+path move only where we decided it should, does the generic path still agree with the old caller
+on real data, does the representation cost an allocation per observation, and how often does the
+hole actually fire.*
+
+## E1 — the STR path across the whole change: every difference accounted for
+
+**The claim to test.** Spec §7.1 asks for byte-identity, with two deliberate exceptions recorded
+along the way. So the real question is not "is it identical" — it is not — but **"is every
+difference one of the two decisions, and nothing else?"**
+
+**How it was checked.** The dump from the start of the plan and the dump from its end, on
+chromosome 1 of tomato `SRR7279503`, aligned row by row with `difflib.SequenceMatcher` over the
+rows with the label column blanked — so a relabelled row aligns to itself instead of looking like
+a delete plus an insert. Then the deletions were classified, and the labels compared within the
+aligned pairs.
+
+```
+observation rows: 11315 before, 8135 after  (delta -3180)
+
+ignoring the label column: 8135 rows identical, 3180 deleted, 0 inserted, 0 replace-blocks
+  of the 3180 deleted rows: 3180 carry NO observed bases; labels {'partial:left': 1608, 'partial:right': 1572}
+
+label transitions among surviving rows: {('partial:left', 'partial:both'): 2530}  (total 2530)
+```
+
+**The account, in full.** Three header/column lines and two classes of row change, and that is
+everything:
+
+| what moved | how much | the decision |
+|---|---|---|
+| the column header `read_coverage` → `read_witness` | 1 line | the rename (Milestone A) |
+| `reads_without_observation` 2,561 → 9,265, `obs_partial` 13,789 → 7,085 | 2 header fields | C0 — reads that clip the window and never enter the tract are not STR partials |
+| rows deleted | **3,180**, and **every one carries no observed bases** | C0, the same decision |
+| rows relabelled | **2,530**, all `partial:left` → `partial:both` | D8 — a witness touching both borders is not a prefix |
+
+**Zero rows appeared, zero rows were reordered, and no surviving row differs in any column other
+than the label.** `obs_complete` is 15,404 before and after; the locus count and the
+zero-coverage count are unchanged.
+
+That is a stronger statement than the plan asked for. "Byte-identical apart from X" leaves the
+reader to trust that X is all there is; this enumerates every byte that moved and names the
+decision behind it. The two moves are also *disjoint in kind* — one deletes rows with empty
+bases, the other rewrites one column of rows that survive — so neither could have hidden the
+other.
+
+**The committed fixture**, the other half of E1, is the ten tests in `ng_ssr_loci_dump`, which
+run in the suite on every gate and assert the tool's output against a fixture in the tree.
+
+## E2 — the generic path against the old caller, on real reads
+
+The differential runs both walkers over one prepared read stream and compares record for record.
+Three runs, two organisms, two depths:
+
+| run | loci | reads | class 1 (partial witness) | the deliverable | holed reads |
+|---|---|---|---|---|---|
+| HG002 30×, chr1:1–6 Mb | 47,752 | 5,683 | 12 | 16 reads / 12 loci (0.03 %) / 22 bases | **0** |
+| HG002 300×, chr1:1–6 Mb | 48,905 | 55,054 | 162 | **871 reads / 162 loci (0.33 %) / 1,550 bases** | **0** |
+| tomato SRR7279503, chr01:1–6 Mb | 96,253 | 6,146 | 29 | 53 reads / 29 loci (0.03 %) / 393 bases | **0** |
+
+All three green: *"every region, reference sequence and counter identical"*, and every divergence
+falls in one of the six named classes.
+
+**The 300× line is the result.** `871 reads over 162 loci (0.33 %) with 1,550 reference bases` is,
+digit for digit, what the generic generator's own Milestone D reported **before any of this change
+existed**. The whole witness representation — the renames, the two set types, the fold speaking in
+sets, a holed read being recorded instead of discarded, the constructor split, the relabelling —
+reproduces the prior measurement exactly on real high-depth data. That is the strongest available
+statement that C3 changed nothing on DNA-seq, and it is a comparison against a number nobody could
+have tuned toward, because it was published first.
+
+**The hole class is counted and reads zero on all three**, which is what spec §8 predicts
+structurally: a ref-skip emits no event, so an intron cannot widen a record on its own, and modern
+Illumina puts `N`s at read ends where they cannot make a hole. Zero here is the *prediction*
+confirmed, not a missing measurement — the same counter reads 400 reads / 528 positions on the
+synthetic corpus, which does emit ref-skips, and that is what the floor asserts on.
+
+## E3 — the memory question, and a finding
+
+### The requirement is met
+
+Spec §5's requirement is **"no allocation on an observation that witnessed one run"**. That is a
+property of the encoding, and it is now pinned where it is decided:
+`a_witness_of_one_or_two_runs_holds_them_inline_and_allocates_nothing` asserts that a one-run and
+a two-run set do not spill to the heap, and that a three-run set does — so the boundary is stated,
+and shrinking the inline capacity to one becomes a test failure rather than a silent cost per
+observation.
+
+### The chromosome-scale numbers reproduce
+
+`ng_generic_loci_dump` over chr1 of HG002 30×:
+
+```
+# generic_loci=1541788 …
+# rows_complete=1646289 rows_partial=872 …
+# reads_with_holed_witness=0 hole_positions=0
+```
+
+**1,541,788 loci and 1,646,289 + 872 = 1,647,161 observations** — both exactly Milestone D's
+numbers, and 1,646,289 complete is exactly spec §3.1's figure. Wall time is unchanged (41 s in
+both trees, same machine, same container).
+
+### ⚠ The finding: peak resident memory grew by about 70 %, and it appears at C2
+
+Measured like for like — same machine, same container, same input, same method (`VmHWM` from
+`/proc`, polled), output to `/dev/null`, and each point run twice:
+
+| tree | what it is | peak RSS |
+|---|---|---|
+| `11de107` (B3) | the set types exist and nothing uses them | **501 MB**, repeat **523 MB** |
+| `761d53e` (C2) | `ReadWitness::Partial` carries a set | **892 MB**, repeat **876 MB** |
+| `93c7461` (D8, head) | end of the plan | **859 MB** |
+
+**+350 MB, about +68 %, and the whole of it appears at C2** — the commit that replaced the
+variant's two `u16`s with a witnessed set. The RSS trajectory is linear and monotonic through the
+walk in both trees, with **no late spike**, and the slope roughly doubles: ~11 MB/s at B3 against
+~20 MB/s at C2, over the same 1,647,161 rows in the same wall time. So the cost is **per row**,
+and it is about 240 bytes per observation.
+
+**What it is not.** It is not the dump tool changing: the tool's diff across C2 is the match arm
+and the per-run assertions, with no new per-row allocation. It is not more rows: the row counts
+are identical to the digit. It is not the row struct's shape: its fields are unchanged across C2
+and its size is the same 152 bytes.
+
+**What I have not established is the mechanism**, and I am not going to guess at it. The honest
+statement is: a reproducible +68 % peak-RSS cost at chromosome scale, localised to one commit and
+to per-row cost, with the cause unidentified.
+
+**Why the instrument cannot answer it.** This measures `ng_generic_loci_dump`, whose peak is
+dominated by its own whole-run row buffer — the Milestone D review established that and withdrew
+the earlier RSS conclusion for exactly this reason. The generator's own live memory is not
+measured here at all, and ng still has **no committed heap profile** (the perf review's M1). A
+`dhat` harness over the generator would give live bytes and an allocation count attributed to a
+call site, which is what this question needs and what `VmHWM` cannot give.
+
+**Recommendation, for the owner at Checkpoint E:** do not accept Milestone E as complete on this
+point. Either build the `dhat` harness and attribute the 240 bytes per observation, or record the
+cost as accepted with its size stated. What should not happen is the number going into the
+record as "measured, fine" — spec §5 asks for allocations per observation to be *rejected at
+review*, and this is the review.
+
+## E4 — the RNA-seq rate: still not run, and now a one-command answer
+
+No spliced alignment is available in the tree or the benchmark bundles, so the open question — how
+often a read witnesses a locus in two pieces on real RNA-seq — is still open, exactly as spec §8
+left it.
+
+What changed is that answering it no longer needs a probe. D7 put `reads_with_holed_witness` and
+`hole_positions` on the walk's own run summary and into `ng_generic_loci_dump`'s header, so the
+answer is one command over any spliced BAM. On all three DNA-seq runs above the counter reads 0,
+which is both the structural prediction and the positive control that the plumbing reports what it
+is given — the same counter reads 400 / 528 on the synthetic corpus.

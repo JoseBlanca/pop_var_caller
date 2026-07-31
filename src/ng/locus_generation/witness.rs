@@ -1013,6 +1013,45 @@ mod tests {
         );
     }
 
+    /// **An observation that witnessed one run allocates nothing for its witness** — spec §5's
+    /// standing requirement, and the reason the encoding is "runs, two inline" rather than a
+    /// bitmask (spec §8, arch §4).
+    ///
+    /// The requirement is a cost claim, so it is checked at the one place that decides it: the
+    /// inline capacity. An observation already heap-allocates twice — its bases and its chain
+    /// ids — and observations run at roughly one per locus (1,647,161 over 1,541,788 loci on
+    /// chromosome 1 of a 30× human sample), so a **third** allocation per observation is the
+    /// thing spec §5 says to reject at review rather than measure afterwards.
+    ///
+    /// One run is every witness in 225 million DNA-seq event-folds; two is the spliced case this
+    /// whole representation exists for. Both must sit inline. Three is the multi-junction case,
+    /// which is allowed to spill — asserted so the boundary is stated rather than assumed, and
+    /// so that shrinking the inline capacity to one is a test failure and not a silent cost.
+    #[test]
+    fn a_witness_of_one_or_two_runs_holds_them_inline_and_allocates_nothing() {
+        let one = WitnessedLocusPositions::from_half_open_runs([(0, 4)]).expect("one run");
+        assert!(
+            !one.0.spilled(),
+            "the common case — every witness measured on DNA-seq — must not reach the heap",
+        );
+
+        let spliced =
+            WitnessedLocusPositions::from_half_open_runs([(0, 3), (7, 10)]).expect("two runs");
+        assert!(
+            !spliced.0.spilled(),
+            "a read blind in the middle is the case this representation was built for; it pays \
+             no allocation either",
+        );
+
+        let three = WitnessedLocusPositions::from_half_open_runs([(0, 3), (7, 10), (14, 18)])
+            .expect("three runs");
+        assert!(
+            three.0.spilled(),
+            "three runs is where the inline capacity ends — stated, so that lowering it to one \
+             fails here instead of quietly costing an allocation per observation",
+        );
+    }
+
     /// **Once the reach covers the whole locus the two constructors agree** — a read that
     /// witnessed every position is constrained from neither border, so there is one run and
     /// not two.

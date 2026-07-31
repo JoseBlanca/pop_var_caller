@@ -298,16 +298,40 @@ expectations is a step that did more than rename.
 
 ## Milestone E — verification at scale
 
-- ☐ **E1.** STR dump byte-identity on the committed fixture and a tomato CRAM, across the whole
-  change. *Depends:* D6. *Source:* spec §7.1.
-- ☐ **E2.** The generic parity anchor green on real data, and the census's new class counted and
-  floored on the HG002 and tomato runs from spec §8. *Depends:* E1. *Source:* spec §7.2.
-- ☐ **E3.** Allocations per observation on the chr1 run, measured against Milestone D's baseline of
-  1,647,161 observations at 461 MB peak RSS. The requirement: no allocation on an observation that
-  witnessed one run. *Depends:* E2. *Source:* spec §5, §7.5.
+- ✅ **E1.** STR dump byte-identity on the committed fixture and a tomato CRAM, across the whole
+  change. *Depends:* D6. *Source:* spec §7.1. **Every difference from the plan's first commit to
+  its last is accounted for**, by aligning the two dumps row by row with the label column blanked:
+  3,180 rows deleted (C0) and **every one carries no observed bases**; 2,530 rows relabelled (D8)
+  and **every one only in the `read_witness` column**; three header/column lines (the A2 rename and
+  C0's two counters). **Zero rows appeared, zero were reordered, and no surviving row differs in
+  any other column.** The committed-fixture half is the ten tests in `ng_ssr_loci_dump`, green on
+  every gate.
+- ✅ **E2.** The generic parity anchor green on real data, and the census's new class counted and
+  floored on the HG002 and tomato runs from spec §8. *Depends:* E1. *Source:* spec §7.2. Three
+  runs — HG002 30× and 300×, tomato SRR7279503, each chr1:1–6 Mb — all *"every region, reference
+  sequence and counter identical"*. **The 300× run reproduces the generic generator's own
+  Milestone D deliverable digit for digit: 871 reads over 162 loci (0.33 %) with 1,550 reference
+  bases**, measured before this change existed. The hole class reads 0 on all three, which is spec
+  §8's structural prediction confirmed rather than a missing measurement.
+- ⚠ **E3 — measured, and it turned up a cost that needs the owner's word.** *Depends:* E2.
+  *Source:* spec §5, §7.5. **The requirement is met**: a one-run and a two-run witness are held
+  inline and allocate nothing, pinned by
+  `a_witness_of_one_or_two_runs_holds_them_inline_and_allocates_nothing`, with three runs asserted
+  to spill so the boundary is stated. **The chr1 counts reproduce exactly** — 1,541,788 loci,
+  1,647,161 observations, wall time unchanged. **But peak resident memory grew about 68 %**
+  (B3 501/523 MB → C2 892/876 MB → head 859 MB, like for like, each point run twice), all of it
+  appearing at C2, **per row** (the RSS slope doubles over the same rows in the same wall time)
+  and worth about 240 bytes per observation. It is not the dump tool, not more rows, and not the
+  row struct's shape. **The mechanism is not identified**, and the instrument cannot identify it:
+  this measures a tool whose peak is its own whole-run row buffer, and ng has no committed heap
+  profile. See the report; the recommendation is to build the `dhat` harness or accept the cost
+  with its size stated, rather than record it as fine.
 - ☐ **E4.** **When a spliced BAM is available:** run the same probe over it and record the hole
   rate. This does not gate any step — it is the number that tells us how much the change bought.
-  *Depends:* E3. *Source:* spec §8 (open), arch §4 (`OPEN:`).
+  *Depends:* E3. *Source:* spec §8 (open), arch §4 (`OPEN:`). **Still not run — no spliced
+  alignment is available.** D7 turned it into a one-command answer over any BAM, and the counter
+  reads 0 on all three DNA-seq runs (the prediction) against 400 / 528 on the synthetic corpus
+  (the control).
 
 > **Checkpoint E: the change is proven at scale.** Pause for review.
 
