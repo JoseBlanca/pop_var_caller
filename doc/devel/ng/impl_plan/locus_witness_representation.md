@@ -20,7 +20,8 @@ its Milestone D, whose measurements are what made this design decidable.
 **In:** the crate-wide rename of the observation and witness vocabulary; a new
 `src/ng/locus_generation/witness.rs`; `WitnessedLocusPositions` and `WitnessedRefPositions`;
 `apply_events_into` returning a set instead of a span and no longer discarding a holed read; the
-narrowed drop path; `witness_of` and `witness_order`; the `from_run` constructor; the consumers
+narrowed drop path; `witness_of` and `witness_order`; the interior-run constructor (which landed
+as `from_witnessed_runs`, not `from_run` — see D3); the consumers
 (`num_obs_along_locus`, the flush predicates, both dump tools, the divergence census); and the two
 regression anchors — the canonicality property and the spliced fixture.
 
@@ -239,12 +240,16 @@ expectations is a step that did more than rename.
   *Source:* spec §4. **`holed_witness_reads` and `hole_positions` on `DivergenceCensus`**, both
   weighted by the reads sharing an observation, the positions being `span() - positions_covered()`
   — the pair of accessors the C review added so the gap is not open-coded as "last end minus first
-  start". **Not floored, unlike the fabrication triple**: both read **0** on every run this repo
-  can make (spec §8 — 0 holed witnesses in 225 million DNA-seq folds), so a floor would fail on
-  real data. What stops them being the miswired probe spec §8 warns about is a positive control
-  instead: a hand-built locus whose read witnesses `[(0,3), (6,10)]` of 10 positions must report
-  4 holed reads and 12 hole positions, and a one-run partial beside it must report neither while
-  still counting as fabricating — so "holed" cannot collapse into a second spelling of "partial".
+  start". **Floored on the synthetic census like every other deliverable, and printed unfloored on
+  the real-data one.** D5 first shipped unfloored, on the claim that both counters read 0 on every
+  run this repo can make; the Milestone D behaviour review ran the census and read **400 reads /
+  528 positions**, because the synthetic corpus emits `CigarOp::Skip` and therefore contains
+  spliced reads. Where zero genuinely is expected is real DNA-seq (spec §8 — 0 holed witnesses in
+  225 million folds), and that census is the `#[ignore]`d one, which prints and asserts nothing.
+  Beside the floor, a positive control says the numbers are the *right* numbers: a hand-built
+  locus whose read witnesses `[(0,3), (6,10)]` of 10 positions must report 4 holed reads and 12
+  hole positions, and a one-run partial beside it must report neither while still counting as
+  fabricating — so "holed" cannot collapse into a second spelling of "partial".
 - ✅ **D6.** The spliced fixture as a permanent test in `pileup/tests.rs`: a 15 bp intron plus a
   20 bp deletion widening the record across it, asserting the read appears with a two-run witness.
   Its comment records the knife-edge. *Depends:* C3. *Source:* spec §7, §8; arch §6. **Two tests,
@@ -255,7 +260,7 @@ expectations is a step that did more than rename.
   both sides:** at 17 the footprint ends at 45, one short of exon 2, and the witness is one run;
   at 18 it reaches 46 and the read is holed. *(The plan said 16 — that was the throwaway probe's
   geometry, and this fixture's own numbers are the ones recorded here.)* Restoring C3's discard
-  fails **both** new tests, alongside C3's three.
+  fails **both** new tests, alongside C3's five.
 
 > **Checkpoint D: every consumer reads the set, and the surfaces show it.** Pause for review.
 

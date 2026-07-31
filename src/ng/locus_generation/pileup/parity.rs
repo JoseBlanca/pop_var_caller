@@ -1748,14 +1748,21 @@ struct DivergenceCensus {
     /// **The hole deliverable, one (D5):** reads whose witness is more than one run — the reads
     /// C3 stopped discarding, and the reason this whole change exists.
     ///
-    /// **It is expected to read zero here, and that is the point of keeping it.** The §8
-    /// measurement found 0 holed witnesses in 225 million DNA-seq event-folds: a `Skip` emits no
-    /// event, so an intron cannot widen a record on its own, and modern Illumina puts `N`s at
-    /// read ends where they cannot make a hole. The number that matters is RNA-seq's, and no
-    /// spliced alignment was available (spec §8, open). So this counter is **not floored** — a
-    /// floor would fail on every run we can currently make — and what stops it being a probe
-    /// that reports zero because it is miswired is the positive control beside it,
-    /// `the_census_counts_a_hole_and_the_positions_inside_it`.
+    /// **On this census it is positive, and it is floored like every other deliverable.** The
+    /// synthetic corpus emits `CigarOp::Skip`, so it contains spliced reads: the run prints 400
+    /// holed reads over 528 positions. D5 first shipped this field documented as "expected to
+    /// read zero" and deliberately unfloored — the Milestone D behaviour review refuted that
+    /// against the very census that prints it, which is why the floor is here now. Without it,
+    /// a `measure_fabrication` that stopped measuring would leave every class flag intact and
+    /// both numbers at zero, reading as "ng never records a hole" (the asymmetry argued against
+    /// for the fabrication triple below).
+    ///
+    /// **Where zero *is* expected is real DNA-seq**, and that census is the `#[ignore]`d one: §8
+    /// measured 0 holed witnesses in 225 million event-folds, structurally, because a `Skip`
+    /// emits no event so an intron cannot widen a record on its own, and modern Illumina puts
+    /// `N`s at read ends where they cannot make a hole. The number worth having is RNA-seq's and
+    /// no spliced alignment was available (spec §8, open; plan E4). So the real-data report
+    /// prints these two and asserts nothing about them.
     holed_witness_reads: u64,
     /// **The hole deliverable, two (D5):** the locus positions inside those holes, summed over
     /// reads. `span() - positions_covered()` — the distance the runs sit in, minus what they
@@ -1806,6 +1813,14 @@ impl DivergenceCensus {
             // unwitnessed positions *between* them. It is non-zero exactly when the witness has
             // more than one run: the set is canonical, so two runs are separated by at least one
             // position the read did not see, and one run has nothing between anything.
+            //
+            // **A plain `-` where the line above needs `saturating_sub`, and the asymmetry is
+            // real** (Milestone D structure review, which found the two spellings two lines
+            // apart). Both terms here come from the *same* set, and a set's span is at least its
+            // coverage by construction — canonical runs are disjoint — so this cannot underflow.
+            // The line above subtracts the coverage from a `footprint` the witness has never
+            // been checked against: `ReadWitness` cannot know its own locus, so an over-long
+            // witness is representable and the saturation is what keeps that from wrapping.
             let hole_positions = positions.span() - positions.positions_covered();
             if hole_positions > 0 {
                 self.holed_witness_reads += u64::from(observation.num_obs);
@@ -3020,6 +3035,24 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         census.fabricated_reads,
         census.fabricated_ref_bases,
     );
+    // **The hole deliverable gets the same floor, and D5 shipped without one on a false
+    // premise.** Its doc said the counters were "expected to read zero" on every run this repo
+    // can make; the Milestone D behaviour review ran this census and read 400 / 528, because the
+    // synthetic corpus emits `CigarOp::Skip` and therefore contains spliced reads. So the floor
+    // holds here, and withholding it left the milestone's own deliverable — the reads C3 stopped
+    // discarding — as the one number nothing would notice going to zero.
+    //
+    // `>=` rather than `>` between the two: a hole is at least one position wide by
+    // construction, since canonical runs are separated by at least one position, so a holed read
+    // contributes at least one position and never fewer.
+    assert!(
+        census.holed_witness_reads > 0 && census.hole_positions >= census.holed_witness_reads,
+        "the hole deliverable is {} reads / {} positions — the synthetic corpus emits ref-skips, \
+         so holed witnesses exist here, and a canonical set separates two runs by at least one \
+         position, so each holed read is blind over at least one",
+        census.holed_witness_reads,
+        census.hole_positions,
+    );
     eprintln!(
         "the divergence census over {} loci (one read group): {} identical to the \
          projection, {diverged} differing, {} of the identical ones agreeing on `q_sum` only \
@@ -3032,8 +3065,8 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
          the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
          over {} loci, appending {} reference bases on their behalf.\n  \
          the hole deliverable (D5): {} reads witnessed their locus in more than one run, blind \
-         over {} positions between them — zero is the expected DNA-seq answer (spec §8), and \
-         `the_census_counts_a_hole_and_the_positions_inside_it` is what says the counter works.",
+         over {} positions between them — the corpus emits ref-skips, so this is the class C3 \
+         stopped discarding, counted.",
         census.loci,
         census.exact,
         census.float_only,
@@ -3056,17 +3089,19 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     );
 }
 
-/// **The positive control for D5's two counters, and the reason they may read zero in peace.**
+/// **The positive control for D5's two counters** — the fixture that says what they mean, beside
+/// the floor on the census that says they fire.
 ///
-/// `holed_witness_reads` and `hole_positions` are expected to be **0** on every run this repo can
-/// currently make: the §8 probe found no holed witness in 225 million DNA-seq event-folds, since
-/// a `Skip` emits no event and so an intron cannot widen a record on its own, and modern Illumina
-/// puts `N`s at read ends where they cannot make a hole. The number worth having is RNA-seq's,
-/// and no spliced alignment was available.
+/// The floor (`holed_witness_reads > 0`, at the census's assertions) says the synthetic corpus
+/// produces holed witnesses at all — 400 reads over 528 positions, since it emits `CigarOp::Skip`.
+/// It cannot say the two numbers are the *right* numbers, because it compares them against
+/// nothing. This does: it drives `measure_fabrication` — the same entry point the census uses on
+/// every locus — with a witness whose hole is known.
 ///
-/// That makes them the shape spec §8 warned about in as many words — *"zero is also what a
-/// miswired probe reports"* — so they cannot be floored like `fabricated_reads` is, and the
-/// guard has to be a fixture that produces the thing they count. Two loci, hand-built:
+/// The pair matters because on **real DNA-seq** the expected answer is zero (spec §8: 0 holed
+/// witnesses in 225 million event-folds), which is the shape §8 warned about in as many words —
+/// *"zero is also what a miswired probe reports"*. A number that will legitimately read zero on
+/// the data we care about needs a fixture that makes it read something else. Two loci, hand-built:
 ///
 /// - a read blind over three positions in the middle, witnessing `[(0,3), (6,10)]` of a
 ///   10-position locus, carried by 4 reads. **4 holed reads, 12 hole positions** — 3 per read,
@@ -4106,7 +4141,9 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
          the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
          over {} loci, appending {} reference bases on their behalf.\n  \
          the hole deliverable (D5): {} reads witnessed their locus in more than one run, blind \
-         over {} positions between them.",
+         over {} positions between them — **zero is the expected answer on DNA-seq** (spec §8: \
+         0 in 225 million event-folds), so this line is a measurement waiting on a spliced BAM \
+         (plan E4) and is asserted on only in the synthetic census, whose corpus emits ref-skips.",
         census.loci,
         census.partial_witness,
         census.group_split,

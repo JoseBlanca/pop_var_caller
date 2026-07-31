@@ -139,7 +139,8 @@ per observation is the thing to avoid**, and an inline representation for common
 requirement, not a nicety.
 
 *Where the observation counts come from:* Milestone D's chr1 throughput run, from the dump's own
-`rows_complete` / `rows_observed` header fields. The loci count is in that run's report
+`rows_complete` / `rows_observed` header fields (`rows_observed` was renamed `rows_partial` at
+plan D4, with the variant name it was left over from). The loci count is in that run's report
 (`ng_locus_generation_pileup_generator_d_2026-07-29.md`); the two observation counts are not, so
 re-running the dump is the only way to reproduce them.
 
@@ -242,7 +243,7 @@ whatever the encoding, the out-of-range case is an error or an assertion, not a 
 |---|---|---|
 | the shared type and the field holding it | `mod.rs:145`, `mod.rs:44` | `ObservedSequence` → `SequenceObservation` (§1), and `observed_sequences` → `observations` — decided (owner, 2026-07-30). `SampleLocusObservations::observations` says the whole thing at the definition, so the field need not repeat "sequence"; `sequence_observations` was the alternative, exactly the plural of the element type and proof against drift, and it lost on length at 100 sites. Mechanical and wide: **39 uses of the type across 7 files, 102 of the field** |
 | the fold's own accumulator | `open_record.rs:237` | `ObservationRow` holds the same information as the public type in the fold's layout, so it needs a name that is not "row" once the public one is an observation. **26 uses with `ObservationKey` across 4 files.** Settled in the [arch doc](../arch/locus_witness_representation.md) §3: `KeyedObservation`, with `ObservationKey` keeping its name |
-| `ReadWitness` + constructors | `mod.rs:213-347` | `Observed` becomes `Partial` and its payload becomes a set; `from_left`/`from_right` keep their signatures and build single-run sets; a third constructor for an interior run, which is what the deferred note asked for. **The type is `ReadCoverage` today and is renamed here** — "coverage" reads as depth, which the type's own doc already has to correct; 193 uses of the type and 91 of the field across 12 files. Decision record in the [arch doc](../arch/locus_witness_representation.md) §3 |
+| `ReadWitness` + constructors | `mod.rs:213-347` | `Observed` becomes `Partial` and its payload becomes a set; `from_left`/`from_right` keep their signatures and build single-run sets; a third constructor for an interior run, which is what the deferred note asked for — landed as `from_witnessed_runs(runs, locus_len)`, which subsumes it and is the only constructor that may answer `Complete` (plan D3, owner 2026-07-31; [arch](../arch/locus_witness_representation.md) §1.1 carries the rule). **The type is `ReadCoverage` today and is renamed here** — "coverage" reads as depth, which the type's own doc already has to correct; 193 uses of the type and 91 of the field across 12 files. Decision record in the [arch doc](../arch/locus_witness_representation.md) §3 |
 | `is_flush_left` / `is_flush_right` / `positions_covered` | `mod.rs:329-347` | derivations from the set; same signatures |
 | `num_obs_along_locus` | `mod.rs:69-104` | iterates the set instead of one run. **Its clamp stays** — the comment there explains why the bound is not expressible on the type, and a set does not change that |
 | `complete_observations` | `mod.rs:123` | unchanged (`Complete` is still a variant) |
@@ -387,9 +388,14 @@ before any number was trusted, because zero is also what a miswired probe report
   fixture: a spliced read with a 15 bp intron, plus a read whose 20 bp deletion widens the record
   across it to positions 28–48. The spliced read witnessed **6 of those 21 positions** — three in
   each exon, two runs — and is **absent from the record entirely**; the drop path fired 6 times for
-  that one read, once per position the record was affected at. With a 16 bp deletion the footprint
-  stops one position short of exon 2 and the same read is recorded normally. One base of footprint
-  width decides it.
+  that one read, once per position the record was affected at. Shorten the deletion and the
+  footprint stops before exon 2, and the same read is recorded normally. **One base of footprint
+  width decides it**, and the boundary is 17 against 18: at 17 the footprint ends at 45, one
+  position short of exon 2 at 46. *(This paragraph said 16 until 2026-07-31. That number came from
+  the throwaway probe; the permanent fixture — `pileup/tests.rs`,
+  `one_more_deleted_base_is_what_turns_the_spliced_read_into_a_holed_one`, plan D6 — asserts both
+  sides of the real boundary, and a Milestone D review found 16 to be two positions short rather
+  than one.)*
 
   **What gates the rate, and is not known:** an intron never widens a record on its own, because a
   `Skip` emits no event (`cigar_cursor.rs:333`) and footprints grow from events

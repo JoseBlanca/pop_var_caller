@@ -52,6 +52,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pop_var_caller::fasta::ContigList;
+#[cfg(test)]
+use pop_var_caller::ng::locus_generation::WitnessedLocusPositions;
 use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
     LocusGenerator, LocusKind, LocusLen, ReadWitness, SampleLocusObservations,
@@ -423,5 +425,42 @@ fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The four strings this tool prints in its `coverage` column**, pinned.
+    ///
+    /// D4 moved two of them — `partial_left` / `partial_right` became `partial:left` /
+    /// `partial:right`, so the three STR dumps stop disagreeing about a separator — and the
+    /// Milestone D reliability review then found that nothing in the tree noticed either the
+    /// rename or a mutation labelling *every* partial `complete`, because this binary had no
+    /// tests at all. It has one now, and it is not decoration: the dashboards key on this column
+    /// (`ng_ssr_cohort_stutter_dashboard.py:172` selects `coverage == "complete"` to decide which
+    /// reads carry an exact length), so a partial mislabelled `complete` feeds a censored lower
+    /// bound into a stutter distribution silently.
+    ///
+    /// The derivation itself lives in `shared/witness_side.rs` and is exercised by
+    /// `ng_ssr_loci_dump`'s fixtures; what is this tool's own, and only this tool's, is the
+    /// spelling.
+    #[test]
+    fn the_coverage_column_spells_the_four_cases_the_dashboards_read() {
+        let len = LocusLen::from_positions(10);
+        let partial = |runs: &[(u16, u16)]| {
+            witness_label(
+                &ReadWitness::Partial {
+                    positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                        .expect("a non-empty set of runs"),
+                },
+                len,
+            )
+        };
+        assert_eq!(witness_label(&ReadWitness::Complete, len), "complete");
+        assert_eq!(partial(&[(0, 4)]), "partial:left");
+        assert_eq!(partial(&[(6, 10)]), "partial:right");
+        assert_eq!(partial(&[(3, 7)]), "partial:interior");
     }
 }

@@ -308,14 +308,10 @@ impl DumpReport {
 fn witness_label(witness: &ReadWitness) -> String {
     match witness {
         ReadWitness::Complete => "complete".to_string(),
-        // **One `<offset>+<positions>` per run, comma-separated.** A one-run witness renders
-        // exactly as it did before C2 — which is every witness the generic path mints until
-        // C3 — so this column has not moved; the comma is what a holed witness will need.
-        // **D4 owns what this column finally says**, along with the drift between the three
-        // dumps' own labels; this is the smallest form that can express the new shape.
         // **One `<offset>+<positions>` per run, comma-separated** — so a witness with a hole
         // renders as the two runs it is (`partial:0+3,7+3`) rather than as the span that would
-        // swallow the gap. A one-run witness renders as it always did apart from the tag.
+        // swallow the gap. A one-run witness renders as it always did apart from the tag, which
+        // is every witness the generic path minted before C3.
         //
         // **`observed:` became `partial:` at D4.** It was the last user-visible use of the
         // variant name spec §3.1 retired: next to `complete`, "observed" is not a contrast — a
@@ -1329,7 +1325,7 @@ mod tests {
                  since C3 is something the row says rather than a reason to drop it"
             );
             // The hole is at 22, inside the record at 20..=24. The row names two runs and
-            // skips it: `observed:<offset>+<positions>` per run, comma separated.
+            // skips it: `partial:<offset>+<positions>` per run, comma separated.
             let holed: Vec<&ObservationRow> = rows_at(&report, 20)
                 .into_iter()
                 .filter(|row| row.read_witness.contains(','))

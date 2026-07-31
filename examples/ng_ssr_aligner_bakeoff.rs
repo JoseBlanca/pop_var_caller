@@ -40,6 +40,8 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
+#[cfg(test)]
+use pop_var_caller::ng::locus_generation::WitnessedLocusPositions;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
@@ -403,5 +405,36 @@ fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The four strings this tool prints in its `coverage` column**, pinned — see the identical
+    /// test in `ng_ssr_cohort_stutter` for why (D4's rename, and the Milestone D reliability
+    /// review finding that a binary with no tests notices neither a rename nor a mutation
+    /// labelling every partial `complete`).
+    ///
+    /// This tool's column is the sharper case: `ng_ssr_aligner_bakeoff_dashboard.py` maps it into
+    /// outcome classes, and an unmapped label becomes a `NaN` that every downstream count drops.
+    /// The notebook now asserts on an unknown label; this asserts the labels it is given.
+    #[test]
+    fn the_coverage_column_spells_the_four_cases_the_dashboard_maps() {
+        let len = LocusLen::from_positions(10);
+        let partial = |runs: &[(u16, u16)]| {
+            witness_label(
+                &ReadWitness::Partial {
+                    positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                        .expect("a non-empty set of runs"),
+                },
+                len,
+            )
+        };
+        assert_eq!(witness_label(&ReadWitness::Complete, len), "complete");
+        assert_eq!(partial(&[(0, 4)]), "partial:left");
+        assert_eq!(partial(&[(6, 10)]), "partial:right");
+        assert_eq!(partial(&[(3, 7)]), "partial:interior");
     }
 }

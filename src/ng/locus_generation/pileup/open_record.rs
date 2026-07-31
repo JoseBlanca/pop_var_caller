@@ -209,10 +209,17 @@ pub(super) fn witness_of(
         "record footprint {record_pos}..{record_end_exclusive} is wider than a `u16` run can \
          describe; `max_record_span` needs a ceiling (C1)",
     );
-    // Each run intersected with the footprint and rebased onto the locus, half-open. A run
-    // lying wholly outside collapses to nothing and is dropped rather than becoming a run of
-    // no positions — which is what `first < past_last` says, and the only reason the filter
-    // is here rather than left to the constructor, which would reject the whole set for it.
+    // Each run intersected with the footprint and rebased onto the locus, half-open. A run lying
+    // wholly outside collapses to nothing and is dropped rather than becoming a run of no
+    // positions — which is what `first < past_last` says, and **the filter is load-bearing**:
+    // `from_witnessed_runs` answers `None` for the whole set on a run whose start is not before
+    // its end, because that shape is a caller's mistake rather than a state (a transposed
+    // offset/length pair). Handing it `(x, x)` would turn a wholly-outside run into a panic here.
+    //
+    // The clamp of each run's **right** edge is, since D3, also done by that constructor against
+    // the locus length — so what this one still buys is the `u16::try_from` below: without it a
+    // deletion reaching more than 65,535 positions past the anchor would panic rather than be
+    // cut, and `events_overlapping` returns a deletion whole (spec §8).
     //
     // **The narrowing is a `try_from`, not a `LocusLen`.** Neither offset is a locus
     // *length*, and minting a `LocusLen` to borrow its saturating cast used the type as the
@@ -264,8 +271,15 @@ pub(super) fn witness_of(
     // narrowing run *offsets* through a type that means "a locus length"; the width of a
     // finalised footprint **is** this locus's length — `finalise` emits the region
     // `record_pos ..= record_end_exclusive - 1`, whose `len()` is exactly this difference — so
-    // the two are the same quantity and the assertions above are what make the narrowing
-    // total.
+    // the two are the same quantity.
+    //
+    // `LocusLen::from_positions` saturates at `u16::MAX`, so the delegated comparison is the
+    // pre-D3 one **for every footprint the config gate admits, which is every footprint there
+    // is**: `PileupGeneratorConfig::check` rejects a `max_record_span` above
+    // `MAX_RECORD_SPAN_CEILING` = `u16::MAX`, and the width `debug_assert` above restates it. A
+    // 65,536-wide footprint would be the one place the two disagree — a read covering 65,535 of
+    // it would saturate to `Complete` — and it cannot be built. (Milestone D behaviour review,
+    // which measured the disagreement rather than assuming it away.)
     let locus_len = LocusLen::from_positions(u64::from(record_end_exclusive - record_pos));
     ReadWitness::from_witnessed_runs(clamped, locus_len).unwrap_or_else(|| {
         panic!(

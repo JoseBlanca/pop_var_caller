@@ -20,12 +20,24 @@
 //! then decided the drift rather than inheriting it: every tool now spells the colon form, which
 //! is the one that was internally consistent.
 //!
+//! **A fourth site remains, and it cannot use this** (Milestone D naming review, which found the
+//! "one body instead of three" above understating what is left). `ng_ssr_divergent_reads` derives
+//! the side from a `(ReadWitness, Vec<u8>)` pair with **no locus length in hand**, so it cannot
+//! call `witness_side` at all; it reads "not flush left" as "flush right", which is sound on the
+//! STR path — a partial there always anchors exactly one border — and mislabels an interior run,
+//! as its own comment says. Its spellings are `partialL` / `partialR`, a fifth and sixth. Folding
+//! it in means threading a `LocusLen` to its call site, which is a change to that tool and not to
+//! this one.
+//!
 //! # What it deliberately cannot answer
 //!
-//! Whether the read **measured** the locus. A witness flush at both borders is not pinned — it
-//! may hold a hole, or come from an STR read whose reach was counted in read bases and saturated
-//! — so `Complete` is the only "the length is pinned" test, and this enum's `Left` swallows the
-//! both-flush case exactly as the three copies did. See the note on `ReadWitness` itself.
+//! Whether a **partial** witness measured the locus. `Complete` answers that for the complete
+//! case and this enum carries it through; what it cannot carry is the difference between a
+//! partial that is flush at both borders because it holds a hole and one that is flush at both
+//! because an STR reach counted in read bases saturated — both land in `Left`, since `(true, _)`
+//! matches first, exactly as the three copies did. `Complete` is the only "the length is pinned"
+//! test. See the note on `ReadWitness` itself, and the Checkpoint D open item asking whether
+//! this enum should grow a fourth case for it.
 
 use pop_var_caller::ng::locus_generation::{LocusLen, ReadWitness};
 

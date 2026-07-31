@@ -396,11 +396,30 @@ impl ReadWitness {
     /// the one constructor that answers [`Complete`](Self::Complete), because it is the one
     /// whose caller states positions rather than a reach.
     ///
-    /// Each run is clamped into `locus_len` and a run left covering nothing is dropped, so a
-    /// caller may hand over runs that reach past the locus without building a witness claiming
-    /// positions the locus does not have. `None` when nothing survives — an empty input, or
-    /// runs lying wholly outside the locus — which is a read that witnessed nothing of it, and
-    /// not a witness (the reason [`from_left`](Self::from_left) gives).
+    /// # Two ways to hand over nothing, and they are answered differently
+    ///
+    /// - **A run outside the locus is a state, so it is dropped.** Its end is clamped into
+    ///   `locus_len`, which leaves it covering nothing, and the rest of the set stands: a caller
+    ///   may hand over runs reaching past the locus without building a witness claiming positions
+    ///   the locus does not have, and without one such run sinking the others.
+    /// - **A run with `start >= end` is a mistake, so the whole set is rejected.** That is not a
+    ///   state any read can be in; it is the transposed `(offset, length)` pair
+    ///   [`one_run_from_offset_and_length`](WitnessedLocusPositions::one_run_from_offset_and_length)
+    ///   exists to keep apart from a half-open pair, and dropping it silently would hand back a
+    ///   *shorter* witness than the caller asked for — the failure
+    ///   [`from_half_open_runs`](WitnessedLocusPositions::from_half_open_runs) refuses for the
+    ///   same reason ("silently dropping it would let a caller build a set it did not mean").
+    ///   The Milestone D structure review found this constructor swallowing `[(0,4), (9,4)]`
+    ///   where its sibling rejected it.
+    ///
+    /// So `None` means: an empty input, a malformed run, or nothing left inside the locus — a
+    /// read that witnessed no position of it, which is not a witness (the reason
+    /// [`from_left`](Self::from_left) gives).
+    ///
+    /// **Only the end is clamped**, because clamping the start would change nothing: a run
+    /// starting at or past the locus end has a clamped end no greater than its start, so it is
+    /// dropped either way. The Milestone D reliability review found the start clamp surviving its
+    /// own deletion, over the whole suite, for exactly that reason.
     ///
     /// # Two families of constructor, and only this one may decide completeness
     ///
@@ -417,10 +436,15 @@ impl ReadWitness {
     /// - This one takes **the set of positions witnessed**, on the locus's own ruler.
     ///   Completeness is then arithmetic and not an inference: do they add up to the locus?
     ///
-    /// **The precondition is that ruler**, and it is the caller's to keep — runs measured with
-    /// anything but locus positions can produce a wrong `Complete` here. The shape is what
-    /// protects it: a caller has to build runs in locus coordinates to reach this function,
-    /// which a producer holding a reach and a border cannot do by accident.
+    /// **The precondition is that ruler, and nothing but the call site keeps it.** Runs measured
+    /// with anything else produce a wrong `Complete` here, and the type system does not help:
+    /// runs are bare `(u16, u16)` pairs, so `from_witnessed_runs([(0, 9)], LocusLen(6))` — the
+    /// run `from_left(9, LocusLen(6))` builds internally, the saturating STR reach this split
+    /// exists to keep out of `Complete` — answers `Complete`. The Milestone D naming review
+    /// demonstrated exactly that, against an earlier version of this paragraph claiming the
+    /// shape protected it. **It does not.** What would: a newtype for a run known to be in locus
+    /// coordinates, which is the same move `LocusLen` made for the length and is worth making
+    /// when `Partial`'s fields are revisited (spec §6, deferred).
     ///
     /// # It decides on the total, never on the outer edges
     ///
@@ -430,19 +454,24 @@ impl ReadWitness {
     /// read complete and hand a likelihood a spliced read as an exact measurement. See the
     /// type-level note on `ReadWitness` for why flush is not pinned.
     ///
-    /// This subsumes the interior-run constructor the deferred note on the variant asked for
-    /// (`from_witnessed_runs([(3, 7)], len)` is a run flush with neither border), which is why
-    /// there is no `from_run`: two spellings of one run differing only in whether they decide
-    /// completeness is a coin-flip for the caller.
+    /// This subsumes the interior-run constructor **spec §1 asked for** — a run flush with
+    /// neither border, which neither reach constructor can express, is
+    /// `from_witnessed_runs([(3, 7)], len)`. That is why there is no `from_run`: two spellings of
+    /// one run differing only in whether they decide completeness is a coin-flip for the caller.
     pub fn from_witnessed_runs(
         runs: impl IntoIterator<Item = (u16, u16)>,
         locus_len: LocusLen,
     ) -> Option<Self> {
-        let inside_the_locus = runs.into_iter().filter_map(|(start, end)| {
-            let start = start.min(locus_len.get());
+        let mut inside_the_locus: SmallVec<[(u16, u16); 2]> = SmallVec::new();
+        for (start, end) in runs {
+            if start >= end {
+                return None;
+            }
             let end = end.min(locus_len.get());
-            (start < end).then_some((start, end))
-        });
+            if start < end {
+                inside_the_locus.push((start, end));
+            }
+        }
         let positions = WitnessedLocusPositions::from_half_open_runs(inside_the_locus)?;
         // The runs are disjoint and inside the locus, so their total is exactly "every
         // position of it". `positions_covered` can never exceed the length here, so this is an
@@ -1029,9 +1058,9 @@ mod tests {
         );
     }
 
-    /// **A run touching neither border** — the shape the deferred note on the variant asked
-    /// for, which `from_left`/`from_right` cannot express and `from_witnessed_runs` subsumes
-    /// (there is no `from_run`; D3, owner).
+    /// **A run touching neither border** — the shape spec §1 asked for, which
+    /// `from_left`/`from_right` cannot express and `from_witnessed_runs` subsumes (there is no
+    /// `from_run`; D3, owner).
     #[test]
     fn an_interior_run_is_flush_with_neither_border() {
         let len = LocusLen::from_positions(10);
@@ -1045,9 +1074,14 @@ mod tests {
 
     /// **Runs are clamped into the locus, and a run left covering nothing is dropped** — so a
     /// caller reaching past the locus builds a shorter witness rather than one claiming
-    /// positions the locus does not have. Deleting either `.min(locus_len.get())` fails the
-    /// first assertion; dropping the `start < end` filter fails the second by rejecting the
-    /// whole set over a run that contributes nothing.
+    /// positions the locus does not have. Deleting `end.min(locus_len.get())` fails the first
+    /// assertion; dropping the `start < end` guard around the push fails the second, by keeping
+    /// an empty run that the canonicalising constructor then rejects the whole set for.
+    ///
+    /// **Only the end is clamped.** A start clamp was here and was deleted: it cannot change any
+    /// answer, because a run starting at or past the locus end has a clamped end no greater than
+    /// its start and is dropped either way. It survived its own deletion over the whole suite
+    /// (Milestone D reliability review), which is what a line with no effect looks like.
     #[test]
     fn runs_are_clamped_into_the_locus_and_empty_ones_dropped() {
         let len = LocusLen::from_positions(10);
@@ -1059,6 +1093,37 @@ mod tests {
             ReadWitness::from_witnessed_runs([(2, 5), (12, 20)], len),
             Some(partial_run(2, 3)),
             "a run wholly past the locus contributes nothing and does not sink the set",
+        );
+    }
+
+    /// **A malformed run is rejected, where a merely out-of-locus one is dropped** — the
+    /// distinction the Milestone D structure review found missing.
+    ///
+    /// `(9, 4)` is not a state a read can be in. It is the transposed `(offset, length)` pair —
+    /// `one_run_from_offset_and_length`'s whole reason for existing under a different name — and
+    /// silently dropping it hands the caller a witness *shorter* than the one they described,
+    /// which is the failure `from_half_open_runs` refuses in the same file. Before this fix
+    /// `from_witnessed_runs([(0,4), (9,4)], len)` answered `Some` with the run `(0,4)` alone
+    /// while `from_half_open_runs([(0,4), (9,4)])` answered `None`: two public constructors, one
+    /// file, opposite policies on the same mistake.
+    #[test]
+    fn a_run_whose_start_is_not_before_its_end_rejects_the_whole_set() {
+        let len = LocusLen::from_positions(10);
+        assert_eq!(
+            WitnessedLocusPositions::from_half_open_runs([(0, 4), (9, 4)]),
+            None,
+            "the sibling constructor's policy, quoted here so the two cannot drift apart again",
+        );
+        assert_eq!(
+            ReadWitness::from_witnessed_runs([(0, 4), (9, 4)], len),
+            None
+        );
+        assert_eq!(ReadWitness::from_witnessed_runs([(5, 5)], len), None);
+        assert_eq!(
+            ReadWitness::from_witnessed_runs([(2, 5), (12, 20)], len),
+            Some(partial_run(2, 3)),
+            "and a run that is merely outside the locus is still dropped rather than fatal — \
+             the two cases are different, which is the point",
         );
     }
 

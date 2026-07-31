@@ -76,7 +76,7 @@ impl WitnessedLocusPositions {
 
 **`ReadWitness` keeps both variants and its constructors' signatures.** `Complete` stays so
 `complete_observations` remains an equality test and the STR path's call sites do not move
-(spec §1 goal 4, §3.1).
+(spec §1 goal 3, §3.1).
 
 ```rust
 pub enum ReadWitness {
@@ -113,7 +113,10 @@ clamped run covers the whole locus. Both were replaced, by a split on **what the
   read* ran out of read*, not that it reached the far border, so these never answer `Complete` —
   which matters because `Complete` gates `complete_observations`, i.e. what a likelihood may score
   as an* exact *length. Implementing the original contract would have scored a lower bound as a
-  measurement, and moved two columns of the STR byte-identity oracle while doing it.*
+  measurement, and moved the STR byte-identity oracle while doing it — the `# obs_complete=
+  obs_partial=` header line, the `depth` column on every row of an affected locus, and the
+  `read_witness` column of the rows themselves, which would print `complete` where they print
+  `partial:left`.*
 - ***A witnessed set*** *—* `from_witnessed_runs`*: "these are the positions the read witnessed",
   on the locus's own ruler. Completeness is then arithmetic rather than inference, decided on the*
   total *positions covered and never on the outer edges (a set flush at both borders can still
@@ -281,7 +284,7 @@ existing types, not new types beside them.
 | `complete_observations` | [mod.rs:123](../../../../src/ng/locus_generation/mod.rs#L123) | unchanged — `Complete` is still a variant, still an equality test |
 | the two borrow sites | Insertion [open_record.rs:1217-1224](../../../../src/ng/locus_generation/pileup/open_record.rs#L1217), Deletion [:1228-1238](../../../../src/ng/locus_generation/pileup/open_record.rs#L1228) | **unchanged** — deferred (§1.2). Recorded here because the guard `offset >= consumed_until` is already exactly "no `Match` emitted this position", so the day it is built, this is where |
 | the drop path | [open_record.rs:1335-1345](../../../../src/ng/locus_generation/pileup/open_record.rs#L1335) | **narrows** to "witnessed nothing"; the set-of-read-ids mechanism and the subtract-prior-contribution step survive untouched — a read still becomes non-contiguous when the window widens |
-| `witness_of` | `coverage_of` [open_record.rs:184-212](../../../../src/ng/locus_generation/pileup/open_record.rs#L184) | renamed with its type; resolves a set against the footprint. The both-ends clamp and the `Complete` short-circuit are kept |
+| `witness_of` | `coverage_of` [open_record.rs:184-212](../../../../src/ng/locus_generation/pileup/open_record.rs#L184) | renamed with its type; resolves a set against the footprint. The both-ends clamp is kept; **the `Complete` short-circuit moved onto the type at D3** — `witness_of` clamps and rebases and then delegates to `ReadWitness::from_witnessed_runs`, per the revised §1.1 and §2 |
 | `witness_order` | `coverage_order` [open_record.rs:261](../../../../src/ng/locus_generation/pileup/open_record.rs#L261) | renamed with its type; signature changes to borrow, and `pub(super)` for the differential stays |
 | the observation identity | `ObservationKey` [open_record.rs:228](../../../../src/ng/locus_generation/pileup/open_record.rs#L228) | **name unchanged**; the witness field inside it grows a set |
 | `KeyedObservation` | `ObservationRow` [open_record.rs:237](../../../../src/ng/locus_generation/pileup/open_record.rs#L237) | **rename** — the fold's accumulator, same fields (§3) |
@@ -307,5 +310,5 @@ The **spliced fixture** is the regression anchor for the change's whole purpose,
 already: spec §8's 15 bp intron with a 20 bp deletion widening the record across it. It belongs in
 `pileup/tests.rs` rather than in a dump example, because it asserts a fold outcome — the read
 appears with a two-run witness where today it is absent from the record. Keep the one-position
-sensitivity in the test's comment: at a 16 bp deletion the footprint stops short of exon 2 and the
+sensitivity in the test's comment: at a 17 bp deletion the footprint stops short of exon 2 and the
 read is recorded normally, which is what makes the fixture a knife-edge rather than a decoration.
