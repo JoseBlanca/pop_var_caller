@@ -31,8 +31,7 @@ use super::decompose::ReadEvent;
 use super::errors::WalkerError;
 use super::witnessed_ref::{WitnessedRefPositions, WitnessedRefRuns};
 use crate::ng::locus_generation::{
-    LocusKind, LocusLen, ReadWitness, SampleLocusObservations, SequenceObservation,
-    WitnessedLocusPositions,
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
 
 /// Pre-allocated capacity for `OpenPileupRecord::folded_reads` —
@@ -171,8 +170,9 @@ pub(super) struct RecordWitnessCounts {
 ///
 /// # The `u16` narrowing is bounded by config, not by a constant
 ///
-/// Runs are expressed in `u16`, and the narrowing goes through [`LocusLen`], which owns the
-/// saturating cast. **An earlier version of this comment claimed saturation was unreachable
+/// Runs are expressed in `u16`, and the narrowing is a `try_from` that panics rather than a
+/// cast that clamps — see the note at the conversion. **An earlier version of this comment
+/// claimed saturation was unreachable
 /// because "production's `max_record_span` is 5000". That is the wrong bound**: the cap is
 /// `--max-record-span`, an unbounded `u32` CLI flag, so a caller could configure a footprint
 /// wider than `u16::MAX` and a partial witness inside it would report a truncated
@@ -196,6 +196,14 @@ pub(super) fn witness_of(
     record_pos: u32,
     record_end_exclusive: u32,
 ) -> ReadWitness {
+    // Ordered before it is measured: `record_end_exclusive.saturating_sub(record_pos)` reads
+    // `0` on an inverted footprint, so the width check below would wave one through and the
+    // failure would surface inside `u32::clamp` as "min > max" naming neither the record nor
+    // the read (Milestone C review, F4).
+    debug_assert!(
+        record_pos <= record_end_exclusive,
+        "inverted record footprint {record_pos}..{record_end_exclusive}",
+    );
     debug_assert!(
         record_end_exclusive.saturating_sub(record_pos) <= u32::from(u16::MAX),
         "record footprint {record_pos}..{record_end_exclusive} is wider than a `u16` run can \
@@ -205,16 +213,31 @@ pub(super) fn witness_of(
     // lying wholly outside collapses to nothing and is dropped rather than becoming a run of
     // no positions — which is what `first < past_last` says, and the only reason the filter
     // is here rather than left to the constructor, which would reject the whole set for it.
+    //
+    // **The narrowing is a `try_from`, not a `LocusLen`.** Neither offset is a locus
+    // *length*, and minting a `LocusLen` to borrow its saturating cast used the type as the
+    // opposite of what its own doc says it exists for — two same-shaped `u16` quantities kept
+    // apart so they cannot be transposed — while silently clamping where spec §3.4 asks for
+    // an error or an assertion (Milestone C review, F3). The width the assertions above pin
+    // is what makes the conversion infallible, and `PileupGeneratorConfig::check` is what
+    // makes *that* true before any locus is walked.
     let clamped: SmallVec<[(u16, u16); 2]> = witnessed
         .runs()
         .filter_map(|(start, end)| {
             let first = start.clamp(record_pos, record_end_exclusive);
             let past_last = end.clamp(first, record_end_exclusive);
             (first < past_last).then(|| {
-                (
-                    LocusLen::from_positions(u64::from(first - record_pos)).get(),
-                    LocusLen::from_positions(u64::from(past_last - record_pos)).get(),
-                )
+                let offset = |position: u32| {
+                    u16::try_from(position - record_pos).unwrap_or_else(|_| {
+                        panic!(
+                            "position {position} sits {} past the anchor of a footprint \
+                             {record_pos}..{record_end_exclusive} that a `u16` run must \
+                             describe; the config gate should have rejected this span",
+                            position - record_pos,
+                        )
+                    })
+                };
+                (offset(first), offset(past_last))
             })
         })
         .collect();
@@ -225,8 +248,16 @@ pub(super) fn witness_of(
     // can lie outside the *final* footprint, and the clamp above can never empty the set. It
     // is kept because `events_overlapping` returns a deletion whole, so a run reaching past
     // the record arrives by that route and must be cut rather than believed (spec §8).
-    let positions = WitnessedLocusPositions::from_half_open_runs(clamped)
-        .expect("a folded read witnessed at least one position inside the record it folded into");
+    //
+    // The message names the runs and the footprint, because the bare invariant does not tell
+    // a maintainer *which* of the two is wrong (Milestone C review, F4).
+    let positions = WitnessedLocusPositions::from_half_open_runs(clamped).unwrap_or_else(|| {
+        panic!(
+            "every run of {witnessed:?} fell outside the footprint \
+             {record_pos}..{record_end_exclusive}, but a read that witnessed nothing inside a \
+             record does not fold into it",
+        )
+    });
 
     // **`Complete` is decided on the set, not on its outermost edges.** A witness whose first
     // run starts at the border and whose last ends at the other one can still have a hole in
@@ -1215,9 +1246,9 @@ impl OpenPileupRecordTable {
 /// covered — an insertion adds bases without positions, a deletion positions
 /// without bases (spec §8, §13).
 ///
-/// # `false` means the read witnessed **nothing** inside the record — and nothing else
+/// # An empty `witnessed_runs` means the read witnessed **nothing** inside the record
 ///
-/// Since C3 that is the only shape that answers `false`. A witness with a **hole** in it —
+/// Since C3 that is the only shape it can mean. A witness with a **hole** in it —
 /// an interior `N`, a ref-skip — used to answer it too: one
 /// `Partial { offset_in_locus, positions_covered }` could not describe two runs honestly, so
 /// the read was discarded whole and counted in `reads_without_observation`. It now comes
@@ -1245,13 +1276,21 @@ impl OpenPileupRecordTable {
 /// Returning the set from here instead would have taken the buffer's storage with it and
 /// left the next read to allocate again.
 ///
-/// *Contract, both directions:* `true` leaves at least one non-empty run in
-/// `witnessed_runs`, so the caller's `take_from` / `refill_from` cannot answer "nothing";
-/// `false` leaves it **empty**, so a read that got no observation cannot leak runs into
-/// the next one's witness. The clear on entry is what makes the second half true, and a
-/// leak there would be silent — the witness is a third of an observation's identity, so
-/// two reads would stop sharing an observation, or share one that overstates what either
-/// saw.
+/// *Contract:* `witnessed_runs` holds the read's runs, non-empty and non-overlapping, or is
+/// **empty** when the read witnessed nothing. The clear on entry is what makes the second
+/// half true, and a leak there would be silent — the witness is a third of an observation's
+/// identity, so two reads would stop sharing an observation, or share one that overstates
+/// what either saw.
+///
+/// **It returns nothing, deliberately.** It answered a `bool` alongside the buffer until the
+/// Milestone C review pointed out that the two are one fact stored twice: three sites
+/// reconciled the copies by hand, and the `bool` could be *ignored* — the caller then folds a
+/// read that witnessed nothing, which is the exact hazard `canonicalise_runs` was reshaped to
+/// close one milestone earlier ("the buffer flows through the return value so that ignoring
+/// the answer cannot compile"). The rule had been applied to the helper and not to the hot
+/// function it exists for. Now the buffer is the only answer, and every caller has to go
+/// through `take_from` or `refill_from` to get a witness at all — both of which say
+/// "nothing" in their own return type.
 ///
 /// **Preconditions on `events`** (every caller in this module
 /// satisfies them; new callers must too):
@@ -1281,7 +1320,7 @@ pub(super) fn apply_events_into(
     record_pos: u32,
     ref_seq: &[u8],
     events: &[ReadEvent],
-) -> bool {
+) {
     allele_seq.clear();
     allele_seq.reserve(ref_seq.len() + 8);
     witnessed_runs.clear();
@@ -1414,12 +1453,8 @@ pub(super) fn apply_events_into(
     // ascending and non-overlapping — so `take_from` / `refill_from` canonicalise a set that
     // is already canonical. They still run: the precondition is a demand on callers, and a
     // caller that breaks it should get a merged set rather than a witness that lies.
-    match witnessed {
-        Some(run) => {
-            witnessed_runs.push(run);
-            true
-        }
-        None => false,
+    if let Some(run) = witnessed {
+        witnessed_runs.push(run);
     }
 }
 
@@ -1439,14 +1474,8 @@ pub(super) fn apply_events(
 ) -> Option<(Vec<u8>, WitnessedRefPositions)> {
     let mut out = Vec::new();
     let mut runs = WitnessedRefRuns::new();
-    if !apply_events_into(&mut out, &mut runs, record_pos, ref_seq, events) {
-        return None;
-    }
-    // The two answers cannot disagree: `apply_events_into` returns `true` exactly when it
-    // pushed a run, and every run it pushes is non-empty.
-    let witnessed = WitnessedRefPositions::take_from(&mut runs)
-        .expect("apply_events_into reported a witnessed run");
-    Some((out, witnessed))
+    apply_events_into(&mut out, &mut runs, record_pos, ref_seq, events);
+    Some((out, WitnessedRefPositions::take_from(&mut runs)?))
 }
 
 /// Order rank for the tied-anchor precondition on
@@ -1510,13 +1539,23 @@ fn fold_read_into_record(
         // `process_position` after this loop, from ids the walk hands down.
         reads_discarded_by_cap: _,
     } = record;
-    if !apply_events_into(
+    apply_events_into(
         allele_seq_buf,
         witnessed_runs_buf,
         rec_pos,
         &alleles[0].seq,
         window_events,
-    ) {
+    );
+    // **The buffer is the answer, and taking it is where "no observation" is decided.** The
+    // fold used to ask `apply_events_into` for a `bool` and then take the buffer separately,
+    // which stored one fact twice and let the answer be ignored (Milestone C review, F1).
+    //
+    // **Taking rather than refilling** because the state below is built fresh: this function
+    // also runs on a *re*-fold at a later walker position, where the read's previous witness
+    // is dropped by the `remove` and its storage with it — which costs nothing while a
+    // witness is one or two runs, since those are inline. If a multi-junction witness ever
+    // makes this path allocate, `refold_live_reads`' in-place refill is the shape to copy.
+    let Some(witnessed) = WitnessedRefPositions::take_from(witnessed_runs_buf) else {
         // A5: **which** reads these were, as a per-record set. The path is reached at
         // every position the record is affected at, so a counter here would multiply
         // by the footprint length (spec §4).
@@ -1536,7 +1575,7 @@ fn fold_read_into_record(
             subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
         }
         return;
-    }
+    };
 
     // PANIC-FREE, and the assert states the invariant rather than defending against it:
     // the record's left edge is its anchor and never moves and a widen only extends the
@@ -1550,19 +1589,6 @@ fn fold_read_into_record(
         "read {} folded after having been recorded as witnessing nothing at all",
         active.read_id,
     );
-
-    // The buffer's runs become this read's witness, and the buffer comes back empty for the
-    // next read. **Taking rather than refilling** because the state below is built fresh:
-    // this function also runs on a *re*-fold at a later walker position, where the read's
-    // previous witness is dropped by the `remove` and its storage with it — which costs
-    // nothing while a witness is one or two runs, since those are inline. If a
-    // multi-junction witness ever makes this path allocate, `refold_live_reads`' in-place
-    // refill is the shape to copy here (Milestone B review M2).
-    //
-    // PANIC-FREE: `apply_events_into` returned `true` above, which it does exactly when it
-    // pushed a run, and every run it pushes is non-empty.
-    let witnessed = WitnessedRefPositions::take_from(witnessed_runs_buf)
-        .expect("apply_events_into reported a witnessed run");
 
     let ln_q = ln_bq_for_read(window_events, bq_fallback).max(active.read.mq_log_err);
     let mapq = u32::from(active.read.mapq);
@@ -1688,13 +1714,26 @@ fn refold_live_reads(
             .cursor
             .events_overlapping(rec_pos, rec_end, &active.read);
 
-        if !apply_events_into(
+        apply_events_into(
             allele_seq_buf,
             witnessed_runs_buf,
             rec_pos,
             &alleles[0].seq,
             &window,
-        ) {
+        );
+        // **The refill is the decision, and it comes first.** It **swaps**, so the read's
+        // old witness storage goes back into the buffer rather than being dropped and a
+        // re-fold of a spilled witness allocates nothing however many times the record
+        // widens (arch §2, Milestone B review M2). Doing it before the bucket work means
+        // there is no window in which the read's witness and its `allele_index` disagree,
+        // and no second copy of "did this read witness anything" to keep in step with the
+        // buffer (Milestone C review, F1).
+        let refilled = folded_reads
+            .get_mut(&read_id)
+            .expect("the id came from this record's own fold state")
+            .witnessed
+            .refill_from(witnessed_runs_buf);
+        if !refilled {
             // **Unreachable since C3, and kept as the invariant's statement.** This was
             // the arrival that made the drop ordinary rather than a corner: a read folded
             // contiguously, the record widened right across an interior gap, and the read
@@ -1743,31 +1782,15 @@ fn refold_live_reads(
             .get_mut(&read_id)
             .expect("the id came from this record's own fold state");
         let FoldedReadState {
-            // The two the re-place decides.
+            // The one the re-place still has to decide; the witness was refilled above.
             allele_index,
-            witnessed,
+            witnessed: _,
             // The rest are facts about the read, which a widen does not change — see the
             // "it moves the read; it does not re-decide anything" note above.
             contribution: _,
             chain_id: _,
             read_group: _,
         } = state;
-        // **Refilled in place, which swaps** — the read's old witness storage goes back
-        // into the buffer rather than being dropped, so a re-fold of a spilled witness
-        // allocates nothing however many times the record widens (arch §2, Milestone B
-        // review M2).
-        //
-        // **The witness is written before the bucket index**, so the two cannot be left
-        // disagreeing: a refill that answered `false` would otherwise leave the read
-        // pointing at the bucket its *new* bases chose while still carrying its old
-        // witness, and only a `debug_assert` would say so (Milestone C review). It cannot
-        // answer `false` here — `apply_events_into` returned `true` a few lines above — and
-        // ordering it this way costs nothing to make that not matter.
-        let refilled = witnessed.refill_from(witnessed_runs_buf);
-        debug_assert!(
-            refilled,
-            "apply_events_into reported a witnessed run for read {read_id} a few lines above",
-        );
         *allele_index = new_index;
     }
 }
@@ -2251,6 +2274,7 @@ pub(super) struct ReadContribution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::locus_generation::LocusLen;
     use crate::ng::locus_generation::pileup::tests::MockFasta;
 
     fn fa(s: &str) -> MockFasta {
@@ -2420,7 +2444,9 @@ mod tests {
     /// carried the same contract since the port and no test named it; this names both.
     ///
     /// Both directions of the contract are asserted, because only the second one is new:
-    /// `true` leaves the run it witnessed, `false` leaves the buffer **empty**.
+    /// a witnessed run replaces whatever was there, and a read that witnessed nothing
+    /// leaves the buffer **empty**. Since the buffer is the function's only answer, these
+    /// two statements are the whole of its return value.
     #[test]
     fn apply_events_into_clears_the_witness_buffer_it_was_handed() {
         let ref_seq = b"ACGTA"; // positions 100..=104
@@ -2435,26 +2461,20 @@ mod tests {
             base: b'X',
             bq_baq: 30,
         };
-        assert!(apply_events_into(
+        apply_events_into(
             &mut allele_seq,
             &mut runs,
             100,
             ref_seq,
             std::slice::from_ref(&snp),
-        ));
+        );
         assert_eq!(
             runs.as_slice(),
             &[(102, 103)],
             "the previous read's run must not survive into this one's witness",
         );
 
-        assert!(!apply_events_into(
-            &mut allele_seq,
-            &mut runs,
-            100,
-            ref_seq,
-            &[],
-        ));
+        apply_events_into(&mut allele_seq, &mut runs, 100, ref_seq, &[]);
         assert!(
             runs.is_empty(),
             "a read that got no observation leaves the buffer empty for the next one",

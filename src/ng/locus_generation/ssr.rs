@@ -198,6 +198,40 @@ pub struct SsrGeneratorCounts {
     pub outside_tract: u64,
 }
 
+impl SsrGeneratorCounts {
+    /// Reads that reached the aligner and yielded nothing, **by every reason there is**.
+    ///
+    /// # It lives here because the sum is what drifts
+    ///
+    /// Two tools print this total and each summed the reasons itself. When C0 added a
+    /// fourth, one of them was updated and the other was not — and it under-reported by
+    /// 6,704 reads of ~9,265 on one tomato chromosome without a warning, because adding a
+    /// field to a struct does not break a `+` chain. A reviewer confirmed the shape rather
+    /// than the instance: adding a *fifth* reason and changing nothing else left
+    /// `clippy --lib --examples --all-features -- -D warnings` clean, with both tools now
+    /// silently short (Milestone C review, F5).
+    ///
+    /// **The destructure is the guard, and it has to name every field with no `..`.** A
+    /// reason added to the struct then fails to compile *here*, once, with
+    /// `error[E0027]: pattern does not mention field`, which is the question being asked:
+    /// does this new reason mean the read yielded no observation? The observation counters
+    /// are named and discarded for the same reason — so a field added to *them* also stops
+    /// here rather than being silently swept into a no-observation total.
+    pub fn reads_without_observation(&self) -> u64 {
+        let Self {
+            reads_fetched: _,
+            reads_discarded_by_cap: _,
+            observations_complete: _,
+            observations_partial: _,
+            no_border_anchored,
+            low_quality,
+            window_truncated,
+            outside_tract,
+        } = self;
+        no_border_anchored + low_quality + window_truncated + outside_tract
+    }
+}
+
 // ---------------------------------------------------------------------
 // The per-locus read cap — a faithful port of production's reservoir sampler
 // (src/ssr/pileup/fetch_reads.rs), keyed to ng's own seed and cap constant.

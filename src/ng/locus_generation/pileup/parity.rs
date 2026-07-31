@@ -120,7 +120,7 @@ use crate::ng::types::{ContigId, GenomeRegion, Position};
 // Aliased, so which walker a call reaches is legible at the call site rather than carried
 // by a `super::` — this file is the one place both are in scope at once.
 use crate::ng::locus_generation::{
-    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation, WitnessedLocusPositions,
 };
 use crate::pileup::walker::{
     CigarOp, MateRole as ProductionMateRole, PreparedRead as ProductionPreparedRead,
@@ -2300,10 +2300,11 @@ fn observations_split_by_group(locus: &SampleLocusObservations) -> bool {
     /// An observation's identity **without** its read group: the bases, and the witness as the
     /// type's own total order gives it ([`ReadWitness::sort_key`]).
     ///
-    /// The witness half is a tag and a borrowed slice of runs since C2, where it was a fixed
+    /// The witness half is a tag and the borrowed set since C2, where it was a fixed
     /// `(u8, u16, u16)` — a set has no fixed width. It still borrows from the observation, so
     /// the key lives exactly as long as the loop below.
-    type ObservationIdentityWithoutGroup<'a> = (&'a [u8], (u8, &'a [(u16, u16)]));
+    type ObservationIdentityWithoutGroup<'a> =
+        (&'a [u8], (u8, Option<&'a WitnessedLocusPositions>));
 
     let mut seen: BTreeSet<ObservationIdentityWithoutGroup<'_>> = BTreeSet::new();
     for observation in &locus.observations {

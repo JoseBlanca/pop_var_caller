@@ -14,7 +14,8 @@
 //!
 //! The three types are re-exported from [`locus_generation`](super), so no *external*
 //! consumer's import path names this module; `canonicalise_runs` is crate-internal and is
-//! imported by path, by `pileup::open_record`.
+//! imported by path, by `pileup::witnessed_ref` — which is the fold's own reference-axis set
+//! and the only other type that has to agree on what "canonical" means.
 
 use smallvec::{Array, SmallVec};
 
@@ -90,7 +91,13 @@ where
 /// rejected on the same evidence: it would pay 16 bytes to say "positions 0..40" for a case
 /// that is one run in every observation measured (arch §4). The encoding is private behind
 /// [`runs`](Self::runs) so it can still move.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// # `Ord` is derived, and it is sound for the same reason `Eq` is
+///
+/// One set has exactly one representation, so ordering the representation orders the set.
+/// [`ReadWitness::sort_key`] returns this type rather than the slice inside it, which is what
+/// keeps the encoding private after all — it was handing out `&[(u16, u16)]` and so promising
+/// the layout it documents as free to move (Milestone C review, F2).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WitnessedLocusPositions(SmallVec<[(u16, u16); 2]>);
 
 impl WitnessedLocusPositions {
@@ -137,6 +144,33 @@ impl WitnessedLocusPositions {
         self.0.iter().copied()
     }
 
+    /// The first run, and the last. **Total, because the set is never empty** — which is the
+    /// point of having them: `runs()` hands back an iterator whose ends are `Option`, so
+    /// every consumer that wants a border pays an `expect` for a case the type has already
+    /// ruled out, or hides it behind an `is_some_and` that silently answers `false` for the
+    /// impossible set. The invariant is this type's, so the one `expect` is too (Milestone C
+    /// review, F7).
+    pub fn first_run(&self) -> (u16, u16) {
+        *self.0.first().expect("a witnessed set is never empty")
+    }
+
+    /// See [`first_run`](Self::first_run).
+    pub fn last_run(&self) -> (u16, u16) {
+        *self.0.last().expect("a witnessed set is never empty")
+    }
+
+    /// The distance from the first position witnessed to one past the last — **the span the
+    /// runs sit in, which is not what they cover.**
+    ///
+    /// Named against [`positions_covered`](Self::positions_covered), which is the number a
+    /// depth or a count wants; the difference between the two is exactly the positions inside
+    /// the holes, which is the quantity the divergence census exists to report (spec §4).
+    /// Having both under names that say which is which is what stops "last end minus first
+    /// start" being open-coded as a coverage.
+    pub fn span(&self) -> u32 {
+        u32::from(self.last_run().1) - u32::from(self.first_run().0)
+    }
+
     /// How many locus positions in total — what `num_obs_along_locus` sums over.
     ///
     /// **The positions, not the span.** Two runs with a gap between them cover fewer
@@ -154,7 +188,7 @@ impl WitnessedLocusPositions {
     /// Whether the witness starts at the locus's left border — a **prefix** constraint on
     /// the allele, unchanged in meaning from the one-run form.
     pub fn is_flush_left(&self) -> bool {
-        self.0.first().is_some_and(|(start, _)| *start == 0)
+        self.first_run().0 == 0
     }
 
     /// Whether the witness reaches the locus's right border — a **suffix** constraint.
@@ -163,9 +197,7 @@ impl WitnessedLocusPositions {
     /// reach is measured in read bases, which diverge from locus positions under stutter, so
     /// a run may be handed a length the locus does not have.
     pub fn is_flush_right(&self, locus_len: LocusLen) -> bool {
-        self.0
-            .last()
-            .is_some_and(|(_, end)| *end >= locus_len.get())
+        self.last_run().1 >= locus_len.get()
     }
 }
 
@@ -188,6 +220,34 @@ impl WitnessedLocusPositions {
 /// folded in: it is the overwhelmingly common case and it keeps
 /// [`complete_observations`](super::SampleLocusObservations::complete_observations) a cheap
 /// equality instead of arithmetic against the footprint.
+///
+/// # Flush at both borders is **not** the same as pinned, and only `Complete` says pinned
+///
+/// A `Partial` witness can answer `true` to both flush predicates and still not have measured
+/// the locus, two ways:
+///
+/// - **A hole in the middle.** The read reached both borders and was blind between them, which
+///   is precisely what C3 made expressible.
+/// - **A reach past the locus.** The STR path measures a partial's reach in *read* bases,
+///   which diverge from locus positions under stutter, so an expanded allele hands
+///   `from_left`/`from_right` a length the reference tract does not have. Clamped, that is one
+///   run covering the whole locus — flush both ways — from a read that anchored **one** border
+///   and then ran out. Its evidence is still a lower bound.
+///
+/// So a consumer asking "did this read pin the length?" must test `Complete`, not the two
+/// predicates; the predicates answer the narrower question they are named for, which is the
+/// prefix/suffix constraint on the *allele* (spec §3.1), and step 7's censored likelihood is
+/// their consumer. `witness_of` decides `Complete` on total coverage rather than on the
+/// outermost edges for exactly this reason.
+///
+/// **This is also why the constructors do not return `Complete` when the clamped run covers
+/// the whole locus**, which arch §1.1's contract asks for and this type deliberately does not
+/// implement. The implementation report justified the departure on the STR dump moving; the
+/// stronger reason is the one above — a read that ran out of read has not reached the second
+/// border, and `Complete` gates `complete_observations`, i.e. what a likelihood may score as
+/// an exact length. Implementing the contract would score a lower bound as a measurement.
+/// **Flagged for the owner at plan step D3**, which owns the constructor set (Milestone C
+/// review, F10).
 ///
 /// **Not `Copy` since C2**, because `Partial` carries a set. Every consumer either matches on
 /// it or clones it, and the one place that mattered — the fold's per-read state — took the
@@ -371,20 +431,29 @@ impl ReadWitness {
     /// # It borrows since C2, and the order over one run is unchanged
     ///
     /// `(u8, u16, u16)` cannot be a total order over a *set* — a witness can hold any number
-    /// of runs — so the key is a tag and a **slice of the canonical runs**, compared
-    /// lexicographically (arch §2). Over a one-run witness that is exactly the old order:
-    /// the old key compared `(offset, covered)` and the new one compares `(start, end)` at
-    /// the same start, so the second component ranks the same runs the same way. Over
-    /// several runs it keeps ordering by where the witness *begins*, then by how it
+    /// of runs — so the key is a tag and the set itself, whose derived `Ord` compares its
+    /// canonical runs lexicographically (arch §2). Over a one-run witness that is exactly the
+    /// old order: the old key compared `(offset, covered)` and this one compares
+    /// `(start, end)` at the same start, so the second component ranks the same runs the same
+    /// way — verified exhaustively over a 132×132 grid by the Milestone C behaviour review.
+    /// Over several runs it keeps ordering by where the witness *begins*, then by how it
     /// continues, which is the same rule read further.
+    ///
+    /// **The key hands back the set, not the runs inside it.** It returned
+    /// `(u8, &[(u16, u16)])` until the Milestone C review pointed out that this type's own
+    /// doc promises "the encoding stays private behind `runs()` so it can still move", and a
+    /// public signature naming `(u16, u16)` pairs is that promise broken: a `Run` newtype or
+    /// a bitmask would be a breaking change to a re-exported type's API. `Option` because
+    /// `Complete` has no positions, and it orders first either way — the tag has already
+    /// decided by then.
     ///
     /// `ReadWitness` still gets no `Ord` of its own, unchanged reasoning: a named key is
     /// opt-in at the sort site, where an impl would make a witness silently comparable
     /// everywhere.
-    pub fn sort_key(&self) -> (u8, &[(u16, u16)]) {
+    pub fn sort_key(&self) -> (u8, Option<&WitnessedLocusPositions>) {
         match self {
-            Self::Complete => (0, &[]),
-            Self::Partial { positions } => (1, &positions.0),
+            Self::Complete => (0, None),
+            Self::Partial { positions } => (1, Some(positions)),
         }
     }
 }

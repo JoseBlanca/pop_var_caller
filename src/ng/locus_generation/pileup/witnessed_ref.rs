@@ -59,15 +59,14 @@ impl WitnessedRefPositions {
     /// The fold does not use this — it owns a buffer and goes through
     /// [`take_from`](Self::take_from) / [`refill_from`](Self::refill_from) so a re-fold
     /// costs a swap rather than an allocation. This is the shape a *test* wants, where the
-    /// runs are written out literally, and the `expect` is what makes a caller who reaches
+    /// runs are written out literally, and `#[cfg(test)]` is what makes a caller who reaches
     /// for it on the hot path notice.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the fold owns a buffer and goes through take_from/refill_from"
-        )
-    )]
+    ///
+    /// *`cfg` rather than `expect(dead_code)`* (Milestone C review, F9): the `expect` fired
+    /// only in the clippy step — under `cargo test --lib` the attribute is `cfg`-ed away
+    /// entirely — where this errors with `no method named from_half_open_runs` in every
+    /// profile.
+    #[cfg(test)]
     pub(super) fn from_half_open_runs(runs: impl IntoIterator<Item = (u32, u32)>) -> Option<Self> {
         canonicalise_runs(runs.into_iter().collect()).map(Self)
     }
@@ -139,13 +138,9 @@ impl WitnessedRefPositions {
     /// which is a different number from the runs' own total, and nothing else on this axis
     /// wants a count. It stays because the tests below are what pin the merge against the
     /// enclosing span, and it is the reference-axis half of the number the locus axis emits.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the fold measures against the footprint, not the runs' own total"
-        )
-    )]
+    ///
+    /// *`cfg` rather than `expect(dead_code)`* — see [`from_half_open_runs`](Self::from_half_open_runs).
+    #[cfg(test)]
     pub(super) fn positions_covered(&self) -> u64 {
         self.0
             .iter()

@@ -249,12 +249,10 @@ fn run_dump<A: RepeatDelimiter>(
     report.reads_capped = counts.reads_discarded_by_cap;
     report.obs_complete = counts.observations_complete;
     report.obs_partial = counts.observations_partial;
-    // Every reason, named — `outside_tract` is the largest of the four on real data, so
-    // summing three of them would report a fraction of the reads that yielded nothing.
-    report.reads_without_observation = counts.no_border_anchored
-        + counts.low_quality
-        + counts.window_truncated
-        + counts.outside_tract;
+    // The sum lives on the counts type, behind an exhaustive destructure, so a reason added
+    // later cannot be left out of it here — which is what happened to this tool's sibling
+    // when C0 added the fourth (Milestone C review, F5).
+    report.reads_without_observation = counts.reads_without_observation();
     Ok(report)
 }
 
