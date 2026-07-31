@@ -6,7 +6,7 @@ Design: [spec](../../ng/spec/locus_witness_representation.md) §1, §4, §8;
 [arch](../../ng/arch/locus_witness_representation.md) §1.1, §2. Branch `ng-pileup-generator`,
 worktree `pop_var_caller-ng-pileup`.*
 
-**Status: D3, D4 and D5 complete. D6 not started.** This report is extended per step and committed
+**Status: Milestone D complete — D3, D4, D5, D6.** This report is extended per step and committed
 with each of them. D1 and D2 landed inside C2, which could not compile without them.
 
 **The baseline this milestone starts from**, re-measured rather than inherited: `cargo fmt
@@ -280,4 +280,71 @@ probe reports"* — so the guard is a fixture that produces the thing the counte
 oracle runs. It is re-run once at the end of the milestone.
 
 **Counts:** `ng::locus_generation` 308 → **309**; the suite 2,841 → **2,842**. `cargo fmt --check`
+and `cargo clippy --all-targets --all-features -- -D warnings` clean.
+
+---
+
+## D6 — the spliced fixture, permanent
+
+### What the step is
+
+The regression anchor for the whole change, and the only fixture in this milestone drawn from a
+real failure rather than constructed to exercise a branch. Two reads over a 60-base reference:
+
+- **the spliced read**, `3M 15N 3M` from 28 — exon 1 at 28–30, a 15-base intron at 31–45, exon 2
+  at 46–48. A `Skip` emits no event, so the read witnesses six positions in two runs;
+- **the deletion read**, `3M 20D 3M` from 26 — it anchors a record at 28, the base before the
+  deletion, and widens its footprint to `28..=48`, twenty-one positions.
+
+The deletion read is why the hole is *inside a record at all*: an intron cannot widen a record on
+its own, so without an indel allele spanning it the two exons would simply be separate records and
+there would be nothing to represent (spec §8).
+
+**The assertions** are the two halves of the failure. The spliced read's observation is *there* —
+before C3 it was absent from the record entirely, `apply_events_into` having answered `None` for a
+non-contiguous witness — and its witness reads `[(0,3), (18,21)]`, two runs, rather than a span
+that swallows the fifteen positions it never saw. Its bases are the two exons and nothing from the
+intron. `reads_without_observation` is 0: a holed witness is evidence, not a read that witnessed
+nothing.
+
+### The knife-edge, asserted from both sides
+
+The plan asks for the one-position sensitivity to be *recorded in a comment*. It is asserted
+instead, because a comment about a boundary is not a test of one:
+
+- a **17**-base deletion widens the record to `28..=45`, one position short of exon 2, and the
+  spliced read's witness inside it is exon 1 alone — one run, which the old representation
+  described perfectly;
+- **18** reaches 46, the first base of exon 2, and the same read is holed at once.
+
+So the change earns its keep on a single deleted base. *(The plan says the boundary is at 16; that
+was the throwaway probe's geometry. This fixture's own numbers are 17 and 18, verified by running
+it, and they are what the test and the plan now record.)*
+
+### How we know it works
+
+**The mutation is C3 put back** — the fold reporting "nothing witnessed" whenever the witness is
+more than one run, which is exactly the pre-C3 behaviour:
+
+```
+test …pileup::tests::a_spliced_read_across_a_widened_record_is_recorded_with_both_of_its_runs ... FAILED
+test …pileup::tests::one_more_deleted_base_is_what_turns_the_spliced_read_into_a_holed_one ... FAILED
+test …open_record::tests::a_read_with_a_hole_is_counted_neither_as_capped_nor_as_witnessing_nothing ... FAILED
+test …open_record::tests::a_read_whose_witness_splits_when_the_record_widens_stays_in_it ... FAILED
+test …open_record::tests::a_read_folding_at_four_positions_of_one_record_is_one_observation ... FAILED
+test result: FAILED. 306 passed; 5 failed
+```
+
+Both new fixtures fail, alongside C3's three. And D3's mutations already showed that deciding
+completeness on the outer edges or on `span()` turns this same shape into a `Complete` — so the
+fixture is pinned against both ways of losing a hole: dropping the read, and describing it as
+whole.
+
+**The oracles, at the end of the milestone.** The STR dump on tomato `SRR7279503` chr01 is
+**byte-identical** to `ssr_dump_outside_tract.tsv` — 8,138 lines, zero diff — across all four
+steps. `parity::ng_agrees_with_production_where_production_fabricated_nothing`,
+`ng_emits_the_same_bytes_in_a_second_process` and
+`every_divergence_from_production_is_one_of_the_six_named_classes` are green.
+
+**Counts:** `ng::locus_generation` 309 → **311**; the suite 2,842 → **2,844**. `cargo fmt --check`
 and `cargo clippy --all-targets --all-features -- -D warnings` clean.

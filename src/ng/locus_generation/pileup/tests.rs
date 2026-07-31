@@ -30,7 +30,7 @@ use super::PreparedRead;
 use super::WalkerConfig;
 use super::run;
 use crate::fasta::{ChromRefFetchError, MultiChromRefFetcher};
-use crate::ng::locus_generation::SequenceObservation;
+use crate::ng::locus_generation::{ReadWitness, SequenceObservation, WitnessedLocusPositions};
 use crate::ng::types::ReadGroupId;
 
 // ---------------------------------------------------------------------
@@ -1777,4 +1777,183 @@ fn prepared_read_length_checks_seq_bq_before_cigar() {
         r.length(),
         Err(super::ReadLengthError::SeqBqMismatch { .. })
     ));
+}
+
+// ---------------------------------------------------------------------
+// The spliced fixture (D6) — the failure this whole change exists for
+// ---------------------------------------------------------------------
+
+/// A 60-base reference, `ACGT` fifteen times. The pattern only has to make the reads'
+/// matched bases distinguishable from each other; every read below agrees with it, so the
+/// fixture's subject is the *shape* of a witness and never an allele.
+const SPLICED_REF: &str = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+
+/// The reference bases at 1-based inclusive `from..=to`.
+fn spliced_ref_bases(from: usize, to: usize) -> Vec<u8> {
+    SPLICED_REF.as_bytes()[from - 1..to].to_vec()
+}
+
+/// Two reads over `SPLICED_REF`, and the deletion's length is the knob.
+///
+/// - **the spliced read**, `3M 15N 3M` from 28: exon 1 at 28–30, a 15-base intron at 31–45,
+///   exon 2 at 46–48. A `Skip` emits no event (`cigar_cursor.rs`), so the read witnesses
+///   **six** positions in two runs and nothing between them;
+/// - **the deletion read**, `3M <del>D 3M` from 26: matches at 26–28, then `del` deleted
+///   positions from 29. It anchors a record at **28** — the base before the deletion — whose
+///   footprint the deletion widens to `28 ..= 28 + del`.
+///
+/// The deletion read is why the spliced read's hole is *inside a record at all*: an intron
+/// cannot widen a record on its own, so without an indel allele spanning it the two exons
+/// would simply be separate records and there would be no hole to represent (spec §8).
+fn spliced_and_deleting_reads(deletion_len: u32) -> Vec<PreparedRead> {
+    let deletion_len_usize = deletion_len as usize;
+    let spliced = PreparedRead {
+        chrom_id: 0,
+        alignment_start: 28,
+        alignment_end: 48,
+        cigar: vec![CigarOp::Match(3), CigarOp::Skip(15), CigarOp::Match(3)],
+        seq: [spliced_ref_bases(28, 30), spliced_ref_bases(46, 48)].concat(),
+        bq_baq: vec![30; 6],
+        mq_log_err: -3.0,
+        is_reverse_strand: false,
+        qname: Arc::from("spliced"),
+        mate_role: MateRole::Solo,
+        adaptor_boundary: None,
+        read_group: ReadGroupId(0),
+        mapq: 60,
+    };
+    let deleting = PreparedRead {
+        chrom_id: 0,
+        alignment_start: 26,
+        alignment_end: 31 + deletion_len,
+        cigar: vec![
+            CigarOp::Match(3),
+            CigarOp::Deletion(deletion_len),
+            CigarOp::Match(3),
+        ],
+        seq: [
+            spliced_ref_bases(26, 28),
+            spliced_ref_bases(29 + deletion_len_usize, 31 + deletion_len_usize),
+        ]
+        .concat(),
+        bq_baq: vec![30; 6],
+        mq_log_err: -3.0,
+        is_reverse_strand: false,
+        qname: Arc::from("deleting"),
+        mate_role: MateRole::Solo,
+        adaptor_boundary: None,
+        read_group: ReadGroupId(0),
+        mapq: 60,
+    };
+    vec![deleting, spliced]
+}
+
+/// The record the deletion anchors at 28, and the spliced read's observation in it (if any).
+fn spliced_reads_observation(deletion_len: u32) -> (Locus, Option<SequenceObservation>) {
+    let records = drive_walker(
+        spliced_and_deleting_reads(deletion_len),
+        MockFasta::new(SPLICED_REF),
+    );
+    let record = records
+        .iter()
+        .find(|record| record.anchor() == 28)
+        .expect("the deletion anchors a record at 28")
+        .clone();
+    // The spliced read's bases are its two exons concatenated; the deletion read's observation over
+    // the same footprint is the anchor base alone, so the two cannot be confused.
+    let observation = record
+        .observations
+        .iter()
+        .find(|observation| observation.bases.len() > 1)
+        .cloned();
+    (record, observation)
+}
+
+/// **A read blind in the middle of a record is recorded, with both of its runs** — the
+/// regression anchor for the whole change, and the only fixture here drawn from a real
+/// failure rather than constructed to exercise a branch (spec §7, §8; arch §6).
+///
+/// A 20-base deletion widens the record at 28 to `28 ..= 48`, twenty-one positions. The
+/// spliced read witnessed **six** of them — three in each exon — and, before C3, was
+/// **absent from the record entirely**: `apply_events_into` answered `None` for a
+/// non-contiguous witness and the drop path fired once per position the record was affected
+/// at. The evidence was not merely mis-described, it was discarded.
+///
+/// The assertions are the two halves of that: the read is *there*, and its witness says
+/// `[(0,3), (18,21)]` — two runs — rather than a span that swallows the fifteen positions it
+/// never saw.
+#[test]
+fn a_spliced_read_across_a_widened_record_is_recorded_with_both_of_its_runs() {
+    let (record, observation) = spliced_reads_observation(20);
+    assert_eq!(
+        record.footprint_len(),
+        21,
+        "28 ..= 48, the anchor plus 20 deleted"
+    );
+
+    let observation = observation.expect(
+        "the spliced read's observation — before C3 the walk dropped it, and this fixture is \
+         what says it no longer does",
+    );
+    assert_eq!(
+        &*observation.bases,
+        &[spliced_ref_bases(28, 30), spliced_ref_bases(46, 48)].concat()[..],
+        "the bases are the two exons and nothing from the intron — the fold copies no \
+         reference base the read did not sequence",
+    );
+    assert_eq!(
+        observation.read_witness,
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 3), (18, 21)])
+                .expect("two runs"),
+        },
+        "exon 1 at locus offsets 0..3, exon 2 at 18..21, and the intron's fifteen positions \
+         are a hole rather than a stretch the read is credited with",
+    );
+    assert_eq!(
+        record.reads_without_observation, 0,
+        "a holed witness is evidence, not a read that witnessed nothing — the counter this \
+         read used to land in now means what its name says",
+    );
+}
+
+/// **One base of footprint width decides it**, which is what makes the fixture above a
+/// knife-edge rather than a decoration (spec §8).
+///
+/// The hole exists only where the record's footprint reaches *past* the intron into exon 2:
+///
+/// - a **17**-base deletion widens the record to `28 ..= 45`, one position short of exon 2 at
+///   46, so the spliced read's witness inside it is exon 1 alone — one run, and the old
+///   representation described it perfectly;
+/// - **18** reaches 46, the first base of exon 2, and the same read is holed at once.
+///
+/// So the change earns its keep on a single deleted base, and a test that only ever built the
+/// 20-base case could not tell the two readings apart.
+#[test]
+fn one_more_deleted_base_is_what_turns_the_spliced_read_into_a_holed_one() {
+    let (short, short_observation) = spliced_reads_observation(17);
+    assert_eq!(short.footprint_len(), 18, "28 ..= 45");
+    assert_eq!(
+        short_observation
+            .expect("exon 1 alone is still an observation")
+            .read_witness,
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 3)]).expect("one run"),
+        },
+        "the footprint stops before exon 2, so the read witnessed one contiguous stretch",
+    );
+
+    let (wide, wide_observation) = spliced_reads_observation(18);
+    assert_eq!(wide.footprint_len(), 19, "28 ..= 46");
+    assert_eq!(
+        wide_observation
+            .expect("the holed observation")
+            .read_witness,
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 3), (18, 19)])
+                .expect("two runs"),
+        },
+        "one more deleted base reaches the first position of exon 2, and the witness is two \
+         runs with a fifteen-position hole between them",
+    );
 }

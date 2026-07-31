@@ -245,10 +245,17 @@ expectations is a step that did more than rename.
   instead: a hand-built locus whose read witnesses `[(0,3), (6,10)]` of 10 positions must report
   4 holed reads and 12 hole positions, and a one-run partial beside it must report neither while
   still counting as fabricating — so "holed" cannot collapse into a second spelling of "partial".
-- ☐ **D6.** The spliced fixture as a permanent test in `pileup/tests.rs`: a 15 bp intron plus a
+- ✅ **D6.** The spliced fixture as a permanent test in `pileup/tests.rs`: a 15 bp intron plus a
   20 bp deletion widening the record across it, asserting the read appears with a two-run witness.
-  Its comment records the knife-edge — at 16 bp the footprint stops one position short of exon 2
-  and the read is recorded normally either way. *Depends:* C3. *Source:* spec §7, §8; arch §6.
+  Its comment records the knife-edge. *Depends:* C3. *Source:* spec §7, §8; arch §6. **Two tests,
+  one geometry:** a `3M 15N 3M` read from 28 (exons 28–30 and 46–48) beside a `3M 20D 3M` read
+  from 26, which anchors the record at 28 and widens it to `28..=48`. The spliced read is present
+  with `[(0,3), (18,21)]` — six positions of twenty-one, the intron a hole — and
+  `reads_without_observation` is 0. **The knife-edge is one deleted base, and it is asserted from
+  both sides:** at 17 the footprint ends at 45, one short of exon 2, and the witness is one run;
+  at 18 it reaches 46 and the read is holed. *(The plan said 16 — that was the throwaway probe's
+  geometry, and this fixture's own numbers are the ones recorded here.)* Restoring C3's discard
+  fails **both** new tests, alongside C3's three.
 
 > **Checkpoint D: every consumer reads the set, and the surfaces show it.** Pause for review.
 
