@@ -180,9 +180,13 @@ expectations is a step that did more than rename.
   `ObservationIdentityWithoutGroup` hardcodes the `(u8, u16, u16)` tuple as a `BTreeSet` key and
   moves with it.
 
-> **Checkpoint C: a read with a hole is recorded instead of discarded.** The spliced fixture
-> passes, output is deterministic across two processes, and the STR path has not moved. Pause for
-> review.
+> **Checkpoint C: a read with a hole is recorded instead of discarded. ✅ Reached and reviewed
+> (2026-07-31).** Output is deterministic across two processes and the STR path has not moved
+> against the C0 baseline. The spliced fixture is D6's; C3 is anchored instead by **seven
+> existing tests flipping** — the same inputs, the opposite assertion — and by putting the
+> discard back, which fails exactly those seven. Three category reviews, sequential because four
+> parallel container VMs cannot start at once;
+> [report](../../reports/reviews/ng_locus_witness_representation_c_2026-07-31.md).
 
 ## Milestone D — consumers and surfaces
 
