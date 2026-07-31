@@ -234,9 +234,17 @@ expectations is a step that did more than rename.
   owns the generic dump's `observed:<offset>+<positions>` value label and its
   `rows_observed`/`reads_observed` counter keys, the last user-visible uses of A4's retired
   variant name.
-- ☐ **D5.** The divergence census counts holed witnesses and the positions inside them — the
+- ✅ **D5.** The divergence census counts holed witnesses and the positions inside them — the
   counters the §8 measurement used, kept this time rather than thrown away. *Depends:* D4.
-  *Source:* spec §4.
+  *Source:* spec §4. **`holed_witness_reads` and `hole_positions` on `DivergenceCensus`**, both
+  weighted by the reads sharing an observation, the positions being `span() - positions_covered()`
+  — the pair of accessors the C review added so the gap is not open-coded as "last end minus first
+  start". **Not floored, unlike the fabrication triple**: both read **0** on every run this repo
+  can make (spec §8 — 0 holed witnesses in 225 million DNA-seq folds), so a floor would fail on
+  real data. What stops them being the miswired probe spec §8 warns about is a positive control
+  instead: a hand-built locus whose read witnesses `[(0,3), (6,10)]` of 10 positions must report
+  4 holed reads and 12 hole positions, and a one-run partial beside it must report neither while
+  still counting as fabricating — so "holed" cannot collapse into a second spelling of "partial".
 - ☐ **D6.** The spliced fixture as a permanent test in `pileup/tests.rs`: a 15 bp intron plus a
   20 bp deletion widening the record across it, asserting the read appears with a two-run witness.
   Its comment records the knife-edge — at 16 bp the footprint stops one position short of exon 2

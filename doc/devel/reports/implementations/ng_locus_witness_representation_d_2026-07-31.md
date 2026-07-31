@@ -6,7 +6,7 @@ Design: [spec](../../ng/spec/locus_witness_representation.md) §1, §4, §8;
 [arch](../../ng/arch/locus_witness_representation.md) §1.1, §2. Branch `ng-pileup-generator`,
 worktree `pop_var_caller-ng-pileup`.*
 
-**Status: D3 and D4 complete. D5–D6 not started.** This report is extended per step and committed
+**Status: D3, D4 and D5 complete. D6 not started.** This report is extended per step and committed
 with each of them. D1 and D2 landed inside C2, which could not compile without them.
 
 **The baseline this milestone starts from**, re-measured rather than inherited: `cargo fmt
@@ -225,3 +225,59 @@ tool's own spelling, so the oracle did not move. The three parity anchors are gr
 **Counts:** the suite 2,839 → **2,841**; `ng::locus_generation` unchanged at 308 (D4 is all
 example-side). `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings`
 clean.
+
+---
+
+## D5 — the census counts the holes, and is honest about reading zero
+
+### What the step is
+
+`DivergenceCensus` gains `holed_witness_reads` and `hole_positions`: the reads whose witness is
+more than one run, and the locus positions inside those runs' gaps. Both are weighted by
+`num_obs`, like every other census deliverable, because an observation is shared by the reads that
+agreed.
+
+The positions come out as **`span() - positions_covered()`** — the distance the runs sit in, minus
+what they cover. That pair of accessors exists precisely so this is not open-coded as "last end
+minus first start", which reads as a coverage and is not one (Milestone C review, F7). The
+difference is non-zero exactly when the witness has more than one run: the set is canonical, so
+two runs are separated by at least one unwitnessed position, and one run has nothing between
+anything.
+
+Both are printed by both census reports — the synthetic differential's and the real-data one.
+
+### The one design decision: no floor, a positive control instead
+
+Every other census deliverable is floored — `fabricated_reads > 0`, `stale_widen_reads > 0` — on
+the argument that a measurement read off production's observations rather than off the
+classification can silently stop measuring. **These two cannot be**, because their expected value
+on every alignment this repo can currently run is **zero**: spec §8 measured 0 holed witnesses in
+225 million DNA-seq event-folds, and structurally so — a `Skip` emits no event, so an intron
+cannot widen a record on its own, and modern Illumina puts `N`s at read ends where they cannot
+make a hole. The number that matters is RNA-seq's, and no spliced alignment was available (spec
+§8, still open; plan E4).
+
+That is exactly the shape spec §8 warned about in as many words — *"zero is also what a miswired
+probe reports"* — so the guard is a fixture that produces the thing the counters count:
+
+- a read blind over three positions in the middle, witnessing `[(0,3), (6,10)]` of a 10-position
+  locus, carried by 4 reads → **4 holed reads, 12 hole positions**;
+- a one-run partial beside it → **neither counter moves**, while `fabricated_reads` and
+  `fabricated_ref_bases` still do (7 reads, 42 bases). Without that half, "holed" could collapse
+  into a second spelling of "partial" and the counter would be measuring a class that already had
+  a name.
+
+### How we know it works
+
+| mutation | what it produced | test result |
+|---|---|---|
+| measure the span rather than the gap (`span() - span()`) | the counters report nothing at all | `the_census_counts_a_hole_and_the_positions_inside_it` — `left: (0, 0)`, `right: (4, 12)` |
+| count every partial as holed (`if true`) | the one-run partial counted | `left: (7, 0)`, `right: (0, 0)` |
+| drop the per-read weighting (`+= 1`) | observations counted instead of reads | `left: (1, 12)`, `right: (4, 12)` |
+
+**The STR oracle was not re-run for this step, and could not have moved:** `mod parity` is
+`#[cfg(test)]` (`pileup/mod.rs:131-133`), so none of it is compiled into the release example the
+oracle runs. It is re-run once at the end of the milestone.
+
+**Counts:** `ng::locus_generation` 308 → **309**; the suite 2,841 → **2,842**. `cargo fmt --check`
+and `cargo clippy --all-targets --all-features -- -D warnings` clean.

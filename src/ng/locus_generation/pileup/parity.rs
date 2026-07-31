@@ -1745,6 +1745,23 @@ struct DivergenceCensus {
     /// reads' behalf — the tail of each production observation past the point it stops matching any
     /// ng observation, times the reads carrying it.
     stale_widen_ref_bases: u64,
+    /// **The hole deliverable, one (D5):** reads whose witness is more than one run — the reads
+    /// C3 stopped discarding, and the reason this whole change exists.
+    ///
+    /// **It is expected to read zero here, and that is the point of keeping it.** The §8
+    /// measurement found 0 holed witnesses in 225 million DNA-seq event-folds: a `Skip` emits no
+    /// event, so an intron cannot widen a record on its own, and modern Illumina puts `N`s at
+    /// read ends where they cannot make a hole. The number that matters is RNA-seq's, and no
+    /// spliced alignment was available (spec §8, open). So this counter is **not floored** — a
+    /// floor would fail on every run we can currently make — and what stops it being a probe
+    /// that reports zero because it is miswired is the positive control beside it,
+    /// `the_census_counts_a_hole_and_the_positions_inside_it`.
+    holed_witness_reads: u64,
+    /// **The hole deliverable, two (D5):** the locus positions inside those holes, summed over
+    /// reads. `span() - positions_covered()` — the distance the runs sit in, minus what they
+    /// cover — which is exactly the gap, and the pair of accessors exists so it is not
+    /// open-coded as "last end minus first start" somewhere it would read as a coverage.
+    hole_positions: u64,
 }
 
 impl DivergenceCensus {
@@ -1781,6 +1798,19 @@ impl DivergenceCensus {
             self.fabricated_ref_bases += footprint
                 .saturating_sub(u64::from(positions.positions_covered()))
                 * u64::from(observation.num_obs);
+            // **The holes, counted rather than thrown away** (D5; spec §4). The §8 probe
+            // measured exactly this and was discarded with the probe.
+            //
+            // `span` is the distance from the first position witnessed to one past the last,
+            // `positions_covered` is what the runs actually cover, so the difference is the
+            // unwitnessed positions *between* them. It is non-zero exactly when the witness has
+            // more than one run: the set is canonical, so two runs are separated by at least one
+            // position the read did not see, and one run has nothing between anything.
+            let hole_positions = positions.span() - positions.positions_covered();
+            if hole_positions > 0 {
+                self.holed_witness_reads += u64::from(observation.num_obs);
+                self.hole_positions += u64::from(hole_positions) * u64::from(observation.num_obs);
+            }
         }
         self.fabricating_loci += usize::from(fabricating);
     }
@@ -3000,7 +3030,10 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
          the deliverable: production credited {} reads over {} loci with {} reference bases \
          they never sequenced ({:.2} fabricated bases per fabricating locus).\n  \
          the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
-         over {} loci, appending {} reference bases on their behalf.",
+         over {} loci, appending {} reference bases on their behalf.\n  \
+         the hole deliverable (D5): {} reads witnessed their locus in more than one run, blind \
+         over {} positions between them — zero is the expected DNA-seq answer (spec §8), and \
+         `the_census_counts_a_hole_and_the_positions_inside_it` is what says the counter works.",
         census.loci,
         census.exact,
         census.float_only,
@@ -3018,6 +3051,86 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         census.stale_widen_reads,
         census.stale_widen,
         census.stale_widen_ref_bases,
+        census.holed_witness_reads,
+        census.hole_positions,
+    );
+}
+
+/// **The positive control for D5's two counters, and the reason they may read zero in peace.**
+///
+/// `holed_witness_reads` and `hole_positions` are expected to be **0** on every run this repo can
+/// currently make: the §8 probe found no holed witness in 225 million DNA-seq event-folds, since
+/// a `Skip` emits no event and so an intron cannot widen a record on its own, and modern Illumina
+/// puts `N`s at read ends where they cannot make a hole. The number worth having is RNA-seq's,
+/// and no spliced alignment was available.
+///
+/// That makes them the shape spec §8 warned about in as many words — *"zero is also what a
+/// miswired probe reports"* — so they cannot be floored like `fabricated_reads` is, and the
+/// guard has to be a fixture that produces the thing they count. Two loci, hand-built:
+///
+/// - a read blind over three positions in the middle, witnessing `[(0,3), (6,10)]` of a
+///   10-position locus, carried by 4 reads. **4 holed reads, 12 hole positions** — 3 per read,
+///   which is `span` (10) minus `positions_covered` (7);
+/// - a one-run partial beside it, which must contribute **nothing** to either counter while
+///   still contributing to the fabrication numbers — otherwise "holed" would just be a second
+///   spelling of "partial" and the counter would measure the class that already had a name.
+#[test]
+fn the_census_counts_a_hole_and_the_positions_inside_it() {
+    fn observation(runs: &[(u16, u16)], num_obs: u32) -> SequenceObservation {
+        SequenceObservation {
+            bases: vec![b'A'; runs.iter().map(|(s, e)| usize::from(e - s)).sum()]
+                .into_boxed_slice(),
+            read_witness: ReadWitness::Partial {
+                positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                    .expect("a non-empty set of runs"),
+            },
+            read_group: PLACEHOLDER_READ_GROUP,
+            num_obs,
+            num_fwd: num_obs,
+            q_sum: 0.0,
+            mapq_sum: 60 * num_obs,
+            mapq_sum_sq: 3600 * u64::from(num_obs),
+            placed_left: 0,
+            chain_ids: Vec::new(),
+        }
+    }
+    fn locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                // 1-based inclusive: ten positions, 1..=10.
+                start: Position(1),
+                end: Position(10),
+            },
+            reference_bases: vec![b'A'; 10].into_boxed_slice(),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    let mut census = DivergenceCensus::default();
+    census.measure_fabrication(&locus(vec![observation(&[(0, 3), (6, 10)], 4)]));
+    assert_eq!(
+        (census.holed_witness_reads, census.hole_positions),
+        (4, 12),
+        "a witness of [(0,3), (6,10)] is blind over positions 3, 4 and 5 — three per read, and \
+         the counter is weighted by the reads sharing the observation",
+    );
+
+    let mut one_run = DivergenceCensus::default();
+    one_run.measure_fabrication(&locus(vec![observation(&[(0, 4)], 7)]));
+    assert_eq!(
+        (one_run.holed_witness_reads, one_run.hole_positions),
+        (0, 0),
+        "a witness of one run has nothing between anything, so it is partial without being holed",
+    );
+    assert_eq!(
+        (one_run.fabricated_reads, one_run.fabricated_ref_bases),
+        (7, 42),
+        "it is still a fabricating read, 6 unwitnessed positions each — so the hole counters \
+         reading zero here is a statement about holes and not about the fixture being inert",
     );
 }
 
@@ -3991,7 +4104,9 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
          the deliverable: production credited {} reads over {} loci ({:.2} % of them) with \
          {} reference bases they never sequenced.\n  \
          the stale-widen deliverable (§13.2's second triple): production mis-folded {} reads \
-         over {} loci, appending {} reference bases on their behalf.",
+         over {} loci, appending {} reference bases on their behalf.\n  \
+         the hole deliverable (D5): {} reads witnessed their locus in more than one run, blind \
+         over {} positions between them.",
         census.loci,
         census.partial_witness,
         census.group_split,
@@ -4006,6 +4121,8 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
         census.stale_widen_reads,
         census.stale_widen,
         census.stale_widen_ref_bases,
+        census.holed_witness_reads,
+        census.hole_positions,
     );
 }
 
