@@ -369,8 +369,14 @@ fn run_bakeoff(
         counts.reads_capped = gen_counts.reads_discarded_by_cap;
         counts.obs_complete = gen_counts.observations_complete;
         counts.obs_partial = gen_counts.observations_partial;
-        counts.reads_without_observation =
-            gen_counts.no_border_anchored + gen_counts.low_quality + gen_counts.window_truncated;
+        // Every reason, named — `outside_tract` is the largest of the four on real data, and
+        // summing three of them would report a fraction of the reads that yielded nothing.
+        // The sibling dump made exactly this slip until C0 added the counter (Milestone C
+        // review): on tomato chr01 it under-reported by 6,704 of ~9,265 reads.
+        counts.reads_without_observation = gen_counts.no_border_anchored
+            + gen_counts.low_quality
+            + gen_counts.window_truncated
+            + gen_counts.outside_tract;
         report.counts.push((tag, *counts));
     }
 

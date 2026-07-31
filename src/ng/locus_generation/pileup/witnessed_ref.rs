@@ -72,9 +72,14 @@ impl WitnessedRefPositions {
         canonicalise_runs(runs.into_iter().collect()).map(Self)
     }
 
-    /// Take a caller-owned scratch buffer's runs, canonicalise them, and leave the buffer
-    /// empty for the next read. `None` — and the buffer untouched — when the read witnessed
-    /// nothing, which is the case the fold answers with no observation at all.
+    /// Take a caller-owned scratch buffer's runs, canonicalise them, and **leave the buffer
+    /// empty either way** — including on `None`, which is the answer when the runs describe
+    /// nothing and the case the fold turns into no observation at all.
+    ///
+    /// *Emptied on failure too, and that is the useful contract*: it matches
+    /// `apply_events_into`'s own ("`false` leaves the buffer empty"), so a read that got no
+    /// observation cannot leak runs into the next read's witness. The doc claimed "the
+    /// buffer untouched" until the Milestone C review probed it.
     ///
     /// This is the shape arch §2 asks for: "the runs are accumulated into a buffer the
     /// caller owns and the callee clears, like `allele_seq`, so a fold allocates nothing
@@ -86,18 +91,25 @@ impl WitnessedRefPositions {
 
     /// Replace this set from a caller-owned scratch buffer, **swapping** rather than
     /// moving, so the buffer inherits this set's storage and a fold that has spilled once
-    /// allocates nothing thereafter. `false` — with both this set and the buffer unchanged
-    /// — when the runs describe nothing.
+    /// allocates nothing thereafter.
     ///
-    /// The fold needs this because a read's witness is rebuilt on **every widen**, not once
-    /// per read: `refold_live_reads` re-places every live folded read against the wider
+    /// `false` when the runs describe nothing. **This set is then unchanged and the buffer
+    /// is empty** — the same contract [`take_from`](Self::take_from) keeps, and the useful
+    /// one: it matches `apply_events_into`'s "`false` leaves the buffer empty", so a failed
+    /// refill cannot leak runs into the next read. Until the Milestone C review probed it,
+    /// the doc promised "both this set and the buffer unchanged" and the code's own comment
+    /// said it would "give it back"; neither was true, and the truth is what the callers
+    /// want.
+    ///
+    /// The fold needs the swap because a read's witness is rebuilt on **every widen**, not
+    /// once per read: `refold_live_reads` re-places every live folded read against the wider
     /// window. A witness of three or more runs owns a heap buffer, so a move-based refill
     /// would allocate per (read × widen) on exactly the multi-junction RNA-seq case this
     /// milestone exists for (Milestone B review).
     pub(super) fn refill_from(&mut self, buf: &mut WitnessedRefRuns) -> bool {
         let Some(canonical) = canonicalise_runs(std::mem::take(buf)) else {
-            // `take` emptied the buffer; give it back, so "nothing witnessed" leaves both
-            // sides exactly as they were.
+            // `take` already emptied the buffer, which is the contract — a caller whose
+            // runs described nothing has nothing worth handing back.
             return false;
         };
         *buf = std::mem::replace(&mut self.0, canonical);
@@ -216,13 +228,19 @@ mod tests {
         assert_eq!(set.runs().collect::<Vec<_>>(), vec![(20, 24), (40, 44)]);
         assert!(buf.is_empty(), "and again on a refill");
 
-        // Nothing witnessed: both sides unchanged, and the caller's buffer still usable.
+        // Nothing witnessed: this set unchanged, and the buffer **empty** — the same answer
+        // `apply_events_into` gives, so a failed refill cannot leak runs into the next read.
         buf.push((7, 7));
         assert!(!set.refill_from(&mut buf), "an empty run is not a set");
         assert_eq!(
             set.runs().collect::<Vec<_>>(),
             vec![(20, 24), (40, 44)],
             "a failed refill must not leave a half-written set behind",
+        );
+        assert!(
+            buf.is_empty(),
+            "and it must not leave the caller's runs behind either — the Milestone C review \
+             found the doc promising exactly that and the code doing the opposite",
         );
         assert!(WitnessedRefPositions::take_from(&mut SmallVec::new()).is_none());
     }

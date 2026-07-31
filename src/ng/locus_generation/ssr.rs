@@ -747,16 +747,15 @@ mod classify {
                 complete_or_low_quality(read, &region, &tract, qual_buffer)
             }
             // **An empty one-sided span is a read outside the locus, not a lower bound of
-            // zero.** The read anchored a flank and crossed no tract position: the
-            // delimiter's rejected side falls back to the read's own edge, so an alignment
-            // that never entered the repeat comes back as `tract_start == tract_end`. It
-            // says the repeat is *at least zero* long, which is no evidence, and it arrives
-            // in bulk — the fetch queries the tract plus its margin, so every read that
-            // clips the flank is delimited (see `NoObservationReason::OutsideTract` for the
-            // measurement). Those bases are the SNP/indel path's to analyse.
-            RepeatSpan::FromLeft(tract) | RepeatSpan::FromRight(tract) if tract.is_empty() => {
-                Classified::NoObservation(NoObservationReason::OutsideTract)
-            }
+            // zero** — and `partial` is where that is decided, in one place.
+            //
+            // This arm used to hold a `if tract.is_empty()` guard of its own, added at C0
+            // when `ReadWitness::from_left`/`from_right` were infallible and nothing else
+            // could reject the case. C2 gave them an `Option`, so `partial` has to handle
+            // "no position covered" anyway and answers exactly this — which made the guard
+            // **unfalsifiable**: the Milestone C review deleted it outright and the whole
+            // suite stayed green, because no input can tell the two paths apart. Two
+            // spellings of one decision, one of them untestable, is worse than one.
             RepeatSpan::FromLeft(tract) => {
                 partial(read, &region, &tract, AnchoredBorder::Left, locus)
             }
@@ -850,11 +849,19 @@ mod classify {
         // saturates to full coverage).
         let reach = (tract.end - tract.start).min(u16::MAX as usize) as u16;
         let locus_len = LocusLen::from_positions(locus.segment.tract_len());
-        // **The constructors answer `None` for a run covering no position, and that is the
-        // same fact `classify_read`'s guard states.** Unreachable from here — the guard
-        // already rejected an empty span, and a locus has a non-empty tract — but the two
-        // are the *same* decision, so they give the same answer rather than one of them
-        // silently minting a witness of nothing (C0, C2).
+        // **The read is outside the locus, and this is where that is decided.** The
+        // constructors answer `None` when the clamped run covers no position, which is
+        // exactly the read that anchored a flank and crossed no tract position: the
+        // delimiter's rejected side falls back to the read's own edge, so an alignment that
+        // never entered the repeat comes back as `tract_start == tract_end`. The bound it
+        // would supply is *at least zero* — no evidence — and it arrives in bulk, because
+        // the fetch queries the tract plus its margin so every read clipping the flank is
+        // delimited. Those bases are the SNP/indel path's to analyse (C0; see
+        // `NoObservationReason::OutsideTract` for the measurement).
+        //
+        // A second `tract.is_empty()` guard stood in `classify_read` from C0 until the
+        // Milestone C review showed no input could distinguish the two — C2's `Option` had
+        // made this branch answer first. One decision, one place.
         let Some(read_witness) = (match border {
             AnchoredBorder::Left => ReadWitness::from_left(reach, locus_len),
             AnchoredBorder::Right => ReadWitness::from_right(reach, locus_len),
@@ -1010,10 +1017,14 @@ mod classify {
         /// chr01 of `SRR7279503`, at a median window overlap of 16 bases against a 30-base
         /// flank. Those bases belong to the SNP/indel path (owner, 2026-07-30).
         ///
-        /// Both borders are asserted, because the two arrive by mirror-image routes — the
+        /// Both borders are asserted because the two arrive by mirror-image routes — the
         /// left case through `tract_start == region_len`, the right through
-        /// `tract_end == 0` — and a fix that caught only one would halve the population and
-        /// look like it worked.
+        /// `tract_end == 0`. **They now share one decision point** (`partial`'s handling of
+        /// the constructors' `None`), so neither can be fixed without the other; asserting
+        /// both is what keeps that true if the routes ever separate again. The mutation that
+        /// discriminates is on the constructor: make `from_left` saturate a zero-length run
+        /// to one position and both cases here fail, along with
+        /// `a_constructor_asked_for_no_positions_answers_none`.
         #[test]
         fn a_read_covering_only_a_flank_is_outside_the_tract() {
             // The left flank alone: the read ends where the tract begins.
@@ -1119,7 +1130,7 @@ mod tally {
     /// supporting reads that began strictly left of it, which is production's own definition
     /// (`open_record.rs`'s `alignment_start < rec_pos`).
     ///
-    /// `counts` carries the **run-level** totals (complete/partial observations and the three
+    /// `counts` carries the **run-level** totals (complete/partial observations and the four
     /// no-observation reasons); the returned `reads_without_observation` is this locus's own
     /// total.
     pub(super) fn tally<'a>(
@@ -1504,14 +1515,21 @@ mod tally {
                     &r,
                     Classified::NoObservation(NoObservationReason::LowQuality),
                 ),
+                // C0's reason, and the largest of the four on real data — its tally arm went
+                // untested until the Milestone C review said so.
+                (
+                    &r,
+                    Classified::NoObservation(NoObservationReason::OutsideTract),
+                ),
             ];
             let mut counts = SsrGeneratorCounts::default();
             let result = tally(outcomes, 1, &mut counts);
             assert!(result.observations.is_empty());
-            assert_eq!(result.reads_without_observation, 4);
+            assert_eq!(result.reads_without_observation, 5);
             assert_eq!(counts.no_border_anchored, 1);
             assert_eq!(counts.low_quality, 2);
             assert_eq!(counts.window_truncated, 1);
+            assert_eq!(counts.outside_tract, 1);
         }
 
         /// `observations` is sorted by bytes, then by witness — so the record is identical

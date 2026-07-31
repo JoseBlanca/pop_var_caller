@@ -317,6 +317,16 @@ than clamp — see §3.4.
   `N`), and `reads_silent_over_footprint` already counts the run-level version, so the two should
   be compared before either is kept. Home: the arch doc's counts section.
 
+  **The question sharpened at C3, and the answer is now more likely "no" (Milestone C review).**
+  On the *generic* path the counter looks structurally unreachable: `process_position` skips a
+  contributor whose event window is empty, `refold_live_reads` visits only reads already folded —
+  whose window over a widening record can only grow — and every event surviving
+  `events_overlapping` clips to a non-empty run, so `apply_events_into` cannot answer "nothing
+  witnessed". The class is real and the route to it is not. **On the STR path it is the opposite:**
+  the same counter carries four reasons, and C0 added the largest of them
+  (`OutsideTract`, 6,704 reads on one tomato chromosome). So the two generators disagree about
+  what the field is for, which is the thing to settle — not whether the number is currently zero.
+
 ---
 
 ## 7. How we know it works

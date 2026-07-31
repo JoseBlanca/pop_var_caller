@@ -611,6 +611,31 @@ mod tests {
         );
     }
 
+    /// **A run reaching *past* the locus is still flush right** — which is why the predicate
+    /// asks `>=` and not `==`.
+    ///
+    /// It is reachable because a witness does not know which locus it is attached to: the
+    /// STR path measures a reach in *read* bases, which diverge from locus positions under
+    /// stutter, so an expanded allele can hand a run a length the locus does not have. The
+    /// constructors clamp their own, but `from_half_open_runs` takes runs as given and
+    /// `Partial`'s field is public.
+    ///
+    /// Added by the Milestone C review, which replaced the `>=` with `==` and watched
+    /// everything stay green — the over-long run its doc justifies was never built.
+    #[test]
+    fn a_run_reaching_past_the_locus_is_flush_right() {
+        let over_long = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(2, 40)])
+                .expect("a run four times the locus"),
+        };
+        assert!(
+            over_long.is_flush_right(LocusLen::from_positions(10)),
+            "a run ending past the locus reaches its right border, and reporting otherwise \
+             reads as 'this read is missing the tail' when it covered everything",
+        );
+        assert!(!over_long.is_flush_left(), "it starts at 2, not at 0");
+    }
+
     /// **The set is one representation whether it fits inline or spills to the heap.**
     ///
     /// The encoding keeps two runs inline; a third spills. If equality could see the

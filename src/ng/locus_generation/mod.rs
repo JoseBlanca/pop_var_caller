@@ -1469,6 +1469,34 @@ mod tests {
         assert_eq!(clamped.num_obs_along_locus(), vec![4, 4, 4]);
     }
 
+    /// **The clamp in `num_obs_along_locus` is the guard, and this is the input that needs
+    /// it** — a witness whose runs reach past the locus *without* having come through a
+    /// constructor.
+    ///
+    /// The test above cannot reach it: `from_left(9, LocusLen(3))` is clamped by the
+    /// constructor, so the run arriving here is already `0..3` and deleting both `.min(len)`
+    /// calls leaves everything green (Milestone C review). That is exactly the gap the
+    /// clamp's own comment describes — `Partial`'s field is public and
+    /// `WitnessedLocusPositions` cannot know which locus it ends up attached to, so a run
+    /// need not have been clamped against *this* one.
+    ///
+    /// Unclamped, the first run indexes `depth[0..20]` on a 3-slot vector: a panic, in a
+    /// release build, on a derivation run over whole cohorts. The second run is past the
+    /// locus entirely and must contribute nothing rather than wrap.
+    #[test]
+    fn depth_clamps_a_witness_that_reaches_past_the_locus_it_is_attached_to() {
+        let over_long = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 20), (40, 44)])
+                .expect("two runs, both overrunning a 3-position locus"),
+        };
+        let l = locus(region(1, 3), vec![obs(b"AAA", over_long, 4)]);
+        assert_eq!(
+            l.num_obs_along_locus(),
+            vec![4, 4, 4],
+            "the first run is cut at the locus's end and the second falls outside it",
+        );
+    }
+
     /// Depth over an **interior** run — flush with neither border. This is the case the
     /// reshape exists to represent (a read blind in the middle of a footprint: an interior
     /// `N`, a ref-skip), and the only one where a wrong window neither panics nor clamps, so

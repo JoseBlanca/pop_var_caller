@@ -344,11 +344,24 @@ pub(super) struct OpenPileupRecord {
     /// mechanism exists to prevent, on the one path with no inherited test to catch
     /// it. Membership is idempotent; the count is taken at `finalise`.
     ///
-    /// A `Vec` rather than a hash set because the population is tiny by construction and,
-    /// since C3, tiny by an even shorter argument: a caller filters an empty event window
-    /// before folding, and every event that overlaps the window contributes a non-empty
-    /// clipped run — so an empty `Vec` costs no allocation on a path that runs once per
-    /// covered base and almost never fills.
+    /// **It may now be unreachable on this path entirely — recorded, not acted on.** The
+    /// Milestone C review traced the two ways in and found both closed: `process_position`
+    /// skips a contributor whose event window is empty, and `refold_live_reads` only visits
+    /// reads already folded, whose window over a *widening* record only grows. Every event
+    /// that survives `events_overlapping` clips to a non-empty run, so `apply_events_into`
+    /// cannot answer "nothing witnessed". If that holds, this counter is structurally zero
+    /// on the generic path and the class it names — a read that covered a locus and said
+    /// nothing usable — is real but arrives by no route the walk currently has.
+    ///
+    /// Left standing rather than removed: **spec §6 already owns the question** ("whether
+    /// `reads_without_observation` survives at all"), and its answer needs comparing this
+    /// against `reads_silent_over_footprint`, which counts the run-level version and is a
+    /// different measurement. Deleting a counter on a reachability argument, without the
+    /// comparison the spec asks for, is how a real class stops being counted.
+    ///
+    /// A `Vec` rather than a hash set for the same reason, from the other side: an empty
+    /// `Vec` costs no allocation on a path that runs once per covered base and, if the
+    /// argument above holds, never fills.
     ///
     /// *Invariant: membership is monotone.* The window's left edge is the record's anchor
     /// and never moves; widening only extends the right, so a read's event window over the
@@ -1739,16 +1752,23 @@ fn refold_live_reads(
             chain_id: _,
             read_group: _,
         } = state;
-        *allele_index = new_index;
         // **Refilled in place, which swaps** — the read's old witness storage goes back
         // into the buffer rather than being dropped, so a re-fold of a spilled witness
         // allocates nothing however many times the record widens (arch §2, Milestone B
         // review M2).
+        //
+        // **The witness is written before the bucket index**, so the two cannot be left
+        // disagreeing: a refill that answered `false` would otherwise leave the read
+        // pointing at the bucket its *new* bases chose while still carrying its old
+        // witness, and only a `debug_assert` would say so (Milestone C review). It cannot
+        // answer `false` here — `apply_events_into` returned `true` a few lines above — and
+        // ordering it this way costs nothing to make that not matter.
         let refilled = witnessed.refill_from(witnessed_runs_buf);
         debug_assert!(
             refilled,
             "apply_events_into reported a witnessed run for read {read_id} a few lines above",
         );
+        *allele_index = new_index;
     }
 }
 
@@ -3204,6 +3224,53 @@ mod tests {
     // -----------------------------------------------------------------
     // A4 — the witness resolved at `finalise`, against the final footprint.
     // -----------------------------------------------------------------
+
+    /// **A witness with a hole never counts as agreeing with the reference** — C3's one
+    /// design decision, and until this test nothing pinned it.
+    ///
+    /// The Milestone C review put the **pre-C3 body back verbatim** — compare the read's
+    /// bases against the reference over the extent that *encloses* its runs — and the whole
+    /// suite stayed green: `300 passed; 0 failed`. The two walk-level fixtures that produce a
+    /// holed witness cannot tell the two readings apart, because their concatenated bases are
+    /// *shorter* than the enclosing slice, so both answer `false` for different reasons. This
+    /// fixture is built so the two readings **disagree**.
+    ///
+    /// The read witnessed positions 100 and 102 of a three-base record and sits in a bucket
+    /// holding `ACG`, the whole reference slice. The enclosing reading compares `ACG` against
+    /// `reference[0..3]`, finds them equal, and withholds the read's chain id **on the
+    /// strength of the base at 101 it never saw** — the fabrication this milestone removes,
+    /// wearing a different hat. The per-run rule answers that it cannot tell, and the read
+    /// keeps its id.
+    #[test]
+    fn a_witness_with_a_hole_never_counts_as_agreeing_with_the_reference() {
+        let record = OpenPileupRecord::new(0, 100, b"ACG".to_vec());
+        let state = |witnessed: WitnessedRefPositions| FoldedReadState {
+            // The REF bucket, so the bases compared are the reference's own three bytes.
+            allele_index: 0,
+            contribution: AlleleSupportStats::default(),
+            chain_id: 1,
+            read_group: ReadGroupId(0),
+            witnessed,
+        };
+
+        let holed = state(
+            WitnessedRefPositions::from_half_open_runs([(100, 101), (102, 103)])
+                .expect("two runs with 101 between them"),
+        );
+        assert!(
+            !record.read_agreed_with_reference(&holed),
+            "the read said nothing about 101, so it cannot have agreed with the reference \
+             there — and `ACG` equalling the enclosing slice is not evidence that it did",
+        );
+
+        let contiguous =
+            state(WitnessedRefPositions::from_half_open_runs([(100, 103)]).expect("one run"));
+        assert!(
+            record.read_agreed_with_reference(&contiguous),
+            "the same bases over one run *do* agree — so this test is about the hole and \
+             not about the bytes",
+        );
+    }
 
     /// A witness that tiles the footprint is a complete one.
     #[test]
