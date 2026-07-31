@@ -21,11 +21,12 @@
 //!
 //! # What the columns say that a `PileupRecord` could not
 //!
-//! - **`read_witness`** is `complete` or `observed:<offset>+<positions>`. A partial witness
-//!   is a *censored* observation — the sequence is at least this long — and production has no
-//!   way to say it: it fills the positions the read did not witness from the reference and
-//!   folds the result as if the read had seen them (spec §4, §6). This column is the whole
-//!   reason the generic generator exists.
+//! - **`read_witness`** is `complete`, or one `<offset>+<positions>` per run the read
+//!   witnessed: `observed:0+2` for a single run, `observed:0+2,3+2` for a witness with a
+//!   hole in the middle. A partial witness is a *censored* observation — the sequence is at
+//!   least this long — and production has no way to say it: it fills the positions the read
+//!   did not witness from the reference and folds the result as if the read had seen them
+//!   (spec §4, §6). This column is the whole reason the generic generator exists.
 //! - **`read_group`** joins the row identity, so an allele carried by two lanes is two rows.
 //! - **`ref_bases`** is the whole footprint, and **`end`** its last position: a one-base SNP
 //!   locus and a widened deletion locus are told apart by the region, not by guessing.
@@ -33,9 +34,10 @@
 //! # The counts header, and why every line of it is load-bearing
 //!
 //! Every read the walk saw has to be somewhere. A read is **admitted** and then either
-//! contributes at some position (and so appears in a locus's rows, or loses its row to a
-//! non-contiguous witness, or is dropped by a depth cap) or contributes **nowhere** — silent
-//! over every footprint it touched, every base `N` or adaptor-masked. That last class is
+//! contributes at some position (and so appears in a locus's rows, or is dropped by a depth
+//! cap) or contributes **nowhere** — silent over every footprint it touched, every base `N`
+//! or adaptor-masked. A witness with a *hole* in it used to be a third way to lose a row and
+//! is not one any more: the row names both runs. That last class is
 //! invisible to both per-locus counters and is `reads_silent_over_footprint`. A read the
 //! **preparer** declines never reaches the walk at all, and is `reads_declined_by_preparer`.
 //!
@@ -141,10 +143,14 @@ impl DumpReport {
     ///
     /// # The one invariant asserted here rather than in a test
     ///
-    /// **No row claims a position the locus does not have, and no row claims zero** (spec §13):
-    /// every `Partial` row satisfies `offset_in_locus + positions_covered <= footprint` and
-    /// `positions_covered > 0`. Asserted on every locus of every run, including the tool's real
-    /// ones, because a run over new data is where it would first be violated.
+    /// **No row claims a position the locus does not have, and no run of it claims zero**
+    /// (spec §13): every run of every `Partial` row satisfies `end <= footprint` and
+    /// `start < end`. Asserted on every locus of every run, including the tool's real ones,
+    /// because a run over new data is where it would first be violated.
+    ///
+    /// **Per run, and that is what keeps it discriminating.** A witness is a set of runs, so
+    /// checking the extent that *encloses* them would wave through an interior run reaching
+    /// past the locus and say nothing at all about the holes between them.
     ///
     /// **This is a bound on positions, and it does not read `bases` — deliberately.** The
     /// clause used to be worded as "the consistency check between `bases` and `read_witness`",
@@ -156,8 +162,10 @@ impl DumpReport {
     /// (corrected 2026-07-30); the code here did not change.
     ///
     /// What ties the bases to the coverage is construction, not an assertion: both come out of
-    /// one `apply_events_into` call, which returns the bases and the witnessed extent together
-    /// and returns `None` rather than a run it cannot describe honestly (spec §6).
+    /// one `apply_events_into` call, which fills the bases and the witnessed runs together and
+    /// answers "nothing witnessed" only when the read saw no position of the record at all
+    /// (spec §6). It used to answer that for a witness with a hole too, and the row this
+    /// method now emits for one is what C3 changed.
     fn push_locus(&mut self, locus: &SampleLocusObservations, contig: &str) {
         self.generic_loci += 1;
         let footprint = locus.region.len();
@@ -961,18 +969,23 @@ mod tests {
     /// is populated by hand — which is the only honest oracle for counters production does not
     /// keep (spec §3, class 3).
     ///
-    /// Four reads, one per class: one that contributes normally, one silenced over every
-    /// position it touches, one blind in the middle of a footprint (so it folds and then loses
-    /// its row), and — through the depth cap — one discarded.
+    /// Four reads: one that contributes normally, one silenced over every position it touches,
+    /// one blind in the middle of a footprint, and — through the depth cap — one discarded.
+    ///
+    /// **`blind` used to populate a class of its own** — folds, then loses its row to a
+    /// witness one `Partial` run could not describe — and since C3 it does not: it gets a row
+    /// naming both runs, and `reads_without_observation` is 0. It is kept because the
+    /// accounting identity has to hold with a holed row in the rows, which is a different
+    /// statement from holding without one.
     #[test]
     fn every_read_the_walk_saw_is_accounted_for() {
         use noodles_sam::alignment::record::cigar::op::Kind;
         // `blind` matches 11..40 except for an `N` at position 22, which the cursor emits no
-        // event for — and 22 is *inside* the record `deleter` opens at 20, so the witness
-        // there is non-contiguous and the read loses its row.
+        // event for — and 22 is *inside* the record `deleter` opens at 20, so its witness
+        // there has a hole in it.
         // The `N` goes at position **22**, inside the record `deleter` opens at 20 (20..=24) —
-        // a hole outside every footprint costs the read nothing and the counter would stay
-        // zero, which is how the first draft of this fixture passed for the wrong reason.
+        // a hole outside every footprint would leave the read a plain complete witness, which
+        // is how the first draft of this fixture passed for the wrong reason.
         let mut blind_seq = contig()[10..40].to_vec();
         blind_seq[11] = b'N';
         let reads = vec![

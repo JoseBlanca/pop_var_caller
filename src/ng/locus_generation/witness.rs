@@ -1,10 +1,10 @@
 //! What one read saw of one locus — the witness vocabulary.
 //!
 //! [`ReadWitness`] is the answer to "how much of this locus did this read witness",
-//! [`WitnessedLocusPositions`] is the set of positions that will replace its single run at
-//! Milestone C, and [`LocusLen`] is the axis both are measured on. [`canonicalise_runs`] is
-//! the one normaliser every witnessed-set type shares — including the fold's reference-axis
-//! `WitnessedRefPositions`, which lives with the walk.
+//! [`WitnessedLocusPositions`] is the set of positions it carries when the answer is
+//! *some of it*, and [`LocusLen`] is the axis both are measured on. [`canonicalise_runs`]
+//! is the one normaliser every witnessed-set type shares — including the fold's
+//! reference-axis `WitnessedRefPositions`, which lives with the walk.
 //!
 //! They live in their own file rather than in `mod.rs` because
 //! `WitnessedLocusPositions`'s invariant — one set of witnessed positions has exactly one
@@ -171,10 +171,11 @@ impl WitnessedLocusPositions {
 
 /// How much of a locus a single read spanned — **one read's span, not depth**.
 ///
-/// `Complete` means the read reached **both** borders of the locus; anything else is
-/// the one **run** of locus positions the read actually witnessed, in **locus**
-/// coordinates (spec §3). A partial run is a *censored* observation: the sequence is
-/// at least this long, but not how long.
+/// `Complete` means the read reached **both** borders of the locus and witnessed every
+/// position between them; anything else is the **set** of locus positions the read
+/// actually witnessed — one run, or several — in **locus** coordinates (spec §3). A
+/// partial witness is a *censored* observation: the sequence is at least this long, but
+/// not how long.
 ///
 /// **One `Partial` run replaces the earlier `PartialLeft`/`PartialRight` pair
 /// (owner, 2026-07-28).** Two side-tagged variants cannot describe what a read
@@ -357,9 +358,9 @@ impl ReadWitness {
     /// withholding an `Ord` impl on the grounds that it "would export **this file's**
     /// sorting convention to every other consumer" — which the STR copy refutes: two
     /// independent producers wanted the identical convention, so it is the type's, not
-    /// either file's (Milestone A review, Mi11). One copy means C4 rewrites this order
-    /// once when the payload becomes a set, rather than twice with the two free to
-    /// disagree while both still compile.
+    /// either file's (Milestone A review, Mi11). One copy is why the payload becoming a set
+    /// rewrote this order **once** rather than twice, with the two free to disagree while
+    /// both still compiled.
     ///
     /// The order it produces is the pre-reshape one — complete, then left-flush partials,
     /// then right-flush — without naming a side: a left-flush run starts at 0 and so sorts

@@ -112,7 +112,8 @@ pub(super) struct AlleleSupportStats {
 pub(super) struct RecordWitnessCounts {
     /// Folded reads that witnessed every position of the final footprint.
     pub reads_complete: u32,
-    /// Folded reads that witnessed one contiguous run short of it.
+    /// Folded reads that witnessed some of it but not all — one run of positions, or
+    /// several with holes between them (C3).
     pub reads_partial: u32,
     /// Reads that covered this record and yielded **no observation at all** — they
     /// witnessed nothing inside the footprint (spec §1 goal 2). The size of
@@ -164,8 +165,9 @@ pub(super) struct RecordWitnessCounts {
 /// ([Milestone B review](../../../../doc/devel/reports/reviews/ng_locus_witness_representation_b_2026-07-30.md) M3).
 /// It is why the type offers no `start()` / `end_exclusive()` to reach for.
 ///
-/// Today every set arriving here still holds one run — `apply_events_into` discards a holed
-/// witness until C3 — so this step moves no byte. It is written for the sets C3 lets through.
+/// The sets that make it matter arrive from C3, which stopped the fold discarding a witness
+/// with a hole. On DNA-seq there are none — zero in 225 million event-folds — so this is
+/// written for the RNA-seq case and costs nothing on the one it is measured over.
 ///
 /// # The `u16` narrowing is bounded by config, not by a constant
 ///
@@ -462,9 +464,9 @@ impl OpenPileupRecord {
             chrom_id,
             pos,
             alleles: vec![OpenAllele::new(ref_seq)],
-            // Unallocated until the first non-contiguous witness, which most records
-            // never see — see the field's own note. Same for the cap list: a truncated
-            // column is rare and most runs never see one at all.
+            // Unallocated until the first read that witnesses nothing at all, which since
+            // C3 almost no record sees — see the field's own note. Same for the cap list:
+            // a truncated column is rare and most runs never see one at all.
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
             folded_reads: AHashMap::with_capacity(RECORD_FOLDED_READS_INITIAL_CAPACITY),
@@ -652,12 +654,19 @@ impl OpenPileupRecord {
             // the end were actually discarded (spec §6).
             //
             // **And absent for the cap's reason, not for A5's.** "Not in `folded_reads`"
-            // has two causes: the cap kept the read out, or it folded and then lost its observation
-            // when its witness turned out non-contiguous. Counting the second here reports
-            // one read in *both* `reads_without_observation` and `reads_discarded_by_cap`,
-            // which double-counts it and tells a model the support is a subsample when the
-            // truth is that a read said nothing usable. Measured at 240 records in ~506,000
-            // before this exclusion.
+            // had two causes: the cap kept the read out, or it folded and then lost its
+            // observation when its witness turned out non-contiguous. Counting the second
+            // here reported one read in *both* `reads_without_observation` and
+            // `reads_discarded_by_cap`, which double-counts it and tells a model the support
+            // is a subsample when the truth is that a read said nothing usable. Measured at
+            // 240 records in ~506,000 before this exclusion.
+            //
+            // **C3 removed the second cause rather than the double count**, by recording a
+            // holed witness instead of dropping it — so `reads_without_observation` now holds
+            // only reads that witnessed nothing at all, and the `!contains` below is the
+            // statement of that rather than a live filter. Kept: it costs a membership test
+            // on a `Vec` that is almost always empty, and what it prevents is a wrong number
+            // rather than a crash.
             reads_discarded_by_cap: self
                 .reads_discarded_by_cap
                 .iter()
@@ -3211,11 +3220,13 @@ mod tests {
     /// wrong at every one of them, with nothing to raise. Read as a set, it is two runs
     /// covering six positions.
     ///
-    /// The fold cannot hand this in yet — `apply_events_into` still discards a holed
-    /// witness until C3 — so this is the one place C2's change is visible, and the mutation
-    /// that names it is "clamp the enclosing extent": replace the per-run walk in
-    /// `witness_of` with `first_start..last_end` and this test fails while every other test
-    /// and the STR dump stay green.
+    /// **Built directly rather than folded**, and deliberately so: at C2 the fold still
+    /// discarded a holed witness, so this was the one place C2's change was visible at all.
+    /// C3 has since made the fold produce them — `a_read_whose_witness_splits_when_the_
+    /// record_widens_stays_in_it` is that path end to end — and this stays as the unit
+    /// statement of the rule, on the shape rather than on a walk. The mutation that names
+    /// it: replace the per-run walk in `witness_of` with `first_start..last_end`, and this
+    /// test fails while the STR dump stays byte-identical.
     #[test]
     fn witness_of_a_witness_with_a_hole_is_not_complete_however_far_its_ends_reach() {
         let spliced = WitnessedRefPositions::from_half_open_runs([(5, 8), (18, 21)])
