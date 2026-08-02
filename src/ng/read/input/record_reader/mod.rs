@@ -66,8 +66,8 @@
 //!
 //! # What is here so far
 //!
-//! Only [`InMemoryRecordReader`]. The BAM arm lands in Milestone C and the CRAM arm in
-//! Milestone E — and the order is deliberate: the forget rule that decides which kept reads
+//! [`InMemoryRecordReader`] and [`BamRecordReader`]. The CRAM arm lands in Milestone E — and
+//! the order is deliberate: the forget rule that decides which kept reads
 //! may be dropped is the one part of this design that can lose reads *silently*, so it is
 //! built and tested against a reader with no file behind it before any real input can hide a
 //! defect in it (spec §6, and the plan's principles).
@@ -84,6 +84,7 @@
               reports the expectation unfulfilled — an error under this repo's -D warnings."
 )]
 
+pub(crate) mod bam;
 pub(crate) mod in_memory;
 
 use std::io;
@@ -93,6 +94,7 @@ use noodles_sam as sam;
 use crate::ng::read::filtering::NoodlesRawRecord;
 use crate::ng::types::GenomeRegion;
 
+pub(crate) use bam::BamRecordReader;
 pub(crate) use in_memory::InMemoryRecordReader;
 
 /// Finds records and unpacks them, one variant per place they can come from.
@@ -109,6 +111,8 @@ pub(crate) enum RecordReader {
     /// scan of the same list, which is the oracle the first attempt at this feature did not
     /// have.
     InMemory(InMemoryRecordReader),
+    /// A BAM, read through its index.
+    Bam(BamRecordReader),
 }
 
 impl RecordReader {
@@ -117,6 +121,7 @@ impl RecordReader {
     pub(crate) fn header(&self) -> &sam::Header {
         match self {
             Self::InMemory(reader) => reader.header(),
+            Self::Bam(reader) => reader.header(),
         }
     }
 
@@ -128,6 +133,7 @@ impl RecordReader {
     pub(crate) fn begin_region(&mut self, region: GenomeRegion) -> io::Result<()> {
         match self {
             Self::InMemory(reader) => reader.begin_region(region),
+            Self::Bam(reader) => reader.begin_region(region),
         }
     }
 
@@ -136,6 +142,7 @@ impl RecordReader {
     pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
         match self {
             Self::InMemory(reader) => reader.read_next(buf),
+            Self::Bam(reader) => reader.read_next(buf),
         }
     }
 }

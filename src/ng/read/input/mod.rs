@@ -170,6 +170,19 @@ pub enum AlignmentFileError {
     )]
     Region { region: GenomeRegion },
 
+    /// The reference could not answer for a contig this file declares, at the point a cursor
+    /// was made for it.
+    ///
+    /// Surfaced here rather than at the first read for the reason the open gate exists: a
+    /// mismatched reference is a fault in what the run was given, not in the region a caller
+    /// happened to ask for first.
+    #[error("the reference cannot serve alignment file '{path}'")]
+    Reference {
+        path: PathBuf,
+        #[source]
+        source: crate::ng::ref_seq::RefSeqError,
+    },
+
     /// A CRAM was opened against a reference that carries no FASTA — a
     /// `.fai`-only `ReferenceInfo`.
     ///

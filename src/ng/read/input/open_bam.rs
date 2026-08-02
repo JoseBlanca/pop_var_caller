@@ -38,10 +38,12 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadGroupCounts,
 };
+use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
+use crate::ng::read::input::record_reader::{BamRecordReader, RecordReader};
 use crate::ng::read::input::reference::{OpenReference, ReferenceBasesError};
 use crate::ng::ref_seq::RawRefSeq;
-use crate::ng::types::GenomeRegion;
+use crate::ng::types::{ContigId, GenomeRegion};
 
 use super::AlignmentFileError;
 use super::region_query::{
@@ -487,6 +489,67 @@ impl AlignmentFile {
     /// this without holding the reference open beside it.
     pub fn contigs(&self) -> &ContigList {
         &self.contigs
+    }
+
+    /// One cursor for one chromosome of this file.
+    ///
+    /// **Called once per chromosome per worker, never per region — that is the whole point.**
+    /// A cursor opens its own descriptor and keeps it for as long as it lives, so it can stay
+    /// positioned between regions and hand back reads it has already decoded and filtered
+    /// rather than seeking to a block it is usually already sitting in.
+    ///
+    /// Fallible only here. Opening the descriptor is the one thing that can fail at
+    /// construction; after this returns, a cursor cannot fail to exist.
+    ///
+    /// **CRAM is not served yet** (Milestone E). It is refused rather than silently mis-read,
+    /// because a CRAM opened as a BAM would fail deep inside a decode with an error naming
+    /// neither the format nor this decision.
+    pub fn cursor<R: RawRefSeq>(
+        self: &Arc<Self>,
+        contig: ContigId,
+        reference: R,
+    ) -> Result<AlignmentCursor<R>, AlignmentFileError> {
+        let open_error = |source: std::io::Error| AlignmentFileError::Open {
+            path: self.path.to_path_buf(),
+            source,
+        };
+
+        match AlignmentFileKind::from_path(&self.path) {
+            Some(AlignmentFileKind::Bam) => {}
+            _ => {
+                return Err(AlignmentFileError::Open {
+                    path: self.path.to_path_buf(),
+                    source: std::io::Error::other(
+                        "a cursor over this format is not implemented yet;                          CRAM arrives at Milestone E",
+                    ),
+                });
+            }
+        }
+
+        let mut reader = bam::io::reader::Builder
+            .build_from_path(&self.path)
+            .map_err(open_error)?;
+        reader.read_header().map_err(open_error)?;
+
+        let record_reader = RecordReader::Bam(BamRecordReader::new(
+            reader,
+            Arc::clone(&self.header),
+            self.index.clone(),
+            Arc::clone(&self.path),
+        ));
+
+        AlignmentCursor::over_records(
+            record_reader,
+            contig,
+            self.resolution.clone(),
+            reference,
+            self.filter_config,
+            Arc::clone(&self.path),
+        )
+        .map_err(|source| AlignmentFileError::Reference {
+            path: self.path.to_path_buf(),
+            source,
+        })
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -1251,6 +1314,192 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // The cursor over a real BAM (alignment cursor, C3)
+    // -----------------------------------------------------------------
+
+    /// A spread of 30-base reads across contig 0, starting every 9 bases, so any region has a
+    /// knowable answer and consecutive regions share reads two or three deep.
+    ///
+    /// Thirty rather than ten because the default `min_read_length` silently drops anything
+    /// shorter — a fixture that ignores it produces an empty walk, which reads as a broken
+    /// cursor rather than as a badly-chosen read length.
+    const SPREAD_READS: u64 = 8;
+
+    fn spread_across_chr1() -> Vec<RecordBuf> {
+        (0..SPREAD_READS)
+            .map(|i| read_named_with_length(&format!("r{i}"), 0, 1 + (i as usize) * 9, 30))
+            .collect()
+    }
+
+    /// **The oracle: a whole-file linear scan, filtered to the region.** It never seeks and
+    /// never consults the index, so nothing about chunks, positioning or the early stop is
+    /// shared with the thing it checks.
+    fn names_by_linear_scan(path: &Path, region: GenomeRegion) -> Vec<String> {
+        let mut reader = bam::io::reader::Builder
+            .build_from_path(path)
+            .expect("open bam");
+        let header = reader.read_header().expect("read header");
+        let mut names = Vec::new();
+        for record in reader.record_bufs(&header) {
+            let record = record.expect("a fixture record");
+            let (Some(first), Some(last)) = (record.alignment_start(), record.alignment_end())
+            else {
+                continue;
+            };
+            if record.reference_sequence_id() == Some(region.contig.get() as usize)
+                && usize::from(first) as u64 <= region.end.get()
+                && usize::from(last) as u64 >= region.start.get()
+            {
+                names.push(
+                    String::from_utf8_lossy(record.name().expect("named").as_ref()).into_owned(),
+                );
+            }
+        }
+        names
+    }
+
+    /// **The test the first attempt at this feature did not have.**
+    ///
+    /// Every other read-path test in this crate drives a *single* region query. That is
+    /// precisely why 1,471 of them passed while 3,830 of 236,081 loci went missing:
+    /// consecutive queries through one reader are the untested surface, and they are the
+    /// entire feature. So a run of regions is asked of **one cursor**, in order, and each
+    /// answer is compared against a scan of the whole file.
+    #[test]
+    fn a_run_of_regions_through_one_bam_cursor_matches_a_linear_scan() {
+        let (reference_dir, reference) = fixture_reference(false);
+        let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &spread_across_chr1());
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), reference_bases())
+            .expect("a cursor for contig 0");
+
+        // Ascending, adjacent, overlapping, far apart, backward, repeated, and empty — the
+        // shapes the plan names, all through the one cursor.
+        for (start, end) in [
+            (1u64, 20u64),
+            (21, 40),
+            (35, 60),
+            (36, 61),
+            (95, 100),
+            (1, 30),
+            (1, 30),
+            (100, 100),
+            (1, 100),
+        ] {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            cursor.move_to_region(asked).expect("on this chromosome");
+            let mut actual = Vec::new();
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("the fixture reads decode and filter");
+                actual.push(String::from_utf8_lossy(&read.qname).into_owned());
+            }
+
+            assert_eq!(
+                actual,
+                names_by_linear_scan(&path, asked),
+                "the cursor disagreed with a linear scan at [{start}, {end}] — and it had \
+                 already served every region before it",
+            );
+        }
+        drop(reference_dir);
+    }
+
+    /// The oracle must be able to fail: a region the fixture covers has to return reads, or
+    /// the test above could be comparing two empty vectors and calling it agreement.
+    #[test]
+    fn the_bam_cursor_oracle_is_not_vacuous() {
+        let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &spread_across_chr1());
+
+        let covered = names_by_linear_scan(
+            &path,
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(100),
+            },
+        );
+        assert_eq!(
+            covered.len(),
+            SPREAD_READS as usize,
+            "the whole contig holds every fixture read",
+        );
+
+        let narrow = names_by_linear_scan(
+            &path,
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(45),
+                end: Position(46),
+            },
+        );
+        assert!(
+            !narrow.is_empty() && narrow.len() < covered.len(),
+            "and the regions must not all return the same thing: {narrow:?}",
+        );
+    }
+
+    /// **A forward walk over a real BAM decodes each read once**, which is the claim the whole
+    /// feature rests on and the number the perf review says has to come down.
+    #[test]
+    fn a_forward_walk_over_a_bam_decodes_each_read_once() {
+        let (reference_dir, reference) = fixture_reference(false);
+        let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &spread_across_chr1());
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), reference_bases())
+            .expect("a cursor for contig 0");
+
+        // Overlapping, ascending — what a real region walk looks like.
+        for (start, end) in [(1u64, 30u64), (20, 50), (40, 70), (60, 100)] {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            cursor.move_to_region(asked).expect("on this chromosome");
+            while let Some(read) = cursor.next_read() {
+                read.expect("the fixture reads decode and filter");
+            }
+        }
+
+        let counts = cursor.counts();
+        assert_eq!(
+            counts.reads_decoded, SPREAD_READS,
+            "every read in the file, and a forward walk must decode each of them once",
+        );
+        assert!(
+            counts.reads_replayed > 0,
+            "reads shared by consecutive regions must be served from what is held",
+        );
+        assert_eq!(
+            counts.regions_jumping, 1,
+            "only the first region has nothing to reuse"
+        );
+        drop(reference_dir);
+    }
+
+    // -----------------------------------------------------------------
     // The reader pool (C1)
     // -----------------------------------------------------------------
 
@@ -1466,6 +1715,7 @@ mod tests {
 
     use crate::ng::read::input::test_fixtures::read_named_with_length;
     use crate::ng::ref_seq::InMemoryRefSeq;
+    use crate::ng::types::Position;
 
     /// An all-`A` reference matching the fixture contigs, so a read of `A`s
     /// matches perfectly and a read of `C`s mismatches at every base.
