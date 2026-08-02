@@ -143,9 +143,16 @@ dhat-heap = ["dep:dhat"]
 # Enable in `cargo bench --features alloc-mimalloc --bench psp_writer_perf`
 # (or any other bench / example) to swap the global allocator for
 # `mimalloc`. Off by default so production binaries pick the system
-# allocator. The mutex exclusion with `dhat-heap` is enforced at the
-# `#[global_allocator]` declaration in each bench / example shim —
-# enabling both at once is a compile error there.
+# allocator.
+#
+# Only one `#[global_allocator]` may exist, so a target that offers both gates
+# its mimalloc declaration on `not(feature = "dhat-heap")` and dhat wins when
+# both are on. That has to stay a *build* that succeeds, because CI lints and
+# tests with `--all-features` (ci.yml:35,47), which enables both. An earlier
+# version of this comment claimed enabling both was a compile error; no target
+# has ever done that, and one that tried would turn CI red. Where the collision
+# matters — a measurement naming one allocator while running another — the
+# target refuses at startup instead (`ng_generic_walk_probe`).
 alloc-mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
@@ -201,3 +208,16 @@ harness = false
 name = "ng_generic_pileup_perf"
 harness = false
 
+
+# The generic walk probe carries its own tests: it is the instrument spec §11 makes every
+# alignment-cursor milestone answer to, so its guards must run where a developer will see
+# them, not only in CI.
+#
+# What this entry buys, measured rather than assumed. `--examples` (which CI runs,
+# ci.yml:47) and `--all-targets` already run every example's tests, with or without it.
+# What they do *not* cover is a plain `cargo test`, which is the command a developer
+# actually types — and `--all-targets` is no substitute, because it also launches the
+# criterion benches. `test = true` adds this one example to the default selection.
+[[example]]
+name = "ng_generic_walk_probe"
+test = true
