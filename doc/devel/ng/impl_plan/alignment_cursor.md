@@ -194,14 +194,51 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 ### Milestone E — the CRAM arm
 
-- ☐ **E1.** `CramRecordReader`: the `.crai` walk and container decode, keeping nothing across
+- ✅ **E1.** `CramRecordReader`: the `.crai` walk and container decode, keeping nothing across
   regions. The existing single-container cache stays exactly as it is — a within-query
-  optimisation. *Depends:* C2. *Source:* spec §5.
-- ☐ **E2. Wire CRAM — its own commit.** **Oracle:** the BAM/CRAM parity test (`t8_…`) must still
+  optimisation. *Depends:* C2. *Source:* spec §5. — `520ceb8` (groundwork), `8f7e149`
+
+  > **⚠ "Keeping nothing across regions" and "the single-container cache stays" cannot both be
+  > true, and the resolution is that the cache was never a cache.** What the reader holds is the
+  > container it is *currently serving*: decoded, drained, and dropped when the next one is
+  > decoded. What survives between regions is the cursor's reads, one layer up. The per-region
+  > source's version genuinely was a cache — it held its last container so the *next query*
+  > could skip a decode — and that job now belongs to the kept reads.
+  >
+  > **⚠ Landed with E2, and the read-group question needed the owner.** A CRAM stores the read
+  > group as a number rather than a tag, so the arm decides it while decoding and hands it up
+  > with the record — the one exception to "records come out raw" (arch §1.3, spec §5). Settled
+  > with the owner; the alternative was keeping every auxiliary tag, at 6.2 MiB per open file.
+- ✅ **E2. Wire CRAM — its own commit.** **Oracle:** the BAM/CRAM parity test (`t8_…`) must still
   show the two formats returning identical reads, now through cursors. *Depends:* E1, D3.
-  *Source:* spec §11.
-- ☐ **E3.** Measure on a tomato CRAM and record it. CRAM is unmeasured in the perf review; this
-  is the first number for it. *Depends:* E2. *Source:* spec §1.
+  *Source:* spec §11. — `8f7e149`
+
+  > **⚠ The oracle is a new test, not the extended `t8_…`** — the same decision C3 made for BAM,
+  > and for the same reason: `t8_…` compares two *files* through the per-region query and builds
+  > no cursor and no reference accessor. What the milestone needs is a **run of regions through
+  > one CRAM cursor against a linear scan**, which is the BAM cursor oracle's shape. `t8_…`
+  > still passes and still earns its keep on the old path.
+  >
+  > **⚠ A three-container fixture, and boundary regions taken from the index.** A fixture inside
+  > one container exercises the decode and none of the walk. And with regions that all sit
+  > inside a container, the walk-back over containers reaching into the region can be deleted
+  > with the whole suite green — checked, and it could.
+- ✅ **E3.** Measure on a tomato CRAM and record it. CRAM is unmeasured in the perf review; this
+  is the first number for it. *Depends:* E2. *Source:* spec §1. — report
+  [`ng_alignment_cursor_e_2026-08-02.md`](../../reports/implementations/ng_alignment_cursor_e_2026-08-02.md)
+
+  > **Read path 23.7×** (12.78 s → 0.54 s, `agreement=exact`, four runs across two samples and
+  > two chromosomes: 23.7–26.4×). **End to end 1.41×** (9.51 s → 6.76 s), output identical.
+  >
+  > **⚠ The gap between those two is the finding, not a discrepancy.** The old CRAM path already
+  > kept its last container (spec §1 says so), so retention was partly there and there was less
+  > to win than on BAM — where nothing was kept and records were decoded thirty times over. And
+  > this chromosome yields 1.7 M loci against chromosome 21's 236 k, so the walk dominates.
+  >
+  > **⚠ Peak memory is 228 MB, and it is the reference, not the reads.** A CRAM decodes against
+  > the reference, so the chromosome's bases are resident — SL4.0 chromosome 1 is 90.9 Mb. That
+  > is what spec §12's deferred per-chromosome registry is for, and its stated trigger was the
+  > first parallel run over CRAM. The cursor does not make it worse (238 → 228 MB).
 
 > **Checkpoint E:** both formats read through cursors, with CRAM measured for the first time.
 > Pause for review.
