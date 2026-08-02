@@ -31,6 +31,8 @@ pub mod region_query;
 pub(crate) mod region_records;
 pub mod sample_cursor;
 
+use sample_cursor::SampleCursor;
+
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 
@@ -46,7 +48,7 @@ use crate::ng::read::input::read_groups::{
 };
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
+use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
 
 use crate::ng::read::aligned_read::AlignedRead;
@@ -586,6 +588,36 @@ impl SampleReads {
         } else {
             SampleRegionReads::Merged(MergedRegionReads::new(streams))
         })
+    }
+
+    /// One cursor for this sample over one chromosome — **the layer a caller holds**.
+    ///
+    /// The counterpart to [`reads_in_region`](Self::reads_in_region), and the difference is
+    /// the whole feature: that returns a stream per region and reopens the question every
+    /// time, while this is made **once per chromosome** and answers every region on it from a
+    /// reader that stays where it is.
+    ///
+    /// One reference accessor per file, as `reads_in_region` takes per query — but taken here
+    /// once for the cursor's whole life rather than rebuilt per region (perf review L2).
+    pub fn cursor<R, F>(
+        &self,
+        contig: ContigId,
+        mut make_reference: F,
+    ) -> Result<SampleCursor<R>, IngestError>
+    where
+        R: RawRefSeq,
+        F: FnMut() -> R,
+    {
+        let mut cursors = Vec::with_capacity(self.files.len());
+        for (source_file_index, file) in self.files.iter().enumerate() {
+            cursors.push(file.cursor(contig, make_reference()).map_err(|source| {
+                IngestError::File {
+                    source_file_index,
+                    source,
+                }
+            })?);
+        }
+        Ok(SampleCursor::new(cursors))
     }
 
     /// What the deferred assembly check needs, per file: the path, and the

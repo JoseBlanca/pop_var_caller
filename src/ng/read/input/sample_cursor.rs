@@ -77,6 +77,27 @@ impl<R: RawRefSeq> SampleCursor<R> {
         }
     }
 
+    /// What this sample's cursors did, summed across its files — see
+    /// [`CursorCounts`](crate::ng::read::input::cursor::CursorCounts). Summed rather than
+    /// per file because the question it answers is about the sample's walk.
+    pub fn counts(&self) -> crate::ng::read::input::cursor::CursorCounts {
+        match self {
+            Self::Single(cursor) => cursor.counts(),
+            Self::Merged(merged) => merged.cursors.iter().fold(
+                crate::ng::read::input::cursor::CursorCounts::default(),
+                |mut total, cursor| {
+                    let counts = cursor.counts();
+                    total.reads_decoded += counts.reads_decoded;
+                    total.reads_replayed += counts.reads_replayed;
+                    total.regions_reusing += counts.regions_reusing;
+                    total.regions_jumping += counts.regions_jumping;
+                    total.reads_evicted += counts.reads_evicted;
+                    total
+                },
+            ),
+        }
+    }
+
     /// The next read of the current region, in position order across every file.
     pub fn next_read(&mut self) -> Option<Result<AlignedRead, CursorError>> {
         match self {
