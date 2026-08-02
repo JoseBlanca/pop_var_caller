@@ -62,8 +62,8 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 ### Milestone A — the instrument, and the types (no behaviour change)
 
-- ☐ **A1.** Commit `examples/ng_generic_walk_probe.rs` with a test module and the fixture builders
-  it shares with the bench. *Depends:* —. *Source:* spec §11.
+- ✅ **A1.** Commit `examples/ng_generic_walk_probe.rs` with a test module and the fixture builders
+  it shares with the bench. *Depends:* —. *Source:* spec §11. — `a400f73`
 - ☐ **A2.** `CursorError` (`WrongChromosome`, `Io`), and `AlignmentFile::contigs()`.
   *Depends:* A1. *Source:* arch §1.4, §2.1.
 - ☐ **A3.** `RecordReader` as an enum with only the `InMemory` arm: finds nothing, unpacks

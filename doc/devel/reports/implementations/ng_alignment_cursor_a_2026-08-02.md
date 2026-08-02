@@ -134,3 +134,75 @@ Real output, host-native (`cargo` is allow-listed; the container was not needed)
 - `refuse_an_ambiguous_allocator` is a startup guard on a path CI never runs (`main`), so
   nothing tests it. Testing it would mean a subprocess run under a feature combination that
   exists only to be rejected.
+
+---
+
+## A2 — `CursorError`, and the chromosomes a cursor may be made for
+
+### Plan
+
+Arch §1.4 and §2.1: the error type a cursor reports once it exists, and
+`AlignmentFile::contigs()`. No behaviour changes — nothing calls either yet.
+
+### Changes made
+
+| file | change |
+|---|---|
+| [src/ng/read/input/cursor.rs](../../../../src/ng/read/input/cursor.rs) | **new.** `CursorError` with two variants, and the module doc that carries the measurement the whole feature rests on. |
+| [src/ng/read/input/open_bam.rs](../../../../src/ng/read/input/open_bam.rs) | `AlignmentFile` gains `contigs: ContigList`, the `contigs()` accessor, and the `Debug` impl counts off it. Five tests. |
+| [src/ng/read/input/mod.rs](../../../../src/ng/read/input/mod.rs) | `pub mod cursor;` |
+
+### Deviations from the architecture, all absorbed and recorded
+
+- **`WrongChromosome` carries the file path.** Arch §1.4 gives it only the two `ContigId`s.
+  But a `ContigId` is an index, and an index means nothing without saying which contig table
+  it indexes — and a run holds up to 320 cursors. The sibling `Io` variant already carries a
+  path, and `alignment_file.md` §4 states this module's house pattern as "each variant
+  carrying its path".
+- **`Io` is named `ReadRecord`.** The repo's rule is that a variant names the failed
+  operation, not the mechanism; every sibling in `AlignmentFileError` and `ReadFilterError`
+  follows it. Arch §1.4's name does not.
+- **`cursor: ContigId` / `requested: ContigId` are `cursor_contig` / `requested_contig`.**
+  Two same-typed fields whose names did not disambiguate them, in the one variant whose whole
+  job is telling them apart.
+- **Arch §1.4's `#[error("reading {path}")]` does not compile** — `Arc<Path>` has no
+  `Display`. The code uses `path.display()`, and a test pins the rendered message so the
+  naive `{path:?}` (quotes and escapes in operator-facing text) cannot creep back.
+
+### The claim this step got wrong, and how
+
+The field, the accessor and a test all said `contigs` is *"the reference's list"*. It is the
+**file's `@SQ` list**, which the open gate *reconciled* against the reference's — and
+reconciled is not identical, because `first_disagreement` treats an absent `M5` as a
+wildcard. A file declaring digests against a `.fai`-only reference passes the gate, and what
+is stored is then the file's claim.
+
+**The test named after the property could not fail.** Two reviewers independently mutated the
+field to be literally what the docs claimed; the test named
+`the_contig_list_is_the_reference_own_list_in_its_own_order` passed under both the true and
+the false version, because its whole-list `assert_eq!` runs through `ContigEntry`'s
+digest-wildcarding `PartialEq`. The three tests are rewritten to compare the fields that
+really are proved equal, with a distinct digest per contig.
+
+**The same sentence is in arch §2.1 and spec §8**, which is where the code got it. Raised at
+Checkpoint A rather than edited here.
+
+### Tests
+
+Six. Two on the error messages (both rendered strings pinned, and the `#[source]` chain), and
+four on `contigs()`:
+`the_contig_list_has_the_reference_names_and_lengths_in_the_reference_order`,
+`the_contig_list_and_the_digest_list_index_alike`,
+`the_contig_list_carries_the_digests_the_file_declared_not_the_reference_s`, and
+`the_debug_line_counts_the_contigs_the_file_actually_has`.
+
+### Validation
+
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib ng::` — **1477 passed; 0 failed; 2 ignored** (1471 at the milestone's
+  start).
+- `cargo doc --no-deps --lib --all-features` — **no `cursor.rs` errors**. The file's first
+  draft added two `unresolved link` errors under the crate's `broken_intra_doc_links =
+  "deny"`, by using intra-doc-link brackets on filesystem paths. Twelve errors remain, all
+  pre-existing in files this branch does not touch — **CI's doc step is red independently of
+  this work**.

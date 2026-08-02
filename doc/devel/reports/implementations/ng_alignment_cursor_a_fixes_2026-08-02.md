@@ -109,3 +109,78 @@ Nothing. Two items are recorded in the review as out of scope for A1:
   untouched by this branch, and the cause of a wrong measurement in this review).
 - `examples/ng_generic_loci_dump.rs` holds a third copy of `write_fasta` / `write_bam`;
   converting it belongs to Milestone F1.
+
+---
+
+## A2
+
+**All findings applied.** One was reached independently by all three agents; three mutations
+that survived the first draft now fail.
+
+### The Major, found three ways
+
+**The docs said `contigs` is "the reference's list" in three places. It is the file's.** The
+value is `contig_list(&header)`, reconciled against the reference by a gate that treats an
+absent `M5` as a wildcard — so a file declaring digests against a `.fai`-only reference
+passes, and what is stored is the file's claim.
+
+**And the test named after the property could not fail.** Two agents mutated the field to be
+literally what the docs claimed; `the_contig_list_is_the_reference_own_list_in_its_own_order`
+passed under both the true and the false version, because its whole-list `assert_eq!` runs
+through `ContigEntry`'s digest-wildcarding `PartialEq`.
+
+Applied: the field doc, the accessor doc and all three tests now say what the value is —
+the file's list, whose **names, lengths and order** the gate proves are the reference's, with
+the digests explicitly the file's. The tests compare those three fields directly rather than
+through `PartialEq`, and use a **distinct digest per contig** so an order or a projection
+error cannot pass.
+
+**The same sentence is in arch §2.1 and spec §8.** Not edited — raised at Checkpoint A.
+
+### Three mutations that survived, and now do not
+
+| mutation | caught by |
+|---|---|
+| populate `contigs` from the reference instead of the file | `the_contig_list_and_the_digest_list_index_alike`, `…_carries_the_digests_the_file_declared_not_the_reference_s` |
+| build `sq_md5s` in reverse order | `the_contig_list_and_the_digest_list_index_alike` |
+| `Debug`'s contig count `+ 999` | `the_debug_line_counts_the_contigs_the_file_actually_has` (new) |
+
+### The error type
+
+- `WrongChromosome` gained the **file path**. Two bare `ContigId`s are indices, and an index
+  means nothing without naming the table it indexes; a run holds up to 320 cursors. The
+  message is now `cursor on '/data/sample.bam' covers contig 20 but the region is on contig
+  7`.
+- `Io` → **`ReadRecord`**, and its message joins the module's house shape
+  (`reading alignment file '…' failed`). The rule — name the failed operation, not the
+  mechanism — is one every other error enum in the crate follows.
+- `cursor` / `requested` → **`cursor_contig` / `requested_contig`**: two same-typed fields
+  whose names did not tell them apart, in the variant whose whole job is telling them apart.
+
+### The doc-comment claims
+
+- `sq_md5s_by_file` **does not exist**; the real consumer is `SampleReads::assembly_inputs`.
+- `(spec §4)` cited "Error model"; corrected to `alignment_file.md` §3.1, check 2.
+- 35,228 now names its mode, because spec §11.5 says both figures are in circulation and B3
+  has to choose between 34,633 and 35,228.
+- The module's **rustdoc summary line** now says what the file contains. The index showed
+  `cursor` as *"A reader that stays where it is."* while the file held an error enum.
+- Two `unresolved link` rustdoc **errors** — intra-doc-link brackets on filesystem paths,
+  under the crate's `broken_intra_doc_links = "deny"` — replaced with plain backticked paths.
+  Confirmed gone: `cargo doc --no-deps --lib --all-features` reports no `cursor.rs` error.
+
+### Applied with a stated reason not to go further
+
+**`contigs` and `sq_md5s` are duplicated state, and my justification for keeping both was
+false.** An agent deleted the field, derived the accessor, and got a green suite ~18 lines
+shorter. But that route changes `check_assembly` — a `pub` function — and eight call sites,
+which is more than the step that *introduced* the duplication should carry. The field doc now
+states the real reason (the accessor lends a slice; `assembly_inputs` lends one from every
+open file at once), records the measured alternative, and names it a follow-up.
+
+### Validation
+
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib ng::` — **1477 passed; 0 failed; 2 ignored**.
+- `cargo doc --no-deps --lib --all-features` — no `cursor.rs` errors; the 12 that remain are
+  pre-existing in files this branch does not touch.

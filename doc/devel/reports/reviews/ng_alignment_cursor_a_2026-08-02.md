@@ -200,3 +200,107 @@ cargo test --lib --tests --examples --all-features
 cargo bench --bench ng_generic_pileup_perf -- --test
 ./target/release/examples/ng_generic_walk_probe <ref.fna> <HG002 30x bam> chr21
 ```
+
+---
+
+## A2 — `CursorError` and `AlignmentFile::contigs()`
+
+### 1. Scope
+
+The uncommitted working-tree change for step A2, against `a400f73` plus its patch, each
+sub-agent in its own worktree. In scope: `src/ng/read/input/cursor.rs` (new),
+`src/ng/read/input/open_bam.rs` (new field, accessor, `Debug`, five tests),
+`src/ng/read/input/mod.rs` (one line). Out of scope: the rest of `open_bam.rs`.
+
+**Three agents over five checklists**, paired because the diff is small: `reliability`;
+`errors` + `naming`; `module_structure` + `smells`. Not dispatched: `defaults`,
+`unsafe_concurrency`, `extras`, `refactor_safety`, `idiomatic` — no trigger on a types-only
+addition.
+
+### 2. Verdict
+
+**Approve-with-changes.** All findings applied. The step's central Major was found
+independently by all three agents.
+
+### 3. Execution status
+
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` clean;
+`cargo test --lib ng::` `1476 passed` at review time. `cargo doc --no-deps --lib` exits 101
+— **13 errors pre-date the branch**, 2 were new here.
+
+### 5. Top 3 priorities
+
+1. **M1** — the docs say `contigs` is the reference's list; it is the file's, and the test
+   named after the property cannot fail.
+2. **M2** — `WrongChromosome` names two indices and no file.
+3. **M3** — two mutations survive: `sq_md5s` built in reverse order, and the `Debug` contig
+   count off by 999.
+
+### 6. Findings
+
+#### Major
+
+**M1: the "reference's list" claim, in three places, none of them true.**
+*Categories: naming, reliability, module_structure — three independent confirmations.*
+The value is `contig_list(&header)` — a re-reading of the file's header — reconciled against
+the reference under a rule that treats an absent `M5` as a wildcard. Proved twice by
+experiment: a probe showed the file's digests surviving into `contigs()` against a `.fai`
+reference carrying none (`PartialEq says equal: true`, structurally identical: `false`), and
+a mutation populating the field from the reference left the test named after the claim
+**passing**. Arch §2.1 and spec §8 carry the same sentence.
+
+**M2: `WrongChromosome` carries no file identity.** `alignment_file.md` §4 states the house
+pattern as "each variant carrying its path"; every `AlignmentFileError` variant has one, and
+the sibling `Io` proves a cursor holds it. With 32–320 live cursors, two bare integers name
+neither the file, the sample, nor the contig table they index. *Category: errors.*
+
+**M3: two surviving mutations.** `sq_md5s` built in reverse order passed all three new tests
+(the fixture's digests are all `None`, so every pair was `None == None`); the `Debug` contig
+count `+ 999` passed everything. *Category: reliability.*
+
+#### Minor
+
+- **Mi1** `Io` names the mechanism, not the failed operation — against the rule the crate's
+  other three error enums follow. *errors.*
+- **Mi2** `sq_md5s_by_file`, cited as the justification for a duplicated field, **does not
+  exist**. The real consumer is `SampleReads::assembly_inputs`. *naming, reliability,
+  module_structure.*
+- **Mi3** `(spec §4)` cites "Error model" / "What the cursor promises"; the claim's home is
+  `alignment_file.md` §3.1 check 2. *naming.*
+- **Mi4** 35,228 quoted without the mode qualifier spec §11.5 explicitly demands — the
+  typed-region walk counts 34,633, and B3's counter assertions have to choose. *naming.*
+- **Mi5** The module's rustdoc **summary line** describes a type the module does not contain;
+  the "only the errors" disclosure sits 18 lines below the fold, where the index does not
+  show it. *naming.*
+- **Mi6** `cursor: ContigId` / `requested: ContigId` — two same-typed fields whose names do
+  not disambiguate them. *naming.*
+- **Mi7** Two `unresolved link` rustdoc errors from intra-doc-link brackets on filesystem
+  paths. *tooling, via cross-category.*
+- **Mi8** `contigs` and `sq_md5s` are duplicated state. **Deleting the field and having
+  `check_assembly` take a `&ContigList` was tried and works** — suite green, ~18 lines
+  shorter — but it changes a `pub` signature and eight call sites. *module_structure.*
+
+### 7. Out of scope observations
+
+- **`cargo doc` is red on this branch's parent** — 12–13 `unresolved link` errors in
+  `src/ng/locus_generation/ssr.rs`, `src/ng/region_typing/`, `src/ng/tandem_repeat.rs`,
+  `src/ng/types.rs` and five `src/ssr/` files. CI runs `cargo doc --no-deps --lib
+  --all-features` with `RUSTDOCFLAGS: -D warnings`, so **the doc step fails independently of
+  this work**. Worth its own fix.
+- **A spec/arch contradiction that will bite at B1.** `spec/alignment_cursor.md` §10: *"The
+  cursor is consumed when it rejects a region, so a half-valid cursor cannot exist."*
+  `arch/alignment_cursor.md` §2.2: *"`move_to_region` leaves the cursor usable on any
+  outcome."* Arch's own signature `move_to_region(&mut self)` cannot consume. A2 has no
+  cursor, so nothing is wrong yet — **raised at Checkpoint A**.
+- **`SampleReads::assembly_inputs` has no production caller** — only a test that `.count()`s
+  it. Its whole reason for existing is `check_assembly`, which no shipping path invokes.
+
+### 9. What's good
+
+- **The same Major, reached three different ways** — by reading the gate's wildcard rule, by
+  a probe printing both lists, and by mutating the field to match the docs and watching the
+  wrong test pass. Convergence on a claim nobody had checked.
+- **Recording the divergences that are *correct*.** One agent noted that arch §1.4's
+  `#[error("reading {path}")]` would not compile and spec §8's `Io(std::io::Error)` carries
+  no path, so the code is right to differ — flagging them so a later reader does not "fix"
+  them back.

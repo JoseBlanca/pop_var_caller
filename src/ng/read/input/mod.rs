@@ -21,6 +21,7 @@
 //! [`RecordSource`](super::RecordSource)/[`RawRecord`](super::RawRecord) seam
 //! (`doc/devel/ng/arch/module_layout.md` principle 1, note b).
 
+pub mod cursor;
 pub mod merge;
 pub mod open_bam;
 pub mod read_groups;

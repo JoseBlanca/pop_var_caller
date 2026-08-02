@@ -105,9 +105,34 @@ pub struct AlignmentFile {
     /// single-read-group case. The header, which has no such cheap-clone form,
     /// is the one that needs an `Arc` of its own.
     resolution: ReadGroupResolution,
-    /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
-    /// because the gate just proved this file's `@SQ` order *is* the
-    /// reference's. `None` where the file carries no usable `M5`.
+    /// **This file's own `@SQ` list**, which the open gate reconciled against
+    /// the reference's: same names, same lengths, same order, and the same
+    /// digests wherever both sides carry one (`alignment_file.md` §3.1,
+    /// check 2). So `entries[i]` is `ContigId(i)`, and a caller asking which
+    /// chromosomes it may make a cursor for gets the answer from the file it is
+    /// about to read rather than from a reference handle it would have to carry
+    /// alongside.
+    ///
+    /// **Reconciled is not identical, and the difference is the digests.**
+    /// `first_disagreement` treats an absent `M5` as a wildcard
+    /// (`fasta/mod.rs`), so a file declaring digests passes against a
+    /// `.fai`-only reference that has none — and what is stored here is then
+    /// the *file's* claim, not the reference's. Names, lengths and order are
+    /// the part that is proved equal, and they are the part a cursor needs.
+    contigs: ContigList,
+    /// The `@SQ M5` tags, indexed by `ContigId`. `None` where the file carries
+    /// no usable `M5`.
+    ///
+    /// **A projection of `contigs` above, and it should not have to exist.**
+    /// It is stored because `sq_md5s()` hands out a *slice*, which a value built
+    /// per call could not outlive the call to lend, and because
+    /// `SampleReads::assembly_inputs` (`mod.rs`) lends one from every open file
+    /// at once for `check_assembly` — which is `pub` and takes
+    /// `&[Option<[u8; 16]>]`. Deleting the field and having `check_assembly`
+    /// take a `&ContigList` was tried during review and works (the suite stays
+    /// green, ~18 lines shorter), but it changes a public signature and eight
+    /// call sites, which is more than the step that introduced `contigs` should
+    /// carry. Recorded as a follow-up rather than left as an unexplained pair.
     ///
     /// Captured at open and compared much later, by `check_assembly` (D1),
     /// once the caller has joined `reference_info`'s background verification.
@@ -429,6 +454,7 @@ impl AlignmentFile {
             header: Arc::new(header),
             index,
             resolution,
+            contigs: file_contigs,
             sq_md5s,
             filter_config,
             // Empty: the first query opens the first reader. `open` itself
@@ -445,6 +471,22 @@ impl AlignmentFile {
     /// How this file's records are assigned to read groups (see the field).
     pub fn read_group_resolution(&self) -> &ReadGroupResolution {
         &self.resolution
+    }
+
+    /// The chromosomes this file may be read over.
+    ///
+    /// **The file's own `@SQ` list**, which the open gate proved agrees with the reference's
+    /// on names, lengths and order, and on digests wherever both sides carry one
+    /// (`alignment_file.md` §3.1, check 2). The digests are therefore the *file's*: a file may
+    /// declare an `M5` where a `.fai`-only reference has none, and an absent digest is a
+    /// wildcard on either side. Use [`sq_md5s`](Self::sq_md5s) and `check_assembly` to compare
+    /// digests against a verified reference; use this to know which contigs exist and what
+    /// `ContigId(i)` means.
+    ///
+    /// Position `i` is `ContigId(i)`, so a caller minting one cursor per chromosome can walk
+    /// this without holding the reference open beside it.
+    pub fn contigs(&self) -> &ContigList {
+        &self.contigs
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -726,7 +768,8 @@ impl std::fmt::Debug for AlignmentFile {
             header: _,
             index: _,
             resolution,
-            sq_md5s,
+            contigs,
+            sq_md5s: _,
             filter_config: _,
             readers: _,
             readers_opened: _,
@@ -738,7 +781,10 @@ impl std::fmt::Debug for AlignmentFile {
         f.debug_struct("AlignmentFile")
             .field("path", path)
             .field("read_groups", resolution)
-            .field("contigs", &sq_md5s.len())
+            // Counted off `contigs` now rather than off `sq_md5s`. The two are the same
+            // length by construction, but one of them *is* the contig list and the other is
+            // a projection of it, and the field is labelled "contigs".
+            .field("contigs", &contigs.entries.len())
             .field("readers_opened", &self.readers_opened())
             .finish_non_exhaustive()
     }
@@ -1066,6 +1112,142 @@ mod tests {
                 .entries
                 .is_empty()
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The chromosomes a cursor may be made for (alignment cursor, A2)
+    // -----------------------------------------------------------------
+
+    /// The list carries the reference's names, lengths and **order** — the part the open
+    /// gate proves equal, and the part that makes `ContigId(i)` mean the same thing to the
+    /// file and to the reference. That is what `contigs()` exists to offer: a caller minting
+    /// one cursor per chromosome walks this without holding the reference open beside it.
+    ///
+    /// **Compared field by field, not with `assert_eq!` on the lists.** `ContigEntry`'s
+    /// `PartialEq` treats an absent `M5` as a wildcard, so comparing whole lists passes
+    /// whether the field holds the file's or the reference's — a review mutation swapping one
+    /// for the other left exactly that assertion green. Naming the three fields that really
+    /// are proved equal is what makes this test able to fail.
+    #[test]
+    fn the_contig_list_has_the_reference_names_and_lengths_in_the_reference_order() {
+        let fixture = open_fixture(&matching_contigs(), false);
+        let file = fixture.file.as_ref().expect("opens");
+
+        let expected: Vec<(&str, u64)> = matching_contigs()
+            .iter()
+            .map(|(name, length, _)| (*name, *length as u64))
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "an empty list would make the comparison below vacuous",
+        );
+
+        let observed: Vec<(&str, u64)> = file
+            .contigs()
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.length))
+            .collect();
+        assert_eq!(observed, expected);
+    }
+
+    /// `contigs()` and `sq_md5s()` are the list and a projection of it, so they cannot
+    /// disagree — not about how many contigs there are, and not about any one contig's
+    /// digest. Both are indexed by `ContigId`, and a divergence would silently pair a file's
+    /// contig with a *different* reference contig inside `check_assembly`.
+    ///
+    /// A **distinct digest per contig**, so a projection that returned the same digest for
+    /// every entry, or the entries in another order, fails here. The duplication itself is
+    /// recorded as a follow-up on the `sq_md5s` field; while it stands, this is what stops
+    /// the two drifting.
+    #[test]
+    fn the_contig_list_and_the_digest_list_index_alike() {
+        let digests = distinct_digests();
+        let fixture = open_fixture(&contigs_declaring(&digests), false);
+        let file = fixture
+            .file
+            .as_ref()
+            .expect("opens against a .fai reference");
+
+        assert_eq!(file.contigs().entries.len(), file.sq_md5s().len());
+        for (entry, digest) in file.contigs().entries.iter().zip(file.sq_md5s()) {
+            assert_eq!(&entry.md5, digest);
+        }
+        assert!(
+            file.sq_md5s().iter().all(Option::is_some),
+            "the fixture declared an M5 for every contig, so a `None` here is the projection \
+             losing one",
+        );
+    }
+
+    /// **What `contigs()` holds is the file's claim, not the reference's** — and this is the
+    /// test that can tell the two apart. The reference is the `.fai` arm, which carries no
+    /// digests at all, while the file declares one per contig; if the field were populated
+    /// from the reference, as this module's doc comments claimed until the A2 review, every
+    /// digest here would be `None`.
+    #[test]
+    fn the_contig_list_carries_the_digests_the_file_declared_not_the_reference_s() {
+        let (reference_dir, reference) = fixture_reference(false);
+        assert!(
+            reference
+                .info()
+                .contig_list()
+                .entries
+                .iter()
+                .all(|entry| entry.md5.is_none()),
+            "the .fai reference arm is supposed to carry no digests; without that this test \
+             proves nothing",
+        );
+
+        let digests = distinct_digests();
+        let fixture = open_fixture(&contigs_declaring(&digests), false);
+        let file = fixture
+            .file
+            .as_ref()
+            .expect("opens against a .fai reference");
+
+        assert!(
+            file.contigs()
+                .entries
+                .iter()
+                .all(|entry| entry.md5.is_some()),
+            "the file declared an M5 for every contig, so `contigs()` cannot be holding the \
+             reference's list",
+        );
+        drop(reference_dir);
+    }
+
+    /// The `Debug` line is what a panic message or a log carries, and its `contigs` field is
+    /// a **count** — the one shape that looks plausible whatever number it holds. A review
+    /// mutation adding 999 to it survived every other test here.
+    #[test]
+    fn the_debug_line_counts_the_contigs_the_file_actually_has() {
+        let fixture = open_fixture(&matching_contigs(), false);
+        let file = fixture.file.as_ref().expect("opens");
+
+        let rendered = format!("{file:?}");
+        assert!(
+            rendered.contains(&format!("contigs: {}", file.contigs().entries.len())),
+            "the Debug line does not report this file's {} contigs:\n{rendered}",
+            file.contigs().entries.len(),
+        );
+    }
+
+    /// One distinct 32-hex-digit `M5` per fixture contig, so a test can tell the digests
+    /// apart rather than only telling present from absent.
+    fn distinct_digests() -> Vec<String> {
+        (1..=matching_contigs().len())
+            .map(|nth| format!("{nth:032x}"))
+            .collect()
+    }
+
+    /// The fixture's `@SQ` shape with a digest attached to each contig.
+    fn contigs_declaring(digests: &[String]) -> Vec<(&str, usize, Option<&str>)> {
+        matching_contigs()
+            .into_iter()
+            .zip(digests)
+            .map(|((name, length, _), digest)| (name, length, Some(digest.as_str())))
+            .collect()
     }
 
     // -----------------------------------------------------------------
