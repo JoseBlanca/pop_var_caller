@@ -20,11 +20,23 @@
 //!
 //! # Why this exists at Milestone B rather than C
 //!
-//! The plan puts this type at C1, *lifted out of `BamRegionSource`*. It has to exist earlier:
+//! The plan puts this type at C1, *lifted out of `BamRegionSource`*. It had to exist earlier:
 //! a cursor yields `AlignedRead`, so it owns a [`ReadFilter`], and a `ReadFilter` needs a
-//! [`RecordSource`] underneath it — and C1 depends on B2. So it is written here in the shape
-//! the in-memory arm needs, and C1's remaining job is to prove the BAM arm reuses *this*
-//! rather than growing a second copy.
+//! [`RecordSource`] underneath it — and C1 depends on B2, so the stated order was not
+//! buildable.
+//!
+//! **C1 is therefore a completeness check rather than a lift, and here is its result.** The
+//! plan lists four things this type owes: the region narrowing, the sorted early stop,
+//! read-group resolution, and the tally. The first three are here. The fourth is **not**, and
+//! deliberately: [`ReadFilter`] has been keeping a running per-read-group tally all along, and
+//! now that one filter lives as long as a cursor rather than as long as a region, reading it
+//! at any moment already gives a whole-chromosome total — arch §2.3's "the tallies need no
+//! field and no hand-over". Adding one here would be a second, worse copy of a number that
+//! already exists. Pinned by `the_step_one_tally_accumulates_across_regions`.
+//!
+//! What remains of C1 is that the BAM arm reuse *this* rather than grow a second copy, which
+//! is C2's and C3's business. The overlap rule is already shared with the sources it replaces
+//! (see `read_next`), so the two cannot disagree while both exist.
 
 #![allow(
     dead_code,

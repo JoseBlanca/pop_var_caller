@@ -79,7 +79,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError};
+use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError, ReadGroupCounts};
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::record_reader::RecordReader;
 use crate::ng::read::input::region_records::{RegionRecords, read_end, read_overlaps};
@@ -412,6 +412,17 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// What this cursor did — see [`CursorCounts`], and read `reads_decoded` first.
     pub fn counts(&self) -> CursorCounts {
         self.counts
+    }
+
+    /// Step-1's per-read-group tally, for as much of the chromosome as this cursor has read.
+    ///
+    /// **It needs no field here and no hand-over**, which is the point arch §2.3 makes: the
+    /// filter has been keeping a running tally all along, and now that it lives as long as the
+    /// cursor rather than as long as one region, reading it at any moment gives a whole-cursor
+    /// total. The per-query sources this replaces had to fold their counts back into the file
+    /// as each stream ended, or the drops they recorded vanished with them.
+    pub fn read_group_counts(&self) -> Vec<ReadGroupCounts> {
+        self.filter.counts()
     }
 
     /// A filter failure, named with the file it came from.
@@ -1142,6 +1153,38 @@ mod tests {
             "a jump drops what it holds, and dropping is dropping however it happens",
         );
         assert_eq!(cursor.kept_reads(), 0);
+    }
+
+    /// **The tally survives across regions with no field and no hand-over** (arch §2.3), which
+    /// is what a filter living as long as the cursor buys: `read_group_counts` is a
+    /// whole-chromosome total rather than whichever region happened to be last.
+    ///
+    /// The per-query sources this replaces had to fold their counts back into the file as each
+    /// stream ended, or the drops they recorded vanished with the stream.
+    #[test]
+    fn the_step_one_tally_accumulates_across_regions() {
+        let mut cursor = cursor_over(script());
+
+        let _ = reads_of(&mut cursor, region(1, 40));
+        let after_one = cursor.read_group_counts();
+        assert!(
+            !after_one.is_empty(),
+            "the walk met at least one read group"
+        );
+        let kept_after_one: u64 = after_one.iter().map(|(_, counts)| counts.kept).sum();
+        assert!(kept_after_one > 0);
+
+        // A backward region, so nothing is replayed and every read is filtered again.
+        let _ = reads_of(&mut cursor, region(1, 100));
+        let kept_after_two: u64 = cursor
+            .read_group_counts()
+            .iter()
+            .map(|(_, counts)| counts.kept)
+            .sum();
+        assert!(
+            kept_after_two > kept_after_one,
+            "the tally did not accumulate: {kept_after_one} then {kept_after_two}",
+        );
     }
 
     /// A cursor that has done nothing says so, rather than reporting a number nobody produced.
