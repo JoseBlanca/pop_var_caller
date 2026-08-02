@@ -467,6 +467,25 @@ impl ReadGroupResolution {
     ///
     /// The `Sole` arm ignores `tag` entirely, which is the whole reason a file
     /// re-headered without rewriting its records can be read at all.
+    /// Whether every record in the file belongs to this sample, whatever it says.
+    ///
+    /// True when the header declares one read group, which is the common case and the one a
+    /// caller can skip work for: there is nothing to look up, so a decoder need not ask a
+    /// record which group it is in at all.
+    pub fn every_record_is_mine(&self) -> bool {
+        matches!(self, Self::Sole(_))
+    }
+
+    /// Which read group a record belongs to, given the **name** its `RG` names.
+    ///
+    /// The same decision [`owner_of`](Self::owner_of) makes, reached from a borrowed name
+    /// rather than from a record. A CRAM stores the read group as a *number* — an index into
+    /// the header's `@RG` list — and noodles turns that number into the declared name without
+    /// copying it, so a CRAM decoder can decide who owns a record before it builds anything.
+    pub fn owner_of_name(&self, name: Option<&str>) -> Result<RecordOwner, UnresolvedReadGroup> {
+        self.owner_of(name.map(str::as_bytes))
+    }
+
     pub fn owner_of(&self, tag: Option<&[u8]>) -> Result<RecordOwner, UnresolvedReadGroup> {
         match self {
             Self::Sole(id) => Ok(RecordOwner::Mine(*id)),

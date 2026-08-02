@@ -51,7 +51,7 @@ use crate::ng::read::filtering::{
     NoodlesRawRecord, ReadFilterError, RecordSource, resolve_read_group,
 };
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
-use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
+use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
 
 use super::AlignmentFileError;
 
@@ -333,6 +333,17 @@ pub(crate) struct CramRegionPlan {
 pub(crate) struct DecodedContainer {
     /// The `.crai` offset the records were decoded from.
     offset: u64,
+    /// Records of this container that belong to **another sample**, counted at decode and not
+    /// otherwise kept.
+    ///
+    /// **They are counted here rather than stepped over later, and that is a real difference
+    /// from the BAM path.** A foreign record is dropped the moment its read group is known, so
+    /// nothing of it is built and nothing of it is stored — which is the saving. The price is
+    /// that this number is *container-granular*: a container holds around ten thousand records
+    /// while a region is a few hundred bases, so it can run ahead of where a walk has actually
+    /// reached. The BAM path's is exact, because it steps over records one at a time. Both are
+    /// honest counts of foreign records met; they are not the same quantity.
+    other_sample_records: u64,
     /// One entry per record of the container, in file order — *not* filtered to any region,
     /// because the next query filters against its own.
     index: Vec<RecordIndex>,
@@ -360,14 +371,17 @@ struct RecordIndex {
     /// ~10⁴ records). Recomputing it there meant a fresh CIGAR walk per record per query, which a
     /// sampling profile put at 9.4% of a cohort run.
     footprint: Footprint,
-    /// Which read group this record belongs to, resolved **once per decode**.
+    /// Which read group this record belongs to, resolved **once per decode** and before the
+    /// record was built.
     ///
-    /// The read group is the *only* thing anything reads out of a record's auxiliary tags
-    /// (`resolve_read_group`, and `AlignedRead` carries no tag field), so resolving it while the
-    /// tags are in hand is what lets them be dropped — 6.2 MiB per open file, measured, the
-    /// single largest item in what an open file cost. Keeping a whole tag map to reach one field
-    /// of it was the waste.
-    owner: RecordOwner,
+    /// A [`ReadGroupId`] rather than a [`RecordOwner`], because a container keeps only this
+    /// sample's records: a foreign one is counted and dropped where its group is decided, so
+    /// "belongs to another sample" is not a state anything here can be in.
+    ///
+    /// The read group is also the *only* thing anything reads out of a record's auxiliary tags
+    /// (`AlignedRead` carries no tag field), so deciding it here is what lets them be dropped —
+    /// 6.2 MiB per open file, measured, the single largest item in what an open file cost.
+    owner: ReadGroupId,
     flags: Flags,
     mapping_quality: Option<MappingQuality>,
     reference_sequence_id: Option<usize>,
@@ -424,7 +438,7 @@ impl DecodedContainer {
     /// The transient `RecordBuf` is still built — noodles' conversion has no field-selective
     /// form, so the allocations happen either way. What changes is that they do not *survive*:
     /// the churn is unchanged, the residency is not.
-    fn push(&mut self, record: &RecordBuf, owner: RecordOwner) -> io::Result<()> {
+    fn push(&mut self, record: &RecordBuf, owner: ReadGroupId) -> io::Result<()> {
         let name = record
             .name()
             .map(|name| self.append_bytes(AsRef::<[u8]>::as_ref(name)))
@@ -721,6 +735,10 @@ impl CramRegionSource {
                     // End of stream reached through the index — nothing further.
                     return Ok(false);
                 };
+                // Counted once per *decode*, not once per query that reuses the container:
+                // the records were dropped when it was built, so this is the only moment they
+                // exist to be counted.
+                self.other_sample_records += container.other_sample_records;
                 self.container = Some(container);
             }
             let held = self
@@ -783,6 +801,7 @@ impl CramRegionSource {
         let compression_header = container.compression_header()?;
         let mut decoded = DecodedContainer {
             offset,
+            other_sample_records: 0,
             index: Vec::new(),
             payload: Vec::new(),
             cigar_ops: Vec::new(),
@@ -800,8 +819,19 @@ impl CramRegionSource {
                 &core_data_src,
                 &external_data_srcs,
             )? {
+                // **Who owns this record is decided before anything is built.** A CRAM stores
+                // the read group as a number, so asking costs an index lookup into the header
+                // and no allocation — where building the `RecordBuf` below copies the name,
+                // the bases, the qualities, the CIGAR and every auxiliary tag. A record
+                // belonging to another sample is therefore counted and dropped without any of
+                // that ever happening. On a single-read-group file the question is not asked
+                // at all: there is one group a record could be in.
+                let RecordOwner::Mine(owner) = owner_of_cram_record(&record, &self.resolution)?
+                else {
+                    decoded.other_sample_records += 1;
+                    continue;
+                };
                 let record = RecordBuf::try_from_alignment_record(&self.header, &record)?;
-                let owner = resolve_read_group(&record, &self.resolution)?;
                 decoded.push(&record, owner)?;
             }
         }
@@ -814,6 +844,47 @@ impl CramRegionSource {
 
         Ok(Some(decoded))
     }
+}
+
+/// Which read group a **borrowed** CRAM record belongs to, without building anything.
+///
+/// A CRAM does not store a read-group string per record: it stores a *number*, an index into
+/// the header's `@RG` list, and noodles turns that number into the declared name on demand
+/// without copying it. So this question can be answered while the record is still borrowed
+/// from the decompressed block — before the copy that turns it into a `RecordBuf`.
+///
+/// **A file declaring one read group is not asked at all.** Every record in it belongs to that
+/// group whatever it says, which is also what lets a file re-headered without rewriting its
+/// records be read ([`ReadGroupResolution::Sole`]).
+fn owner_of_cram_record(
+    record: &cram::Record<'_>,
+    resolution: &ReadGroupResolution,
+) -> io::Result<RecordOwner> {
+    use noodles_sam::alignment::Record as _;
+    use noodles_sam::alignment::record::data::field::{Tag, Value};
+
+    if resolution.every_record_is_mine() {
+        return resolution
+            .owner_of(None)
+            .map_err(|unresolved| io::Error::new(io::ErrorKind::InvalidData, unresolved));
+    }
+
+    let data = record.data();
+    let name = match data.get(&Tag::READ_GROUP).transpose()? {
+        Some(Value::String(name)) => Some(name),
+        // A non-string `RG` is a malformed record, not an absent tag; reading it as absent
+        // would report a broken file as a missing tag.
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a CRAM record has an RG field that is not a string",
+            ));
+        }
+        None => None,
+    };
+    resolution
+        .owner_of(name.as_ref().map(AsRef::<[u8]>::as_ref))
+        .map_err(|unresolved| io::Error::new(io::ErrorKind::InvalidData, unresolved))
 }
 
 impl RecordSource for CramRegionSource {
@@ -839,23 +910,17 @@ impl RecordSource for CramRegionSource {
                     .container
                     .as_ref()
                     .expect("pending indices only exist while their container is held");
-                // The read group was resolved at decode, while the record still carried its `RG`
-                // tag — which is what lets the tags be dropped (see `decode_container_at`).
-                // Copied out before the record is rebuilt so the borrow ends here.
-                let owner = held.index[index as usize].owner;
-                match owner {
-                    RecordOwner::Mine(id) => {
-                        // Rebuilt into the caller's buffer rather than moved in, so the buffer's
-                        // allocations are reused across the whole stream (`DecodedContainer::fill`).
-                        held.fill(index as usize, &mut buf.record);
-                        buf.read_group = Some(id);
-                        return Ok(true);
-                    }
-                    RecordOwner::OtherSample => {
-                        self.other_sample_records += 1;
-                        continue;
-                    }
-                }
+                // The read group was resolved at decode, before the record was built — which
+                // is what lets a foreign record cost nothing and the tags be dropped (see
+                // `decode_container_at`). Copied out before the record is rebuilt so the
+                // borrow ends here. Every record the container kept is this sample's; the
+                // foreign ones were counted and dropped there.
+                let id = held.index[index as usize].owner;
+                // Rebuilt into the caller's buffer rather than moved in, so the buffer's
+                // allocations are reused across the whole stream (`DecodedContainer::fill`).
+                held.fill(index as usize, &mut buf.record);
+                buf.read_group = Some(id);
+                return Ok(true);
             }
 
             match self.refill() {
