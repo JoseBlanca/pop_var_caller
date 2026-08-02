@@ -11,7 +11,9 @@ validates a single indexed BAM/CRAM against the reference and yields its reads f
 **permutation hole** and the **coordinate-sort-order check**. Under [`ng_proposal.md`](ng_proposal.md)
 §1 and [`../arch/module_layout.md`](../arch/module_layout.md). Naming: **STR** in prose, `ssr` in
 code. Code-facing companion: [`../arch/alignment_file.md`](../arch/alignment_file.md) (types &
-interfaces).*
+interfaces). **⚠ §3.3's cost model is superseded — see
+[`alignment_cursor.md`](alignment_cursor.md) (2026-08-02), which replaces seek-per-query and the
+reader pool with a per-worker cursor; the rest of this document stands.***
 
 ---
 
@@ -315,6 +317,38 @@ silently-wrong merge.
 one file. Aggregation across files is refused on purpose; see `sample_reads.md` §3.3 for why.
 
 ### 3.3 Cost: open once, seek per query
+
+> **⚠ Superseded (2026-08-02). Read [`alignment_cursor.md`](alignment_cursor.md) before building
+> anything from this section.**
+>
+> Everything below still describes the code as it stands, and its reasoning about *index* cost is
+> unchanged. **One claim was falsified by measurement; one decision was reversed on a separate
+> architecture argument that measurement does not support; one prediction came true.** They are
+> listed apart because conflating them would let the architecture change borrow the authority of
+> the number:
+>
+> - **"BAM seeks are cheap" is false.** On HG002 30×, chromosome 21: **82 % of seeks target the
+>   BGZF block the reader is already holding** (27,731 of 33,671), those seeks are **30 % of the
+>   walk**, and the same 35,228 records are decoded **1,067,729 times**. noodles re-inflates
+>   unconditionally on `seek` (noodles-bgzf 0.47.0 `src/io/reader.rs:175-186`), so each is a full
+>   64 KB decompression. Consecutive queries overlap because the caller widens each region by
+>   `max_record_span`, so ~93 % of what a query decodes the previous one already decoded.
+> - **Reader pooling is removed — and *not* because it was measured slow.** It is not: its locks
+>   are 3 samples in 25,446, and the whole per-region query setup is 0.58 µs. Retention even works
+>   *through* it today, which is how the CRAM container cache already survives across queries
+>   (`open_bam.rs:169-172`). It goes on a separate argument — one home for the reuse rule, no
+>   per-region reference-accessor factory, and the shape a per-worker
+>   fan-out needs, which is what production already reached for CRAM (*"One per worker (not
+>   pooled)"*, `segment_reader.rs:1121-1123`). **This section's `&self`-plus-pool reasoning was
+>   sound for its goal; the goal is now met a different way.**
+> - **The forward sweep this section anticipated is now being built.** *"A sorted batch of loci
+>   could later be served by one forward sweep instead of N seeks… the interface must not preclude
+>   it; but it is not built now."* That is exactly what the cursor is. The interface did not
+>   preclude it, so the prediction held.
+>
+> Unchanged and still load-bearing: the index and header are parsed once and never per query
+> (§3.1, T13); ng drives the index and the reader separately rather than using noodles'
+> `IndexedReader`; and the `.crai` prefix-rescan inefficiency is not inherited.
 
 **This is the baseline, not an optimisation.** The STR path issues on the order of 10⁶ region queries
 (one per locus), and a sample multiplies that by its file count, so anything paid *per query* is paid
