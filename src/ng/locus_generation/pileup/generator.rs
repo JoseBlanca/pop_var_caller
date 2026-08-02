@@ -19,9 +19,9 @@ use std::sync::Arc;
 use crate::ng::locus_generation::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, SampleLocusObservations,
 };
-use crate::ng::read::input::SampleReads;
 use crate::ng::read::input::cursor::CursorCounts;
 use crate::ng::read::input::sample_cursor::SampleCursor;
+use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{ContigId, GenomeRegion, Position};
@@ -667,11 +667,17 @@ pub struct PileupGenerator<R: RawRefSeq, P: ReadPreparer> {
     /// coordinates: one accessor between them would be one file position and one sliding
     /// window serving k readers, and its eviction would be driven by whichever asked last.
     ///
-    /// **`+ Send` costs nothing and is here for the fan-out.** A bare `Box<dyn FnMut>` makes
-    /// this generator `!Send` whatever `R` and `P` are. Nothing is blocked today — the
+    /// **`+ Send` costs nothing *here* and is kept for the fan-out.** A bare `Box<dyn FnMut>`
+    /// makes this generator `!Send` whatever `R` and `P` are. Nothing is blocked today — the
     /// `Rc<RefCell<ReadPreparation>>` below already blocks it — but `locus_generation.md` §9
-    /// gives each worker its own generator, so this would become a second blocker to
-    /// remove for no gain.
+    /// gives each worker its own generator, so this would become a second blocker to remove
+    /// for no gain.
+    ///
+    /// **The STR generator deliberately does *not* carry the bound**, and the difference is a
+    /// caller rather than a preference: `ng_ssr_cohort_stutter` hands every file a clone of one
+    /// `Arc<WindowedRefSeq>`, which is `!Send` because `WindowedRefSeq` holds a `RefCell` and is
+    /// therefore `!Sync`. Every caller of *this* constructor builds a fresh accessor per call,
+    /// capturing only a `PathBuf` and two `Arc`s.
     make_reference: Box<dyn FnMut() -> R + Send>,
     /// The preparer and its scratch, lent to each region's read stream.
     preparation: Rc<RefCell<ReadPreparation<P>>>,
@@ -704,6 +710,13 @@ pub struct PileupGenerator<R: RawRefSeq, P: ReadPreparer> {
     /// it at the boundary, so they are taken there; the live one is asked directly. See
     /// [`cursor_counts`](Self::cursor_counts).
     retired_cursor_counts: CursorCounts,
+    /// The sample this generator opened its first cursor for. **One sample per generator** —
+    /// a second one is refused rather than answered out of the first one's files. See
+    /// [`open_walk`](Self::open_walk).
+    ///
+    /// `None` until the first cursor opens, so a generator is unclaimed until it reads
+    /// something.
+    sample: Option<SampleIdentity>,
     /// A fatal error that has happened and not yet been reported.
     ///
     /// The stream's errors are **shed** (it hands the walker an infallible item
@@ -734,8 +747,8 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
     /// parameter list (arch §3.6). The `'static` that comes with the box is the one real
     /// constraint: the factory is called for the whole life of the generator, at every
     /// chromosome boundary, so it must not borrow anything shorter-lived — which every
-    /// caller already satisfies by capturing owned paths and shared indexes. `Send` is
-    /// required for the reason on the field.
+    /// caller already satisfies by capturing owned paths and shared indexes. `Send` is required
+    /// for the reason on the field, and every caller satisfies that too.
     ///
     /// Fails only on a configuration a witness run could not describe — see
     /// [`PileupGeneratorConfig::check`].
@@ -765,6 +778,7 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
             chromosome: None,
             walk: None,
             retired_cursor_counts: CursorCounts::default(),
+            sample: None,
             pending_failure: None,
             failed: false,
         })
@@ -804,12 +818,7 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
     pub fn cursor_counts(&self) -> CursorCounts {
         let mut total = self.retired_cursor_counts;
         if let Some(chromosome) = &self.chromosome {
-            let live = chromosome.walker.reads().reads.counts();
-            total.reads_decoded += live.reads_decoded;
-            total.reads_replayed += live.reads_replayed;
-            total.regions_reusing += live.regions_reusing;
-            total.regions_jumping += live.regions_jumping;
-            total.reads_evicted += live.reads_evicted;
+            total += chromosome.walker.reads().reads.counts();
         }
         total
     }
@@ -983,17 +992,35 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
     /// The walk is **stopped** at the region's own end rather than run to the end of the
     /// halo the cursor is pointed at — see [`PileupWalker::move_to_region`], and
     /// [`PreparedSampleReads::query`] for the halo itself.
+    ///
+    /// # One sample per generator, and it is checked here
+    ///
+    /// A cursor is opened for **one sample's files** and kept for a whole chromosome. Handing
+    /// this generator a second sample would answer that sample out of the first one's files —
+    /// with no error, and output of exactly the right shape. So the sample is remembered and a
+    /// foreign one is refused ([`ForeignSample`](LocusGenerationError::ForeignSample)).
+    ///
+    /// **No caller does this today, and the STR generator's did.** The check is here because
+    /// the two generators are handed a `&SampleReads` per call by the same trait, so the
+    /// mistake is equally available on both — it was simply made on the other one first.
     fn open_walk(
         &mut self,
         region: GenomeRegion,
         reads: &SampleReads,
     ) -> Result<(), LocusGenerationError> {
+        let sample = reads.identity();
+        if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
+            return Err(LocusGenerationError::ForeignSample { region });
+        }
         if self
             .chromosome
             .as_ref()
             .is_none_or(|chromosome| chromosome.contig != region.contig)
         {
             self.enter_chromosome(region, reads)?;
+            // Adopted only once a cursor exists, so a failed open leaves the generator
+            // unclaimed and a retry with the same sample still works.
+            self.sample = Some(sample);
         }
         // Saturating, and in the safe direction: the walker's positions are
         // `u32`, so a region ending past 4 Gb cannot be walked at all, and a
@@ -1037,12 +1064,7 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
         if let Some(retiring) = self.chromosome.take() {
             // Taken before the walker is consumed: a cursor's tallies die with it, and they
             // are what says whether the cursor did anything (see `cursor_counts`).
-            let counts = retiring.walker.reads().reads.counts();
-            self.retired_cursor_counts.reads_decoded += counts.reads_decoded;
-            self.retired_cursor_counts.reads_replayed += counts.reads_replayed;
-            self.retired_cursor_counts.regions_reusing += counts.regions_reusing;
-            self.retired_cursor_counts.regions_jumping += counts.regions_jumping;
-            self.retired_cursor_counts.reads_evicted += counts.reads_evicted;
+            self.retired_cursor_counts += retiring.walker.reads().reads.counts();
 
             let mut chain_ids = retiring.walker.into_chain_ids();
             // **Redundant with `WalkerState::begin_region`, and kept anyway.** The next
@@ -2409,6 +2431,65 @@ mod tests {
             after_second.reads_decoded > after_first.reads_decoded,
             "the second chromosome's reads must add to the first's, not replace them: \
              {after_first:?} then {after_second:?}",
+        );
+    }
+
+    /// **A second sample through one generator is refused, not answered.**
+    ///
+    /// A generator opens a reader for one sample's files and keeps it for a whole chromosome,
+    /// but the `LocusGenerator` trait hands it a `&SampleReads` afresh on every call. Without
+    /// this check it would answer the second sample out of the **first** sample's files, with
+    /// no error and output of exactly the right shape.
+    ///
+    /// No caller of *this* generator loops samples today. The STR generator's did, and review
+    /// caught it there; the two are handed their reads by the same trait, so the mistake is
+    /// equally available here.
+    ///
+    /// Sample B's read is 60 bases from the region, so any locus it produces is A's.
+    #[test]
+    fn a_second_sample_through_one_generator_is_refused() {
+        let (_ra, _ba, sample_a) = sample_reads_with(&[read_named_with_length("a0", 0, 10, 30)]);
+        let (_rb, _bb, sample_b) = sample_reads_with(&[read_named_with_length("b0", 1, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        assert!(
+            !loci_of(&mut generator, region(0, 1, 40), &sample_a).is_empty(),
+            "sample A's read must yield loci, or this test cannot fail",
+        );
+
+        generator.begin_segment(region(0, 1, 40));
+        match generator.next_locus(&sample_b) {
+            Err(LocusGenerationError::ForeignSample { region: named }) => {
+                assert_eq!(
+                    named,
+                    region(0, 1, 40),
+                    "the refusal names the region asked for"
+                );
+            }
+            other => panic!("expected a refusal naming the foreign sample, got {other:?}"),
+        }
+    }
+
+    /// **A generator per sample is the shape that works** — the other half of the test above,
+    /// because "refuses everything" would pass that one on its own.
+    #[test]
+    fn a_generator_per_sample_gives_each_sample_its_own_reads() {
+        let (_ra, _ba, sample_a) = sample_reads_with(&[read_named_with_length("a0", 0, 10, 30)]);
+        let (_rb, _bb, sample_b) = sample_reads_with(&[read_named_with_length("b0", 1, 10, 30)]);
+
+        let anchors_for = |reads: &SampleReads| {
+            let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+            anchors(&loci_of(&mut generator, region(0, 1, 40), reads))
+        };
+
+        assert!(
+            !anchors_for(&sample_a).is_empty(),
+            "sample A's read is on this contig and must yield loci",
+        );
+        assert!(
+            anchors_for(&sample_b).is_empty(),
+            "sample B's only read is on another contig and must yield nothing — which is the \
+             whole point",
         );
     }
 

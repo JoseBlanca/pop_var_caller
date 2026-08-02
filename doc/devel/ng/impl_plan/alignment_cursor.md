@@ -165,7 +165,28 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
   > over the same coordinates, so one accessor between them would be one file position and one
   > sliding window. It is now called once per file per *chromosome*, which is perf-review L2
   > closed. Cost: a `'static` bound every caller already satisfies.
-- ☐ **D3.** The STR generator, same change. *Depends:* D2. *Source:* `ssr.rs:375`.
+- ✅ **D3.** The STR generator, same change. *Depends:* D2. *Source:* `ssr.rs:375`.
+
+  > **⚠ "Same change" hid a defect the generic generator's shape could not have.** A generator
+  > keeps its reader for a whole chromosome, but the `LocusGenerator` trait hands it a
+  > `&SampleReads` on *every* call — and the first version keyed the kept reader on the
+  > chromosome alone, so the sample argument was read once and ignored after that.
+  > `ng_ssr_cohort_stutter` shares one generator across every sample, asking all of them about
+  > one repeat before moving on, so the first sample would have answered for all of them: one
+  > plant's reads, N times, under N names, with no error. Both review agents found it
+  > independently and both proved it.
+  >
+  > **Fixed on the owner's decision: one generator per sample, and a generator refuses a sample
+  > it was not opened for.** Re-opening on a change of sample — the obvious alternative — would
+  > open one reader per sample *per repeat* in a region-major walk, which is worse than the
+  > per-repeat query it replaced. `SampleReads::identity` is the new interface the check needs;
+  > the guard is on both generators. Nothing already measured is affected: the recorded tomato
+  > results predate this branch.
+  >
+  > **Measured:** `ng_ssr_loci_dump` on chromosome 21, **−28 % of CPU time**, dump
+  > byte-identical. Wall time does not move — that tool's wall is the reference checksum on
+  > another thread. Repeats are far apart, so the saving is smaller than the generic
+  > generator's, which is why a number was owed rather than an argument.
 
 > **Checkpoint D:** both generators run through cursors; the STR dump and the generic dump are
 > byte-identical to their committed baselines. **The old API is still there and still used by the

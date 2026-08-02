@@ -26,7 +26,9 @@ use crate::ng::alignment::{
     BestPathAligner, PerQualityEmission, RepeatContext, RepeatSpan, StutterModel,
 };
 use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::input::SampleReads;
+use crate::ng::read::input::cursor::{CursorCounts, CursorError};
+use crate::ng::read::input::sample_cursor::SampleCursor;
+use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::ref_seq::{ContigTable, RawRefSeq, RefSeq, RefSeqError};
 use crate::ng::region_typing::segment_criteria::SsrSegment;
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
@@ -359,34 +361,37 @@ pub struct CappedReads {
 /// Admission is **relevance** — overlap with `query_span`, which `SampleReads` already applies
 /// — **not** spanning: production's `reaches_locus` gate is deliberately not ported, because a
 /// read that runs off mid-tract is exactly what a partial observation is made of (spec §2). The
-/// cap sits between fetch and align; `None` keeps every read. `make_reference` is the per-query
-/// reference factory `reads_in_region` needs for the mismatch-fraction filter.
+/// cap sits between fetch and align; `None` keeps every read.
+///
+/// **Pointed at a cursor, not handed a query — D3.** The cursor covers `query_span`'s
+/// chromosome and stays open across every locus on it, so consecutive loci that share reads
+/// decode them once (`spec/alignment_cursor.md` §1). Making the cursor and moving it to the
+/// right chromosome is the caller's job; this only points it at the span.
 pub fn fetch_capped_reads<R: RawRefSeq>(
-    reads: &SampleReads,
+    reads: &mut SampleCursor<R>,
     query_span: GenomeRegion,
     seed: u64,
     max_reads_per_locus: Option<u32>,
-    make_reference: impl FnMut() -> R,
 ) -> Result<CappedReads, LocusGenerationError> {
     // **The region these failures are attributed to is the span queried**, this
     // function knowing no other: it is handed a tract-plus-margin span, not the
     // segment it came from. Every other attachment in this module names the
     // segment's own region (`LocusGenerationError`'s doc).
-    let stream = reads
-        .reads_in_region(query_span, make_reference)
+    reads
+        .move_to_region(query_span)
         .map_err(|source| LocusGenerationError::OpenReadQuery {
             region: query_span,
-            source,
+            source: source.into(),
         })?;
-    let read_failed = |source| LocusGenerationError::Reads {
+    let read_failed = |source: CursorError| LocusGenerationError::Reads {
         region: query_span,
-        source,
+        source: source.into(),
     };
     let mut fetched = 0u64;
     let kept = match max_reads_per_locus {
         Some(cap) => {
             let mut reservoir = Reservoir::new(cap as usize, seed);
-            for read in stream {
+            while let Some(read) = reads.next_read() {
                 reservoir.offer(read.map_err(read_failed)?);
                 fetched += 1;
             }
@@ -394,7 +399,7 @@ pub fn fetch_capped_reads<R: RawRefSeq>(
         }
         None => {
             let mut all = Vec::new();
-            for read in stream {
+            while let Some(read) = reads.next_read() {
                 all.push(read.map_err(read_failed)?);
                 fetched += 1;
             }
@@ -1822,22 +1827,50 @@ impl<A> RepeatDelimiter for A where
 /// current [`RawRefSeq`] design keeps apart:
 /// - `reference` — the margin fetch ([`SsrLocus::fetch`], [`RefSeq`] + [`ContigTable`]), a
 ///   persistent accessor the generator holds.
-/// - `make_reference` — a **factory** the per-file read query needs
-///   ([`SampleReads::reads_in_region`]): each file's stream owns its own reader, and a
-///   `RawRefSeq` is a stateful reader that is neither `Clone` nor shareable by `&`, so the query
-///   takes `FnMut() -> R` rather than a borrow.
+/// - `make_reference` — a **factory** the cursor needs ([`SampleReads::cursor`]): each file's
+///   cursor owns its own reader, and a `RawRefSeq` is a stateful reader that is neither `Clone`
+///   nor shareable by `&`, so the cursor takes `FnMut() -> R` rather than a borrow.
 ///
 /// These are the same reference logically; a future `Arc`-shared reference would collapse them to
-/// one field with a cheap per-file view. Holding both — the factory rebuilding `R` per query — is
-/// the working stopgap the spec flags (spec §8): correct, and cheap on the in-memory fixtures the
-/// tests and the dump tool run, though a file-backed `R` whose factory reloads is the real
-/// integration this defers.
-pub struct SsrGenerator<R, MF, A: RepeatDelimiter> {
+/// one field with a cheap per-file view. Holding both is the working stopgap the spec flags (spec
+/// §8) — **and D3 took most of its cost away**: the factory is called once per file per
+/// *chromosome* now, where it used to run at every locus, so a file-backed `R` whose factory
+/// reloads is no longer the per-locus tax it was.
+pub struct SsrGenerator<R: RawRefSeq, A: RepeatDelimiter> {
     /// The reference the margin fetch reads the flanks from.
     reference: R,
-    /// Builds a fresh read-query reference for [`SampleReads::reads_in_region`]'s
-    /// mismatch-fraction filter — one per file, per query (see the type doc).
-    make_reference: MF,
+    /// Builds a fresh read reference for the cursor's mismatch-fraction filter — one per file,
+    /// per chromosome (see the type doc).
+    ///
+    /// **Boxed, which is what keeps it off this type's parameter list**, the same trade the
+    /// generic generator took at D2 (arch §3.6). It is called at chromosome boundaries and
+    /// nowhere else, so the indirection is not on any path that matters.
+    ///
+    /// **Not `+ Send`, and a real caller is why.** Review proposed it as free insurance for the
+    /// fan-out. It is not free: `Arc<T>` implements [`RawRefSeq`], and `ng_ssr_cohort_stutter`
+    /// uses that to hand every file a clone of one accessor — but `WindowedRefSeq` holds a
+    /// `RefCell`, so it is `!Sync`, so `Arc<WindowedRefSeq>` is `!Send`, so the closure
+    /// returning it is `!Send`. Requiring `Send` here rules out a caller that exists. The
+    /// fan-out does not need it either: a worker takes its own generator and its own accessor,
+    /// and both generators are already `!Send` through other fields.
+    make_reference: Box<dyn FnMut() -> R>,
+    /// The sample's cursor and the chromosome it covers — **D3.** One per chromosome, minted by
+    /// the first locus on each and rebuilt at every boundary, because nothing in a cursor
+    /// survives a chromosome change (`spec/alignment_cursor.md` §4).
+    ///
+    /// `None` before the first locus. It is *not* cleared per segment: the whole point is that
+    /// it outlives them.
+    cursor: Option<(ContigId, SampleCursor<R>)>,
+    /// What the cursors of *already-retired* chromosomes did — see
+    /// [`cursor_counts`](Self::cursor_counts).
+    retired_cursor_counts: CursorCounts,
+    /// The sample this generator opened its first cursor for. **One sample per generator** —
+    /// a second one is refused rather than answered out of the first one's files. See
+    /// [`cursor_for`](Self::cursor_for) for what that mistake looks like when it is not caught.
+    ///
+    /// `None` until the first cursor opens, so a generator is unclaimed until it reads
+    /// something.
+    sample: Option<SampleIdentity>,
     /// The tract delimiter — the chosen [`RepeatDelimiter`] (algorithm 3 or 4).
     aligner: A,
     /// Reused alignment matrices (the aligner's own scratch type), so it does not reallocate per
@@ -1862,10 +1895,9 @@ pub struct SsrGenerator<R, MF, A: RepeatDelimiter> {
     produced: bool,
 }
 
-impl<R, MF> SsrGenerator<R, MF, SsrUnitRobustAligner<PerQualityEmission>>
+impl<R> SsrGenerator<R, SsrUnitRobustAligner<PerQualityEmission>>
 where
     R: RefSeq + ContigTable + RawRefSeq,
-    MF: FnMut() -> R,
 {
     /// A generator with the **recommended** delimiter — algorithm 4u, the *unit-robust* aligner over
     /// production's [`PerQualityEmission`] table. It is algorithm 4 (unit-slip) hardened by the
@@ -1880,7 +1912,7 @@ where
     /// against this, because unit-robust deliberately departs from production's measurement.
     pub fn with_default_aligner(
         reference: R,
-        make_reference: MF,
+        make_reference: impl FnMut() -> R + 'static,
         config: SsrGeneratorConfig,
         bundle_threshold: Bp,
     ) -> Result<Self, SsrGeneratorConfigError> {
@@ -1894,10 +1926,9 @@ where
     }
 }
 
-impl<R, MF, A> SsrGenerator<R, MF, A>
+impl<R, A> SsrGenerator<R, A>
 where
     R: RefSeq + ContigTable + RawRefSeq,
-    MF: FnMut() -> R,
     A: RepeatDelimiter,
 {
     /// Build a generator over `reference` (the margin fetch), `make_reference` (the read-query
@@ -1907,7 +1938,7 @@ where
     /// [`with_default_aligner`](Self::with_default_aligner).
     pub fn new(
         reference: R,
-        make_reference: MF,
+        make_reference: impl FnMut() -> R + 'static,
         aligner: A,
         config: SsrGeneratorConfig,
         bundle_threshold: Bp,
@@ -1915,7 +1946,10 @@ where
         config.check_flank_within(bundle_threshold)?;
         Ok(Self {
             reference,
-            make_reference,
+            make_reference: Box::new(make_reference),
+            cursor: None,
+            retired_cursor_counts: CursorCounts::default(),
+            sample: None,
             aligner,
             align_scratch: A::Scratch::default(),
             stutter: StutterModel::hipstr_shipped(),
@@ -1931,6 +1965,83 @@ where
     /// The running STR counts — accumulated across every segment, readable at any point.
     pub fn counts(&self) -> &SsrGeneratorCounts {
         &self.counts
+    }
+
+    /// **What the cursors did**, summed over every chromosome walked so far — see
+    /// [`PileupGenerator::cursor_counts`](super::pileup::PileupGenerator::cursor_counts) for the
+    /// argument, which is the same one.
+    ///
+    /// In short: a generator that mints a cursor per locus and one that keeps a cursor per
+    /// chromosome emit **identical loci**, so nothing in the output can tell them apart, and the
+    /// D2 review proved the feature could be switched off with the whole suite green. What
+    /// moves is only what the reader avoided (`spec/alignment_cursor.md` §11.5).
+    pub fn cursor_counts(&self) -> CursorCounts {
+        let mut total = self.retired_cursor_counts;
+        if let Some((_, cursor)) = &self.cursor {
+            total += cursor.counts();
+        }
+        total
+    }
+
+    /// This sample's cursor for `contig`, minting one if the last locus was on another
+    /// chromosome — **D3, and the whole of it.**
+    ///
+    /// The cursor is what replaces a read query per locus. It stays open and positioned, so two
+    /// STR loci close enough to share reads decode them once
+    /// (`spec/alignment_cursor.md` §1). A chromosome change is the one thing it cannot absorb:
+    /// nothing in a cursor survives it — the kept reads are useless and, on CRAM, so are the
+    /// reference bases — so the boundary mints a new one rather than repositioning the old (§4).
+    ///
+    /// **The STR generator's own regions are far apart**, so this reuses far less than the
+    /// generic generator's tiling walk does — and the ratio the Checkpoint C audit measured
+    /// collapses with stride (23× dense, 3.8× at a 13× stride, 0.5× walked backwards). So the
+    /// gain here is **measured, not assumed**: `ng_ssr_loci_dump` on chromosome 21 of HG002 30×
+    /// goes from **17.3 s to 12.5 s of user CPU, −28 %**, with the dump byte-identical. Wall time
+    /// does not move, because that tool's wall is the background whole-genome reference MD5.
+    ///
+    /// The two generators hold **separate** cursors on purpose: their regions interleave, and
+    /// sharing one would tie their lifetimes together (spec §12).
+    ///
+    /// # One sample per generator, and it is checked here
+    ///
+    /// A cursor is opened for **one sample's files** and kept. Handing this generator a second
+    /// sample would answer that sample out of the first one's files — every individual in a
+    /// cohort reporting the first one's reads, with no error and output of exactly the right
+    /// shape. So the sample is remembered alongside the chromosome and a foreign one is refused
+    /// ([`ForeignSample`](LocusGenerationError::ForeignSample)).
+    ///
+    /// **Refused rather than re-opened**, and the arithmetic is why. A cohort tool walks
+    /// region-major — every sample is asked about one repeat before anything moves to the next
+    /// repeat — so re-opening on a change of sample would open one reader per sample *per
+    /// locus*, which is worse than the per-locus query this replaced. A generator per sample
+    /// opens one reader per sample per chromosome, which is what the design assumes anyway
+    /// (`arch/alignment_cursor.md` §2.4 counts open files as `files × generators × workers`).
+    fn cursor_for(
+        &mut self,
+        contig: ContigId,
+        reads: &SampleReads,
+        region: GenomeRegion,
+    ) -> Result<&mut SampleCursor<R>, LocusGenerationError> {
+        let sample = reads.identity();
+        if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
+            return Err(LocusGenerationError::ForeignSample { region });
+        }
+        if self.cursor.as_ref().is_none_or(|(on, _)| *on != contig) {
+            // Taken before the new one is built, so a run never holds two chromosomes'
+            // cursors — and their kept reads — at once. The tallies are taken with it: they
+            // die with the cursor, and they are what says whether it did anything.
+            if let Some((_, retiring)) = self.cursor.take() {
+                self.retired_cursor_counts += retiring.counts();
+            }
+            let cursor = reads
+                .cursor(contig, &mut self.make_reference)
+                .map_err(|source| LocusGenerationError::OpenReadQuery { region, source })?;
+            self.cursor = Some((contig, cursor));
+            // Adopted only once a cursor exists, so a failed open leaves the generator
+            // unclaimed and a retry with the same sample still works.
+            self.sample = Some(sample);
+        }
+        Ok(&mut self.cursor.as_mut().expect("the cursor was just ensured").1)
     }
 
     /// Delimit every kept read for `segment` with this generator's aligner and return the per-read
@@ -1969,12 +2080,15 @@ where
             start: Position(margin_start),
             end: Position(margin_start + margin_len - 1),
         };
+        // Read out before the cursor is borrowed: `cursor_for` takes `&mut self`, and a config
+        // field read in the same call would hold a shared borrow across it.
+        let max_reads_per_locus = self.config.max_reads_per_locus;
+        let seed = seed_for_segment(segment);
         let capped = fetch_capped_reads(
-            reads,
+            self.cursor_for(contig, reads, region)?,
             query_span,
-            seed_for_segment(segment),
-            self.config.max_reads_per_locus,
-            &mut self.make_reference,
+            seed,
+            max_reads_per_locus,
         )?;
 
         // (3) Classify each kept read, keeping the per-read outcome instead of tallying it.
@@ -2041,10 +2155,9 @@ pub struct SegmentDelimitations {
     pub reads: Vec<ReadDelimitation>,
 }
 
-impl<R, MF, A> LocusGenerator<SsrSegment> for SsrGenerator<R, MF, A>
+impl<R, A> LocusGenerator<SsrSegment> for SsrGenerator<R, A>
 where
     R: RefSeq + ContigTable + RawRefSeq,
-    MF: FnMut() -> R,
     A: RepeatDelimiter,
 {
     fn begin_segment(&mut self, region: GenomeRegion) {
@@ -2109,12 +2222,15 @@ where
             start: Position(margin_start),
             end: Position(margin_start + margin_len - 1),
         };
+        // Read out before the cursor is borrowed: `cursor_for` takes `&mut self`, and a config
+        // field read in the same call would hold a shared borrow across it.
+        let max_reads_per_locus = self.config.max_reads_per_locus;
+        let seed = seed_for_segment(segment);
         let capped = fetch_capped_reads(
-            reads,
+            self.cursor_for(contig, reads, region)?,
             query_span,
-            seed_for_segment(segment),
-            self.config.max_reads_per_locus,
-            &mut self.make_reference,
+            seed,
+            max_reads_per_locus,
         )?;
         // Per-locus discards cannot approach 2^32 (the cap and any real depth are far below), so
         // the `as u32` on the locus field below is exact; the run-level counter keeps the u64.
@@ -2478,6 +2594,15 @@ mod tests {
         )
     }
 
+    /// A cursor over the fixture sample's first contig — what
+    /// [`fetch_capped_reads`] is pointed at since D3, in place of the sample plus a
+    /// per-locus query.
+    fn a_cursor(reads: &SampleReads) -> SampleCursor<InMemoryRefSeq> {
+        reads
+            .cursor(ContigId(0), fixture_ref_bases)
+            .expect("the fixture sample opens a cursor")
+    }
+
     /// Open a `SampleReads` over one indexed BAM of `records`, against the fixture reference.
     fn sample_reads_with(
         records: &[noodles_sam::alignment::RecordBuf],
@@ -2511,13 +2636,15 @@ mod tests {
             .collect();
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
 
-        let capped = fetch_capped_reads(&reads, span(1, 100), 42, Some(3), fixture_ref_bases)
-            .expect("fetch succeeds");
+        let mut cursor = a_cursor(&reads);
+        let capped =
+            fetch_capped_reads(&mut cursor, span(1, 100), 42, Some(3)).expect("fetch succeeds");
         assert_eq!(capped.fetched, 5);
         assert_eq!(capped.kept.len(), 3, "capped to 3 of the 5 fetched");
 
-        let uncapped = fetch_capped_reads(&reads, span(1, 100), 42, None, fixture_ref_bases)
-            .expect("fetch succeeds");
+        let mut cursor = a_cursor(&reads);
+        let uncapped =
+            fetch_capped_reads(&mut cursor, span(1, 100), 42, None).expect("fetch succeeds");
         assert_eq!(uncapped.fetched, 5);
         assert_eq!(uncapped.kept.len(), 5, "no cap keeps every read");
     }
@@ -2533,7 +2660,7 @@ mod tests {
         let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
         let kept_positions = |seed| {
             let mut positions: Vec<u64> =
-                fetch_capped_reads(&reads, span(1, 100), seed, Some(5), fixture_ref_bases)
+                fetch_capped_reads(&mut a_cursor(&reads), span(1, 100), seed, Some(5))
                     .expect("fetch succeeds")
                     .kept
                     .iter()
@@ -2556,9 +2683,7 @@ mod tests {
     /// read-query factory are the same all-`A` bases, so fixture reads (also all-`A`) clear the
     /// mismatch filter — the tract content is not real STR sequence, which is fine for the
     /// structural checks D3 owns (real tract parity is E's).
-    fn ssr_generator()
-    -> SsrGenerator<InMemoryRefSeq, fn() -> InMemoryRefSeq, SsrUnitSlipAligner<PerQualityEmission>>
-    {
+    fn ssr_generator() -> SsrGenerator<InMemoryRefSeq, SsrUnitSlipAligner<PerQualityEmission>> {
         // Pinned to unit-slip (algorithm 4), not `with_default_aligner` (now unit-robust): these
         // structural checks assert byte-exact observation baselines established against the
         // production-derived delimiter, so they must not move when the recommended default changes.
@@ -2573,6 +2698,243 @@ mod tests {
             Bp(10),
         )
         .expect("flank within the bundle threshold")
+    }
+
+    /// **The cursor is kept across loci rather than minted for each — D3, and the test that can
+    /// tell.**
+    ///
+    /// A generator that opens a query per locus and one that keeps a cursor per chromosome emit
+    /// **identical loci**; that is the correctness requirement, and it is why the D2 review could
+    /// switch the whole feature off with 1,557 tests green. The only observable is what the
+    /// reader avoided (`spec/alignment_cursor.md` §11.5), which is what `cursor_counts` exists
+    /// for.
+    ///
+    /// Asserted on `regions_reusing`, not on `reads_decoded`: a fresh cursor has no last region
+    /// to compare against, so its first move always jumps — three loci through one cursor jump
+    /// once and reuse twice, and three cursors jump three times.
+    #[test]
+    fn the_cursor_is_kept_across_loci_rather_than_minted_for_each() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("r0", 0, 20, 30),
+            read_named_with_length("r1", 0, 40, 30),
+            read_named_with_length("r2", 0, 55, 30),
+        ]);
+        let mut generator = ssr_generator();
+
+        for (start, end) in [(30u64, 39u64), (45, 54), (60, 69)] {
+            generator.begin_segment(span(start, end));
+            generator
+                .next_locus(&tract(start, end), &reads)
+                .expect("no fetch error")
+                .expect("one locus per segment");
+        }
+
+        let counts = generator.cursor_counts();
+        assert_eq!(
+            (counts.regions_jumping, counts.regions_reusing),
+            (1, 2),
+            "three ascending loci through one cursor jump once — at the first, which has \
+             nothing to reuse — and reuse twice: {counts:?}",
+        );
+        assert_eq!(
+            (counts.reads_decoded, counts.reads_replayed),
+            (3, 4),
+            "the three reads are decoded once each and handed back four more times — locus 2 \
+             replays r0 and r1, locus 3 replays r1 and r2. That ratio *is* the feature: \
+             {counts:?}",
+        );
+        assert_eq!(
+            counts.reads_evicted, 1,
+            "and r0 ends before the third locus begins, so it is dropped — the only witness \
+             that 'the kept set is bounded' is an observation rather than an argument: \
+             {counts:?}",
+        );
+    }
+
+    /// **Every retired chromosome's tallies survive, not just the last one's.**
+    ///
+    /// With a single retirement, accumulating and *overwriting* are numerically identical — so
+    /// `retired += counts` mutated to `retired = counts` passed, and so did dropping four of the
+    /// five fields. Both matter: `regions_reusing` and `regions_jumping` are the only observable
+    /// that says whether the cursor is being kept at all, and a fold that loses them would leave
+    /// the feature detectable on the first chromosome and undetectable on every other.
+    ///
+    /// chr1 → chr2 → chr1 is two retirements, which is what tells the two apart.
+    #[test]
+    fn returning_to_a_chromosome_keeps_every_retired_cursors_tallies() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("chr1-a", 0, 20, 30),
+            read_named_with_length("chr2-a", 1, 20, 30),
+            read_named_with_length("chr2-b", 1, 25, 30),
+        ]);
+        let mut generator = ssr_generator();
+
+        let mut decoded = Vec::new();
+        for (contig, name) in [(0u32, "chr1"), (1, "chr2"), (0, "chr1")] {
+            let segment =
+                SsrSegment::new(name.into(), 30, 39, Motif::new(b"AC").unwrap(), 1.0).unwrap();
+            generator.begin_segment(GenomeRegion {
+                contig: ContigId(contig),
+                start: Position(30),
+                end: Position(39),
+            });
+            generator
+                .next_locus(&segment, &reads)
+                .expect("no fetch error")
+                .expect("one locus per segment");
+            decoded.push(generator.cursor_counts().reads_decoded);
+        }
+
+        assert_eq!(
+            decoded,
+            vec![1, 3, 4],
+            "chr1 decodes one read, chr2 two more, and returning to chr1 decodes its one \
+             again — a fold that overwrote instead of accumulating would report [1, 2, 1]",
+        );
+    }
+
+    /// **A locus on a new chromosome mints a cursor, and the old one's tallies survive it.**
+    ///
+    /// A cursor covers one chromosome and refuses a region on any other (§4), so the generator
+    /// has to notice the boundary. Nothing before D3 could see this: a query per locus carried
+    /// its contig in the query.
+    #[test]
+    fn a_locus_on_a_new_chromosome_mints_a_cursor_and_keeps_the_old_tallies() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("on-chr1", 0, 20, 30),
+            read_named_with_length("on-chr2", 1, 20, 30),
+        ]);
+        let mut generator = ssr_generator();
+
+        generator.begin_segment(span(30, 39));
+        let first = generator
+            .next_locus(&tract(30, 39), &reads)
+            .expect("no fetch error")
+            .expect("one locus per segment");
+        let after_first = generator.cursor_counts();
+
+        // The same coordinates on chr2 — `SsrSegment` carries a contig *name*, the region a
+        // `ContigId`, and the generator's own debug assertion pins that they agree.
+        let on_chr2 = SsrSegment::new("chr2".into(), 30, 39, Motif::new(b"AC").unwrap(), 1.0)
+            .expect("a valid segment");
+        generator.begin_segment(GenomeRegion {
+            contig: ContigId(1),
+            start: Position(30),
+            end: Position(39),
+        });
+        let second = generator
+            .next_locus(&on_chr2, &reads)
+            .expect("chr2 must be reachable — a cursor stuck on chr1 would refuse it")
+            .expect("one locus per segment");
+        let after_second = generator.cursor_counts();
+
+        // Not asserted on `region.contig`: a locus's region is built from `begin_segment`'s,
+        // never from the cursor, so it re-states the test's own input and cannot fail under any
+        // mutation here (review). What is load-bearing is that chr2's *read* arrived.
+        assert!(
+            !first.observations.is_empty(),
+            "chr1's read must reach its locus, or the comparison below is between two nothings",
+        );
+        assert!(
+            !second.observations.is_empty(),
+            "chr2's read must reach the locus, not merely fail to error",
+        );
+        assert!(
+            after_first.reads_decoded > 0,
+            "the first chromosome must decode something, or this test cannot fail: \
+             {after_first:?}",
+        );
+        assert!(
+            after_second.reads_decoded > after_first.reads_decoded,
+            "the retiring cursor's tallies must be taken before it is dropped, not replaced: \
+             {after_first:?} then {after_second:?}",
+        );
+    }
+
+    /// **A second sample through one generator is refused, not answered.**
+    ///
+    /// This is the shape of a real defect, caught by review before it shipped. A generator
+    /// opens a reader for one sample's files and keeps it for a whole chromosome, but the
+    /// `LocusGenerator` trait hands it a `&SampleReads` afresh on every call. Keyed on the
+    /// chromosome alone, it answered the second sample out of the **first** sample's files —
+    /// so a cohort tool asking 51 plants about one repeat would have got one plant's reads 51
+    /// times, under 51 names, with no error and rows of exactly the right shape.
+    ///
+    /// The fixture is built so the wrong answer is unmistakable: sample A has a read on the
+    /// tract, and sample B's nearest read is 45 bases away — outside the queried span
+    /// `[20,49]` — so *any* observation from B is A's.
+    #[test]
+    fn a_second_sample_through_one_generator_is_refused() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let (_ra, _ba, sample_a) = sample_reads_with(&[read_named_with_length("a0", 0, 25, 30)]);
+        let (_rb, _bb, sample_b) = sample_reads_with(&[read_named_with_length("b0", 0, 80, 30)]);
+        let mut generator = ssr_generator();
+        let seg = tract(30, 39);
+
+        generator.begin_segment(span(30, 39));
+        let a = generator
+            .next_locus(&seg, &sample_a)
+            .expect("no fetch error")
+            .expect("one locus per segment");
+        assert_eq!(
+            a.observations.len(),
+            1,
+            "sample A's read must reach the tract, or this test cannot fail",
+        );
+
+        generator.begin_segment(span(30, 39));
+        let refused = generator.next_locus(&seg, &sample_b);
+
+        match refused {
+            Err(LocusGenerationError::ForeignSample { region }) => {
+                assert_eq!(
+                    region,
+                    span(30, 39),
+                    "the refusal names the region asked for"
+                );
+            }
+            Ok(Some(locus)) => panic!(
+                "sample B was answered instead of refused, and with sample A's read — B has \
+                 nothing within 45 bases of this tract: {:?}",
+                locus.observations,
+            ),
+            other => panic!("expected a refusal naming the foreign sample, got {other:?}"),
+        }
+    }
+
+    /// **A generator per sample is the shape that works** — the other half of the test above,
+    /// because "refuses everything" would pass that one on its own.
+    #[test]
+    fn a_generator_per_sample_gives_each_sample_its_own_reads() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        let (_ra, _ba, sample_a) = sample_reads_with(&[read_named_with_length("a0", 0, 25, 30)]);
+        let (_rb, _bb, sample_b) = sample_reads_with(&[read_named_with_length("b0", 0, 80, 30)]);
+        let seg = tract(30, 39);
+
+        let observations_for = |reads: &SampleReads| {
+            let mut generator = ssr_generator();
+            generator.begin_segment(span(30, 39));
+            generator
+                .next_locus(&seg, reads)
+                .expect("no fetch error")
+                .expect("one locus per segment")
+                .observations
+                .len()
+        };
+
+        assert_eq!(
+            observations_for(&sample_a),
+            1,
+            "sample A's read covers the tract",
+        );
+        assert_eq!(
+            observations_for(&sample_b),
+            0,
+            "sample B's read is 45 bases away and must not appear — which is the whole point",
+        );
     }
 
     /// `new` refuses a flank wider than the bundle threshold — the cross-config check at

@@ -390,6 +390,22 @@ pub enum LocusGenerationError {
         #[source]
         source: IngestError,
     },
+    /// A generator was handed a **different sample** from the one it was opened for.
+    ///
+    /// **Each sample needs its own generator.** A generator opens a reader for one sample and
+    /// keeps it positioned for a whole chromosome — that is what makes it fast — but it is
+    /// lent a `&SampleReads` afresh on every call. Sharing one generator between samples would
+    /// therefore answer every sample out of the first one's files: no error, no empty rows, and
+    /// a cohort in which every individual looks identical to the first. This is that mistake,
+    /// caught.
+    ///
+    /// It is a caller bug, not a data problem. Correct code builds a generator per sample and
+    /// never sees it.
+    #[error(
+        "this generator was opened for another sample, so it cannot answer for {region}: \
+         give each sample its own generator"
+    )]
+    ForeignSample { region: GenomeRegion },
     /// A read query failed **mid-stream**, or the alignment input was malformed: the
     /// open already succeeded and reads were flowing.
     #[error("read access over {region} failed during locus generation")]
@@ -435,6 +451,7 @@ impl LocusGenerationError {
         match self {
             LocusGenerationError::TypedRegion(_) => None,
             LocusGenerationError::OpenReadQuery { region, .. }
+            | LocusGenerationError::ForeignSample { region }
             | LocusGenerationError::Reads { region, .. }
             | LocusGenerationError::Reference { region, .. }
             | LocusGenerationError::Walker { region, .. } => Some(*region),

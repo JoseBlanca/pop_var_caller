@@ -95,10 +95,7 @@ fn make_generator<A: RepeatDelimiter>(
     aligner: A,
     config: SsrGeneratorConfig,
     bundle_threshold: Bp,
-) -> Result<
-    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<SsrGenerator<WindowedRefSeq, A>, Box<dyn std::error::Error>> {
     Ok(SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {

@@ -226,10 +226,7 @@ fn make_generator<A: RepeatDelimiter>(
     aligner: A,
     config: SsrGeneratorConfig,
     bundle_threshold: Bp,
-) -> Result<
-    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<SsrGenerator<WindowedRefSeq, A>, Box<dyn std::error::Error>> {
     let generator = SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {
@@ -246,8 +243,8 @@ fn make_generator<A: RepeatDelimiter>(
 
 /// Run one delimiter over one `SsrSegment` and append its rows — the per-aligner half of the walk,
 /// written once so adding a delimiter is one call, not another copy of the loop.
-fn dump_segment<MF, A>(
-    generator: &mut SsrGenerator<WindowedRefSeq, MF, A>,
+fn dump_segment<A>(
+    generator: &mut SsrGenerator<WindowedRefSeq, A>,
     aligner: &'static str,
     counts: &mut AlignerCounts,
     rows: &mut Vec<Row>,
@@ -256,7 +253,6 @@ fn dump_segment<MF, A>(
     sample: &SampleReads,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
-    MF: FnMut() -> WindowedRefSeq,
     A: RepeatDelimiter,
 {
     generator.begin_segment(region);

@@ -259,6 +259,34 @@ pub struct CursorCounts {
     pub reads_evicted: u64,
 }
 
+/// Summing two cursors' tallies — a sample's k files, or a run's chromosomes.
+///
+/// **It is an impl rather than five `+=` lines at each site because there are four such
+/// sites**, and review found that dropping four of the five fields at one of them left the
+/// whole suite green: `regions_reusing` and `regions_jumping` are the only observable that
+/// says whether the cursor is being *kept*, and a fold that quietly loses them makes the
+/// feature undetectable again on every chromosome but the live one. A sixth field added to
+/// this struct is now folded everywhere by construction instead of in three places out of
+/// four.
+impl std::ops::AddAssign for CursorCounts {
+    fn add_assign(&mut self, other: Self) {
+        // Exhaustive destructure, no `..`: a new field is a compile error here until it is
+        // folded, which is the property this impl exists to make free.
+        let Self {
+            reads_decoded,
+            reads_replayed,
+            regions_reusing,
+            regions_jumping,
+            reads_evicted,
+        } = other;
+        self.reads_decoded += reads_decoded;
+        self.reads_replayed += reads_replayed;
+        self.regions_reusing += regions_reusing;
+        self.regions_jumping += regions_jumping;
+        self.reads_evicted += reads_evicted;
+    }
+}
+
 impl<R: RawRefSeq> AlignmentCursor<R> {
     /// A cursor over a scripted list of records, with no file behind it.
     ///

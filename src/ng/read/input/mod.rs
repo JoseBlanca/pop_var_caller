@@ -391,6 +391,46 @@ pub struct SampleReads {
     sample_name: String,
 }
 
+/// Which sample a reader was opened for — see [`SampleReads::identity`].
+///
+/// **Two samples are the same one when they read the same files**, not when they carry the
+/// same name. Names are the wrong test in both directions: a cohort can hold two `SampleReads`
+/// built from different files under one name (the same individual sequenced twice, opened as
+/// two samples), and one file set can be opened twice under names that differ only by how the
+/// caller spelled them. The files are what the reads actually come from, so the files are what
+/// this compares.
+///
+/// It holds shared handles rather than raw addresses, so a freed sample's address cannot be
+/// reused by a later one and quietly compare equal.
+#[derive(Clone)]
+pub struct SampleIdentity {
+    files: Vec<Arc<AlignmentFile>>,
+}
+
+impl PartialEq for SampleIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.files.len() == other.files.len()
+            && std::iter::zip(&self.files, &other.files).all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+}
+
+impl Eq for SampleIdentity {}
+
+impl std::fmt::Debug for SampleIdentity {
+    /// The paths, because that is what an operator can act on. A pointer would say only that
+    /// two things differ, which the comparison already said.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_list()
+            .entries(
+                self.files
+                    .iter()
+                    .map(|file| file.path().display().to_string()),
+            )
+            .finish()
+    }
+}
+
 impl SampleReads {
     /// Open every file, validating each, then check they all name one sample.
     /// Both happen before any read flows.
@@ -509,6 +549,22 @@ impl SampleReads {
     /// The one sample all this sample's files name.
     pub fn sample_name(&self) -> &str {
         &self.sample_name
+    }
+
+    /// Which sample this is, as a token a caller can keep and compare later.
+    ///
+    /// **What it is for.** A locus generator opens a cursor for one sample and keeps it for a
+    /// whole chromosome, but it is handed a `&SampleReads` afresh on every call. Without
+    /// something to compare, a generator handed a *second* sample would keep answering out of
+    /// the first sample's files — every sample in a cohort reporting the first one's reads,
+    /// with no error and output of exactly the right shape. Holding this token lets the
+    /// generator notice and refuse.
+    ///
+    /// Cheap: one atomic increment per file, and a sample has one file in almost every run.
+    pub fn identity(&self) -> SampleIdentity {
+        SampleIdentity {
+            files: self.files.clone(),
+        }
     }
 
     /// How many files this sample has — and the index space of [`counts()`](Self::counts).

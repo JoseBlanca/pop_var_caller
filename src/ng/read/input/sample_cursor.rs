@@ -79,12 +79,7 @@ impl<R: RawRefSeq> SampleCursor<R> {
             Self::Merged(merged) => merged.cursors.iter().fold(
                 crate::ng::read::input::cursor::CursorCounts::default(),
                 |mut total, cursor| {
-                    let counts = cursor.counts();
-                    total.reads_decoded += counts.reads_decoded;
-                    total.reads_replayed += counts.reads_replayed;
-                    total.regions_reusing += counts.regions_reusing;
-                    total.regions_jumping += counts.regions_jumping;
-                    total.reads_evicted += counts.reads_evicted;
+                    total += cursor.counts();
                     total
                 },
             ),
