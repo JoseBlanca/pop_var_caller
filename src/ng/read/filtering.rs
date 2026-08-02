@@ -976,6 +976,18 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
         false
     }
 
+    /// Whether this filter stopped because of a **fatal error**, as opposed to running out of
+    /// input or still running.
+    ///
+    /// A caller that keeps one filter across many regions has to be able to tell the two
+    /// stops apart: an end of input is this region's business, while a failure is the whole
+    /// file's and no later region can be served from it. Without this the distinction exists
+    /// inside the filter and nowhere a caller can see it, and the caller reports later
+    /// regions as **empty** rather than as impossible.
+    pub(crate) fn has_failed(&self) -> bool {
+        self.state == FilterState::Failed
+    }
+
     /// The source underneath, to reposition it.
     ///
     /// **The one thing a long-lived filter needs that a per-query one did not.** Until the

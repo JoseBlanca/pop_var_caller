@@ -351,6 +351,148 @@ mod tests {
         assert!(!source.read_next(&mut buf).expect("no reader is involved"));
     }
 
+    /// A read whose CIGAR consumes no reference — all soft-clip.
+    fn all_soft_clip_at(qname: &str, start: usize) -> RecordBuf {
+        use noodles_core::Position as CorePosition;
+        use noodles_sam::alignment::record::cigar::Op;
+        use noodles_sam::alignment::record::cigar::op::Kind;
+        use noodles_sam::alignment::record::{Flags, MappingQuality};
+        use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+        RecordBuf::builder()
+            .set_name(qname.as_bytes())
+            .set_reference_sequence_id(0)
+            .set_flags(Flags::empty())
+            .set_mapping_quality(MappingQuality::new(60).expect("mapq in range"))
+            .set_alignment_start(CorePosition::try_from(start).expect("1-based"))
+            .set_cigar([Op::new(Kind::SoftClip, 30)].into_iter().collect())
+            .set_sequence(Sequence::from(vec![b'A'; 30]))
+            .set_quality_scores(QualityScores::from(vec![30u8; 30]))
+            .build()
+    }
+
+    /// **The two overlap rules must agree, and this is the read that tells them apart.**
+    ///
+    /// A read consuming no reference is not given an empty footprint: noodles answers `None`
+    /// rather than `Some(0)` for its span, so `alignment_end()` reports the read's own start
+    /// and it touches exactly the one base it is anchored at. This layer applies that rule to
+    /// the *record*; [`read_overlaps`] applies it to the *read* the record was decoded into.
+    ///
+    /// If the two ever disagree, such a read is yielded when it is read fresh and dropped
+    /// when it is replayed from what the cursor kept — a read lost with nothing failing, and
+    /// the answer changing with how the caller happened to walk. Deleting `read_end`'s
+    /// `.max(1)` is exactly that, and it left the whole suite green until this test existed.
+    #[test]
+    fn the_record_rule_and_the_read_rule_agree_on_a_read_with_no_reference_span() {
+        let script = vec![all_soft_clip_at("clip", 40)];
+
+        for (start, end) in [(31u64, 60u64), (40, 40), (1, 39), (41, 100), (1, 10)] {
+            let asked = region(start, end);
+
+            // What this layer says about the record.
+            let mut source = records_over(script.clone());
+            let by_record = !narrowed_to(&mut source, asked).is_empty();
+
+            // What the read-level rule says about the read that record decodes into.
+            let read = crate::ng::read::aligned_read::decode_record(
+                &script[0],
+                crate::ng::types::ReadGroupId(0),
+            )
+            .expect("the fixture record decodes");
+            let by_read = read_overlaps(&read, asked);
+
+            assert_eq!(
+                by_record, by_read,
+                "the record rule and the read rule disagree about {}..={}",
+                start, end,
+            );
+        }
+    }
+
+    /// The read-level rule's own edges, named rather than reached by luck: a review found the
+    /// `pos <= region.end` boundary caught in two full-suite runs out of three.
+    #[test]
+    fn the_read_rule_includes_both_edges_of_the_region() {
+        let read = crate::ng::read::aligned_read::decode_record(
+            &read_at("r", 0, 31),
+            crate::ng::types::ReadGroupId(0),
+        )
+        .expect("the fixture record decodes");
+        // 10 bases from 31, so 31..=40.
+        assert_eq!(read_end(&read), 40);
+
+        assert!(
+            read_overlaps(&read, region(40, 50)),
+            "starts on the last base"
+        );
+        assert!(!read_overlaps(&read, region(41, 50)), "starts after");
+        assert!(
+            read_overlaps(&read, region(20, 31)),
+            "ends on the first base"
+        );
+        assert!(!read_overlaps(&read, region(20, 30)), "ends before");
+        assert!(
+            read_overlaps(&read, region(35, 36)),
+            "wholly inside the read"
+        );
+    }
+
+    /// `continue_into` must **not** move the reader — that is the whole difference between it
+    /// and [`RegionRecords::jump_to`], and the reason a forward region costs no seek.
+    #[test]
+    fn continuing_into_a_region_does_not_move_the_reader() {
+        let mut source = records_over(vec![
+            read_at("a", 0, 10),
+            read_at("b", 0, 40),
+            read_at("c", 0, 70),
+        ]);
+
+        // Drain a narrow region: `a` is yielded, and the stop fires on `b`.
+        assert_eq!(narrowed_to(&mut source, region(1, 25)), ["a"]);
+
+        // Continuing must carry on from there — not start again, which would yield `a` twice.
+        source.continue_into(region(26, 100));
+        let mut buf = NoodlesRawRecord::default();
+        let mut names = Vec::new();
+        while source
+            .read_next(&mut buf)
+            .expect("an in-memory read cannot fail")
+        {
+            names.push(String::from_utf8_lossy(buf.record.name().expect("named")).into_owned());
+        }
+        assert_eq!(names, ["b", "c"]);
+    }
+
+    /// **The record the early stop consumed is handed to the next region first.** The stop
+    /// fires *on* a record, which has already been taken from the reader; a region that
+    /// continues rather than jumping has nothing else that would ever produce it.
+    #[test]
+    fn the_record_the_early_stop_took_is_handed_over_next() {
+        let mut source = records_over(vec![read_at("inside", 0, 10), read_at("stopped-on", 0, 40)]);
+
+        assert_eq!(narrowed_to(&mut source, region(1, 25)), ["inside"]);
+        source.continue_into(region(26, 100));
+
+        let mut buf = NoodlesRawRecord::default();
+        assert!(source.read_next(&mut buf).expect("reads"));
+        assert_eq!(
+            String::from_utf8_lossy(buf.record.name().expect("named")),
+            "stopped-on",
+            "the record the early stop consumed was lost",
+        );
+    }
+
+    /// A **jump** discards what was held, because the reposition will read it again — keeping
+    /// it would hand the same record over twice.
+    #[test]
+    fn a_jump_discards_the_held_record() {
+        let mut source = records_over(vec![read_at("a", 0, 10), read_at("b", 0, 40)]);
+
+        assert_eq!(narrowed_to(&mut source, region(1, 25)), ["a"]);
+        // `b` is held. Jumping re-reads from the start, so it must not also be replayed.
+        assert_eq!(narrowed_to(&mut source, region(1, 100)), ["a", "b"]);
+    }
+
     /// Read groups are resolved on the record actually yielded, and the buffer is stamped —
     /// `RawRecord::decode` refuses an unstamped one, so a missed stamp is a fatal error
     /// rather than a read attributed to whatever came before it.

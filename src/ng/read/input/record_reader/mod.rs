@@ -25,6 +25,20 @@
 //! - **[`begin_region`](RecordReader::begin_region)** positions the reader for a region on
 //!   the chromosome it is reading. Cheap when the reader is already there, a seek when it is
 //!   not.
+//!
+//!   **It *positions*; it must never *bound*.** After it, reading on must yield every record
+//!   from that point to the end of the chromosome — not just the ones inside the region it
+//!   was handed. The region says *where to start*, and nothing else. This is not a style
+//!   preference: the cursor above serves a forward region by carrying on reading without
+//!   repositioning at all (`RegionRecords::continue_into`), so a reader that had quietly
+//!   stopped at the previous region's end would lose every record past it, silently, for
+//!   every region after the first.
+//!
+//!   **The trap this names is specific and easy to fall into at Milestone C.** noodles'
+//!   `query()` returns an iterator bounded by the interval it was given, which satisfies
+//!   every other word of this contract and breaks this one. A BAM arm must either query a
+//!   range that runs to the end of the chromosome, or re-query when it runs out — and either
+//!   way it owes this contract a test.
 //! - **[`read_next`](RecordReader::read_next)** fills the caller's buffer with the next
 //!   record **in position order** and answers whether it filled one. It is the shape
 //!   [`RecordSource::read_next`](crate::ng::read::filtering::RecordSource::read_next)

@@ -128,6 +128,16 @@ pub enum CursorError {
         requested_contig: ContigId,
     },
 
+    /// A region was asked for after a read had already failed.
+    ///
+    /// **The alternative is worse than an error.** A cursor whose file failed cannot serve
+    /// any later region, but it *can* still answer from the reads it happens to be holding —
+    /// so without this the caller gets a plausible, silently short answer for every remaining
+    /// region instead of being told the run is over. The failure was reported once, when it
+    /// happened; this says the cursor has not recovered from it.
+    #[error("cursor on '{}' cannot serve more regions: a read already failed", path.display())]
+    AfterFailure { path: Arc<Path> },
+
     /// Reading the next record from the file failed.
     #[error("reading alignment file '{}' failed", path.display())]
     ReadRecord {
@@ -259,6 +269,15 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             });
         }
 
+        // A cursor whose file has failed serves nothing further. Checked here, after the
+        // chromosome test and before anything moves, so a dead cursor says so rather than
+        // answering later regions out of whatever it is still holding.
+        if self.filter.has_failed() {
+            return Err(CursorError::AfterFailure {
+                path: Arc::clone(&self.path),
+            });
+        }
+
         // **The forget rule, and it is one comparison** (spec §6). Reuse what is held only
         // when the new region begins at or after the last one served; otherwise drop it all
         // and jump.
@@ -349,11 +368,16 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             // back the record its own early stop is already holding (and stops again) or
             // finds the reader at the end. Same answer, same reads decoded, same counters.
             //
-            // So mutating `return None` into `continue` fails no test, and **no test can be
-            // written that it would fail** — its only effect is to avoid walking the rest of
-            // the kept set, which at 5,000 bases of overlap is a scan worth skipping but is
-            // not something the cursor's output or its counters can see. Recorded rather than
-            // left as a mutation that quietly survives.
+            // So mutating `return None` into `continue` fails no test *today*, and the
+            // reason is worth stating exactly: kept reads never decrease in position, so
+            // reaching the layer below would only make it early-stop for the same reason.
+            //
+            // **It is not, however, unobservable in principle**, and an earlier version of
+            // this comment overclaimed that. Walking on consumes records off the reader that
+            // stopping leaves alone — and once the reader is a real file rather than a
+            // scripted list, that read can fail, turning a clean `None` into an error and a
+            // permanently dead filter. So this is a short-circuit that also narrows what can
+            // go wrong, not merely a saving.
             if read.pos > region.end.get() {
                 return None;
             }
@@ -623,6 +647,48 @@ mod tests {
         assert!(reads_of(&mut cursor, region(500, 600)).is_empty());
         let after = region(1, 20);
         assert_eq!(reads_of(&mut cursor, after), by_linear_scan(&script, after));
+    }
+
+    /// **A cursor whose file has failed must say so, not answer short.**
+    ///
+    /// After a fatal read the filter is finished for good — but the cursor is still holding
+    /// reads, so it can keep producing *plausible* answers for every later region: not empty,
+    /// which might be noticed, but **truncated**, which would not be. The failure was
+    /// reported once, when it happened; a later region has to be told the run is over.
+    ///
+    /// Found in review by driving a failing read and then asking for a region past it: the
+    /// cursor answered `Ok` with `[]` where a linear scan had two reads.
+    #[test]
+    fn a_cursor_whose_file_failed_refuses_later_regions_instead_of_answering_short() {
+        let mut script = script();
+        // A record that decodes but whose *filtering* cannot be completed: its footprint runs
+        // off the end of the contig, so the reference fetch fails, which is fatal.
+        script.push(read_named_with_length(
+            "overruns",
+            0,
+            95,
+            READ_LENGTH as usize,
+        ));
+        let mut cursor = cursor_over(script);
+
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+        let mut saw_failure = false;
+        while let Some(read) = cursor.next_read() {
+            if read.is_err() {
+                saw_failure = true;
+                break;
+            }
+        }
+        assert!(saw_failure, "the fixture must actually reach a fatal read");
+
+        let after = cursor.move_to_region(region(1, 100));
+        assert!(
+            matches!(after, Err(CursorError::AfterFailure { .. })),
+            "a cursor that met a fatal error answered a later region instead of refusing: \
+             {after:?}",
+        );
     }
 
     /// A cursor that has not been pointed anywhere yields nothing rather than guessing at a
