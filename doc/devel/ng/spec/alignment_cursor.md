@@ -560,9 +560,30 @@ two consecutive regions are, never by chromosome length. Keeping reads was measu
 **+2.8 % of wall time** — the cost of copying each read — against the 43 % that decompression
 occupies.
 
-**Errors.** Two new cases, both meaning "make a new cursor". Input/output errors keep their
-current shape. The cursor is consumed when it rejects a region, so a half-valid cursor cannot
-exist.
+**Errors.** Two new cases. Input/output errors keep their current shape.
+
+**A rejected region is refused, and the cursor survives it** (owner, 2026-08-02). Asking for a
+region on a chromosome this cursor does not cover **must** return `WrongChromosome` — it is never
+silently ignored, never a no-op, and never answered from the wrong chromosome's reads. But the
+cursor itself is unharmed and still good for its own chromosome.
+
+An earlier draft said the opposite — that the cursor is consumed when it rejects a region, so a
+half-valid cursor could not exist. Three things retire that:
+
+- **There is no half-valid state to protect against.** The chromosome check runs *before* the
+  cursor touches anything: no seek, no dropped reads, nothing repositioned. A refusal leaves the
+  cursor exactly as it was, which is a stronger guarantee than destroying it.
+- **The cost is one-sided.** A cursor holds an open descriptor and, on CRAM, that chromosome's
+  reference bases — hundreds of megabytes. Rebuilding one because a caller passed the wrong
+  region is an expensive answer to a cheap mistake.
+- **This error is a bug report, not a corruption.** §4 already says correct code compares against
+  `contig()` first and never sees it. And a consuming `move_to_region` cannot be written against
+  the interface §8 specifies: `&mut self` cannot consume, and the alternative forces
+  `cursor = cursor.move_to_region(r)?` at every call site.
+
+**The obligation this puts on the implementation:** validate the chromosome *first*, before any
+state is touched, so "unharmed" holds by construction rather than by care — with a test that a
+refused region both returns the error and leaves the cursor serving its own chromosome correctly.
 
 **Threads.** Nothing inside a cursor is locked, because nothing is shared. `AlignmentFile` can be
 used from many threads; a cursor cannot be, in the same way and for the same reason as the

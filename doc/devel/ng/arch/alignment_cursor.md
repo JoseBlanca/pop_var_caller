@@ -197,8 +197,12 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
   region size (`locus_generation_pileup.md:72-80`) — is about a walker that retains nothing, so it
   does not carry over unqualified. A cursor adds what it keeps: the overlap between two
   consecutive regions, ~5,000 bases' worth with this caller (spec §10, arithmetic not measured).
-- **`move_to_region` leaves the cursor usable on any outcome.** `WrongChromosome` means "make a
-  cursor for that chromosome"; the cursor itself is unharmed and still good for its own (spec §4).
+- **`move_to_region` refuses a foreign region and leaves the cursor usable** (owner, 2026-08-02;
+  spec §10 carried the opposite until then). `WrongChromosome` is **returned**, never swallowed and
+  never answered from the wrong chromosome's reads — and the cursor itself is unharmed and still
+  good for its own. **Implementation obligation:** check the chromosome before touching any state,
+  so "unharmed" is true by construction; test that a refused region both errors and leaves the
+  cursor serving its own chromosome.
 - **Abandoning a region is free.** A caller that stops pulling and moves elsewhere leaves nothing
   to unwind: there is no stream object, so there is nothing to give back and nothing to forget.
 
