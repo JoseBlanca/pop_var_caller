@@ -437,6 +437,27 @@ first pass.
 
 ---
 
+## Author responses
+
+Applied 2026-08-02 on `ng-generic-perf`, one commit per finding, each validated with
+`cargo test --lib ng::` (1,471 passed) and re-measured on a quiet host.
+
+| finding | response |
+|---|---|
+| H1 — 64 KiB buffer zeroed per refill | applied in `25c8971` |
+| H2 — base canonicalised 12× | applied in `eaa7427` |
+| H6 — `witness_of` slow path for `Complete` | applied in `1f28287` |
+| H7 — `finalise` resolves each witness twice | applied in `1f28287` |
+| H8 — mate-overlap hash map per column | applied in `b7a08d7`, **at half the reported size** — −1.2 % on a quiet host against the −2.6 % measured while five agents shared the machine |
+| H3, H4 — per-region BAM query re-decodes 30.3× | deferred to the alignment-cursor work: [spec](../../ng/spec/alignment_cursor.md), [plan](../../ng/impl_plan/alignment_cursor.md) |
+| H5 — `folded_reads` as a sorted `Vec` | deferred — touches `open_record.rs` alongside H6/H7 and needs a rebase |
+| H9 — FASTA verification is an 11 s fixed tail | not yet actioned |
+| L1–L4, S1–S5 | not actioned |
+| N1–N6 | no action by design — measured non-wins and checked-and-rejected rules, recorded so they are not re-proposed |
+
+**Combined result of H1, H2, H6, H7 and H8**, chr21, alternating binaries on a quiet host:
+**5.166 s → 4.445 s, −14.0 %**, with `loci=236081 observations=251786` unchanged.
+
 ## Author response convention
 
 Address each finding by its identifier (H1, L2, …) with one of: `applied in <commit>` /
