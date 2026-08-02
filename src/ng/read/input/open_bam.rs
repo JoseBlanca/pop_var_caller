@@ -40,7 +40,7 @@ use crate::ng::read::filtering::{
 };
 use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::record_reader::{BamRecordReader, RecordReader};
+use crate::ng::read::input::record_reader::{BamRecordReader, CramRecordReader, RecordReader};
 use crate::ng::read::input::reference::{OpenReference, ReferenceBasesError};
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{ContigId, GenomeRegion};
@@ -528,30 +528,61 @@ impl AlignmentFile {
             });
         }
 
-        match AlignmentFileKind::from_path(&self.path) {
-            Some(AlignmentFileKind::Bam) => {}
-            other => {
+        let record_reader = match AlignmentFileKind::from_path(&self.path) {
+            Some(AlignmentFileKind::Bam) => {
+                let mut reader = bam::io::reader::Builder
+                    .build_from_path(&self.path)
+                    .map_err(open_error)?;
+                reader.read_header().map_err(open_error)?;
+                RecordReader::Bam(BamRecordReader::new(
+                    reader,
+                    Arc::clone(&self.header),
+                    self.index.clone(),
+                    Arc::clone(&self.path),
+                ))
+            }
+            Some(AlignmentFileKind::Cram) => {
+                let mut reader = cram::io::reader::Builder::default()
+                    .build_from_path(&self.path)
+                    .map_err(open_error)?;
+                reader.read_header().map_err(open_error)?;
+                // **The bases are taken once, for this cursor's chromosome, and held for its
+                // life.** A CRAM decodes against the reference, and a cursor covers one
+                // chromosome — so asking here rather than per region is the whole of what the
+                // cursor changes about the reference (spec §10). Asking the *run's*
+                // `OpenReference`, rather than holding a repository of our own, is what lets
+                // the run drop a chromosome's bases when every cursor on it is gone.
+                let repository = self
+                    .reference
+                    .as_ref()
+                    .and_then(|reference| reference.bases_for_contig(contig))
+                    .ok_or_else(|| AlignmentFileError::Open {
+                        path: self.path.to_path_buf(),
+                        source: std::io::Error::other(
+                            "a CRAM was opened without reference bases to decode against",
+                        ),
+                    })?;
+                let entries = self
+                    .crai_by_contig
+                    .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
+                    .cloned()
+                    .unwrap_or_else(|| Vec::new().into());
+                RecordReader::Cram(CramRecordReader::new(
+                    reader,
+                    Arc::clone(&self.header),
+                    repository,
+                    entries,
+                    self.resolution.clone(),
+                    Arc::clone(&self.path),
+                ))
+            }
+            _ => {
                 return Err(AlignmentFileError::CursorFormatUnsupported {
                     path: self.path.to_path_buf(),
-                    kind: match other {
-                        Some(AlignmentFileKind::Cram) => "CRAM",
-                        _ => "this format",
-                    },
+                    kind: "this format",
                 });
             }
-        }
-
-        let mut reader = bam::io::reader::Builder
-            .build_from_path(&self.path)
-            .map_err(open_error)?;
-        reader.read_header().map_err(open_error)?;
-
-        let record_reader = RecordReader::Bam(BamRecordReader::new(
-            reader,
-            Arc::clone(&self.header),
-            self.index.clone(),
-            Arc::clone(&self.path),
-        ));
+        };
 
         AlignmentCursor::over_records(
             record_reader,
@@ -1439,6 +1470,191 @@ mod tests {
         drop(reference_dir);
     }
 
+    // -----------------------------------------------------------------
+    // The cursor over a real CRAM (alignment cursor, E2)
+    // -----------------------------------------------------------------
+
+    /// A raw reference accessor over the CRAM fixture's FASTA, for the cursor's mismatch
+    /// filter — the same shape the BAM cursor tests use, over the fixture the CRAM needs.
+    fn cram_cursor_reference_bases(fasta: &Path) -> crate::ng::ref_seq::WindowedRefSeq {
+        let info = read_reference_info(ReferenceSource::Fasta {
+            fasta: fasta.to_path_buf(),
+            fai: None,
+        })
+        .expect("read reference");
+        crate::ng::ref_seq::WindowedRefSeq::new(fasta.to_path_buf(), info.contig_list())
+    }
+
+    /// The CRAM cursor fixture: a long contig with **more records than fit in one container**.
+    ///
+    /// noodles writes 10,240 records per container, so a fixture under that produces one
+    /// container and one `.crai` entry — which exercises the container decode and **none** of
+    /// the walk: not the multi-entry loop, not the positioning, not the carry-on past a
+    /// container boundary. That is the CRAM shape of the trap the BAM tests above describe,
+    /// and it would let the oracle pass with a reader that stops at the first container.
+    const CRAM_CURSOR_CONTIG_LENGTH: usize = 400_000;
+    const CRAM_CURSOR_READS: usize = 25_000;
+
+    /// A whole-file linear scan of a CRAM, filtered to the region — the same oracle shape the
+    /// BAM tests use, sharing nothing with the thing it checks: it never seeks and never opens
+    /// the `.crai`.
+    fn cram_names_by_linear_scan(path: &Path, fasta: &Path, region: GenomeRegion) -> Vec<String> {
+        use noodles_fasta as fasta;
+
+        let repository = fasta::Repository::new(
+            fasta::io::indexed_reader::Builder::default()
+                .build_from_path(fasta)
+                .map(fasta::repository::adapters::IndexedReader::new)
+                .expect("the fixture FASTA is indexed"),
+        );
+        let mut reader = cram::io::reader::Builder::default()
+            .set_reference_sequence_repository(repository)
+            .build_from_path(path)
+            .expect("open cram");
+        let header = reader.read_header().expect("read header");
+        let mut names = Vec::new();
+        for record in reader.records(&header) {
+            let record = record.expect("a fixture record");
+            let record = RecordBuf::try_from_alignment_record(&header, &record)
+                .expect("a fixture record converts");
+            let (Some(first), Some(last)) = (record.alignment_start(), record.alignment_end())
+            else {
+                continue;
+            };
+            if record.reference_sequence_id() == Some(region.contig.get() as usize)
+                && usize::from(first) as u64 <= region.end.get()
+                && usize::from(last) as u64 >= region.start.get()
+            {
+                names.push(
+                    String::from_utf8_lossy(record.name().expect("named").as_ref()).into_owned(),
+                );
+            }
+        }
+        names
+    }
+
+    /// **The parity oracle, now through cursors — E2.**
+    ///
+    /// A run of regions is asked of **one CRAM cursor**, in order, and each answer is compared
+    /// against a scan of the whole file. This is the CRAM half of what
+    /// [`a_run_of_regions_through_one_bam_cursor_matches_a_linear_scan`] does, and it is the
+    /// test the milestone exists to pass: the two formats share every line above the record
+    /// reader, so a disagreement here is a container-walk bug.
+    ///
+    /// The regions deliberately cross container boundaries, go backwards, repeat, and end with
+    /// the whole contig — because a reader that positioned correctly but *bounded* at the
+    /// region's end would answer the first region right and every later one short.
+    #[test]
+    fn a_run_of_regions_through_one_cram_cursor_matches_a_linear_scan() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), cram_cursor_reference_bases(&fasta))
+            .expect("a cursor for contig 0");
+
+        // Ascending, adjacent, overlapping, far apart, backward, repeated, and the whole
+        // contig — plus **a region just inside each container's first base**, taken from the
+        // `.crai` itself rather than hard-coded so it stays a boundary whatever the writer's
+        // container size turns out to be.
+        //
+        // Those boundary regions are what makes this able to fail for a reader that positions
+        // at the container *starting* at or after the region and forgets the one before it: a
+        // read beginning a few bases earlier reaches into the region and lives in the previous
+        // container. Without them the fixture's regions all sit comfortably inside a container
+        // and a reader that never stepped back would pass.
+        let mut regions: Vec<(u64, u64)> = vec![
+            (1, 20_000),
+            (20_001, 40_000),
+            (30_000, 90_000),
+            (30_001, 90_001),
+            (300_000, 340_000),
+            (1, 25_000),
+            (1, 25_000),
+            (399_000, 400_000),
+        ];
+        let crai = cram::crai::fs::read(format!("{}.crai", path.display()))
+            .expect("the fixture writes a .crai");
+        for entry in &crai {
+            let Some(first) = entry.alignment_start() else {
+                continue;
+            };
+            let first = usize::from(first) as u64;
+            if first > 1 {
+                regions.push((first + 4, first + 60));
+                regions.push((first, first + 60));
+            }
+        }
+        regions.push((1, 400_000));
+
+        for (start, end) in regions {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            cursor.move_to_region(asked).expect("on this chromosome");
+            let mut actual = Vec::new();
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("the fixture reads decode and filter");
+                actual.push(String::from_utf8_lossy(&read.qname).into_owned());
+            }
+
+            assert_eq!(
+                actual,
+                cram_names_by_linear_scan(&path, &fasta, asked),
+                "the CRAM cursor disagreed with a linear scan at [{start}, {end}] — and it \
+                 had already served every region before it",
+            );
+        }
+    }
+
+    /// The CRAM oracle must be able to fail, and on a fixture that reaches past one container.
+    #[test]
+    fn the_cram_cursor_oracle_is_not_vacuous() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+
+        let covered = cram_names_by_linear_scan(
+            &path,
+            &fasta,
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(CRAM_CURSOR_CONTIG_LENGTH as u64),
+            },
+        );
+        assert_eq!(
+            covered.len(),
+            CRAM_CURSOR_READS,
+            "the whole contig holds every fixture read",
+        );
+
+        let crai = cram::crai::fs::read(format!("{}.crai", path.display()))
+            .expect("the fixture writes a .crai");
+        assert!(
+            crai.len() > 1,
+            "the fixture must span more than one container, or the walk this checks is one \
+             decode and the oracle cannot fail for a reader that stops there: {} entries",
+            crai.len(),
+        );
+    }
+
     /// The oracle must be able to fail: a region the fixture covers has to return reads, or
     /// the test above could be comparing two empty vectors and calling it agreement.
     #[test]
@@ -2159,7 +2375,7 @@ mod tests {
     // BAM/CRAM parity (C5) — T8
     // -----------------------------------------------------------------
 
-    use crate::ng::read::input::test_fixtures::indexed_cram;
+    use crate::ng::read::input::test_fixtures::{indexed_cram, multi_container_cram};
 
     /// A spread of reads with pile-ups, so parity means more than "both
     /// returned nothing".

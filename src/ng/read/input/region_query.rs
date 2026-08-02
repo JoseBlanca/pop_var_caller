@@ -431,6 +431,27 @@ impl Span {
 }
 
 impl DecodedContainer {
+    /// How many records this container held that belong to another sample — counted at decode
+    /// and not otherwise kept. See the field.
+    pub(crate) fn other_sample_records(&self) -> u64 {
+        self.other_sample_records
+    }
+
+    /// How many of this sample's records the container holds.
+    pub(crate) fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// The read group record `i` belongs to, decided at decode.
+    pub(crate) fn read_group(&self, i: usize) -> ReadGroupId {
+        self.index[i].owner
+    }
+
+    /// Rebuild record `i` into `out`, reusing its allocations — see [`Self::fill`].
+    pub(crate) fn fill_record(&self, i: usize, out: &mut RecordBuf) {
+        self.fill(i, out);
+    }
+
     /// Append one decoded record: its bytes move into the flat
     /// buffers and its scalars into the index, and the `RecordBuf` itself is dropped by the
     /// caller.
@@ -773,10 +794,35 @@ impl CramRegionSource {
     /// group it belongs to. `Ok(None)` at end of stream (`read_container` reads 0 — the EOF
     /// marker).
     fn decode_container_at(&mut self, offset: u64) -> io::Result<Option<DecodedContainer>> {
-        self.reader.seek(SeekFrom::Start(offset))?;
+        decode_container_at(
+            &mut self.reader,
+            &self.header,
+            &self.repository,
+            &self.resolution,
+            offset,
+        )
+    }
+}
+
+/// Seek to a container and decode it into [`DecodedContainer`] — **the one body both CRAM
+/// paths use.**
+///
+/// The per-region source and the cursor's record reader differ in *which* containers they
+/// visit and in what they do with the records afterwards; they must not differ in how a
+/// container becomes records. Sharing this is what makes them provably identical rather than
+/// identical-looking, which is the same reason the overlap rule is one function.
+pub(crate) fn decode_container_at(
+    reader: &mut cram::io::Reader<File>,
+    header: &sam::Header,
+    repository: &fasta::Repository,
+    resolution: &ReadGroupResolution,
+    offset: u64,
+) -> io::Result<Option<DecodedContainer>> {
+    {
+        reader.seek(SeekFrom::Start(offset))?;
 
         let mut container = cram::io::reader::Container::default();
-        if self.reader.read_container(&mut container)? == 0 {
+        if reader.read_container(&mut container)? == 0 {
             return Ok(None);
         }
 
@@ -813,8 +859,8 @@ impl CramRegionSource {
             // independent of those borrows.
             let (core_data_src, external_data_srcs) = slice.decode_blocks()?;
             for record in slice.records(
-                self.repository.clone(),
-                &self.header,
+                repository.clone(),
+                header,
                 &compression_header,
                 &core_data_src,
                 &external_data_srcs,
@@ -826,12 +872,11 @@ impl CramRegionSource {
                 // belonging to another sample is therefore counted and dropped without any of
                 // that ever happening. On a single-read-group file the question is not asked
                 // at all: there is one group a record could be in.
-                let RecordOwner::Mine(owner) = owner_of_cram_record(&record, &self.resolution)?
-                else {
+                let RecordOwner::Mine(owner) = owner_of_cram_record(&record, resolution)? else {
                     decoded.other_sample_records += 1;
                     continue;
                 };
-                let record = RecordBuf::try_from_alignment_record(&self.header, &record)?;
+                let record = RecordBuf::try_from_alignment_record(header, &record)?;
                 decoded.push(&record, owner)?;
             }
         }

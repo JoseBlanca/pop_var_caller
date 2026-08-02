@@ -84,6 +84,7 @@
 )]
 
 pub(crate) mod bam;
+pub(crate) mod cram;
 pub(crate) mod in_memory;
 
 use std::io;
@@ -94,6 +95,7 @@ use crate::ng::read::filtering::NoodlesRawRecord;
 use crate::ng::types::GenomeRegion;
 
 pub(crate) use bam::BamRecordReader;
+pub(crate) use cram::CramRecordReader;
 pub(crate) use in_memory::InMemoryRecordReader;
 
 /// Finds records and unpacks them, one variant per place they can come from.
@@ -112,6 +114,8 @@ pub(crate) enum RecordReader {
     InMemory(InMemoryRecordReader),
     /// A BAM, read through its index.
     Bam(BamRecordReader),
+    /// A CRAM, read through its `.crai` — container by container.
+    Cram(CramRecordReader),
 }
 
 impl RecordReader {
@@ -121,6 +125,7 @@ impl RecordReader {
         match self {
             Self::InMemory(reader) => reader.header(),
             Self::Bam(reader) => reader.header(),
+            Self::Cram(reader) => reader.header(),
         }
     }
 
@@ -133,6 +138,7 @@ impl RecordReader {
         match self {
             Self::InMemory(reader) => reader.begin_region(region),
             Self::Bam(reader) => reader.begin_region(region),
+            Self::Cram(reader) => reader.begin_region(region),
         }
     }
 
@@ -142,6 +148,25 @@ impl RecordReader {
         match self {
             Self::InMemory(reader) => reader.read_next(buf),
             Self::Bam(reader) => reader.read_next(buf),
+            Self::Cram(reader) => reader.read_next(buf),
+        }
+    }
+
+    /// Records this reader dropped as another sample's, before they were built.
+    ///
+    /// **Only the CRAM arm has any**, and that is the one asymmetry in this contract. A CRAM
+    /// decides who owns a record while decoding a container, because the read group is a number
+    /// the container carries rather than a tag on the record — so a foreign record is dropped
+    /// there, and the layer above never sees it to step over. Every other arm hands its records
+    /// up untouched and the layer above does the skipping and the counting.
+    ///
+    /// The consequence for the number is real and is stated where it is counted: this one is
+    /// container-granular and can run ahead of where a walk has reached, while the BAM path's is
+    /// exact.
+    pub(crate) fn other_sample_records(&self) -> u64 {
+        match self {
+            Self::InMemory(_) | Self::Bam(_) => 0,
+            Self::Cram(reader) => reader.other_sample_records(),
         }
     }
 }

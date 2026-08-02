@@ -47,7 +47,7 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{NoodlesRawRecord, RecordSource, resolve_read_group};
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::read::input::record_reader::RecordReader;
-use crate::ng::types::{ContigId, GenomeRegion};
+use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 
 /// The records of one region of one file, narrowed from whatever the reader hands over.
 ///
@@ -82,7 +82,12 @@ pub(crate) struct RegionRecords {
     /// Held here rather than in the [`RecordReader`], which is where `arch §1.3` puts it: the
     /// over-read happens in this layer, because this is the layer that knows where the region
     /// ends. A reader cannot hold back a record it was never told to stop at.
-    held: Option<sam::alignment::RecordBuf>,
+    ///
+    /// **The read group is held with it.** The CRAM arm decides a record's read group while
+    /// decoding, and that answer arrives attached to the record; putting the record back
+    /// without it would leave the next region resolving a CRAM record from a tag it does not
+    /// have.
+    held: Option<(sam::alignment::RecordBuf, Option<ReadGroupId>)>,
 }
 
 impl RegionRecords {
@@ -140,7 +145,9 @@ impl RecordSource for RegionRecords {
     /// sources this replaces: one of these outlives every region it serves, so a count reset
     /// at each `move_to` would report only the last region's and lose the rest.
     fn other_sample_records(&self) -> u64 {
-        self.other_sample_records
+        // The reader's own, plus this layer's. Only the CRAM arm contributes any of its own:
+        // it drops a foreign record while decoding, so this layer never sees it to skip.
+        self.other_sample_records + self.reader.other_sample_records()
     }
 
     fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
@@ -155,9 +162,9 @@ impl RecordSource for RegionRecords {
             // The record the previous region's early stop took, before anything new is read:
             // it is the next one in position order, and nothing else will ever produce it.
             match self.held.take() {
-                Some(held) => {
+                Some((held, read_group)) => {
                     buf.record = held;
-                    buf.read_group = None;
+                    buf.read_group = read_group;
                 }
                 None => {
                     if !self.reader.read_next(buf)? {
@@ -180,7 +187,7 @@ impl RecordSource for RegionRecords {
                     .is_some_and(|start| usize::from(start) as u64 > region.end.get())
             {
                 // Held, not dropped: see the field. The next region gets it first.
-                self.held = Some(buf.record.clone());
+                self.held = Some((buf.record.clone(), buf.read_group));
                 return Ok(false);
             }
 
@@ -199,9 +206,18 @@ impl RecordSource for RegionRecords {
                 continue;
             }
 
-            // Resolved on the record actually being yielded, never on one the loop skipped:
-            // the answer can depend on the record's own `RG` tag, so resolving early would
-            // attribute this read to whatever the previous record carried.
+            // **The source may already have decided, and only the CRAM arm ever does.** A
+            // CRAM stores the read group as a number the container carries rather than as a
+            // tag on the record, so it is settled while the container is decoded — which is
+            // what lets every auxiliary tag be dropped there. A record arriving with the
+            // answer attached is not asked again; there is nothing left on it to ask.
+            //
+            // Otherwise resolved on the record actually being yielded, never on one the loop
+            // skipped: the answer can depend on the record's own `RG` tag, so resolving early
+            // would attribute this read to whatever the previous record carried.
+            if buf.read_group.is_some() {
+                return Ok(true);
+            }
             match resolve_read_group(&buf.record, &self.resolution)? {
                 RecordOwner::Mine(id) => {
                     buf.read_group = Some(id);
