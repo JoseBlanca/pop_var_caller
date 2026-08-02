@@ -96,21 +96,34 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 ### Milestone C — the BAM arm
 
-- ☐ **C1.** `RegionRecords`: the region narrowing, the sorted early stop, read-group resolution
+- ✅ **C1.** `RegionRecords`: the region narrowing, the sorted early stop, read-group resolution
   and the tally — lifted out of `BamRegionSource`, written once. *Depends:* B2.
   *Source:* spec §5, arch §2.3.
-- ☐ **C2.** `BamRecordReader`: index query, positioned reading, and the one-record pushback for
+- ✅ **C2.** `BamRecordReader`: index query, positioned reading, and the one-record pushback for
   the record the early stop consumes without yielding. Keeps nothing across regions.
   *Depends:* C1. *Source:* arch §1.3.
-- ☐ **C3. Wire the cursor to BAM — its own commit.** **Oracle:** the extended
+- ✅ **C3. Wire the cursor to BAM — its own commit.** **Oracle:** the extended
   `t5_…returns_exactly_what_a_linear_scan_returns`, driving *a run of ascending regions through
   one cursor* rather than a single query. *Depends:* C2. *Source:* spec §11.3.
-- ☐ **C4.** `SampleCursor`: k file cursors, the argmin merge, and the `Single` arm kept free of
-  dynamic dispatch. *Depends:* C3. *Source:* arch §2.4.
+- ✅ **C4.** `SampleCursor`: k file cursors, the argmin merge, and the `Single` arm kept free of
+  dynamic dispatch. *Depends:* C3. *Source:* arch §2.4. — `c7e992a`, `8c4621d`, `d6443f4`, `741ec56`
 
-> **Checkpoint C:** BAM reads through the cursor. The probe must print the baseline numbers
-> exactly, at 400 bp, 10 kb, 100 kb and whole-contig region sizes. **This is the first point the
-> saving can be measured** — record it against 5.18 s on chromosome 21. Pause for review.
+> **Checkpoint C — reached.** BAM reads through the cursor; the probe prints the baseline
+> numbers at every region size, which at this point means only that nothing broke.
+>
+> **⚠ "The first point the saving can be measured" was not achievable as written**, and the
+> reason is in the dependency graph rather than in the work: at C nothing a user runs goes
+> through the cursor, because `PileupGenerator` still calls `SampleReads::reads_in_region`
+> (`generator.rs:854`). The probe measures the old path either way. Wiring the generators is
+> D1 and D2 — so an end-to-end number is D's to report.
+>
+> **The measurement was therefore made where the change is**, by `examples/ng_cursor_vs_query`:
+> the same typed regions, halo included, once through each path, reads compared before any time
+> is reported. HG002 30×: **chr21 3.723 s → 0.141 s (26.3×)**, **chr1 27.122 s → 0.945 s
+> (28.7×)**, `agreement=exact` on both. On chr1 the cursor decodes **234,730** reads to serve
+> **3,699,522**, reusing for 613,681 of 613,682 regions and jumping once.
+>
+> Pause for review.
 
 ### Milestone D — the callers
 
