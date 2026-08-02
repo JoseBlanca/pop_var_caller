@@ -19,7 +19,6 @@
 //! untouched.
 
 use std::collections::VecDeque;
-use std::iter::Peekable;
 
 use crate::pileup_record::ChainId;
 
@@ -54,6 +53,63 @@ where
     PileupWalker::new(reads.into_iter(), reference, config)
 }
 
+/// A read source with one read of look-ahead, and a way to throw that look-ahead away.
+///
+/// **`Peekable` cannot do the second, and the second is what D1 needs.** The walk decides
+/// where to advance to by looking at the next read without taking it. While a walker is
+/// rebuilt per region that look-ahead is discarded along with the walker, so `Peekable` was
+/// enough; a walker that stays alive across regions has to be able to drop it deliberately,
+/// or it carries the previous region's peeked read into the next one's walk.
+///
+/// Behaviourally identical to `Peekable` today — every existing walk exercises it, and the
+/// stage-1 differential and both dumps agree byte for byte. `forget_lookahead` is the one
+/// thing it adds, and it is unused until the walker is pointed at a second region.
+///
+/// **Throwing the look-ahead away will lose no read, but only because of what sits
+/// underneath**: a cursor keeps every read it hands out, so the next region is offered it
+/// again. Against a source that does not keep its reads, discarding it would discard a read —
+/// which is why this type is not offered as a general utility.
+struct LookAhead<I: Iterator<Item = PreparedRead>> {
+    inner: I,
+    peeked: Option<PreparedRead>,
+}
+
+impl<I: Iterator<Item = PreparedRead>> LookAhead<I> {
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            peeked: None,
+        }
+    }
+
+    fn peek(&mut self) -> Option<&PreparedRead> {
+        if self.peeked.is_none() {
+            self.peeked = self.inner.next();
+        }
+        self.peeked.as_ref()
+    }
+
+    fn next(&mut self) -> Option<PreparedRead> {
+        match self.peeked.take() {
+            Some(read) => Some(read),
+            None => self.inner.next(),
+        }
+    }
+
+    /// Drop the look-ahead, so the next `peek` asks the source again.
+    ///
+    /// Unused until the walker is pointed at a second region (D2), and kept rather than added
+    /// then because it is the reason this type exists at all — without it the swap from
+    /// `Peekable` buys nothing and would read as churn.
+    #[allow(
+        dead_code,
+        reason = "the per-region reset that calls this lands with the generator wiring at D2"
+    )]
+    fn forget_lookahead(&mut self) {
+        self.peeked = None;
+    }
+}
+
 /// Pull-shaped walker over a coordinate-sorted stream of prepared
 /// reads. See [`run`] for the convenience constructor.
 pub struct PileupWalker<I, F>
@@ -61,7 +117,7 @@ where
     I: Iterator<Item = PreparedRead>,
     F: RefSeq,
 {
-    reads: Peekable<I>,
+    reads: LookAhead<I>,
     reference: F,
     state: WalkerState,
     /// Records produced by walker ticks but not yet consumed by
@@ -99,7 +155,7 @@ where
     F: RefSeq,
 {
     pub fn new(reads: I, reference: F, config: &WalkerConfig) -> Self {
-        let mut reads = reads.peekable();
+        let mut reads = LookAhead::new(reads);
         let mut state = WalkerState::new(*config);
         // Initial chromosome anchor: the first peeked read sets
         // `chrom_id`, `walker_pos = 1`, and
