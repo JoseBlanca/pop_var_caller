@@ -28,6 +28,7 @@ pub mod read_groups;
 pub(crate) mod record_reader;
 pub mod reference;
 pub mod region_query;
+pub(crate) mod region_records;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;

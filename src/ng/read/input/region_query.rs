@@ -877,7 +877,7 @@ impl RecordSource for CramRegionSource {
 /// sources so the two containers cannot disagree about what "overlap" means —
 /// which is precisely what the BAM/CRAM parity oracle (T8) would otherwise be
 /// left to discover.
-fn overlaps(record: &sam::alignment::RecordBuf, region: GenomeRegion) -> bool {
+pub(crate) fn overlaps(record: &sam::alignment::RecordBuf, region: GenomeRegion) -> bool {
     match (record.alignment_start(), record.alignment_end()) {
         (Some(first), Some(last)) => {
             usize::from(first) as u64 <= region.end.get()

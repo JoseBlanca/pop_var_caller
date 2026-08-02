@@ -815,9 +815,30 @@ pub struct ReadFilter<S: RecordSource, R> {
     counts: Vec<ReadGroupCounts>,
     /// Reused scratch for #8's reference fetch (touched only when #8 runs).
     ref_buf: Vec<u8>,
-    /// Set on clean end of input or after a fatal error is yielded; makes the
-    /// iterator fused (subsequent `next()`s return `None`).
-    done: bool,
+    /// Whether this filter is still yielding, and if not, **why it stopped**.
+    /// Makes the iterator fused: anything but `Running` returns `None`.
+    state: FilterState,
+}
+
+/// Whether a [`ReadFilter`] is still yielding reads, and if not, why it stopped.
+///
+/// **The two ways of stopping have to be told apart**, which a single `done` flag could not.
+/// A long-lived filter — one the alignment cursor keeps for a whole chromosome and repoints
+/// at each region — reaches `EndOfInput` at the end of *every* region, because the region
+/// narrowing below it reports a region boundary the only way a `RecordSource` can, as
+/// `Ok(false)`. Repositioning must be able to undo that. It must **not** undo `Failed`: a
+/// filter that met a corrupt record or an I/O fault yields the error once and then stays
+/// quiet, and resurrecting it would start the next region reading from a file already known
+/// to be broken (owner, 2026-08-02).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterState {
+    /// Reads are still coming.
+    Running,
+    /// The source reported a clean end of input. Undone by
+    /// [`ReadFilter::restart_after_end_of_input`].
+    EndOfInput,
+    /// A fatal error was yielded. **Permanent** — the only way on is a new filter.
+    Failed,
 }
 
 /// One read group's step-1 tally, keyed by the read group it belongs to.
@@ -928,8 +949,31 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
             config,
             counts: Vec::new(),
             ref_buf: buffers.ref_buf,
-            done: false,
+            state: FilterState::Running,
         }
+    }
+
+    /// Undo a **clean** end of input, so a repositioned source can be read again.
+    ///
+    /// The other half of [`source_mut`](Self::source_mut), and the half that is easy to miss:
+    /// pointing the source at a new region is not enough, because reaching the end of the
+    /// *previous* region already fused this filter. A region boundary arrives here as an
+    /// ordinary end of input — `Ok(false)` is the only way a [`RecordSource`] can report one
+    /// — so without this the first region a cursor drains silences it for the whole
+    /// chromosome. Measured before it existed: two regions through one filter gave 2 reads,
+    /// then 0.
+    ///
+    /// **A failed filter is not restarted**, and that is the point of separating the two
+    /// states. A corrupt record or an I/O fault is yielded once and then the filter stays
+    /// quiet; carrying on would mean reading the next region out of a file already known to
+    /// be broken. Answers whether it restarted anything, so a caller that cares can tell
+    /// "there was nothing to undo" from "this filter is finished for good".
+    pub(crate) fn restart_after_end_of_input(&mut self) -> bool {
+        if self.state == FilterState::EndOfInput {
+            self.state = FilterState::Running;
+            return true;
+        }
+        false
     }
 
     /// The source underneath, to reposition it.
@@ -941,28 +985,14 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     /// reads a chromosome and points the layer below at each new region through it
     /// (`arch/alignment_cursor.md` §2.3).
     ///
-    /// **What this does not do is reset the filter.** The tally keeps running — which is the
-    /// point, since `counts()` is then a whole-cursor total rather than one region's — and so
-    /// does the fused-iterator flag, which [`next`](Self::next) sets on a **clean end of
-    /// input** and on a fatal error alike. Repositioning the source will not restart a
-    /// finished filter.
+    /// **This accessor alone is not enough**, and the clean case is the one that bites: a
+    /// region's end reaches the filter as an ordinary end of input, so the first region a
+    /// cursor drains would fuse it for the rest of the chromosome — measured at 2 reads, then
+    /// 0. Pair it with [`restart_after_end_of_input`](Self::restart_after_end_of_input),
+    /// which is what undoes that and refuses to undo a failure.
     ///
-    /// **So this accessor alone is not enough for `move_to_region`, and the clean case is the
-    /// one that bites.** A region's end reaches the filter as an ordinary end of input — the
-    /// sorted early stop answers `Ok(false)` — so the first region a cursor drains fuses it
-    /// for the rest of the chromosome and every later region yields nothing. Measured: two
-    /// regions driven through one filter give 2 reads and then 0. Pinned by
-    /// `a_filter_that_has_reached_the_end_stays_finished_after_a_reposition`.
-    ///
-    /// How the flag is cleared — a reset, a source that reports a region boundary as
-    /// something other than end-of-input, or a cursor that never drains a region — is a
-    /// Milestone B decision and not an accessor's.
-    #[allow(
-        dead_code,
-        reason = "Milestone A is types only: the cursor that repositions through this lands \
-                  at B1, so today it is reached from this module's own tests and nowhere \
-                  else. Remove this attribute at B1."
-    )]
+    /// The tally is deliberately **not** reset either: `counts()` is then a whole-cursor
+    /// total rather than whichever region happened to be last.
     pub(crate) fn source_mut(&mut self) -> &mut S {
         &mut self.source
     }
@@ -987,7 +1017,7 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
         // `ReadFilter` later must be routed here explicitly or this stops
         // compiling. The `_` bindings name what is deliberately not returned —
         // `reference` and `config` are the caller's to rebuild per query, and
-        // `done` is meaningless once the filter is consumed.
+        // `state` is meaningless once the filter is consumed.
         let Self {
             source,
             record_buf,
@@ -995,7 +1025,7 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
             config: _,
             counts,
             ref_buf,
-            done: _,
+            state: _,
         } = self;
         // Folded here rather than left on the source, which the caller drops:
         // it is part of what this query saw, and after the move it is gone. It
@@ -1071,7 +1101,7 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     /// Mark the iterator finished and yield a fatal error. Shared by the three
     /// fatal arms of `next()`.
     fn fail(&mut self, error: ReadFilterError) -> Option<Result<AlignedRead, ReadFilterError>> {
-        self.done = true;
+        self.state = FilterState::Failed;
         Some(Err(error))
     }
 }
@@ -1081,14 +1111,14 @@ impl<S: RecordSource, R: RawRefSeq> Iterator for ReadFilter<S, R> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // Fused: once a clean EOF or a fatal error has been reported, stay stopped.
-        if self.done {
+        if self.state != FilterState::Running {
             return None;
         }
         loop {
             match self.source.read_next(&mut self.record_buf) {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.done = true;
+                    self.state = FilterState::EndOfInput;
                     return None; // clean end of input
                 }
                 Err(error) => return self.fail(ReadFilterError::Source(error)),
@@ -1836,6 +1866,77 @@ mod tests {
             after_two_passes.kept, 2,
             "both passes' keeps must be counted"
         );
+    }
+
+    /// **The guard that is the whole reason there are three states and not two.** A filter
+    /// stopped by a fatal error must not be restarted: carrying on would read the next region
+    /// out of a file already known to be corrupt or unreadable, and the error has been
+    /// reported exactly once. A reviewer deleted this guard — making the restart
+    /// unconditional — and the entire 1,503-test suite stayed green.
+    #[test]
+    fn a_failed_filter_is_not_restarted_and_says_so() {
+        let mut undecodable = fake(FLAG_PAIRED, 60);
+        undecodable.decode_fails = true;
+        let mut filter = ReadFilter::new(
+            FakeSource::new(vec![undecodable], one_contig_header()),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert!(matches!(
+            filter.next(),
+            Some(Err(ReadFilterError::Decode(_)))
+        ));
+        assert!(
+            !filter.restart_after_end_of_input(),
+            "a failed filter reports that there was nothing to restart",
+        );
+
+        filter.source_mut().rewind();
+        assert!(
+            filter.next().is_none(),
+            "and it stays finished — the only way on is a new filter",
+        );
+    }
+
+    /// The other side: a filter stopped by a clean end of input **is** restarted, and says so.
+    /// Without this the two states are indistinguishable from the outside.
+    #[test]
+    fn a_filter_stopped_cleanly_is_restarted_and_says_so() {
+        let mut filter = ReadFilter::new(
+            FakeSource::new(vec![fake(FLAG_PAIRED, 60)], one_contig_header()),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert!(filter.next().is_some());
+        assert!(filter.next().is_none(), "the source is exhausted");
+
+        assert!(
+            filter.restart_after_end_of_input(),
+            "a cleanly finished filter reports that it restarted",
+        );
+        filter.source_mut().rewind();
+        assert!(
+            filter.next().is_some(),
+            "and it yields the rewound script again",
+        );
+    }
+
+    /// A running filter has nothing to restart, and must not claim it did.
+    #[test]
+    fn a_running_filter_reports_that_there_was_nothing_to_restart() {
+        let mut filter = ReadFilter::new(
+            FakeSource::new(vec![fake(FLAG_PAIRED, 60)], one_contig_header()),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert!(!filter.restart_after_end_of_input());
+        assert!(filter.next().is_some(), "and it is untouched by the asking");
     }
 
     /// A filter finished by a **fatal error** stays finished too, and for the same reason —
