@@ -29,10 +29,12 @@
 //!   is bounded by depth, not by region length, so depth is the axis that claim
 //!   lives on.
 //! - **Region grain** at fixed coverage and span: the same base pairs walked as one
-//!   region, as ten, as a hundred. Each region re-opens a read query and re-fetches
-//!   reference; the halo means reads near a boundary are prepared twice. The grain
-//!   is the caller's choice in the real pipeline, so a harness that cannot vary it
-//!   cannot answer questions about it.
+//!   region, as ten, as a hundred. The halo means reads near a boundary are prepared
+//!   twice, and the grain is the caller's choice in the real pipeline, so a harness
+//!   that cannot vary it cannot answer questions about it. **This is the axis D1
+//!   flattened**: a region used to re-open a read query and re-fetch the reference, and
+//!   now it repositions a cursor that stayed open and hands back reads it already
+//!   decoded, so the slope here is what the change is for.
 //!
 //! Both fixtures are deterministic: the contig comes from a fixed-seed LCG and the
 //! reads are laid down by an integer rule, so two runs on one commit compare.
@@ -65,8 +67,9 @@ mod synthetic_alignment;
 use synthetic_alignment::{SyntheticGeometry, SyntheticSample};
 
 /// Reference span of every fixture, in base pairs. Big enough that per-region
-/// constants (opening the query, the first reference fetch) do not dominate, small
-/// enough that writing the BAM stays a setup cost measured in tenths of a second.
+/// constants do not dominate — since D1 those are a cursor reposition rather than a
+/// fresh query and a first reference fetch — small enough that writing the BAM stays
+/// a setup cost measured in tenths of a second.
 const SPAN: u64 = 100_000;
 
 /// Read length. Illumina-shaped, and the length production's own walker bench sweeps
@@ -92,18 +95,17 @@ fn geometry(coverage: u64) -> SyntheticGeometry {
 /// They are returned together because `next_locus` borrows the `SampleReads`, and a
 /// bench body that rebuilt either between iterations would be timing the setup.
 struct Driver {
-    generator: PileupGenerator<
-        WindowedRefSeq,
-        Box<dyn FnMut() -> WindowedRefSeq>,
-        LeftAlignPreparer<WindowedRefSeq>,
-    >,
+    generator: PileupGenerator<WindowedRefSeq, LeftAlignPreparer<WindowedRefSeq>>,
     reads: SampleReads,
 }
 
 /// Open the fixture and build a generator over it — the same construction
 /// `ng_generic_loci_dump` uses, including the one thing that is not obvious: the
-/// `.fai` is parsed once and shared, because a fresh `WindowedRefSeq::new` per region
-/// re-parses it and more than doubles a region's cost.
+/// `.fai` is parsed once and shared, because a fresh `WindowedRefSeq::new` re-parses
+/// it on its first fetch. Since D1 the factory is called once per file per
+/// *chromosome* rather than once per region, so this matters far less than it did —
+/// it is kept because it is the shape the dump tool uses and this bench exists to
+/// measure that shape.
 fn driver(fixture: &SyntheticSample) -> Driver {
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) =
@@ -139,11 +141,11 @@ fn driver(fixture: &SyntheticSample) -> Driver {
         contigs.clone(),
         index.clone(),
     ));
-    let make_reference: Box<dyn FnMut() -> WindowedRefSeq> = {
+    // Not boxed here any more: `PileupGenerator::new` boxes the factory itself, which is
+    // what keeps it off the type this `Driver` names (arch §3.6).
+    let make_reference = {
         let fasta = fixture.fasta.clone();
-        Box::new(move || {
-            WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
-        })
+        move || WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
     };
     let generator = PileupGenerator::new(
         reference,

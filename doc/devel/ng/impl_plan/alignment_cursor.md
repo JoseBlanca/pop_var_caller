@@ -141,13 +141,30 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 ### Milestone D — the callers
 
-- ☐ **D1.** The walker holds the cursor for the run instead of taking an iterator at
+- ✅ **D1.** The walker holds the cursor for the run instead of taking an iterator at
   construction: `move_to_region` forwarded, and a per-region reset of `WalkerState`, `pending`,
   `done` and `stop_after`. **The largest edit in this plan.** *Depends:* C4.
   *Source:* spec §3.
-- ☐ **D2.** The generic generator: cursor per chromosome, minted at the boundary, and
+- ✅ **D2.** The generic generator: cursor per chromosome, minted at the boundary, and
   `make_reference` deleted — which drops a type parameter from `PileupGenerator`.
   *Depends:* D1. *Source:* spec §3, perf review L2.
+
+  > **⚠ D1 and D2 landed as one step, one review, one commit — agreed with the owner before any
+  > code was written.** They are not separable: nothing in `src/` builds a `PileupWalker` for
+  > more than one region, so D1's `move_to_region` has **no caller** until D2 replaces
+  > `open_walk`, and committing it alone would ship a method carrying `#[allow(dead_code)]`
+  > exercised only by its own tests — the shape B1 shipped and a reviewer found unreachable by
+  > putting `panic!` in the body while thirteen tests passed. The counters are the stronger
+  > reason: the two field-by-field decisions in the per-region reset that can corrupt a total
+  > silently are only checkable against `fold_region_walk`, which is D2's call site. The same
+  > coupling already hit B1/B2 and C1/C2+C3.
+  >
+  > **⚠ `make_reference` is boxed, not deleted.** The stated consequence holds —
+  > `PileupGenerator<R, MakeReference, P>` is now `PileupGenerator<R, P>` — but the factory
+  > itself has to stay: `SampleReads::cursor` takes one, and a sample's k cursors interleave
+  > over the same coordinates, so one accessor between them would be one file position and one
+  > sliding window. It is now called once per file per *chromosome*, which is perf-review L2
+  > closed. Cost: a `'static` bound every caller already satisfies.
 - ☐ **D3.** The STR generator, same change. *Depends:* D2. *Source:* `ssr.rs:375`.
 
 > **Checkpoint D:** both generators run through cursors; the STR dump and the generic dump are

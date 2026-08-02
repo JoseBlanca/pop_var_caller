@@ -51,8 +51,10 @@
 //! one job that file has and the others do not: advancing a position cursor
 //! along genome coordinates over an active read set. The **type** keeps
 //! production's `PileupWalker`, so the differential reads as a straight
-//! comparison. *(A walk covers one region, not the genome; `genome_walk` names
-//! the axis it advances along, not the extent.)*
+//! comparison. *(`genome_walk` names the axis it advances along, not the extent:
+//! since D1 a walker is pointed at one region after another and lives for a
+//! chromosome, and before that it covered a single region — the name was right
+//! for both.)*
 //!
 //! # What this module re-exports, and why
 //!

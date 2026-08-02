@@ -37,7 +37,10 @@
 //! - `PVC_PROBE_WHOLE_CONTIG=1` — replace the typed-region stream with **one region per
 //!   contig**. Not a configuration anybody would ship (it walks SSR regions through the
 //!   generic generator, so the loci differ); it exists to put a **bound** on what the
-//!   per-region constants and the region typing together cost, by removing both.
+//!   per-region constants and the region typing together cost, by removing both. Since D1
+//!   the largest of those constants is gone from the ordinary path too — a region
+//!   repositions a cursor instead of opening a query — so the gap this mode measures is
+//!   narrower than when it was written.
 //!
 //! # What it prints
 //!

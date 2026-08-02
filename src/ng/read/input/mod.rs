@@ -31,6 +31,7 @@ pub mod region_query;
 pub(crate) mod region_records;
 pub mod sample_cursor;
 
+use cursor::CursorError;
 use sample_cursor::SampleCursor;
 
 #[cfg(test)]
@@ -377,12 +378,14 @@ pub fn check_assembly(
 /// decision now, not a compile error.
 #[derive(Debug)]
 pub struct SampleReads {
-    /// `Arc` because a region stream **owns** the file it reads through: it has
-    /// to hand the pooled reader back on `Drop`, and the generic locus
-    /// generator holds one region's stream across many `next_locus` calls while
-    /// it is lent `&SampleReads` per call (arch `locus_generation_pileup.md`
-    /// §2.2). One pool per file either way — the `Arc` is shared, not cloned
-    /// deeply.
+    /// `Arc` because a reader **owns** the file it reads through, and outlives the
+    /// borrow of this `SampleReads` that made it: a generator is lent `&SampleReads`
+    /// per `next_locus` call while holding its reader across many of them (arch
+    /// `locus_generation_pileup.md` §2.2). That is a region stream for the STR
+    /// generator, which hands its pooled reader back on `Drop`, and since D1 a
+    /// **chromosome-lived cursor** for the generic one, which has no pool to hand
+    /// anything back to. One pool per file either way — the `Arc` is shared, not
+    /// cloned deeply.
     files: Vec<Arc<AlignmentFile>>,
     /// The one name all k files agree on.
     sample_name: String,
@@ -546,6 +549,12 @@ impl SampleReads {
 
     /// Every read of the sample overlapping `region`, coordinate-ordered
     /// across all files.
+    ///
+    /// **The generic locus generator no longer calls this** — since D1 it holds a
+    /// [`cursor`](Self::cursor) for a chromosome and points it at each region, which is
+    /// the whole of `spec/alignment_cursor.md`. The STR generator still does, and
+    /// Milestone F is where that ends and this is deleted. Read the paragraphs below
+    /// with that in mind: they were written about a caller that has moved on.
     ///
     /// `&self` for the same reason `AlignmentFile::reads_in_region` is: the
     /// per-file pools make concurrent queries possible without a signature
@@ -884,6 +893,24 @@ pub enum IngestError {
         #[source]
         source: AlignmentFileError,
     },
+
+    /// A cursor could not be pointed at a region, or failed reading one.
+    ///
+    /// **Not tagged with a file index, unlike [`File`](Self::File)**, because a
+    /// [`CursorError`] carries its own provenance: all but one variant names the path it
+    /// came from, which is what a run holding one cursor per chromosome per generator per
+    /// worker actually needs — a bare index would not say which of them spoke.
+    ///
+    /// **The exception is
+    /// [`DuplicateReadAcrossFiles`](CursorError::DuplicateReadAcrossFiles)**, which names
+    /// two cursor *indexes* and no path, and which duplicates a condition this enum already
+    /// has at top level ([`DuplicateReadAcrossFiles`](Self::DuplicateReadAcrossFiles)) —
+    /// raised by the per-region merge this cursor replaces. Until Milestone F deletes that
+    /// path, **a caller matching on the top-level variant to detect "the same file listed
+    /// twice" will miss it on the cursor path.** No consumer does today; F is where the two
+    /// become one.
+    #[error("this sample's cursor failed")]
+    Cursor(#[from] CursorError),
 }
 
 #[cfg(test)]
@@ -1392,9 +1419,12 @@ mod tests {
     ///
     /// That is `LocusGenerator::next_locus(&mut self, segment, reads:
     /// &SampleReads)` in miniature — the contract that cannot carry a lifetime
-    /// (arch `locus_generation_pileup.md` §2.2) — and the generic locus
-    /// generator yields many loci per segment, so it must hold the stream
-    /// between calls. A **compile-time anchor**: with a borrowed stream the
+    /// (arch `locus_generation_pileup.md` §2.2) — and a locus generator yields many
+    /// loci per segment, so it must hold its reader between calls. **The shape this
+    /// models is the STR generator's since D1**: the generic one now holds a
+    /// [`SampleCursor`] for a chromosome rather than a stream for a region, and it
+    /// needs the same lifetime-free property for the same reason. A **compile-time
+    /// anchor**: with a borrowed stream the
     /// `Generator` struct below needs a lifetime parameter and the test does not
     /// build. Named for what the body proves, since the run-time assertion
     /// repeats `drain`; the property that a *second* query cannot disturb a held
