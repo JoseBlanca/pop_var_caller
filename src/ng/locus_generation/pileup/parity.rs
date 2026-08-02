@@ -4035,11 +4035,18 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
     )
     .expect("the alignment file opens against this reference");
 
-    let stream = sample
-        .reads_in_region(region, || {
+    // A cursor for the region's chromosome, pointed at the region — the only way to read an
+    // alignment file since the cursor landed. This census reads one region once, so it reuses
+    // nothing; it is here because the old per-region query no longer exists, not for a saving
+    // it cannot make on a single pass.
+    let mut cursor = sample
+        .cursor(region.contig, || {
             WindowedRefSeq::new(fasta.clone(), contigs.clone())
         })
-        .expect("the region query opens");
+        .expect("a cursor for the region's chromosome opens");
+    cursor
+        .move_to_region(region)
+        .expect("the region is on this cursor's chromosome");
 
     // Prepared **once**. The preparer holds its own accessor, separate from the ones the
     // query factory mints — read preparation's rule.
@@ -4050,7 +4057,7 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
     let mut scratch = <LeftAlignPreparer<WindowedRefSeq> as ReadPreparer>::Scratch::default();
 
     let mut ng_reads: Vec<NgPreparedRead> = Vec::new();
-    for item in stream {
+    while let Some(item) = cursor.next_read() {
         let read = item.expect("the read stream is readable");
         if let Some(prepared) = preparer
             .prepare_read(read, &mut scratch)
