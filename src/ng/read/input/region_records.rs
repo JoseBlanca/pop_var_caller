@@ -39,6 +39,8 @@ use std::io;
 
 use noodles_sam as sam;
 
+use crate::bam::alignment_input::cigar_ref_span;
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{NoodlesRawRecord, RecordSource, resolve_read_group};
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::read::input::record_reader::RecordReader;
@@ -67,6 +69,18 @@ pub(crate) struct RegionRecords {
     /// Records skipped as another sample's — **cumulative across every region this source
     /// serves**, because it now outlives the region it was counted in.
     other_sample_records: u64,
+    /// The record the sorted early stop consumed without yielding.
+    ///
+    /// **Without this, carrying on into the next region loses exactly one read.** The stop
+    /// fires *on* a record — the first one beginning past the region's end — and that record
+    /// has already been taken from the reader. When the next region jumps, the reader is
+    /// repositioned and re-reads it; when the next region **continues** from here, nothing
+    /// re-reads it and it is gone. It is one read, silently, per region boundary.
+    ///
+    /// Held here rather than in the [`RecordReader`], which is where `arch §1.3` puts it: the
+    /// over-read happens in this layer, because this is the layer that knows where the region
+    /// ends. A reader cannot hold back a record it was never told to stop at.
+    held: Option<sam::alignment::RecordBuf>,
 }
 
 impl RegionRecords {
@@ -81,6 +95,7 @@ impl RegionRecords {
             region: None,
             resolution,
             other_sample_records: 0,
+            held: None,
         }
     }
 
@@ -89,14 +104,29 @@ impl RegionRecords {
         self.contig
     }
 
-    /// Point at a new region, and position the reader beneath for it.
+    /// Point at a new region **and reposition the reader**, discarding whatever was held.
+    ///
+    /// What every region did before the forget rule, and what a region that cannot reuse what
+    /// is kept still does: start again from wherever the index says this region begins.
     ///
     /// The chromosome is **not** checked here: the cursor above has already refused a foreign
     /// region before anything was touched, which is what makes its "the cursor is unharmed"
     /// promise true by construction rather than by care (spec §10).
-    pub(crate) fn move_to(&mut self, region: GenomeRegion) -> io::Result<()> {
+    pub(crate) fn jump_to(&mut self, region: GenomeRegion) -> io::Result<()> {
         self.region = Some(region);
+        self.held = None;
         self.reader.begin_region(region)
+    }
+
+    /// Point at a new region **without moving the reader** — the case the whole design exists
+    /// for.
+    ///
+    /// The new region begins at or after the last one served, so every record it needs is
+    /// either already behind the reader (kept above, as reads) or still ahead of it. Reading
+    /// simply carries on, and the record the last early stop took is handed over first (spec
+    /// §4, the *partly held* case).
+    pub(crate) fn continue_into(&mut self, region: GenomeRegion) {
+        self.region = Some(region);
     }
 }
 
@@ -125,8 +155,18 @@ impl RecordSource for RegionRecords {
         };
 
         loop {
-            if !self.reader.read_next(buf)? {
-                return Ok(false);
+            // The record the previous region's early stop took, before anything new is read:
+            // it is the next one in position order, and nothing else will ever produce it.
+            match self.held.take() {
+                Some(held) => {
+                    buf.record = held;
+                    buf.read_group = None;
+                }
+                None => {
+                    if !self.reader.read_next(buf)? {
+                        return Ok(false);
+                    }
+                }
             }
 
             let on_this_contig = buf.record.reference_sequence_id() == Some(self.contig.0 as usize);
@@ -142,6 +182,8 @@ impl RecordSource for RegionRecords {
                     .alignment_start()
                     .is_some_and(|start| usize::from(start) as u64 > region.end.get())
             {
+                // Held, not dropped: see the field. The next region gets it first.
+                self.held = Some(buf.record.clone());
                 return Ok(false);
             }
 
@@ -175,6 +217,29 @@ impl RecordSource for RegionRecords {
             }
         }
     }
+}
+
+/// The last reference position a read touches.
+///
+/// **Matches what noodles reports for the record this read was decoded from**, including the
+/// odd case — because the layer above compares kept *reads* against a region while this layer
+/// compares *records*, and two rules that merely look equivalent is how a read gets yielded
+/// when it is read fresh and dropped when it is replayed.
+///
+/// The odd case: a read whose CIGAR consumes no reference — all soft-clip — is **not** given
+/// an empty footprint. `alignment_span()` answers `None` rather than `Some(0)`, so
+/// `alignment_end()` reports the read's own start, and the read touches exactly the one base
+/// it is anchored at. Measured rather than assumed: a `30S` record at position 40 reports
+/// `end = 40`, and overlaps 31..=60 but not 1..=10.
+pub(crate) fn read_end(read: &AlignedRead) -> u64 {
+    let span = u64::from(cigar_ref_span(&read.cigar));
+    read.pos + span.max(1) - 1
+}
+
+/// Whether a read's footprint touches `region`, by the same rule this module applies to the
+/// record it was decoded from.
+pub(crate) fn read_overlaps(read: &AlignedRead, region: GenomeRegion) -> bool {
+    read.pos <= region.end.get() && read_end(read) >= region.start.get()
 }
 
 #[cfg(test)]
@@ -213,7 +278,7 @@ mod tests {
     /// Every record this source yields for `region`, by name.
     fn narrowed_to(source: &mut RegionRecords, region: GenomeRegion) -> Vec<String> {
         source
-            .move_to(region)
+            .jump_to(region)
             .expect("an in-memory move cannot fail");
         let mut buf = NoodlesRawRecord::default();
         let mut names = Vec::new();
@@ -292,7 +357,7 @@ mod tests {
     #[test]
     fn a_yielded_record_carries_its_read_group() {
         let mut source = records_over(vec![read_at("a", 0, 40)]);
-        source.move_to(region(31, 60)).expect("moves");
+        source.jump_to(region(31, 60)).expect("moves");
 
         let mut buf = NoodlesRawRecord::default();
         assert!(source.read_next(&mut buf).expect("reads"));

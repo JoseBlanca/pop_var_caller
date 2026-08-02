@@ -46,13 +46,24 @@
 //!   yet; it needs the layers to agree on where reading resumes, not just a rule about what to
 //!   keep.
 //!
-//! **What is deliberately absent is the forget rule.** This cursor keeps reads, and throws
-//! all of them away on every `move_to_region`: correct, and no faster than the code it will
-//! replace. Deciding which kept reads *may be reused* is the next step, on its own, because
-//! it is the one part of this design that can lose reads without anything failing — a rule
-//! that drops a read it should have kept produces a wrong genotype, not a crash. Building the
-//! machinery first means the rule arrives as a diff against something already known to be
-//! correct (spec §6, and the plan's principles).
+//! # The forget rule, which is the whole point and one comparison
+//!
+//! **Reuse what is held only when the new region begins at or after the last one served;
+//! otherwise drop everything and jump.** Eviction is its mirror image: drop a kept read once
+//! it ends before the current region begins, because every later region begins at or after
+//! this one.
+//!
+//! That single test is sufficient, and the argument is short enough to check. Split the
+//! records this region needs by where they begin. One beginning at or before the *last*
+//! region's end reaches forward into this region, and this region begins at or after the last
+//! one did — so it overlapped the last region too, was read then, and is held now. One
+//! beginning after the last region's end was where the scan stopped, so the reader is sitting
+//! on it and it is read forward with no jump. Every record is in one of those two groups.
+//!
+//! **There is nothing to tune and no index is consulted.** An earlier design derived a byte
+//! cut-off from the index and was unsound three ways — `min_offset` collapses to byte 0 past
+//! the last populated window on *both* index kinds, and a byte range is not a record set
+//! (spec §6).
 
 #![allow(
     dead_code,
@@ -71,7 +82,7 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError};
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::record_reader::RecordReader;
-use crate::ng::read::input::region_records::RegionRecords;
+use crate::ng::read::input::region_records::{RegionRecords, read_end, read_overlaps};
 use crate::ng::ref_seq::{RawRefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomeRegion};
 
@@ -157,6 +168,13 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// the whole saving, since a read is returned by about a dozen consecutive regions and
     /// would otherwise be turned into an `AlignedRead` a dozen times (spec §5).
     kept: VecDeque<AlignedRead>,
+    /// How far into `kept` the region being served has looked — the index of the next kept
+    /// read to consider. **Not a drain**: a read this region has already been given may still
+    /// be owed to the next one, so it stays where it is and only this marker moves.
+    examined: usize,
+    /// Where the last region served began. **This one number is the entire forget rule**
+    /// (spec §6). `None` before the first region.
+    last_region_start: Option<u64>,
     /// The region being served, or `None` before the first [`move_to_region`](Self::move_to_region).
     region: Option<GenomeRegion>,
     contig: ContigId,
@@ -183,6 +201,8 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         Ok(Self {
             filter: ReadFilter::new(records, reference, config)?,
             kept: VecDeque::new(),
+            examined: 0,
+            last_region_start: None,
             region: None,
             contig,
             path,
@@ -211,12 +231,46 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             });
         }
 
-        // **Everything is dropped, every time — for now.** Deciding which of these may be
-        // reused is the next step, deliberately on its own. Until it lands this cursor is
-        // correct and no faster than a fresh query, which is the right order for the one
-        // rule in this design that can lose reads without anything failing.
-        self.kept.clear();
+        // **The forget rule, and it is one comparison** (spec §6). Reuse what is held only
+        // when the new region begins at or after the last one served; otherwise drop it all
+        // and jump.
+        //
+        // Why that single test is enough, in the two cases every needed record falls into.
+        // Take a record this region needs. Either it begins at or before the *last* region's
+        // end — and since this region begins at or after the last one did, such a record
+        // overlapped the last region too, so it was read then and is held now. Or it begins
+        // after the last region's end — and the scan stopped at the first of those, so the
+        // reader is sitting on it and it is read forward, with no jump.
+        //
+        // The rule consults no index and has nothing to tune. An earlier design derived a
+        // byte cut-off from the index instead and was unsound three ways: `min_offset`
+        // collapses to byte 0 past the last populated window on **both** index kinds, and a
+        // byte range is not a record set (spec §6).
+        let reuse = self
+            .last_region_start
+            .is_some_and(|last| region.start.get() >= last);
+
+        if reuse {
+            // Eviction is the mirror image of the rule: a read that ends before this region
+            // begins cannot touch this region or any later one, because every later region
+            // begins at or after this one. Dropped from the front, which is the oldest end,
+            // so this stays a walk rather than a scan.
+            while self
+                .kept
+                .front()
+                .is_some_and(|read| read_end(read) < region.start.get())
+            {
+                self.kept.pop_front();
+            }
+        } else {
+            self.kept.clear();
+        }
+        // Every kept read is offered to the new region, including ones the last region was
+        // already given: consecutive regions overlap, and a read touching both is owed to
+        // both.
+        self.examined = 0;
         self.region = Some(region);
+        self.last_region_start = Some(region.start.get());
 
         // Undo the *clean* stop the previous region ended with. Without this the first region
         // a cursor drains silences it for the whole chromosome: a region boundary reaches the
@@ -224,13 +278,18 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         // can report. A filter stopped by a **fatal error** is not restarted, and must not be.
         self.filter.restart_after_end_of_input();
 
-        self.filter
-            .source_mut()
-            .move_to(region)
-            .map_err(|source| CursorError::ReadRecord {
-                path: Arc::clone(&self.path),
-                source,
-            })
+        if reuse {
+            self.filter.source_mut().continue_into(region);
+            Ok(())
+        } else {
+            self.filter
+                .source_mut()
+                .jump_to(region)
+                .map_err(|source| CursorError::ReadRecord {
+                    path: Arc::clone(&self.path),
+                    source,
+                })
+        }
     }
 
     /// The next read of the current region, or `None` at the end of it.
@@ -241,21 +300,42 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         // Not pointed anywhere yields nothing rather than guessing at a region. The layer
         // below would answer the same, but a type is better for stating its own contract than
         // for leaning on a neighbour's.
-        let _region = self.region?;
+        let region = self.region?;
 
-        // Everything the filter yields already overlaps the region — `RegionRecords` narrowed
-        // it below — so what is kept here is exactly what a later region may be able to
-        // reuse. **Nothing reads from `kept` yet**: until the forget rule lets kept reads
-        // survive a reposition there is never anything in it to replay, so the walk that
-        // would do the replaying lands with the rule that makes it reachable (B2). Writing it
-        // here would have been code no test could execute — which is what a first draft of
-        // this step did, and a reviewer found it by putting a `panic!` in the loop body and
-        // watching all thirteen tests pass.
+        // **What is already held**, in the order it came off the file — so a read this region
+        // shares with the last one skips decode and filtering entirely. That is the saving:
+        // a read is returned by about a dozen consecutive regions and would otherwise be
+        // turned into an `AlignedRead` a dozen times.
+        while let Some(read) = self.kept.get(self.examined) {
+            // Held reads are in position order, so once one begins past this region's end,
+            // neither it nor any later one can reach back into it, and neither can anything
+            // still in the file. The answer is complete.
+            //
+            // **This is a saving, not a correctness guard, and the difference is worth being
+            // exact about.** Walking on instead of stopping would skip these reads anyway
+            // (overlap needs `pos <= region.end`), reach the file, and be told the same thing
+            // by the early stop below — same answer, one wasted read. Mutating `return None`
+            // into `continue` therefore fails no test here, and cannot: the effect is on how
+            // many records are read, which nothing counts until B3. It is pinned there, by
+            // `a_region_answered_from_what_is_held_reads_nothing`.
+            if read.pos > region.end.get() {
+                return None;
+            }
+            self.examined += 1;
+            if read_overlaps(read, region) {
+                return Some(Ok(read.clone()));
+            }
+        }
+
+        // Then read on, from wherever the reader is. Everything the filter yields already
+        // overlaps the region — `RegionRecords` narrowed it below — so what is kept here is
+        // exactly what a later region may be able to reuse.
         match self.filter.next() {
             None => None,
             Some(Err(error)) => Some(Err(self.read_failure(error))),
             Some(Ok(read)) => {
                 self.kept.push_back(read.clone());
+                self.examined = self.kept.len();
                 Some(Ok(read))
             }
         }
@@ -581,11 +661,10 @@ mod tests {
         assert_eq!(names, whole);
     }
 
-    /// Reads are **kept**, which is the mechanism the next step turns into a saving. Until
-    /// the forget rule lands they are all dropped at every reposition, and that is stated
-    /// here so the step that changes it has something to change.
+    /// Reads are **kept** as a region is walked, and a region beginning at or after the last
+    /// one keeps them.
     #[test]
-    fn reads_are_kept_while_a_region_is_walked_and_dropped_when_it_moves() {
+    fn reads_are_kept_while_a_region_is_walked_and_survive_a_forward_move() {
         let mut cursor = cursor_over(script());
 
         cursor
@@ -599,14 +678,223 @@ mod tests {
         while cursor.next_read().is_some() {}
         assert_eq!(cursor.kept_reads(), 5, "every read of the region is held");
 
+        // Forward, and no read has ended before base 1, so everything is still reachable.
         cursor
             .move_to_region(region(1, 100))
             .expect("on this chromosome");
         assert_eq!(
             cursor.kept_reads(),
-            0,
-            "B1 keeps nothing across a reposition; B2 is what changes this",
+            5,
+            "a region beginning at or after the last one reuses what is held",
         );
+    }
+
+    /// **A backward region drops everything**, because the rule's argument does not hold for
+    /// it: a record it needs may begin before the last region's start, and the reader has
+    /// already gone past. That is the case the first attempt got wrong — it assumed moving
+    /// forward along the chromosome meant moving forward through the file, and a bin index
+    /// makes that false.
+    #[test]
+    fn a_backward_region_drops_everything_and_jumps() {
+        let mut cursor = cursor_over(script());
+
+        let _ = reads_of(&mut cursor, region(46, 100));
+        assert!(cursor.kept_reads() > 0);
+
+        cursor
+            .move_to_region(region(1, 30))
+            .expect("on this chromosome");
+        assert_eq!(
+            cursor.kept_reads(),
+            0,
+            "a region beginning before the last one served cannot reuse what is held",
+        );
+    }
+
+    /// **Eviction, which is the rule's mirror image**: a read that ends before this region
+    /// begins cannot touch it, or any later region, because every later region begins at or
+    /// after this one.
+    #[test]
+    fn a_forward_region_evicts_only_the_reads_that_ended_before_it() {
+        let mut cursor = cursor_over(script());
+
+        // Reads start at 1, 16, 31, 46, 61 and are 30 long, so they end at 30, 45, 60, 75, 90.
+        let _ = reads_of(&mut cursor, region(1, 100));
+        assert_eq!(cursor.kept_reads(), 5);
+
+        cursor
+            .move_to_region(region(61, 100))
+            .expect("on this chromosome");
+        assert_eq!(
+            cursor.kept_reads(),
+            2,
+            "the three reads ending at 30, 45 and 60 are all before 61",
+        );
+
+        cursor
+            .move_to_region(region(90, 100))
+            .expect("on this chromosome");
+        assert_eq!(
+            cursor.kept_reads(),
+            1,
+            "only the read ending at 90 survives"
+        );
+
+        cursor
+            .move_to_region(region(91, 100))
+            .expect("on this chromosome");
+        assert_eq!(cursor.kept_reads(), 0, "and then nothing does");
+    }
+
+    /// **The oracle the plan asks for, over the five shapes it names** (B2): ascending,
+    /// backward, overlapping, adjacent and far-apart regions, driven through *one* cursor and
+    /// compared against a linear scan of the same script at every step.
+    ///
+    /// This is the test the first attempt at this feature did not have. It passed 1,471 unit
+    /// tests while losing 3,830 of 236,081 loci, because every read-path test drove a single
+    /// query.
+    #[test]
+    fn a_run_of_every_region_shape_matches_a_linear_scan_at_every_step() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        let regions = [
+            // ascending and adjacent
+            region(1, 20),
+            region(21, 40),
+            region(41, 60),
+            // overlapping, forward
+            region(50, 80),
+            region(55, 85),
+            // far apart, forward
+            region(95, 100),
+            // backward
+            region(1, 30),
+            // backward again, further
+            region(1, 5),
+            // forward from there, overlapping
+            region(3, 40),
+            // exactly the same region twice
+            region(3, 40),
+            // a region no read touches, then back into the reads
+            region(97, 100),
+            region(16, 45),
+        ];
+
+        for region in regions {
+            assert_eq!(
+                reads_of(&mut cursor, region),
+                by_linear_scan(&script, region),
+                "region {}..={} in a run through one cursor",
+                region.start.get(),
+                region.end.get(),
+            );
+        }
+    }
+
+    /// **The record the early stop consumed must survive into the next region.** The stop
+    /// fires *on* a record — the first beginning past the region's end — and that record has
+    /// already been taken from the reader. A region that continues from here, rather than
+    /// jumping, has nothing else that will ever produce it.
+    #[test]
+    fn the_read_the_early_stop_consumed_reaches_the_next_region() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        // Ends at 35, so the stop fires on the read starting at 46.
+        let first = region(1, 35);
+        assert_eq!(reads_of(&mut cursor, first), by_linear_scan(&script, first));
+
+        // Forward, so this reuses — and the read at 46 is the one the stop took.
+        let second = region(36, 70);
+        assert_eq!(
+            reads_of(&mut cursor, second),
+            by_linear_scan(&script, second),
+            "the read the previous region's early stop consumed was lost",
+        );
+    }
+
+    /// A read owed to two consecutive regions is given to **both** — kept reads are examined
+    /// afresh by every region, not drained by the first that sees them.
+    #[test]
+    fn a_read_touching_two_regions_is_given_to_both() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        // The read starting at 31 ends at 60, so it touches both of these.
+        let left = region(31, 45);
+        let right = region(46, 60);
+        assert!(by_linear_scan(&script, left).contains(&"r2".to_string()));
+        assert!(by_linear_scan(&script, right).contains(&"r2".to_string()));
+
+        assert_eq!(reads_of(&mut cursor, left), by_linear_scan(&script, left));
+        assert_eq!(reads_of(&mut cursor, right), by_linear_scan(&script, right));
+    }
+
+    /// Reuse must not hand the same read to one region twice — which is what simply *not
+    /// clearing* the kept set would do, because the reader carries on and the filter arm does
+    /// not check what is already held.
+    #[test]
+    fn no_read_is_given_to_one_region_twice() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        for region in [region(1, 40), region(20, 70), region(30, 100)] {
+            let names = reads_of(&mut cursor, region);
+            let mut unique = names.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(
+                names.len(),
+                unique.len(),
+                "a read was yielded twice in one region",
+            );
+        }
+    }
+
+    /// **Random scripts, random runs of regions, one cursor.** The hand-written tables above
+    /// name the shapes a reader can think of; this looks for the ones nobody thought of.
+    ///
+    /// It earned its place immediately during review of the previous step: an equivalent
+    /// property test killed an `end >= region.start` boundary mutation that a table of six
+    /// regions did not reach.
+    ///
+    /// Every region's answer is compared against a linear scan of the same script, so a
+    /// cursor and the answer it is checked against cannot share a mistake — the scan does not
+    /// call any of the code under test.
+    #[test]
+    fn any_run_of_regions_through_one_cursor_matches_a_linear_scan() {
+        use proptest::prelude::*;
+
+        // Reads on a 100-base contig, long enough to clear the default minimum length.
+        let read_starts = prop::collection::vec(1usize..=70, 0..8);
+        let regions = prop::collection::vec(
+            (1u64..=100, 0u64..=40).prop_map(|(start, width)| (start, (start + width).min(100))),
+            1..10,
+        );
+
+        proptest!(|(starts in read_starts, asked in regions)| {
+            // A coordinate-sorted file, which is what every layer below assumes.
+            let mut starts = starts;
+            starts.sort_unstable();
+            let script: Vec<RecordBuf> = starts
+                .iter()
+                .enumerate()
+                .map(|(i, start)| read_at(&format!("r{i}"), *start))
+                .collect();
+
+            let mut cursor = cursor_over(script.clone());
+            for (start, end) in asked {
+                let asked = region(start, end);
+                prop_assert_eq!(
+                    reads_of(&mut cursor, asked),
+                    by_linear_scan(&script, asked),
+                    "region {}..={}",
+                    start,
+                    end
+                );
+            }
+        });
     }
 
     /// Nothing is unpacked ahead of demand: pulling one read must not walk the script.
