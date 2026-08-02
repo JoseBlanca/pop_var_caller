@@ -21,8 +21,6 @@
 use std::collections::VecDeque;
 use std::iter::Peekable;
 
-use ahash::AHashMap;
-
 use crate::pileup_record::ChainId;
 
 use crate::ng::locus_generation::SampleLocusObservations;
@@ -452,6 +450,9 @@ struct WalkerState {
     /// the same reason as `contributors_buf`: this runs once per covered reference base,
     /// and a truncated column is rare, so the buffer is usually empty and never grows.
     truncated_read_ids_buf: Vec<u32>,
+    /// EXPERIMENT E2: reusable scratch for `resolve_mate_overlap_at_pos`, replacing
+    /// the per-column `AHashMap<ChainId, Vec<usize>>` and its two companion `Vec`s.
+    mate_overlap_buf: MateOverlapScratch,
     /// Reusable per-step buffer for `close_aged_records`'s drained
     /// records. Paired with `OpenPileupRecordTable::closing_keys_buf`;
     /// together they remove the two per-walker-step `Vec` allocations
@@ -477,6 +478,7 @@ impl WalkerState {
             config,
             contributors_buf: Vec::new(),
             truncated_read_ids_buf: Vec::new(),
+            mate_overlap_buf: MateOverlapScratch::default(),
             drained_buf: Vec::new(),
         }
     }
@@ -595,7 +597,7 @@ impl WalkerState {
         // observation, contributing ln(1)=0 log-likelihood mass)
         // and is flagged so any window event the fold pulls from
         // its cursor also gets BQ-zeroed.
-        resolve_mate_overlap_at_pos(contributors, &mut self.summary);
+        resolve_mate_overlap_at_pos(contributors, &mut self.summary, &mut self.mate_overlap_buf);
 
         // Step 2b: per-column depth cap. Adopted from samtools'
         // mpileup (see `WalkerConfig` doc-comment). Apply *after*
@@ -791,6 +793,21 @@ fn malformed_read_from_length_err(err: ReadLengthError, read: &PreparedRead) -> 
     }
 }
 
+/// The scratch space `resolve_mate_overlap_at_pos` needs for one column, hoisted so it is
+/// reused instead of rebuilt.
+///
+/// It used to build a hash map keyed by chain id plus one `Vec` per distinct chain id — lists
+/// almost always of length one — and two more `Vec`s besides. Grouping by sorting a single
+/// `(chain_id, index)` vector gives the same runs for a `clear()` and a sort per column
+/// rather than `1 + N + 2` allocations.
+#[derive(Debug, Default)]
+struct MateOverlapScratch {
+    /// `(chain_id, contributor index)`, sorted so equal chain ids form one run.
+    by_chain_id: Vec<(ChainId, usize)>,
+    to_remove: Vec<usize>,
+    bq_updates: Vec<(usize, u8, bool)>,
+}
+
 /// Resolve mate-overlap at the current walker position.
 ///
 /// Two regimes, distinguished by whether either side carries an
@@ -816,7 +833,11 @@ fn malformed_read_from_length_err(err: ReadLengthError, read: &PreparedRead) -> 
 // contributors on indel-overlap, which requires the owning `Vec`,
 // not a slice.
 #[allow(clippy::ptr_arg)]
-fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary: &mut RunSummary) {
+fn resolve_mate_overlap_at_pos(
+    contributors: &mut Vec<ReadContribution>,
+    summary: &mut RunSummary,
+    scratch: &mut MateOverlapScratch,
+) {
     // Fast path: mate overlap requires two contributors at this
     // walker_pos sharing a chain_id. Solo-read inputs never
     // hit it; in paired-end inputs the geometry of insert sizes
@@ -842,13 +863,29 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // RandomState would make iteration non-deterministic between runs
     // and is also slower for this hot path. Mi4 in
     // `ia/reviews/pileup_2026-05-09.md`.
-    let mut by_chain_id: AHashMap<ChainId, Vec<usize>> = AHashMap::new();
-    for (i, c) in contributors.iter().enumerate() {
-        by_chain_id.entry(c.chain_id).or_default().push(i);
-    }
+    //
+    // EXPERIMENT E2: built as a sorted `(chain_id, index)` list in a reused buffer
+    // rather than an `AHashMap<ChainId, Vec<usize>>` rebuilt per column. Groups are
+    // the runs of equal chain id; within a run the indices stay ascending, which is
+    // the order `values()` produced, and the two loops below are order-independent
+    // across groups (each contributor belongs to exactly one group, and `to_remove`
+    // is sorted and deduped before it is applied).
+    let MateOverlapScratch {
+        by_chain_id,
+        to_remove,
+        bq_updates,
+    } = scratch;
+    by_chain_id.clear();
+    by_chain_id.extend(
+        contributors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.chain_id, i)),
+    );
+    by_chain_id.sort_unstable();
 
     // Indices to discard outright (indel-overlap losers).
-    let mut to_remove: Vec<usize> = Vec::new();
+    to_remove.clear();
     // (idx, new_bq_at_walker_pos, zero_in_window) — applied to
     // each contributor of a match-only overlap pair (S7). Agree-
     // case keeper gets the summed BQ (capped at 200, zero_in_window
@@ -858,10 +895,18 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // (zeros every window event from this contributor's cursor)
     // and `bq_override_at_walker_pos` (rewrites walker_pos events'
     // BQ on top of the cursor pull).
-    let mut bq_updates: Vec<(usize, u8, bool /*zero_in_window*/)> = Vec::new();
+    bq_updates.clear();
 
-    for indices in by_chain_id.values() {
-        if indices.len() < 2 {
+    let mut run_start = 0usize;
+    while run_start < by_chain_id.len() {
+        let chain = by_chain_id[run_start].0;
+        let mut run_end = run_start + 1;
+        while run_end < by_chain_id.len() && by_chain_id[run_end].0 == chain {
+            run_end += 1;
+        }
+        let group = &by_chain_id[run_start..run_end];
+        run_start = run_end;
+        if group.len() < 2 {
             continue;
         }
         // Spec invariant: only mate pairs share a chain id, so at
@@ -870,16 +915,16 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
         // (e.g. supplementary alignments slipping past upstream
         // filters) surfaces in tests instead of in production.
         debug_assert!(
-            indices.len() <= 2,
+            group.len() <= 2,
             "more than two contributors share chain_id {:?}",
-            indices,
+            group,
         );
         // All-pairs comparison so a future relaxation of the
         // invariant doesn't silently miss the (i, j>i+1) cases
         // that `indices.windows(2)` skips.
-        for i in 0..indices.len() {
-            for j in (i + 1)..indices.len() {
-                let (a, b) = (indices[i], indices[j]);
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let (a, b) = (group[i].1, group[j].1);
                 summary.mate_overlap_positions += 1;
                 let any_indel_here = pair_has_indel(&contributors[a], &contributors[b]);
                 if any_indel_here {
@@ -934,7 +979,7 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // (rewriting walker_pos events' BQ on top of the cursor
     // pull). Update the local contribution's `bq_baq_at_walker_pos`
     // and `events_at_pos` for consistency with the override.
-    for (idx, new_bq, zero_in_window) in bq_updates {
+    for (idx, new_bq, zero_in_window) in bq_updates.drain(..) {
         contributors[idx].bq_baq_at_walker_pos = new_bq;
         for ev in contributors[idx].events_at_pos.iter_mut() {
             set_match_event_bq(ev, new_bq);
@@ -950,7 +995,7 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // Sort descending so swap_remove keeps earlier indices valid.
     to_remove.sort_unstable();
     to_remove.dedup();
-    for idx in to_remove.into_iter().rev() {
+    for idx in to_remove.drain(..).rev() {
         contributors.swap_remove(idx);
     }
 }
