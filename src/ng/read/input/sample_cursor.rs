@@ -5,13 +5,6 @@
 //! be a sample-level one that holds a file cursor each and merges what they yield
 //! (`arch/alignment_cursor.md` §2.4).
 
-#![allow(
-    dead_code,
-    reason = "the generators move onto this at Milestone D; until then it is reached from its \
-              own tests. Remove at D2 — if it is still needed then, the generators are not \
-              reading through the cursor that was built for them."
-)]
-
 use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{ContigId, GenomePosition, Position};
@@ -198,6 +191,44 @@ impl<R: RawRefSeq> MergedCursors<R> {
         best
     }
 
+    /// **The same-file-twice check, run only on a tie.**
+    ///
+    /// Two reads at different positions cannot be the same read, so this has nothing to do
+    /// unless the argmin already found two heads sharing a position — which it learned as a
+    /// by-product of the comparison it had to make anyway. Within a tie, `flag` (a `u16`) is
+    /// compared before `qname` (a short string), so the string compare happens only for reads
+    /// that already agree on position *and* flags.
+    ///
+    /// **Why it must exist here and not only at open.** `SampleReads::open` rejects a
+    /// duplicate *path*, which a copy or a symlink walks straight past. Two copies of one read
+    /// are two votes at a locus: the depth doubles and so does every allele count derived from
+    /// it, which looks like real evidence rather than like a fault. `MergedRegionReads` has
+    /// always had this guard; the first version of this type dropped it, and two cursors over
+    /// one file yielded every read twice with nothing failing.
+    fn same_read_across_files(&self, winner: usize) -> Option<CursorError> {
+        let winning_key = self.keys[winner]?;
+        let winning_read = self.heads[winner].as_ref()?;
+
+        for (other, key) in self.keys.iter().enumerate().skip(winner + 1) {
+            if *key != Some(winning_key) {
+                continue;
+            }
+            let Some(other_read) = self.heads[other].as_ref() else {
+                continue;
+            };
+            if other_read.flag == winning_read.flag && other_read.qname == winning_read.qname {
+                return Some(CursorError::DuplicateReadAcrossFiles {
+                    qname: winning_read.qname.clone(),
+                    contig: winning_key.contig,
+                    position: winning_key.position.get(),
+                    first_file: winner,
+                    second_file: other,
+                });
+            }
+        }
+        None
+    }
+
     fn next_read(&mut self) -> Option<Result<AlignedRead, CursorError>> {
         if self.done {
             return None;
@@ -218,6 +249,11 @@ impl<R: RawRefSeq> MergedCursors<R> {
         }
 
         let winner = self.argmin()?;
+
+        if let Some(error) = self.same_read_across_files(winner) {
+            self.done = true;
+            return Some(Err(error));
+        }
 
         // One move per read: `take` hands the read out and empties the slot, which is then
         // refilled from its own cursor. No clone.
@@ -328,6 +364,43 @@ mod tests {
             names_of(&mut sample, region(1, 100)),
             ["a1", "b2", "a3", "b4"],
         );
+    }
+
+    /// **The guard the first version of this type dropped.** Two cursors over the same file
+    /// are two votes at every locus: the depth doubles and so does every allele count derived
+    /// from it, which looks like evidence rather than like a fault.
+    ///
+    /// `SampleReads::open` rejects a duplicate *path*; a copy or a symlink walks straight
+    /// past it, which is why the check has to be here too. Measured before the fix: the same
+    /// script through two cursors yielded `["r0", "r0", "r1", "r1"]` with no error.
+    #[test]
+    fn the_same_read_from_two_files_is_a_hard_error() {
+        let script = vec![read_at("r0", 1), read_at("r1", 31)];
+        let mut sample = SampleCursor::new(vec![
+            cursor_over("/a.bam", script.clone()),
+            cursor_over("/a-copy.bam", script),
+        ]);
+
+        sample
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+        let first = sample.next_read().expect("a read");
+        assert!(
+            matches!(first, Err(CursorError::DuplicateReadAcrossFiles { .. })),
+            "two files holding the same read must be refused, not counted twice: {first:?}",
+        );
+    }
+
+    /// And the guard must not fire on reads that merely *share a position* — which is
+    /// routine, because a sample's files usually cover the same coordinate range.
+    #[test]
+    fn different_reads_at_the_same_position_are_not_a_duplicate() {
+        let mut sample = SampleCursor::new(vec![
+            cursor_over("/a.bam", vec![read_at("from-a", 16)]),
+            cursor_over("/b.bam", vec![read_at("from-b", 16)]),
+        ]);
+
+        assert_eq!(names_of(&mut sample, region(1, 100)), ["from-a", "from-b"]);
     }
 
     /// **Ties break to the lowest file index**, and that is what makes a run reproducible: a

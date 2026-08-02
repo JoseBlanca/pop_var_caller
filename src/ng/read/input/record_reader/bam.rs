@@ -103,6 +103,13 @@ impl BamRecordReader {
     fn chunks_from(&self, region: GenomeRegion) -> Result<Vec<Chunk>, AlignmentFileError> {
         let invalid_region = || AlignmentFileError::Region { region };
 
+        // Carried over from `BamRegionSource::plan`, which the first version of this dropped:
+        // an inverted or zero-width region is not a question the index can be asked, and
+        // without this it is quietly accepted and answered — a region `80..=70` returned a
+        // read spanning it.
+        if region.is_empty() {
+            return Err(invalid_region());
+        }
         let reference_sequence_id =
             usize::try_from(region.contig.get()).map_err(|_| invalid_region())?;
         let (_, reference_sequence) = self

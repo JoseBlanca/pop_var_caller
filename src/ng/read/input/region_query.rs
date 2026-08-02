@@ -873,19 +873,10 @@ impl RecordSource for CramRegionSource {
     }
 }
 
-/// Whether a record's reference footprint touches the region. Shared by both
-/// sources so the two containers cannot disagree about what "overlap" means —
-/// which is precisely what the BAM/CRAM parity oracle (T8) would otherwise be
-/// left to discover.
-pub(crate) fn overlaps(record: &sam::alignment::RecordBuf, region: GenomeRegion) -> bool {
-    match (record.alignment_start(), record.alignment_end()) {
-        (Some(first), Some(last)) => {
-            usize::from(first) as u64 <= region.end.get()
-                && usize::from(last) as u64 >= region.start.get()
-        }
-        _ => false,
-    }
-}
+/// The overlap rule now lives with the layer that will outlive this module — moved there
+/// at Milestone C so the new read path does not depend on the file Milestone F deletes.
+/// Re-exported here because this module's own sources still apply it.
+pub(crate) use super::region_records::overlaps;
 
 /// Proves, while streaming, that the reads really do arrive in genome order.
 ///

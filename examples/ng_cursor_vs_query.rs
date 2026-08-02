@@ -19,8 +19,21 @@
 //! for, which is what the plan wanted the checkpoint to do.
 //!
 //! **It is a correctness check as well as a measurement, and that is the more important
-//! half.** Both paths are asked for the same regions in the same order and their reads are
-//! compared name by name. A faster path that returns different reads is not a saving.
+//! half.** Both paths are asked for the same regions in the same order, and every read is
+//! hashed over its name, flags, contig, position, mapping quality, sequence, qualities and
+//! read group — element by element, not as a summary. An earlier version compared a count and
+//! a position-only digest while its own comment claimed "name by name"; it was blind to a
+//! substitution, to a corrupted payload, and to the ~11 % of reads that share a position with
+//! the one before them.
+//!
+//! # What the ratio is, and is not
+//!
+//! **It is a property of the region shape, not a constant.** Audited on this fixture: 26×
+//! walking forward through dense typed regions, 11.7× at half that density, 3.8× at a 13×
+//! stride, ~1× whole-contig — and **0.5×, a two-fold regression**, on the same regions walked
+//! *backwards*, which the design explicitly permits. A backward walk cannot reuse anything, so
+//! the cursor decodes everything the query does and clones each read into its kept set on top.
+//! Quote the shape with the number.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -119,33 +132,59 @@ fn run(
         ReadFilterConfig::default(),
         true,
     )?;
+    // The background reference verification is joined **before** either timed section: it is
+    // an 11-second whole-genome MD5 on another thread, and leaving it running across the
+    // measurement puts an uncontrolled contaminant on both halves of it.
+    if let Some(handle) = verify {
+        handle.join()?;
+    }
+
     let started = Instant::now();
     let mut by_query: u64 = 0;
-    let mut query_digest: u64 = 0;
     for region in &regions {
         let stream = sample.reads_in_region(*region, bases)?;
         for read in stream {
-            let read = read?;
-            by_query += 1;
-            query_digest = query_digest.wrapping_mul(31).wrapping_add(read.pos);
+            by_query += read?.pos.min(1);
         }
     }
     let query_seconds = started.elapsed().as_secs_f64();
 
     // --- the path replacing it: one cursor for the whole chromosome ---
-    let mut cursor = sample.cursor(contig, bases)?;
+    // Construction is **inside** the timer: opening the descriptor is work the cursor path
+    // does and the query path does not, and charging it elsewhere would be picking the
+    // boundary that flatters the answer.
     let started = Instant::now();
+    let mut cursor = sample.cursor(contig, bases)?;
     let mut by_cursor: u64 = 0;
-    let mut cursor_digest: u64 = 0;
     for region in &regions {
         cursor.move_to_region(*region)?;
         while let Some(read) = cursor.next_read() {
-            let read = read?;
-            by_cursor += 1;
-            cursor_digest = cursor_digest.wrapping_mul(31).wrapping_add(read.pos);
+            by_cursor += read?.pos.min(1);
         }
     }
     let cursor_seconds = started.elapsed().as_secs_f64();
+
+    // --- and now, untimed, the comparison ---
+    //
+    // **A second pass, deliberately.** Hashing every read to compare them is a fixed cost per
+    // read on both sides — noise against 3.8 seconds, a third of the cursor's 0.15 — so
+    // leaving it inside the timers would tax the fast path far harder than the slow one and
+    // quietly understate the very thing being measured. The walks above count and nothing
+    // else; correctness is established here, where a millisecond does not matter.
+    let mut query_reads = Vec::with_capacity(by_query as usize);
+    for region in &regions {
+        for read in sample.reads_in_region(*region, bases)? {
+            query_reads.push(fingerprint(&read?));
+        }
+    }
+    let mut verify_cursor = sample.cursor(contig, bases)?;
+    let mut cursor_reads = Vec::with_capacity(by_cursor as usize);
+    for region in &regions {
+        verify_cursor.move_to_region(*region)?;
+        while let Some(read) = verify_cursor.next_read() {
+            cursor_reads.push(fingerprint(&read?));
+        }
+    }
 
     println!("reads_by_query={by_query}");
     println!("reads_by_cursor={by_cursor}");
@@ -164,16 +203,38 @@ fn run(
 
     // **The half that matters more than the times.** A faster path returning different reads
     // is not a saving, and on this fixture a 1.6 % loss is what the first attempt at this
-    // feature produced while every unit test passed.
+    // feature produced while every unit test passed. Compared element by element, so the
+    // first disagreement names where it is rather than only that there is one.
     assert_eq!(
-        (by_query, query_digest),
-        (by_cursor, cursor_digest),
-        "the cursor and the per-region query disagreed about which reads these regions hold",
+        by_query, by_cursor,
+        "the two paths returned different read counts"
     );
-    println!("agreement=exact");
-
-    if let Some(handle) = verify {
-        handle.join()?;
+    for (index, (from_query, from_cursor)) in query_reads.iter().zip(&cursor_reads).enumerate() {
+        assert_eq!(
+            from_query, from_cursor,
+            "the cursor and the per-region query disagreed at read {index} of {by_query}",
+        );
     }
+    println!("agreement=exact");
     Ok(())
+}
+
+/// Everything about a read that a caller downstream can see, hashed.
+///
+/// Not the position alone: a path that returned the right *number* of reads at the right
+/// *places* but with a substituted name, a flipped flag or a corrupted sequence would satisfy
+/// a positional digest completely, and about one read in nine here shares its position with
+/// the one before it.
+fn fingerprint(read: &pop_var_caller::ng::read::aligned_read::AlignedRead) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    read.qname.hash(&mut hasher);
+    read.flag.hash(&mut hasher);
+    read.ref_id.hash(&mut hasher);
+    read.pos.hash(&mut hasher);
+    read.mapq.hash(&mut hasher);
+    read.seq.hash(&mut hasher);
+    read.qual.hash(&mut hasher);
+    read.read_group.hash(&mut hasher);
+    hasher.finish()
 }

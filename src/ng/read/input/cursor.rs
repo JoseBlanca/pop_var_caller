@@ -65,15 +65,6 @@
 //! the last populated window on *both* index kinds, and a byte range is not a record set
 //! (spec §6).
 
-#![allow(
-    dead_code,
-    reason = "Milestone B builds the cursor against a scripted list; the callers that hold one \
-              arrive with the BAM arm at Milestone C and the generators at D. Until then every \
-              item here is reached from its own tests. Remove at C3, where the cursor is wired \
-              to a real file — if it is still needed then, nothing is reading through the \
-              cursor that was built for it."
-)]
-
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
@@ -126,6 +117,51 @@ pub enum CursorError {
         cursor_contig: ContigId,
         /// The chromosome the region the caller asked for lies on.
         requested_contig: ContigId,
+    },
+
+    /// The same read reached this sample from two of its files.
+    ///
+    /// **A sample's files must not overlap.** Two copies of one read are two votes at a
+    /// locus: the depth doubles, the allele counts double, and every number derived from them
+    /// is wrong in a way that looks like real evidence. The reachable route is a file listed
+    /// twice under two names — a copy, or a symlink — which the path-based check at open
+    /// cannot see.
+    #[error(
+        "the read '{}' appears in two of this sample's files (cursor {} and cursor {}) at \
+         contig {} position {}",
+        String::from_utf8_lossy(qname),
+        first_file,
+        second_file,
+        contig.get(),
+        position
+    )]
+    DuplicateReadAcrossFiles {
+        qname: Vec<u8>,
+        contig: ContigId,
+        position: u64,
+        first_file: usize,
+        second_file: usize,
+    },
+
+    /// A read came out before the one before it.
+    ///
+    /// **The guarantee every layer above depends on and none of them re-checks.** The walker
+    /// treats out-of-order input as a hard error, the merge's argmin is only sound over sorted
+    /// inputs, and the sorted early stop below is only sound if the file really is sorted —
+    /// the open gate proved the file *claims* to be, which is not the same thing. The
+    /// per-region query this cursor replaces wrapped every stream in this check; a cursor that
+    /// dropped it would be trusting a claim rather than the data.
+    #[error(
+        "alignment file '{}' yielded a read at position {} after one at {}, within one \
+         region: the file is not coordinate-sorted",
+        path.display(),
+        position,
+        after
+    )]
+    OutOfOrderRead {
+        path: Arc<Path>,
+        position: u64,
+        after: u64,
     },
 
     /// A region was asked for after a read had already failed.
@@ -188,6 +224,9 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// The region being served, or `None` before the first [`move_to_region`](Self::move_to_region).
     region: Option<GenomeRegion>,
     contig: ContigId,
+    /// The position of the last read handed to the caller **for the region being served**,
+    /// or `None` before the first. The order guard, per region — see [`next_read`](Self::next_read).
+    last_emitted: Option<u64>,
     /// Named in errors, so two bare contig numbers mean something in a run holding hundreds
     /// of cursors over many files.
     path: Arc<Path>,
@@ -240,6 +279,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             kept: VecDeque::new(),
             examined: 0,
             last_region_start: None,
+            last_emitted: None,
             region: None,
             contig,
             path,
@@ -322,6 +362,9 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         self.examined = 0;
         self.region = Some(region);
         self.last_region_start = Some(region.start.get());
+        // Per region, because a new region rewinds through what is kept: positions ascend
+        // *within* a region, never across one.
+        self.last_emitted = None;
 
         // Undo the *clean* stop the previous region ended with. Without this the first region
         // a cursor drains silences it for the whole chromosome: a region boundary reaches the
@@ -383,8 +426,9 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             }
             self.examined += 1;
             if read_overlaps(read, region) {
+                let read = read.clone();
                 self.counts.reads_replayed += 1;
-                return Some(Ok(read.clone()));
+                return Some(self.emit(read));
             }
         }
 
@@ -398,11 +442,17 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
                 self.counts.reads_decoded += 1;
                 self.kept.push_back(read.clone());
                 self.examined = self.kept.len();
-                Some(Ok(read))
+                Some(self.emit(read))
             }
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "the memory bound this reports is what Milestone D measures and what the \
+                  deferred per-chromosome reference registry is triggered by; until then it \
+                  is read only by this module's tests"
+    )]
     /// How many reads this cursor is holding. The memory bound made observable, and what the
     /// eviction rule is judged on.
     pub(crate) fn kept_reads(&self) -> usize {
@@ -423,6 +473,25 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// as each stream ended, or the drops they recorded vanished with them.
     pub fn read_group_counts(&self) -> Vec<ReadGroupCounts> {
         self.filter.counts()
+    }
+
+    /// Hand a read to the caller, checking it does not go backwards.
+    ///
+    /// The order guard the per-region query kept in `OrderVerified` and this cursor would
+    /// otherwise have dropped. Scoped **to the region**: a new region rewinds through what is
+    /// kept, so positions ascend within a region and not across one.
+    fn emit(&mut self, read: AlignedRead) -> Result<AlignedRead, CursorError> {
+        if let Some(last) = self.last_emitted
+            && read.pos < last
+        {
+            return Err(CursorError::OutOfOrderRead {
+                path: Arc::clone(&self.path),
+                position: read.pos,
+                after: last,
+            });
+        }
+        self.last_emitted = Some(read.pos);
+        Ok(read)
     }
 
     /// A filter failure, named with the file it came from.

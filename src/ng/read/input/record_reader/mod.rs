@@ -73,15 +73,14 @@
 //! defect in it (spec §6, and the plan's principles).
 
 // Covers this module and `in_memory` below it, so the reason is stated once.
+// Narrowed after Milestone C: the BAM arm is live, and what is left unused is the in-memory
+// arm's constructor, which the cursor's own tests reach and nothing else does. The blanket
+// version of this said "remove at B1" and had outlived that by two milestones — a trigger
+// nobody checks is worse than no trigger.
 #![allow(
     dead_code,
-    reason = "Milestone A is types only: nothing constructs a RecordReader until the cursor \
-              does at B1, so every item here is reachable from its own tests and from nowhere \
-              else. Remove this attribute at B1 — if it is still needed then, the cursor is \
-              not using the reader it was built for. `expect` would be the self-removing \
-              choice and does not work here: the tests *do* use these items, so the lint \
-              fires for the lib target and not the test target, and `--all-targets` then \
-              reports the expectation unfulfilled — an error under this repo's -D warnings."
+    reason = "the in-memory arm is reached from tests and from the differential harness; it \
+              is permanent, not scaffolding (see the enum's own doc)"
 )]
 
 pub(crate) mod bam;

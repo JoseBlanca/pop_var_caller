@@ -173,6 +173,32 @@ pub enum AlignmentFileError {
     )]
     Region { region: GenomeRegion },
 
+    /// A cursor was asked for over a chromosome this file does not have.
+    ///
+    /// Every layer below would answer this as "nothing here", which is indistinguishable from
+    /// a chromosome that is genuinely empty — so it is refused where the caller can still act
+    /// on it rather than reported as an absence of reads.
+    #[error(
+        "alignment file '{path}' has {contigs_in_file} contigs and no contig {}",
+        contig.get()
+    )]
+    CursorContigNotInFile {
+        path: PathBuf,
+        contig: crate::ng::types::ContigId,
+        contigs_in_file: usize,
+    },
+
+    /// A cursor was asked for over a format that cannot serve one yet.
+    ///
+    /// Its own variant rather than an `Open` failure carrying a sentence, because nothing
+    /// failed to open: the file is fine and the feature is absent. An operator who reads
+    /// "opening … failed" goes looking at the file.
+    #[error(
+        "reading '{path}' through a cursor is not implemented for {kind} yet; \
+         it arrives with the CRAM arm"
+    )]
+    CursorFormatUnsupported { path: PathBuf, kind: &'static str },
+
     /// The reference could not answer for a contig this file declares, at the point a cursor
     /// was made for it.
     ///

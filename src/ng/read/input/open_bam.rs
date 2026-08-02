@@ -514,14 +514,29 @@ impl AlignmentFile {
             source,
         };
 
+        // A contig this file does not declare has no reads and no chunks, and every layer
+        // below would answer that as "nothing here" — which is indistinguishable from a
+        // chromosome that is genuinely empty. Refused where the caller can still act on it.
+        if usize::try_from(contig.get())
+            .ok()
+            .is_none_or(|id| id >= self.contigs.entries.len())
+        {
+            return Err(AlignmentFileError::CursorContigNotInFile {
+                path: self.path.to_path_buf(),
+                contig,
+                contigs_in_file: self.contigs.entries.len(),
+            });
+        }
+
         match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {}
-            _ => {
-                return Err(AlignmentFileError::Open {
+            other => {
+                return Err(AlignmentFileError::CursorFormatUnsupported {
                     path: self.path.to_path_buf(),
-                    source: std::io::Error::other(
-                        "a cursor over this format is not implemented yet;                          CRAM arrives at Milestone E",
-                    ),
+                    kind: match other {
+                        Some(AlignmentFileKind::Cram) => "CRAM",
+                        _ => "this format",
+                    },
                 });
             }
         }

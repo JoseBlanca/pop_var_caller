@@ -38,15 +38,6 @@
 //! is C2's and C3's business. The overlap rule is already shared with the sources it replaces
 //! (see `read_next`), so the two cannot disagree while both exist.
 
-#![allow(
-    dead_code,
-    reason = "Milestone B builds the cursor against a scripted list; the callers that hold one \
-              arrive with the BAM arm at Milestone C and the generators at D. Until then every \
-              item here is reached from its own tests. Remove at C3, where the cursor is wired \
-              to a real file — if it is still needed then, nothing is reading through the \
-              cursor that was built for it."
-)]
-
 use std::io;
 
 use noodles_sam as sam;
@@ -56,7 +47,6 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{NoodlesRawRecord, RecordSource, resolve_read_group};
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::read::input::record_reader::RecordReader;
-use crate::ng::read::input::region_query::overlaps;
 use crate::ng::types::{ContigId, GenomeRegion};
 
 /// The records of one region of one file, narrowed from whatever the reader hands over.
@@ -109,11 +99,6 @@ impl RegionRecords {
             other_sample_records: 0,
             held: None,
         }
-    }
-
-    /// The chromosome this source narrows to.
-    pub(crate) fn contig(&self) -> ContigId {
-        self.contig
     }
 
     /// Point at a new region **and reposition the reader**, discarding whatever was held.
@@ -228,6 +213,24 @@ impl RecordSource for RegionRecords {
                 }
             }
         }
+    }
+}
+
+/// Whether a record's reference footprint touches `region`.
+///
+/// **One rule, applied by every path that has ever asked the question.** It came from
+/// `region_query.rs`, where the per-region BAM and CRAM sources still call it through a
+/// re-export — moved here at Milestone C so the new read path does not depend on the module
+/// Milestone F deletes, rather than the other way round. The single thing that must never
+/// happen in this design is two paths disagreeing about which reads a region contains, and
+/// sharing one body is what makes them provably identical rather than identical-looking.
+pub(crate) fn overlaps(record: &sam::alignment::RecordBuf, region: GenomeRegion) -> bool {
+    match (record.alignment_start(), record.alignment_end()) {
+        (Some(first), Some(last)) => {
+            usize::from(first) as u64 <= region.end.get()
+                && usize::from(last) as u64 >= region.start.get()
+        }
+        _ => false,
     }
 }
 

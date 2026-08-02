@@ -98,13 +98,13 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 - ✅ **C1.** `RegionRecords`: the region narrowing, the sorted early stop, read-group resolution
   and the tally — lifted out of `BamRegionSource`, written once. *Depends:* B2.
-  *Source:* spec §5, arch §2.3.
+  *Source:* spec §5, arch §2.3. **⚠ Landed at B1** — a cursor owns a `ReadFilter`, which needs a `RecordSource`, so this could not wait for a step that depends on B2. The *tally* it lists was deliberately **not** built: `ReadFilter` already keeps one, and one filter now lives as long as a cursor (arch §2.3).
 - ✅ **C2.** `BamRecordReader`: index query, positioned reading, and the one-record pushback for
   the record the early stop consumes without yielding. Keeps nothing across regions.
-  *Depends:* C1. *Source:* arch §1.3.
+  *Depends:* C1. *Source:* arch §1.3. **⚠ The pushback is in `RegionRecords`, not here** — the over-read happens in the layer that knows where the region ends, and a reader cannot hold back a record it was never told to stop at.
 - ✅ **C3. Wire the cursor to BAM — its own commit.** **Oracle:** the extended
   `t5_…returns_exactly_what_a_linear_scan_returns`, driving *a run of ascending regions through
-  one cursor* rather than a single query. *Depends:* C2. *Source:* spec §11.3.
+  one cursor* rather than a single query. *Depends:* C2. *Source:* spec §11.3. **⚠ The run-of-regions oracle landed in `open_bam.rs`, beside `cursor()`, not as an edit to `t5_…`** — that fixture builds no reference and no cursor, so extending it would have meant rebuilding both there.
 - ✅ **C4.** `SampleCursor`: k file cursors, the argmin merge, and the `Single` arm kept free of
   dynamic dispatch. *Depends:* C3. *Source:* arch §2.4. — `c7e992a`, `8c4621d`, `d6443f4`, `741ec56`
 
@@ -118,10 +118,24 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 > D1 and D2 — so an end-to-end number is D's to report.
 >
 > **The measurement was therefore made where the change is**, by `examples/ng_cursor_vs_query`:
-> the same typed regions, halo included, once through each path, reads compared before any time
-> is reported. HG002 30×: **chr21 3.723 s → 0.141 s (26.3×)**, **chr1 27.122 s → 0.945 s
-> (28.7×)**, `agreement=exact` on both. On chr1 the cursor decodes **234,730** reads to serve
-> **3,699,522**, reusing for 613,681 of 613,682 regions and jumping once.
+> the same typed regions, halo included, once through each path, with every read compared over
+> its whole content in an untimed second pass. HG002 30×, chr21: **3.81–3.89 s → 0.167–0.169 s,
+> ~23×**, `agreement=exact`. The cursor decodes **34,876** reads to serve 543,389 — against
+> 35,228 records on chr21 by `samtools view -c` — reusing for 102,937 of 102,938 regions and
+> jumping once.
+>
+> **⚠ The ratio is a property of the region shape and must be quoted with it.** Audited: ~23×
+> forward through dense typed regions, 11.7× at half that density, 3.8× at a 13× stride, ~1×
+> whole-contig, and **0.5× — a two-fold regression — on the same regions walked backwards**,
+> which §4 explicitly permits. A backward walk reuses nothing, so the cursor decodes everything
+> the query does and clones each read into its kept set on top.
+>
+> **⚠ And this is the read path, not a run.** An earlier draft here quoted 26.3× against a
+> harness that left cursor construction outside its timer, ran an 11-second whole-genome MD5
+> across the measurement, and compared reads by a position-only digest while claiming to
+> compare them "name by name". All three are fixed; the number moved from 26.3× to ~23×. The
+> end-to-end figure is D's to report — the spec's own retention prototype puts the *walk* at
+> 5.18 s → 2.69 s, which is 1.9×, and nothing at this commit reconciles the two.
 >
 > Pause for review.
 
