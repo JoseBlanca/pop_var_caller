@@ -81,15 +81,15 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 ### Milestone B — the forget rule, against the in-memory reader
 
-- ☐ **B1.** `AlignmentCursor` over `RecordReader::InMemory`: `move_to_region`, `next_read`,
+- ✅ **B1.** `AlignmentCursor` over `RecordReader::InMemory`: `move_to_region`, `next_read`,
   `contig()`, and the kept reads. *Depends:* A3, A4. *Source:* arch §1.2, §2.2.
-- ☐ **B2. The forget rule — its own commit, do not bundle.** Reuse when the new region starts at
+- ✅ **B2. The forget rule — its own commit, do not bundle.** Reuse when the new region starts at
   or after the last one served; otherwise drop and reposition. Evict a kept read once it ends
   before the current region's start. **Oracle:** a scripted reader driven through ascending,
   backward, overlapping, adjacent and far-apart regions must return exactly what a linear scan of
   the same scripted list returns. *Depends:* B1. *Source:* spec §6.
-- ☐ **B3.** The counters — reads kept, replayed, decoded, repositions — and the test that a
-  forward walk decodes each read once. *Depends:* B2. *Source:* spec §11.5.
+- ✅ **B3.** The counters — reads kept, replayed, decoded, repositions — and the test that a
+  forward walk decodes each read once. *Depends:* B2. *Source:* spec §11.5. — `3af749d`, `3ba6047`, `2149be1`
 
 > **Checkpoint B:** the rule is correct on a reader with no file behind it, and its failure modes
 > are exercised before any real input can hide them. Pause for review.
