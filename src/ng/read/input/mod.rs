@@ -29,6 +29,7 @@ pub(crate) mod record_reader;
 pub mod reference;
 pub mod region_query;
 pub(crate) mod region_records;
+pub mod sample_cursor;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
