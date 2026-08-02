@@ -181,6 +181,33 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// Named in errors, so two bare contig numbers mean something in a run holding hundreds
     /// of cursors over many files.
     path: Arc<Path>,
+    counts: CursorCounts,
+}
+
+/// What a cursor did, as opposed to what it returned.
+///
+/// **The saving this whole design exists for is invisible in the reads.** A cursor that keeps
+/// nothing and one that keeps everything hand back exactly the same reads for exactly the
+/// same regions — that is the correctness requirement — so the only way to tell whether it is
+/// working is to count what it *avoided*. On the fixture the perf review measured, the same
+/// 35,228 records were decoded 1,067,729 times; the number that has to come down is
+/// `reads_decoded`, and nothing else in the output moves when it does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CursorCounts {
+    /// Reads that came up through the filter — decoded and step-1 filtered exactly once each,
+    /// if the rule is working. **This is the number the feature is about.**
+    pub reads_decoded: u64,
+    /// Reads handed to a caller from what was already held, skipping decode and filtering
+    /// altogether. The saving, counted from the other side.
+    pub reads_replayed: u64,
+    /// Regions that reused what was held, and regions that dropped it and repositioned. They
+    /// sum to the regions asked for, so a walk that quietly stopped reusing shows up as a
+    /// ratio rather than as a slower run nobody attributes.
+    pub regions_reusing: u64,
+    pub regions_jumping: u64,
+    /// Kept reads dropped because they ended before a region began. Without this, "the kept
+    /// set is bounded" is an argument rather than an observation.
+    pub reads_evicted: u64,
 }
 
 impl<R: RawRefSeq> AlignmentCursor<R> {
@@ -206,6 +233,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             region: None,
             contig,
             path,
+            counts: CursorCounts::default(),
         })
     }
 
@@ -261,9 +289,13 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
                 .is_some_and(|read| read_end(read) < region.start.get())
             {
                 self.kept.pop_front();
+                self.counts.reads_evicted += 1;
             }
+            self.counts.regions_reusing += 1;
         } else {
+            self.counts.reads_evicted += self.kept.len() as u64;
             self.kept.clear();
+            self.counts.regions_jumping += 1;
         }
         // Every kept read is offered to the new region, including ones the last region was
         // already given: consecutive regions overlap, and a read touching both is owed to
@@ -311,18 +343,23 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             // neither it nor any later one can reach back into it, and neither can anything
             // still in the file. The answer is complete.
             //
-            // **This is a saving, not a correctness guard, and the difference is worth being
-            // exact about.** Walking on instead of stopping would skip these reads anyway
-            // (overlap needs `pos <= region.end`), reach the file, and be told the same thing
-            // by the early stop below — same answer, one wasted read. Mutating `return None`
-            // into `continue` therefore fails no test here, and cannot: the effect is on how
-            // many records are read, which nothing counts until B3. It is pinned there, by
-            // `a_region_answered_from_what_is_held_reads_nothing`.
+            // **A short-circuit, and — traced carefully — nothing more.** Walking on instead
+            // of stopping would skip every one of these reads anyway, since overlap needs
+            // `pos <= region.end`; it would then reach the layer below, which either hands
+            // back the record its own early stop is already holding (and stops again) or
+            // finds the reader at the end. Same answer, same reads decoded, same counters.
+            //
+            // So mutating `return None` into `continue` fails no test, and **no test can be
+            // written that it would fail** — its only effect is to avoid walking the rest of
+            // the kept set, which at 5,000 bases of overlap is a scan worth skipping but is
+            // not something the cursor's output or its counters can see. Recorded rather than
+            // left as a mutation that quietly survives.
             if read.pos > region.end.get() {
                 return None;
             }
             self.examined += 1;
             if read_overlaps(read, region) {
+                self.counts.reads_replayed += 1;
                 return Some(Ok(read.clone()));
             }
         }
@@ -334,6 +371,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             None => None,
             Some(Err(error)) => Some(Err(self.read_failure(error))),
             Some(Ok(read)) => {
+                self.counts.reads_decoded += 1;
                 self.kept.push_back(read.clone());
                 self.examined = self.kept.len();
                 Some(Ok(read))
@@ -342,9 +380,14 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     }
 
     /// How many reads this cursor is holding. The memory bound made observable, and what the
-    /// eviction rule will be judged on.
+    /// eviction rule is judged on.
     pub(crate) fn kept_reads(&self) -> usize {
         self.kept.len()
+    }
+
+    /// What this cursor did — see [`CursorCounts`], and read `reads_decoded` first.
+    pub fn counts(&self) -> CursorCounts {
+        self.counts
     }
 
     /// A filter failure, named with the file it came from.
@@ -911,6 +954,136 @@ mod tests {
             1,
             "one read asked for, one read decoded",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // What the cursor did, as opposed to what it returned (B3)
+    // -----------------------------------------------------------------
+
+    /// **The claim the whole feature rests on: a forward walk decodes each read once.**
+    ///
+    /// Every region overlaps the last, which is what a real walk looks like — the caller
+    /// widens each region by 5,000 bases against regions averaging 390 — so almost every read
+    /// is owed to several regions. Decoding is what must not repeat.
+    #[test]
+    fn a_forward_walk_decodes_each_read_once() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        // Overlapping, ascending: 1..40, 20..60, 40..80, 60..100.
+        let mut served = 0;
+        for (start, end) in [(1, 40), (20, 60), (40, 80), (60, 100)] {
+            served += reads_of(&mut cursor, region(start, end)).len();
+        }
+
+        let counts = cursor.counts();
+        assert_eq!(
+            counts.reads_decoded,
+            script.len() as u64,
+            "a forward walk decoded {} reads out of a script of {}",
+            counts.reads_decoded,
+            script.len(),
+        );
+        assert_eq!(
+            counts.regions_jumping, 1,
+            "only the first region has nothing to reuse",
+        );
+        assert_eq!(counts.regions_reusing, 3);
+        assert!(
+            counts.reads_replayed > 0,
+            "reads owed to several regions must be served from what is held",
+        );
+        assert_eq!(
+            counts.reads_decoded + counts.reads_replayed,
+            served as u64,
+            "every read handed to a caller was either decoded or replayed, and not both",
+        );
+    }
+
+    /// The counters against the same walk with the rule *not* applying: regions that go
+    /// backwards cannot reuse, so each one decodes again. The contrast is the measurement.
+    #[test]
+    fn a_backward_walk_cannot_reuse_and_decodes_again() {
+        let mut forward = cursor_over(script());
+        for (start, end) in [(1, 40), (20, 60), (40, 80)] {
+            let _ = reads_of(&mut forward, region(start, end));
+        }
+
+        let mut backward = cursor_over(script());
+        for (start, end) in [(40, 80), (20, 60), (1, 40)] {
+            let _ = reads_of(&mut backward, region(start, end));
+        }
+
+        assert_eq!(backward.counts().regions_reusing, 0);
+        assert_eq!(backward.counts().reads_replayed, 0);
+        assert!(
+            backward.counts().reads_decoded > forward.counts().reads_decoded,
+            "the backward walk decoded {} against the forward walk's {}",
+            backward.counts().reads_decoded,
+            forward.counts().reads_decoded,
+        );
+    }
+
+    /// **A region whose answer is entirely held must reach the file not at all** — the
+    /// saving stated as the thing it is, rather than inferred from a faster run.
+    ///
+    /// (This is *not* what pins the kept walk's early `return None`. That short-circuit has
+    /// no observable effect — see its comment — and no test can be written that it would
+    /// fail; this one passes with or without it.)
+    #[test]
+    fn a_region_answered_from_what_is_held_reads_nothing() {
+        let mut cursor = cursor_over(script());
+
+        // Read the whole contig, so everything is held.
+        let _ = reads_of(&mut cursor, region(1, 100));
+        let after_the_first_pass = cursor.counts().reads_decoded;
+        assert_eq!(after_the_first_pass, 5);
+
+        // A narrower region inside it: every read it needs is held, and the reads beyond it
+        // are held too — so the walk can answer without touching the file.
+        let _ = reads_of(&mut cursor, region(16, 40));
+        assert_eq!(
+            cursor.counts().reads_decoded,
+            after_the_first_pass,
+            "a region whose answer was entirely held still read from the file",
+        );
+    }
+
+    /// Eviction is counted, so "the kept set is bounded" is an observation rather than an
+    /// argument — and the two ways a read leaves the set both show up.
+    #[test]
+    fn every_read_that_leaves_the_kept_set_is_counted() {
+        let mut cursor = cursor_over(script());
+
+        let _ = reads_of(&mut cursor, region(1, 100));
+        assert_eq!(cursor.kept_reads(), 5);
+        assert_eq!(cursor.counts().reads_evicted, 0);
+
+        // Forward past three of them: evicted one at a time.
+        cursor
+            .move_to_region(region(61, 100))
+            .expect("on this chromosome");
+        assert_eq!(cursor.counts().reads_evicted, 3);
+        assert_eq!(cursor.kept_reads(), 2);
+
+        // Backward: the rest go together, and they are counted the same way.
+        cursor
+            .move_to_region(region(1, 10))
+            .expect("on this chromosome");
+        assert_eq!(
+            cursor.counts().reads_evicted,
+            5,
+            "a jump drops what it holds, and dropping is dropping however it happens",
+        );
+        assert_eq!(cursor.kept_reads(), 0);
+    }
+
+    /// A cursor that has done nothing says so, rather than reporting a number nobody produced.
+    #[test]
+    fn a_fresh_cursor_has_counted_nothing() {
+        let cursor = cursor_over(script());
+
+        assert_eq!(cursor.counts(), CursorCounts::default());
     }
 
     /// The message names both contigs, names them apart, **and names the file** — two bare
