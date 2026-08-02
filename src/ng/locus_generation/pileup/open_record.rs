@@ -822,8 +822,7 @@ impl OpenPileupRecord {
         );
         // **The observations come from the reads, not from the bucket totals** (B1). See
         // `keyed_observations` for why, and for what makes the two agree at one read group.
-        let mut keyed =
-            self.keyed_observations_counting(record_end_exclusive, &mut witness_counts);
+        let mut keyed = self.keyed_observations_counting(record_end_exclusive, &mut witness_counts);
         // Every folded read is resolved exactly once and lands in exactly one of the two
         // classes; the no-observation set is disjoint from `folded_reads` by construction,
         // its members having been removed when they produced nothing.

@@ -414,11 +414,15 @@ impl RawChromReader {
         self.buf.reserve(target_len);
         self.buf_start_base = start_1based;
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut self.buf, target_len, &mut self.read_buf).map_err(|source| {
-            ChromRefFetchError::Io {
-                chrom_name: chrom,
-                source,
-            }
+        read_raw_bases(
+            &mut self.file,
+            &mut self.buf,
+            target_len,
+            &mut self.read_buf,
+        )
+        .map_err(|source| ChromRefFetchError::Io {
+            chrom_name: chrom,
+            source,
         })
     }
 
@@ -452,12 +456,12 @@ impl RawChromReader {
         self.seek_to(offset)?;
         let mut prefix = Vec::with_capacity(extra_bases);
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut prefix, extra_bases, &mut self.read_buf).map_err(|source| {
-            ChromRefFetchError::Io {
+        read_raw_bases(&mut self.file, &mut prefix, extra_bases, &mut self.read_buf).map_err(
+            |source| ChromRefFetchError::Io {
                 chrom_name: chrom,
                 source,
-            }
-        })?;
+            },
+        )?;
         // `splice` does the memmove and reuses capacity where it can.
         self.buf.splice(..0, prefix);
         self.buf_start_base = new_start;

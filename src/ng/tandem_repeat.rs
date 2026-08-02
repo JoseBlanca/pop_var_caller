@@ -502,13 +502,10 @@ pub fn find_tandem_repeats(
         let penalty = -i64::from(params.mismatch_penalty);
         let back = &canonical[..n - p];
         let here = &canonical[p..];
-        let scores = back.iter().zip(here.iter()).map(|(&b, &h)| {
-            if h != 0 && h == b {
-                reward
-            } else {
-                penalty
-            }
-        });
+        let scores = back
+            .iter()
+            .zip(here.iter())
+            .map(|(&b, &h)| if h != 0 && h == b { reward } else { penalty });
         maximal_scoring_subsequences(scores, |k0, k1, score| {
             // Segment [k0, k1] → tract [k0, k1 + p + 1): the earliest base involved is
             // `j0 - p = k0`, the latest is `j1 = k1 + p`, so the exclusive end is `k1+p+1`.
