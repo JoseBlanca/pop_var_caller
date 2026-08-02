@@ -264,3 +264,65 @@ header's identity, the abandoned-region rewind, and the enum's forwarding.
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 - `cargo test --lib ng::` — **1488 passed; 0 failed; 2 ignored**.
 - `cargo doc --no-deps --lib --all-features` — no `record_reader` errors.
+
+---
+
+## A4 — reaching the source through the filter
+
+### Plan
+
+Arch §2.3: `ReadFilter::source_mut`, and a test that repositioning through it reaches the
+source. The plan's words: *"One accessor; nothing else in `filtering.rs` moves."*
+
+### Why one accessor is the whole step
+
+Today a `ReadFilter` owns its source and gives it back only by being consumed
+(`into_parts`) — which is *what forces* a new filter per region, and therefore a fresh record
+buffer, a fresh reference buffer and a fresh tally each time. A cursor keeps one filter for a
+whole chromosome and points the layer below at each new region through it.
+
+### Changes made
+
+One accessor, two methods on the existing `FakeSource` test double (`rewind`,
+`records_consumed`), a `named_fake` helper, and five tests — all in
+[src/ng/read/filtering.rs](../../../../src/ng/read/filtering.rs).
+
+### **What this step found, and did not fix**
+
+**`source_mut` is necessary but not sufficient, and the accessor cannot be what fixes it.**
+`ReadFilter` is a fused iterator: `next()` sets `done` on a clean end of input, and returns
+`None` for ever after. `source_mut` reaches the source and touches neither `done` nor
+anything else.
+
+The reviewer built the case rather than arguing it — a `RecordSource` narrowing to a window
+and answering `Ok(false)` at its end, exactly as a sorted early stop does, driven through one
+filter as arch §2.3 spells it:
+
+```
+assertion `left == right` failed: region B must yield its two reads
+  left: 0
+ right: 2
+```
+
+**Region A yields its reads; region B yields nothing.** And the clean end of input is not the
+exceptional case — it is *how every region ends*. So `spec/alignment_cursor.md` §3's "The
+filter seam — **solved**, at the price of one accessor" is false as written.
+
+Pinned in a test and documented on the accessor rather than fixed here: clearing the flag is
+a design choice (a reset? a source that reports a region boundary as something other than
+end-of-input? a cursor that never drains?) and does not belong in an accessor. **Raised at
+Checkpoint A.**
+
+### Tests
+
+Five: the reposition reaches the source; a filter finished by clean EOF stays finished; one
+finished by a fatal error stays finished; the tally survives a reposition **and keeps
+accumulating**; and the source's own position moves.
+
+The clean-EOF test is, by the reviewer's count, the **only** test in the 1,492-test `ng::`
+suite that pins that half of the fuse.
+
+### Validation
+
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib ng::` — **1492 passed; 0 failed; 2 ignored**.

@@ -932,6 +932,41 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
         }
     }
 
+    /// The source underneath, to reposition it.
+    ///
+    /// **The one thing a long-lived filter needs that a per-query one did not.** Until the
+    /// alignment cursor, a filter was built per region and thrown away, so the only way to
+    /// reach its source was [`into_parts`](Self::into_parts) — which consumes the filter, and
+    /// therefore *forced* a new one per region. A cursor keeps one filter for as long as it
+    /// reads a chromosome and points the layer below at each new region through it
+    /// (`arch/alignment_cursor.md` §2.3).
+    ///
+    /// **What this does not do is reset the filter.** The tally keeps running — which is the
+    /// point, since `counts()` is then a whole-cursor total rather than one region's — and so
+    /// does the fused-iterator flag, which [`next`](Self::next) sets on a **clean end of
+    /// input** and on a fatal error alike. Repositioning the source will not restart a
+    /// finished filter.
+    ///
+    /// **So this accessor alone is not enough for `move_to_region`, and the clean case is the
+    /// one that bites.** A region's end reaches the filter as an ordinary end of input — the
+    /// sorted early stop answers `Ok(false)` — so the first region a cursor drains fuses it
+    /// for the rest of the chromosome and every later region yields nothing. Measured: two
+    /// regions driven through one filter give 2 reads and then 0. Pinned by
+    /// `a_filter_that_has_reached_the_end_stays_finished_after_a_reposition`.
+    ///
+    /// How the flag is cleared — a reset, a source that reports a region boundary as
+    /// something other than end-of-input, or a cursor that never drains a region — is a
+    /// Milestone B decision and not an accessor's.
+    #[allow(
+        dead_code,
+        reason = "Milestone A is types only: the cursor that repositions through this lands \
+                  at B1, so today it is reached from this module's own tests and nowhere \
+                  else. Remove this attribute at B1."
+    )]
+    pub(crate) fn source_mut(&mut self) -> &mut S {
+        &mut self.source
+    }
+
     /// Give the source, the two reused buffers, and the final tally back to
     /// whoever lent them.
     ///
@@ -1578,6 +1613,20 @@ mod tests {
                 next_index: 0,
             }
         }
+
+        /// Send the source back to its first record — what a real source does when it is
+        /// pointed at a new region, in the smallest form that is observable from outside.
+        fn rewind(&mut self) {
+            self.next_index = 0;
+        }
+
+        /// How many of the scripted records this source has handed over — **not** a
+        /// reference coordinate, which is what `pos` means everywhere else in this file.
+        /// Lets a test say *where* the source was repositioned to rather than only that
+        /// something changed.
+        fn records_consumed(&self) -> usize {
+            self.next_index
+        }
     }
 
     impl RecordSource for FakeSource {
@@ -1601,6 +1650,13 @@ mod tests {
                 None => Ok(false),
             }
         }
+    }
+
+    /// A [`fake`] record under a name, so two records in one script can be told apart.
+    fn named_fake(qname: &[u8], flag: u16, mapq: u8) -> FakeRecord {
+        let mut record = fake(flag, mapq);
+        record.read.qname = qname.to_vec();
+        record
     }
 
     /// A 30 bp all-`A` mapped read carrying the given flag/MAPQ — long enough to
@@ -1651,6 +1707,163 @@ mod tests {
 
         // End of input.
         assert!(!source.read_next(&mut buf).unwrap());
+    }
+
+    // -----------------------------------------------------------------
+    // Reaching the source through the filter (alignment cursor, A4)
+    // -----------------------------------------------------------------
+
+    /// **The accessor the cursor is built on.** A filter used to be made per region and
+    /// consumed to get its source back, which is what forced a new filter per region in the
+    /// first place. A cursor keeps one filter for a whole chromosome and points the layer
+    /// below at each new region *through* it, so the reach has to be by `&mut`.
+    #[test]
+    fn repositioning_through_the_filter_reaches_the_source() {
+        let mut filter = ReadFilter::new(
+            FakeSource::new(
+                vec![
+                    named_fake(b"first", FLAG_PAIRED, 60),
+                    named_fake(b"second", FLAG_PAIRED, 60),
+                ],
+                one_contig_header(),
+            ),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert_eq!(filter.source_mut().records_consumed(), 0);
+        let first = filter.next().expect("a read").expect("it passes");
+        assert_eq!(
+            filter.source_mut().records_consumed(),
+            1,
+            "the filter consumed one record"
+        );
+
+        // The reposition, through the filter, without consuming it.
+        filter.source_mut().rewind();
+        assert_eq!(filter.source_mut().records_consumed(), 0);
+
+        // Named records, because `fake` builds every one at the same position with the same
+        // flags: two byte-identical reads made this assertion unable to fail.
+        let again = filter.next().expect("a read").expect("it passes");
+        assert_eq!(first.qname, b"first");
+        assert_eq!(
+            again.qname, b"first",
+            "after rewinding the source the filter re-read the record after the first, not \
+             the first",
+        );
+    }
+
+    /// **The half of the contract the cursor will have to work around, pinned here so it is
+    /// discovered now rather than at the first cursor.**
+    ///
+    /// `ReadFilter` is a *fused* iterator: a clean end of input sets `done`, and `next()`
+    /// returns `None` from then on. `source_mut` reaches the source but does not reset that
+    /// flag — so a caller that drains a region and then repositions gets nothing, however
+    /// well the source was repositioned. Arch §2.3 describes `move_to_region` as
+    /// `self.filter.source_mut().move_to(region)` and does not mention it.
+    ///
+    /// Whether the cursor drains its regions, or the flag gains a way to be cleared, is a
+    /// design question for Milestone B — not something to settle in an accessor.
+    #[test]
+    fn a_filter_that_has_reached_the_end_stays_finished_after_a_reposition() {
+        let mut filter = ReadFilter::new(
+            FakeSource::new(vec![fake(FLAG_PAIRED, 60)], one_contig_header()),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert!(filter.next().is_some(), "the one record passes the filter");
+        assert!(filter.next().is_none(), "and then the source is exhausted");
+
+        filter.source_mut().rewind();
+        assert_eq!(
+            filter.source_mut().records_consumed(),
+            0,
+            "the source really did rewind"
+        );
+        assert!(
+            filter.next().is_none(),
+            "the filter is fused: repositioning its source does not restart it",
+        );
+    }
+
+    /// The tally is **not** reset by a reposition, which is the behaviour a cursor wants:
+    /// `counts()` then totals a whole chromosome rather than whichever region happened to be
+    /// last. Stated as a test because the opposite is just as plausible a design.
+    #[test]
+    fn repositioning_the_source_does_not_reset_the_running_tally() {
+        let mut filter = ReadFilter::new(
+            FakeSource::new(
+                vec![fake(FLAG_DUPLICATE, 60), fake(FLAG_PAIRED, 60)],
+                one_contig_header(),
+            ),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert!(
+            filter.next().is_some(),
+            "the second record passes; the first is a duplicate"
+        );
+        let after_one_pass = filter.counts();
+        assert!(
+            !after_one_pass.is_empty(),
+            "the duplicate drop must have been tallied, or this test pins nothing",
+        );
+
+        filter.source_mut().rewind();
+        assert_eq!(
+            filter.counts(),
+            after_one_pass,
+            "repositioning the source discarded the tally",
+        );
+
+        // And it keeps **adding**, which is the half the doc comment's claim rests on:
+        // reading the script a second time tallies it a second time, so `counts()` totals a
+        // whole cursor rather than whichever region happened to be last. Non-erasure alone
+        // would also be satisfied by a tally that stopped counting.
+        assert!(filter.next().is_some(), "the rewound script replays");
+        let after_two_passes = only_tally(&filter);
+        assert_eq!(
+            after_two_passes.duplicate, 2,
+            "both passes' duplicate drops must be counted",
+        );
+        assert_eq!(
+            after_two_passes.kept, 2,
+            "both passes' keeps must be counted"
+        );
+    }
+
+    /// A filter finished by a **fatal error** stays finished too, and for the same reason —
+    /// the flag is one flag. Documented as an invariant by `source_mut`; untested until now,
+    /// which is how a "needs a fresh filter" instruction quietly becomes optional.
+    #[test]
+    fn a_filter_stopped_by_a_fatal_error_stays_finished_after_a_reposition() {
+        let mut undecodable = fake(FLAG_PAIRED, 60);
+        undecodable.decode_fails = true;
+        let mut filter = ReadFilter::new(
+            FakeSource::new(vec![undecodable], one_contig_header()),
+            poly_a_ref(30),
+            ReadFilterConfig::default(),
+        )
+        .expect("the fake header resolves against the poly-A reference");
+
+        assert!(
+            matches!(filter.next(), Some(Err(ReadFilterError::Decode(_)))),
+            "the record is built to fail its decode",
+        );
+        assert!(filter.next().is_none(), "and the filter fuses on it");
+
+        filter.source_mut().rewind();
+        assert_eq!(filter.source_mut().records_consumed(), 0);
+        assert!(
+            filter.next().is_none(),
+            "a filter stopped by a fatal error is not restarted by repositioning its source",
+        );
     }
 
     fn bam_record(

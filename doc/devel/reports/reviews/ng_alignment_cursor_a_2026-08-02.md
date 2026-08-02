@@ -394,3 +394,65 @@ read on the wrong chromosome. *Category: reliability. Both mutation-verified.*
 - **The `clone_from` finding was settled with a standalone program**, not by reading noodles'
   source: `grep -rn "fn clone_from"` over noodles-sam returning nothing is suggestive; the
   pointer and capacity numbers are proof.
+
+---
+
+## A4 — `ReadFilter::source_mut`
+
+### 1. Scope
+
+The uncommitted change for A4 against `31ae687` plus its patch: one accessor, two test-double
+methods and three tests in `src/ng/read/filtering.rs`. **One agent** over `reliability` +
+`naming` — the diff is one accessor, and the rest of the 2,600-line file is pre-existing.
+
+### 2. Verdict
+
+**Approve-with-changes.** Every finding applied. **Five mutations run, none survived** — the
+step's tests were sound; what was wrong was one vacuous assertion and a doc comment pointing
+at the wrong half of the problem it had found.
+
+### 5. Top priorities
+
+1. **M1** — the fuse's *clean-EOF* half is the one that breaks Milestone B, and the doc
+   framed it as a fatal-error caveat.
+2. **Mi1** — the reposition test's closing assertion compared two byte-identical records.
+
+### 6. Findings
+
+#### Major
+
+**M1: `source_mut` alone cannot serve `move_to_region`, and the doc pointed at the wrong
+case.** `done` is written in exactly two places — the clean-EOF arm of `next` and `fail` —
+and `source_mut` touches neither. The accessor's doc offered only the fatal-error remedy
+("needs a fresh filter"), but a region's end reaches the filter as a **clean** end of input,
+because a sorted early stop answers `Ok(false)`. Built as a probe and measured: two regions
+through one filter give **2 reads then 0**. `spec/alignment_cursor.md` §3's "The filter seam —
+solved, at the price of one accessor" is false as written. *Pinning rather than fixing is the
+right call for this step; the spec and arch edits are a **stop-and-ask**.*
+
+#### Minor
+
+- **Mi1** `repositioning_through_the_filter_reaches_the_source`'s closing assertion compared
+  `(pos, flag)` of two records that `fake` builds identically — it could not fail. Proved by
+  removing the `records_consumed` assertions and making `rewind` a no-op: still green. Fixed
+  with distinct read names.
+- **Mi2** the tally test pinned non-erasure but not the **accumulation** its doc claimed —
+  a tally that stopped counting would also have passed.
+- **Mi3** `FakeSource::position` collided with the file's established meaning of
+  `pos`/`position` as a **reference coordinate**, in the one test whose job is to show the
+  source moved. Renamed `records_consumed`.
+- **Mi4** no test covered repositioning after a *fatal* error, a documented invariant.
+
+### 7. Out of scope observations
+
+- **Two more consequences of a long-lived filter, for Milestone B.** A read replayed from the
+  cursor's kept set bypasses the filter and so bypasses its tally; and
+  `other_sample_records` must become cumulative across repositions rather than per region.
+- `#[allow(dead_code)]` on the accessor was checked as genuinely required, and `allow` rather
+  than `expect` is right for the reason A3 already documents.
+
+### 9. What's good
+
+- **The reviewer built the failing case instead of arguing it.** A temporary `WindowedSource`
+  reproducing a sorted early stop turned "the fuse might be a problem at B1" into a measured
+  `2 reads, then 0` — which is the difference between a caveat and a bill with a number on it.

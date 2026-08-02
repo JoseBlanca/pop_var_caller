@@ -231,3 +231,39 @@ answer for its own skipping.
 
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 - `cargo test --lib ng::` — **1488 passed; 0 failed; 2 ignored**.
+
+---
+
+## A4
+
+**All findings applied. Five mutations were run against the first draft and none survived** —
+unusual for this milestone, and it is because the step's own tests were built from a finding
+rather than from an assumption. What the review corrected was an assertion that could not
+fail and a doc comment aimed at the wrong half of the problem.
+
+| finding | what was done |
+|---|---|
+| **M1** the fuse's clean-EOF half | `source_mut`'s doc now names the clean end of input as *the* case, carries the measured "2 reads then 0", and says plainly that the accessor is not enough for `move_to_region`. The remedy is left open as a Milestone B decision. |
+| **Mi1** two byte-identical records | `named_fake`, and the closing assertion now compares read **names** — verified to fail under a no-op `rewind` on that assertion alone. |
+| **Mi2** accumulation untested | four lines: after a rewind and a replay, `duplicate` and `kept` both reach 2. |
+| **Mi3** `position` collides with the genomic meaning | renamed `records_consumed`, with a doc saying what it is not. |
+| **Mi4** no fatal-error reposition test | `a_filter_stopped_by_a_fatal_error_stays_finished_after_a_reposition`. |
+
+### Re-run after the fixes
+
+| mutation | result |
+|---|---|
+| `rewind` is a no-op | **4 tests fail** |
+| `records_consumed` always reports 0 | 1 fails |
+| `next()` no longer fuses on clean EOF | 1 fails |
+
+### Not applied — a stop-and-ask
+
+The review's second half of M1 asks for edits to `spec/alignment_cursor.md` §3 and
+`arch/alignment_cursor.md` §2.3, which claim the filter seam is *solved* by this accessor.
+They are design documents; this loop does not edit them. **Raised at Checkpoint A.**
+
+### Validation
+
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib ng::` — **1492 passed; 0 failed; 2 ignored**.
