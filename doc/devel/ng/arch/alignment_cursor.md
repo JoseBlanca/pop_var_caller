@@ -137,8 +137,14 @@ No ordering variant: within a chromosome there is no ordering rule (spec §4).
 
 ```rust
 impl AlignmentFile {
-    /// The chromosomes this file may be read over — the reference's own list,
-    /// proven equal to it by the open gate (spec §4).
+    /// The chromosomes this file may be read over — **the file's own `@SQ`
+    /// list**, which the open gate proved agrees with the reference's on names,
+    /// lengths, order, and on digests wherever both sides carry one
+    /// (`alignment_file.md` §3.1, check 2). *Reconciled, not identical:* an
+    /// absent `M5` is a wildcard on either side, so a file declaring digests
+    /// passes against a `.fai`-only reference and what is published here is
+    /// then the file's claim. Names, lengths and order are the part that is
+    /// proved, and the part a cursor needs.
     pub fn contigs(&self) -> &ContigList;
 
     /// One cursor for one chromosome. Opens its own descriptor and, for CRAM,
@@ -330,7 +336,14 @@ neither `AlignmentFileError` nor `IngestError` expresses.
 - `OPEN:` **Must a replayed record be staged through a scratch buffer before decoding?** Worth
   +2.8 % of wall time. Decide after the first working cursor is measured end to end — spec §13.
 - *Impl-time confirmation:* the exact `RecordReader` contract method names. The contract is fixed
-  (§1.3); the spelling is the implementer's.
+  (§1.3); the spelling is the implementer's. **Settled at A3:** `begin_region` and `read_next`,
+  and `other_sample_records` is *not* among them — read groups are resolved above this layer, so
+  `RegionRecords` answers for its own skipping at C1.
+- **Corrected at A2, because the code proved it wrong:** §2.1 said `contigs()` returns "the
+  reference's own list, proven equal to it". It returns the **file's** `@SQ` list. The open gate
+  reconciles the two under a rule that treats an absent `M5` as a wildcard, so a file declaring
+  digests passes against a `.fai`-only reference and the digests published are the file's. Names,
+  lengths and order are what is proved. Spec §8 carried the same sentence and is corrected too.
 
 ## 6. Test & bench shape
 

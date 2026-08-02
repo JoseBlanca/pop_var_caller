@@ -470,8 +470,10 @@ approach; a coordinate comparison has nothing to tune.
 pub struct AlignmentFile { /* path, header, index, read groups, CRAM base registry */ }
 
 impl AlignmentFile {
-    /// The chromosomes this file can be read over — the reference's own list,
-    /// proven equal to it by the checks run at open.
+    /// The chromosomes this file can be read over — the file's own `@SQ` list,
+    /// which the checks at open proved agrees with the reference's on names,
+    /// lengths and order. Not *identical* to it: an absent digest is a wildcard
+    /// on either side, so the digests published here are the file's.
     pub fn contigs(&self) -> &ContigList;
 
     /// Make a cursor for one chromosome. Opens its own file descriptor and,
