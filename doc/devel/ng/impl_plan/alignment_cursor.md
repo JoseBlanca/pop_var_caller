@@ -64,8 +64,8 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 
 - ✅ **A1.** Commit `examples/ng_generic_walk_probe.rs` with a test module and the fixture builders
   it shares with the bench. *Depends:* —. *Source:* spec §11. — `a400f73`
-- ☐ **A2.** `CursorError` (`WrongChromosome`, `Io`), and `AlignmentFile::contigs()`.
-  *Depends:* A1. *Source:* arch §1.4, §2.1.
+- ✅ **A2.** `CursorError` (`WrongChromosome`, `Io`), and `AlignmentFile::contigs()`.
+  *Depends:* A1. *Source:* arch §1.4, §2.1. — `aaae5db` (`Io` landed as `ReadRecord`)
 - ☐ **A3.** `RecordReader` as an enum with only the `InMemory` arm: finds nothing, unpacks
   nothing, yields a scripted list in position order. *Depends:* A2. *Source:* arch §1.3.
 - ☐ **A4.** `ReadFilter::source_mut`, and a test that repositioning through it reaches the source.
