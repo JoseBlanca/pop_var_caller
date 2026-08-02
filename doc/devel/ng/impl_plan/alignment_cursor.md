@@ -69,7 +69,7 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 - ✅ **A3.** `RecordReader` as an enum with only the `InMemory` arm: finds nothing, unpacks
   nothing, yields a scripted list in position order. *Depends:* A2. *Source:* arch §1.3. — `382667b`
 - ✅ **A4.** `ReadFilter::source_mut`, and a test that repositioning through it reaches the source.
-  One accessor; nothing else in `filtering.rs` moves. *Depends:* A2. *Source:* arch §2.3. — commit below.
+  One accessor; nothing else in `filtering.rs` moves. *Depends:* A2. *Source:* arch §2.3. — `1d150af`
   **⚠ It found that one accessor is not enough.** `ReadFilter` fuses on a *clean* end of input,
   which is how every region ends, so the first region a cursor drains silences it for the rest of
   the chromosome — measured at two regions through one filter: 2 reads, then 0. B1 must decide how
