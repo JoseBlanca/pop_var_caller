@@ -74,7 +74,7 @@ use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError, 
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::record_reader::RecordReader;
 use crate::ng::read::input::region_records::{RegionRecords, read_end, read_overlaps};
-use crate::ng::ref_seq::{RawRefSeq, RefSeqError};
+use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomeRegion};
 
 /// What can go wrong once a cursor exists.
@@ -490,6 +490,31 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// What this cursor did — see [`CursorCounts`], and read `reads_decoded` first.
     pub fn counts(&self) -> CursorCounts {
         self.counts
+    }
+
+    /// Release the reference bases this cursor's read filter has gone past.
+    ///
+    /// **A cursor keeps its reference reader as long as it keeps its file**, and the filter
+    /// reads that reference once per surviving read to check its mismatch fraction. Reading
+    /// is all it does — the window only ever grows — so on a densely covered chromosome the
+    /// reader ends up holding one byte for every base walked: about 250 MB on human
+    /// chromosome 1, against a walk that otherwise peaks around 25 MB.
+    ///
+    /// The caller says when, because only the caller knows what it will ask for next. Passing
+    /// too high a position costs a re-read and never an answer — eviction is a hint.
+    pub fn evict_reference_before(&self, pos: u64)
+    where
+        R: EvictableRefSeq,
+    {
+        self.filter.reference().evict_before(pos);
+    }
+
+    /// How many reference bases this cursor's reader is holding — the bound made observable.
+    pub fn resident_reference_bases(&self) -> usize
+    where
+        R: EvictableRefSeq,
+    {
+        self.filter.reference().resident_bases()
     }
 
     /// Step-1's per-read-group tally, for as much of the chromosome as this cursor has read.

@@ -23,7 +23,7 @@ use crate::ng::read::input::cursor::CursorCounts;
 use crate::ng::read::input::sample_cursor::SampleCursor;
 use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
-use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq};
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
@@ -644,7 +644,7 @@ struct RegionWalk {
 /// per segment would give two fragments of different regions the same id (spec
 /// §8). What that costs — `reset()` between segments, and counters that must be
 /// folded as deltas because `reset()` preserves them — is C3's.
-pub struct PileupGenerator<R: RawRefSeq, P: ReadPreparer> {
+pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> {
     /// The reference the walk fetches REF bases from. Built once, for the run,
     /// and handed to each walk as a shared handle.
     reference: Arc<R>,
@@ -737,7 +737,7 @@ pub struct PileupGenerator<R: RawRefSeq, P: ReadPreparer> {
     failed: bool,
 }
 
-impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
+impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
     /// Build a generator over `reference` (the walk's REF fetches),
     /// `make_reference` (the cursor's per-file accessor factory) and
     /// `preparer` (per-read canonicalisation), with `config` checked before
@@ -1022,6 +1022,7 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
             // unclaimed and a retry with the same sample still works.
             self.sample = Some(sample);
         }
+        self.release_reference_behind(region);
         // Saturating, and in the safe direction: the walker's positions are
         // `u32`, so a region ending past 4 Gb cannot be walked at all, and a
         // stop bound clamped to `u32::MAX` makes the walk run long rather than
@@ -1042,6 +1043,77 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
             chain_ids_at_open,
         });
         Ok(())
+    }
+
+    /// Let every reference reader drop the bases this walk has gone past.
+    ///
+    /// # The problem, which is not the cursor's and predates it
+    ///
+    /// A reference reader here is a **sliding window over the FASTA**, not the whole
+    /// chromosome. It extends forward as it is asked for more, and it only ever shrinks when
+    /// someone tells it to. Nobody told it to. So a run walking a chromosome forward ended up
+    /// holding **one byte in memory for every base it had walked** — measured directly at
+    /// 1,999,995 bytes resident after a 2 Mb walk, against 150 bytes with releasing turned on.
+    /// On human chromosome 1 that is around 250 MB, against a walk that otherwise peaks near
+    /// 25 MB.
+    ///
+    /// It never showed up, because every measurement behind this generator used a
+    /// tandem-repeat-targeted file. Its coverage is sparse enough that consecutive reads are
+    /// far apart, and the reader jumps rather than extending — which is exactly the case that
+    /// cannot grow.
+    ///
+    /// **Three readers, because they cannot be one.** The walk asks *what base is here*, the
+    /// read preparer asks for the window under each read it left-aligns, and each input file's
+    /// read filter asks for the window under each read it mismatch-checks. They are separate
+    /// because each is a stateful reader with its own file position, and sharing one would
+    /// give several consumers one position between them.
+    ///
+    /// # The bound, and why it is generous
+    ///
+    /// Everything any of them will read from here on lies at or after this region's start,
+    /// less a margin: a read overlapping the region may begin before it, and a record's
+    /// footprint may reach back to the read that opened it. `max_record_span` is a bound on
+    /// both, so this releases everything before `region.start - max_record_span`.
+    ///
+    /// **Being wrong here costs a re-read, never an answer.** Releasing is a hint: a base
+    /// asked for after it was released is simply read again. That is what lets the margin be
+    /// generous rather than exact.
+    fn release_reference_behind(&mut self, region: GenomeRegion) {
+        let keep_from = region
+            .start
+            .get()
+            .saturating_sub(u64::from(self.config.max_record_span));
+        self.reference.evict_before(keep_from);
+        self.preparation
+            .borrow()
+            .preparer
+            .evict_reference_before(keep_from);
+        if let Some(chromosome) = &self.chromosome {
+            chromosome
+                .walker
+                .reads()
+                .reads
+                .evict_reference_before(keep_from);
+        }
+    }
+
+    /// How many reference bases this generator's readers are holding between them — the walk's,
+    /// the preparer's, and the cursor's.
+    ///
+    /// **The bound made observable.** Without it "the window is bounded" is an argument about
+    /// where [`release_reference_behind`](Self::release_reference_behind) is called from, and a
+    /// call site quietly dropped costs memory without changing a single answer — which is how
+    /// it went unnoticed in the first place.
+    pub fn resident_reference_bases(&self) -> usize {
+        self.reference.resident_bases()
+            + self
+                .preparation
+                .borrow()
+                .preparer
+                .resident_reference_bases()
+            + self.chromosome.as_ref().map_or(0, |chromosome| {
+                chromosome.walker.reads().reads.resident_reference_bases()
+            })
     }
 
     /// Retire the walker on the chromosome being left and build the one for `region`'s.
@@ -1123,7 +1195,7 @@ impl<R: RawRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
 /// the tests in this module drive: an inherent method wins name resolution
 /// against a trait method, so `generator.next_locus(&reads)` is the two-argument
 /// one below and never a mis-resolved trait call.
-impl<R: RawRefSeq, P: ReadPreparer> LocusGenerator<()> for PileupGenerator<R, P> {
+impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> LocusGenerator<()> for PileupGenerator<R, P> {
     fn begin_segment(&mut self, region: GenomeRegion) {
         PileupGenerator::begin_segment(self, region);
     }
@@ -1362,7 +1434,7 @@ mod tests {
     }
 
     /// Drain a whole segment: every locus `next_locus` yields for `region`.
-    fn loci_of<R: RawRefSeq, P: ReadPreparer>(
+    fn loci_of<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer>(
         generator: &mut PileupGenerator<R, P>,
         region: GenomeRegion,
         reads: &SampleReads,
@@ -2490,6 +2562,133 @@ mod tests {
             anchors_for(&sample_b).is_empty(),
             "sample B's only read is on another contig and must yield nothing — which is the \
              whole point",
+        );
+    }
+
+    /// A reference that records what it was told to release, and delegates everything else.
+    ///
+    /// The fixture reference is in memory, so it holds no window and `resident_reference_bases`
+    /// reads zero however badly the release is wired. Asking *what was released, and when* is
+    /// falsifiable where asking *how much is held* is not.
+    struct ReleaseSpy {
+        inner: InMemoryRefSeq,
+        released: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl EvictableRefSeq for ReleaseSpy {
+        fn evict_before(&self, pos: u64) {
+            self.released.lock().expect("no panic holds this").push(pos);
+        }
+    }
+
+    impl RawRefSeq for ReleaseSpy {
+        fn fetch_raw_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+            self.inner.fetch_raw_into(contig, start_1based, length, dst)
+        }
+    }
+
+    impl crate::ng::ref_seq::RefSeq for ReleaseSpy {
+        fn fetch_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+            self.inner.fetch_into(contig, start_1based, length, dst)
+        }
+    }
+
+    /// **Every region tells the reference readers what they may release, and the mark moves
+    /// forward with the walk.**
+    ///
+    /// A reference reader is a sliding window over the FASTA. It extends forward as it is asked
+    /// for more, and it only shrinks when it is told to — and nothing was telling it. A run
+    /// walking a chromosome forward therefore held one byte in memory for every base it had
+    /// walked: measured directly at 1,999,995 bytes resident after a 2 Mb walk, against 150
+    /// bytes once the release is wired (`ref_seq`'s own tests own that measurement).
+    ///
+    /// **It went unseen because of the fixture.** Every measurement behind this generator used
+    /// a tandem-repeat-targeted file, whose coverage is sparse enough that the reader jumps
+    /// between reads rather than extending — the one case that cannot grow.
+    ///
+    /// This asserts the two things the generator is responsible for: that it releases at all,
+    /// and that the mark advances. What is *safe* to release is the margin below.
+    #[test]
+    fn every_region_releases_the_reference_behind_it() {
+        let records: Vec<RecordBuf> = (0..5)
+            .map(|index| read_named_with_length(&format!("r{index}"), 1, 30 + index * 20, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+
+        // Two recorders, because there are two readers to release: the walk's own, and the
+        // one each input file's read filter holds inside the cursor.
+        let released = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let released_by_cursor = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = ReleaseSpy {
+            inner: fixture_bases(),
+            released: Arc::clone(&released),
+        };
+        let make_reference = {
+            let released_by_cursor = Arc::clone(&released_by_cursor);
+            move || ReleaseSpy {
+                inner: fixture_bases(),
+                released: Arc::clone(&released_by_cursor),
+            }
+        };
+        let mut generator = PileupGenerator::new(
+            Arc::new(spy),
+            make_reference,
+            PassthroughPreparer,
+            PileupGeneratorConfig {
+                max_record_span: 5,
+                ..PileupGeneratorConfig::default()
+            },
+        )
+        .expect("config");
+
+        for index in 0..5u64 {
+            let start = 30 + index * 20;
+            loci_of(&mut generator, region(1, start, start + 19), &reads);
+        }
+
+        let marks = released.lock().expect("no panic holds this").clone();
+        assert_eq!(
+            marks.len(),
+            5,
+            "one release per region, so a walk of any length holds one region's worth: {marks:?}",
+        );
+        assert!(
+            marks.windows(2).all(|pair| pair[1] > pair[0]),
+            "the mark must move forward with the walk, or it releases the same nothing every \
+             time: {marks:?}",
+        );
+        // Region 1 starts at 30 and the margin is `max_record_span` = 5.
+        assert_eq!(
+            marks[0], 25,
+            "the mark is the region's start less one `max_record_span`, which bounds both how \
+             far back a read overlapping the region can begin and how far a record's footprint \
+             can reach: {marks:?}",
+        );
+
+        // The cursor's reader is released too, and it is the one that was growing hardest —
+        // the read filter reads the reference once per surviving read, so it touches every
+        // covered base of the chromosome.
+        let by_cursor = released_by_cursor
+            .lock()
+            .expect("no panic holds this")
+            .clone();
+        assert_eq!(
+            by_cursor, marks,
+            "the cursor's reader is released at the same mark and as often as the walk's — \
+             the release runs after the cursor is minted, so even the first region reaches it: \
+             {by_cursor:?}",
         );
     }
 

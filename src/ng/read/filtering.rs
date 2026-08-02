@@ -1009,6 +1009,18 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
         &mut self.source
     }
 
+    /// The reference this filter reads for the mismatch-fraction check.
+    ///
+    /// **Shared, not mutable, and that is the point.** The one thing a caller needs it for is
+    /// *releasing the bases the walk has gone past*, which is a `&self` operation
+    /// ([`EvictableRefSeq`](crate::ng::ref_seq::EvictableRefSeq)). A filter that lives as long
+    /// as a cursor reads the reference once per surviving read, forward, and never releases
+    /// any of it on its own — on a densely covered chromosome that is one byte held for every
+    /// base walked, about 250 MB on human chromosome 1.
+    pub(crate) fn reference(&self) -> &R {
+        &self.reference
+    }
+
     /// Give the source, the two reused buffers, and the final tally back to
     /// whoever lent them.
     ///

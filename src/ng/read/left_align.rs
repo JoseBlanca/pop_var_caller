@@ -24,7 +24,7 @@ use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::alignment::{Alignment, AlignmentNormalizer, DefaultAlignmentNormalizer};
 use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::prepared_read::PreparedRead;
-use crate::ng::ref_seq::RefSeq;
+use crate::ng::ref_seq::{EvictableRefSeq, RefSeq};
 use crate::ng::types::ContigId;
 use crate::pileup::per_sample::baq_engine::prepare_passthrough;
 use crate::pileup::walker::CigarOp;
@@ -187,7 +187,7 @@ impl<R: RefSeq, N: AlignmentNormalizer> LeftAlignPreparer<R, N> {
     }
 }
 
-impl<R: RefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N> {
+impl<R: RefSeq + EvictableRefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N> {
     type Scratch = LeftAlignScratch;
 
     /// Prepare one read: canonicalise its indels if it has any, otherwise hand back what the
@@ -206,6 +206,19 @@ impl<R: RefSeq, N: AlignmentNormalizer> ReadPreparer for LeftAlignPreparer<R, N>
             self.canonicalize(&mut read, scratch)?;
         }
         Ok(Some(into_prepared(read)))
+    }
+
+    /// Release the reference bases already left behind — see the trait method.
+    ///
+    /// This preparer fetches only for reads that carry an indel, so its window is sparse and
+    /// grows more slowly than the walk's. It still grows: two indels a kilobase apart leave
+    /// the kilobase between them resident.
+    fn evict_reference_before(&self, pos: u64) {
+        self.reference.evict_before(pos);
+    }
+
+    fn resident_reference_bases(&self) -> usize {
+        self.reference.resident_bases()
     }
 }
 
@@ -252,6 +265,11 @@ mod tests {
     /// rather than left as a claim in a doc comment: the assertion is that the fetch is not
     /// reached at all, which no amount of inspecting the returned read could show.
     struct NeverFetched;
+    impl EvictableRefSeq for NeverFetched {
+        /// Holds no window, so there is nothing to release.
+        fn evict_before(&self, _pos: u64) {}
+    }
+
     impl RefSeq for NeverFetched {
         fn fetch_into(
             &self,
@@ -266,6 +284,11 @@ mod tests {
 
     /// A reference whose every fetch fails — for proving a broken fetch ends the run.
     struct AlwaysFailsToFetch;
+    impl EvictableRefSeq for AlwaysFailsToFetch {
+        /// Holds no window, so there is nothing to release.
+        fn evict_before(&self, _pos: u64) {}
+    }
+
     impl RefSeq for AlwaysFailsToFetch {
         fn fetch_into(
             &self,

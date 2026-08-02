@@ -128,6 +128,26 @@ pub trait ReadPreparer {
         read: AlignedRead,
         scratch: &mut Self::Scratch,
     ) -> Result<Option<PreparedRead>, ReadPrepError>;
+
+    /// Release any reference bases this preparer has read and gone past.
+    ///
+    /// **A preparer that reads the reference holds what it read.** Left-alignment fetches the
+    /// window each read covers, so a preparer walking a chromosome forward accumulates one
+    /// byte for every base it passes — about 250 MB on human chromosome 1 — unless something
+    /// tells it what it may release. Only the caller knows what it will ask for next, so the
+    /// caller says when.
+    ///
+    /// **A hint, never a fact an answer depends on.** An evicted base that is asked for again
+    /// is simply read again, so a `pos` that is too high costs time and never correctness.
+    /// The default does nothing, which is honest for a preparer that reads no reference —
+    /// most of them, including every passthrough.
+    fn evict_reference_before(&self, _pos: u64) {}
+
+    /// How many reference bases this preparer is holding. Zero unless it reads a reference —
+    /// the bound made observable, so "it is bounded" is a test rather than an argument.
+    fn resident_reference_bases(&self) -> usize {
+        0
+    }
 }
 
 #[cfg(test)]

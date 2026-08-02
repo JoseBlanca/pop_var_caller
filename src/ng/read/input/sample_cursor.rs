@@ -86,6 +86,40 @@ impl<R: RawRefSeq> SampleCursor<R> {
         }
     }
 
+    /// Release the reference bases every file's read filter has gone past — see
+    /// [`AlignmentCursor::evict_reference_before`].
+    ///
+    /// Each file's cursor holds its own reference reader, because they are stateful readers
+    /// and sharing one between k files would give them one file position between them. So the
+    /// release goes to all of them.
+    pub fn evict_reference_before(&self, pos: u64)
+    where
+        R: crate::ng::ref_seq::EvictableRefSeq,
+    {
+        match self {
+            Self::Single(cursor) => cursor.evict_reference_before(pos),
+            Self::Merged(merged) => merged
+                .cursors
+                .iter()
+                .for_each(|cursor| cursor.evict_reference_before(pos)),
+        }
+    }
+
+    /// How many reference bases this sample's readers hold between them.
+    pub fn resident_reference_bases(&self) -> usize
+    where
+        R: crate::ng::ref_seq::EvictableRefSeq,
+    {
+        match self {
+            Self::Single(cursor) => cursor.resident_reference_bases(),
+            Self::Merged(merged) => merged
+                .cursors
+                .iter()
+                .map(|cursor| cursor.resident_reference_bases())
+                .sum(),
+        }
+    }
+
     /// The next read of the current region, in position order across every file.
     pub fn next_read(&mut self) -> Option<Result<AlignedRead, CursorError>> {
         match self {

@@ -394,6 +394,12 @@ impl RawChromReader {
         self.buf_start_base = pos;
     }
 
+    /// How many bases this reader is holding — the memory bound made observable, and what
+    /// [`evict_before`](Self::evict_before) is judged on. Cheap: a `Vec`'s length.
+    pub fn resident_bases(&self) -> usize {
+        self.buf.len()
+    }
+
     /// Current resident buffer length. Test/diagnostic.
     #[cfg(test)]
     pub fn buf_len(&self) -> usize {

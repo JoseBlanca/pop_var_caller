@@ -29,7 +29,7 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::input::cursor::{CursorCounts, CursorError};
 use crate::ng::read::input::sample_cursor::SampleCursor;
 use crate::ng::read::input::{SampleIdentity, SampleReads};
-use crate::ng::ref_seq::{ContigTable, RawRefSeq, RefSeq, RefSeqError};
+use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeqError};
 use crate::ng::region_typing::segment_criteria::SsrSegment;
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 
@@ -1836,7 +1836,7 @@ impl<A> RepeatDelimiter for A where
 /// §8) — **and D3 took most of its cost away**: the factory is called once per file per
 /// *chromosome* now, where it used to run at every locus, so a file-backed `R` whose factory
 /// reloads is no longer the per-locus tax it was.
-pub struct SsrGenerator<R: RawRefSeq, A: RepeatDelimiter> {
+pub struct SsrGenerator<R: RawRefSeq + EvictableRefSeq, A: RepeatDelimiter> {
     /// The reference the margin fetch reads the flanks from.
     reference: R,
     /// Builds a fresh read reference for the cursor's mismatch-fraction filter — one per file,
@@ -1897,7 +1897,7 @@ pub struct SsrGenerator<R: RawRefSeq, A: RepeatDelimiter> {
 
 impl<R> SsrGenerator<R, SsrUnitRobustAligner<PerQualityEmission>>
 where
-    R: RefSeq + ContigTable + RawRefSeq,
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
 {
     /// A generator with the **recommended** delimiter — algorithm 4u, the *unit-robust* aligner over
     /// production's [`PerQualityEmission`] table. It is algorithm 4 (unit-slip) hardened by the
@@ -1928,7 +1928,7 @@ where
 
 impl<R, A> SsrGenerator<R, A>
 where
-    R: RefSeq + ContigTable + RawRefSeq,
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
     A: RepeatDelimiter,
 {
     /// Build a generator over `reference` (the margin fetch), `make_reference` (the read-query
@@ -2026,6 +2026,18 @@ where
         if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
             return Err(LocusGenerationError::ForeignSample { region });
         }
+        // Let both readers drop what this walk has gone past. A reference reader is a
+        // sliding window over the FASTA that only ever grows unless it is told to shrink, and
+        // nobody was telling it: a forward walk of a chromosome ended up holding one byte for
+        // every base it had passed. The margin is one flank, which is the furthest back either
+        // reader looks from a repeat's own start; being generous costs a re-read and never an
+        // answer, because releasing is a hint.
+        let keep_from = region.start.get().saturating_sub(self.config.flank_bp.0);
+        self.reference.evict_before(keep_from);
+        if let Some((_, cursor)) = &self.cursor {
+            cursor.evict_reference_before(keep_from);
+        }
+
         if self.cursor.as_ref().is_none_or(|(on, _)| *on != contig) {
             // Taken before the new one is built, so a run never holds two chromosomes'
             // cursors — and their kept reads — at once. The tallies are taken with it: they
@@ -2157,7 +2169,7 @@ pub struct SegmentDelimitations {
 
 impl<R, A> LocusGenerator<SsrSegment> for SsrGenerator<R, A>
 where
-    R: RefSeq + ContigTable + RawRefSeq,
+    R: RefSeq + ContigTable + RawRefSeq + EvictableRefSeq,
     A: RepeatDelimiter,
 {
     fn begin_segment(&mut self, region: GenomeRegion) {
@@ -2934,6 +2946,139 @@ mod tests {
             observations_for(&sample_b),
             0,
             "sample B's read is 45 bases away and must not appear — which is the whole point",
+        );
+    }
+
+    /// A reference that records what it was told to release, delegating everything else.
+    ///
+    /// The fixture reference is in memory and holds no window, so "how much is resident" reads
+    /// zero however badly the release is wired. Asking *what was released, and when* is
+    /// falsifiable where asking *how much is held* is not.
+    struct ReleaseSpy {
+        inner: InMemoryRefSeq,
+        released: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl EvictableRefSeq for ReleaseSpy {
+        fn evict_before(&self, pos: u64) {
+            self.released.lock().expect("no panic holds this").push(pos);
+        }
+    }
+
+    impl RawRefSeq for ReleaseSpy {
+        fn fetch_raw_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), RefSeqError> {
+            self.inner.fetch_raw_into(contig, start_1based, length, dst)
+        }
+    }
+
+    impl RefSeq for ReleaseSpy {
+        fn fetch_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), RefSeqError> {
+            self.inner.fetch_into(contig, start_1based, length, dst)
+        }
+    }
+
+    impl ContigTable for ReleaseSpy {
+        fn contigs(&self) -> &crate::fasta::ContigList {
+            self.inner.contigs()
+        }
+    }
+
+    /// **Every repeat tells the reference readers what they may release, and the mark moves
+    /// forward.**
+    ///
+    /// A reference reader is a sliding window over the FASTA. It grows as it is asked for more
+    /// and shrinks only when told to — so a walk that never tells it holds one byte for every
+    /// base it has passed, about 250 MB on human chromosome 1. `ref_seq`'s own tests measure
+    /// that directly; this pins the two things *this* generator is responsible for: that it
+    /// releases at all, and that the mark advances with the walk.
+    ///
+    /// Reviewers found this exact call site deletable with the whole suite green, which is why
+    /// it has a test of its own rather than sharing the generic generator's.
+    #[test]
+    fn every_repeat_releases_the_reference_behind_it() {
+        use crate::ng::read::input::test_fixtures::read_named_with_length;
+        // Kept clear of the 100-base fixture contig's end: the last read runs 50..79.
+        let records: Vec<_> = (0..4)
+            .map(|index| read_named_with_length(&format!("r{index}"), 0, 5 + index * 15, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+
+        // Two recorders: the margin fetch's reader, and the one the read filter holds inside
+        // the cursor.
+        let released = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let released_by_cursor = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = ReleaseSpy {
+            inner: fixture_ref_bases(),
+            released: std::sync::Arc::clone(&released),
+        };
+        let make_reference = {
+            let released_by_cursor = std::sync::Arc::clone(&released_by_cursor);
+            move || ReleaseSpy {
+                inner: fixture_ref_bases(),
+                released: std::sync::Arc::clone(&released_by_cursor),
+            }
+        };
+        let mut generator = SsrGenerator::new(
+            spy,
+            make_reference,
+            SsrUnitSlipAligner::new(PerQualityEmission::new()),
+            SsrGeneratorConfig {
+                flank_bp: Bp(10),
+                max_reads_per_locus: None,
+            },
+            Bp(10),
+        )
+        .expect("flank within the bundle threshold");
+
+        for index in 0..4u64 {
+            let start = 20 + index * 10;
+            generator.begin_segment(span(start, start + 9));
+            generator
+                .next_locus(&tract(start, start + 9), &reads)
+                .expect("no fetch error");
+        }
+
+        let marks = released.lock().expect("no panic holds this").clone();
+        assert_eq!(
+            marks.len(),
+            4,
+            "one release per repeat, so a walk of any length holds one repeat's worth: \
+             {marks:?}",
+        );
+        assert!(
+            marks.windows(2).all(|pair| pair[1] > pair[0]),
+            "the mark must move forward with the walk, or it releases the same nothing every \
+             time: {marks:?}",
+        );
+        // The first repeat starts at 20 and the margin is one flank, 10.
+        assert_eq!(
+            marks[0], 10,
+            "the mark is the repeat's start less one flank, which is the furthest back either \
+             reader looks from a repeat's own start: {marks:?}",
+        );
+
+        // The cursor's reader has none to release at the first repeat, which opens it.
+        let by_cursor = released_by_cursor
+            .lock()
+            .expect("no panic holds this")
+            .clone();
+        assert_eq!(
+            by_cursor,
+            marks[1..].to_vec(),
+            "the cursor's reader is released too, from the repeat after the one that opens it: \
+             {by_cursor:?}",
         );
     }
 

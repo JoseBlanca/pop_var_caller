@@ -3605,7 +3605,7 @@ mod tests {
             }
         }
         impl EvictableRefSeq for FailsLate {
-            fn evict_before(&mut self, _pos: u64) {}
+            fn evict_before(&self, _pos: u64) {}
         }
 
         let bases = windowing_fixture();
@@ -3682,7 +3682,7 @@ mod tests {
             }
         }
         impl EvictableRefSeq for EvictionSpy {
-            fn evict_before(&mut self, pos: u64) {
+            fn evict_before(&self, pos: u64) {
                 self.evictions.borrow_mut().push(pos);
             }
         }
