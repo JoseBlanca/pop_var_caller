@@ -25,6 +25,7 @@ pub mod cursor;
 pub mod merge;
 pub mod open_bam;
 pub mod read_groups;
+pub(crate) mod record_reader;
 pub mod reference;
 pub mod region_query;
 

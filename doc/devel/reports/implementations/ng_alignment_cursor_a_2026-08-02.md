@@ -206,3 +206,61 @@ four on `contigs()`:
   "deny"`, by using intra-doc-link brackets on filesystem paths. Twelve errors remain, all
   pre-existing in files this branch does not touch — **CI's doc step is red independently of
   this work**.
+
+---
+
+## A3 — `RecordReader`, and the arm with no file behind it
+
+### Plan
+
+Arch §1.3: the layer that finds and unpacks records, **with only its `InMemory` arm** — a
+scripted list. BAM lands at Milestone C, CRAM at E.
+
+### Why this arm is built first, and why it is not a test fixture
+
+The next milestone builds the forget rule, and that is the only part of this design that can
+lose reads *silently*: a rule dropping a read it should have kept produces a wrong genotype,
+not a crash. The first attempt lost 3,830 of 236,081 loci with all 1,471 tests green. So the
+rule is driven from a scripted list, where "what should this region return?" is answerable by
+scanning the same list by hand — before an indexed file can hide a defect in it.
+
+That makes this arm the **oracle**, which raises the bar on it specifically: a defect here
+does not produce a red test, it produces a wrong yardstick.
+
+### Changes made
+
+| file | change |
+|---|---|
+| [src/ng/read/input/record_reader/mod.rs](../../../../src/ng/read/input/record_reader/mod.rs) | **new.** The `RecordReader` enum, the contract in its module doc, and the enum's forwarding test. |
+| [src/ng/read/input/record_reader/in_memory.rs](../../../../src/ng/read/input/record_reader/in_memory.rs) | **new.** `InMemoryRecordReader` and ten tests. |
+| [src/ng/read/input/mod.rs](../../../../src/ng/read/input/mod.rs) | `pub(crate) mod record_reader;` |
+
+`begin_region` **rewinds** rather than searching: this arm indexes nothing, so every region
+sees every record and the layer above does the overlap test — which is exactly the linear
+scan a BAM index query has to agree with. Records come out **raw**, with `read_group` cleared
+and never stamped, because resolution belongs to the layer above and a reused buffer would
+otherwise carry the previous record's group silently.
+
+### Deviations, absorbed
+
+- **`other_sample_records` is not here.** The first draft added it returning a constant `0`,
+  justified by a rule that does not apply — `RecordReader` is an enum with inherent methods
+  and does not implement `RecordSource`, so the trait's deliberate no-default requirement
+  never reached it. `RegionRecords` resolves read groups and will answer for itself at C1.
+- **Both files' dead-code allow is stated once**, in `mod.rs`, which covers the child module
+  (checked). `#[expect]` would be the self-removing choice and does not work here: the tests
+  *do* use these items, so the lint fires for the lib target and not the test target, and
+  `--all-targets` then reports the expectation unfulfilled — an error under `-D warnings`.
+  The reason records that, so the next reader does not "upgrade" it and break the build.
+
+### Tests
+
+Eleven. Order, replay, end-of-input, the empty script, the out-of-order script left
+unsorted, the raw read group on **every** record of a pass, whole-record fidelity, the
+header's identity, the abandoned-region rewind, and the enum's forwarding.
+
+### Validation
+
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib ng::` — **1488 passed; 0 failed; 2 ignored**.
+- `cargo doc --no-deps --lib --all-features` — no `record_reader` errors.

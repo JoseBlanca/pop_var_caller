@@ -184,3 +184,50 @@ open file at once), records the measured alternative, and names it a follow-up.
 - `cargo test --lib ng::` — **1477 passed; 0 failed; 2 ignored**.
 - `cargo doc --no-deps --lib --all-features` — no `cursor.rs` errors; the 12 that remain are
   pre-existing in files this branch does not touch.
+
+---
+
+## A3
+
+**All findings applied. Thirteen mutations were run against the first draft and six survived;
+all six now fail.**
+
+| mutation | now caught by |
+|---|---|
+| `begin_region` rewinds only when the previous region was drained | `a_reader_abandoned_part_way_through_still_rewinds` |
+| the enum's `begin_region` swallows the call | `the_enum_forwards_every_contract_method_to_its_arm`, rewritten to reposition **after** a drain |
+| the clone loses `alignment_start` | `the_whole_record_survives_the_clone` |
+| the clone keeps only the name | `the_whole_record_survives_the_clone` |
+| `read_group` cleared only for the first record | `every_record_of_a_pass_comes_out_with_no_read_group` |
+| `header()` returns a different header of the same shape | `the_header_is_the_one_the_reader_was_built_with` |
+
+The root cause of three of them was one helper: `drain` compared **name lists**, so anything
+that preserved names passed. It now delegates to `drain_records`, and its doc says why names
+alone are not enough.
+
+### The contract's false claims
+
+- **"reusing the buffer's allocations"** — true of a file arm, false of this one, and the
+  difference is now stated with its mechanism (`RecordBuf` derives `Clone`, so `clone_from`
+  is the default `*self = source.clone()`). The claim that a real arm has "the same cost
+  shape" is deleted: it is the opposite.
+- **"A reader holds only its position"** — now says "and (from Milestone C) the single record
+  the sorted early stop consumes without yielding", which is what arch §1.3 requires and what
+  C2 will implement.
+- **"stated once so two arms cannot drift"** — the heading now says what the list is: a place
+  to check an arm against, not a mechanism, with a note that what will actually hold the arms
+  together is the oracle at spec §11.3 and a shared harness when the second arm lands.
+- **"a record replayed from memory"** — spec §5's sentence is about **reads**, and a replayed
+  read skips decode and filtering entirely. Corrected, with the distinction spelled out.
+
+### Removed rather than fixed
+
+**`other_sample_records`.** It returned a constant `0` justified by a rule that does not
+apply: `RecordReader` is an enum with inherent methods and does not implement `RecordSource`.
+Nothing calls it until `RegionRecords` at C1, which resolves read groups itself and will
+answer for its own skipping.
+
+### Validation
+
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings` — clean.
+- `cargo test --lib ng::` — **1488 passed; 0 failed; 2 ignored**.

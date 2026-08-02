@@ -304,3 +304,93 @@ count `+ 999` passed everything. *Category: reliability.*
   `#[error("reading {path}")]` would not compile and spec §8's `Io(std::io::Error)` carries
   no path, so the code is right to differ — flagging them so a later reader does not "fix"
   them back.
+
+---
+
+## A3 — `RecordReader` and its in-memory arm
+
+### 1. Scope
+
+The uncommitted change for A3 against `cd9fbd9` plus its patch. In scope:
+`src/ng/read/input/record_reader/{mod,in_memory}.rs` (both new) and one line in
+`src/ng/read/input/mod.rs`. **Two agents over four checklists**: `reliability`; and
+`module_structure` + `naming` + `smells` paired.
+
+### 2. Verdict
+
+**Request-changes, then approve.** The step's own deliverable — an oracle — was the thing the
+tests did not pin. **Thirteen mutations run, six survived.**
+
+### 5. Top 3 priorities
+
+1. **B1** — `begin_region`'s rewind is never observed from mid-script, so it can be deleted
+   at either layer with the suite green. That is spec §7's abandoned-region case.
+2. **B2** — the clone's fidelity is never checked beyond the read name; dropping
+   `alignment_start`, the one field the forget rule compares, survives.
+3. **M1** — the contract claims `read_next` reuses the buffer's allocations. The only arm
+   does not, and the doc also claims the real arms have "the same cost shape".
+
+### 6. Findings
+
+#### Blocker
+
+**B1: the rewind can be deleted and nothing fails.** Both tests exercising `begin_region`
+called it on a reader already at position 0 or already drained. `if self.next_index >=
+self.records.len() { self.next_index = 0 }` passed the whole suite — and that is exactly
+spec §7's first named case: a caller that abandons a region leaves the reader mid-script, and
+the next region would get a truncated one. *Category: reliability. Mutation-verified.*
+
+**B2: the clone is only proved to carry the name.** `drain` compared name lists, so a clone
+losing `alignment_start` — **the field the forget rule compares** — survived, as did one
+keeping the name and garbage everywhere else. *Category: reliability. Mutation-verified.*
+
+#### Major
+
+**M1: "reusing the buffer's allocations" is false for the only arm.** `RecordBuf` derives
+`Clone`, and a derived `Clone` gets the default `clone_from` (`*self = source.clone()`),
+which drops the destination's buffers. Measured with a standalone program: `derive(Clone):
+ptr_same=false cap_before=256 cap_after=64` against a manual impl's `ptr_same=true
+cap_after=256`. The second claim — that a real arm has "the same cost shape" — is wrong the
+other way: noodles' `read_record_buf` is genuine reuse. *Category: smells.*
+
+**M2: the forwarding test cannot detect a skipped delegation**, though its doc says it can.
+Replacing the enum's `begin_region` body with `Ok(())` left all eight tests green, because the
+test repositioned a freshly built reader. *Category: smells. Mutation-verified.*
+
+**M3: `other_sample_records`'s justification is untrue.** `RecordReader` does not implement
+`RecordSource`, so the trait's no-default rule does not reach it; and "happened twice in this
+module's history" relocated another module's incidents into a module created in this commit.
+*Category: smells.*
+
+**M4: the read-group guard was one record deep**, and `header()` was pinned only by contig
+*count* — a header with the right number of contigs under different names would put every
+read on the wrong chromosome. *Category: reliability. Both mutation-verified.*
+
+#### Minor
+
+- **Mi1** "stated once so two arms cannot drift" describes a hope; prose does not fail a
+  build. *module_structure.*
+- **Mi2** "A reader holds only its position" drops arch §1.3's **one-record pushback**, which
+  plan C2 implements — so the contract was already scheduled to be false. *smells.*
+- **Mi3** "a record replayed from memory" transposes spec §5's *read* into *record*; a
+  replayed read sits above the filter and goes through **fewer** lines, not the same ones.
+  *smells.*
+- **Mi4** `next: usize` is a bare participle where the crate's two nearest analogues use
+  `next_index`. *naming.*
+- **Mi5** the four-line allow reason was duplicated verbatim in both files. *smells.*
+
+### 7. Out of scope observations
+
+- `src/ng/read/input/region_query.rs` says "The trait's default is `0`" of a trait method
+  that **has no default** — the stale sentence the new doc echoed.
+- Arch §1.3's own bullets contradict its prose about who keeps what.
+
+### 9. What's good
+
+- **Three of the brief's four judgement calls came out in the code's favour, with the reason
+  measured rather than asserted** — including why `#[expect]` would *not* work here (the
+  lint fires for the lib target and not the test target, so `--all-targets` reports the
+  expectation unfulfilled and fails `-D warnings`).
+- **The `clone_from` finding was settled with a standalone program**, not by reading noodles'
+  source: `grep -rn "fn clone_from"` over noodles-sam returning nothing is suggestive; the
+  pointer and capacity numbers are proof.
