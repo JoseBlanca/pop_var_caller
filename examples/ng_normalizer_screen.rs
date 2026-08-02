@@ -191,8 +191,8 @@ fn main() -> ExitCode {
         }
     };
 
-    // One windowed reference for this loop's own per-read window fetches. The read stream's own
-    // mismatch filter gets a fresh one per query through `make_reference`.
+    // One windowed reference for this loop's own per-read window fetches. The cursor's own
+    // mismatch filter gets a fresh one per chromosome, through the factory below.
     let window_reference = WindowedRefSeq::new(fasta.clone(), contigs.clone());
 
     let mut tally = Tally::default();
@@ -202,17 +202,25 @@ fn main() -> ExitCode {
             start: Position(1),
             end: Position(contig.length),
         };
-        let stream = match sample.reads_in_region(region, || {
+        // A cursor per contig, pointed at the whole of it. This screen reads each contig once
+        // end to end, so nothing is reused and nothing is kept for long — the cursor is here
+        // because it is the only way to read an alignment file, not for a saving it cannot
+        // make on a single whole-contig pass.
+        let mut cursor = match sample.cursor(ContigId(index as u32), || {
             WindowedRefSeq::new(fasta.clone(), contigs.clone())
         }) {
-            Ok(stream) => stream,
+            Ok(cursor) => cursor,
             Err(error) => {
                 eprintln!("skipping contig {}: {}", contig.name, error_chain(&error));
                 continue;
             }
         };
+        if let Err(error) = cursor.move_to_region(region) {
+            eprintln!("skipping contig {}: {}", contig.name, error_chain(&error));
+            continue;
+        }
 
-        for item in stream {
+        while let Some(item) = cursor.next_read() {
             let read = match item {
                 Ok(read) => read,
                 Err(_) => {
