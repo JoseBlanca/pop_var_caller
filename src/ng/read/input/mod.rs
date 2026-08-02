@@ -1810,6 +1810,85 @@ mod tests {
         );
     }
 
+    /// **The same, through a cursor** — because a sample's libraries are the case a cursor
+    /// could most plausibly get wrong, and the test above drives the path the cursor replaces.
+    ///
+    /// **A sample is not one read group.** One individual sequenced as several libraries
+    /// declares an `@RG` for each, and every one of them is ours: the reads must all be kept,
+    /// each carrying the library it came from, because that is the grouping a per-chemistry
+    /// error model is fitted on. "Belongs to another sample" is the only thing that makes a
+    /// record foreign.
+    ///
+    /// That matters more on the CRAM arm than anywhere else, because it is the one arm that
+    /// decides a record's read group **itself**, while decoding a container — so a mistake
+    /// here would drop a whole library's reads before any other layer could see them, and the
+    /// output would look like a sample that was simply sequenced less deeply.
+    #[test]
+    fn a_cursor_keeps_every_read_group_of_its_sample_not_just_one() {
+        use crate::ng::read::input::test_fixtures::{
+            indexed_cram_declaring, read_named_with_length_in_read_group,
+        };
+        use crate::ng::reference_info::{ReferenceSource, read_reference_info};
+
+        let (_cram_dir, cram_path, _fasta_dir, fasta) = indexed_cram_declaring(
+            &[
+                read_named_with_length_in_read_group("a", 0, 1, 30, "rg1"),
+                read_named_with_length_in_read_group("b", 0, 20, 30, "rg2"),
+                read_named_with_length_in_read_group("c", 0, 40, 30, "rg1"),
+            ],
+            // Two libraries, **one sample**. Not two samples — that is the other case, and it
+            // is what `a_shared_cram_serves_each_open_only_its_own_reads` covers.
+            &[("rg1", Some("NA12878")), ("rg2", Some("NA12878"))],
+        );
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+
+        let read_groups = build_read_groups(std::slice::from_ref(&cram_path)).expect("one sample");
+        let [sample] = read_groups.read_groups_per_sample() else {
+            panic!("both read groups name NA12878");
+        };
+        let reads = SampleReads::open(
+            sample,
+            &read_groups,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+        )
+        .expect("opens");
+
+        let mut cursor = reads
+            .cursor(ContigId(0), reference_bases)
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(whole_first_contig())
+            .expect("on this chromosome");
+
+        let mut observed = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("every record resolves");
+            observed.push((
+                String::from_utf8_lossy(&read.qname).into_owned(),
+                read.read_group.get(),
+            ));
+        }
+
+        assert_eq!(
+            observed,
+            vec![
+                ("a".to_string(), 0),
+                ("b".to_string(), 1),
+                ("c".to_string(), 0),
+            ],
+            "every library of this sample is kept, each read carrying its own — a cursor that \
+             kept only the first read group would drop 'b' and look like shallower sequencing",
+        );
+    }
+
     // --- how an open resolves one file's records ---
 
     /// `resolution_for` is where a file's read groups become this open's view of

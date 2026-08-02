@@ -38,7 +38,7 @@ use crate::ng::types::GenomeRegion;
 /// the region's end, and filters each container's records against the region. Both belong to a
 /// reader that answers one region and is then thrown away. Neither can be here.
 ///
-/// # One record, one read group — the documented exception
+/// # Each record carries its own read group — the documented exception
 ///
 /// Every other arm hands up a record with no read group attached, and the layer above resolves
 /// it from the record's `RG` tag. This arm attaches it, because a CRAM does not have an `RG`
@@ -47,6 +47,15 @@ use crate::ng::types::GenomeRegion;
 /// file, measured, the largest single item in what an open file cost — and re-inflating a
 /// number into a string so the layer above can parse it back would be perverse. So the answer
 /// travels with the record, and `RegionRecords` uses it rather than asking again.
+///
+/// **A sample is not one read group, and this is the arm where getting that wrong would be
+/// worst.** One individual sequenced as several libraries declares an `@RG` for each, and every
+/// one of them is ours — the reads are all kept, each carrying the library it came from,
+/// because that is the grouping a per-chemistry error model is fitted on. The *only* thing that
+/// makes a record foreign is belonging to another **sample**. Since this is the one arm that
+/// decides the question itself, a mistake here would drop a whole library before any other
+/// layer could see it, and the result would look like a sample sequenced less deeply rather
+/// than like a fault.
 pub(crate) struct CramRecordReader {
     reader: cram::io::Reader<File>,
     /// Parsed once at open and shared, never re-read per region.
