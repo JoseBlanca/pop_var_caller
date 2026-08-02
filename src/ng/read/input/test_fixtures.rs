@@ -191,6 +191,50 @@ pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, OpenReference) 
     )
 }
 
+/// **A contig long enough that the index has resolution**, for the tests that need it.
+///
+/// BAI's finest bins are 16 kb and a BGZF block is 64 kB, so a fixture smaller than that
+/// resolves *every* region to the same single chunk — and a test on one cannot tell a reader
+/// that positions from one that bounds. That is not hypothetical: the first version of the
+/// cursor's differential oracle ran on a 100-base contig and passed with the bounding defect
+/// in place.
+pub(crate) const BIG_FIXTURE_CONTIG: (&str, usize) = ("chrBig", 200_000);
+
+/// An [`OpenReference`] over [`BIG_FIXTURE_CONTIG`], from a `.fai`-only read.
+pub(crate) fn big_fixture_reference() -> (TempDir, OpenReference) {
+    let (dir, fasta) = build_fasta(&[ContigSpec {
+        name: BIG_FIXTURE_CONTIG.0.to_string(),
+        length: BIG_FIXTURE_CONTIG.1 as u64,
+    }])
+    .expect("build fasta");
+    (
+        dir,
+        OpenReference::from(
+            read_reference_info(ReferenceSource::Fai(
+                crate::ng::reference_info::sibling_fai_path(&fasta),
+            ))
+            .expect("read reference"),
+        ),
+    )
+}
+
+/// [`BIG_FIXTURE_CONTIG`] in the `@SQ` shape.
+pub(crate) fn big_contig_specs() -> Vec<(&'static str, usize, Option<&'static str>)> {
+    vec![(BIG_FIXTURE_CONTIG.0, BIG_FIXTURE_CONTIG.1, None)]
+}
+
+/// Reads spread across [`BIG_FIXTURE_CONTIG`], 30 bases each starting every `stride`, which
+/// is enough data to span several BGZF blocks and many index bins.
+pub(crate) fn big_spread_of_reads(stride: usize) -> Vec<RecordBuf> {
+    let mut records = Vec::new();
+    let mut start = 1;
+    while start + 30 < BIG_FIXTURE_CONTIG.1 {
+        records.push(read_named_with_length(&format!("r{start}"), 0, start, 30));
+        start += stride;
+    }
+    records
+}
+
 /// A 10 bp perfectly-matching read at `start` on `reference_sequence_id`.
 ///
 /// `qname` matters for the region-query oracle, which identifies reads by name

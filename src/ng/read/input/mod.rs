@@ -2437,4 +2437,76 @@ mod tests {
              '/data/a.bam' names 'NA12878', '/data/b.bam' names 'NA12892'"
         );
     }
+
+    /// **`SampleReads::cursor` must build one cursor per file, and nothing tested that.**
+    ///
+    /// Changing its loop to `.take(1)` — building only the first file's cursor — left the
+    /// whole suite green. A sample sequenced across several runs would then be genotyped from
+    /// one of its BAMs, silently: the reads it returned would be real, and the ones it never
+    /// looked for invisible.
+    #[test]
+    fn a_sample_cursor_covers_every_file_of_the_sample() {
+        use crate::ng::read::input::test_fixtures::{
+            bam_header, fixture_reference, indexed_named_bam, matching_contigs,
+            read_named_with_length,
+        };
+        use crate::ng::ref_seq::InMemoryRefSeq;
+        use crate::ng::types::{ContigId, Position};
+
+        let (_reference_dir, reference) = fixture_reference(false);
+        let header = bam_header(&matching_contigs());
+        // Two files, disjoint reads, so a cursor that skipped one would still answer
+        // plausibly — which is the point.
+        let (_dir_a, path_a) = indexed_named_bam(
+            &header,
+            &[read_named_with_length("from-a", 0, 1, 30)],
+            "a.bam",
+        );
+        let (_dir_b, path_b) = indexed_named_bam(
+            &header,
+            &[read_named_with_length("from-b", 0, 41, 30)],
+            "b.bam",
+        );
+
+        let sample = SampleReads::open_only_sample(
+            &[path_a, path_b],
+            &reference,
+            ReadFilterConfig::default(),
+            true,
+        )
+        .expect("two files naming one sample open together");
+        assert_eq!(sample.file_count(), 2);
+
+        let bases = || {
+            InMemoryRefSeq::from_contigs(
+                crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS
+                    .iter()
+                    .map(|(_, length)| vec![b'A'; *length])
+                    .collect(),
+            )
+        };
+        let mut cursor = sample
+            .cursor(ContigId(0), bases)
+            .expect("a cursor per file of this sample");
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(100),
+            })
+            .expect("on this chromosome");
+
+        let mut names = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            names.push(
+                String::from_utf8_lossy(&read.expect("the fixture reads decode").qname)
+                    .into_owned(),
+            );
+        }
+        assert_eq!(
+            names,
+            ["from-a", "from-b"],
+            "a sample's cursor must reach every file it was opened with",
+        );
+    }
 }

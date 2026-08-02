@@ -1040,7 +1040,8 @@ fn hex_nibble(character: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference, header, indexed_bam,
+        BIG_FIXTURE_CONTIG, FIXTURE_CONTIGS, bam_header, big_contig_specs, big_fixture_reference,
+        big_spread_of_reads, fixture_read_group, fixture_reference, header, indexed_bam,
         matching_contigs, one_read, only_tally, read_named, unindexed_bam,
     };
 
@@ -1332,18 +1333,23 @@ mod tests {
     // The cursor over a real BAM (alignment cursor, C3)
     // -----------------------------------------------------------------
 
-    /// A spread of 30-base reads across contig 0, starting every 9 bases, so any region has a
-    /// knowable answer and consecutive regions share reads two or three deep.
+    /// **The cursor tests run on a 200,000-base contig, and the reason is a defect this
+    /// milestone shipped and a review caught.**
     ///
-    /// Thirty rather than ten because the default `min_read_length` silently drops anything
+    /// The first version of these tests used the 100-base fixture contig. BAI's finest bins
+    /// are 16 kb and a BGZF block is 64 kB, so *every* region there resolves to the same
+    /// single chunk — and the run-of-regions oracle below, whose entire job is to catch a
+    /// reader that stops at the previous region's end, **passed with exactly that defect in
+    /// place**. An oracle that cannot fail for the thing the milestone is about is worse than
+    /// no oracle, because it is counted as coverage.
+    ///
+    /// Reads are 30 bases because the default `min_read_length` silently drops anything
     /// shorter — a fixture that ignores it produces an empty walk, which reads as a broken
     /// cursor rather than as a badly-chosen read length.
-    const SPREAD_READS: u64 = 8;
+    const BIG_STRIDE: usize = 90;
 
-    fn spread_across_chr1() -> Vec<RecordBuf> {
-        (0..SPREAD_READS)
-            .map(|i| read_named_with_length(&format!("r{i}"), 0, 1 + (i as usize) * 9, 30))
-            .collect()
+    fn big_spread() -> Vec<RecordBuf> {
+        big_spread_of_reads(BIG_STRIDE)
     }
 
     /// **The oracle: a whole-file linear scan, filtered to the region.** It never seeks and
@@ -1382,8 +1388,8 @@ mod tests {
     /// answer is compared against a scan of the whole file.
     #[test]
     fn a_run_of_regions_through_one_bam_cursor_matches_a_linear_scan() {
-        let (reference_dir, reference) = fixture_reference(false);
-        let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &spread_across_chr1());
+        let (reference_dir, reference) = big_fixture_reference();
+        let (_bam_dir, path) = indexed_bam(&bam_header(&big_contig_specs()), &big_spread());
         let file = AlignmentFile::open(
             &path,
             &reference,
@@ -1394,21 +1400,22 @@ mod tests {
         .expect("the fixture opens");
 
         let mut cursor = file
-            .cursor(ContigId(0), reference_bases())
+            .cursor(ContigId(0), big_reference_bases())
             .expect("a cursor for contig 0");
 
         // Ascending, adjacent, overlapping, far apart, backward, repeated, and empty — the
-        // shapes the plan names, all through the one cursor.
+        // shapes the plan names, all through the one cursor, and spanning enough of the
+        // contig that the index has to resolve more than one chunk.
         for (start, end) in [
-            (1u64, 20u64),
-            (21, 40),
-            (35, 60),
-            (36, 61),
-            (95, 100),
-            (1, 30),
-            (1, 30),
-            (100, 100),
-            (1, 100),
+            (1u64, 5_000u64),
+            (5_001, 10_000),
+            (9_000, 20_000),
+            (9_001, 20_001),
+            (150_000, 160_000),
+            (1, 8_000),
+            (1, 8_000),
+            (199_999, 200_000),
+            (1, 200_000),
         ] {
             let asked = GenomeRegion {
                 contig: ContigId(0),
@@ -1436,19 +1443,19 @@ mod tests {
     /// the test above could be comparing two empty vectors and calling it agreement.
     #[test]
     fn the_bam_cursor_oracle_is_not_vacuous() {
-        let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &spread_across_chr1());
+        let (_bam_dir, path) = indexed_bam(&bam_header(&big_contig_specs()), &big_spread());
 
         let covered = names_by_linear_scan(
             &path,
             GenomeRegion {
                 contig: ContigId(0),
                 start: Position(1),
-                end: Position(100),
+                end: Position(200_000),
             },
         );
         assert_eq!(
             covered.len(),
-            SPREAD_READS as usize,
+            big_spread().len(),
             "the whole contig holds every fixture read",
         );
 
@@ -1456,8 +1463,10 @@ mod tests {
             &path,
             GenomeRegion {
                 contig: ContigId(0),
-                start: Position(45),
-                end: Position(46),
+                // Inside the read starting at 91, which is 30 bases long. The reads are
+                // 90 apart, so most single bases fall in a gap.
+                start: Position(100),
+                end: Position(101),
             },
         );
         assert!(
@@ -1470,8 +1479,8 @@ mod tests {
     /// feature rests on and the number the perf review says has to come down.
     #[test]
     fn a_forward_walk_over_a_bam_decodes_each_read_once() {
-        let (reference_dir, reference) = fixture_reference(false);
-        let (_bam_dir, path) = indexed_bam(&bam_header(&matching_contigs()), &spread_across_chr1());
+        let (reference_dir, reference) = big_fixture_reference();
+        let (_bam_dir, path) = indexed_bam(&bam_header(&big_contig_specs()), &big_spread());
         let file = AlignmentFile::open(
             &path,
             &reference,
@@ -1482,11 +1491,16 @@ mod tests {
         .expect("the fixture opens");
 
         let mut cursor = file
-            .cursor(ContigId(0), reference_bases())
+            .cursor(ContigId(0), big_reference_bases())
             .expect("a cursor for contig 0");
 
         // Overlapping, ascending — what a real region walk looks like.
-        for (start, end) in [(1u64, 30u64), (20, 50), (40, 70), (60, 100)] {
+        for (start, end) in [
+            (1u64, 60_000u64),
+            (50_000, 110_000),
+            (100_000, 160_000),
+            (150_000, 200_000),
+        ] {
             let asked = GenomeRegion {
                 contig: ContigId(0),
                 start: Position(start),
@@ -1500,7 +1514,8 @@ mod tests {
 
         let counts = cursor.counts();
         assert_eq!(
-            counts.reads_decoded, SPREAD_READS,
+            counts.reads_decoded,
+            big_spread().len() as u64,
             "every read in the file, and a forward walk must decode each of them once",
         );
         assert!(
@@ -1731,6 +1746,11 @@ mod tests {
     use crate::ng::read::input::test_fixtures::read_named_with_length;
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::Position;
+
+    /// All-`A` bases over the big fixture contig, so nothing is dropped for mismatching.
+    fn big_reference_bases() -> InMemoryRefSeq {
+        InMemoryRefSeq::from_contigs(vec![vec![b'A'; BIG_FIXTURE_CONTIG.1]])
+    }
 
     /// An all-`A` reference matching the fixture contigs, so a read of `A`s
     /// matches perfectly and a read of `C`s mismatches at every base.

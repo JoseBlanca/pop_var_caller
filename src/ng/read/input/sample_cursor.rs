@@ -366,6 +366,59 @@ mod tests {
         );
     }
 
+    /// **"All or nothing" has to be a fact, not a claim.** A move that fails part-way leaves
+    /// the earlier files pointed at the new region and the later ones where they were, with
+    /// heads still primed — and reads from a subset of a sample's files are real reads at real
+    /// positions, so nothing downstream can tell they are half an answer. Measured before the
+    /// latch: 13 reads served after `move_to_region` returned `Err`.
+    #[test]
+    fn a_failed_move_serves_nothing_afterwards() {
+        let mut sample = SampleCursor::new(vec![
+            cursor_over("/a.bam", vec![read_at("a0", 1), read_at("a1", 31)]),
+            cursor_over("/b.bam", vec![read_at("b0", 1), read_at("b1", 31)]),
+        ]);
+        // Prime both files on a good region first.
+        assert!(!names_of(&mut sample, region(1, 100)).is_empty());
+
+        // A region on another chromosome: the first file refuses, and the second is never
+        // reached.
+        let foreign = GenomeRegion {
+            contig: ContigId(1),
+            start: Position(1),
+            end: Position(50),
+        };
+        assert!(sample.move_to_region(foreign).is_err());
+
+        assert!(
+            sample.next_read().is_none(),
+            "a sample whose move failed answered anyway, from the files that had moved",
+        );
+    }
+
+    /// The `Merged` arm's accessors must answer for the sample, not for whichever file
+    /// happens to be first — `counts` sums, `contig` is the one they all cover.
+    #[test]
+    fn the_merged_arm_reports_the_whole_samples_work() {
+        let mut sample = SampleCursor::new(vec![
+            cursor_over("/a.bam", vec![read_at("a0", 1)]),
+            cursor_over("/b.bam", vec![read_at("b0", 31)]),
+        ]);
+
+        assert_eq!(sample.contig(), ContigId(0));
+        assert_eq!(sample.counts(), Default::default());
+        let _ = names_of(&mut sample, region(1, 100));
+
+        let counts = sample.counts();
+        assert_eq!(
+            counts.reads_decoded, 2,
+            "the sample decoded one read from each of its two files",
+        );
+        assert_eq!(
+            counts.regions_jumping, 2,
+            "one first region per file, and both had to jump",
+        );
+    }
+
     /// **The guard the first version of this type dropped.** Two cursors over the same file
     /// are two votes at every locus: the depth doubles and so does every allele count derived
     /// from it, which looks like evidence rather than like a fault.
