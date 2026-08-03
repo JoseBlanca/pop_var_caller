@@ -104,6 +104,9 @@ by document kind:
     `types.rs` seed, and the `RefSeq` accessor (three impls).
   - [`read_filtering.md`](impl_plan/read_filtering.md) — step 1: the `read/` module,
     the cascade, the `RecordSource`/`RawRecord` seam, the `ReadFilter` iterator.
+  - [`read_filtering_stages.md`](impl_plan/read_filtering_stages.md) — dividing step 1 into two
+    filters and a conversion: the renames, the contig check as a table comparison, the loop
+    moving into the cursor, and the two tests output identity cannot see.
   - [`read_input.md`](impl_plan/read_input.md) — step 1's input edge (`read/input/`): the
     validate-on-open gate, the BAM/CRAM region queries, the order guard, and the k-file
     merge. Covers both `alignment_file` and `sample_reads`.

@@ -4,7 +4,8 @@
 [`../spec/read_filtering_stages.md`](../spec/read_filtering_stages.md) — every **why** points
 there and is not re-argued here. Revises the single-type shape in
 [`read_filtering.md`](read_filtering.md) §1; the filters that doc pins down are unchanged.
-Under [`module_layout.md`](module_layout.md). Naming per
+Under [`module_layout.md`](module_layout.md). Build order:
+[`../impl_plan/read_filtering_stages.md`](../impl_plan/read_filtering_stages.md). Naming per
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md). Signatures are
 illustrative; the **contract** is the deliverable.*
 

@@ -9,6 +9,7 @@ only about how the work is divided and where each piece lives.
 **Companions:** [`alignment_cursor.md`](alignment_cursor.md) (the reader below this),
 [`ref_seq.md`](ref_seq.md) (the reference the last filter consults).
 **Code-facing companion:** [`../arch/read_filtering_stages.md`](../arch/read_filtering_stages.md).
+**Build order:** [`../impl_plan/read_filtering_stages.md`](../impl_plan/read_filtering_stages.md).
 
 ---
 
