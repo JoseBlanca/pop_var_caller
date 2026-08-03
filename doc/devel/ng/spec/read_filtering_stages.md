@@ -1,11 +1,11 @@
-# ng — read filtering in stages: two filters and a converter
+# ng — read filtering in stages: two filters and a conversion
 
-**Date:** 2026-08-03 · **Status:** design draft, **no code yet**. Four open questions for the
-owner in §8.
-**Supersedes** the single-type shape in [`read_filtering.md`](read_filtering.md) §5. That
-document's filter *policy* — which nine filters run, their thresholds, their order — is
-unchanged and stays there; this one is only about how the work is divided.
-**Companions:** [`alignment_cursor.md`](alignment_cursor.md) (the reader above this),
+**Date:** 2026-08-03 · **Status:** design draft, **no code yet**. Two open questions in §9.
+**Revises** [`read_filtering.md`](read_filtering.md) §5, which gave step 1 a single type. That
+document's filter *policy* — which nine filters run, their thresholds, their order, the drop
+reasons — is unchanged and stays there. This one is only about how the work is divided and
+where each piece lives.
+**Companions:** [`alignment_cursor.md`](alignment_cursor.md) (the reader below this),
 [`ref_seq.md`](ref_seq.md) (the reference the last filter consults).
 **Code-facing companion:** [`../arch/read_filtering_stages.md`](../arch/read_filtering_stages.md).
 
@@ -14,256 +14,302 @@ unchanged and stays there; this one is only about how the work is divided.
 ## 1. What this is
 
 Today one type, `ReadFilter`, does three jobs in one loop
-([`filtering.rs:895-951`](../../../../src/ng/read/filtering.rs#L895)): it rejects records on
-their flag and mapping quality, decodes the survivors into ng's own read type, then rejects
-some of *those* on their length, their CIGAR and how well they match the reference.
+([`filtering.rs:895-951`](../../../../src/ng/read/filtering.rs#L895)): it rejects reads on their
+flag and mapping quality, converts the survivors into ng's own read type, then rejects some of
+*those* on their length, their CIGAR and how well they match the reference. Only two of the
+three are filtering.
 
-**Two words, and this document turns on the difference.** A **raw record** is what comes off
-the file undecoded: the reused buffer, with a SAM flag and a mapping quality readable without
-unpacking anything else. It is `NoodlesRawRecord` behind the `RawRecord` trait
-([`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334),
-[`:479`](../../../../src/ng/read/filtering.rs#L479)). A **read** is ng's own `AlignedRead`: the
-decoded thing, with its sequence uppercased, its CIGAR in ng's own operations, and its adaptor
-boundary worked out ([`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67)). The
-converter turns one into the other, and the question this document answers is which filters run
-on which side of it.
+**Two words, and the design is about the boundary between them.** After the rename in §6 the
+types carry the distinction themselves:
 
-Splitting it gives three named things:
+- a **raw aligned read** (`RawAlignedRead`) is what comes off the file undecoded — a SAM flag
+  and a mapping quality readable without unpacking anything else;
+- an **aligned read** (`AlignedRead`) is the converted one: sequence uppercased, CIGAR in ng's
+  own operations, adaptor boundary worked out
+  ([`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67)).
+
+The conversion turns one into the other, and the question this document answers is **which
+filters run on which side of it, and who owns the loop.**
 
 ```
-record readers → region narrowing        raw records, one reused buffer   ← unchanged
-      ↓  admission on the raw record     flag, mapping quality — no reference
-      ↓  decode                          raw record → AlignedRead
-      ↓  admission on the read           length, CIGAR, mismatch fraction
-      ↓  the cursor keeps what survives
+AlignedReadsReader         finds and unpacks raw aligned reads, one reused buffer
+      ↓
+RegionRawAlignedReads      this region's raw aligned reads only
+      ↓
+AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping quality)
+                           ├ convert it                    (raw aligned read → aligned read)
+                           ├ filter the aligned read       (length, CIGAR, mismatch fraction)
+                           └ keep it, and serve it to every region that overlaps it
 ```
 
 **Goals.**
 
-- A converter that only converts, reachable on its own.
-- A first filter that needs **no reference**: today nothing can filter on flag and mapping
-  quality without supplying a `RawRefSeq` and paying a probe fetch for every contig in the
-  header ([`filtering.rs:688-702`](../../../../src/ng/read/filtering.rs#L688)).
-- The pre-decode/post-decode boundary expressed in types rather than in a comment.
+- Filtering stops being something a conversion happens inside. The two filters and the
+  conversion become three separately nameable, separately testable things.
+- `read/filtering.rs` holds **policy only** — no file reading, no conversion, no loop.
+- The first filter needs **no reference**: today nothing can filter on flag and mapping quality
+  without supplying a `RawRefSeq` and paying a probe fetch for every contig in the header
+  ([`filtering.rs:688-702`](../../../../src/ng/read/filtering.rs#L688)).
 - **Byte-identical output.** Same reads kept, same drops charged to the same reasons.
 
 **Non-goals.**
 
-- **No change to the filter policy.** The nine filters, their thresholds, their evaluation
-  order and the `DropReason` set stay exactly as `read_filtering.md` settled them.
-- **No change to what the cursor keeps.** It keeps **reads** — `AlignedRead`s, decoded and past
-  both filters — in a `VecDeque` above the whole chain
-  ([`input/cursor.rs:242-247`](../../../../src/ng/read/input/cursor.rs#L242)), never raw records.
-  That is deliberate and [`alignment_cursor.md`](alignment_cursor.md) §5 gives the reason: a read
-  is served by about a dozen consecutive regions, so keeping it decoded means it is converted
-  once rather than a dozen times. Keeping raw records instead would also mean a CRAM cursor
-  holding a whole container. This split does not reopen either.
-- **No performance change sought.** Nothing here should get faster or slower. If a measurement
-  moves, something is wrong.
-- **Not a new module.** This is a reorganisation inside `read/filtering.rs`; see §6.
+- **No change to the filter policy** — the nine filters, their thresholds, their evaluation
+  order and the `DropReason` set are `read_filtering.md`'s and stay as they are.
+- **No change to what the cursor keeps** (§3).
+- **No performance change sought.** If a measurement moves, something is wrong.
 
-**It does not** introduce a trait with competing implementations, change the error taxonomy's
-*meaning*, add a configuration knob, or touch `AlignedRead`.
+**It does not** introduce a trait, add a type, change the meaning of any error, add a
+configuration knob, or touch `AlignedRead`.
 
-## 2. Why the work is divided the way it is
+## 2. Why the division falls where it does
 
-**The division is not a matter of taste — it falls out of what each filter reads.** Six of the
-nine filters read two integers off the raw record. The other three read fields of the read that
-only the conversion produces.
+**It is not a matter of taste — it falls out of what each filter reads.** Six of the nine read
+two integers off the raw aligned read. The other three read fields that only the conversion
+produces.
 
-| filter | what it reads | which side of the converter |
+| filter | what it reads | which side of the conversion |
 |---|---|---|
-| #1 duplicate, #3 supplementary, #4 secondary, #5 unmapped, #6 QC-fail | the SAM flag | the raw record |
-| #2 low mapping quality | the SAM mapping quality | the raw record |
-| #7 too short | the read's sequence length | the read — the conversion uppercases the sequence into a `Vec<u8>` |
-| #9 bad CIGAR | the read's CIGAR | the read — the conversion turns noodles' CIGAR into ng's `CigarOp` |
-| #8 high mismatch fraction | the read's CIGAR, sequence, base qualities, position and contig, plus a reference fetch | the read, for the same two reasons |
+| #1 duplicate, #3 supplementary, #4 secondary, #5 unmapped, #6 QC-fail | the SAM flag | the raw aligned read |
+| #2 low mapping quality | the SAM mapping quality | the raw aligned read |
+| #7 too short | the sequence length | the aligned read — the conversion uppercases the sequence into a `Vec<u8>` |
+| #9 bad CIGAR | the CIGAR | the aligned read — the conversion turns noodles' CIGAR into ng's `CigarOp` |
+| #8 high mismatch fraction | CIGAR, sequence, base qualities, position, contig, plus a reference fetch | the aligned read, for the same two reasons |
 
-Cited: `verdict_pre_decode` ([`filtering.rs:210-238`](../../../../src/ng/read/filtering.rs#L210))
-and `verdict_post_decode` ([`filtering.rs:269-322`](../../../../src/ng/read/filtering.rs#L269));
-the CIGAR conversion and the uppercase are in `decode_record`
-([`aligned_read.rs:102`](../../../../src/ng/read/aligned_read.rs#L102) and
+Cited: `verdict_pre_decode` ([`filtering.rs:210-238`](../../../../src/ng/read/filtering.rs#L210)),
+`verdict_post_decode` ([`filtering.rs:269-322`](../../../../src/ng/read/filtering.rs#L269)), and
+the two conversions ([`aligned_read.rs:102`](../../../../src/ng/read/aligned_read.rs#L102),
 [`:107`](../../../../src/ng/read/aligned_read.rs#L107)).
 
-**So "all nine filters run on the raw record" is not available.** Reaching it would mean either
-re-implementing the mismatch rule and the CIGAR scan against noodles' types — a second copy of
-two rules, which is the failure this module guards against hardest — or running the uppercase
-and the CIGAR conversion before the filter, which is the decode under another name. Two filter
-stages with the converter between them is the shape the code already has; this makes it visible.
+**So "all nine filters run on the raw aligned read" is not reachable.** It would need either a
+second copy of the mismatch rule and the CIGAR scan written against noodles' types — the failure
+this module guards against hardest — or the uppercase and the CIGAR conversion run before the
+filter, which is the conversion under another name.
 
-**The decode is not a formality.** Besides the two conversions above it computes the adaptor
-boundary from the flag, the mate's placement and the template length
-([`aligned_read.rs:112-120`](../../../../src/ng/read/aligned_read.rs#L112)). That is real work,
-and it is work a filter has no business doing.
+## 3. Why the boundary is inside the cursor — the property that fixes the scope
 
-## 3. What will bite you
+Once the three pieces are separable, the first question a reader will ask is where the cursor's
+edge falls. **Both alternatives to the current placement are wasteful, and they fail in opposite
+directions**, which is what makes the answer forced rather than preferred.
 
-**The raw record is one reused buffer, so a stage cannot return one.** `RecordSource::read_next`
-fills a caller-owned buffer in place and the whole pass allocates exactly one record
-([`filtering.rs:366-382`](../../../../src/ng/read/filtering.rs#L366)). There is one live raw
-record at any moment. So the first stage cannot have the shape `fn(RawRecord) -> Option<RawRecord>`
-without cloning a `RecordBuf` per record — measured elsewhere in this codebase at ~680 bytes
-across seven allocations
+**(a) The cursor keeps raw aligned reads and the filters sit above it.** Then a read is converted
+once per region that serves it. Not twice: consecutive regions overlap by about 93 % because the
+caller widens each one by 5,000 bases against regions averaging 390, so a read is returned by
+**about a dozen** consecutive regions
+([`input/cursor.rs:12`](../../../../src/ng/read/input/cursor.rs#L12),
+[`:245`](../../../../src/ng/read/input/cursor.rs#L245)). Twelve conversions per surviving read.
+On CRAM it is worse again — keeping raw reads means keeping a whole decoded container, which
+[`alignment_cursor.md`](alignment_cursor.md) §5 already rules out.
+
+**(b) The cursor converts everything and the filters sit above it.** Then every raw aligned read
+is converted before the flag and mapping-quality filters can speak. On a BAM with 30 % duplicates
+— ordinary for real cohort input after duplicate marking — 30 % of conversions are thrown away,
+and the cursor's kept set holds reads that are about to be discarded, so the memory goes too.
+
+**(c) The filters sit below what the cursor keeps** — today's shape, and this design's. Converted
+**once**, and only for reads that already cleared flag and mapping quality.
+
+**So the scope-fixing property is: the two filters and the conversion all live below the kept
+set, and the cursor owns the loop.** Anything that moves one of them above it re-introduces (a)
+or (b).
+
+**A rationale considered and rejected, recorded so nobody re-proposes it.** *"Splitting the
+pieces lets us convert fewer reads."* It does not. The conversion already sits after the cheap
+filters and before the expensive ones
+([`filtering.rs:920`](../../../../src/ng/read/filtering.rs#L920), *"Decode only the pre-decode
+survivors"*), and this design does not move it. Reads dropped by #1–#6 already pay no
+conversion; reads dropped by #7/#8/#9 pay one and always will, because those filters read what
+the conversion produces. Not one conversion is saved. The reasons to do this are §5's.
+
+## 4. What will bite you
+
+**The raw aligned read is one reused buffer, so a filter cannot return one.** The reader fills a
+caller-owned buffer in place and the whole pass allocates exactly one
+([`filtering.rs:366-382`](../../../../src/ng/read/filtering.rs#L366)). A filter shaped
+`fn(RawAlignedRead) -> Option<RawAlignedRead>` would clone a noodles `RecordBuf` per read —
+measured elsewhere in this codebase at ~680 bytes across seven allocations
 ([`record_reader/container.rs:13-17`](../../../../src/ng/read/input/record_reader/container.rs#L13)).
-It has to be a **verdict about the buffer**, not a value returned from it. The existing trait
-doc calls this the lending-iterator problem and says the buffer shape was chosen for exactly
-this reason ([`filtering.rs:359-365`](../../../../src/ng/read/filtering.rs#L359)).
+A filter takes a **borrow** and returns a **verdict**, and the verdict carries the drop reason
+because the tally is keyed on it.
 
-**A drop must be charged to a read group, and the first stage runs before any read exists** — a
-raw record is all there is at that point.
-This is already solved and easy to miss: the raw record carries its read group, stamped by the
-region narrowing ([`region_records.rs:222`](../../../../src/ng/read/input/region_records.rs#L222)),
-and `RawRecord::read_group` exists for the tally rather than for any filter
-([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)). The first stage can charge
-its own drops correctly without decoding anything.
+**A drop must be charged to a read group, and the first filter runs before any aligned read
+exists.** Already solved, and easy to undo by accident: the raw aligned read carries its read
+group, stamped by the region narrowing
+([`region_records.rs:222`](../../../../src/ng/read/input/region_records.rs#L222)), and the
+`read_group` accessor exists for the tally rather than for any filter
+([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
 
-**Filter order inside stage two is deliberate and is not the spec's table order.** It runs #7,
-then #9, then #8, so that a read failing the cheap checks never pays the reference fetch — and
-so a read failing both #9 and #8 is charged to the root cause rather than the symptom
-([`filtering.rs:240-268`](../../../../src/ng/read/filtering.rs#L240)). One test pins it, using a
-fixture record that fails both
-(`a_walk_charges_every_drop_reason_by_hand_count`, `input/cursor.rs`). Preserve the order or
-that test fails, which is what it is for.
+**The second filter's order is #7 → #9 → #8, not the numbering order.** The cheap checks run
+first so a doomed read never pays the reference fetch, and a read failing both #9 and #8 is
+charged to the root cause rather than the symptom
+([`filtering.rs:240-268`](../../../../src/ng/read/filtering.rs#L240)). Pinned by
+`a_walk_charges_every_drop_reason_by_hand_count` (`input/cursor.rs`), whose fixture's last
+record fails both.
 
-**Three things stop the same way and one of them must not restart.** The filter's state is
-`Running` / `EndOfInput` / `Failed`
-([`filtering.rs:646-658`](../../../../src/ng/read/filtering.rs#L646)). A long-lived filter reaches
+**An unmapped read travels through `RawAlignedRead`.** Filter #5 drops it, so it exists as one
+before being rejected — and an unmapped read is not aligned. `AlignedRead` has no such case: the
+conversion refuses a record with no reference id or no position. The name is still right — SAM
+calls every line an alignment record, unmapped ones included, and this type only ever comes from
+an alignment file — but say so in the type's doc rather than leave it to be discovered and
+"fixed".
+
+**Deleting the source trait takes three fatal-error tests with it if nobody notices** — §6.
+
+## 5. What this buys
+
+**The three-way stop collapses to a boolean.** `FilterState::EndOfInput` exists **only** because
+the filter is a separate type that cannot tell why its source stopped. Its own doc says so
+([`filtering.rs:635-645`](../../../../src/ng/read/filtering.rs#L635)): a long-lived filter reaches
 `EndOfInput` at the end of *every* region, because the region narrowing reports a region boundary
-the only way a record source can, and repositioning undoes it. `Failed` is permanent. Whatever
-owns the stages has to keep that distinction; collapsing it into one flag is how a cursor ends up
-reading on from a file already known to be broken.
+the only way it can, and repositioning has to undo that. The cursor is the thing that *causes*
+region ends, so once it owns the loop it never has to ask. `FilterState`,
+`restart_after_end_of_input`, `has_failed` and `source_mut` all go, replaced by one `failed` flag.
 
-**The `Option<ReadGroupId>` on the buffer is a guard, not a convenience.** It is cleared when the
-buffer is handed out and set again after each record is filled, so a source that forgets to stamp
-produces a refusal rather than attributing the read to the previous record's library
-([`filtering.rs:479-497`](../../../../src/ng/read/filtering.rs#L479)). Any restructure that hands
-the buffer between stages must keep that order.
+**No new types — this is a subtraction.** With the tally on the cursor (§7) the first filter
+holds nothing, and it is already a free function today. The second needs the reference and a
+scratch buffer, which the cursor can hold. So `ReadFilter` goes, the source trait goes, and what
+remains is two verdict functions, a conversion, and a loop in the type that was already driving
+all three.
 
-## 4. What this buys
+**The reference stops being a precondition for filtering at all.** Nothing in ng needs that today
+— it is a capability the current shape forecloses, not a request anyone has made — but a coverage
+histogram, an insert-size pass or a read-group pre-pass would each want flag and mapping-quality
+filtering without a reference, and cannot have it.
 
-Three things, and only the first is about tidiness.
+**Two vestiges dissolve rather than needing their own cleanup.** `with_validated_contigs` and
+`ReadFilterBuffers` exist because a filter used to be built per region by a pooled caller. That
+caller is gone; both stop having a reason to exist once the cursor owns the loop.
 
-**The reference stops being a precondition for filtering at all.** `ReadFilter::new` takes a
-`RawRefSeq` and fetches a zero-length window on every contig in the header before it will build
-([`filtering.rs:688-702`](../../../../src/ng/read/filtering.rs#L688)). With the stages split,
-anything that only wants flag and mapping-quality filtering — a coverage histogram, an
-insert-size pass, a read-group pre-pass — can have it without a reference. **Nothing in ng needs
-this today**; it is a capability the current shape forecloses, not a request anyone has made.
+**`read/filtering.rs` becomes a policy module** — thresholds, drop reasons, two verdicts. It
+stopped reading files on 2026-08-03; this is what takes the conversion and the loop out too.
 
-**Two vestiges dissolve rather than needing their own cleanup.** `with_validated_contigs` (the
-probe-free constructor, [`filtering.rs:746`](../../../../src/ng/read/filtering.rs#L746)) and
-`ReadFilterBuffers` (a lend-and-reclaim seam) both exist because a filter used to be built per
-region by a pooled caller. That caller is gone; `ReadFilter::new` is the only route into
-`with_validated_contigs`, and the only value anything passes for the buffers is
-`Default::default()`. If the reference enters only at stage two, both stop having a reason to
-exist.
+## 6. Naming, and where each piece lives
 
-**The ordering becomes a type instead of a comment.** Today the only thing stopping someone
-hoisting `decode()` above the flag checks is prose. That change would keep every test green and
-pay a full decode — name, sequence, qualities, CIGAR, adaptor boundary — for every duplicate,
-secondary and low-mapping-quality read.
+**The rename is part of this design, not a tidy-up.** `RawRecord` names its topic rather than its
+value — a record of *what*? A reference sequence, a read, an observation? Renaming it pairs it
+with the type it converts into, so the relationship the whole design turns on becomes visible in
+the names instead of needing a paragraph of prose.
 
-## 5. What could go wrong with it
+| now | becomes |
+|---|---|
+| `RawRecord` (trait) | `RawAlignedRead` |
+| `NoodlesRawRecord` | `NoodlesRawAlignedRead` |
+| `RecordReader` (enum) | `AlignedReadsReader` |
+| `BamRecordReader` / `CramRecordReader` / `InMemoryRecordReader` | `BamAlignedReadsReader` / `CramAlignedReadsReader` / `InMemoryAlignedReadsReader` |
+| `record_reader/` (module) | `aligned_reads_reader/` |
+| `RegionRecords` | `RegionRawAlignedReads` |
+| `RecordSource` (trait) | **deleted** — below |
 
-**You may end up with the same type, renamed, plus three more.** Someone still has to own the
-three-way stop, the error taxonomy, and the loop that pulls until something survives. A driver
-owning all three stages will look a great deal like today's `ReadFilter`. **The split is only
-worth doing if the parts are separately nameable and separately testable** — if the design ends
-up with a driver that no one can use the pieces of, it has added three types and bought nothing.
-That is the question §8's first two items exist to settle before code.
+**The readers leave "raw" out of their names** (owner's call, 2026-08-03). They yield undecoded
+reads, so each reader's doc comment has to say so where a caller meets it; the type name does not
+carry it.
 
-**This is the module every dump's byte-identity runs through.** Step 1 decides which reads reach
-every locus. The evidence that a restructure changed nothing is not the unit suite — it is the
-four acceptance dumps (§7).
+**The source trait is deleted, not renamed.** It has exactly one production implementation
+(`RegionRecords`) and, once the cursor owns the loop, no generic consumer at all — it would
+survive only so two test doubles could feed the filter. **The consequence is real and must not be
+missed:** those doubles exist to raise the fatal errors a real file cannot conveniently raise
+(`read_filter_source_read_error_is_fatal`, `read_filter_decode_error_is_fatal`,
+`read_filter_reference_error_mid_stream_is_fatal`). With the trait gone the in-memory reader must
+be able to yield a scripted error — which is the better arrangement anyway, because the error
+path then runs through the real chain instead of through a fake that bypasses two layers.
 
-## 6. Where it lives
+**Module homes.**
 
-`src/ng/read/filtering.rs`, unchanged. The module-layout rule is that a step with no competing
-implementations is a file rather than a folder
-([`../arch/module_layout.md`](../arch/module_layout.md) principle 1a), and splitting one type
-into three inside a file does not create alternatives to sit side by side. If the file grows past
-readability once the three are in it, that is a reason to make `read/filtering/` a folder — a
-mechanical move, decided at code time, not here.
+- `read/aligned_read.rs` — `RawAlignedRead`, `NoodlesRawAlignedRead`, `AlignedRead`, and the
+  conversion between them. One thing in two states, and now named so; the conversion already
+  lives here.
+- `read/filtering.rs` — the policy: `ReadFilterConfig`, `DropReason`, `FilterVerdict`,
+  `ReadFilterCounts`, and the two verdicts.
+- `read/input/aligned_reads_reader/`, `read/input/region_raw_aligned_reads.rs` — unchanged in
+  substance, renamed.
+- `read/input/cursor.rs` — gains the loop.
 
-## 7. How we know it works
+## 7. The tally
+
+**One tally per read group met, held by the cursor, cumulative until the caller says otherwise.**
+A drop rate is a read group's property: one bad library shows up as an anomalous mapping-quality
+or mismatch rate, and summing across read groups erases exactly that signal.
+
+**`AlignmentCursor::reset_counts()` lets the caller choose the window.** On the cursor, not on
+`AlignmentFile`, and deliberately: that file held a `Mutex<Vec<ReadGroupCounts>>` until three
+commits ago, fed by each per-region stream on `Drop`, and it went with the rest of that path.
+Putting it back means either a lock on the hottest loop or a fold at cursor drop — which makes
+the number unreadable while the cursor is alive and loses it entirely if the cursor leaks. A
+run-wide total is aggregation, not shared state: read each cursor's counts before dropping it,
+which is what `SampleCursor::read_group_counts` already does across a sample's files.
+
+**Not per region.** Regions overlap by ~93 % and a read is filtered once, when first read off the
+file — never again when replayed. A per-region tally would record *where the reader happened to
+be when it met a bad read*, not how bad the region is; the numbers would not sum to the
+chromosome's total and would not be comparable between regions.
+
+## 8. How we know it works
 
 **The unit suite is necessary and not sufficient.** 45 tests live in `filtering.rs` and most
-drive `ReadFilter` as one thing; they will need re-pointing at whichever type keeps their
-subject.
+drive `ReadFilter` as one thing; each moves to whichever piece keeps its subject.
 
 **The evidence is output identity on real data:**
 
 | anchor | what it proves |
 |---|---|
-| `ng_generic_loci_dump` and `ng_ssr_loci_dump`, HG002 chromosome 21 (BAM) | 251,792 and 4,406 lines, byte-identical |
-| the same two on tomato SL4.0ch01 (CRAM) | 1,718,914 and 11,945 lines, byte-identical |
-| `ng_generic_walk_probe`, chromosome 21 | `loci=236081 observations=251786 reads_admitted=54709` |
+| `ng_generic_loci_dump`, `ng_ssr_loci_dump` — HG002 chr21 (BAM) | 251,792 and 4,406 lines, byte-identical |
+| the same two — tomato SL4.0ch01 (CRAM) | 1,718,914 and 11,945 lines, byte-identical |
+| `ng_generic_walk_probe`, chr21 | `loci=236081 observations=251786 reads_admitted=54709` |
 
-A read admitted or dropped differently shows up in all of them. `reads_admitted` is the direct
-one: it is step 1's keep count for the run.
+`reads_admitted` is the direct one: step 1's keep count for the run.
 
-**Two properties need a test each, because output identity cannot see them:**
+**Three tests do not exist yet**, and each covers something no output comparison can see:
 
-- **The first stage builds without a reference.** The capability §4 claims is not exercised by
-  any existing caller, so it needs a test that constructs it with no `RawRefSeq` at all —
-  otherwise the claim is untested and will quietly stop being true.
-- **The decode still happens only for survivors.** This is a *work* property, not an answer
-  property: hoisting the decode changes no output. Assert it directly — a fixture of records that
-  all fail stage one, and a converter that has been asked for nothing.
+- **The first filter runs with no reference at all.** Untested, §5's capability quietly stops
+  being true.
+- **The conversion is asked for nothing when every read fails the first filter.** A *work*
+  property: hoisting the conversion changes no output.
+- **A scripted read error still surfaces as fatal, through the real chain.** Replaces the three
+  test-double tests the deleted trait takes with it (§6).
 
-## 8. Open questions — for the owner, before any code
+## 9. Open questions
 
-**Q1. Is the first stage a type, or does the free function stay a free function?**
-`verdict_pre_decode(flag, mapq, &config)` is already a pure function
-([`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210)). It needs to become a type only
-if it must hold something — the configuration, or its own tally. *Leaning: a type, because it has
-to charge drops to read groups and that means owning a tally.* Settles §5's "same type renamed"
-risk: if stage one is only a function, there is no second type and less to justify.
+**Q1. Are both verdicts free functions, or does the second become a type?** The first is pure —
+flag, mapping quality, config → verdict — and is a free function today. The second needs the
+reference and a scratch buffer: either it becomes a type holding them, or the cursor holds them
+and passes them in, which is today's shape. *Leaning: both stay free functions, the cursor holds
+the reference and the buffer.* Smallest change, and it keeps `filtering.rs` free of state.
+**Confirm before code.**
 
-**Q2. Who owns the per-read-group tally when two stages both drop reads?** One shared value the
-driver owns and lends, or one per stage, merged on read. *Leaning: one, owned by the driver* —
-the tally is read as a whole (`SampleCursor::read_group_counts`) and merging two on every read
-would be work for nothing. But this is the decision that most shapes whether the stages are
-usable apart, so it is the owner's.
+**Q2. Does the contig probe move with the reference?** `ReadFilter::new` validates every `@SQ`
+contig against the reference before building
+([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)). If the cursor holds the
+reference, the cursor's constructor runs the probe. *Leaning: yes* — it is already fallible
+there, and it keeps the "validated up front, so a mid-stream fetch failure means corrupt input"
+guarantee intact. **Confirm before code.**
 
-**Q3. What is the driver called, if `ReadFilter` becomes the post-decode stage?** The repo's
-naming rule is that a name says what the value *is*. Candidates: keep `ReadFilter` for the
-composite and name the stages for what they admit; or make the stages `RecordAdmission` /
-`ReadAdmission` and the driver `FilteredReads`. *No leaning — this is a taste call and it is
-yours.*
+## 10. Deferred, with a home
 
-**Q4. Does the cursor consume a driver, or compose the three stages itself?** It holds a
-`ReadFilter<RegionRecords, R>` today
-([`input/cursor.rs:241`](../../../../src/ng/read/input/cursor.rs#L241)) and drives it through
-four methods: `next`, `has_failed`, `restart_after_end_of_input`, `source_mut`. If the cursor
-composes the stages, that surface grows and the cursor gains knowledge of the split. *Leaning:
-a driver, so the cursor's surface is unchanged* — which also means the cursor's tests do not move.
+- **Removing `with_validated_contigs` and `ReadFilterBuffers`.** They dissolve as a consequence
+  of this change (§5), so they belong to whichever step lands it — not to a separate cleanup.
+- **A whole-file read path.** Filtering without a reference (§5) is not the same as a way to
+  *read* a whole file, which ng does not have: `AlignmentFile::open` requires an index. If one is
+  wanted it arrives as an `AlignedReadsReader` arm, beside the others.
+- **`read/filtering/` as a folder.** A step with no competing implementations is a file
+  ([`../arch/module_layout.md`](../arch/module_layout.md) principle 1a), and this change makes
+  `filtering.rs` *smaller*. Revisit only if that stops being true.
 
-## 9. Deferred, with a home
+## 11. Reuse map
 
-- **Removing `with_validated_contigs` and `ReadFilterBuffers`.** They dissolve as a *consequence*
-  of this split (§4), so they belong to whichever step lands stage two — not to a separate
-  cleanup, and not to this document to schedule.
-- **A whole-file read path.** The capability §4 opens (filtering without a reference) is not the
-  same as a way to *read* a whole file, which ng does not have: `AlignmentFile::open` requires an
-  index. If one is ever wanted it arrives as a `RecordReader` arm, beside the others
-  ([`../arch/alignment_cursor.md`](../arch/alignment_cursor.md) §1.3).
-- **`read/filtering/` as a folder.** See §6; decided at code time on the file's real size.
+No new logic. Every rule exists and is being re-homed or renamed.
 
-## 10. Reuse map
-
-Nothing here is new code in the sense of new logic. Every rule already exists and is being
-re-homed.
-
-| what | existing code | how it is reused |
+| what | existing code | action |
 |---|---|---|
-| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210) | **move**, body unchanged |
-| the three decode-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **move**, body unchanged — including the #7/#9/#8 order |
-| the converter | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is**; it is already a standalone function |
-| the raw record and its buffer contract | `RawRecord` / `RecordSource` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), [`:366`](../../../../src/ng/read/filtering.rs#L366) | **reuse as-is** — `read_group()` already exists for the tally |
-| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), [`:661`](../../../../src/ng/read/filtering.rs#L661) | **reuse as-is**; Q2 decides who holds it |
-| the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646) | **reuse as-is**, on the driver |
-| the error taxonomy | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** — its three variants already name the three stages: `Source`, `Decode`, `Reference` |
+| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210) | **keep**, renamed for the vocabulary |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **keep**, renamed; the #7/#9/#8 order unchanged |
+| the conversion | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is**, called by the cursor |
+| the loop | `ReadFilter::next` [`filtering.rs:895`](../../../../src/ng/read/filtering.rs#L895) | **move** into `AlignmentCursor::next_read` |
+| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), [`:661`](../../../../src/ng/read/filtering.rs#L661) | **reuse as-is**, owned by the cursor |
+| the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** — its three variants already name the three pieces |
+| the raw read and its buffer contract | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334) | **rename and move** to `aligned_read.rs` |
+| the region narrowing | `RegionRecords` [`region_records.rs`](../../../../src/ng/read/input/region_records.rs) | **rename**; its `RecordSource` impl becomes inherent methods |
+| the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646) | **delete** — a `failed` flag on the cursor replaces it (§5) |
+| the source trait and its doubles | `RecordSource` [`filtering.rs:366`](../../../../src/ng/read/filtering.rs#L366), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
 
-**The parity oracle is the four dumps** (§7). There is no second implementation to differ from —
+**The parity oracle is the four dumps** (§8). There is no second implementation to differ from —
 the oracle is this code before the change.

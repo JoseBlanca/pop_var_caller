@@ -8,230 +8,248 @@ Under [`module_layout.md`](module_layout.md). Naming per
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md). Signatures are
 illustrative; the **contract** is the deliverable.*
 
-**Two words, used exactly as the spec defines them** (spec §1): a **raw record** is the
-undecoded reused buffer (`RawRecord` / `NoodlesRawRecord`), a **read** is ng's `AlignedRead`
-after the conversion. The two stage types are named for which of the two they judge.
+**This change adds no types.** It renames several, deletes three, and moves one loop. Read it as
+a subtraction — spec §5.
 
-**Four of the shapes below are not settled** — spec §8 holds them as questions for the owner.
-They are marked `OPEN:` where they bite. Do not build past one without an answer.
+**Two open items**, both about how much state the second filter keeps: spec §9. Marked `OPEN:`
+where they bite.
 
 ---
 
-## Module home
+## 1. Module homes
 
-`src/ng/read/filtering.rs`, unchanged — spec §6. Nothing moves file.
+| module | holds | change |
+|---|---|---|
+| `read/aligned_read.rs` | `RawAlignedRead`, `NoodlesRawAlignedRead`, `AlignedRead`, `decode_record` | **gains** the two raw types from `filtering.rs` — they are one thing in two states, and the conversion is already here |
+| `read/filtering.rs` | `ReadFilterConfig`, `DropReason`, `FilterVerdict`, `ReadFilterCounts`, the two verdicts | **policy only**: loses the raw types, the loop, the source trait, `ReadFilter` |
+| `read/input/aligned_reads_reader/` | the per-format readers | renamed from `record_reader/` |
+| `read/input/region_raw_aligned_reads.rs` | `RegionRawAlignedReads` | renamed from `region_records.rs`; its trait impl becomes inherent methods |
+| `read/input/cursor.rs` | `AlignmentCursor` | **gains** the loop, the reference, the buffer and the tally |
 
-## 1. The types
+## 2. The renames
 
-### 1.1 What a stage answers
+Mechanical, and the reasoning is spec §6. Listed here because every signature below uses the new
+names.
 
-Both stages answer the same question about a candidate — keep it, or drop it for a named
-reason — and the answer type already exists.
+| now | becomes |
+|---|---|
+| `RawRecord` (trait) | `RawAlignedRead` |
+| `NoodlesRawRecord` | `NoodlesRawAlignedRead` |
+| `RecordReader` | `AlignedReadsReader` |
+| `BamRecordReader` / `CramRecordReader` / `InMemoryRecordReader` | `BamAlignedReadsReader` / `CramAlignedReadsReader` / `InMemoryAlignedReadsReader` |
+| `record_reader/` | `aligned_reads_reader/` |
+| `RegionRecords` | `RegionRawAlignedReads` |
+| `DecodedContainer::fill_record` | `fill_raw_read` |
+| `RecordIndex` (private) | `RawReadIndex` |
+
+**The readers do not carry "raw" in their names**, so each reader's doc comment must state that
+what it yields is undecoded — the name no longer says it.
+
+## 3. The pieces
+
+### 3.1 The item, and the conversion between its two states
 
 ```rust
-// Unchanged, in place: filtering.rs:96-118.
-pub enum FilterVerdict { Keep, Drop(DropReason) }
-pub enum DropReason { Duplicate, LowMapq, Supplementary, Secondary, Unmapped,
-                      QcFail, TooShort, HighMismatchFraction, BadCigar }
+// read/aligned_read.rs
+
+/// One alignment record as it comes off the file, undecoded: a flag and a mapping
+/// quality readable without unpacking anything else.
+///
+/// **An unmapped read is one of these.** Filter #5 rejects it, so it exists here
+/// before it is rejected. `AlignedRead` has no such case — the conversion refuses a
+/// record with no reference id or no position (spec §4).
+pub trait RawAlignedRead {
+    fn flag(&self) -> u16;
+    fn mapq(&self) -> MapQual;
+    /// Which read group this read belongs to, once its reader has resolved it.
+    /// Read by the **tally**, not by any filter: a drop is charged to the read group
+    /// it came from, and the first filter runs before any `AlignedRead` exists.
+    fn read_group(&self) -> Option<ReadGroupId>;
+    /// Convert into ng's own read. Fatal on failure, never a drop.
+    fn decode(&self) -> io::Result<AlignedRead>;
+}
 ```
 
-**No new verdict type, and no `Option<T>` in a stage's return.** `Option` would lose the reason,
-and the reason is what the tally is keyed on.
+Unchanged apart from the name and the module. `NoodlesRawAlignedRead` moves with it.
 
-### 1.2 The first stage — admission on the raw record
+### 3.2 The two verdicts
 
-Filters #1–#6, on the raw record's SAM flag and mapping quality. It needs no reference and no contig
-probe; that is the capability the split exists to open (spec §4).
+Both already exist as free functions and both stay free functions (`OPEN:` spec §9 Q1).
+`filtering.rs` exports them; the cursor calls them.
 
 ```rust
-/// Decides whether an undecoded record is worth decoding, on its flag and its
-/// mapping quality alone.
+// read/filtering.rs — policy only.
+
+/// Filters #1–#6, on the flag and the mapping quality. **Needs no reference**, so
+/// anything wanting flag/MAPQ filtering without one can call it (spec §5).
+pub(crate) fn verdict_on_raw_read(
+    flag: u16, mapq: MapQual, config: &ReadFilterConfig,
+) -> FilterVerdict;
+
+/// Filters #7, #9 and #8, **in that order** — cheap checks first so a doomed read
+/// never pays the reference fetch, and a read failing both #9 and #8 is charged to
+/// the root cause. `Err` is a reference-fetch failure and is fatal, never a drop.
 ///
-/// **Takes a borrow and returns a verdict, never a record.** The record lives in a
-/// single buffer the source refills in place, so returning one would mean cloning it
-/// (spec §3).
-pub struct RecordAdmission {
-    config: ReadFilterConfig,
-    /// One tally per read group met, in first-seen order.
-    /// OPEN: spec §8 Q2 — this may belong to the driver instead.
-    counts: Vec<ReadGroupCounts>,
-}
+/// `ref_buf` is caller-owned scratch, reused across reads.
+pub(crate) fn verdict_on_aligned_read(
+    read: &AlignedRead, reference: &impl RawRefSeq,
+    config: &ReadFilterConfig, ref_buf: &mut Vec<u8>,
+) -> Result<FilterVerdict, RefSeqError>;
+```
 
-impl RecordAdmission {
-    pub fn new(config: ReadFilterConfig) -> Self;
+**Contract.** Both are pure functions of their arguments — no I/O, no state, no tally. Neither
+knows what a BAM is. The first cannot fail.
 
-    /// Judge one record and charge the drop, if any, to the read group the record
-    /// carries. Infallible: nothing here reads a file or the reference.
-    pub fn admit(&mut self, record: &impl RawRecord) -> FilterVerdict;
+`OPEN:` spec §9 Q1 — if the second becomes a type instead, it holds `reference` and `ref_buf` and
+`admit(&AlignedRead)` replaces the last two parameters. Nothing else moves.
 
-    pub fn counts(&self) -> &[ReadGroupCounts];
+### 3.3 The region narrowing
+
+`RegionRawAlignedReads` loses its `RecordSource` impl and keeps the same four methods as
+inherent ones. **No signature changes** beyond the rename.
+
+```rust
+// read/input/region_raw_aligned_reads.rs
+impl RegionRawAlignedReads {
+    pub(crate) fn header(&self) -> &sam::Header;
+    /// Fill `buf` with this region's next raw aligned read. `Ok(false)` = the region
+    /// is done — which is *not* the end of the file, and the caller knows which.
+    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool>;
+    pub(crate) fn other_sample_reads(&self) -> u64;
+    pub(crate) fn jump_to(&mut self, region: GenomeRegion) -> io::Result<()>;
+    pub(crate) fn continue_into(&mut self, region: GenomeRegion);
 }
 ```
 
-**Contract.** Infallible. Reads `flag()`, `mapq()` and `read_group()` off the record and nothing
-else. Charges every drop to a reason and a read group; a record whose source never stamped a
-group is charged to `None`, never to an arbitrary one. Holds no reference, no buffer and no file.
+**Why the trait goes:** one production impl, and after §3.4 no generic consumer — spec §6.
 
-`OPEN:` spec §8 Q1 — whether this is a type at all, or whether `verdict_pre_decode` stays a free
-function and the driver keeps the tally. The block above assumes a type; if Q1 lands the other
-way, delete it and keep `verdict_pre_decode(flag, mapq, &config)` as it is today.
-
-### 1.3 The converter
-
-Already exists and already stands alone: `RawRecord::decode`
-([`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349)) calling `decode_record`
-([`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67)). **No new type.** What
-changes is that it is called by the driver between two stages rather than from inside one.
-
-Its failure stays fatal to the run, not a drop — a record that cleared stage one is mapped, so a
-decode failure means a corrupt record (spec, `read_filtering.md` §7).
-
-### 1.4 The second stage — admission on the read
-
-Filters #7, #9 and #8, on the decoded read, **in that order** — the cheap checks first so a doomed read never pays the
-reference fetch, and a read failing both #9 and #8 charged to the root cause (spec §3).
+### 3.4 The cursor owns the loop
 
 ```rust
-/// Decides whether a decoded read survives, on its length, its CIGAR, and how well
-/// it matches the reference.
-///
-/// The only stage that touches a reference, and the only one that can fail.
-pub struct ReadAdmission<R: RawRefSeq> {
+// read/input/cursor.rs
+pub struct AlignmentCursor<R: RawRefSeq> {
+    reads: RegionRawAlignedReads,
+    /// The single buffer reused across the whole walk.
+    buffer: NoodlesRawAlignedRead,
+    /// Held here because only the second filter needs it, and it is the cursor that
+    /// keeps it alive for the chromosome (`OPEN:` spec §9 Q1).
     reference: R,
-    config: ReadFilterConfig,
-    /// Reused scratch for the mismatch check's reference fetch; touched only when
-    /// that filter runs.
     ref_buf: Vec<u8>,
-    /// OPEN: spec §8 Q2, as above.
+    config: ReadFilterConfig,
+    /// One entry per read group met, in first-seen order. Cumulative until
+    /// `reset_counts` — spec §7.
     counts: Vec<ReadGroupCounts>,
-}
-
-impl<R: RawRefSeq> ReadAdmission<R> {
-    /// Fallible, because it probes every contig of `header` against the reference so
-    /// an in-loop fetch failure means corrupt input rather than a mismatched
-    /// reference. This is `ReadFilter::new`'s probe, moved.
-    pub fn new(header: &sam::Header, reference: R, config: ReadFilterConfig)
-        -> Result<Self, RefSeqError>;
-
-    /// `Err` is a reference-fetch failure and is **fatal to the run**, never a drop.
-    pub fn admit(&mut self, read: &AlignedRead) -> Result<FilterVerdict, RefSeqError>;
-
-    pub fn reference(&self) -> &R;
-    pub fn counts(&self) -> &[ReadGroupCounts];
+    /// **Replaces `FilterState`.** The cursor causes region ends, so it never has to
+    /// ask why reading stopped — which is what makes the three-way state
+    /// unnecessary (spec §5).
+    failed: bool,
+    kept: VecDeque<AlignedRead>,
+    /* …the retention fields, unchanged… */
 }
 ```
 
-**Contract.** The probe runs once, at construction, over the header's `@SQ` list. `admit` reads
-only the decoded read and the reference. `reference()` exists so a long-lived caller can release
-the bases a walk has gone past — the cursor uses it today
-([`input/cursor.rs:553`](../../../../src/ng/read/input/cursor.rs#L553)).
+The loop, in `next_read`, after the kept set is exhausted:
 
-**`with_validated_contigs` and `ReadFilterBuffers` are deleted here**, not in a separate cleanup
-— spec §9.
+```
+read_next → false: the region is done, return None
+          → Err:   failed = true, return the error
+verdict_on_raw_read       → Drop: charge it, continue
+decode                    → Err:  failed = true, return the error
+verdict_on_aligned_read   → Drop: charge it, continue
+                          → Err:  failed = true, return the error
+                          → Keep: tally, push onto `kept`, emit
+```
 
-### 1.5 The driver
+**Contract, unchanged from today's composite.** Lazy; one raw read resident. A fatal error is
+yielded once and then the cursor refuses every later region (`CursorError::AfterFailure`,
+already present). The order guard still runs on emit.
 
-Someone has to pull records until one survives, own the three-way stop, and turn three failure
-kinds into one error. That is this, and it keeps the name callers already use.
+**New public surface:**
 
 ```rust
-/// One sample's reads, filtered — the composition of the two stages and the
-/// converter, as an `Iterator<Item = Result<AlignedRead, ReadFilterError>>`.
-pub struct ReadFilter<S: RecordSource, R: RawRefSeq> {
-    source: S,
-    /// The single record buffer reused across the whole pass.
-    record_buf: S::Record,
-    records: RecordAdmission,
-    reads: ReadAdmission<R>,
-    state: FilterState,
+impl<R: RawRefSeq> AlignmentCursor<R> {
+    /// Step-1's tally, one entry per read group met. Cumulative — spec §7.
+    pub fn read_group_counts(&self) -> Vec<ReadGroupCounts>;   // exists
+    /// Start a fresh tally window. The caller chooses the window; the cursor does
+    /// not reset on its own, and never per region — spec §7.
+    pub fn reset_counts(&mut self);                            // new
 }
 ```
 
-**Contract, unchanged from today.** Lazy; one record resident. Fused — a fatal error is yielded
-once and then `None`. Only `EndOfInput` is undone by `restart_after_end_of_input`; `Failed` is
-permanent ([`filtering.rs:646-658`](../../../../src/ng/read/filtering.rs#L646)).
+## 4. Errors
 
-The surface the alignment cursor drives is **unchanged** — `next`, `has_failed`,
-`restart_after_end_of_input`, `source_mut`, `counts`, `reference`
-([`input/cursor.rs:241`](../../../../src/ng/read/input/cursor.rs#L241) and its uses). That is
-what keeps this change inside one file.
-
-`OPEN:` spec §8 Q3 (is `ReadFilter` still the right name for the composite, now that two of its
-three jobs have names of their own) and Q4 (does the cursor keep consuming a driver, or compose
-the stages itself — the block above assumes a driver).
-
-## 2. Errors
-
-**No new error type, and no change of meaning.** `ReadFilterError`'s three variants already name
-the three stages ([`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578)):
+**No new error type and no change of meaning.** `ReadFilterError`'s three variants already name
+the three pieces:
 
 | variant | raised by |
 |---|---|
-| `Source` | the record source, under stage one |
-| `Decode` | the converter |
-| `Reference` | stage two's mismatch check |
+| `Source` | `RegionRawAlignedReads::read_next` |
+| `Decode` | the conversion |
+| `Reference` | the second filter's mismatch check |
 
-`RecordAdmission::admit` cannot fail at all, which is why it returns a bare verdict.
+`verdict_on_raw_read` cannot fail, which is why it returns a bare verdict.
 
-## 3. Design decisions — decided
+## 5. Design decisions — decided
 
-- **Two filter stages, not one** — spec §2.
-- **A stage takes a borrow and returns a verdict, never a record** — spec §3.
-- **The drop reason travels in the verdict**, so an `Option` return is ruled out: the tally is
-  keyed on reason and read group.
-- **The read group is read off the raw record, not the read** — it is already stamped there for
-  exactly this ([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
-- **Stage two owns the reference and the contig probe; stage one has neither** — spec §4.
-- **Stage two keeps the #7 → #9 → #8 order**, not the numbering order — spec §3, pinned by
-  `a_walk_charges_every_drop_reason_by_hand_count`.
-- **The driver keeps the three-way `FilterState`** — spec §3.
-- **No trait, no bake-off:** no competing implementations, so concrete types in one file —
+- **The two filters and the conversion sit below the cursor's kept set; the cursor owns the
+  loop.** The scope-fixing property — spec §3.
+- **Two filters, not one** — spec §2.
+- **A filter takes a borrow and returns a verdict, never a read** — spec §4.
+- **The verdict carries the drop reason**, so an `Option` return is ruled out: the tally is keyed
+  on reason and read group.
+- **The read group is read off the raw aligned read** — it is already stamped there for exactly
+  this ([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
+- **The second filter's #7 → #9 → #8 order is kept**, not the numbering order — spec §4.
+- **`FilterState` is deleted for a `failed` flag** — spec §5.
+- **The source trait is deleted and the in-memory reader gains a scripted error** — spec §6.
+- **The tally lives on the cursor, cumulative, with `reset_counts`; not on `AlignmentFile`** —
+  spec §7.
+- **No trait, no bake-off:** no competing implementations, so free functions and concrete types —
   `module_layout.md` principle 1a.
 
-## 4. Reconciliation with existing code
+## 6. Reconciliation with existing code
 
-Every row read at the cited line, 2026-08-03. This is a re-homing: no row is new logic.
+Every row read at the cited line, 2026-08-03.
 
 | what | existing code | action |
 |---|---|---|
-| stage one's body | `verdict_pre_decode` [`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210) | **move** into `RecordAdmission::admit`, body unchanged |
-| stage two's body | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **move** into `ReadAdmission::admit`, body unchanged |
-| the converter | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is**; called by the driver |
-| the contig probe | `ReadFilter::new` [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | **move** to `ReadAdmission::new` |
-| the raw record and its buffer contract | `RawRecord` / `RecordSource` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), [`:366`](../../../../src/ng/read/filtering.rs#L366) | **reuse as-is**, unchanged |
-| the verdict and the reasons | `FilterVerdict` / `DropReason` [`filtering.rs:96`](../../../../src/ng/read/filtering.rs#L96), [`:104`](../../../../src/ng/read/filtering.rs#L104) | **reuse as-is** |
-| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), [`:661`](../../../../src/ng/read/filtering.rs#L661); `tally_for_current_record` [`:846`](../../../../src/ng/read/filtering.rs#L846) | **reuse as-is**; `OPEN:` Q2 decides the owner |
-| the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646) | **reuse as-is**, on the driver |
+| the six flag/MAPQ filters | `verdict_pre_decode` [`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210) | **rename** to `verdict_on_raw_read`; body unchanged |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **rename** to `verdict_on_aligned_read`; body unchanged |
+| the conversion | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is** |
+| the loop | `ReadFilter::next` [`filtering.rs:895`](../../../../src/ng/read/filtering.rs#L895) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
+| the contig probe | `ReadFilter::new` [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | **move** to the cursor's constructor (`OPEN:` spec §9 Q2) |
+| the tally and its fold | `ReadFilterCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), `ReadGroupCounts` [`:661`](../../../../src/ng/read/filtering.rs#L661), `tally_for_current_record` [`:846`](../../../../src/ng/read/filtering.rs#L846), `counts` [`:868`](../../../../src/ng/read/filtering.rs#L868) | **move** to the cursor, including the `other_sample` rider on the first entry |
 | the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** |
-| the probe-free constructor + lent buffers | `with_validated_contigs` [`filtering.rs:746`](../../../../src/ng/read/filtering.rs#L746), `ReadFilterBuffers` | **delete** — their only caller was the deleted reader pool |
-| the caller | `AlignmentCursor` holds `ReadFilter<RegionRecords, R>` [`input/cursor.rs:241`](../../../../src/ng/read/input/cursor.rs#L241) | **unchanged**, if Q4 lands on a driver |
+| the raw read | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), `NoodlesRawRecord` [`:479`](../../../../src/ng/read/filtering.rs#L479) | **rename and move** to `aligned_read.rs` |
+| the region narrowing | `RegionRecords` [`region_records.rs`](../../../../src/ng/read/input/region_records.rs) | **rename**; trait impl → inherent methods |
+| the per-format readers | `RecordReader` and arms [`record_reader/mod.rs`](../../../../src/ng/read/input/record_reader/mod.rs) | **rename**; `InMemory` arm gains a scripted error |
+| the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646), `restart_after_end_of_input` [`:778`](../../../../src/ng/read/filtering.rs#L778), `has_failed` [`:794`](../../../../src/ng/read/filtering.rs#L794), `source_mut` [`:816`](../../../../src/ng/read/filtering.rs#L816) | **delete**, all four |
+| the source trait and its doubles | `RecordSource` [`filtering.rs:366`](../../../../src/ng/read/filtering.rs#L366), `FakeSource`, `ErroringSource` | **delete** |
+| the probe-free constructor and lent buffers | `with_validated_contigs` [`filtering.rs:746`](../../../../src/ng/read/filtering.rs#L746), `ReadFilterBuffers` | **delete** — no caller once the cursor owns the loop |
+| the cursor's existing filter field and its four call sites | [`input/cursor.rs:241`](../../../../src/ng/read/input/cursor.rs#L241), `:387`, `:445`, `:448` | **replace** with the fields in §3.4 |
 
-## 5. Open items
+## 7. Open items
 
-**Genuine open design questions** — spec §8 holds the reasoning and a leaning for each:
+**Genuine open design questions** — spec §9 holds the reasoning and a leaning:
 
-- `OPEN: Q1` — is stage one a type, or does `verdict_pre_decode` stay a free function?
-- `OPEN: Q2` — one tally on the driver, or one per stage merged on read?
-- `OPEN: Q3` — what the composite is called if `ReadFilter` names stage two instead.
-- `OPEN: Q4` — driver, or the cursor composing the three stages?
+- `OPEN: Q1` — does the second verdict stay a free function, or become a type holding the
+  reference and the scratch buffer?
+- `OPEN: Q2` — does the contig probe move to the cursor's constructor with the reference?
 
 **Impl-time confirmations, not decisions:**
 
-- Whether `RecordAdmission::admit` takes `&impl RawRecord` or a concrete `&S::Record`. The
-  generic form is stated above; the concrete one may inline better and changes no contract.
-- Whether `ref_buf` stays a field of stage two or moves to the driver. It is scratch for one
-  filter; keeping it beside that filter is the assumption.
-- Whether `filtering.rs` needs to become `read/filtering/` once three types live in it. Decide on
-  the file's real size (spec §6).
+- Whether `verdict_on_raw_read` takes `(flag, mapq)` or `&impl RawAlignedRead`. The split form is
+  what exists; the whole-read form reads better beside its sibling and changes no contract.
+- What shape the in-memory reader's scripted error takes — an error at position *n*, or an arm
+  that always fails. The three tests it has to serve are named in spec §8.
+- Whether `region_records.rs` is renamed on disk or the type simply moves. The spec assumes the
+  file follows the type.
 
-## 6. Test & bench shape
+## 8. Test & bench shape
 
-Tests stay beside the code, in `filtering.rs`'s own module. 45 tests live there now and most
-drive `ReadFilter` as one thing; each moves to whichever type keeps its subject.
+Tests stay beside the code. `filtering.rs`'s 45 tests split: the policy ones stay, the loop ones
+move to `cursor.rs`, the three test-double ones are replaced (spec §8).
 
-**Two tests do not exist yet, and spec §7 says why they are the point of the change:** stage one
-building with no reference, and the converter being asked for nothing when every record fails
-stage one.
-
-**The regression anchors are output identity on real data, not the unit suite** — spec §7 has the
-four dumps and the walk probe's figures.
+**The regression anchors are output identity on real data, not the unit suite** — spec §8 has the
+four dumps and the walk probe's figures. Three tests that do not exist yet are named there too,
+and each covers something no output comparison can see.
