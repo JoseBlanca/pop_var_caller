@@ -43,8 +43,8 @@ use std::io;
 use noodles_sam as sam;
 
 use crate::bam::alignment_input::cigar_ref_span;
-use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::filtering::{NoodlesRawRecord, RecordSource, resolve_read_group};
+use crate::ng::read::aligned_read::{AlignedRead, NoodlesRawAlignedRead};
+use crate::ng::read::filtering::{RecordSource, resolve_read_group};
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::read::input::record_reader::RecordReader;
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
@@ -133,7 +133,7 @@ impl RegionRecords {
 }
 
 impl RecordSource for RegionRecords {
-    type Record = NoodlesRawRecord;
+    type Record = NoodlesRawAlignedRead;
 
     fn header(&self) -> &sam::Header {
         self.reader.header()
@@ -150,7 +150,7 @@ impl RecordSource for RegionRecords {
         self.other_sample_records + self.reader.other_sample_records()
     }
 
-    fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
+    fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
         let Some(region) = self.region else {
             // Never pointed at a region. Yielding nothing is the honest answer; guessing at
             // one would make the first region's reads depend on the order calls happened to
@@ -311,7 +311,7 @@ mod tests {
         source
             .jump_to(region)
             .expect("an in-memory move cannot fail");
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         let mut names = Vec::new();
         while source
             .read_next(&mut buf)
@@ -430,7 +430,7 @@ mod tests {
     fn a_source_pointed_nowhere_yields_nothing() {
         let mut source = records_over(vec![read_at("a", 0, 40)]);
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         assert!(!source.read_next(&mut buf).expect("no reader is involved"));
     }
 
@@ -535,7 +535,7 @@ mod tests {
 
         // Continuing must carry on from there — not start again, which would yield `a` twice.
         source.continue_into(region(26, 100));
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         let mut names = Vec::new();
         while source
             .read_next(&mut buf)
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(narrowed_to(&mut source, region(1, 25)), ["inside"]);
         source.continue_into(region(26, 100));
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         assert!(source.read_next(&mut buf).expect("reads"));
         assert_eq!(
             String::from_utf8_lossy(buf.record.name().expect("named")),
@@ -577,14 +577,14 @@ mod tests {
     }
 
     /// Read groups are resolved on the record actually yielded, and the buffer is stamped —
-    /// `RawRecord::decode` refuses an unstamped one, so a missed stamp is a fatal error
+    /// `RawAlignedRead::decode` refuses an unstamped one, so a missed stamp is a fatal error
     /// rather than a read attributed to whatever came before it.
     #[test]
     fn a_yielded_record_carries_its_read_group() {
         let mut source = records_over(vec![read_at("a", 0, 40)]);
         source.jump_to(region(31, 60)).expect("moves");
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         assert!(source.read_next(&mut buf).expect("reads"));
         assert!(
             buf.read_group.is_some(),

@@ -10,7 +10,7 @@ use noodles_cram as cram;
 use noodles_fasta as fasta;
 use noodles_sam as sam;
 
-use crate::ng::read::filtering::NoodlesRawRecord;
+use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::record_reader::container::{DecodedContainer, decode_container_at};
 use crate::ng::types::GenomeRegion;
@@ -163,7 +163,7 @@ impl CramRecordReader {
 
     /// The next record, raw except for its read group — see the type's doc for why that one
     /// field travels with it.
-    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
+    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
         if self.done {
             return Ok(false);
         }

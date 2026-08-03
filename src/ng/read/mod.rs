@@ -32,10 +32,9 @@ pub mod left_align;
 mod left_align_parity;
 pub mod prepared_read;
 
-pub use aligned_read::AlignedRead;
+pub use aligned_read::{AlignedRead, NoodlesRawAlignedRead, RawAlignedRead};
 pub use filtering::{
-    NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig, ReadFilterCounts, ReadFilterError,
-    RecordSource,
+    ReadFilter, ReadFilterConfig, ReadFilterCounts, ReadFilterError, RecordSource,
 };
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
@@ -44,11 +43,12 @@ use crate::ng::ref_seq::RefSeqError;
 /// The read group a fixture uses when the group plays no part in what it checks.
 ///
 /// **Not a sentinel.** `ReadGroupId(0)` is the *first* id the run's table mints
-/// ([`ReadGroupId`](crate::ng::types::ReadGroupId)), so it is indistinguishable from a real group —
-/// the crate already recorded this trap once, on `NoodlesRawRecord::default`
-/// ([filtering.rs](filtering)). Naming it is what keeps a future assertion from passing whether the
-/// group was threaded through or silently defaulted. A test that actually asserts *on* the group
-/// must use a distinctive id, as [`left_align`]'s `the_read_group_rides_through_both_paths` does.
+/// ([`ReadGroupId`](crate::ng::types::ReadGroupId)), so it is indistinguishable from a real
+/// group — the crate already recorded this trap once, on `NoodlesRawAlignedRead::default`
+/// ([aligned_read.rs](aligned_read)). Naming it is what keeps a future assertion from passing
+/// whether the group was threaded through or silently defaulted. A test that actually asserts
+/// *on* the group must use a distinctive id, as [`left_align`]'s
+/// `the_read_group_rides_through_both_paths` does.
 #[cfg(test)]
 pub(crate) const PLACEHOLDER_READ_GROUP: crate::ng::types::ReadGroupId =
     crate::ng::types::ReadGroupId(0);

@@ -5,7 +5,7 @@ use std::io;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
 
-use crate::ng::read::filtering::NoodlesRawRecord;
+use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::types::GenomeRegion;
 
 /// A fixed list of records, yielded in the order it was given.
@@ -79,7 +79,7 @@ impl InMemoryRecordReader {
     /// reader with no file behind it and it is not something to generalise from; if the churn
     /// ever matters to a harness driving long scripts, the fix is a field-wise copy through
     /// `RecordBuf`'s `*_mut()` accessors, and it should wait for a measurement that asks.
-    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
+    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
         // Cleared before anything else, and never set: records come out raw, and a stale
         // group left in the reused buffer would attribute this record to the previous one's
         // read group without a word.
@@ -128,7 +128,7 @@ mod tests {
 
     /// Drain the reader into the whole records it yielded.
     fn drain_records(reader: &mut InMemoryRecordReader) -> Vec<RecordBuf> {
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         let mut records = Vec::new();
         while reader
             .read_next(&mut buf)
@@ -177,7 +177,7 @@ mod tests {
         reader.begin_region(region(1, 100)).expect("positions");
 
         assert_eq!(drain(&mut reader), ["a"]);
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         assert!(!reader.read_next(&mut buf).expect("ends"));
         assert!(!reader.read_next(&mut buf).expect("still ends"));
     }
@@ -194,16 +194,19 @@ mod tests {
     /// **The stale-read-group guard, from the one direction that can fail.** The buffer is
     /// reused across reads and across readers, so a reader that did not clear the field
     /// would hand this record out wearing the previous one's read group — and
-    /// `RawRecord::decode` would accept it, because the field is populated.
+    /// `RawAlignedRead::decode` would accept it, because the field is populated.
     #[test]
     fn a_record_comes_out_raw_with_no_read_group_stamped() {
         let mut reader = reader(vec![read_named("a", 0, 10)]);
         reader.begin_region(region(1, 100)).expect("positions");
 
         // A group left over from an earlier pass through some other source.
-        let mut buf = NoodlesRawRecord {
+        // Both fields spelled out: the spread would fill exactly one and would
+        // silently absorb a third if the buffer ever grows one — on the very
+        // literal whose subject is the field being spread past.
+        let mut buf = NoodlesRawAlignedRead {
+            record: RecordBuf::default(),
             read_group: Some(crate::ng::types::ReadGroupId(7)),
-            ..NoodlesRawRecord::default()
         };
         assert!(reader.read_next(&mut buf).expect("reads"));
 
@@ -244,7 +247,7 @@ mod tests {
         reader.begin_region(region(1, 100)).expect("positions");
 
         // One record, then the caller moves on.
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         assert!(reader.read_next(&mut buf).expect("reads"));
 
         reader.begin_region(region(50, 60)).expect("repositions");
@@ -275,7 +278,7 @@ mod tests {
     /// The buffer is reused across every read of a pass, so the guard has to hold on every
     /// read — not only the first. A reader that cleared once per pass would leave the
     /// *second* record wearing whatever the caller last had, which is the shape of the bug
-    /// `NoodlesRawRecord`'s own doc records having been bitten by.
+    /// `NoodlesRawAlignedRead`'s own doc records having been bitten by.
     #[test]
     fn every_record_of_a_pass_comes_out_with_no_read_group() {
         let mut reader = reader(vec![
@@ -285,7 +288,7 @@ mod tests {
         ]);
         reader.begin_region(region(1, 100)).expect("positions");
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         let mut read = 0;
         loop {
             // Re-stamped between every read, as a caller resolving read groups would.

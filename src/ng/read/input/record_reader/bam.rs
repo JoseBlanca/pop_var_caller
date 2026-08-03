@@ -12,7 +12,7 @@ use noodles_csi::binning_index::index::reference_sequence::bin::Chunk;
 use noodles_sam as sam;
 
 use crate::bam::index_preflight::AlignmentIndex;
-use crate::ng::read::filtering::NoodlesRawRecord;
+use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::AlignmentFileError;
 use crate::ng::types::GenomeRegion;
 
@@ -181,7 +181,7 @@ impl BamRecordReader {
 
     /// The next record, raw: no contig test, no overlap test, no read-group resolution. Those
     /// belong to the layer above, written once for every format.
-    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
+    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
         if self.done {
             return Ok(false);
         }
@@ -319,7 +319,7 @@ mod tests {
 
         reader.begin_region(region(1, 100)).expect("positions");
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         let mut last_start = 0u64;
         let mut records = 0u64;
         while reader.read_next(&mut buf).expect("the fixture reads") {
@@ -349,7 +349,7 @@ mod tests {
             .begin_region(region(190_000, 200_000))
             .expect("positions");
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         while reader.read_next(&mut buf).expect("the fixture reads") {}
         assert!(!reader.read_next(&mut buf).expect("still quiet"));
 
@@ -369,9 +369,12 @@ mod tests {
         let mut reader = reader_over(&path, &header);
         reader.begin_region(region(1, 100)).expect("positions");
 
-        let mut buf = NoodlesRawRecord {
+        // Both fields spelled out: the spread would fill exactly one and would
+        // silently absorb a third if the buffer ever grows one — on the very
+        // literal whose subject is the field being spread past.
+        let mut buf = NoodlesRawAlignedRead {
+            record: RecordBuf::default(),
             read_group: Some(crate::ng::types::ReadGroupId(7)),
-            ..NoodlesRawRecord::default()
         };
         assert!(reader.read_next(&mut buf).expect("reads"));
         assert!(

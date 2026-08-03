@@ -80,7 +80,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
 
 ### Milestone A — the renames (no behaviour change)
 
-- ☐ **A1.** `RawRecord` → `RawAlignedRead` and `NoodlesRawRecord` → `NoodlesRawAlignedRead`,
+- ✅ **A1.** `RawRecord` → `RawAlignedRead` and `NoodlesRawRecord` → `NoodlesRawAlignedRead`,
   **moved to `read/aligned_read.rs`** beside `AlignedRead` and the conversion. Its doc gains the
   fact that an unmapped read is one of these. *Depends:* —. *Source:* spec §6, arch §2, §3.1.
 - ☐ **A2.** `RecordReader` → `AlignedReadsReader`, its three arms to

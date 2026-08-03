@@ -62,7 +62,7 @@
 //! - **Records come out raw.** In particular `read_group` is cleared, never stamped: the
 //!   buffer is reused, and a reader that left the previous record's group in place would
 //!   attribute this record to it silently. Clearing turns that into a refusal at
-//!   [`RawRecord::decode`](crate::ng::read::filtering::RawRecord::decode).
+//!   [`RawAlignedRead::decode`](crate::ng::read::aligned_read::RawAlignedRead::decode).
 //!
 //! # What is here so far
 //!
@@ -92,7 +92,7 @@ use std::io;
 
 use noodles_sam as sam;
 
-use crate::ng::read::filtering::NoodlesRawRecord;
+use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::types::GenomeRegion;
 
 pub(crate) use bam::BamRecordReader;
@@ -145,7 +145,7 @@ impl RecordReader {
 
     /// Fill `buf` with the next record in position order. `Ok(false)` at the end, after
     /// which `buf` holds a stale record the caller must not read.
-    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawRecord) -> io::Result<bool> {
+    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
         match self {
             Self::InMemory(reader) => reader.read_next(buf),
             Self::Bam(reader) => reader.read_next(buf),
@@ -206,7 +206,7 @@ mod tests {
             header.reference_sequences().len(),
         );
 
-        let mut buf = NoodlesRawRecord::default();
+        let mut buf = NoodlesRawAlignedRead::default();
         reader.begin_region(region(0, 1, 100)).expect("positions");
         let mut read_to_the_end = |reader: &mut RecordReader| {
             let mut records = 0;

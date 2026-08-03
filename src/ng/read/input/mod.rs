@@ -24,9 +24,11 @@
 //! the merge to compare positions *across* files without re-checking anything.
 //!
 //! This is step 1's input edge rather than a new step, so it lives under
-//! `read/` beside `filtering.rs` and reuses that module's
-//! [`RecordSource`](super::RecordSource)/[`RawRecord`](super::RawRecord) seam
-//! (`doc/devel/ng/arch/module_layout.md` principle 1, note b).
+//! `read/` beside `filtering.rs` and reuses the seam those two modules define:
+//! [`RecordSource`](crate::ng::read::filtering::RecordSource) from
+//! `filtering.rs`, and the buffer it fills,
+//! [`RawAlignedRead`](crate::ng::read::aligned_read::RawAlignedRead), from
+//! `aligned_read.rs` (`doc/devel/ng/arch/module_layout.md` principle 1, note b).
 
 pub mod cursor;
 pub mod open_bam;

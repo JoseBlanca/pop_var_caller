@@ -17,23 +17,25 @@
 //! `compute_adaptor_boundary` and `cigar_to_ops` rather than reproducing them.
 //!
 //! The whole step is here: the step-1-local types, the two-phase `verdict_*`
-//! cascade, the `RawRecord`/`RecordSource` seam with the noodles BAM/CRAM
-//! adapters, and the `ReadFilter` iterator that drives them into a stream of
-//! kept reads with a running drop tally.
+//! cascade, the `RecordSource` input seam, and the `ReadFilter` iterator that
+//! drives them into a stream of kept reads with a running drop tally. The read
+//! it filters — [`RawAlignedRead`] undecoded, [`AlignedRead`] decoded, and the
+//! conversion between them — lives in [`crate::ng::read::aligned_read`].
 
 use crate::bam::alignment_input::{
     DEFAULT_MAX_READ_MISMATCH_FRACTION, DEFAULT_MIN_MAPQ, DEFAULT_MIN_READ_LENGTH,
     DEFAULT_MISMATCH_BQ_FLOOR, FLAG_DUPLICATE, FLAG_QC_FAIL, FLAG_SECONDARY, FLAG_SUPPLEMENTARY,
     FLAG_UNMAPPED, cigar_is_bad, cigar_ref_span, read_exceeds_mismatch_fraction,
 };
-use crate::ng::read::aligned_read::{AlignedRead, decode_record};
+use crate::ng::read::aligned_read::{AlignedRead, RawAlignedRead};
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::ref_seq::{RawRefSeq, RefSeqError};
 use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction, ReadGroupId};
 // **No `noodles_bam`, `noodles_cram` or `noodles_fasta` here, and their absence is the
-// point.** This module knows what a *record* is and what the filtering policy is; it does not
-// know what a BAM or a CRAM is. It did until 2026-08-03, when the two whole-file
-// `RecordSource` implementations that lived below were deleted — see the note where they were.
+// point.** This module knows what the filtering policy is; it does not know what a BAM or a
+// CRAM is. It did until 2026-08-03, when the two whole-file `RecordSource` implementations
+// that lived below were deleted — see the note where they were. What a *record* is left the
+// same day, to `aligned_read.rs`, with the two raw types.
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
 use std::io;
@@ -324,51 +326,18 @@ fn verdict_post_decode(
 // The record-source seam (input edge)
 // ---------------------------------------------------------------------
 
-/// A borrowed view of one alignment record — the seam that lets the flag/MAPQ
-/// cascade (#1–#6) run *before* the record is decoded. [`Self::flag`] and
-/// [`Self::mapq`] are cheap field reads on the still-packed record; [`Self::decode`]
-/// is the expensive phase (base/quality decode + adaptor-boundary annotation →
-/// [`AlignedRead`]), run only on the reads that clear the pre-decode gate. It
-/// borrows `&self`, not `self`, so the underlying buffer stays reusable for the
-/// next read.
-pub trait RawRecord {
-    /// The SAM flag bitfield — the same `u16` [`AlignedRead::flag`] carries; read
-    /// by filters #1, #3–#6.
-    fn flag(&self) -> u16;
-    /// The SAM mapping quality; filter #2. "Unavailable" (SAM `0xFF`) resolves to
-    /// [`MapQual`]`(0)`, matching production, so any non-zero minimum drops it.
-    fn mapq(&self) -> MapQual;
-    /// Decode the record into an owned [`AlignedRead`] (filters #7–#9 read the
-    /// result). Fallible because the decode is: a record reaching here has passed
-    /// the pre-decode cascade (so it is mapped), but a corrupt record — the unmapped
-    /// flag clear yet no position — surfaces here as an `Err` that, like the #8
-    /// fetch and `RecordSource::read_next`, is **fatal to the run** rather than a
-    /// per-read drop or a panic (spec §7). (The spec's illustrative signature
-    /// showed this infallible; it is fallible in practice because the reused
-    /// production decoder is.)
-    fn decode(&self) -> io::Result<AlignedRead>;
-    /// Which read group this record belongs to, once its source has resolved it.
-    ///
-    /// Read by the tally, not by any filter — a drop has to be charged to the
-    /// read group it came from, and the pre-decode filters run before any
-    /// `AlignedRead` exists to carry it. `None` means the source has not stamped
-    /// the buffer, which [`Self::decode`] refuses; the tally charges it to no
-    /// read group rather than to an arbitrary one.
-    fn read_group(&self) -> Option<ReadGroupId>;
-}
-
 /// The filter's input: fills a caller-owned buffer with the next record, reusing
 /// its allocations. Modelled as a source that *fills* a buffer rather than an
-/// `Iterator<Item = RawRecord>` precisely so one buffer survives the whole pass
+/// `Iterator<Item = RawAlignedRead>` precisely so one buffer survives the whole pass
 /// (a std iterator's owned `Item` cannot borrow a reused buffer — the
 /// lending-iterator problem, spec §5). `Ok(true)` = filled, `Ok(false)` = end of
 /// input; an `Err` is **fatal to the run**.
 pub trait RecordSource {
-    /// The reused buffer type — a [`RawRecord`] the source refills in place. The
+    /// The reused buffer type — a [`RawAlignedRead`] the source refills in place. The
     /// `Default` bound is load-bearing: the [`ReadFilter`] iterator seeds *one*
     /// buffer with `Default::default()` and hands the same `&mut` to
     /// [`Self::read_next`] on every read, so the whole pass allocates one record.
-    type Record: RawRecord + Default;
+    type Record: RawAlignedRead + Default;
     /// The alignment file's SAM header. Its `@SQ` list defines the contigs the
     /// reads may reference; [`ReadFilter::new`] validates that every one resolves
     /// in the reference up front, so an in-loop reference error later means
@@ -458,85 +427,10 @@ fn unreadable_record(record: &RecordBuf, problem: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{name} {problem}"))
 }
 
-/// An ng-owned adapter viewing a noodles [`RecordBuf`] as a [`RawRecord`]. The
-/// production `RecordSource` refills the inner `record` in place;
-/// [`RawRecord::flag`]/[`RawRecord::mapq`] are cheap field reads on the undecoded
-/// record, and [`RawRecord::decode`] runs ng's own
-/// [`decode_record`](crate::ng::read::aligned_read) (which still calls
-/// production's `compute_adaptor_boundary` and `cigar_to_ops`). `read_group` is
-/// the read group the decoded read is attributed to; the source sets it before
-/// each read.
-///
-/// ng-owned by design (spec §7, decision a): the dependency points ng → existing
-/// code, so production never learns about ng.
-///
-/// Both fields are `pub(crate)` internal state, not a caller-set surface:
-/// `read_group` is (re)stamped by the source on every [`RecordSource::read_next`],
-/// and `record` is refilled in place — a caller-written value would just be
-/// overwritten. No `Clone`: the whole point is to reuse one buffer, and cloning
-/// would deep-copy the `RecordBuf` it exists to avoid copying.
-#[derive(Debug)]
-pub struct NoodlesRawRecord {
-    /// The reused undecoded record buffer.
-    pub(crate) record: RecordBuf,
-    /// The read group this record belongs to, stamped onto the decoded
-    /// [`AlignedRead`].
-    ///
-    /// **Cleared when the buffer is handed out and set again after each record
-    /// is filled** — in that order, and it matters. The buffer is reused, so a
-    /// source that failed to stamp would otherwise leave the *previous*
-    /// record's group in place and attribute this read to it, silently. Clearing
-    /// first turns that into a refusal at [`RawRecord::decode`], which is what
-    /// the `Option` is for; without it the guard only ever caught a missed stamp
-    /// on the very first record.
-    pub(crate) read_group: Option<ReadGroupId>,
-}
-
-/// Hand-written rather than derived, because a fresh buffer has **no** read
-/// group and must not pretend to one.
-///
-/// `ReadGroupId(0)` would be the obvious filler and is the trap: zero is not a
-/// sentinel, it is the first identifier the run's table mints, so a source that
-/// failed to stamp would attribute every read to a real library — silently, and
-/// on exactly the grouping the error model is fitted per. `None` makes that a
-/// loud failure at the one place that reads the field.
-impl Default for NoodlesRawRecord {
-    fn default() -> Self {
-        Self {
-            record: RecordBuf::default(),
-            read_group: None,
-        }
-    }
-}
-
-impl RawRecord for NoodlesRawRecord {
-    fn flag(&self) -> u16 {
-        self.record.flags().bits()
-    }
-
-    fn mapq(&self) -> MapQual {
-        // `map(u8::from).unwrap_or(0)`: SAM `0xFF` (unavailable) decodes to `None`
-        // → treated as MAPQ 0, matching production `classify_pre_decode`.
-        MapQual(self.record.mapping_quality().map(u8::from).unwrap_or(0))
-    }
-
-    fn read_group(&self) -> Option<ReadGroupId> {
-        self.read_group
-    }
-
-    fn decode(&self) -> io::Result<AlignedRead> {
-        // A buffer reaching decode without a read group means a `RecordSource`
-        // skipped its stamp. Refusing is the point: the alternative is a read
-        // silently attributed to whichever library the filler happened to name.
-        let read_group = self.read_group.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "a record reached decode with no read group: its source did not stamp one",
-            )
-        })?;
-        decode_record(&self.record, read_group)
-    }
-}
+// **`NoodlesRawAlignedRead` was here, and it moved to `read/aligned_read.rs` with the
+// `RawAlignedRead` trait it implements (2026-08-03, `read_filtering_stages.md` §6).** A raw
+// aligned read and a decoded one are one thing in two states, and the conversion between them
+// already lived there. What is left here is the keep-or-drop rules.
 
 // **`BamRecordSource` and `CramRecordSource` were here, and they are gone (2026-08-03).**
 //
@@ -656,7 +550,7 @@ enum FilterState {
 /// One read group's step-1 tally, keyed by the read group it belongs to.
 ///
 /// `None` keys the records whose source never stamped a read group — which
-/// [`RawRecord::decode`] refuses, so they are counted apart rather than charged
+/// [`RawAlignedRead::decode`] refuses, so they are counted apart rather than charged
 /// to an arbitrary group.
 pub type ReadGroupCounts = (Option<ReadGroupId>, ReadFilterCounts);
 
@@ -1341,16 +1235,11 @@ mod tests {
 
     // ----- the record-source seam (C) -------------------------------------
 
-    use noodles_core::Position;
-    use noodles_sam::alignment::record::cigar::Op;
-    use noodles_sam::alignment::record::cigar::op::Kind;
-    use noodles_sam::alignment::record::{Flags, MappingQuality};
-    use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
     use noodles_sam::header::record::value::Map;
     use noodles_sam::header::record::value::map::ReferenceSequence;
     use std::num::NonZero;
 
-    /// A trivial in-memory `RawRecord`: it carries a whole `AlignedRead` and reads
+    /// A trivial in-memory `RawAlignedRead`: it carries a whole `AlignedRead` and reads
     /// its `flag`/`mapq` back off it, so the cascade can be driven with no BAM.
     /// `decode_fails` makes `decode` return an error (to exercise the fatal
     /// decode-error path).
@@ -1385,7 +1274,7 @@ mod tests {
         counts[0].1.clone()
     }
 
-    impl RawRecord for FakeRecord {
+    impl RawAlignedRead for FakeRecord {
         /// Unstamped: this fake has no source that resolves read groups, so its
         /// drops are charged to no read group — which is what `None` keys.
         fn read_group(&self) -> Option<ReadGroupId> {
@@ -1749,26 +1638,6 @@ mod tests {
         );
     }
 
-    fn bam_record(
-        qname: &str,
-        ref_id: usize,
-        start: usize,
-        len: usize,
-        mapq: u8,
-        flags: Flags,
-    ) -> RecordBuf {
-        RecordBuf::builder()
-            .set_name(qname)
-            .set_reference_sequence_id(ref_id)
-            .set_flags(flags)
-            .set_mapping_quality(MappingQuality::new(mapq).expect("mapq in range"))
-            .set_alignment_start(Position::try_from(start).unwrap())
-            .set_cigar([Op::new(Kind::Match, len)].into_iter().collect())
-            .set_sequence(Sequence::from(vec![b'A'; len]))
-            .set_quality_scores(QualityScores::from(vec![30u8; len]))
-            .build()
-    }
-
     /// A header with a single `chr1` reference sequence of the given length.
     fn contig_header(length: usize) -> sam::Header {
         sam::Header::builder()
@@ -1784,51 +1653,9 @@ mod tests {
         contig_header(100)
     }
 
-    #[test]
-    fn noodles_raw_record_reads_flag_mapq_and_decodes() {
-        let record = bam_record("r1", 0, 5, 4, 42, Flags::from(FLAG_DUPLICATE));
-        let raw = NoodlesRawRecord {
-            record,
-            read_group: Some(ReadGroupId(7)),
-        };
-        // Cheap pre-decode reads.
-        assert_eq!(raw.flag(), FLAG_DUPLICATE);
-        assert_eq!(raw.mapq(), MapQual(42));
-        // Decode produces the AlignedRead the cascade's phase two consumes.
-        let read = raw.decode().unwrap();
-        assert_eq!(read.ref_id, 0);
-        assert_eq!(read.pos, 5);
-        assert_eq!(read.mapq, 42);
-        assert_eq!(read.seq, b"AAAA");
-        assert_eq!(read.read_group, ReadGroupId(7));
-    }
-
-    #[test]
-    fn noodles_raw_record_maps_unavailable_mapq_to_zero() {
-        // A record with no mapping quality (SAM 0xFF) → MapQual(0).
-        let record = RecordBuf::builder()
-            .set_reference_sequence_id(0)
-            .set_flags(Flags::from(FLAG_PAIRED))
-            .set_alignment_start(Position::try_from(1usize).unwrap())
-            .set_cigar([Op::new(Kind::Match, 4)].into_iter().collect())
-            .set_sequence(Sequence::from(b"ACGT".to_vec()))
-            .set_quality_scores(QualityScores::from(vec![30u8; 4]))
-            .build();
-        let raw = NoodlesRawRecord {
-            record,
-            read_group: Some(ReadGroupId(0)),
-        };
-        assert_eq!(raw.mapq(), MapQual(0));
-    }
-
-    #[test]
-    fn noodles_raw_record_decode_errors_on_a_record_with_no_position() {
-        // A default record has no reference_sequence_id / alignment_start, so the
-        // reused decoder fails — the Err a corrupt record would surface (fatal).
-        let raw = NoodlesRawRecord::default();
-        let err = raw.decode().expect_err("missing position must fail decode");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-    }
+    // **The three `NoodlesRawAlignedRead` tests moved to `read/aligned_read.rs` with the type
+    // (2026-08-03).** Their subject is the adapter's flag/MAPQ reads and its refusal to decode
+    // an unstamped buffer, not any keep-or-drop rule.
 
     // **The four tests of `BamRecordSource`/`CramRecordSource` went with them (2026-08-03).**
     // Their subject was the sources: raw flag/MAPQ off a real file, the reused buffer not
