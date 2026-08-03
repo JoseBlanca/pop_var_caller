@@ -1,4 +1,4 @@
-//! A record reader with no file behind it: a scripted list, handed back in order.
+//! An aligned-reads reader with no file behind it: a scripted list, handed back in order.
 
 use std::io;
 
@@ -9,6 +9,13 @@ use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::types::GenomeRegion;
 
 /// A fixed list of records, yielded in the order it was given.
+///
+/// **What it yields is undecoded** — a [`NoodlesRawAlignedRead`], which is a SAM flag and a
+/// mapping quality readable without unpacking anything else. The name no longer says so, so
+/// this does. It matters most on *this* arm: the records are handed in already built, so it
+/// would be easy to assume they arrive converted. They do not — this arm goes through the
+/// same lines above it as a record freshly read from a file, which is the whole reason it can
+/// serve as the oracle.
 ///
 /// **Permanent, not a test fixture.** The forget rule — the one comparison that decides
 /// which kept reads may be dropped — is the only part of the cursor design that can lose
@@ -31,7 +38,7 @@ use crate::ng::types::GenomeRegion;
 /// this reader does not sort them, so a scripted list that is out of order is a way to drive
 /// the order guard rather than a mistake this type will correct.
 #[derive(Debug)]
-pub(crate) struct InMemoryRecordReader {
+pub(crate) struct InMemoryAlignedReadsReader {
     /// The header the records' `reference_sequence_id`s are resolved against.
     header: sam::Header,
     /// The script, in the order it will be handed back.
@@ -41,7 +48,7 @@ pub(crate) struct InMemoryRecordReader {
     next_index: usize,
 }
 
-impl InMemoryRecordReader {
+impl InMemoryAlignedReadsReader {
     pub(crate) fn new(header: sam::Header, records: Vec<RecordBuf>) -> Self {
         Self {
             header,
@@ -57,7 +64,7 @@ impl InMemoryRecordReader {
     /// Rewind to the start of the script.
     ///
     /// The region is accepted and ignored: this reader finds nothing, and the overlap test
-    /// belongs to the layer above (`record_reader/mod.rs`, the contract). Taking it anyway
+    /// belongs to the layer above (`aligned_reads_reader/mod.rs`, the contract). Taking it anyway
     /// keeps the arm's shape identical to the ones that *will* use it, so the enum's
     /// delegation is uniform and a later arm cannot quietly need a different signature.
     pub(crate) fn begin_region(&mut self, _region: GenomeRegion) -> io::Result<()> {
@@ -100,8 +107,8 @@ mod tests {
     use crate::ng::read::input::test_fixtures::{bam_header, matching_contigs, read_named};
     use crate::ng::types::{ContigId, Position};
 
-    fn reader(records: Vec<RecordBuf>) -> InMemoryRecordReader {
-        InMemoryRecordReader::new(bam_header(&matching_contigs()), records)
+    fn reader(records: Vec<RecordBuf>) -> InMemoryAlignedReadsReader {
+        InMemoryAlignedReadsReader::new(bam_header(&matching_contigs()), records)
     }
 
     fn region(start: u64, end: u64) -> GenomeRegion {
@@ -119,7 +126,7 @@ mod tests {
     /// **Names alone are not enough**, and [`the_whole_record_survives_the_clone`] is why: a
     /// clone carrying the name and garbage everywhere else would satisfy every assertion made
     /// through this helper. Use [`drain_records`] where the record's *content* is the point.
-    fn drain(reader: &mut InMemoryRecordReader) -> Vec<String> {
+    fn drain(reader: &mut InMemoryAlignedReadsReader) -> Vec<String> {
         drain_records(reader)
             .iter()
             .map(|record| String::from_utf8_lossy(record.name().expect("named")).into_owned())
@@ -127,7 +134,7 @@ mod tests {
     }
 
     /// Drain the reader into the whole records it yielded.
-    fn drain_records(reader: &mut InMemoryRecordReader) -> Vec<RecordBuf> {
+    fn drain_records(reader: &mut InMemoryAlignedReadsReader) -> Vec<RecordBuf> {
         let mut buf = NoodlesRawAlignedRead::default();
         let mut records = Vec::new();
         while reader

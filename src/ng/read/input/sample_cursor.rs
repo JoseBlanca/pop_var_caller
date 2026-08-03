@@ -352,7 +352,9 @@ fn key_of(read: &AlignedRead) -> GenomePosition {
 mod tests {
     use super::*;
     use crate::ng::read::ReadFilterConfig;
-    use crate::ng::read::input::record_reader::{InMemoryRecordReader, RecordReader};
+    use crate::ng::read::input::aligned_reads_reader::{
+        AlignedReadsReader, InMemoryAlignedReadsReader,
+    };
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_read_group, matching_contigs, read_named_with_length,
     };
@@ -385,7 +387,7 @@ mod tests {
 
     fn cursor_over(name: &str, records: Vec<RecordBuf>) -> AlignmentCursor<InMemoryRefSeq> {
         AlignmentCursor::over_records(
-            RecordReader::InMemory(InMemoryRecordReader::new(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
                 bam_header(&matching_contigs()),
                 records,
             )),

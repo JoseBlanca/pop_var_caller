@@ -1,21 +1,21 @@
 //! **This region's records only** — the questions that are the same whichever format the
 //! file is.
 //!
-//! A [`RecordReader`] finds and unpacks records and asks nothing about them. Something has to
-//! ask: is this record on the chromosome we want, does it touch the region, may we stop
+//! An [`AlignedReadsReader`] finds and unpacks records and asks nothing about them. Something
+//! has to ask: is this record on the chromosome we want, does it touch the region, may we stop
 //! looking, and which read group is it? Those four are format-blind, so they are written once
 //! here rather than twice in a BAM reader and a CRAM one — which is what makes a record from
 //! a scripted list and a record from a BGZF block behave identically instead of that being
 //! something the design claims (`arch/alignment_cursor.md` §2.3).
 //!
 //! ```text
-//! RecordReader    raw records, from wherever they come from
+//! AlignedReadsReader   raw records, from wherever they come from
 //!    ↓
-//! RegionRecords   this region's records only  ← here
+//! RegionRecords        this region's records only  ← here
 //!    ↓
-//! ReadFilter      step-1 filtering
+//! ReadFilter           step-1 filtering
 //!    ↓
-//! AlignedRead     what the cursor hands out
+//! AlignedRead          what the cursor hands out
 //! ```
 //!
 //! # Why this exists at Milestone B rather than C
@@ -45,8 +45,8 @@ use noodles_sam as sam;
 use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::read::aligned_read::{AlignedRead, NoodlesRawAlignedRead};
 use crate::ng::read::filtering::{RecordSource, resolve_read_group};
+use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
-use crate::ng::read::input::record_reader::RecordReader;
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 
 /// The records of one region of one file, narrowed from whatever the reader hands over.
@@ -57,7 +57,7 @@ use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 /// the cursor, not the cursor itself.
 #[derive(Debug)]
 pub(crate) struct RegionRecords {
-    reader: RecordReader,
+    reader: AlignedReadsReader,
     /// The chromosome every region must be on — the cursor's, checked before this is ever
     /// asked to move.
     contig: ContigId,
@@ -79,7 +79,7 @@ pub(crate) struct RegionRecords {
     /// repositioned and re-reads it; when the next region **continues** from here, nothing
     /// re-reads it and it is gone. It is one read, silently, per region boundary.
     ///
-    /// Held here rather than in the [`RecordReader`], which is where `arch §1.3` puts it: the
+    /// Held here rather than in the [`AlignedReadsReader`], which is where `arch §1.3` puts it: the
     /// over-read happens in this layer, because this is the layer that knows where the region
     /// ends. A reader cannot hold back a record it was never told to stop at.
     ///
@@ -92,7 +92,7 @@ pub(crate) struct RegionRecords {
 
 impl RegionRecords {
     pub(crate) fn new(
-        reader: RecordReader,
+        reader: AlignedReadsReader,
         contig: ContigId,
         resolution: ReadGroupResolution,
     ) -> Self {
@@ -276,7 +276,7 @@ pub(crate) fn read_overlaps(read: &AlignedRead, region: GenomeRegion) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::read::input::record_reader::InMemoryRecordReader;
+    use crate::ng::read::input::aligned_reads_reader::InMemoryAlignedReadsReader;
     use crate::ng::read::input::test_fixtures::{
         bam_header, fixture_read_group, matching_contigs, read_named_with_length,
     };
@@ -285,7 +285,7 @@ mod tests {
 
     fn records_over(script: Vec<RecordBuf>) -> RegionRecords {
         RegionRecords::new(
-            RecordReader::InMemory(InMemoryRecordReader::new(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
                 bam_header(&matching_contigs()),
                 script,
             )),

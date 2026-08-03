@@ -18,11 +18,16 @@ use crate::ng::types::GenomeRegion;
 
 /// A BAM reader that stays where it is between regions.
 ///
+/// **What it yields is undecoded** — a [`NoodlesRawAlignedRead`], which is a SAM flag and a
+/// mapping quality readable without unpacking anything else. The name no longer says so, so
+/// this does: nothing here builds an [`AlignedRead`](crate::ng::read::AlignedRead), and the
+/// conversion happens above, only for the reads that clear the flag/MAPQ filter.
+///
 /// # The one thing this must get right
 ///
 /// [`begin_region`](Self::begin_region) **positions; it never bounds.** After it, reading on
 /// yields every record from that point to the end of the chromosome — not just the ones inside
-/// the region it was handed. That is the contract in `record_reader/mod.rs`, and it is
+/// the region it was handed. That is the contract in `aligned_reads_reader/mod.rs`, and it is
 /// load-bearing rather than tidy: the cursor above serves a forward region by *not
 /// repositioning at all*, so a reader that had quietly stopped at the previous region's end
 /// would lose every record past it, silently, for every region after the first.
@@ -33,7 +38,7 @@ use crate::ng::types::GenomeRegion;
 /// with are scanned in order. On a coordinate-sorted file that costs almost nothing extra: a
 /// contig's records are contiguous, so the bins covering a suffix merge into a short run of
 /// chunks rather than one per region.
-pub(crate) struct BamRecordReader {
+pub(crate) struct BamAlignedReadsReader {
     reader: bam::io::Reader<bgzf::io::Reader<File>>,
     /// Parsed once at open and shared, never re-read per region.
     header: Arc<sam::Header>,
@@ -53,9 +58,9 @@ pub(crate) struct BamRecordReader {
 
 /// Hand-written because noodles' reader is not `Debug`, and so the output says what
 /// identifies this reader rather than dumping a parsed index.
-impl std::fmt::Debug for BamRecordReader {
+impl std::fmt::Debug for BamAlignedReadsReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BamRecordReader")
+        f.debug_struct("BamAlignedReadsReader")
             .field("path", &self.path)
             .field("chunks_left", &self.chunks.len())
             .field("done", &self.done)
@@ -63,7 +68,7 @@ impl std::fmt::Debug for BamRecordReader {
     }
 }
 
-impl BamRecordReader {
+impl BamAlignedReadsReader {
     pub(crate) fn new(
         reader: bam::io::Reader<bgzf::io::Reader<File>>,
         header: Arc<sam::Header>,
@@ -140,7 +145,7 @@ impl BamRecordReader {
             // Reaching here means the reader was built wrong — this module's bug, not the
             // caller's — so it must not masquerade as bad input.
             AlignmentIndex::Crai(_) => unreachable!(
-                "a .crai index reached the BAM record reader; \
+                "a .crai index reached the BAM aligned-reads reader; \
                  open pairs .crai only with CRAM"
             ),
         }
@@ -251,12 +256,12 @@ mod tests {
         (dir, path, header)
     }
 
-    fn reader_over(path: &std::path::Path, header: &sam::Header) -> BamRecordReader {
+    fn reader_over(path: &std::path::Path, header: &sam::Header) -> BamAlignedReadsReader {
         let mut reader = bam::io::reader::Builder
             .build_from_path(path)
             .expect("open bam");
         reader.read_header().expect("read header");
-        BamRecordReader::new(
+        BamAlignedReadsReader::new(
             reader,
             Arc::new(header.clone()),
             load_alignment_index(path).expect("the fixture is indexed"),
@@ -272,8 +277,8 @@ mod tests {
         }
     }
 
-    /// **`begin_region` positions; it never bounds** — the contract in `record_reader/mod.rs`,
-    /// checked where it can actually fail.
+    /// **`begin_region` positions; it never bounds** — the contract in
+    /// `aligned_reads_reader/mod.rs`, checked where it can actually fail.
     ///
     /// The cursor above serves a forward region by *not repositioning at all*, so a reader
     /// that stopped at the previous region's end would lose every record past it, silently,

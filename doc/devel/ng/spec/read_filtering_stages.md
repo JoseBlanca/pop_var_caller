@@ -144,7 +144,7 @@ caller-owned buffer in place and the whole pass allocates exactly one
 ([`filtering.rs:366-382`](../../../../src/ng/read/filtering.rs#L366)). A filter shaped
 `fn(RawAlignedRead) -> Option<RawAlignedRead>` would clone a noodles `RecordBuf` per read —
 measured elsewhere in this codebase at ~680 bytes across seven allocations
-([`record_reader/container.rs:13-17`](../../../../src/ng/read/input/record_reader/container.rs#L13)).
+([`aligned_reads_reader/container.rs:13-17`](../../../../src/ng/read/input/aligned_reads_reader/container.rs#L13)).
 A filter takes a **borrow** and returns a **verdict**, and the verdict carries the drop reason
 because the tally is keyed on it.
 

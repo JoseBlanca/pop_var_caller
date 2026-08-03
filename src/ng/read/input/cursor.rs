@@ -1,5 +1,5 @@
 //! **The alignment cursor — a reader that stays where it is.** So far only its errors:
-//! [`CursorError`]. The cursor itself lands in Milestone B, and the record readers beneath it
+//! [`CursorError`]. The cursor itself lands in Milestone B, and the aligned-reads readers beneath it
 //! in the next step; the rest of this module doc is the problem being built for.
 //!
 //! Reading a sorted alignment file today opens a fresh query per region: the index is
@@ -22,7 +22,7 @@
 //!
 //! # What is here so far
 //!
-//! The cursor, over a scripted list of records — [`RecordReader::InMemory`]. The BAM arm
+//! The cursor, over a scripted list of records — [`AlignedReadsReader::InMemory`]. The BAM arm
 //! lands at Milestone C and CRAM at E; the sample-level merge that callers actually hold at
 //! C4.
 //!
@@ -71,8 +71,8 @@ use std::sync::Arc;
 
 use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError, ReadGroupCounts};
+use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::record_reader::RecordReader;
 use crate::ng::read::input::region_records::{RegionRecords, read_end, read_overlaps};
 use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomeRegion};
@@ -131,7 +131,7 @@ pub enum CursorError {
     /// repositioning at all.
     ///
     /// So the check moved here, to the one entry point above both arms and both paths. It is
-    /// **not** the reader's to make: a record reader positions and never bounds, so
+    /// **not** the reader's to make: an aligned-reads reader positions and never bounds, so
     /// `region.end` does not reach it and an inverted region is a perfectly well-defined
     /// position for it. `end` is only meaningful where the overlap test and the early stop
     /// are, which is above the reader.
@@ -233,7 +233,7 @@ pub enum CursorError {
 /// is no stream object to give back.
 pub struct AlignmentCursor<R: RawRefSeq> {
     /// The whole chain below, owned: the filter holds [`RegionRecords`], which holds the
-    /// [`RecordReader`]. Not a cycle — the filter's source is the layer *below* this cursor,
+    /// [`AlignedReadsReader`]. Not a cycle — the filter's source is the layer *below* this cursor,
     /// not the cursor itself.
     ///
     /// The reference accessor the mismatch filter needs sits inside, taken once here rather
@@ -325,7 +325,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// same list by hand, which is what makes this the thing the forget rule is judged
     /// against before an indexed file can hide a defect in it.
     pub(crate) fn over_records(
-        reader: RecordReader,
+        reader: AlignedReadsReader,
         contig: ContigId,
         resolution: ReadGroupResolution,
         reference: R,
@@ -607,7 +607,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::read::input::record_reader::InMemoryRecordReader;
+    use crate::ng::read::input::aligned_reads_reader::InMemoryAlignedReadsReader;
     use crate::ng::read::input::test_fixtures::{
         FIXTURE_CONTIGS, bam_header, fixture_read_group, matching_contigs, only_tally,
         read_named_with_length,
@@ -651,7 +651,7 @@ mod tests {
     /// A cursor over a scripted list, on contig 0.
     fn cursor_over(records: Vec<RecordBuf>) -> AlignmentCursor<InMemoryRefSeq> {
         AlignmentCursor::over_records(
-            RecordReader::InMemory(InMemoryRecordReader::new(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
                 bam_header(&matching_contigs()),
                 records,
             )),
@@ -1569,7 +1569,7 @@ mod tests {
     // whole-file `BamRecordSource`/`CramRecordSource` it owned. Those sources are gone: a
     // filter module has no business opening files. What the two tests actually pinned is the
     // *filter's accounting*, and it is pinned here, where the chain that accounting belongs to
-    // composes — `RecordReader` → `RegionRecords` → `ReadFilter` → `AlignmentCursor`.
+    // composes — `AlignedReadsReader` → `RegionRecords` → `ReadFilter` → `AlignmentCursor`.
     //
     // The fixture sits on **contig 1**, which the fixture table makes 200 bases long; its
     // records reach base 149 and would not fit on contig 0's 100.
@@ -1688,7 +1688,7 @@ mod tests {
     /// mismatch counts below the fixture's own property rather than the reference's.
     fn cursor_over_contig_one(records: Vec<RecordBuf>) -> AlignmentCursor<InMemoryRefSeq> {
         AlignmentCursor::over_records(
-            RecordReader::InMemory(InMemoryRecordReader::new(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
                 bam_header(&matching_contigs()),
                 records,
             )),

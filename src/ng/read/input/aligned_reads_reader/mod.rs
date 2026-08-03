@@ -1,13 +1,27 @@
 //! **Where a cursor's records come from** — one arm per format, and one contract they all
 //! honour.
 //!
-//! A [`RecordReader`] finds records and unpacks them. That is *all* it does: it runs no
+//! An [`AlignedReadsReader`] finds reads and unpacks them. That is *all* it does: it runs no
 //! contig test, no overlap test, no read-group resolution and no early stop. Those are the
 //! same questions whatever the file format is, so they are asked once, above this, by the
 //! layer that turns records into reads (`arch/alignment_cursor.md` §2.3). A record from a
 //! scripted list and a record freshly decoded from a file therefore go through *the same
 //! lines* above this point, which is what makes them behave identically — rather than that
 //! being something this module claims.
+//!
+//! **What every arm yields is undecoded**, and the type name no longer says so, so the module
+//! does: a [`NoodlesRawAlignedRead`] is a SAM flag and a mapping quality readable without
+//! unpacking anything else. Nothing here builds an [`AlignedRead`](crate::ng::read::AlignedRead)
+//! — the conversion happens above, and only for the reads that clear the flag/MAPQ filter,
+//! which is the whole point of the split (`spec/read_filtering_stages.md` §2). Each arm's own
+//! doc repeats it, because that is where a caller meets one.
+//!
+//! **"Reads" in the type name, "records" in the contract below, and the difference is on
+//! purpose.** A caller of this module wants *reads*, so that is what the type promises. A
+//! record is the *encoding* of one — the line in the file, the entry in a CRAM container — and
+//! the contract below is about finding and unpacking those, which is the only level at which
+//! the arms differ from each other. Where this module says "record" it means the thing on
+//! disk; where it says "read" it means what a caller gets back.
 //!
 //! (A read *replayed* from what the cursor kept is a different matter, and spec §5's sentence
 //! is about **reads**, not records: a kept read sits **above** the filter, so replaying it
@@ -22,7 +36,7 @@
 //! and, when the second arm lands, a shared test harness driving both. Until then this list
 //! is where to check an arm against, and its being only a list is worth knowing.
 //!
-//! - **[`begin_region`](RecordReader::begin_region)** positions the reader for a region on
+//! - **[`begin_region`](AlignedReadsReader::begin_region)** positions the reader for a region on
 //!   the chromosome it is reading. Cheap when the reader is already there, a seek when it is
 //!   not.
 //!
@@ -39,7 +53,7 @@
 //!   every other word of this contract and breaks this one. A BAM arm must either query a
 //!   range that runs to the end of the chromosome, or re-query when it runs out — and either
 //!   way it owes this contract a test.
-//! - **[`read_next`](RecordReader::read_next)** fills the caller's buffer with the next
+//! - **[`read_next`](AlignedReadsReader::read_next)** fills the caller's buffer with the next
 //!   record **in position order** and answers whether it filled one. It is the shape
 //!   [`RecordSource::read_next`](crate::ng::read::filtering::RecordSource::read_next)
 //!   already has, because the layer above this is a `RecordSource`.
@@ -59,18 +73,26 @@
 //!   filtered, held one level up — so a read is transformed once rather than once per region
 //!   that returns it (spec §5). A reader holds only its position, and (from Milestone C) the
 //!   single record the sorted early stop consumes without yielding.
-//! - **Records come out raw.** In particular `read_group` is cleared, never stamped: the
-//!   buffer is reused, and a reader that left the previous record's group in place would
-//!   attribute this record to it silently. Clearing turns that into a refusal at
+//! - **Records come out raw, and `read_group` is cleared rather than left stale.** The buffer
+//!   is reused, so a reader that left the previous record's group in place would attribute
+//!   this record to it silently; clearing turns that into a refusal at
 //!   [`RawAlignedRead::decode`](crate::ng::read::aligned_read::RawAlignedRead::decode).
 //!
-//! # What is here so far
+//!   **The CRAM arm stamps it instead of clearing it, and that is the one exception in this
+//!   contract** — a CRAM stores the read group as a container-level number, so it is decided
+//!   at decode and travels with the record ([`CramAlignedReadsReader`]'s own doc says why).
+//!   Stated here because this list is where a new arm's author checks their arm, and a
+//!   universal with a live counterexample is how an arm ends up clearing a field it should
+//!   have carried.
 //!
-//! [`InMemoryRecordReader`] and [`BamRecordReader`]. The CRAM arm lands in Milestone E — and
-//! the order is deliberate: the forget rule that decides which kept reads
-//! may be dropped is the one part of this design that can lose reads *silently*, so it is
-//! built and tested against a reader with no file behind it before any real input can hide a
-//! defect in it (spec §6, and the plan's principles).
+//! # What is here
+//!
+//! All three arms: [`InMemoryAlignedReadsReader`], [`BamAlignedReadsReader`] and
+//! [`CramAlignedReadsReader`], plus [`container`], which holds the CRAM decode's unit of work
+//! and is not an arm. The order they were built in was deliberate — the forget rule that
+//! decides which kept reads may be dropped is the one part of this design that can lose reads
+//! *silently*, so it was built and tested against a reader with no file behind it before any
+//! real input could hide a defect in it (spec §6, and the plan's principles).
 
 // Covers this module and `in_memory` below it, so the reason is stated once.
 // Narrowed after Milestone C: the BAM arm is live, and what is left unused is the in-memory
@@ -95,11 +117,15 @@ use noodles_sam as sam;
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::types::GenomeRegion;
 
-pub(crate) use bam::BamRecordReader;
-pub(crate) use cram::CramRecordReader;
-pub(crate) use in_memory::InMemoryRecordReader;
+pub(crate) use bam::BamAlignedReadsReader;
+pub(crate) use cram::CramAlignedReadsReader;
+pub(crate) use in_memory::InMemoryAlignedReadsReader;
 
-/// Finds records and unpacks them, one variant per place they can come from.
+/// Finds reads and unpacks them, one variant per place they can come from.
+///
+/// **What it yields is undecoded** — a [`NoodlesRawAlignedRead`], not an
+/// [`AlignedRead`](crate::ng::read::AlignedRead). The name says *reads* because that is what a
+/// caller wants; it does not say *raw*, so this does (`spec/read_filtering_stages.md` §6).
 ///
 /// **An enum rather than a trait**, and the reason is not taste: the set of formats is
 /// closed, and a trait would add a type parameter through four layers — it would reach
@@ -107,19 +133,19 @@ pub(crate) use in_memory::InMemoryRecordReader;
 /// the dispatcher. The dynamic-dispatch alternative pays a virtual call per record, about a
 /// million per run (spec §5).
 #[derive(Debug)]
-pub(crate) enum RecordReader {
+pub(crate) enum AlignedReadsReader {
     /// A fixed list of records with no file behind it. **Permanent, not test-only**: it is
     /// what lets the forget rule be driven from a scripted list and compared against a plain
     /// scan of the same list, which is the oracle the first attempt at this feature did not
     /// have.
-    InMemory(InMemoryRecordReader),
+    InMemory(InMemoryAlignedReadsReader),
     /// A BAM, read through its index.
-    Bam(BamRecordReader),
+    Bam(BamAlignedReadsReader),
     /// A CRAM, read through its `.crai` — container by container.
-    Cram(CramRecordReader),
+    Cram(CramAlignedReadsReader),
 }
 
-impl RecordReader {
+impl AlignedReadsReader {
     /// The header of the file these records came from — the `@SQ` list a decode resolves
     /// contig references against.
     pub(crate) fn header(&self) -> &sam::Header {
@@ -196,7 +222,7 @@ mod tests {
     #[test]
     fn the_enum_forwards_every_contract_method_to_its_arm() {
         let header = bam_header(&matching_contigs());
-        let mut reader = RecordReader::InMemory(InMemoryRecordReader::new(
+        let mut reader = AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
             header.clone(),
             vec![read_named("a", 0, 10), read_named("b", 0, 20)],
         ));
@@ -208,7 +234,7 @@ mod tests {
 
         let mut buf = NoodlesRawAlignedRead::default();
         reader.begin_region(region(0, 1, 100)).expect("positions");
-        let mut read_to_the_end = |reader: &mut RecordReader| {
+        let mut read_to_the_end = |reader: &mut AlignedReadsReader| {
             let mut records = 0;
             while reader
                 .read_next(&mut buf)

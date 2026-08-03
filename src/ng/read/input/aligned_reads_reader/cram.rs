@@ -11,11 +11,20 @@ use noodles_fasta as fasta;
 use noodles_sam as sam;
 
 use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
+use crate::ng::read::input::aligned_reads_reader::container::{
+    DecodedContainer, decode_container_at,
+};
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::record_reader::container::{DecodedContainer, decode_container_at};
 use crate::ng::types::GenomeRegion;
 
 /// A CRAM reader that stays where it is between regions.
+///
+/// **What it yields is undecoded** — a [`NoodlesRawAlignedRead`], which is a SAM flag and a
+/// mapping quality readable without unpacking anything else. The name no longer says so, so
+/// this does. "Undecoded" here means *not converted into ng's own read*: a CRAM container
+/// still has to be decompressed and decoded into `RecordBuf`s before any record can be looked
+/// at, which is a different sense of the word and the reason to be explicit. Nothing here
+/// builds an [`AlignedRead`](crate::ng::read::AlignedRead).
 ///
 /// # What is different about CRAM, in one paragraph
 ///
@@ -28,7 +37,7 @@ use crate::ng::types::GenomeRegion;
 ///
 /// [`begin_region`](Self::begin_region) **positions; it never bounds.** After it, reading on
 /// yields every record from that point to the end of the chromosome — not just the ones inside
-/// the region it was handed. That is the contract in `record_reader/mod.rs`, and it is
+/// the region it was handed. That is the contract in `aligned_reads_reader/mod.rs`, and it is
 /// load-bearing rather than tidy: the cursor above serves a forward region by *not
 /// repositioning at all*, so a reader that had quietly stopped at the previous region's end
 /// would lose every record past it, silently, for every region after the first.
@@ -58,7 +67,7 @@ use crate::ng::types::GenomeRegion;
 /// decides the question itself, a mistake here would drop a whole library before any other
 /// layer could see it, and the result would look like a sample sequenced less deeply rather
 /// than like a fault.
-pub(crate) struct CramRecordReader {
+pub(crate) struct CramAlignedReadsReader {
     reader: cram::io::Reader<File>,
     /// Parsed once at open and shared, never re-read per region.
     header: Arc<sam::Header>,
@@ -94,9 +103,9 @@ pub(crate) struct CramRecordReader {
 
 /// Hand-written because noodles' reader is not `Debug`, and so the output says what identifies
 /// this reader rather than dumping a parsed index.
-impl std::fmt::Debug for CramRecordReader {
+impl std::fmt::Debug for CramAlignedReadsReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CramRecordReader")
+        f.debug_struct("CramAlignedReadsReader")
             .field("path", &self.path)
             .field("entries", &self.entries.len())
             .field("next_entry", &self.next_entry)
@@ -105,7 +114,7 @@ impl std::fmt::Debug for CramRecordReader {
     }
 }
 
-impl CramRecordReader {
+impl CramAlignedReadsReader {
     pub(crate) fn new(
         reader: cram::io::Reader<File>,
         header: Arc<sam::Header>,
@@ -262,7 +271,7 @@ impl CramRecordReader {
 /// many-container contig would be paid at each.
 ///
 /// A free function over the entries rather than a method, so the rule can be stated against a
-/// hand-built index — a `CramRecordReader` needs a real file behind it, and the property this
+/// hand-built index — a `CramAlignedReadsReader` needs a real file behind it, and the property this
 /// has to get right is about the index alone.
 fn first_entry_reaching(entries: &[cram::crai::Record], start: u64) -> usize {
     let container_start = |entry: &cram::crai::Record| {

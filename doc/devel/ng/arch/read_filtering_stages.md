@@ -228,7 +228,7 @@ Every row read at the cited line, 2026-08-03.
 | the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** |
 | the raw read | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), `NoodlesRawRecord` [`:479`](../../../../src/ng/read/filtering.rs#L479) | **rename and move** to `aligned_read.rs` |
 | the region narrowing | `RegionRecords` [`region_records.rs`](../../../../src/ng/read/input/region_records.rs) | **rename**; trait impl → inherent methods |
-| the per-format readers | `RecordReader` and arms [`record_reader/mod.rs`](../../../../src/ng/read/input/record_reader/mod.rs) | **rename**; `InMemory` arm gains a scripted error |
+| the per-format readers | `RecordReader` and arms, [now `aligned_reads_reader/mod.rs`](../../../../src/ng/read/input/aligned_reads_reader/mod.rs) | **renamed at A2**; `InMemory` arm gains a scripted error at C1 |
 | the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646), `restart_after_end_of_input` [`:778`](../../../../src/ng/read/filtering.rs#L778), `has_failed` [`:794`](../../../../src/ng/read/filtering.rs#L794), `source_mut` [`:816`](../../../../src/ng/read/filtering.rs#L816) | **delete**, all four |
 | the source trait and its doubles | `RecordSource` [`filtering.rs:366`](../../../../src/ng/read/filtering.rs#L366), `FakeSource`, `ErroringSource` | **delete** |
 | the probe-free constructor and lent buffers | `with_validated_contigs` [`filtering.rs:746`](../../../../src/ng/read/filtering.rs#L746), `ReadFilterBuffers` | **delete** — no caller once the cursor owns the loop |

@@ -440,23 +440,23 @@ fn unreadable_record(record: &RecordBuf, problem: &str) -> io::Error {
 //
 // **Two things retired them.** They had no caller — only this module's own tests drove them —
 // and, more to the point, *a filter module has no business opening files*. Finding and
-// unpacking records is `read/input/record_reader/`'s job, and since the alignment cursor
-// (`spec/alignment_cursor.md`) there is exactly one shape for it: a `RecordReader` positions,
+// unpacking records is `read/input/aligned_reads_reader/`'s job, and since the alignment cursor
+// (`spec/alignment_cursor.md`) there is exactly one shape for it: an `AlignedReadsReader` positions,
 // `RegionRecords` narrows, and this filter consumes what they hand over. Keeping a second,
 // unused file reader here left ng with two ways to read a BAM and only one of them reachable.
 //
 // **What became of what they proved.** The four tests whose subject was the sources themselves
 // went with them — raw records out of a real file, buffer reuse without leaking the previous
 // record, and CRAM agreement across container boundaries are all asserted on the cursor path
-// (`record_reader/bam.rs`, `record_reader/cram.rs`, and the run-of-regions oracles in
+// (`aligned_reads_reader/bam.rs`, `aligned_reads_reader/cram.rs`, and the run-of-regions oracles in
 // `open_bam.rs`). The two that tested *this filter* against a hand-counted drop tally over a
-// real BAM and a real CRAM were kept and re-pointed at a `RecordReader`, which is where they
+// real BAM and a real CRAM were kept and re-pointed at an `AlignedReadsReader`, which is where they
 // belong: they were never about the source.
 //
 // **A whole-file pass is therefore not available in ng, and that is now explicit.** Point a
 // cursor at a whole chromosome — which is what the linear-scan oracles do. If a genuine
 // whole-file need appears (a coverage histogram, an unindexed input), it arrives as a
-// `RecordReader` arm, beside the others, not as a type in the filter.
+// `AlignedReadsReader` arm, beside the others, not as a type in the filter.
 
 // ---------------------------------------------------------------------
 // The ReadFilter iterator (the driver)
@@ -1661,8 +1661,8 @@ mod tests {
     // Their subject was the sources: raw flag/MAPQ off a real file, the reused buffer not
     // leaking the previous record, and CRAM agreeing with noodles across container boundaries.
     // All three properties are asserted on the read path that survived —
-    // `record_reader::bam`'s `a_record_comes_out_of_the_bam_arm_raw` and its sibling walk
-    // tests, `record_reader::in_memory`'s buffer tests, and the run-of-regions oracles in
+    // `aligned_reads_reader::bam`'s `a_record_comes_out_of_the_bam_arm_raw` and its sibling walk
+    // tests, `aligned_reads_reader::in_memory`'s buffer tests, and the run-of-regions oracles in
     // `open_bam` for the CRAM container walk.
 
     // **The drop-tally fixture moved to `read/input/cursor.rs` (2026-08-03).**
@@ -1673,7 +1673,7 @@ mod tests {
     // keeping when `BamRecordSource`/`CramRecordSource` were deleted, and they were never
     // about the source: what they pin is *this* filter's accounting.
     //
-    // They live where the chain they need now composes — `RecordReader` → `RegionRecords` →
+    // They live where the chain they need now composes — `AlignedReadsReader` → `RegionRecords` →
     // `ReadFilter` → `AlignmentCursor` — as `a_walk_charges_every_drop_reason_by_hand_count`.
     // A file is not needed to state the property and, since this module no longer knows what a
     // BAM is, could not be opened from here anyway.

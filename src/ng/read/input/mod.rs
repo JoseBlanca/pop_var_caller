@@ -1,7 +1,7 @@
 //! Step 1's **input edge**: turning alignment files on disk into ordered,
 //! filtered streams of reads for a region.
 //!
-//! Two layers, split by subject. [`open_bam`], [`record_reader`],
+//! Two layers, split by subject. [`open_bam`], [`aligned_reads_reader`],
 //! [`region_records`] and [`cursor`] own the reader logic whose subject is
 //! **one alignment file** — the validate-on-open gate, the per-format record
 //! readers, the region narrowing and the long-lived cursor
@@ -30,10 +30,10 @@
 //! [`RawAlignedRead`](crate::ng::read::aligned_read::RawAlignedRead), from
 //! `aligned_read.rs` (`doc/devel/ng/arch/module_layout.md` principle 1, note b).
 
+pub(crate) mod aligned_reads_reader;
 pub mod cursor;
 pub mod open_bam;
 pub mod read_groups;
-pub(crate) mod record_reader;
 pub mod reference;
 pub(crate) mod region_records;
 pub mod sample_cursor;
@@ -1839,7 +1839,7 @@ mod tests {
         );
     }
 
-    /// The same shared-file behaviour over a **CRAM**, which reaches the other record reader
+    /// The same shared-file behaviour over a **CRAM**, which reaches the other aligned-reads reader
     /// — and with it the enum's CRAM arm, whose forwarding of the skipped-record count was
     /// added blind.
     #[test]
@@ -1888,7 +1888,7 @@ mod tests {
         assert_eq!(
             only_tally(&cursor.read_group_counts()).other_sample,
             1,
-            "the other sample's single read is reported through the record reader's CRAM arm"
+            "the other sample's single read is reported through the aligned-reads reader's CRAM arm"
         );
     }
 

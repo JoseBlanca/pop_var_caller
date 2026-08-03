@@ -376,7 +376,7 @@ pub(crate) fn named_bam(
 /// Production's CRAM fixtures are single-contig too, which is why this has not
 /// bitten before. The `.crai` contig walk is covered instead by hand-built
 /// indexes, which need no file at all: the grouping in `open_bam`'s tests and
-/// the positioning in `record_reader::cram`'s.
+/// the positioning in `aligned_reads_reader::cram`'s.
 pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir, PathBuf) {
     indexed_cram_declaring(records, &[("rg1", Some("NA12878"))])
 }

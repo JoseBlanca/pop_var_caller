@@ -33,9 +33,11 @@ use crate::bam::index_preflight::{
 };
 use crate::fasta::{ContigEntry, ContigList};
 use crate::ng::read::filtering::ReadFilterConfig;
+use crate::ng::read::input::aligned_reads_reader::{
+    AlignedReadsReader, BamAlignedReadsReader, CramAlignedReadsReader,
+};
 use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::record_reader::{BamRecordReader, CramRecordReader, RecordReader};
 use crate::ng::read::input::reference::{OpenReference, ReferenceBasesError};
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::ContigId;
@@ -352,13 +354,13 @@ impl AlignmentFile {
             });
         }
 
-        let record_reader = match AlignmentFileKind::from_path(&self.path) {
+        let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {
                 let mut reader = bam::io::reader::Builder
                     .build_from_path(&self.path)
                     .map_err(open_error)?;
                 reader.read_header().map_err(open_error)?;
-                RecordReader::Bam(BamRecordReader::new(
+                AlignedReadsReader::Bam(BamAlignedReadsReader::new(
                     reader,
                     Arc::clone(&self.header),
                     self.index.clone(),
@@ -391,7 +393,7 @@ impl AlignmentFile {
                     .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
                     .cloned()
                     .unwrap_or_else(|| Vec::new().into());
-                RecordReader::Cram(CramRecordReader::new(
+                AlignedReadsReader::Cram(CramAlignedReadsReader::new(
                     reader,
                     Arc::clone(&self.header),
                     repository,
@@ -409,7 +411,7 @@ impl AlignmentFile {
         };
 
         AlignmentCursor::over_records(
-            record_reader,
+            aligned_reads_reader,
             contig,
             self.resolution.clone(),
             reference,
@@ -1375,7 +1377,7 @@ mod tests {
     }
 
     /// Every read a cursor yields for one region of one file, by name — the whole real chain
-    /// (record reader → region narrowing → step-1 filter → order guard).
+    /// (aligned-reads reader → region narrowing → step-1 filter → order guard).
     fn cursor_names(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
         let mut cursor = file
             .cursor(region.contig, reference_bases())
@@ -1668,10 +1670,10 @@ mod tests {
     /// **T8 — the same reads written as BAM and as CRAM produce the same
     /// ordered stream.**
     ///
-    /// The two containers share nothing below the record-reader seam: BAM reads one record at
+    /// The two containers share nothing below the aligned-reads-reader seam: BAM reads one record at
     /// a time from bgzf chunks, CRAM decodes whole containers against the reference and walks
     /// a `.crai`. Everything above — the region narrowing, the filter, the order guard — is
-    /// the same code. So a disagreement here is a record-reader bug, which is exactly what
+    /// the same code. So a disagreement here is a aligned-reads-reader bug, which is exactly what
     /// this is looking for, and BAM is the oracle because it is the simpler reader and was
     /// verified first against a linear scan.
     ///
@@ -1794,11 +1796,11 @@ mod tests {
     // runs a whole sequence of regions, including late ones and the whole contig, over a
     // three-container fixture, and compares every answer against a scan of the file.
     //
-    // The second is a rule the cursor **deliberately does not have**: a record reader
-    // positions, it never bounds (`record_reader/mod.rs`), because the cursor serves a
+    // The second is a rule the cursor **deliberately does not have**: an aligned-reads reader
+    // positions, it never bounds (`aligned_reads_reader/mod.rs`), because the cursor serves a
     // forward region by not repositioning at all. Where the walk *starts* is still asserted —
     // by `containers_ending_before_the_region_are_skipped_rather_than_walked`, in
-    // `record_reader::cram` — and where it stops is now the layer above's business.
+    // `aligned_reads_reader::cram` — and where it stops is now the layer above's business.
 
     /// **T2b's sequencing half.** The digest check is deferred *on purpose*:
     /// the reference a file is opened against usually carries no digests yet
