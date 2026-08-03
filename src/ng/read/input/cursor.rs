@@ -77,7 +77,7 @@ use crate::ng::read::filtering::{
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::region_raw_aligned_reads::{
-    RegionRawAlignedReads, read_end, read_overlaps,
+    RegionRawAlignedReads, RegionReadError, read_end, read_overlaps,
 };
 use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
@@ -232,9 +232,20 @@ pub enum CursorError {
 /// meets these failures lives in `read/input/cursor.rs` (spec §5).
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReadFilterError {
-    /// The record source failed to read the next record (e.g. a truncated file).
+    /// The reader failed to hand over the next record — a truncated file, a bad block.
     #[error("reading the next alignment record failed")]
     Source(#[source] io::Error),
+    /// A record's read group could not be resolved against its file's `@RG` table — an absent
+    /// tag in a file declaring several groups, or a tag naming a group the file does not.
+    ///
+    /// **Its own variant since 2026-08-03, and it used to be `Source`'s.** Both failures leave
+    /// `RegionRawAlignedReads::read_next`, so while that returned an `io::Result` the cursor
+    /// could not tell them apart and charged both here to *"reading the next alignment record
+    /// failed"*. An operator meeting that message goes looking for a truncated file, when what
+    /// is wrong is the `@RG` header — a different fault, in a different file, wanting a
+    /// different fix.
+    #[error("resolving a record's read group failed")]
+    ReadGroup(#[source] io::Error),
     /// A record that cleared the first filter failed to convert.
     ///
     /// **No input can reach this, and that is measured rather than assumed** (C1, 2026-08-03;
@@ -680,7 +691,14 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
                 // difference because it is the thing that set the region — which is why no
                 // three-way state is needed here (spec §5).
                 Ok(false) => return None,
-                Err(error) => return self.fail(ReadFilterError::Source(error)),
+                // The two faults the layer below can meet are charged apart: a file that cannot
+                // be read, and a record whose read group cannot be resolved.
+                Err(RegionReadError::Read(error)) => {
+                    return self.fail(ReadFilterError::Source(error));
+                }
+                Err(RegionReadError::ReadGroup(error)) => {
+                    return self.fail(ReadFilterError::ReadGroup(error));
+                }
             }
 
             // The first filter — flag and mapping quality, before any conversion. Exhaustive
@@ -1266,6 +1284,81 @@ mod tests {
         assert!(cursor.next_read().is_none(), "the walk stays stopped");
         assert!(matches!(
             cursor.move_to_region(region(1, 100)),
+            Err(CursorError::AfterFailure { .. })
+        ));
+    }
+
+    /// **An unresolvable read group is fatal, and charged to `ReadGroup` — not to `Source`.**
+    ///
+    /// The fourth fatal condition, and until 2026-08-03 it wore the third one's name: both
+    /// failures leave `RegionRawAlignedReads::read_next`, so while that returned an `io::Result`
+    /// the cursor could not tell them apart and rendered this one as *"reading the next alignment
+    /// record failed"*. An operator meeting that goes looking for a truncated file, when what is
+    /// wrong is the `@RG` header.
+    ///
+    /// The fixture is a file declaring two read groups and a record carrying neither.
+    #[test]
+    fn an_unresolvable_read_group_is_fatal_and_charged_to_its_own_condition() {
+        use crate::ng::read::input::read_groups::RecordOwner;
+        use crate::ng::types::ReadGroupId;
+
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "rg1".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "rg2".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(1)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let untagged = record_with_seq(
+            "untagged",
+            10,
+            60,
+            Flags::from(FLAG_PAIRED),
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let mut cursor = AlignmentCursor::over_records(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
+                bam_header(&matching_contigs()),
+                vec![untagged],
+            )),
+            ContigId(1),
+            resolution,
+            reference_bases(),
+            ReadFilterConfig::default(),
+            Arc::from(Path::new("/fixture/sample.bam")),
+        );
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(FIXTURE_CONTIGS[1].1 as u64),
+            })
+            .expect("on this chromosome");
+
+        let error = cursor
+            .next_read()
+            .expect("the unresolvable read group is yielded, not swallowed")
+            .expect_err("a record with no RG tag in a two-group file cannot be attributed");
+        assert!(
+            matches!(step_one_failure(&error), ReadFilterError::ReadGroup(_)),
+            "an unresolvable read group must not be charged to the file failing to read: \
+             {error:?}",
+        );
+
+        assert!(cursor.next_read().is_none(), "the walk stays stopped");
+        assert!(matches!(
+            cursor.move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(50),
+            }),
             Err(CursorError::AfterFailure { .. })
         ));
     }

@@ -19,7 +19,7 @@ one way to read a file and the two vestiges this plan removes.
 `read/aligned_read.rs`; replacing the per-contig fetch loop with a contig-table comparison;
 moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleting `ReadFilter`,
 `FilterState`, the `RecordSource` trait and its two test doubles, `with_validated_contigs` and
-`ReadFilterBuffers`; `AlignmentCursor::reset_counts`; and the three tests the design owes.
+`ReadFilterBuffers`; `AlignmentCursor::reset_read_group_counts`; and the three tests the design owes.
 
 **Out (later plans).**
 
@@ -154,13 +154,12 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
 - ✅ **C3.** Delete the `RecordSource` trait and its two doubles; `RegionRawAlignedReads`'s trait
   implementation becomes inherent methods. Nothing generic consumes it once C2 lands.
   *Depends:* C2, C1. *Source:* spec §6, arch §3.3.
-- ✅ **C4.** `AlignmentCursor::reset_counts`, with a test that a fresh window starts empty and that
+- ✅ **C4.** `AlignmentCursor::reset_read_group_counts`, with a test that a fresh window starts empty and that
   nothing else on the cursor moves. Small and additive; kept out of C2 so that step stays about
   the loop. *Depends:* C2. *Source:* spec §7, arch §3.4.
   — *Shipped as **`reset_read_group_counts`**: the cursor keeps two unrelated tallies, and
   `reset_counts` would name this one by the other's word, re-opening the collision C2's review
-  filed as a Major. **Six `reset_counts` references remain across the spec, this plan and the
-  arch** — for Checkpoint C. It also needed state the arch sketch has no field for: the
+  filed as a Major. **The spec and the arch were amended to match** (owner, Checkpoint C). It also needed state the arch sketch has no field for: the
   other-sample count lives on the layer below and is cumulative for the life of the cursor, so a
   window that cleared only the tally would not start empty.*
 

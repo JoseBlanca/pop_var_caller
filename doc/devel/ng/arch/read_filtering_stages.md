@@ -125,23 +125,42 @@ filter becomes a type.
 
 ### 3.3 The region narrowing
 
-`RegionRawAlignedReads` loses its `RecordSource` impl and keeps the same four methods as
-inherent ones. **No signature changes** beyond the rename.
+`RegionRawAlignedReads` loses its `RecordSource` impl and keeps its methods as inherent ones.
+**As built at C3** — this listing was corrected at Checkpoint C; the notes below say where it was
+wrong.
 
 ```rust
 // read/input/region_raw_aligned_reads.rs
 impl RegionRawAlignedReads {
-    pub(crate) fn header(&self) -> &sam::Header;
     /// Fill `buf` with this region's next raw aligned read. `Ok(false)` = the region
-    /// is done — which is *not* the end of the file, and the caller knows which.
-    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool>;
-    pub(crate) fn other_sample_reads(&self) -> u64;
+    /// is done — which is *not* the end of the file, and the caller knows which,
+    /// because the caller is what set the region.
+    pub(crate) fn read_next(
+        &mut self, buf: &mut NoodlesRawAlignedRead,
+    ) -> Result<bool, RegionReadError>;
+    pub(crate) fn other_sample_records(&self) -> u64;
     pub(crate) fn jump_to(&mut self, region: GenomeRegion) -> io::Result<()>;
     pub(crate) fn continue_into(&mut self, region: GenomeRegion);
 }
 ```
 
 **Why the trait goes:** one production impl, and after §3.4 no generic consumer — spec §6.
+
+> ⚠ **Three corrections, all made by building it.**
+>
+> **`header()` is not there, and should not be.** It went at B1 with the contig probe that was its
+> only caller; §6 already carried the instruction *"re-add it at C3 only if a caller appears"*, and
+> none has (grep-verified at C3). So there are **four** methods, not five.
+>
+> **The method is `other_sample_records`, not `other_sample_reads`.** The code's name is the older
+> one, every call site uses it, and it is the more accurate: this layer counts *records* it stepped
+> over, before anything became a read.
+>
+> **`read_next` does not return `io::Result`.** Two unrelated faults leave it — the reader failing,
+> and a read group failing to resolve — and an `io::Result` cannot tell them apart, which is how
+> an unresolvable `@RG` came to render as *"reading the next alignment record failed"*. It returns
+> `Result<bool, RegionReadError>` and the cursor maps the two arms to `ReadFilterError::Source` and
+> `::ReadGroup` (§4).
 
 ### 3.4 The cursor owns the loop
 
@@ -157,8 +176,20 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     ref_buf: Vec<u8>,
     config: ReadFilterConfig,
     /// One entry per read group met, in first-seen order. Cumulative until
-    /// `reset_counts` — spec §7.
-    counts: Vec<ReadGroupCounts>,
+    /// `reset_read_group_counts` — spec §7.
+    ///
+    /// **Named `read_group_tally`, not `counts`**: the cursor already has a `counts` field of
+    /// type `CursorCounts` — what the cursor *did* — and a `read_group_counts()` method whose
+    /// value differs from this field's, because the method stamps the `other_sample` rider onto
+    /// the first entry. A field and a method spelled alike and returning different things, both
+    /// reachable in one function, is what C2's review filed as a Major.
+    read_group_tally: Vec<ReadGroupCounts>,
+    /// What the layer below had already skipped as another sample's when the current tally
+    /// window opened. **Not in this sketch until Checkpoint C**, and it is what makes
+    /// `reset_read_group_counts` honest: that count lives on the narrowing and is cumulative for
+    /// the life of the cursor, so a reset that cleared only the tally would open a window with
+    /// every foreign record the cursor had ever stepped over already in it.
+    other_sample_at_window_start: u64,
     /// **Replaces `FilterState`.** The cursor causes region ends, so it never has to
     /// ask why reading stopped — which is what makes the three-way state
     /// unnecessary (spec §5).
@@ -184,6 +215,23 @@ verdict_on_aligned_read   → Drop: charge it, continue
 yielded once and then the cursor refuses every later region (`CursorError::AfterFailure`,
 already present). The order guard still runs on emit.
 
+> ⚠ **One thing did change, and it is worth stating because nothing enforces it.** The old
+> `ReadFilter` was a `FusedIterator` with an explicit guard: it stopped on a **clean end of
+> input** as well as on a failure. The cursor's guard is `failed` alone, so re-asking a drained
+> region re-enters `RegionRawAlignedReads::read_next` instead of short-circuiting.
+>
+> **Behaviour-preserving today, but only by the grace of two layers below.** All three reader arms
+> latch their own "done" state, and the narrowing re-holds the record its early stop consumed, so
+> a redundant call moves no counter and loses no read — verified by driving ten of them. That is a
+> guarantee the cursor used to make for itself and now *assumes* of layers that never promised it.
+> If it is worth keeping, it belongs in the `AlignedReadsReader` contract as a written rule; if
+> not, the cursor should latch a clean stop again. **Not decided** — raised at Checkpoint C.
+>
+> A failed **reposition** also stops the cursor, not only a failed read: the reader's position is
+> unknown afterwards, so no later region can be served from it, the reuse path included. The
+> reposition therefore happens before any of the new region's state is committed, so a failed jump
+> leaves the cursor exactly as it was.
+
 **What the cursor gains publicly:**
 
 ```rust
@@ -192,22 +240,40 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     pub fn read_group_counts(&self) -> Vec<ReadGroupCounts>;   // exists
     /// Start a fresh tally window. The caller chooses the window; the cursor does
     /// not reset on its own, and never per region — spec §7.
-    pub fn reset_counts(&mut self);                            // new
+    pub fn reset_read_group_counts(&mut self);                 // new
 }
 ```
 
 ## 4. Errors
 
-**No new error type and no change of meaning.** `ReadFilterError`'s three variants already name
-the three pieces:
+**No new error type**, and no existing variant changes meaning. `ReadFilterError` gained a fourth
+variant at Checkpoint C (owner, 2026-08-03) — see the correction below.
 
 | variant | raised by |
 |---|---|
-| `Source` | `RegionRawAlignedReads::read_next` |
+| `Source` | the reader failing to hand over a record |
+| `ReadGroup` | `resolve_read_group`, on a record that cannot be attributed |
 | `Decode` | the conversion |
 | `Reference` | the second filter's mismatch check |
 
 `verdict_on_raw_read` cannot fail, which is why it returns a bare verdict.
+
+> ⚠ **This table said "three variants name the three pieces" and it was wrong.** Two unrelated
+> faults leave `RegionRawAlignedReads::read_next` — the reader failing, and a record's read group
+> failing to resolve — and while that method returned an `io::Result` they were indistinguishable,
+> so **both rendered as *"reading the next alignment record failed"***. An operator meeting that
+> goes looking for a truncated file when what is wrong is the `@RG` header: a different fault, in a
+> different file, wanting a different fix. Found by C2's review against a real BAM.
+>
+> The split is at the source: `read_next` returns `Result<bool, RegionReadError>`, whose two
+> variants the cursor maps to `Source` and `ReadGroup`. Pinned by
+> `an_unresolvable_read_group_is_fatal_and_charged_to_its_own_condition`, which fails if the two
+> are re-conflated.
+>
+> **`ReadFilterError::Decode` is unreachable and unpinned**, and that is recorded on the variant
+> itself rather than here. No input can reach it: the conversion refuses a record with no reference
+> id, no alignment start, or no read group stamped, and the region narrowing guarantees all three
+> before it yields. It is kept as defence in depth against that narrowing regressing.
 
 ## 5. Design decisions — decided
 
@@ -222,7 +288,7 @@ the three pieces:
 - **The second filter's #7 → #9 → #8 order is kept**, not the numbering order — spec §4.
 - **`FilterState` is deleted for a `failed` flag** — spec §5.
 - **The source trait is deleted and the in-memory reader gains a scripted error** — spec §6.
-- **The tally lives on the cursor, cumulative, with `reset_counts`; not on `AlignmentFile`** —
+- **The tally lives on the cursor, cumulative, with `reset_read_group_counts`; not on `AlignmentFile`** —
   spec §7.
 - **The cursor holds the reference bases and the buffer; neither filter becomes a type** —
   spec §9 Q1.

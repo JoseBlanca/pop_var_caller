@@ -259,7 +259,7 @@ path then runs through the real chain instead of through a fake that bypasses tw
 A drop rate is a read group's property: one bad library shows up as an anomalous mapping-quality
 or mismatch rate, and summing across read groups erases exactly that signal.
 
-**`AlignmentCursor::reset_counts()` lets the caller choose the window.** On the cursor, not on
+**`AlignmentCursor::reset_read_group_counts()` lets the caller choose the window.** On the cursor, not on
 `AlignmentFile`, and deliberately: that file held a `Mutex<Vec<ReadGroupCounts>>` until three
 commits ago, fed by each per-region stream on `Drop`, and it went with the rest of that path.
 Putting it back means either a lock on the hottest loop or a fold at cursor drop — which makes

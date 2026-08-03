@@ -39,6 +39,24 @@ use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner, resolve_read_group};
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 
+/// Why narrowing a region to its next raw aligned read failed.
+///
+/// **Two unrelated faults, and they were one until 2026-08-03.** Both leave
+/// [`RegionRawAlignedReads::read_next`], so an `io::Result` could not tell them apart and the
+/// cursor charged both to `ReadFilterError::Source` — whose message is *"reading the next
+/// alignment record failed"*. An unresolvable `RG` tag rendered under that, which sends an
+/// operator to look for a truncated file when the fault is in the `@RG` header.
+///
+/// They also want different things done about them: re-fetch the BAM, against fix the header.
+#[derive(Debug)]
+pub(crate) enum RegionReadError {
+    /// The reader could not hand over the next record — a truncated file, a bad block.
+    Read(io::Error),
+    /// A record's read group could not be resolved against its file's `@RG` table: an absent
+    /// tag in a file declaring several groups, or a tag naming a group the file does not.
+    ReadGroup(io::Error),
+}
+
 /// The raw aligned reads of one region of one file, narrowed from whatever the reader hands
 /// over.
 ///
@@ -142,7 +160,10 @@ impl RegionRawAlignedReads {
     /// group cannot be resolved.
     ///
     /// After `Ok(false)`, `buf` holds an unspecified record the caller must not read.
-    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
+    pub(crate) fn read_next(
+        &mut self,
+        buf: &mut NoodlesRawAlignedRead,
+    ) -> Result<bool, RegionReadError> {
         let Some(region) = self.region else {
             // Never pointed at a region. Yielding nothing is the honest answer; guessing at
             // one would make the first region's reads depend on the order calls happened to
@@ -159,7 +180,7 @@ impl RegionRawAlignedReads {
                     buf.read_group = read_group;
                 }
                 None => {
-                    if !self.reader.read_next(buf)? {
+                    if !self.reader.read_next(buf).map_err(RegionReadError::Read)? {
                         return Ok(false);
                     }
                 }
@@ -209,7 +230,9 @@ impl RegionRawAlignedReads {
             if buf.read_group.is_some() {
                 return Ok(true);
             }
-            match resolve_read_group(&buf.record, &self.resolution)? {
+            match resolve_read_group(&buf.record, &self.resolution)
+                .map_err(RegionReadError::ReadGroup)?
+            {
                 RecordOwner::Mine(id) => {
                     buf.read_group = Some(id);
                     return Ok(true);
