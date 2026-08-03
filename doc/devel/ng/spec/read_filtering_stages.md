@@ -1,6 +1,7 @@
 # ng — read filtering in stages: two filters and a conversion
 
-**Date:** 2026-08-03 · **Status:** design draft, **no code yet**. Two open questions in §9.
+**Date:** 2026-08-03 · **Status:** design settled, **no code yet**. Both questions §9 raised are
+resolved (owner, 2026-08-03).
 **Revises** [`read_filtering.md`](read_filtering.md) §5, which gave step 1 a single type. That
 document says which nine filters run, what their thresholds are, in what order they are
 evaluated, and what each drop is called. All of that is unchanged and stays there. This one is
@@ -290,7 +291,10 @@ changes nothing about why the change was made.
 - **A scripted read error still surfaces as fatal, through the real chain.** Replaces the three
   test-double tests the deleted trait takes with it (§6).
 
-## 9. Open questions
+## 9. Resolved decisions & open questions
+
+**Q1 — resolved (owner, 2026-08-03): the cursor holds them, and both filters stay plain
+functions.** The reasoning is below, kept because it is what the answer was chosen against.
 
 **Q1. Where do the reference bases and the buffer they are read into live?**
 
@@ -304,11 +308,11 @@ so the check costs no allocation. Something has to hold both. Either the second 
 small object that holds them, or the cursor holds them and hands them over on each call — which
 is what happens today, one layer up.
 
-*Leaning: the cursor holds them, and both filters stay plain functions.* It is the smaller
-change, and it leaves `read/filtering.rs` holding only rules and thresholds, with nothing to
-construct and no state to get wrong. **Confirm before code.**
+*Chosen: the cursor holds them, and both filters stay plain functions.* It is the smaller change,
+and it leaves `read/filtering.rs` holding only rules and thresholds, with nothing to construct and
+no state to get wrong.
 
-**Q2. Is the up-front contig check still worth what it costs, and over what?**
+**Q2 — resolved. The check compares two contig tables instead of opening 2,580 contigs.**
 
 **Three different checks are involved, and it helps to keep them apart.**
 
@@ -316,46 +320,61 @@ construct and no state to get wrong. **Confirm before code.**
    ([`reference_info.rs:239`](../../../../src/ng/reference_info.rs#L239)) builds the contig
    table, checks the FASTA against its `.fai`, and rejects duplicate names. Everything that opens
    a reference goes through it, and this design does not touch that.
-2. **The alignment file agrees with the reference.** `AlignmentFile::open`'s gate proves the
-   file's `@SQ` list *equals* that contig table — names, lengths **and order**
-   ([`alignment_file.md`](alignment_file.md) §3.1, check 2).
-3. **The accessor handed to the cursor can actually serve those contigs.** This is the check in
-   question: building a filter asks the reference for a zero-length window on every contig in the
-   header, and refuses to build if one does not resolve
-   ([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)).
+2. **The alignment file agrees with the reference.** `AlignmentFile::open` compares the file's
+   `@SQ` list against that contig table with `ContigList::first_disagreement` — names, lengths
+   and, where both sides carry one, digests
+   ([`open_bam.rs:206-211`](../../../../src/ng/read/input/open_bam.rs#L206)).
+3. **The accessor handed to `cursor()` is over that same reference.** Nothing checks this
+   directly. What stands in for it is a loop that asks the accessor for a zero-length window on
+   every contig in the header ([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)) —
+   which proves each contig *resolves* and nothing about its length.
 
-**Check 2 is strictly stronger than check 3, and the code says so** — in the doc for the
-constructor that exists to skip it: the gate "also rules out the permutation the probe happily
-accepts" ([`filtering.rs:715-721`](../../../../src/ng/read/filtering.rs#L715)). The cursor path is
-only ever reached through a gated `AlignmentFile`
-([`open_bam.rs:411`](../../../../src/ng/read/input/open_bam.rs#L411) is its one production
-caller), so check 3 looks redundant there.
+**Check 3 is the weak one and the expensive one.** It opens every contig in turn and discards
+each: ~2,580 on GRCh38 at roughly 52 µs per open with a shared index
+([`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622)), an estimated **~130 ms per cursor**,
+paid once per file per chromosome. (Arithmetic on a documented micro-measurement, not a
+measurement of this check.) And for all that it never notices an accessor whose contigs have the
+right names and the wrong lengths.
 
-**It is not quite redundant, and the gap is worth naming.** The gate compares the *file* against
-the *reference table*. Check 3 exercises the *accessor the caller passed to `cursor()`* — and
-nothing ties that accessor to the reference the file was opened against. A caller whose factory
-builds over a different FASTA is caught by check 3 and by nothing else.
+**The fix: ask the accessor which table it is over, and compare.** Every accessor already answers
+that — `ContigTable::contigs()`, implemented by all three of them
+([`ref_seq.rs:257`](../../../../src/ng/ref_seq.rs#L257)) — and `ContigList` is comparable, with
+`first_disagreement` for the message. So the cursor's constructor does what the open gate does,
+against the accessor instead of the reference:
 
-**And it is not free.** It opens every contig in the header one after another, discarding each:
-~2,580 of them on GRCh38, at roughly 52 µs per open with a shared index
-([`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622)) — an estimated **~130 ms per
-cursor**, paid once per file per chromosome. That is arithmetic on a documented
-micro-measurement, not a measurement of this check, and it is worth confirming before it decides
-anything.
+```rust
+pub fn cursor<R: RawRefSeq + ContigTable>(
+    self: &Arc<Self>, contig: ContigId, reference: R,
+) -> Result<AlignmentCursor<R>, AlignmentFileError> {
+    self.contigs
+        .first_disagreement(reference.contigs())
+        .map_err(|detail| AlignmentFileError::ContigReconcile { … })?;
+    …
+}
+```
 
-**Four options.**
+**This is strictly better on both counts.** It costs one comparison of ~2,580 entries — integer
+and string compares in memory, microseconds — against ~2,580 file opens. And it proves more:
+names *and* lengths agree, which is the same thing the gate proves for the file, so the file, the
+reference and the accessor are all held to one table instead of two-and-a-half.
 
-| | option | what it costs and catches |
-|---|---|---|
-| (a) | keep it as it is | the ~130 ms; catches a mismatched accessor |
-| (b) | delete it | free; a mismatched accessor surfaces mid-walk instead of at construction |
-| (c) | check **only the cursor's own contig** | one open instead of ~2,580. A cursor covers one chromosome, and the mismatch filter only ever fetches the read's own contig, so this still covers every fetch that cursor can make |
-| (d) | tie the accessor to the file's reference so the question cannot arise | the real fix, and bigger than this change |
+**Why not check it once, in whatever builds the cursors?** Because at that moment the accessor
+does not exist. `AlignmentFile::open` and `SampleReads::open` run before any accessor is made:
+the caller supplies one per file, through a factory, and that is not incidental —
+`WindowedRefSeq` holds an open per-contig reader behind a `RefCell` and is `Send` but not `Sync`,
+so a sample's k files must each have their own or they share one file position and one sliding
+window. Moving the factory into `open` would let the check run once, but it would not fully close
+the hole — validating one accessor a factory returns does not prove the next one is over the same
+FASTA — and it changes `open`'s signature and every caller. With the comparison above costing
+microseconds there is nothing left to save.
 
-*Leaning: (c), with (d) recorded as the proper answer for later.* It keeps the fail-fast property
-where it does work and drops the part that was checking contigs no read of this cursor can name.
-**Confirm before code** — and if (c) is taken, measure before and after, because the estimate
-above is the only number anyone has.
+**The one thing this does not do** is stop a caller passing an unrelated accessor *that happens
+to carry a matching table*. Closing that means the file owning its reference and handing out
+accessors itself, which is a larger change — §10.
+
+**Impl note:** the added `+ ContigTable` bound is satisfied by every accessor in the tree
+(`InMemoryRefSeq`, `ResidentRefSeq`, `WindowedRefSeq`, and the three test spies) and propagates to
+`SampleReads::cursor` and to both generators. Mechanical, but it does touch their signatures.
 
 ## 10. Deferred, with a home
 
@@ -364,6 +383,13 @@ above is the only number anyone has.
 - **A whole-file read path.** Filtering without a reference (§5) is not the same as a way to
   *read* a whole file, which ng does not have: `AlignmentFile::open` requires an index. If one is
   wanted it arrives as an `AlignedReadsReader` arm, beside the others.
+- **The file owning its reference, and handing out accessors itself.** Q2 closes the hole that
+  matters — an accessor over a different reference — by comparing contig tables. What remains is
+  a caller passing an unrelated accessor whose table happens to match. Removing the possibility
+  means `AlignmentFile` holding an `OpenReference` for BAM as well as CRAM (today it is `None`
+  for BAM) and building accessors itself, which would also drop the factory from
+  `SampleReads::cursor` and the type parameter from both generators. That is its own change, with
+  its own reasons, and it is not this one's to make.
 - **`read/filtering/` as a folder.** A step with no competing implementations is a file
   ([`../arch/module_layout.md`](../arch/module_layout.md) principle 1a), and this change makes
   `filtering.rs` *smaller*. Revisit only if that stops being true.

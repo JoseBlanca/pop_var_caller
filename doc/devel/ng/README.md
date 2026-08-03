@@ -15,7 +15,7 @@ by document kind:
     deletes the source trait and the three-way stop, and fixes the boundary — the filters and
     the conversion live *below* what the cursor keeps, or reads get converted a dozen times
     each. Which filters run, and their thresholds, stay in `read_filtering.md`.
-    **Draft — two open questions.**
+    **Settled, no code yet.**
   - [`read_preparation.md`](spec/read_preparation.md) — step 2, the per-read, **locus-independent**
     transform (pass-through / canonicalize / re-align → `PreparedRead`). It is a **generic-path-only**
     step: the STR path has no read preparation — it goes filtering → observation generation, aligning

@@ -11,8 +11,9 @@ illustrative; the **contract** is the deliverable.*
 **This change adds no types.** It renames several, deletes three, and moves one loop. Read it as
 a subtraction — spec §5.
 
-**Two open items**, both about how much state the second filter keeps: spec §9. Marked `OPEN:`
-where they bite.
+**Both of the spec's questions are settled** (spec §9): the cursor holds the reference bases and
+the buffer they are read into, and both filters stay plain functions; and the up-front contig
+check becomes a comparison of two contig tables.
 
 ---
 
@@ -74,8 +75,8 @@ Unchanged apart from the name and the module. `NoodlesRawAlignedRead` moves with
 
 ### 3.2 The two verdicts
 
-Both are plain functions today — not methods on anything — and both stay that way
-(`OPEN:` spec §9 Q1). `filtering.rs` exports them; the cursor calls them.
+Both are plain functions today — not methods on anything — and both stay that way (spec §9 Q1).
+`filtering.rs` exports them; the cursor calls them.
 
 ```rust
 // read/filtering.rs — the keep-or-drop rules; nothing here reads a file or converts.
@@ -100,8 +101,8 @@ pub(crate) fn verdict_on_aligned_read(
 **Contract.** Both are pure functions of their arguments — no I/O, no state, no tally. Neither
 knows what a BAM is. The first cannot fail.
 
-`OPEN:` spec §9 Q1 — if the second becomes a type instead, it holds `reference` and `ref_buf` and
-`admit(&AlignedRead)` replaces the last two parameters. Nothing else moves.
+Settled (spec §9 Q1): the cursor holds `reference` and `ref_buf` and passes them in, so neither
+filter becomes a type.
 
 ### 3.3 The region narrowing
 
@@ -132,7 +133,7 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// The single buffer reused across the whole walk.
     buffer: NoodlesRawAlignedRead,
     /// Held here because only the second filter needs it, and it is the cursor that
-    /// keeps it alive for the chromosome (`OPEN:` spec §9 Q1).
+    /// keeps it alive for the chromosome (spec §9 Q1).
     reference: R,
     ref_buf: Vec<u8>,
     config: ReadFilterConfig,
@@ -204,6 +205,10 @@ the three pieces:
 - **The source trait is deleted and the in-memory reader gains a scripted error** — spec §6.
 - **The tally lives on the cursor, cumulative, with `reset_counts`; not on `AlignmentFile`** —
   spec §7.
+- **The cursor holds the reference bases and the buffer; neither filter becomes a type** —
+  spec §9 Q1.
+- **The up-front contig check becomes a contig-table comparison**, not ~2,580 window fetches, and
+  it proves more than the fetches did — spec §9 Q2.
 - **No trait, no bake-off:** no competing implementations, so plain functions and concrete types
   — `module_layout.md` principle 1a.
 
@@ -217,7 +222,7 @@ Every row read at the cited line, 2026-08-03.
 | the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **rename** to `verdict_on_aligned_read`; body unchanged |
 | the conversion | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is** |
 | the loop | `ReadFilter::next` [`filtering.rs:895`](../../../../src/ng/read/filtering.rs#L895) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
-| the up-front contig check | `ReadFilter::new` [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | `OPEN:` spec §9 Q2 — leaning towards narrowing it to the cursor's own contig, ~2,580 opens down to one |
+| the up-front contig check | `ReadFilter::new`'s per-contig fetch loop [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | **replace** with `self.contigs.first_disagreement(reference.contigs())` in `AlignmentFile::cursor`, the same comparison the open gate makes [`open_bam.rs:206`](../../../../src/ng/read/input/open_bam.rs#L206) — spec §9 Q2 |
 | the tally and its fold | `ReadFilterCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), `ReadGroupCounts` [`:661`](../../../../src/ng/read/filtering.rs#L661), `tally_for_current_record` [`:846`](../../../../src/ng/read/filtering.rs#L846), `counts` [`:868`](../../../../src/ng/read/filtering.rs#L868) | **move** to the cursor, including the `other_sample` rider on the first entry |
 | the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** |
 | the raw read | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), `NoodlesRawRecord` [`:479`](../../../../src/ng/read/filtering.rs#L479) | **rename and move** to `aligned_read.rs` |
@@ -230,11 +235,7 @@ Every row read at the cited line, 2026-08-03.
 
 ## 7. Open items
 
-**Genuine open design questions** — spec §9 holds the reasoning and a leaning:
-
-- `OPEN: Q1` — where do the reference bases and their read buffer live: on the cursor, which
-  hands them to the second filter, or inside a small object the second filter becomes?
-- `OPEN: Q2` — does the up-front contig check stay as it is, narrow to the cursor's own contig, or go? Spec §9 lays out four options and leans on narrowing.
+**No open design questions.** Both of the spec's are settled — §9 there keeps the reasoning.
 
 **Impl-time confirmations, not decisions:**
 
@@ -244,6 +245,9 @@ Every row read at the cited line, 2026-08-03.
   that always fails. The three tests it has to serve are named in spec §8.
 - Whether `region_records.rs` is renamed on disk or the type simply moves. The spec assumes the
   file follows the type.
+- The `+ ContigTable` bound the contig comparison needs on `cursor`'s `R`. Every accessor in the
+  tree implements it, but it propagates to `SampleReads::cursor` and to both generators'
+  signatures — mechanical, and worth doing in one commit of its own.
 
 ## 8. Test & bench shape
 
