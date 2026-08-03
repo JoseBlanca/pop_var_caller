@@ -18,6 +18,16 @@ Today one type, `ReadFilter`, does three jobs in one loop
 their flag and mapping quality, decodes the survivors into ng's own read type, then rejects
 some of *those* on their length, their CIGAR and how well they match the reference.
 
+**Two words, and this document turns on the difference.** A **raw record** is what comes off
+the file undecoded: the reused buffer, with a SAM flag and a mapping quality readable without
+unpacking anything else. It is `NoodlesRawRecord` behind the `RawRecord` trait
+([`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334),
+[`:479`](../../../../src/ng/read/filtering.rs#L479)). A **read** is ng's own `AlignedRead`: the
+decoded thing, with its sequence uppercased, its CIGAR in ng's own operations, and its adaptor
+boundary worked out ([`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67)). The
+converter turns one into the other, and the question this document answers is which filters run
+on which side of it.
+
 Splitting it gives three named things:
 
 ```
@@ -41,10 +51,13 @@ record readers → region narrowing        raw records, one reused buffer   ← 
 
 - **No change to the filter policy.** The nine filters, their thresholds, their evaluation
   order and the `DropReason` set stay exactly as `read_filtering.md` settled them.
-- **No change to what the cursor keeps.** It keeps decoded, filtered reads, and
-  [`alignment_cursor.md`](alignment_cursor.md) §5 gives the reason — a read served by about a
-  dozen consecutive regions is transformed once, not a dozen times. This split does not reopen
-  that.
+- **No change to what the cursor keeps.** It keeps **reads** — `AlignedRead`s, decoded and past
+  both filters — in a `VecDeque` above the whole chain
+  ([`input/cursor.rs:242-247`](../../../../src/ng/read/input/cursor.rs#L242)), never raw records.
+  That is deliberate and [`alignment_cursor.md`](alignment_cursor.md) §5 gives the reason: a read
+  is served by about a dozen consecutive regions, so keeping it decoded means it is converted
+  once rather than a dozen times. Keeping raw records instead would also mean a CRAM cursor
+  holding a whole container. This split does not reopen either.
 - **No performance change sought.** Nothing here should get faster or slower. If a measurement
   moves, something is wrong.
 - **Not a new module.** This is a reorganisation inside `read/filtering.rs`; see §6.
@@ -55,16 +68,16 @@ record readers → region narrowing        raw records, one reused buffer   ← 
 ## 2. Why the work is divided the way it is
 
 **The division is not a matter of taste — it falls out of what each filter reads.** Six of the
-nine filters read two integers off the undecoded record. The other three read fields that the
-decode *produces*.
+nine filters read two integers off the raw record. The other three read fields of the read that
+only the conversion produces.
 
-| filter | reads | where that comes from |
+| filter | what it reads | which side of the converter |
 |---|---|---|
-| #1 duplicate, #3 supplementary, #4 secondary, #5 unmapped, #6 QC-fail | the SAM flag | on the raw record |
-| #2 low mapping quality | the SAM mapping quality | on the raw record |
-| #7 too short | the read's sequence length | decode uppercases the sequence into a `Vec<u8>` |
-| #9 bad CIGAR | the read's CIGAR | decode converts noodles' CIGAR into ng's `CigarOp` |
-| #8 high mismatch fraction | CIGAR, sequence, base qualities, position, contig — plus a reference fetch | same |
+| #1 duplicate, #3 supplementary, #4 secondary, #5 unmapped, #6 QC-fail | the SAM flag | the raw record |
+| #2 low mapping quality | the SAM mapping quality | the raw record |
+| #7 too short | the read's sequence length | the read — the conversion uppercases the sequence into a `Vec<u8>` |
+| #9 bad CIGAR | the read's CIGAR | the read — the conversion turns noodles' CIGAR into ng's `CigarOp` |
+| #8 high mismatch fraction | the read's CIGAR, sequence, base qualities, position and contig, plus a reference fetch | the read, for the same two reasons |
 
 Cited: `verdict_pre_decode` ([`filtering.rs:210-238`](../../../../src/ng/read/filtering.rs#L210))
 and `verdict_post_decode` ([`filtering.rs:269-322`](../../../../src/ng/read/filtering.rs#L269));
@@ -72,7 +85,7 @@ the CIGAR conversion and the uppercase are in `decode_record`
 ([`aligned_read.rs:102`](../../../../src/ng/read/aligned_read.rs#L102) and
 [`:107`](../../../../src/ng/read/aligned_read.rs#L107)).
 
-**So "all nine filters run on raw records" is not available.** Reaching it would mean either
+**So "all nine filters run on the raw record" is not available.** Reaching it would mean either
 re-implementing the mismatch rule and the CIGAR scan against noodles' types — a second copy of
 two rules, which is the failure this module guards against hardest — or running the uppercase
 and the CIGAR conversion before the filter, which is the decode under another name. Two filter
@@ -96,7 +109,8 @@ It has to be a **verdict about the buffer**, not a value returned from it. The e
 doc calls this the lending-iterator problem and says the buffer shape was chosen for exactly
 this reason ([`filtering.rs:359-365`](../../../../src/ng/read/filtering.rs#L359)).
 
-**A drop must be charged to a read group, and the first stage runs before any read exists.**
+**A drop must be charged to a read group, and the first stage runs before any read exists** — a
+raw record is all there is at that point.
 This is already solved and easy to miss: the raw record carries its read group, stamped by the
 region narrowing ([`region_records.rs:222`](../../../../src/ng/read/input/region_records.rs#L222)),
 and `RawRecord::read_group` exists for the tally rather than for any filter

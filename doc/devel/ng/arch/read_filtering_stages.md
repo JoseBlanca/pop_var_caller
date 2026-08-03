@@ -8,6 +8,10 @@ Under [`module_layout.md`](module_layout.md). Naming per
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md). Signatures are
 illustrative; the **contract** is the deliverable.*
 
+**Two words, used exactly as the spec defines them** (spec §1): a **raw record** is the
+undecoded reused buffer (`RawRecord` / `NoodlesRawRecord`), a **read** is ng's `AlignedRead`
+after the conversion. The two stage types are named for which of the two they judge.
+
 **Four of the shapes below are not settled** — spec §8 holds them as questions for the owner.
 They are marked `OPEN:` where they bite. Do not build past one without an answer.
 
@@ -36,7 +40,7 @@ and the reason is what the tally is keyed on.
 
 ### 1.2 The first stage — admission on the raw record
 
-Filters #1–#6, on the SAM flag and the mapping quality. It needs no reference and no contig
+Filters #1–#6, on the raw record's SAM flag and mapping quality. It needs no reference and no contig
 probe; that is the capability the split exists to open (spec §4).
 
 ```rust
@@ -84,7 +88,7 @@ decode failure means a corrupt record (spec, `read_filtering.md` §7).
 
 ### 1.4 The second stage — admission on the read
 
-Filters #7, #9 and #8, **in that order** — the cheap checks first so a doomed read never pays the
+Filters #7, #9 and #8, on the decoded read, **in that order** — the cheap checks first so a doomed read never pays the
 reference fetch, and a read failing both #9 and #8 charged to the root cause (spec §3).
 
 ```rust
