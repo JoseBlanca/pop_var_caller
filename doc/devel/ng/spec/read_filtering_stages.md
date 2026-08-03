@@ -180,10 +180,10 @@ region ends, so once it owns the loop it never has to ask. `FilterState`,
 `restart_after_end_of_input`, `has_failed` and `source_mut` all go, replaced by one `failed` flag.
 
 **No new types — this is a subtraction.** With the tally on the cursor (§7) the first filter
-holds nothing, and it is already a free function today. The second needs the reference and a
-scratch buffer, which the cursor can hold. So `ReadFilter` goes, the source trait goes, and what
-remains is two verdict functions, a conversion, and a loop in the type that was already driving
-all three.
+holds nothing, and is already a plain function today. The second needs the reference bases and
+the buffer they are read into, and the cursor can hold both. So `ReadFilter` goes, the source trait goes, and what
+remains is the two filters, the conversion, and a loop in the type that was already driving all
+three.
 
 **The reference stops being a precondition for filtering at all.** Nothing in ng needs that today
 — it is a capability the current shape forecloses, not a request anyone has made — but a coverage
@@ -234,7 +234,7 @@ path then runs through the real chain instead of through a fake that bypasses tw
   conversion between them. One thing in two states, and now named so; the conversion already
   lives here.
 - `read/filtering.rs` — the rules and their thresholds: `ReadFilterConfig`, `DropReason`,
-  `FilterVerdict`, `ReadFilterCounts`, and the two verdict functions.
+  `FilterVerdict`, `ReadFilterCounts`, and the two filters themselves.
 - `read/input/aligned_reads_reader/`, `read/input/region_raw_aligned_reads.rs` — unchanged in
   substance, renamed.
 - `read/input/cursor.rs` — gains the loop.
@@ -292,19 +292,34 @@ changes nothing about why the change was made.
 
 ## 9. Open questions
 
-**Q1. Are both verdicts free functions, or does the second become a type?** The first is pure —
-flag, mapping quality, config → verdict — and is a free function today. The second needs the
-reference and a scratch buffer: either it becomes a type holding them, or the cursor holds them
-and passes them in, which is today's shape. *Leaning: both stay free functions, the cursor holds
-the reference and the buffer.* Smallest change, and it keeps `filtering.rs` free of state.
-**Confirm before code.**
+**Q1. Where do the reference bases and the buffer they are read into live?**
 
-**Q2. Does the contig probe move with the reference?** `ReadFilter::new` validates every `@SQ`
-contig against the reference before building
-([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)). If the cursor holds the
-reference, the cursor's constructor runs the probe. *Leaning: yes* — it is already fallible
-there, and it keeps the "validated up front, so a mid-stream fetch failure means corrupt input"
-guarantee intact. **Confirm before code.**
+The **first filter** — the one that looks at the SAM flag and the mapping quality — needs nothing
+but the read in front of it and the thresholds. It is a plain function today, one that stands on
+its own rather than belonging to an object, and it can stay one.
+
+The **second filter** needs two more things: the reference bases, to compare the read against for
+the mismatch check, and a buffer to read those bases into. The buffer is reused from read to read
+so the check costs no allocation. Something has to hold both. Either the second filter becomes a
+small object that holds them, or the cursor holds them and hands them over on each call — which
+is what happens today, one layer up.
+
+*Leaning: the cursor holds them, and both filters stay plain functions.* It is the smaller
+change, and it leaves `read/filtering.rs` holding only rules and thresholds, with nothing to
+construct and no state to get wrong. **Confirm before code.**
+
+**Q2. Who checks up front that every contig the file names exists in the reference?**
+
+Building a filter today does that check: it asks the reference for a zero-length window on each
+contig in the file's `@SQ` list, and refuses to build if one does not resolve
+([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)). The point is that a
+reference-fetch failure *later*, mid-walk, then means genuinely corrupt input rather than a
+reference that never matched the file.
+
+If Q1 puts the reference on the cursor, this check goes to the cursor's constructor with it.
+
+*Leaning: yes, it moves.* Building a cursor can already fail, and the guarantee is worth keeping
+exactly as it is. **Confirm before code.**
 
 ## 10. Deferred, with a home
 

@@ -272,6 +272,57 @@ these goals", and it is much less useful.
 
 ---
 
+## 8. A third name for something already named twice — and jargon in the one place that must be plain
+
+**Written:** "**Q1. Are both verdicts free functions, or does the second become a type?** The
+first is pure — flag, mapping quality, config → verdict — and is a free function today. The
+second needs the reference and a scratch buffer: either it becomes a type holding them, or the
+cursor holds them and passes them in, which is today's shape. *Leaning: both stay free functions,
+the cursor holds the reference and the buffer.* Smallest change, and it keeps `filtering.rs` free
+of state. **Confirm before code.**"
+
+**Owner:** *"I don't understand, so bad writting. I'm missing context. 'Which are the verdicts
+you're talking about? What's a "free fucntion"?'"*
+
+**What was wrong.** Two faults, and the first is the more instructive.
+
+**A third name for the same two things.** The document calls them "the two filters" in its
+diagram and "the first / the other three" in the section that divides them. Then this question
+calls them "the verdicts" — a word the document had used only for what a filter *returns*. One
+concept, three names, and the third appears for the first time in the question the owner is being
+asked to answer. `clear-technical-writing` Rule 7 says one term per concept and one concept per
+term; this broke both halves in one sentence.
+
+**Rust vocabulary in the one place that has to be plain.** "Free function" means a function that
+is not attached to a type. The reader is a domain expert who is not a Rust internals specialist,
+and an open question is the *last* place to make them decode anything: it is the paragraph whose
+whole purpose is to be answered by someone else. Also unexplained: what the "scratch buffer" was
+for, and what "pure" was doing.
+
+**Became:** the question is now titled by what it actually asks — *"Where do the reference bases
+and the buffer they are read into live?"* — and the body says what each filter needs in the
+document's own terms, defines "plain function" inline as *"one that stands on its own rather than
+belonging to an object"*, and says the buffer is reused from read to read so the check costs no
+allocation. Q2 got the same treatment: "does the contig probe move" became "who checks up front
+that every contig the file names exists in the reference?"
+
+**Two tests to apply.**
+
+- **Count the names.** Before introducing a word for something, check what the document already
+  calls it. A synonym is not variety; it is a second thing the reader has to identify.
+- **Read the open questions as if you are the person answering them.** They are the only part of
+  a spec written *to* someone rather than *for* them. If any of them needs a term the rest of the
+  document did not teach, it is not askable.
+
+**Skill gap.** `spec-authoring` says an open item states the options, a leaning, and "confirm
+before code" — a shape, which this had, all three parts present. It says nothing about the open
+questions being **the least jargon-tolerant part of the document**, which is what makes a
+correctly-shaped question unanswerable. And `clear-technical-writing` Rule 3 covers acronyms and
+terms of art on first use; it does not say *do not mint a synonym for something you have already
+named*, which is the fault that did the most damage here.
+
+---
+
 ## Patterns so far
 
 | # | pattern | one-line test |
@@ -283,6 +334,7 @@ these goals", and it is much less useful.
 | 5 | a count or partitive with no head noun, or no set to belong to | read the sentence alone: "six of the nine **what**, out of which nine?" |
 | 6 | a design explained by ruling out the alternative | state the reason for the design; if you cannot, you have not found it |
 | 7 | a choice presented as a necessity | what would have to be true for another option to win? if there is an answer, it is a choice — name the goals |
+| 8 | a synonym minted for something the document already named; jargon in an open question | count the names before adding one; read every open question as the person who has to answer it |
 
 **A common root for 1–4, provisionally.** All four are sentences written for how they would
 *sound* to someone judging the document, rather than for what a colleague needs from it.

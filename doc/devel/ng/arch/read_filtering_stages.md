@@ -74,8 +74,8 @@ Unchanged apart from the name and the module. `NoodlesRawAlignedRead` moves with
 
 ### 3.2 The two verdicts
 
-Both already exist as free functions and both stay free functions (`OPEN:` spec §9 Q1).
-`filtering.rs` exports them; the cursor calls them.
+Both are plain functions today — not methods on anything — and both stay that way
+(`OPEN:` spec §9 Q1). `filtering.rs` exports them; the cursor calls them.
 
 ```rust
 // read/filtering.rs — the keep-or-drop rules; nothing here reads a file or converts.
@@ -204,8 +204,8 @@ the three pieces:
 - **The source trait is deleted and the in-memory reader gains a scripted error** — spec §6.
 - **The tally lives on the cursor, cumulative, with `reset_counts`; not on `AlignmentFile`** —
   spec §7.
-- **No trait, no bake-off:** no competing implementations, so free functions and concrete types —
-  `module_layout.md` principle 1a.
+- **No trait, no bake-off:** no competing implementations, so plain functions and concrete types
+  — `module_layout.md` principle 1a.
 
 ## 6. Reconciliation with existing code
 
@@ -232,8 +232,8 @@ Every row read at the cited line, 2026-08-03.
 
 **Genuine open design questions** — spec §9 holds the reasoning and a leaning:
 
-- `OPEN: Q1` — does the second verdict stay a free function, or become a type holding the
-  reference and the scratch buffer?
+- `OPEN: Q1` — where do the reference bases and their read buffer live: on the cursor, which
+  hands them to the second filter, or inside a small object the second filter becomes?
 - `OPEN: Q2` — does the contig probe move to the cursor's constructor with the reference?
 
 **Impl-time confirmations, not decisions:**
