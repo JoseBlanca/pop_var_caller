@@ -68,8 +68,9 @@ configuration knob, or touch `AlignedRead`.
 
 ## 2. Why the division falls where it does
 
-Six of the nine filters read two integers off the raw aligned read. The other three read fields
-that only the conversion produces.
+Step 1 runs nine filters; [`read_filtering.md`](read_filtering.md) §3 is where they are defined.
+**Six of them read two values that are on the raw aligned read already** — the SAM flag and the
+mapping quality. **The other three read fields that only the conversion produces.**
 
 | filter | what it reads | which side of the conversion |
 |---|---|---|

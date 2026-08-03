@@ -145,6 +145,49 @@ instead of starting it.
 
 ---
 
+## 5. The missing head noun — and the antecedent a deletion carried off with it
+
+**Written:** "Six of the nine read two integers off the raw aligned read."
+
+**Owner:** *"More bad writting. Six of the nine what?"*
+
+**What was wrong.** The noun is absent. "Six of the nine" needs a head — six of the nine
+*filters* — and the sentence never supplies one.
+
+**Two things made it, and the second is the one worth learning from.**
+
+*First*, the noun was carried by the sentence in front of it. The passage originally opened
+"…what each **filter** reads", so "six of the nine" had something to bind to. That was the
+defensive lead in entry 4. **Deleting it orphaned the sentence after it** — the cut was right and
+the re-read was not thorough enough. Entry 4's own test says *cut it and read the passage*; the
+cut happened and the reading did not.
+
+*Second*, even with the noun restored the sentence leaned on a back-reference it had not earned.
+"The nine filters" assumes the reader knows there are nine and which nine. This document
+mentions the number twice before §2, and both times as another document's content — so a reader
+arriving at §2 knows a count and nothing else. And "two integers" was coy: the table three lines
+below names them, so there was no reason for the prose not to.
+
+**Became:** "Step 1 runs nine filters; `read_filtering.md` §3 is where they are defined. **Six of
+them read two values that are on the raw aligned read already** — the SAM flag and the mapping
+quality. **The other three read fields that only the conversion produces.**"
+
+**Two tests to apply.**
+
+- **After deleting a sentence, read the next two.** A deletion can remove the antecedent for a
+  pronoun, a bare number, or a partitive ("six of the nine", "the other three", "both", "the
+  latter"). The delete test is not finished when the sentence is gone.
+- **A bare count or partitive needs its noun *and* its set.** "Six of the nine X" fails if the
+  reader has not been told there are nine X and where they are defined. Introduce the set in the
+  same breath or point at where it lives.
+
+**Skill gap.** `clear-technical-writing` Rule 7 asks for short active sentences and one idea per
+sentence. It does not say that **a sentence must survive being read on its own** — which is the
+property both faults here break, and the property most easily destroyed by an edit somewhere
+else. Nothing in either skill covers *damage caused by a correct deletion*.
+
+---
+
 ## Patterns so far
 
 | # | pattern | one-line test |
@@ -153,12 +196,19 @@ instead of starting it.
 | 2 | a load-bearing distinction never defined | define both sides before the first sentence that leans on either |
 | 3 | an invented standard, stricter than the truth | would the opposite outcome really be bad? is this a goal or a constraint? |
 | 4 | a lead-in that argues instead of informs | delete it and re-read; watch every *"it is not just…"* |
+| 5 | a count or partitive with no head noun, or no set to belong to | read the sentence alone: "six of the nine **what**, out of which nine?" |
 
-**The common root, provisionally.** All four are sentences written for how they would *sound* to
-someone judging the document, rather than for what a colleague needs from it. `spec-authoring`
-already says the bar is not "could this survive review", because that puts an adversary in the
-room. These are what that adversary does to individual sentences — and the skill only names the
-damage at the level of sections and decisions.
+**A common root for 1–4, provisionally.** All four are sentences written for how they would
+*sound* to someone judging the document, rather than for what a colleague needs from it.
+`spec-authoring` already says the bar is not "could this survive review", because that puts an
+adversary in the room. These are what that adversary does to individual sentences — and the skill
+only names the damage at the level of sections and decisions.
 
 That may be the rule worth extracting: **the adversary-in-the-room failure is a sentence-level
 disease, not only a document-level one.**
+
+**Entry 5 is a different root, and worth keeping separate.** Nothing about it is defensive — it
+is a sentence that could not stand alone, half of it caused by fixing entry 4. That points at a
+second candidate rule: **every revision pass should re-read the neighbours of anything it
+changed**, because the failure a good edit introduces is invisible to the person who made it.
+They still have the deleted sentence in their head.
