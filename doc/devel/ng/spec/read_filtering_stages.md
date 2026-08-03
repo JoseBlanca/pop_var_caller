@@ -85,10 +85,15 @@ Cited: `verdict_pre_decode` ([`filtering.rs:210-238`](../../../../src/ng/read/fi
 the two conversions ([`aligned_read.rs:102`](../../../../src/ng/read/aligned_read.rs#L102),
 [`:107`](../../../../src/ng/read/aligned_read.rs#L107)).
 
-**So "all nine filters run on the raw aligned read" is not reachable.** It would need either a
-second copy of the mismatch rule and the CIGAR scan written against noodles' types — the failure
-this module guards against hardest — or the uppercase and the CIGAR conversion run before the
-filter, which is the conversion under another name.
+**Converting is not free, and that is what fixes the order.** Building an aligned read copies the
+name, uppercases the sequence, rebuilds the CIGAR as ng's own operations and works out the
+adaptor boundary ([`aligned_read.rs:67-120`](../../../../src/ng/read/aligned_read.rs#L67)). So:
+reject on what the raw aligned read already carries, convert what survives, then reject on what
+the conversion produced. **A read dropped by the first six never pays for a conversion.**
+
+The last three cannot move earlier — they read fields the conversion makes. Taking them off the
+raw read instead would mean writing the mismatch rule and the CIGAR scan a second time against
+noodles' types, and two copies of one rule is the thing this module guards against hardest.
 
 ## 3. Why the filters and the conversion sit below what the cursor keeps
 

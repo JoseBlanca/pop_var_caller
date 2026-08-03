@@ -188,6 +188,45 @@ else. Nothing in either skill covers *damage caused by a correct deletion*.
 
 ---
 
+## 6. Explaining a design by ruling out the alternative, instead of saying what it does
+
+**Written:** "**So 'all nine filters run on the raw aligned read' is not reachable.** It would
+need either a second copy of the mismatch rule and the CIGAR scan written against noodles' types
+— the failure this module guards against hardest — or the uppercase and the CIGAR conversion run
+before the filter, which is the conversion under another name."
+
+**Owner:** *"better reasoning. converting a rawalignedread to an alignedread has a cost, so we
+filter what we can in the rawlignedreads, then we convert and finally we filter the
+alignedreads."*
+
+**What was wrong.** The paragraph closed the section by defeating an option, so the reader was
+left holding a *negative*: they now know one arrangement will not work, and still have to infer
+the arrangement that does. The owner's sentence carries the whole design in one line — a cost, and
+the ordering that follows from it — and needs no alternative at all.
+
+**Note what is *not* wrong with it.** The option really had been raised, in conversation, so this
+is not the strawman of entry 4. The fault is the shape of the explanation, not its honesty: a
+design explained by elimination is weaker than the same design explained by its reason, even when
+every word of the elimination is true.
+
+**Became:** "**Converting is not free, and that is what fixes the order.** Building an aligned
+read copies the name, uppercases the sequence, rebuilds the CIGAR as ng's own operations and
+works out the adaptor boundary. So: reject on what the raw aligned read already carries, convert
+what survives, then reject on what the conversion produced. **A read dropped by the first six
+never pays for a conversion.**" The constraint that follows — that the last three cannot move
+earlier without a second copy of two rules — is kept, but demoted to the paragraph after, where
+it is a consequence rather than the argument.
+
+**Test to apply.** When a section ends by saying what cannot be done, ask what the *reason* for
+the actual design is and lead with that. If the reason exists, the elimination is at best a
+footnote; if you cannot state the reason without the elimination, you have not found it yet.
+
+**Skill gap.** `clear-technical-writing` Rule 1 is *explain before you formalize* — plain English
+before the formula. There is no companion rule for **explain positively before you eliminate**,
+and it is the same instinct: the reader wants the thing, not the boundary around the thing.
+
+---
+
 ## Patterns so far
 
 | # | pattern | one-line test |
@@ -197,6 +236,7 @@ else. Nothing in either skill covers *damage caused by a correct deletion*.
 | 3 | an invented standard, stricter than the truth | would the opposite outcome really be bad? is this a goal or a constraint? |
 | 4 | a lead-in that argues instead of informs | delete it and re-read; watch every *"it is not just…"* |
 | 5 | a count or partitive with no head noun, or no set to belong to | read the sentence alone: "six of the nine **what**, out of which nine?" |
+| 6 | a design explained by ruling out the alternative | state the reason for the design; if you cannot, you have not found it |
 
 **A common root for 1–4, provisionally.** All four are sentences written for how they would
 *sound* to someone judging the document, rather than for what a colleague needs from it.
