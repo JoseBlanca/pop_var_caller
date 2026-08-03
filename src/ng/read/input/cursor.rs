@@ -318,6 +318,15 @@ pub struct AlignmentCursor<R: RawRefSeq> {
     /// method spelled the same and returning different things, both reachable in one function,
     /// is a reading a caller has to know to distrust.
     read_group_tally: Vec<ReadGroupCounts>,
+    /// What the layer below had already skipped as another sample's when the current tally
+    /// window opened — `0` until [`reset_read_group_counts`](Self::reset_read_group_counts) is
+    /// first called.
+    ///
+    /// **A window that reset the drops but not this would not start empty**, which is the one
+    /// thing `reset_read_group_counts` promises. The skipped-record count lives on the narrowing
+    /// and is cumulative for the life of the cursor — the narrowing has no notion of a window —
+    /// so the window is expressed here, as the offset to subtract.
+    other_sample_at_window_start: u64,
     /// **Whether this cursor has met a fatal error.** Replaces the three-way `FilterState` the
     /// filter used to keep: that state existed only because a separate filter could not tell why
     /// its source stopped, and reached "end of input" at the end of *every* region. The cursor
@@ -442,6 +451,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             ref_buf: Vec::new(),
             config,
             read_group_tally: Vec::new(),
+            other_sample_at_window_start: 0,
             failed: false,
             kept: VecDeque::new(),
             examined: 0,
@@ -790,17 +800,68 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     pub fn read_group_counts(&self) -> Vec<ReadGroupCounts> {
         let mut counts = self.read_group_tally.clone();
         match counts.first_mut() {
-            Some((_, first)) => first.other_sample = self.reads.other_sample_records(),
-            // Every record was another sample's, so the filters met none at all.
+            Some((_, first)) => first.other_sample = self.other_sample_this_window(),
+            // The tally is empty — either every record was another sample's, or the window has
+            // just been reset. **The `None` key here is a fabrication**, and it is spelled the
+            // same as the genuine one `ReadGroupCounts` documents: a read whose reader never
+            // stamped a group. A caller cannot tell the two apart, which is a wart worth knowing
+            // about rather than one worth a second key nobody asked for.
             None => counts.push((
                 None,
                 ReadFilterCounts {
-                    other_sample: self.reads.other_sample_records(),
+                    other_sample: self.other_sample_this_window(),
                     ..ReadFilterCounts::default()
                 },
             )),
         }
         counts
+    }
+
+    /// Records skipped as another sample's **since the current tally window opened**.
+    ///
+    /// The narrowing counts them for the life of the cursor and has no notion of a window, so
+    /// the subtraction happens here.
+    ///
+    /// **The subtraction cannot underflow**, and an earlier version of this comment justified
+    /// the saturation with the wrong direction. The underlying count only ever grows — every
+    /// contribution is a `+=` — and the baseline is sampled *from* that same number, so the
+    /// baseline can never exceed it. `saturating_sub` is free belt-and-braces, not a guard
+    /// against a reachable case.
+    ///
+    /// **The hazard that is real runs the other way, and it is the CRAM arm's**, pre-dating this
+    /// window: `CramAlignedReadsReader` adds a container's foreign-record count each time it
+    /// decodes one, so a container decoded twice — which a backward reposition can cause —
+    /// contributes twice. The field's own doc already calls the number container-granular and
+    /// says it can run ahead of where a walk has reached. A window therefore *starts* at zero
+    /// honestly and may *over*-report afterwards on CRAM, exactly as the unwindowed number does.
+    /// Recorded rather than fixed: it is the reader's accounting, not the window's.
+    fn other_sample_this_window(&self) -> u64 {
+        self.reads
+            .other_sample_records()
+            .saturating_sub(self.other_sample_at_window_start)
+    }
+
+    /// Start a fresh tally window: [`read_group_counts`](Self::read_group_counts) reports only
+    /// what happens from here.
+    ///
+    /// **The caller chooses the window, and the cursor never chooses one for itself** — not per
+    /// region, and not on a reposition (spec §7). Regions overlap by about 93 % and a read is
+    /// filtered once, when it is first read off the file, so a per-region tally would record
+    /// where the reader happened to be when it met a bad read rather than how bad the region is;
+    /// the numbers would not sum to the chromosome's total and would not be comparable between
+    /// regions.
+    ///
+    /// **It resets the tally and nothing else.** The reads being held, the walk's own counters
+    /// ([`counts`](Self::counts)), the region being served and whether the cursor has failed are
+    /// all untouched — this is a question about a number, not a way to rewind a cursor.
+    ///
+    /// Named for the tally it resets rather than `reset_counts`, because the cursor keeps two
+    /// unrelated tallies: this one, and [`CursorCounts`] — what the cursor *did*.
+    pub fn reset_read_group_counts(&mut self) {
+        self.read_group_tally.clear();
+        // Without this the window would start with every foreign record the cursor has ever
+        // stepped over already in it.
+        self.other_sample_at_window_start = self.reads.other_sample_records();
     }
 
     /// Hand a read to the caller, checking it does not go backwards.
@@ -2581,6 +2642,356 @@ mod tests {
                 "the foreign record was charged as a drop against {group:?}",
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Choosing the tally window (C4)
+    // -----------------------------------------------------------------
+
+    /// **A fresh window starts empty, and nothing else on the cursor moves.**
+    ///
+    /// The tally is cumulative until the caller says otherwise, so the only way to scope it is
+    /// to say so — and the reset must be a question about a *number*, not a way to rewind a
+    /// cursor. Both halves are asserted: the tally is empty afterwards, and the reads being
+    /// held, the walk's own counters, and the cursor's ability to carry on are not.
+    #[test]
+    fn resetting_the_tally_starts_a_fresh_window_and_moves_nothing_else() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        // A forward region first, so the *next* one can be backward and therefore re-read.
+        let first = reads_of(&mut cursor, region(46, 100));
+        assert!(!first.is_empty(), "the first window saw reads");
+        let kept: u64 = cursor
+            .read_group_counts()
+            .iter()
+            .map(|(_, counts)| counts.kept)
+            .sum();
+        assert!(kept > 0, "…and tallied them");
+
+        let held_before = cursor.kept_reads();
+        let walk_before = cursor.counts();
+
+        cursor.reset_read_group_counts();
+
+        // The window is empty — every counter of every entry, not merely `kept`.
+        for (group, counts) in cursor.read_group_counts() {
+            assert_eq!(
+                counts,
+                ReadFilterCounts::default(),
+                "the fresh window already had {group:?}'s drops in it",
+            );
+        }
+
+        // …and nothing else moved.
+        assert_eq!(
+            cursor.kept_reads(),
+            held_before,
+            "resetting the tally dropped the reads the cursor was holding",
+        );
+        assert_eq!(
+            cursor.counts(),
+            walk_before,
+            "resetting the tally disturbed the walk's own counters",
+        );
+
+        // The cursor still works, and the new window fills — from a **backward** region, which
+        // drops what is held and re-reads. A forward one would replay the kept reads instead,
+        // and a replayed read is not filtered again, so it is not tallied again either
+        // (spec §7) — which is why this cannot simply repeat the region it just served.
+        let after_reset = reads_of(&mut cursor, region(1, 20));
+        assert_eq!(
+            after_reset,
+            by_linear_scan(&script, region(1, 20)),
+            "the cursor stopped serving its own chromosome",
+        );
+        let kept_after: u64 = cursor
+            .read_group_counts()
+            .iter()
+            .map(|(_, counts)| counts.kept)
+            .sum();
+        assert!(
+            kept_after > 0,
+            "the fresh window never filled, so the reset broke the tally rather than scoping it",
+        );
+        assert!(
+            kept_after <= kept,
+            "the fresh window carried the first one's count forward: {kept} then {kept_after}",
+        );
+    }
+
+    /// **A reset mid-region leaves the region being served untouched.**
+    ///
+    /// The two tests above reset at a region *boundary* and then call `reads_of`, which begins
+    /// with `move_to_region` and re-establishes everything a mutation could have disturbed — so
+    /// neither can see the state that governs a region **in flight**. Measured: setting
+    /// `region = None` in the reset truncates the region to nothing, and setting `examined = 0`
+    /// serves a read **twice**; both survived all 2,860 tests.
+    ///
+    /// The duplicate is the nastier one, because the order guard cannot catch it: it compares
+    /// with `<`, so a read replayed at its own position sails through.
+    #[test]
+    fn resetting_the_tally_mid_region_leaves_the_region_being_served_untouched() {
+        let script = script();
+
+        let mut undisturbed = cursor_over(script.clone());
+        let expected = reads_of(&mut undisturbed, region(1, 100));
+
+        let mut cursor = cursor_over(script.clone());
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+        let first = cursor.next_read().expect("a first read").expect("decodes");
+        let mut served = vec![String::from_utf8_lossy(&first.qname).into_owned()];
+
+        cursor.reset_read_group_counts();
+
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("the reset must not stop the region being served");
+            served.push(String::from_utf8_lossy(&read.qname).into_owned());
+        }
+        assert_eq!(
+            served, expected,
+            "resetting the tally changed which reads the region being served hands back",
+        );
+    }
+
+    /// **A reset mid-region leaves the order guard armed**, for the region already in flight.
+    ///
+    /// `last_emitted` is per region, so clearing it in the reset would disarm the guard for the
+    /// rest of the region a caller is walking — and a file that lies about being sorted would
+    /// then be served silently. Survived all 2,860 before this existed.
+    #[test]
+    fn resetting_the_tally_leaves_the_order_guard_armed_for_the_region_being_served() {
+        let mut cursor = cursor_over(vec![read_at("a", 1), read_at("c", 61), read_at("b", 31)]);
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+
+        let mut names = Vec::new();
+        for _ in 0..2 {
+            let read = cursor.next_read().expect("a read").expect("decodes");
+            names.push(String::from_utf8_lossy(&read.qname).into_owned());
+        }
+        assert_eq!(names, vec!["a", "c"], "the reads before the break flow");
+
+        cursor.reset_read_group_counts();
+
+        match cursor
+            .next_read()
+            .expect("the backwards read")
+            .expect_err("resetting the tally disarmed the order guard mid-region")
+        {
+            CursorError::OutOfOrderRead {
+                position, after, ..
+            } => {
+                assert_eq!(position, 31);
+                assert_eq!(after, 61);
+            }
+            other => panic!("expected OutOfOrderRead, got {other:?}"),
+        }
+    }
+
+    /// **A reset does not make the next forward region reposition.**
+    ///
+    /// `last_region_start` *is* the forget rule — one number. Clearing it in the reset would make
+    /// every later region jump, dropping and re-reading what it was holding. Invisible in the
+    /// reads and in the acceptance dumps, which is why it survived all 2,860: only the cursor's
+    /// own counters say whether the rule is still working.
+    #[test]
+    fn resetting_the_tally_does_not_make_the_next_forward_region_reposition() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+        let _ = reads_of(&mut cursor, region(1, 50));
+        let before = cursor.counts();
+
+        cursor.reset_read_group_counts();
+
+        let _ = reads_of(&mut cursor, region(20, 80));
+        let after = cursor.counts();
+        assert_eq!(
+            after.regions_jumping, before.regions_jumping,
+            "resetting the tally forgot where the last region began, so the next forward region \
+             dropped everything it was holding and re-read it",
+        );
+        assert_eq!(after.regions_reusing, before.regions_reusing + 1);
+    }
+
+    /// **The window is applied on the arm a real walk takes**, not only when the tally is empty.
+    ///
+    /// `read_group_counts` folds the other-sample rider in two places — onto the first entry when
+    /// the walk met read groups of its own, and into a fabricated entry when it met none. The
+    /// test below exercises the *empty* arm, because its fixture consumes the whole contig before
+    /// the reset. The `first_mut` arm — the one every real cohort walk takes — was reverted to
+    /// its pre-C4 body and **all 2,860 tests stayed green**: the single line the window field
+    /// exists to protect was the untested one.
+    #[test]
+    fn read_group_counts_scopes_the_other_sample_rider_when_the_new_window_met_its_own_reads() {
+        use crate::ng::read::input::read_groups::RecordOwner;
+        use crate::ng::types::ReadGroupId;
+
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "mine".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "theirs".to_string().into_boxed_str(),
+                    RecordOwner::OtherSample,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut cursor = AlignmentCursor::over_records(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
+                bam_header(&matching_contigs()),
+                vec![
+                    tagged_read("mine_early", 10, FLAG_PAIRED, "mine"),
+                    tagged_read("theirs_early", 20, FLAG_PAIRED, "theirs"),
+                    tagged_read("mine_late", 100, FLAG_PAIRED, "mine"),
+                    tagged_read("theirs_late", 110, FLAG_PAIRED, "theirs"),
+                ],
+            )),
+            ContigId(1),
+            resolution,
+            reference_bases(),
+            ReadFilterConfig::default(),
+            Arc::from(Path::new("/fixture/sample.bam")),
+        );
+        let at = |start: u64, end: u64| GenomeRegion {
+            contig: ContigId(1),
+            start: Position(start),
+            end: Position(end),
+        };
+
+        cursor.move_to_region(at(100, 200)).expect("on contig 1");
+        while let Some(read) = cursor.next_read() {
+            read.expect("the fixture decodes");
+        }
+        assert_eq!(
+            only_tally(&cursor.read_group_counts()).other_sample,
+            1,
+            "the first window must meet a foreign record, or this test pins nothing",
+        );
+
+        cursor.reset_read_group_counts();
+
+        // A *backward* region, so it is re-read rather than replayed — and it meets one of our
+        // own reads, so the tally is non-empty and the rider lands on the `first_mut` arm.
+        cursor.move_to_region(at(1, 60)).expect("on contig 1");
+        while let Some(read) = cursor.next_read() {
+            read.expect("the fixture decodes");
+        }
+        let tally = cursor.read_group_counts();
+        assert!(
+            tally.first().expect("an entry").0.is_some(),
+            "the second window must meet one of our own reads, or it tests the empty-tally arm",
+        );
+        assert_eq!(
+            only_tally(&tally).other_sample,
+            1,
+            "the non-empty-tally arm reported the cursor's whole history, not this window's",
+        );
+    }
+
+    /// **A window served entirely from replayed reads tallies nothing**, and that is worth its
+    /// own test rather than a sentence in someone else's comment.
+    ///
+    /// A read is filtered once, when first read off the file — never again when replayed (spec
+    /// §7). So a window can serve five reads and count none of them, and a caller reading these
+    /// numbers as "what this window served" is reading them wrong.
+    ///
+    /// Without this, a later "fix" that tallied replayed reads would double-count every read the
+    /// cursor keeps, and only the acceptance dumps' *counts* would move — the reads themselves
+    /// would not.
+    #[test]
+    fn read_group_counts_stays_empty_when_a_window_is_served_only_from_replayed_reads() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+        let first = reads_of(&mut cursor, region(1, 100));
+        assert!(!first.is_empty(), "the first walk served reads");
+
+        cursor.reset_read_group_counts();
+        let replayed_before = cursor.counts().reads_replayed;
+
+        let again = reads_of(&mut cursor, region(1, 100));
+        assert_eq!(again, first, "the same region serves the same reads");
+        assert_eq!(
+            cursor.counts().reads_replayed,
+            replayed_before + again.len() as u64,
+            "every read of the second walk came from what was held",
+        );
+
+        assert_eq!(
+            cursor.read_group_counts(),
+            vec![(None, ReadFilterCounts::default())],
+            "a replayed read was tallied a second time, or the empty window grew an entry",
+        );
+    }
+
+    /// **The other-sample rider is part of the window too**, which is the half a `clear()` on the
+    /// tally alone would miss.
+    ///
+    /// That count lives on the layer below and is cumulative for the life of the cursor — the
+    /// narrowing has no notion of a window — so a reset that only emptied the tally would open a
+    /// window with every foreign record the cursor had ever stepped over already in it.
+    #[test]
+    fn resetting_the_tally_also_starts_the_other_sample_count_from_zero() {
+        use crate::ng::read::input::read_groups::RecordOwner;
+        use crate::ng::types::ReadGroupId;
+
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "mine".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "theirs".to_string().into_boxed_str(),
+                    RecordOwner::OtherSample,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut cursor = AlignmentCursor::over_records(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
+                bam_header(&matching_contigs()),
+                vec![
+                    tagged_read("ours", 10, FLAG_PAIRED, "mine"),
+                    tagged_read("foreign", 20, FLAG_PAIRED, "theirs"),
+                ],
+            )),
+            ContigId(1),
+            resolution,
+            reference_bases(),
+            ReadFilterConfig::default(),
+            Arc::from(Path::new("/fixture/sample.bam")),
+        );
+        let whole = GenomeRegion {
+            contig: ContigId(1),
+            start: Position(1),
+            end: Position(FIXTURE_CONTIGS[1].1 as u64),
+        };
+        cursor.move_to_region(whole).expect("on this chromosome");
+        while let Some(read) = cursor.next_read() {
+            read.expect("the fixture decodes");
+        }
+        assert_eq!(
+            only_tally(&cursor.read_group_counts()).other_sample,
+            1,
+            "the fixture must actually meet a foreign record, or this test pins nothing",
+        );
+
+        cursor.reset_read_group_counts();
+
+        assert_eq!(
+            only_tally(&cursor.read_group_counts()).other_sample,
+            0,
+            "the fresh window opened with the cursor's whole other-sample history in it",
+        );
     }
 
     /// The message names the file and both positions — two bare offsets are meaningless
