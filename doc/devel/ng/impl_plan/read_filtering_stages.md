@@ -121,12 +121,18 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
 
 ### Milestone C — the loop moves into the cursor
 
-- ☐ **C1.** `InMemoryAlignedReadsReader` gains a scripted error — a read position at which it
+- ✅ **C1.** `InMemoryAlignedReadsReader` gains a scripted error — a read position at which it
   returns `Err` instead of a record. Re-point the three fatal-error tests
   (`read_filter_source_read_error_is_fatal`, `read_filter_decode_error_is_fatal`,
   `read_filter_reference_error_mid_stream_is_fatal`) through it, so they run the real chain
   rather than a double that bypasses two layers. **Before C3, which deletes the doubles.**
-  *Depends:* A2. *Source:* spec §6, §8.
+  *Depends:* A2. *Source:* spec §6, §8. — *Two of the three were re-pointed. The third,
+  `read_filter_decode_error_is_fatal`, has **no successor**: the chain cannot produce a decode
+  failure, because the region narrowing guarantees exactly the three things the conversion
+  refuses. Measured at C1 and confirmed independently by three reviewers. Spec §8 already
+  sanctions the reduction — it lists one replacement test "replacing the three". C1 also gained
+  `with_failing_seek`, for the second way a reader can break, after a mutation swallowing a
+  failed reposition survived the whole suite.*
 - ☐ **C2. The cursor takes over the loop — its own commit, do not bundle.** `AlignmentCursor`
   gains the record buffer, the reference, the fetch scratch buffer, the config, the tally and a
   `failed` flag, and calls the two filters and the conversion itself. `ReadFilter`, `FilterState`,
@@ -135,6 +141,16 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   no output and no dump — so its oracle is `a_walk_charges_every_drop_reason_by_hand_count`, green
   before *and* after, plus the `other_sample` rider still landing on the first entry.
   *Depends:* B1, C1. *Source:* spec §5, §7; arch §3.4.
+  — **Widened by the owner at C1 (2026-08-03), from C1's review.** The `failed` flag covers
+  **both** routes into a stopped cursor, not only the one replacing `FilterState`: a failed
+  reposition must stop the cursor too. Today it does not — `move_to_region` commits `region` and
+  `last_region_start` *before* the fallible `jump_to`, so a failed seek leaves the cursor serving
+  from an unknown file position, and the next forward region then takes the *reuse* path and
+  reads on without jumping. So C2 also commits that state only after the jump succeeds.
+  Latent today (both real arms' `begin_region` are effectively infallible) and found by a
+  mutation that survived the whole suite. `a_reposition_that_fails_is_refused_rather_than_
+  answered` (`input/cursor.rs`) pins the refusal already and grows the two missing assertions
+  here.
 - ☐ **C3.** Delete the `RecordSource` trait and its two doubles; `RegionRawAlignedReads`'s trait
   implementation becomes inherent methods. Nothing generic consumes it once C2 lands.
   *Depends:* C2, C1. *Source:* spec §6, arch §3.3.

@@ -37,6 +37,27 @@ use crate::ng::types::GenomeRegion;
 /// because that is what a coordinate-sorted file yields and what the layer above assumes;
 /// this reader does not sort them, so a scripted list that is out of order is a way to drive
 /// the order guard rather than a mistake this type will correct.
+///
+/// # A reader can be scripted to break, and that is what makes the fatal paths testable
+///
+/// [`with_failure_at_read`](Self::with_failure_at_read) marks a read at which this reader hands
+/// back an `Err` instead of a record — a truncated block, a read cut off part-way, whatever a
+/// real file does when it breaks. [`with_failing_seek`](Self::with_failing_seek) breaks the
+/// *reposition* instead, which is the other way a reader can fail and a different fatal route
+/// above.
+///
+/// **What this buys is narrower than "the chain carries a fault", because that was already
+/// covered.** Two tests carry real faults up the whole chain on real inputs:
+/// `open_bam.rs`'s `t10_a_truncated_file_fails_once_and_then_refuses_later_regions` truncates an
+/// indexed BAM mid-walk, and `cursor.rs`'s
+/// `a_cursor_whose_file_failed_refuses_later_regions_instead_of_answering_short` drives a
+/// reference fetch off the end of a contig. Both fail if a layer swallows the fault.
+///
+/// What neither of them can see is **which** [`ReadFilterError`](crate::ng::read::filtering)
+/// a fault is charged to: both match `Err(_)`, so swapping `Source` and `Reference` at their
+/// call sites leaves the whole suite green. A scripted fault is a fault whose kind the script
+/// chose, so the test can assert the charge — measured: swapping either one fails exactly one
+/// test in the tree, the scripted one.
 #[derive(Debug)]
 pub(crate) struct InMemoryAlignedReadsReader {
     /// The header the records' `reference_sequence_id`s are resolved against.
@@ -46,6 +67,12 @@ pub(crate) struct InMemoryAlignedReadsReader {
     /// How far through `records` the reader is — the index of the next one to hand back.
     /// Reset by [`begin_region`](Self::begin_region).
     next_index: usize,
+    /// The index into `records` of the read that fails instead of being handed back, or `None`
+    /// for a reader that never fails. Counted in the same space as `next_index` — a read of the
+    /// script, **not** a reference coordinate.
+    failing_read_index: Option<usize>,
+    /// Whether repositioning fails. See [`with_failing_seek`](Self::with_failing_seek).
+    seek_fails: bool,
 }
 
 impl InMemoryAlignedReadsReader {
@@ -54,7 +81,42 @@ impl InMemoryAlignedReadsReader {
             header,
             records,
             next_index: 0,
+            failing_read_index: None,
+            seek_fails: false,
         }
+    }
+
+    /// Fail at read `read_index` of the script, instead of handing back a record.
+    ///
+    /// **A read at or past the end of the script is meaningful, not a mistake**: it is the
+    /// truncated file, which breaks exactly where it should have said it was finished. So the
+    /// fault is decided before the script is consulted, and it fires at the first read that
+    /// reaches it *or past it* — otherwise a fault scripted beyond the last record would be
+    /// accepted in silence and exercise nothing, which is the one thing a fault-injection knob
+    /// must not do.
+    ///
+    /// **The failure is not consumed**: reading again fails again, and
+    /// [`begin_region`](Self::begin_region) does not clear it. A file that cannot be read stays
+    /// unreadable, which is the condition the layers above are built to stop on. Nothing above
+    /// ever asks twice — the filter fuses on the first one — so this is about the reader telling
+    /// the truth rather than about a path anyone walks.
+    pub(crate) fn with_failure_at_read(mut self, read_index: usize) -> Self {
+        self.failing_read_index = Some(read_index);
+        self
+    }
+
+    /// Fail the **reposition** rather than a read.
+    ///
+    /// The other way a reader can break, and a different fatal route: on a BAM,
+    /// [`begin_region`](Self::begin_region) runs an index query, so a corrupt index fails the
+    /// *move* and no read is ever attempted. A caller that swallowed that would answer the
+    /// region from wherever the reader happened to be left — a plausible, silently short answer,
+    /// which is the condition `CursorError::AfterFailure` exists to make loud one layer later.
+    ///
+    /// A reader whose seek fails has not moved, so `next_index` is left where it was.
+    pub(crate) fn with_failing_seek(mut self) -> Self {
+        self.seek_fails = true;
+        self
     }
 
     pub(crate) fn header(&self) -> &sam::Header {
@@ -68,6 +130,14 @@ impl InMemoryAlignedReadsReader {
     /// keeps the arm's shape identical to the ones that *will* use it, so the enum's
     /// delegation is uniform and a later arm cannot quietly need a different signature.
     pub(crate) fn begin_region(&mut self, _region: GenomeRegion) -> io::Result<()> {
+        if self.seek_fails {
+            // The reader has not moved: a failed seek leaves the position it had, which is what
+            // makes swallowing the error produce a wrong answer rather than an empty one.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the script is set to fail its reposition",
+            ));
+        }
         self.next_index = 0;
         Ok(())
     }
@@ -91,6 +161,28 @@ impl InMemoryAlignedReadsReader {
         // group left in the reused buffer would attribute this record to the previous one's
         // read group without a word.
         buf.read_group = None;
+
+        // Before the script is consulted, so a fault scripted at or past its end is the
+        // truncated file rather than a clean stop — see `with_failure_at_read`.
+        //
+        // **Clamped to the end of the script, and neither `==` nor a bare `>=` is enough.**
+        // `next_index` stops advancing once the script runs out, so it never reaches a fault
+        // scripted beyond the last record: under either of those the fault would be unreachable
+        // and accepted in silence, which is the one thing a fault-injection knob must not do.
+        // Clamping makes every past-the-end fault fire at the end, where the file breaks.
+        // `next_index` does not move: a file that cannot be read stays unreadable.
+        if self
+            .failing_read_index
+            .is_some_and(|failing| self.next_index >= failing.min(self.records.len()))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                // Nothing above this reads the `ErrorKind` — `io::Error::other` re-kinds the
+                // outer error to `Other` before any caller sees it — so the message is what an
+                // operator gets, and it names the read.
+                format!("the script is set to fail at read {}", self.next_index),
+            ));
+        }
 
         let Some(record) = self.records.get(self.next_index) else {
             return Ok(false);
@@ -139,13 +231,18 @@ mod tests {
         let mut records = Vec::new();
         while reader
             .read_next(&mut buf)
-            .expect("an in-memory read cannot fail")
+            .expect("this script has no scripted fault")
         {
             records.push(buf.record.clone());
         }
         records
     }
 
+    /// **A reader is unarmed unless a fault is scripted onto it**, which nothing states
+    /// separately because it does not need to: [`drain`] `expect`s every read, so a `new` that
+    /// armed its reader by accident fails this test and eight others in this module before it
+    /// reaches anything that scripted a fault deliberately. Verified — setting
+    /// `failing_read_index: Some(0)` in `new` fails 60 tests.
     #[test]
     fn the_script_comes_back_in_the_order_it_was_given() {
         let mut reader = reader(vec![
@@ -310,6 +407,164 @@ mod tests {
             );
         }
         assert_eq!(read, 3, "the pass did not reach every record");
+    }
+
+    /// **The scripted fault fires at its own read, and not before.**
+    ///
+    /// The "and not before" half is what makes this able to fail: a reader that failed on
+    /// every read — the shape the deleted `ErroringSource` double had — would satisfy an
+    /// assertion that only looked for an error, and would then be useless for driving a fault
+    /// that arrives *mid-walk*, which is the interesting one.
+    #[test]
+    fn a_scripted_fault_fires_at_its_own_read_and_not_before() {
+        let mut reader = reader(vec![
+            read_named("a", 0, 10),
+            read_named("b", 0, 20),
+            read_named("c", 0, 30),
+        ])
+        .with_failure_at_read(1);
+        reader.begin_region(region(1, 100)).expect("positions");
+
+        let mut buf = NoodlesRawAlignedRead::default();
+        assert!(
+            reader.read_next(&mut buf).expect("the first read is clean"),
+            "the reader must hand back the reads before the scripted fault",
+        );
+        assert_eq!(
+            String::from_utf8_lossy(buf.record.name().expect("named")),
+            "a",
+        );
+
+        let error = reader
+            .read_next(&mut buf)
+            .expect_err("the second read is the scripted fault");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(
+            // "at read 1" rather than "read 1", which also matches "read 10".
+            error.to_string().contains("at read 1"),
+            "the message must say which read failed, got {error}",
+        );
+    }
+
+    /// **A fault does not heal.** Reading again fails again, and repositioning does not clear
+    /// it — a file that cannot be read stays unreadable, which is the condition every layer
+    /// above is built to stop on. A reader that consumed its scripted fault would let a caller
+    /// walk on past a broken file and answer the next region short.
+    #[test]
+    fn a_scripted_fault_is_not_consumed_by_reading_or_by_repositioning() {
+        let mut reader =
+            reader(vec![read_named("a", 0, 10), read_named("b", 0, 20)]).with_failure_at_read(0);
+        reader.begin_region(region(1, 100)).expect("positions");
+
+        let mut buf = NoodlesRawAlignedRead::default();
+        assert!(reader.read_next(&mut buf).is_err(), "it fails at once");
+        assert!(reader.read_next(&mut buf).is_err(), "and again");
+
+        reader.begin_region(region(50, 60)).expect("repositions");
+        assert!(
+            reader.read_next(&mut buf).is_err(),
+            "repositioning cleared the scripted fault",
+        );
+    }
+
+    /// **A fault at a non-zero read survives a rewind in the right place**, which the test
+    /// above cannot tell: at read 0 "rewound to the start" and "rewound into the fault" are the
+    /// same observation. Here they are not — the first read must come back clean a second time,
+    /// and the fault must fire on the second read again.
+    ///
+    /// Kills a rewind that shifts the fault relative to the script rather than leaving it
+    /// where it was.
+    #[test]
+    fn a_scripted_fault_survives_a_rewind_at_the_same_read() {
+        let mut reader =
+            reader(vec![read_named("a", 0, 10), read_named("b", 0, 20)]).with_failure_at_read(1);
+        reader.begin_region(region(1, 100)).expect("positions");
+
+        let mut buf = NoodlesRawAlignedRead::default();
+        assert!(reader.read_next(&mut buf).expect("the first read is clean"));
+        assert!(reader.read_next(&mut buf).is_err(), "the scripted fault");
+
+        reader.begin_region(region(50, 60)).expect("repositions");
+        assert!(
+            reader
+                .read_next(&mut buf)
+                .expect("the first read is clean again"),
+            "the rewind did not return to the start of the script",
+        );
+        assert_eq!(
+            String::from_utf8_lossy(buf.record.name().expect("named")),
+            "a",
+        );
+        assert!(
+            reader.read_next(&mut buf).is_err(),
+            "the fault moved relative to the rewound script",
+        );
+    }
+
+    /// **A fault scripted at or past the end of the script is the truncated file**, and it must
+    /// fail rather than report the clean end of input it looks like from inside.
+    ///
+    /// Two shapes, and both have caught an implementation. Checking the script *before* the
+    /// fault turns the at-the-end case into `Ok(false)`; comparing the fault for **equality**
+    /// with the read index makes anything further past the end unreachable, because the index
+    /// stops advancing at the end of the script — so the fault would be accepted in silence and
+    /// exercise nothing. A truncated file reported as a finished one is a silently short answer.
+    #[test]
+    fn a_fault_scripted_at_or_past_the_end_of_the_script_fails_rather_than_ending_cleanly() {
+        let mut buf = NoodlesRawAlignedRead::default();
+
+        // Exactly at the end: the file breaks where it should have said it was finished.
+        let mut at_the_end = reader(vec![read_named("a", 0, 10)]).with_failure_at_read(1);
+        at_the_end.begin_region(region(1, 100)).expect("positions");
+        assert!(
+            at_the_end.read_next(&mut buf).expect("the one record"),
+            "reads"
+        );
+        assert!(
+            at_the_end.read_next(&mut buf).is_err(),
+            "the reader reported a clean end of input where the script says it breaks",
+        );
+
+        // Well past the end — the case an equality comparison makes unreachable.
+        let mut past_the_end = reader(vec![read_named("a", 0, 10)]).with_failure_at_read(5);
+        past_the_end
+            .begin_region(region(1, 100))
+            .expect("positions");
+        assert!(
+            past_the_end.read_next(&mut buf).expect("the one record"),
+            "reads"
+        );
+        assert!(
+            past_the_end.read_next(&mut buf).is_err(),
+            "a fault scripted well past the end of the script never fired",
+        );
+
+        // The degenerate end: a file that broke before its first record, not one that had none.
+        let mut empty = reader(Vec::new()).with_failure_at_read(0);
+        empty.begin_region(region(1, 100)).expect("positions");
+        assert!(
+            empty.read_next(&mut buf).is_err(),
+            "an empty script with a fault at read 0 reported a clean end of input",
+        );
+    }
+
+    /// **A scripted seek failure breaks the reposition, and no read is attempted.** The other
+    /// way a reader can break: on a BAM `begin_region` runs an index query, so a corrupt index
+    /// fails the *move* rather than a read.
+    #[test]
+    fn a_scripted_seek_failure_breaks_the_reposition() {
+        let mut reader = reader(vec![read_named("a", 0, 10)]).with_failing_seek();
+
+        let error = reader
+            .begin_region(region(1, 100))
+            .expect_err("the scripted seek failure");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            reader
+                .read_next(&mut NoodlesRawAlignedRead::default())
+                .is_ok(),
+            "a failed seek breaks the move, not the reads — the reader simply has not moved",
+        );
     }
 
     /// `header()` hands back **this reader's** header, not merely one of the right shape: the

@@ -1668,69 +1668,74 @@ mod tests {
         ReadFilter::with_validated_contigs(source, reference, config, ReadFilterBuffers::default())
     }
 
-    /// A `RecordSource` whose `read_next` always fails — to drive the fatal path.
-    struct ErroringSource;
+    // **`ErroringSource` and `read_filter_source_read_error_is_fatal` are gone (C1,
+    // 2026-08-03), and so is `read_filter_reference_error_mid_stream_is_fatal`.** Both drove a
+    // double standing where `RegionRawAlignedReads` and `AlignedReadsReader` stand in a real
+    // run, so neither said anything about the two layers in between.
+    //
+    // **That gap was already closed from the other end, and saying otherwise would overstate
+    // what C1 bought.** `open_bam.rs`'s
+    // `t10_a_truncated_file_fails_once_and_then_refuses_later_regions` truncates a real indexed
+    // BAM mid-walk; `input/cursor.rs`'s
+    // `a_cursor_whose_file_failed_refuses_later_regions_instead_of_answering_short` drives a
+    // reference fetch off the end of a contig. Both carry a fault up the whole chain and both
+    // stop the cursor — making the narrowing swallow a reader failure fails the first, and
+    // making a reference failure a silent drop fails the second.
+    //
+    // **What no test anywhere pinned is which of the three fatal conditions a fault is charged
+    // to**, because those two match `Err(_)`. Swapping `Source` and `Reference` at the two call
+    // sites in `next` below leaves the whole suite green. The successors —
+    // `a_failure_reading_off_the_file_is_fatal_through_the_whole_chain` and
+    // `a_reference_fetch_failure_mid_walk_is_fatal_through_the_whole_chain`, both in
+    // `input/cursor.rs` — each fail under exactly one of those swaps and nothing else does.
+    // That is C1's real contribution, and it is what a scripted fault buys: the script chooses
+    // the kind, so the assertion can name it.
 
-    impl RecordSource for ErroringSource {
-        type Record = FakeRecord;
-        /// Nothing to skip: this fake carries no read-group resolution, so it
-        /// can never meet another sample's record.
-        fn other_sample_records(&self) -> u64 {
-            0
-        }
-
-        fn read_next(&mut self, _buf: &mut FakeRecord) -> io::Result<bool> {
-            Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated"))
-        }
-    }
-
-    #[test]
-    fn read_filter_source_read_error_is_fatal() {
-        let source = ErroringSource;
-        let mut filter = filter_over(source, poly_a_ref(100), ReadFilterConfig::default());
-        // The read error surfaces as the yielded item …
-        assert!(matches!(
-            filter.next(),
-            Some(Err(ReadFilterError::Source(_)))
-        ));
-        // … and the iterator is fused (stays stopped) afterward.
-        assert!(filter.next().is_none());
-    }
-
-    #[test]
-    fn read_filter_decode_error_is_fatal() {
-        // A record that clears the pre-decode gate but fails to decode.
-        let mut record = fake(FLAG_PAIRED, 60);
-        record.decode_fails = true;
-        let source = FakeSource::new(vec![record]);
-        let mut filter = filter_over(source, poly_a_ref(100), ReadFilterConfig::default());
-        assert!(matches!(
-            filter.next(),
-            Some(Err(ReadFilterError::Decode(_)))
-        ));
-        assert!(filter.next().is_none());
-    }
-
-    #[test]
-    fn read_filter_reference_error_mid_stream_is_fatal() {
-        // A read whose #8 reference window runs past the (short) contig end. The
-        // contig resolves in `new` (a zero-length probe), so this fails only
-        // in-loop → fatal Reference error.
-        let read = mapped(&[b'A'; 50], &[30u8; 50], vec![CigarOp::Match(50)]);
-        let source = FakeSource::new(vec![FakeRecord {
-            read,
-            decode_fails: false,
-        }]);
-        // contig length 10 < the read's 50-base reference span.
-        let mut filter = filter_over(source, poly_a_ref(10), ReadFilterConfig::default());
-        assert!(matches!(
-            filter.next(),
-            Some(Err(ReadFilterError::Reference(
-                RefSeqError::OutOfBounds { .. }
-            )))
-        ));
-        assert!(filter.next().is_none());
-    }
+    // **`read_filter_decode_error_is_fatal` is the last of the three, and it has no successor —
+    // because the chain it would be re-pointed through cannot produce a decode failure at
+    // all.** Measured at C1 rather than argued (2026-08-03), and confirmed independently by
+    // three reviewers, one of which asserted `decode(&*buf).is_ok()` at both of the narrowing's
+    // yield points and ran the whole suite — including the real BAM and CRAM walks — without
+    // the assertion ever tripping.
+    //
+    // `RawAlignedRead::decode` refuses exactly three things: a record with no reference
+    // sequence id, one with no alignment start, and a buffer with no read group stamped.
+    // `RegionRawAlignedReads::read_next` guarantees all three before it yields — it drops
+    // anything whose `reference_sequence_id` is not this contig's, `overlaps` returns `false`
+    // for a record without both an alignment start and an alignment end, and the read group is
+    // resolved and stamped on the record actually handed over. So every buffer that reaches
+    // the conversion decodes.
+    //
+    // Driven as an experiment: a cursor scripted with a placed-but-unstarted record and a
+    // started-but-unplaced one yields **neither an error nor a read** — both are discarded by
+    // the narrowing, below the filter and uncounted.
+    //
+    // What that leaves is a variant, `ReadFilterError::Decode`, that is defence in depth
+    // against a regression in the layer below rather than a response to any input — which is
+    // worth keeping and is not worth a test double substituted for the chain that makes it
+    // unreachable. It is recorded here because "this error cannot happen" is a claim that
+    // rots: if the narrowing ever stops guaranteeing one of the three, this is the note that
+    // says a test became possible.
+    //
+    // **What C2 and C3 take with them, recorded so it is a decision and not a discovery.**
+    // `FakeRecord::decode_fails` is **not** dead: `a_failed_filter_is_not_restarted_and_says_so`
+    // and `a_filter_stopped_by_a_fatal_error_stays_finished_after_a_reposition` still set it,
+    // and they are the only two constructions of `ReadFilterError::Decode` in the tree. Both die
+    // with `FakeSource` (C3) and with `FilterState` / `restart_after_end_of_input` /
+    // `has_failed` (C2). Their *property* — a fatal error fuses the walk and makes every later
+    // region a refusal — is already re-homed onto the real chain, and the two cursor tests named
+    // above fail if `fail()` stops setting `Failed` or if `next`'s fused guard goes. **What is
+    // genuinely lost after C2/C3 is one mutation: rewriting the decode arm below as
+    // `Err(_) => continue` will survive the whole suite.** No input can reach it, so nothing can
+    // pin it from outside; the arm's own exhaustive `match` is what keeps it honest. Nothing is
+    // owed at C2 or C3 beyond knowing this.
+    //
+    // **It also bears on the plan's D2**, which proposes proving the conversion is not hoisted
+    // above the first filter by using "a read that would fail to convert: unmapped, with no
+    // alignment start". No such read reaches filter #5: with no alignment start it has no
+    // footprint and the narrowing drops it first. An unmapped read that *does* reach #5 has a
+    // start and a contig, so it would convert perfectly well if the conversion were hoisted —
+    // and D2 would pass under the mutation it names. Carried to Checkpoint C.
 
     #[test]
     fn read_filter_charges_an_unmapped_read_end_to_end() {

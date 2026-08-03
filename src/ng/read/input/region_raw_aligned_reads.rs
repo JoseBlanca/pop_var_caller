@@ -307,12 +307,12 @@ mod tests {
     fn narrowed_to(source: &mut RegionRawAlignedReads, region: GenomeRegion) -> Vec<String> {
         source
             .jump_to(region)
-            .expect("an in-memory move cannot fail");
+            .expect("this script has no scripted seek failure");
         let mut buf = NoodlesRawAlignedRead::default();
         let mut names = Vec::new();
         while source
             .read_next(&mut buf)
-            .expect("an in-memory read cannot fail")
+            .expect("this script has no scripted fault")
         {
             names.push(String::from_utf8_lossy(buf.record.name().expect("named")).into_owned());
         }
@@ -536,7 +536,7 @@ mod tests {
         let mut names = Vec::new();
         while source
             .read_next(&mut buf)
-            .expect("an in-memory read cannot fail")
+            .expect("this script has no scripted fault")
         {
             names.push(String::from_utf8_lossy(buf.record.name().expect("named")).into_owned());
         }

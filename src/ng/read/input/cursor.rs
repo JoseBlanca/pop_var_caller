@@ -635,7 +635,7 @@ mod tests {
         FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference_bases, matching_contigs,
         only_tally, read_named_with_length,
     };
-    use crate::ng::ref_seq::InMemoryRefSeq;
+    use crate::ng::ref_seq::{InMemoryRefSeq, RefSeqError};
     use crate::ng::types::Position;
     use noodles_sam::alignment::RecordBuf;
 
@@ -668,17 +668,58 @@ mod tests {
 
     /// A cursor over a scripted list, on contig 0.
     fn cursor_over(records: Vec<RecordBuf>) -> AlignmentCursor<InMemoryRefSeq> {
+        cursor_over_reader(InMemoryAlignedReadsReader::new(
+            bam_header(&matching_contigs()),
+            records,
+        ))
+    }
+
+    /// A cursor over a scripted list whose reader **fails at read `read_index`** instead of
+    /// handing back a record — the truncated file, driven from the bottom of the real chain.
+    fn cursor_whose_reader_fails_at_read(
+        records: Vec<RecordBuf>,
+        read_index: usize,
+    ) -> AlignmentCursor<InMemoryRefSeq> {
+        cursor_over_reader(
+            InMemoryAlignedReadsReader::new(bam_header(&matching_contigs()), records)
+                .with_failure_at_read(read_index),
+        )
+    }
+
+    /// A cursor on contig 0 over an already-built reader — the one place the six-argument
+    /// constructor is spelled out, so a scripted variant cannot drift from the plain one.
+    fn cursor_over_reader(reader: InMemoryAlignedReadsReader) -> AlignmentCursor<InMemoryRefSeq> {
         AlignmentCursor::over_records(
-            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
-                bam_header(&matching_contigs()),
-                records,
-            )),
+            AlignedReadsReader::InMemory(reader),
             ContigId(0),
             fixture_read_group(),
             reference_bases(),
             ReadFilterConfig::default(),
             Arc::from(Path::new("/fixture/sample.bam")),
         )
+    }
+
+    /// The step-1 failure a cursor error raised **while reading** is carrying, or a panic naming
+    /// what came instead.
+    ///
+    /// Scoped to the failures `AlignmentCursor::read_failure` builds, which is what `next_read`
+    /// yields. `CursorError::ReadRecord` has a **second** construction site —
+    /// `move_to_region`'s failed reposition (`cursor.rs`, the `jump_to` arm) — whose `source` is
+    /// the reader's raw `io::Error` with no step-1 error inside it, so this would panic on one
+    /// of those rather than answer. That is deliberate: a reposition failure is not a step-1
+    /// failure and has no variant to discriminate.
+    ///
+    /// Asserting by type rather than on the rendered message is the point: a message substring
+    /// would still pass if `Source` and `Reference` were swapped at the call site, which is
+    /// exactly the wiring these tests exist to pin.
+    fn step_one_failure(error: &CursorError) -> &ReadFilterError {
+        match error {
+            CursorError::ReadRecord { source, .. } => source
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<ReadFilterError>())
+                .expect("a failure yielded by next_read carries the step-1 error that caused it"),
+            other => panic!("expected CursorError::ReadRecord, got {other:?}"),
+        }
     }
 
     /// A 30-base read on contig 0 — long enough to clear the default minimum read length,
@@ -895,6 +936,167 @@ mod tests {
             matches!(after, Err(CursorError::AfterFailure { .. })),
             "a cursor that met a fatal error answered a later region instead of refusing: \
              {after:?}",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Which fatal condition a fault is charged to (C1)
+    // -----------------------------------------------------------------
+    //
+    // `filtering.rs` pinned these against two test doubles — `ErroringSource`, whose every read
+    // failed, and `FakeSource`, a `RecordSource` implemented in the test module. Both stood
+    // where `RegionRawAlignedReads` and `AlignedReadsReader` stand in a real run, so neither
+    // said anything about the two layers in between.
+    //
+    // **That gap was already closed from the other end, on real inputs, and these tests are not
+    // what closes it.** `open_bam.rs`'s `t10_a_truncated_file_fails_once_and_then_refuses_
+    // later_regions` truncates an indexed BAM mid-walk, and
+    // `a_cursor_whose_file_failed_refuses_later_regions_instead_of_answering_short` above drives
+    // a reference fetch off the end of a contig. Both carry a fault up the whole chain and both
+    // stop the cursor; making the narrowing swallow a reader failure, or making a reference
+    // failure a silent drop, fails them.
+    //
+    // What neither can see is **which** `ReadFilterError` the fault was charged to — both match
+    // `Err(_)`. Swapping `Source` and `Reference` at their two call sites in `ReadFilter::next`
+    // leaves the whole suite green. These two tests pin the charge, and each is the only test in
+    // the tree that fails when its own variant is swapped. That is their whole job, and it is
+    // why a *scripted* fault is worth the mechanism: the script chose the kind, so the test can
+    // assert it. C3 deletes the doubles, and this is what has to exist first.
+
+    /// **A failure reading off the file is fatal, charged to `Source`, and the cursor never
+    /// recovers from it.**
+    ///
+    /// The fault is scripted into the reader at the *second* read, so the walk is working
+    /// before it breaks: a chain that never delivered a read at all would satisfy "the second
+    /// call is an error" without proving anything travelled through it.
+    #[test]
+    fn a_failure_reading_off_the_file_is_fatal_through_the_whole_chain() {
+        let mut cursor = cursor_whose_reader_fails_at_read(script(), 1);
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+
+        let first = cursor
+            .next_read()
+            .expect("a read")
+            .expect("the first record is clean");
+        assert_eq!(first.qname, b"r0", "the reads before the fault flow");
+
+        let error = cursor
+            .next_read()
+            .expect("the fault is yielded, not swallowed into a clean end of input")
+            .expect_err("the scripted read failure");
+        assert!(
+            matches!(step_one_failure(&error), ReadFilterError::Source(_)),
+            "a read failure must be charged to the source, got {error:?}",
+        );
+
+        // Yielded once, and then the cursor is finished: a fused walk, and every later region
+        // refused rather than answered short out of what is still held.
+        assert!(cursor.next_read().is_none(), "the walk stays stopped");
+        assert!(matches!(
+            cursor.move_to_region(region(1, 100)),
+            Err(CursorError::AfterFailure { .. })
+        ));
+    }
+
+    /// **A reference fetch that fails mid-walk is fatal too, and charged to `Reference`.**
+    ///
+    /// Filter #8 fetches the bases a read covers; a read whose footprint runs off the end of
+    /// the contig has none to fetch. Under the fatal error model that is corrupt input to stop
+    /// on, not a read to quietly drop — a validly-aligned read cannot cover positions the
+    /// contig does not have. Needs no scripted fault: the record is ordinary and it is the
+    /// *reference* that cannot answer.
+    ///
+    /// **Distinct from `a_cursor_whose_file_failed_refuses_later_regions_instead_of_answering_
+    /// short` in exactly one assertion**, over the same `overruns` fixture — and that assertion
+    /// is the reason it exists. The older test matches `Err(_)`, so charging this failure to
+    /// `Source` instead of `Reference` passes it. Deleting either as "the duplicate" loses one
+    /// of the two properties.
+    #[test]
+    fn a_reference_fetch_failure_mid_walk_is_fatal_through_the_whole_chain() {
+        // Contig 0 is 100 bases; a 30-base read at 95 reaches 124.
+        let mut cursor = cursor_over(vec![
+            read_at("clean", 1),
+            read_named_with_length("overruns", 0, 95, READ_LENGTH as usize),
+        ]);
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+
+        let first = cursor
+            .next_read()
+            .expect("a read")
+            .expect("the first record is clean");
+        assert_eq!(first.qname, b"clean");
+
+        let error = cursor
+            .next_read()
+            .expect("the fetch failure is yielded")
+            .expect_err("the read runs off the end of the contig");
+        assert!(
+            matches!(
+                step_one_failure(&error),
+                ReadFilterError::Reference(RefSeqError::OutOfBounds { .. }),
+            ),
+            "an out-of-bounds fetch must be charged to the reference, got {error:?}",
+        );
+
+        assert!(cursor.next_read().is_none(), "the walk stays stopped");
+        assert!(matches!(
+            cursor.move_to_region(region(1, 100)),
+            Err(CursorError::AfterFailure { .. })
+        ));
+    }
+
+    /// **A reposition that fails is refused, not answered** — the third fatal route, and the one
+    /// no test reached.
+    ///
+    /// A reader can break in two places, and only one of them is a read. On a BAM,
+    /// `begin_region` runs an index query, so a corrupt index fails the **move** and no read is
+    /// ever attempted. Swallowing that serves the region from wherever the reader happened to be
+    /// left — not empty, which might be noticed, but *wrong*, which would not be. It is the same
+    /// condition `CursorError::AfterFailure` exists to make loud one layer later.
+    ///
+    /// Found by mutation during C1's review: replacing the whole arm with
+    /// `let _ = self.filter.source_mut().jump_to(region); Ok(())` passed all 2,845 tests. Every
+    /// other test that touches that line asserts the move *succeeds*.
+    ///
+    /// # What this does not yet assert, and why
+    ///
+    /// **A failed reposition does not stop the cursor**, and writing this test is what showed
+    /// it. `move_to_region` sets `region` and `last_region_start` *before* the fallible
+    /// `jump_to`, so after the failure the cursor is pointed at a region it never reached, with
+    /// the reader left wherever the failed seek abandoned it — and `next_read` serves from
+    /// there. Worse, `last_region_start` has moved too, so the *next* forward region takes the
+    /// reuse path and carries on reading without jumping at all.
+    ///
+    /// That is the "plausible, silently short answer" `CursorError::AfterFailure` exists to
+    /// prevent, and the guard misses it because it asks `self.filter.has_failed()` — a failed
+    /// reposition never reaches the filter.
+    ///
+    /// **The repair is C2's, by the owner's ruling (2026-08-03):** C2 gives the cursor its own
+    /// `failed` flag, and that flag covers *both* routes into a stopped cursor rather than only
+    /// the one that replaces `FilterState`. C2 also commits `region` and `last_region_start`
+    /// only after the jump has succeeded. When it lands, this test grows the two assertions it
+    /// is missing — the walk serves nothing, and the next region is refused.
+    ///
+    /// Latent today: both real arms' `begin_region` are effectively infallible (the BAM arm
+    /// queries an in-memory index, the CRAM arm resets state), so no production path reaches it
+    /// yet. Asserting the refusal is what C1 can honestly pin, and it is what kills the
+    /// mutation.
+    #[test]
+    fn a_reposition_that_fails_is_refused_rather_than_answered() {
+        let mut cursor = cursor_over_reader(
+            InMemoryAlignedReadsReader::new(bam_header(&matching_contigs()), script())
+                .with_failing_seek(),
+        );
+
+        // The first region always jumps — there is nothing held to continue from.
+        let moved = cursor.move_to_region(region(1, 100));
+        assert!(
+            matches!(moved, Err(CursorError::ReadRecord { .. })),
+            "a failed reposition must be reported, not swallowed: {moved:?}",
         );
     }
 

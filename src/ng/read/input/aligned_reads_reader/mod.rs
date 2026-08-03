@@ -238,7 +238,7 @@ mod tests {
             let mut records = 0;
             while reader
                 .read_next(&mut buf)
-                .expect("an in-memory read cannot fail")
+                .expect("this script has no scripted fault")
             {
                 records += 1;
             }
