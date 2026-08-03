@@ -10,11 +10,12 @@ by document kind:
   - [`read_filtering.md`](spec/read_filtering.md) — step 1 (the whole-read keep/drop
     prelude) + the ng foundations it settles (skeleton, `types.rs` seed, conventions).
   - [`read_filtering_stages.md`](spec/read_filtering_stages.md) — dividing step 1 into two
-    filters and a conversion, so `filtering.rs` becomes policy only and the cursor owns the
-    loop. Adds no types: it renames the raw read to say what it is, deletes the source trait
-    and the three-way stop, and fixes the boundary — the filters and the conversion live
-    *below* what the cursor keeps, or reads get converted a dozen times each. The *policy*
-    stays in `read_filtering.md`. **Draft — two open questions.**
+    filters and a conversion, so `filtering.rs` is left holding only the keep-or-drop rules
+    and the cursor owns the loop. Adds no types: it renames the raw read to say what it is,
+    deletes the source trait and the three-way stop, and fixes the boundary — the filters and
+    the conversion live *below* what the cursor keeps, or reads get converted a dozen times
+    each. Which filters run, and their thresholds, stay in `read_filtering.md`.
+    **Draft — two open questions.**
   - [`read_preparation.md`](spec/read_preparation.md) — step 2, the per-read, **locus-independent**
     transform (pass-through / canonicalize / re-align → `PreparedRead`). It is a **generic-path-only**
     step: the STR path has no read preparation — it goes filtering → observation generation, aligning

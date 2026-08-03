@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-03 · **Status:** design draft, **no code yet**. Two open questions in §9.
 **Revises** [`read_filtering.md`](read_filtering.md) §5, which gave step 1 a single type. That
-document's filter *policy* — which nine filters run, their thresholds, their order, the drop
-reasons — is unchanged and stays there. This one is only about how the work is divided and
-where each piece lives.
+document says which nine filters run, what their thresholds are, in what order they are
+evaluated, and what each drop is called. All of that is unchanged and stays there. This one is
+only about how the work is divided and where each piece lives.
 **Companions:** [`alignment_cursor.md`](alignment_cursor.md) (the reader below this),
 [`ref_seq.md`](ref_seq.md) (the reference the last filter consults).
 **Code-facing companion:** [`../arch/read_filtering_stages.md`](../arch/read_filtering_stages.md).
@@ -45,8 +45,9 @@ AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping qual
 **Goals.**
 
 - Filtering stops being something a conversion happens inside. The two filters and the
-  conversion become three separately nameable, separately testable things.
-- `read/filtering.rs` holds **policy only** — no file reading, no conversion, no loop.
+  conversion each get a name, and each can be tested on its own.
+- `read/filtering.rs` holds **the keep-or-drop rules and the thresholds they use, and nothing
+  else**: it opens no files, converts nothing, and drives no loop over reads.
 - The first filter needs **no reference**: today nothing can filter on flag and mapping quality
   without supplying a `RawRefSeq` and paying a probe fetch for every contig in the header
   ([`filtering.rs:688-702`](../../../../src/ng/read/filtering.rs#L688)).
@@ -54,8 +55,8 @@ AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping qual
 
 **Non-goals.**
 
-- **No change to the filter policy** — the nine filters, their thresholds, their evaluation
-  order and the `DropReason` set are `read_filtering.md`'s and stay as they are.
+- **No filter changes.** Which nine filters run, their thresholds, the order they run in and
+  what each drop is called are `read_filtering.md`'s and stay exactly as they are.
 - **No change to what the cursor keeps** (§3).
 - **No performance change sought.** If a measurement moves, something is wrong.
 
@@ -86,7 +87,7 @@ second copy of the mismatch rule and the CIGAR scan written against noodles' typ
 this module guards against hardest — or the uppercase and the CIGAR conversion run before the
 filter, which is the conversion under another name.
 
-## 3. Why the boundary is inside the cursor — the property that fixes the scope
+## 3. Why the filters and the conversion sit below what the cursor keeps
 
 Once the three pieces are separable, the first question a reader will ask is where the cursor's
 edge falls. **Both alternatives to the current placement are wasteful, and they fail in opposite
@@ -109,9 +110,10 @@ and the cursor's kept set holds reads that are about to be discarded, so the mem
 **(c) The filters sit below what the cursor keeps** — today's shape, and this design's. Converted
 **once**, and only for reads that already cleared flag and mapping quality.
 
-**So the scope-fixing property is: the two filters and the conversion all live below the kept
-set, and the cursor owns the loop.** Anything that moves one of them above it re-introduces (a)
-or (b).
+**So the rule is: the two filters and the conversion all sit below the kept set, and the cursor
+owns the loop.** It is stated here because separating three things that were fused is exactly
+when someone rearranges them — and moving any one of them above the kept set brings back (a) or
+(b).
 
 **A rationale considered and rejected, recorded so nobody re-proposes it.** *"Splitting the
 pieces lets us convert fewer reads."* It does not. The conversion already sits after the cheap
@@ -180,8 +182,9 @@ filtering without a reference, and cannot have it.
 `ReadFilterBuffers` exist because a filter used to be built per region by a pooled caller. That
 caller is gone; both stop having a reason to exist once the cursor owns the loop.
 
-**`read/filtering.rs` becomes a policy module** — thresholds, drop reasons, two verdicts. It
-stopped reading files on 2026-08-03; this is what takes the conversion and the loop out too.
+**`read/filtering.rs` ends up holding only the rules and their thresholds.** It stopped
+reading files on 2026-08-03, when the two whole-file readers it owned were deleted; this takes
+the conversion and the loop out too. What is left is: what counts as a read worth keeping.
 
 ## 6. Naming, and where each piece lives
 
@@ -218,8 +221,8 @@ path then runs through the real chain instead of through a fake that bypasses tw
 - `read/aligned_read.rs` — `RawAlignedRead`, `NoodlesRawAlignedRead`, `AlignedRead`, and the
   conversion between them. One thing in two states, and now named so; the conversion already
   lives here.
-- `read/filtering.rs` — the policy: `ReadFilterConfig`, `DropReason`, `FilterVerdict`,
-  `ReadFilterCounts`, and the two verdicts.
+- `read/filtering.rs` — the rules and their thresholds: `ReadFilterConfig`, `DropReason`,
+  `FilterVerdict`, `ReadFilterCounts`, and the two verdict functions.
 - `read/input/aligned_reads_reader/`, `read/input/region_raw_aligned_reads.rs` — unchanged in
   substance, renamed.
 - `read/input/cursor.rs` — gains the loop.

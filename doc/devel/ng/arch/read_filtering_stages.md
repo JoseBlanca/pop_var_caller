@@ -3,7 +3,7 @@
 *Architecture draft, 2026-08-03. Code-facing companion to
 [`../spec/read_filtering_stages.md`](../spec/read_filtering_stages.md) — every **why** points
 there and is not re-argued here. Revises the single-type shape in
-[`read_filtering.md`](read_filtering.md) §1; the filter policy that doc pins down is unchanged.
+[`read_filtering.md`](read_filtering.md) §1; the filters that doc pins down are unchanged.
 Under [`module_layout.md`](module_layout.md). Naming per
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md). Signatures are
 illustrative; the **contract** is the deliverable.*
@@ -21,7 +21,7 @@ where they bite.
 | module | holds | change |
 |---|---|---|
 | `read/aligned_read.rs` | `RawAlignedRead`, `NoodlesRawAlignedRead`, `AlignedRead`, `decode_record` | **gains** the two raw types from `filtering.rs` — they are one thing in two states, and the conversion is already here |
-| `read/filtering.rs` | `ReadFilterConfig`, `DropReason`, `FilterVerdict`, `ReadFilterCounts`, the two verdicts | **policy only**: loses the raw types, the loop, the source trait, `ReadFilter` |
+| `read/filtering.rs` | `ReadFilterConfig`, `DropReason`, `FilterVerdict`, `ReadFilterCounts`, the two verdicts | **only the keep-or-drop rules and their thresholds** — loses the raw types, the loop, the source trait and `ReadFilter` |
 | `read/input/aligned_reads_reader/` | the per-format readers | renamed from `record_reader/` |
 | `read/input/region_raw_aligned_reads.rs` | `RegionRawAlignedReads` | renamed from `region_records.rs`; its trait impl becomes inherent methods |
 | `read/input/cursor.rs` | `AlignmentCursor` | **gains** the loop, the reference, the buffer and the tally |
@@ -78,7 +78,7 @@ Both already exist as free functions and both stay free functions (`OPEN:` spec 
 `filtering.rs` exports them; the cursor calls them.
 
 ```rust
-// read/filtering.rs — policy only.
+// read/filtering.rs — the keep-or-drop rules; nothing here reads a file or converts.
 
 /// Filters #1–#6, on the flag and the mapping quality. **Needs no reference**, so
 /// anything wanting flag/MAPQ filtering without one can call it (spec §5).
@@ -164,7 +164,7 @@ verdict_on_aligned_read   → Drop: charge it, continue
 yielded once and then the cursor refuses every later region (`CursorError::AfterFailure`,
 already present). The order guard still runs on emit.
 
-**New public surface:**
+**What the cursor gains publicly:**
 
 ```rust
 impl<R: RawRefSeq> AlignmentCursor<R> {
@@ -192,7 +192,7 @@ the three pieces:
 ## 5. Design decisions — decided
 
 - **The two filters and the conversion sit below the cursor's kept set; the cursor owns the
-  loop.** The scope-fixing property — spec §3.
+  loop.** The rule that stops the pieces being rearranged — spec §3.
 - **Two filters, not one** — spec §2.
 - **A filter takes a borrow and returns a verdict, never a read** — spec §4.
 - **The verdict carries the drop reason**, so an `Option` return is ruled out: the tally is keyed
@@ -247,7 +247,7 @@ Every row read at the cited line, 2026-08-03.
 
 ## 8. Test & bench shape
 
-Tests stay beside the code. `filtering.rs`'s 45 tests split: the policy ones stay, the loop ones
+Tests stay beside the code. `filtering.rs`'s 45 tests split: the ones about a rule stay, the loop ones
 move to `cursor.rs`, the three test-double ones are replaced (spec §8).
 
 **The regression anchors are output identity on real data, not the unit suite** — spec §8 has the
