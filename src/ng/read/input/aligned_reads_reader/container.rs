@@ -18,9 +18,10 @@
 //!
 //! So the bytes go into two flat buffers, [`payload`](DecodedContainer::payload) and
 //! [`cigar_ops`](DecodedContainer::cigar_ops), and each record becomes a fixed-size
-//! [`RawReadIndex`] naming its slices of them. A record is materialised as a `RecordBuf` **only
-//! when it is actually served**, straight into the caller's reused buffer — which is also how
-//! the per-record `clone()` this replaced disappeared, so serving a read allocates nothing.
+//! [`PackedReadEntry`] naming its slices of them. A record is materialised as a `RecordBuf`
+//! **only when it is actually served**, straight into the caller's reused buffer — which is
+//! also how the per-record `clone()` this replaced disappeared, so serving a read allocates
+//! nothing.
 
 use std::fs::File;
 use std::io;
@@ -56,22 +57,23 @@ pub(crate) struct DecodedContainer {
     other_sample_records: u64,
     /// One entry per record of the container, in file order — *not* filtered to any region.
     /// Which records a region wants is decided above this, by the layer that knows the region.
-    index: Vec<RawReadIndex>,
+    index: Vec<PackedReadEntry>,
     /// Every record's name, sequence and quality scores, back to back. Sliced by the offsets in
-    /// [`RawReadIndex`]; meaningless on its own.
+    /// [`PackedReadEntry`]; meaningless on its own.
     payload: Vec<u8>,
     /// Every record's CIGAR operations, back to back. Separate from [`payload`](Self::payload)
     /// because an `Op` is not a byte and packing it into one would mean encoding and decoding it.
     cigar_ops: Vec<Op>,
 }
 
-/// Where one record's bytes are, and every scalar field of it that anything reads.
+/// One read in its packed form: where its bytes are in the container's flat buffers, and every
+/// scalar field of it that anything reads.
 ///
 /// Fixed size, so the whole index is one allocation. The scalars are the noodles types rather
 /// than raw integers: they are all `Copy`, so nothing is gained by unpacking them, and keeping
-/// them means [`DecodedContainer::fill`] hands them back without conversion.
+/// them means [`DecodedContainer::fill_raw_read`] hands them back without conversion.
 #[derive(Clone, Copy)]
-struct RawReadIndex {
+struct PackedReadEntry {
     /// Which read group this record belongs to, resolved **once per decode** and before the
     /// record was built.
     ///
@@ -165,7 +167,7 @@ impl DecodedContainer {
         self.cigar_ops.extend_from_slice(record.cigar().as_ref());
         let cigar = Span::new(cigar_start, self.cigar_ops.len())?;
 
-        self.index.push(RawReadIndex {
+        self.index.push(PackedReadEntry {
             owner,
             flags: record.flags(),
             mapping_quality: record.mapping_quality(),

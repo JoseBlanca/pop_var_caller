@@ -42,10 +42,26 @@ names.
 | `record_reader/` | `aligned_reads_reader/` |
 | `RegionRecords` | `RegionRawAlignedReads` |
 | `DecodedContainer::fill_record` | `fill_raw_read` |
-| `RecordIndex` (private) | `RawReadIndex` |
+| `RecordIndex` (private) | `PackedReadEntry` |
 
 **The readers do not carry "raw" in their names**, so each reader's doc comment must state that
 what it yields is undecoded — the name no longer says it.
+
+**Two rows were revised by the owner at Checkpoint A (2026-08-03), after the review of the
+step that landed them.**
+
+`RecordIndex` first became `RawReadIndex`, which failed twice: "Index" named the container's
+*field* rather than one entry — the code around it already calls a single one an `entry` — and
+`RawRead` was a second, shorter name for `RawAlignedRead`, minted inside the very milestone
+that existed to make that vocabulary consistent. `PackedReadEntry` says what the value is: one
+read in the packed form this container stores, which is the whole reason the type exists.
+
+`fill_raw_read` **keeps its name and gains a signature change, at Milestone B.** It takes
+`&mut RecordBuf` today, so it fills only the record half of a raw aligned read and its one
+caller stamps the read group on the following line. It will take
+`&mut NoodlesRawAlignedRead` and set both halves — which makes the name true and puts "on CRAM
+the read group is decided at decode" in one place instead of two. Not a rename, so it could not
+travel with Milestone A.
 
 ## 3. The pieces
 

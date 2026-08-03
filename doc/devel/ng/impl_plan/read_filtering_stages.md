@@ -88,8 +88,10 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   module `record_reader/` → `aligned_reads_reader/`. Each reader's doc must now state that what
   it yields is undecoded, because the name no longer says so. *Depends:* A1. *Source:* spec §6.
 - ✅ **A3.** `RegionRecords` → `RegionRawAlignedReads` (file follows the type),
-  `DecodedContainer::fill_record` → `fill_raw_read`, `RecordIndex` → `RawReadIndex`.
-  *Depends:* A2. *Source:* spec §6, arch §2.
+  `DecodedContainer::fill_record` → `fill_raw_read`, `RecordIndex` → **`PackedReadEntry`**.
+  *Depends:* A2. *Source:* spec §6, arch §2. — *`RecordIndex`'s new name was `RawReadIndex` when
+  this step landed; the owner revised it at Checkpoint A on the review's argument (arch §2 has
+  the reasoning).*
 
 > **Checkpoint A:** nothing behaves differently. The four dumps are byte-identical, the probe
 > prints the anchor, the suite is unchanged in count. Pause for review.
@@ -103,6 +105,15 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   check that works, so it ships with a test that a mismatched accessor is refused, and that test
   is mutation-verified (disable the comparison; it must fail). *Depends:* A3. *Source:* spec §9
   Q2, arch §6.
+- ☐ **B2.** `DecodedContainer::fill_raw_read` takes `&mut NoodlesRawAlignedRead` instead of
+  `&mut RecordBuf`, and sets **both** its fields — the record and the read group — so the CRAM
+  arm stops stamping the group on the line after the call. **Added by the owner at Checkpoint A**
+  (2026-08-03), from A3's review: the name says it fills a raw aligned read and it fills half of
+  one, which is the record-versus-read confusion Milestone A removed everywhere else. It is a
+  signature change rather than a rename, so it could not travel with A3. Small and behaviour-free
+  — the container already holds both halves — but it moves *where* CRAM's read-group exception
+  lives, so it lands as its own commit and is proven by the four dumps like everything else.
+  *Depends:* A3, and nothing in B1. *Source:* arch §2.
 
 > **Checkpoint B:** the dumps and the anchor unchanged, and the walk probe's `seconds` measured
 > before and after. The estimate says ~130 ms per cursor comes off; it has never been measured,
