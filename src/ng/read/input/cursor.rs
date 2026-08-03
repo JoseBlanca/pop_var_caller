@@ -66,20 +66,22 @@
 //! (spec §6).
 
 use std::collections::VecDeque;
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ng::read::aligned_read::AlignedRead;
+use crate::ng::read::aligned_read::{AlignedRead, NoodlesRawAlignedRead, RawAlignedRead};
 use crate::ng::read::filtering::{
-    ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterError, ReadGroupCounts,
+    FilterVerdict, ReadFilterConfig, ReadFilterCounts, RecordSource, verdict_on_aligned_read,
+    verdict_on_raw_read,
 };
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::region_raw_aligned_reads::{
     RegionRawAlignedReads, read_end, read_overlaps,
 };
-use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq};
-use crate::ng::types::{ContigId, GenomeRegion};
+use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq, RefSeqError};
+use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 
 /// What can go wrong once a cursor exists.
 ///
@@ -234,15 +236,84 @@ pub enum CursorError {
 ///
 /// Nothing is unpacked ahead of demand: a caller that pulls one read and moves elsewhere has
 /// unpacked at most one block, and abandoning a region costs nothing to unwind because there
+/// A fatal, run-level failure of step 1. **Three conditions, one per piece of the work**: the
+/// read off the file, the conversion, and the second filter's reference fetch.
+///
+/// It is yielded **in the cursor's item stream** — a fatal condition makes
+/// [`AlignmentCursor::next_read`](crate::ng::read::input::cursor::AlignmentCursor::next_read) return
+/// `Some(Err(..))` once and then `None` — so a caller cannot mistake it for a clean end of
+/// input: `let read = read?;` propagates it. It is never folded into a per-read drop or a
+/// silent end of input.
+///
+/// **Raised by the cursor, not here.** This module states the keep-or-drop rules; the loop that
+/// meets these failures lives in `read/input/cursor.rs` (spec §5).
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadFilterError {
+    /// The record source failed to read the next record (e.g. a truncated file).
+    #[error("reading the next alignment record failed")]
+    Source(#[source] io::Error),
+    /// A record that cleared the pre-decode gate failed to decode — a corrupt
+    /// record (the unmapped flag clear yet no position).
+    #[error("decoding an alignment record failed")]
+    Decode(#[source] io::Error),
+    /// Filter #8's reference fetch failed — corrupt input, or a read reaching past a contig's
+    /// end.
+    ///
+    /// **Narrow since B1.** `AlignmentFile::cursor` compares the two contig tables *and* proves
+    /// the accessor can serve this cursor's own contig before building anything, so what is
+    /// left to fail here is a read whose footprint runs off the end of the contig.
+    #[error("reference access failed during filtering")]
+    Reference(#[source] RefSeqError),
+}
+
+/// One read group's step-1 tally, keyed by the read group it belongs to.
+///
+/// `None` keys the records whose reader never stamped a read group — which
+/// [`RawAlignedRead::decode`] refuses, so they are counted apart rather than charged to an
+/// arbitrary group.
+pub type ReadGroupCounts = (Option<ReadGroupId>, ReadFilterCounts);
+
 /// is no stream object to give back.
 pub struct AlignmentCursor<R: RawRefSeq> {
-    /// The whole chain below, owned: the filter holds [`RegionRawAlignedReads`], which holds the
-    /// [`AlignedReadsReader`]. Not a cycle — the filter's source is the layer *below* this cursor,
-    /// not the cursor itself.
+    /// The chain below, owned: [`RegionRawAlignedReads`] holds the [`AlignedReadsReader`].
+    reads: RegionRawAlignedReads,
+    /// The single raw read buffer reused across the whole walk, so the pass allocates one
+    /// record rather than one per read.
+    buffer: NoodlesRawAlignedRead,
+    /// Raw reference bases for the second filter's mismatch check.
     ///
-    /// The reference accessor the mismatch filter needs sits inside, taken once here rather
-    /// than rebuilt per query (perf review L2).
-    filter: ReadFilter<RegionRawAlignedReads, R>,
+    /// **Held here because only that filter needs it and it is the cursor that keeps it alive
+    /// for the chromosome** (spec §9 Q1). Taken once rather than rebuilt per query.
+    reference: R,
+    /// Reused scratch the second filter's reference fetch reads into — touched only when
+    /// filter #8 runs, so a walk with it disabled allocates nothing here.
+    ref_buf: Vec<u8>,
+    config: ReadFilterConfig,
+    /// One tally per read group met, in first-seen order.
+    ///
+    /// A `Vec` scanned linearly rather than a map: a file declares a handful of read groups, and
+    /// the scan is a few integer compares on a path that has just decoded a record. Per read
+    /// group rather than per *file* because a drop rate is a read group's property — one bad
+    /// library shows up as one read group with an anomalous MAPQ or mismatch rate, and a
+    /// per-file tally over a file holding several would average that away (spec §7).
+    ///
+    /// **Named `tally` rather than `counts`, and not for variety.** The cursor already has a
+    /// `counts` field — [`CursorCounts`], what the cursor *did* — and a public
+    /// [`read_group_counts`](Self::read_group_counts) method whose value differs from this
+    /// field's: the method stamps the `other_sample` rider onto the first entry. A field and a
+    /// method spelled the same and returning different things, both reachable in one function,
+    /// is a reading a caller has to know to distrust.
+    read_group_tally: Vec<ReadGroupCounts>,
+    /// **Whether this cursor has met a fatal error.** Replaces the three-way `FilterState` the
+    /// filter used to keep: that state existed only because a separate filter could not tell why
+    /// its source stopped, and reached "end of input" at the end of *every* region. The cursor
+    /// is the thing that *causes* region ends, so it never has to ask — which is what collapses
+    /// three states to one flag (spec §5).
+    ///
+    /// **Set by both routes into a stopped cursor**, not only by a failed read: a failed
+    /// reposition leaves the reader at an unknown position, so no later region can be served
+    /// from it either.
+    failed: bool,
     /// **Our** reads — decoded and filtered — in the order they came off the file.
     ///
     /// Held above the filter, so serving one again skips both decode and filtering: that is
@@ -330,12 +401,12 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// against before an indexed file can hide a defect in it.
     ///
     /// **Infallible, and that is what changed here.** It used to return `Result` for one
-    /// reason: it built its filter through `ReadFilter::new`, which fetched a zero-length
-    /// window on every contig of the header to prove each one resolved in `reference`. Nothing
-    /// else about constructing a cursor can fail. The caller now proves the same thing —
-    /// and more — by comparing the two contig tables before it ever gets here
-    /// ([`AlignmentFile::cursor`](crate::ng::read::input::AlignmentFile::cursor)), so the
-    /// filter is built through the constructor that takes that as given.
+    /// reason: it built a `ReadFilter` through a constructor that fetched a zero-length window
+    /// on every contig of the header to prove each one resolved in `reference`. Nothing else
+    /// about constructing a cursor can fail. The caller now proves the same thing — and more —
+    /// by comparing the two contig tables before it ever gets here
+    /// ([`AlignmentFile::cursor`](crate::ng::read::input::AlignmentFile::cursor)), and since
+    /// C2 there is no separate filter to build at all.
     ///
     /// **The precondition is the caller's, and it is not a formality.**
     /// `with_validated_contigs` assumes the file's `@SQ` list has been proved *equal* to the
@@ -350,14 +421,14 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         config: ReadFilterConfig,
         path: Arc<Path>,
     ) -> Self {
-        let records = RegionRawAlignedReads::new(reader, contig, resolution);
         Self {
-            filter: ReadFilter::with_validated_contigs(
-                records,
-                reference,
-                config,
-                ReadFilterBuffers::default(),
-            ),
+            reads: RegionRawAlignedReads::new(reader, contig, resolution),
+            buffer: NoodlesRawAlignedRead::default(),
+            reference,
+            ref_buf: Vec::new(),
+            config,
+            read_group_tally: Vec::new(),
+            failed: false,
             kept: VecDeque::new(),
             examined: 0,
             last_region_start: None,
@@ -407,7 +478,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         // A cursor whose file has failed serves nothing further. Checked here, after the
         // chromosome test and before anything moves, so a dead cursor says so rather than
         // answering later regions out of whatever it is still holding.
-        if self.filter.has_failed() {
+        if self.failed {
             return Err(CursorError::AfterFailure {
                 path: Arc::clone(&self.path),
             });
@@ -432,7 +503,19 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             .last_region_start
             .is_some_and(|last| region.start.get() >= last);
 
+        // **The reposition comes first, because it is the only thing here that can fail.**
+        // Everything below it — the eviction, the counters, the region state — is committed
+        // only once the reader is really where this region needs it. See the block after it.
+        if !reuse && let Err(source) = self.reads.jump_to(region) {
+            self.failed = true;
+            return Err(CursorError::ReadRecord {
+                path: Arc::clone(&self.path),
+                source,
+            });
+        }
+
         if reuse {
+            self.reads.continue_into(region);
             // Eviction is the mirror image of the rule: a read that ends before this region
             // begins cannot touch this region or any later one, because every later region
             // begins at or after this one. Dropped from the front, which is the oldest end,
@@ -451,6 +534,23 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             self.kept.clear();
             self.counts.regions_jumping += 1;
         }
+
+        // **Everything from the reposition down is committed only because the jump succeeded**,
+        // and that ordering is the point: a cursor left pointing at a region it never reached
+        // would serve that region from wherever the failed seek abandoned the reader — not
+        // empty, which might be noticed, but *wrong*, which would not be. A failed jump now
+        // leaves the kept set, the counters and the region state exactly as they were.
+        //
+        // A failed reposition also **stops the cursor for good**: the reader's position is
+        // unknown afterwards, so no later region can be served from it, the reuse path included.
+        // Found by mutation at C1 — swallowing the failure entirely left all 2,845 tests green
+        // — and widened to the `failed` flag on the owner's ruling.
+        //
+        // **The two halves are independent, and only one of them used to be pinned.** The flag
+        // masks the ordering, so reverting the ordering left the whole suite green until
+        // `a_failed_reposition_leaves_the_cursor_untouched` drove a seek that fails *after* a
+        // region has been served and checked what survived.
+        //
         // Every kept read is offered to the new region, including ones the last region was
         // already given: consecutive regions overlap, and a read touching both is owed to
         // both.
@@ -461,24 +561,13 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         // *within* a region, never across one.
         self.last_emitted = None;
 
-        // Undo the *clean* stop the previous region ended with. Without this the first region
-        // a cursor drains silences it for the whole chromosome: a region boundary reaches the
-        // filter as an ordinary end of input, because that is the only end a `RecordSource`
-        // can report. A filter stopped by a **fatal error** is not restarted, and must not be.
-        self.filter.restart_after_end_of_input();
-
-        if reuse {
-            self.filter.source_mut().continue_into(region);
-            Ok(())
-        } else {
-            self.filter
-                .source_mut()
-                .jump_to(region)
-                .map_err(|source| CursorError::ReadRecord {
-                    path: Arc::clone(&self.path),
-                    source,
-                })
-        }
+        // **Nothing restarts anything here any more**, and its absence is the point. A filter
+        // that lived apart from the cursor reached "end of input" at the end of *every* region
+        // — a region boundary was the only end its source could report — so a cursor had to undo
+        // that on each move or the first region silenced it for the whole chromosome. The cursor
+        // is the thing that causes region ends, so it never has to ask: the loop below simply
+        // reads on, and `failed` is the only stop it keeps (spec §5).
+        Ok(())
     }
 
     /// The next read of the current region, or `None` at the end of it.
@@ -527,10 +616,10 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             }
         }
 
-        // Then read on, from wherever the reader is. Everything the filter yields already
-        // overlaps the region — `RegionRawAlignedReads` narrowed it below — so what is kept
-        // here is exactly what a later region may be able to reuse.
-        match self.filter.next() {
+        // Then read on, from wherever the reader is. Everything below already overlaps the
+        // region — `RegionRawAlignedReads` narrowed it — so what is kept here is exactly what a
+        // later region may be able to reuse.
+        match self.next_filtered_read() {
             None => None,
             Some(Err(error)) => Some(Err(self.read_failure(error))),
             Some(Ok(read)) => {
@@ -540,6 +629,93 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
                 Some(self.emit(read))
             }
         }
+    }
+
+    /// **Step 1, one read at a time** — the loop that used to be `ReadFilter::next`.
+    ///
+    /// Reads the next raw aligned read into the one reused buffer, rejects it on its flag and
+    /// mapping quality, converts only what survives, rejects *that* on its length, CIGAR and
+    /// mismatch fraction, and charges every drop to the read group it came from. Returns the
+    /// first read that passes.
+    ///
+    /// **The order is the whole design** (spec §2): the six flag/MAPQ filters read values the
+    /// raw read already carries, so a read they drop never pays for a conversion; the other
+    /// three read fields only the conversion produces. Moving either filter across the
+    /// conversion changes no output and would quietly undo that.
+    ///
+    /// Fused on `failed`: a fatal condition is yielded once and then this returns `None`
+    /// forever, and `move_to_region` refuses every later region.
+    fn next_filtered_read(&mut self) -> Option<Result<AlignedRead, ReadFilterError>> {
+        if self.failed {
+            return None;
+        }
+        loop {
+            match self.reads.read_next(&mut self.buffer) {
+                Ok(true) => {}
+                // The region is done. **Not the end of the file**, and the cursor knows the
+                // difference because it is the thing that set the region — which is why no
+                // three-way state is needed here (spec §5).
+                Ok(false) => return None,
+                Err(error) => return self.fail(ReadFilterError::Source(error)),
+            }
+
+            // The first filter — flag and mapping quality, before any conversion. Exhaustive
+            // so a new `FilterVerdict` variant cannot silently fall through to the conversion.
+            match verdict_on_raw_read(self.buffer.flag(), self.buffer.mapq(), &self.config) {
+                FilterVerdict::Keep => {}
+                FilterVerdict::Drop(reason) => {
+                    self.tally_for_buffered_read().record_drop(reason);
+                    continue;
+                }
+            }
+
+            // The conversion, for the survivors only.
+            let read = match self.buffer.decode() {
+                Ok(read) => read,
+                Err(error) => return self.fail(ReadFilterError::Decode(error)),
+            };
+
+            // The second filter — length, CIGAR, mismatch fraction, in that order.
+            match verdict_on_aligned_read(&read, &self.reference, &self.config, &mut self.ref_buf) {
+                Ok(FilterVerdict::Keep) => {
+                    self.tally_for_buffered_read().kept += 1;
+                    return Some(Ok(read));
+                }
+                Ok(FilterVerdict::Drop(reason)) => {
+                    self.tally_for_buffered_read().record_drop(reason);
+                    continue;
+                }
+                Err(error) => return self.fail(ReadFilterError::Reference(error)),
+            }
+        }
+    }
+
+    /// Stop the cursor and yield the failure that stopped it. The three fatal arms share it.
+    fn fail(&mut self, error: ReadFilterError) -> Option<Result<AlignedRead, ReadFilterError>> {
+        self.failed = true;
+        Some(Err(error))
+    }
+
+    /// The tally of the read group the **buffered** read belongs to, created on first sight.
+    ///
+    /// Keyed on the buffer rather than passed in, because the first filter drops a read before
+    /// anything owns it — the buffer is the only thing that knows, and it knows because the
+    /// region narrowing resolved the read group before handing it over.
+    fn tally_for_buffered_read(&mut self) -> &mut ReadFilterCounts {
+        let read_group = self.buffer.read_group();
+        let index = match self
+            .read_group_tally
+            .iter()
+            .position(|(id, _)| *id == read_group)
+        {
+            Some(index) => index,
+            None => {
+                self.read_group_tally
+                    .push((read_group, ReadFilterCounts::default()));
+                self.read_group_tally.len() - 1
+            }
+        };
+        &mut self.read_group_tally[index].1
     }
 
     #[allow(
@@ -573,7 +749,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     where
         R: EvictableRefSeq,
     {
-        self.filter.reference().evict_before(pos);
+        self.reference.evict_before(pos);
     }
 
     /// How many reference bases this cursor's reader is holding — the bound made observable.
@@ -581,18 +757,36 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     where
         R: EvictableRefSeq,
     {
-        self.filter.reference().resident_bases()
+        self.reference.resident_bases()
     }
 
     /// Step-1's per-read-group tally, for as much of the chromosome as this cursor has read.
     ///
-    /// **It needs no field here and no hand-over**, which is the point arch §2.3 makes: the
-    /// filter has been keeping a running tally all along, and now that it lives as long as the
-    /// cursor rather than as long as one region, reading it at any moment gives a whole-cursor
-    /// total. The per-query sources this replaces had to fold their counts back into the file
-    /// as each stream ended, or the drops they recorded vanished with them.
+    /// **One entry per read group met, in first-seen order, and never summed here.** A drop rate
+    /// is a read group's property: one bad library is one read group with an anomalous rate, and
+    /// adding them up erases exactly that. A caller wanting a total adds them itself.
+    ///
+    /// **Cumulative** — a whole-cursor total rather than whichever region happened to be last.
+    /// The per-query sources this replaces had to fold their counts back into the file as each
+    /// stream ended, or the drops they recorded vanished with the stream.
+    ///
+    /// The skipped-record count belongs to no single read group — a foreign record is never
+    /// yielded to the filters, and its own group is not one of these — so it is reported once,
+    /// against the first entry.
     pub fn read_group_counts(&self) -> Vec<ReadGroupCounts> {
-        self.filter.counts()
+        let mut counts = self.read_group_tally.clone();
+        match counts.first_mut() {
+            Some((_, first)) => first.other_sample = self.reads.other_sample_records(),
+            // Every record was another sample's, so the filters met none at all.
+            None => counts.push((
+                None,
+                ReadFilterCounts {
+                    other_sample: self.reads.other_sample_records(),
+                    ..ReadFilterCounts::default()
+                },
+            )),
+        }
+        counts
     }
 
     /// Hand a read to the caller, checking it does not go backwards.
@@ -643,6 +837,7 @@ mod tests {
     // `read_named_with_length` because each one has to fail a *named* filter.
     use crate::bam::alignment_input::{
         FLAG_DUPLICATE, FLAG_PAIRED, FLAG_QC_FAIL, FLAG_SECONDARY, FLAG_SUPPLEMENTARY,
+        FLAG_UNMAPPED,
     };
     use crate::ng::read::filtering::ReadFilterCounts;
     use noodles_core::Position as RecordPosition;
@@ -1062,34 +1257,28 @@ mod tests {
     /// `let _ = self.filter.source_mut().jump_to(region); Ok(())` passed all 2,845 tests. Every
     /// other test that touches that line asserts the move *succeeds*.
     ///
-    /// # What this does not yet assert, and why
+    /// # And it stops the cursor, which is the half C2 added
     ///
-    /// **A failed reposition does not stop the cursor**, and writing this test is what showed
-    /// it. `move_to_region` sets `region` and `last_region_start` *before* the fallible
-    /// `jump_to`, so after the failure the cursor is pointed at a region it never reached, with
-    /// the reader left wherever the failed seek abandoned it — and `next_read` serves from
-    /// there. Worse, `last_region_start` has moved too, so the *next* forward region takes the
-    /// reuse path and carries on reading without jumping at all.
+    /// Writing this test at C1 showed the defect was bigger than a missing assertion:
+    /// `move_to_region` set `region` and `last_region_start` **before** the fallible `jump_to`,
+    /// so a failed reposition left the cursor pointed at a region it never reached, serving from
+    /// wherever the seek abandoned the reader — and because `last_region_start` had moved too,
+    /// the *next* forward region took the reuse path and read on without jumping at all. The
+    /// `AfterFailure` guard missed it because it asked the filter, and a failed reposition never
+    /// reached the filter.
     ///
-    /// That is the "plausible, silently short answer" `CursorError::AfterFailure` exists to
-    /// prevent, and the guard misses it because it asks `self.filter.has_failed()` — a failed
-    /// reposition never reaches the filter.
+    /// C2 repairs both halves on the owner's ruling: the reposition happens before any of the
+    /// region's state is committed, and it sets the cursor's own `failed` flag — which covers
+    /// **both** routes into a stopped cursor, not only the one that replaced `FilterState`.
     ///
-    /// **The repair is C2's, by the owner's ruling (2026-08-03):** C2 gives the cursor its own
-    /// `failed` flag, and that flag covers *both* routes into a stopped cursor rather than only
-    /// the one that replaces `FilterState`. C2 also commits `region` and `last_region_start`
-    /// only after the jump has succeeded. When it lands, this test grows the two assertions it
-    /// is missing — the walk serves nothing, and the next region is refused.
-    ///
-    /// Latent today: both real arms' `begin_region` are effectively infallible (the BAM arm
-    /// queries an in-memory index, the CRAM arm resets state), so no production path reaches it
-    /// yet. Asserting the refusal is what C1 can honestly pin, and it is what kills the
-    /// mutation.
+    /// Latent in production: both real arms' `begin_region` are effectively infallible (the BAM
+    /// arm queries an in-memory index, the CRAM arm resets state), which is why a scripted fault
+    /// is what reaches it.
     #[test]
-    fn a_reposition_that_fails_is_refused_rather_than_answered() {
+    fn a_reposition_that_fails_is_refused_and_stops_the_cursor() {
         let mut cursor = cursor_over_reader(
             InMemoryAlignedReadsReader::new(bam_header(&matching_contigs()), script())
-                .with_failing_seek(),
+                .with_failing_seek_at(0),
         );
 
         // The first region always jumps — there is nothing held to continue from.
@@ -1097,6 +1286,21 @@ mod tests {
         assert!(
             matches!(moved, Err(CursorError::ReadRecord { .. })),
             "a failed reposition must be reported, not swallowed: {moved:?}",
+        );
+        assert!(
+            cursor.next_read().is_none(),
+            "a region that was never reached was served anyway",
+        );
+
+        // And no later region is answered out of a reader whose position is unknown — including
+        // a *forward* one, which is the case the reuse path would otherwise serve without
+        // repositioning at all.
+        assert!(
+            matches!(
+                cursor.move_to_region(region(50, 100)),
+                Err(CursorError::AfterFailure { .. })
+            ),
+            "a cursor whose reposition failed answered a later region",
         );
     }
 
@@ -1807,6 +2011,26 @@ mod tests {
             .build()
     }
 
+    /// A 30-base read on contig 1 carrying an `RG` tag, so a `PerRecord` resolution has something
+    /// to resolve. The tally tests need this; `Sole` short-circuits before the tag is read.
+    fn tagged_read(qname: &str, start: usize, flags: u16, read_group: &str) -> RecordBuf {
+        use noodles_sam::alignment::record::data::field::Tag;
+        use noodles_sam::alignment::record_buf::data::field::Value;
+
+        let mut record = record_with_seq(
+            qname,
+            start,
+            60,
+            Flags::from(flags),
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        record.data_mut().insert(
+            Tag::READ_GROUP,
+            Value::String(read_group.as_bytes().to_vec().into()),
+        );
+        record
+    }
+
     fn boundary_deletion_record(start: usize, seq: &[u8]) -> RecordBuf {
         RecordBuf::builder()
             .set_name("bad")
@@ -1951,6 +2175,398 @@ mod tests {
 
         assert_eq!(kept.len(), 2, "exactly the two clean reads survive");
         assert_eq!(only_tally(&cursor.read_group_counts()), expected);
+    }
+
+    // -----------------------------------------------------------------
+    // The tally's remaining properties, re-homed from `filtering.rs` (C2)
+    // -----------------------------------------------------------------
+    //
+    // Ten tests died with `ReadFilter`, and C2's first account of where their properties went
+    // was wrong on two rows. The review corrected both by experiment; this is the version that
+    // survived it.
+    //
+    // - **Four have no successor, by design.** They drove `source_mut`,
+    //   `restart_after_end_of_input` and the three-way `FilterState` — the machinery spec §5
+    //   collapses to one flag, because the cursor causes region ends and never has to ask why
+    //   reading stopped.
+    // - **Two covered the fatal stop**, and the cursor's own fatal-path tests cover it — but
+    //   only for `Source` and `Reference`. One of them drove the **`Decode`** arm, which no
+    //   test now reaches: C1 established no input can, so the arm is unreachable rather than
+    //   untested, which is a better disposition than the one first written but not the same one.
+    // - **One was the tally surviving a reposition**, and it was *not* covered by
+    //   `the_step_one_tally_accumulates_across_regions` as first claimed: that test's second
+    //   region begins at or after its first, so it reuses and never jumps. Its successor is
+    //   `the_tally_survives_a_reposition_that_drops_everything_and_jumps`.
+    // - **Three are re-homed below.**
+    //
+    // The two tally tests after them are not re-homings: they close mutations that survived the
+    // whole suite, which is how the first account's gaps were found.
+
+    /// **The #5 counter the drop fixture omits**: an unmapped read that clears the mapping-quality
+    /// filter is charged to `unmapped`, through the whole chain.
+    ///
+    /// The fixture leaves it out because a *realistic* unmapped read has MAPQ 0 and is charged to
+    /// #2 first, and because a fake mapping quality does not survive a CRAM round trip. Given one
+    /// anyway, the flag must decide it.
+    ///
+    /// It needs a placed unmapped read — a contig and a position — because one without them has
+    /// no footprint and the region narrowing drops it below the filters, uncounted. That is the
+    /// same measurement C1 recorded against the plan's D2.
+    #[test]
+    fn an_unmapped_read_that_clears_the_mapping_quality_filter_is_charged_to_unmapped() {
+        let unmapped = record_with_seq(
+            "unmapped",
+            10,
+            60,
+            Flags::from(FLAG_PAIRED | FLAG_UNMAPPED),
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let clean = record_with_seq(
+            "clean",
+            50,
+            60,
+            Flags::from(FLAG_PAIRED),
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let mut cursor = cursor_over_contig_one(vec![unmapped, clean]);
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(FIXTURE_CONTIGS[1].1 as u64),
+            })
+            .expect("on this chromosome");
+
+        let mut kept = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            kept.push(read.expect("the fixture decodes"));
+        }
+
+        assert_eq!(kept.len(), 1, "only the clean read survives");
+        let tally = only_tally(&cursor.read_group_counts());
+        assert_eq!(tally.unmapped, 1);
+        assert_eq!(tally.kept, 1);
+    }
+
+    /// A cursor over an empty script yields nothing and counts nothing — and still answers with a
+    /// tally rather than an empty vector, because a caller folding several cursors together needs
+    /// an entry to fold.
+    #[test]
+    fn a_cursor_over_an_empty_script_yields_nothing_and_counts_nothing() {
+        let mut cursor = cursor_over(Vec::new());
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+
+        assert!(cursor.next_read().is_none());
+        assert_eq!(
+            only_tally(&cursor.read_group_counts()),
+            ReadFilterCounts::default()
+        );
+    }
+
+    /// **The tally is running, not final**: it is readable part-way through a walk and already
+    /// reflects the drops the walk has met.
+    ///
+    /// Stated because the opposite is just as plausible a design — a tally folded together only
+    /// when the walk ends — and because a caller reading it early would then get zeros that look
+    /// like a clean file.
+    #[test]
+    fn the_tally_is_readable_before_the_walk_is_finished() {
+        let duplicate = record_with_seq(
+            "dup",
+            10,
+            60,
+            Flags::from(FLAG_PAIRED | FLAG_DUPLICATE),
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let clean = record_with_seq(
+            "clean",
+            50,
+            60,
+            Flags::from(FLAG_PAIRED),
+            b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        let mut cursor = cursor_over_contig_one(vec![duplicate, clean]);
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(FIXTURE_CONTIGS[1].1 as u64),
+            })
+            .expect("on this chromosome");
+
+        // One read pulled — which is the *second* record, the first having been dropped.
+        assert!(matches!(cursor.next_read(), Some(Ok(_))));
+        let part_way = only_tally(&cursor.read_group_counts());
+        assert_eq!(part_way.duplicate, 1, "the drop is already counted");
+        assert_eq!(part_way.kept, 1);
+
+        assert!(cursor.next_read().is_none(), "and then the script is done");
+        assert_eq!(only_tally(&cursor.read_group_counts()).kept, 1);
+    }
+
+    /// **A failed reposition leaves the cursor untouched** — the kept set, the counters and the
+    /// region state all as they were.
+    ///
+    /// The owner's ruling has two halves: the reposition happens before any of the new region's
+    /// state is committed, *and* it sets `failed`. **Only the flag was pinned.** The flag masks
+    /// the ordering — nothing can observe the stale state once the cursor refuses everything —
+    /// so hoisting the commits back above the jump left all 2,855 tests green.
+    ///
+    /// Reaching it needs a seek that fails **after a region has been served**, which the
+    /// all-or-nothing fault could not express: a reader whose *first* seek fails has served
+    /// nothing, so "left exactly as it was" and "was never anywhere" are the same observation.
+    /// That is why `with_failing_seek_at` is positional.
+    #[test]
+    fn a_failed_reposition_leaves_the_cursor_untouched() {
+        let mut cursor = cursor_over_reader(
+            InMemoryAlignedReadsReader::new(bam_header(&matching_contigs()), script())
+                // The first region's jump succeeds; the second one's fails.
+                .with_failing_seek_at(1),
+        );
+
+        let served = reads_of(&mut cursor, region(46, 100));
+        assert!(!served.is_empty(), "the first region must really be served");
+        let kept_before = cursor.kept_reads();
+        let counts_before = cursor.counts();
+        let tally_before = cursor.read_group_counts();
+        assert!(kept_before > 0, "and it must leave reads held");
+
+        // Backwards, so the forget rule jumps — and the jump fails.
+        let failed = cursor.move_to_region(region(1, 20));
+        assert!(
+            matches!(failed, Err(CursorError::ReadRecord { .. })),
+            "the failing seek must be reported: {failed:?}",
+        );
+
+        assert_eq!(
+            cursor.kept_reads(),
+            kept_before,
+            "a failed reposition dropped the reads it was holding",
+        );
+        assert_eq!(
+            cursor.counts(),
+            counts_before,
+            "a failed reposition moved the counters for a region that never happened",
+        );
+        assert_eq!(
+            cursor.read_group_counts(),
+            tally_before,
+            "a failed reposition disturbed the step-1 tally",
+        );
+    }
+
+    /// **The tally survives a reposition that drops everything and jumps.**
+    ///
+    /// The half of the deleted `repositioning_the_source_does_not_reset_the_running_tally` that
+    /// `the_step_one_tally_accumulates_across_regions` does **not** reach, and C2's accounting
+    /// first mis-filed as covered by it. That test's second region begins at or after its first,
+    /// so it takes the *reuse* path and never repositions — instrumented, it reports
+    /// `jumping=1 reusing=1 replayed=3`. Nothing in the tree drove the tally across a jump.
+    ///
+    /// The deleted test said in as many words why non-erasure needs its own assertion:
+    /// accumulation alone is also satisfied by a tally that stopped counting. Measured — adding
+    /// `self.read_group_tally.clear()` to the jump branch of the forget rule left all 2,855
+    /// tests green.
+    ///
+    /// This is the surface the plan singles C2 out for, and **C4 is about to add
+    /// `reset_counts`** — the first legitimate caller of "clear the tally" — into a file where
+    /// clearing it on the wrong edge is invisible.
+    #[test]
+    fn the_tally_survives_a_reposition_that_drops_everything_and_jumps() {
+        let mut cursor = cursor_over(script());
+
+        let _ = reads_of(&mut cursor, region(46, 100));
+        let after_forward: u64 = cursor.read_group_counts().iter().map(|(_, c)| c.kept).sum();
+        assert!(after_forward > 0, "the first region kept something");
+        assert_eq!(cursor.counts().regions_jumping, 1, "the first region jumps");
+
+        // Backwards, which is the path that drops the kept set and repositions.
+        let _ = reads_of(&mut cursor, region(1, 20));
+        assert_eq!(
+            cursor.counts().regions_jumping,
+            2,
+            "a backward region must jump, or this test pins nothing",
+        );
+        let after_jump: u64 = cursor.read_group_counts().iter().map(|(_, c)| c.kept).sum();
+        assert!(
+            after_jump > after_forward,
+            "the reposition reset the running tally: {after_forward} then {after_jump}",
+        );
+    }
+
+    /// **Two read groups are tallied apart, not summed** — the property spec §7 exists for, and
+    /// the one nothing pinned.
+    ///
+    /// A drop rate is a read group's property: one bad library shows up as one read group with an
+    /// anomalous mapping-quality or mismatch rate, and adding them together erases exactly that
+    /// signal. The failure is silent in the strongest sense — it changes no output, no dump and
+    /// no read, only a number nobody is looking at.
+    ///
+    /// Found by mutation while moving the tally onto the cursor: keying every read onto the first
+    /// entry, so a file's libraries merge into one, **left all 2,853 tests green**. The existing
+    /// multi-read-group test collects `(qname, read_group)` off the *reads* and never looks at the
+    /// tally.
+    ///
+    /// Each group is given a *different* drop reason, so a fold that merged them would have to
+    /// lose one of the two counters to pass.
+    #[test]
+    fn two_read_groups_are_tallied_apart_rather_than_summed() {
+        use crate::ng::read::input::read_groups::RecordOwner;
+        use crate::ng::types::ReadGroupId;
+
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "rg1".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "rg2".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(1)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut cursor = AlignmentCursor::over_records(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
+                bam_header(&matching_contigs()),
+                vec![
+                    // rg1 loses one read to the duplicate filter, rg2 one to QC-fail.
+                    tagged_read("dup", 10, FLAG_PAIRED | FLAG_DUPLICATE, "rg1"),
+                    tagged_read("kept1", 20, FLAG_PAIRED, "rg1"),
+                    tagged_read("qcfail", 30, FLAG_PAIRED | FLAG_QC_FAIL, "rg2"),
+                    tagged_read("kept2", 40, FLAG_PAIRED, "rg2"),
+                ],
+            )),
+            ContigId(1),
+            resolution,
+            reference_bases(),
+            ReadFilterConfig::default(),
+            Arc::from(Path::new("/fixture/sample.bam")),
+        );
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(FIXTURE_CONTIGS[1].1 as u64),
+            })
+            .expect("on this chromosome");
+        while let Some(read) = cursor.next_read() {
+            read.expect("the fixture decodes");
+        }
+
+        let counts = cursor.read_group_counts();
+        assert_eq!(
+            counts.len(),
+            2,
+            "the two libraries were folded into one tally: {counts:?}",
+        );
+
+        let of = |id: ReadGroupId| {
+            counts
+                .iter()
+                .find(|(group, _)| *group == Some(id))
+                .map(|(_, tally)| tally.clone())
+                .unwrap_or_else(|| panic!("no tally for {id:?} in {counts:?}"))
+        };
+        let first = of(ReadGroupId(0));
+        assert_eq!((first.duplicate, first.qc_fail, first.kept), (1, 0, 1));
+        let second = of(ReadGroupId(1));
+        assert_eq!((second.duplicate, second.qc_fail, second.kept), (0, 1, 1));
+    }
+
+    /// **The other-sample count rides on the first entry, and is not a drop.**
+    ///
+    /// A record belonging to another sample says nothing about how *this* sample's read groups
+    /// behaved, so it is deliberately outside every other counter — charging it as a drop would
+    /// make a shared file look like a low-quality one. It belongs to no single read group either,
+    /// so it is reported once, against the **first**.
+    ///
+    /// **It takes two of our read groups and a foreign record to state that**, which is why no
+    /// earlier fixture could: with one read group the first entry *is* the last, so moving the
+    /// rider to the last entry is undetectable. Measured — that mutation survived all 2,855 tests
+    /// until this fixture existed.
+    #[test]
+    fn the_other_sample_count_rides_on_the_first_entry_and_is_not_a_drop() {
+        use crate::ng::read::input::read_groups::RecordOwner;
+        use crate::ng::types::ReadGroupId;
+
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "mine1".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "mine2".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(1)),
+                ),
+                (
+                    "theirs".to_string().into_boxed_str(),
+                    RecordOwner::OtherSample,
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let mut cursor = AlignmentCursor::over_records(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
+                bam_header(&matching_contigs()),
+                vec![
+                    tagged_read("ours-a", 10, FLAG_PAIRED, "mine1"),
+                    tagged_read("foreign", 20, FLAG_PAIRED, "theirs"),
+                    tagged_read("ours-b", 30, FLAG_PAIRED, "mine2"),
+                ],
+            )),
+            ContigId(1),
+            resolution,
+            reference_bases(),
+            ReadFilterConfig::default(),
+            Arc::from(Path::new("/fixture/sample.bam")),
+        );
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(FIXTURE_CONTIGS[1].1 as u64),
+            })
+            .expect("on this chromosome");
+        while let Some(read) = cursor.next_read() {
+            read.expect("the fixture decodes");
+        }
+
+        let counts = cursor.read_group_counts();
+        assert_eq!(
+            counts.len(),
+            2,
+            "two of ours, and the foreign one is not a read group of this sample"
+        );
+
+        let (_, first) = &counts[0];
+        assert_eq!(
+            first.other_sample, 1,
+            "the foreign record must be reported against the first entry: {counts:?}",
+        );
+        let (_, second) = &counts[1];
+        assert_eq!(
+            second.other_sample, 0,
+            "…and against that entry only, or a caller summing them double-counts it",
+        );
+
+        // **Not a drop, and that is the point of the separate counter.** Every drop counter of
+        // both entries is zero: the foreign record was skipped, not rejected.
+        for (group, tally) in &counts {
+            assert_eq!(
+                (tally.kept, tally.duplicate, tally.low_mapq, tally.unmapped),
+                (1, 0, 0, 0),
+                "the foreign record was charged as a drop against {group:?}",
+            );
+        }
     }
 
     /// The message names the file and both positions — two bare offsets are meaningless

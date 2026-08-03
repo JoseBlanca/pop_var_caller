@@ -44,8 +44,9 @@ use noodles_sam as sam;
 
 use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::read::aligned_read::{AlignedRead, NoodlesRawAlignedRead};
-use crate::ng::read::filtering::{RecordSource, resolve_read_group};
+use crate::ng::read::filtering::RecordSource;
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
+use crate::ng::read::input::read_groups::resolve_read_group;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 

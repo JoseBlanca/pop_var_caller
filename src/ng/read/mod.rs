@@ -67,7 +67,7 @@ pub(crate) const PLACEHOLDER_READ_GROUP: crate::ng::types::ReadGroupId =
 /// un-normalised, which is what production does
 /// ([read_processor.rs](../../../pileup/per_sample/read_processor.rs)) and what ng
 /// deliberately diverges from (spec §7, §9). Step 1 made the same call for the same reason
-/// ([`ReadFilterError::Reference`](filtering::ReadFilterError)).
+/// ([`ReadFilterError::Reference`](input::cursor::ReadFilterError)).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ReadPrepError {

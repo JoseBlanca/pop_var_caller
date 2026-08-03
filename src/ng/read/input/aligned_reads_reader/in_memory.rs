@@ -71,8 +71,11 @@ pub(crate) struct InMemoryAlignedReadsReader {
     /// for a reader that never fails. Counted in the same space as `next_index` — a read of the
     /// script, **not** a reference coordinate.
     failing_read_index: Option<usize>,
-    /// Whether repositioning fails. See [`with_failing_seek`](Self::with_failing_seek).
-    seek_fails: bool,
+    /// Which reposition fails — counted from the first, or `None` for a reader whose seeks all
+    /// succeed. See [`with_failing_seek_at`](Self::with_failing_seek_at).
+    failing_seek_index: Option<usize>,
+    /// How many repositions have been asked for, so `failing_seek_index` can name one.
+    seeks_asked_for: usize,
 }
 
 impl InMemoryAlignedReadsReader {
@@ -82,7 +85,8 @@ impl InMemoryAlignedReadsReader {
             records,
             next_index: 0,
             failing_read_index: None,
-            seek_fails: false,
+            failing_seek_index: None,
+            seeks_asked_for: 0,
         }
     }
 
@@ -105,7 +109,8 @@ impl InMemoryAlignedReadsReader {
         self
     }
 
-    /// Fail the **reposition** rather than a read.
+    /// Fail the **reposition** rather than a read, at reposition `seek_index` counting from the
+    /// first.
     ///
     /// The other way a reader can break, and a different fatal route: on a BAM,
     /// [`begin_region`](Self::begin_region) runs an index query, so a corrupt index fails the
@@ -113,9 +118,14 @@ impl InMemoryAlignedReadsReader {
     /// region from wherever the reader happened to be left — a plausible, silently short answer,
     /// which is the condition `CursorError::AfterFailure` exists to make loud one layer later.
     ///
+    /// **Positional rather than all-or-nothing, and that is what makes it useful.** A reader
+    /// whose *first* seek fails has served nothing, so a caller cannot tell "left exactly as it
+    /// was" from "was never anywhere" — which is precisely the state a failed reposition must
+    /// preserve. Failing a *later* seek is what reaches it.
+    ///
     /// A reader whose seek fails has not moved, so `next_index` is left where it was.
-    pub(crate) fn with_failing_seek(mut self) -> Self {
-        self.seek_fails = true;
+    pub(crate) fn with_failing_seek_at(mut self, seek_index: usize) -> Self {
+        self.failing_seek_index = Some(seek_index);
         self
     }
 
@@ -130,12 +140,14 @@ impl InMemoryAlignedReadsReader {
     /// keeps the arm's shape identical to the ones that *will* use it, so the enum's
     /// delegation is uniform and a later arm cannot quietly need a different signature.
     pub(crate) fn begin_region(&mut self, _region: GenomeRegion) -> io::Result<()> {
-        if self.seek_fails {
+        let this_seek = self.seeks_asked_for;
+        self.seeks_asked_for += 1;
+        if self.failing_seek_index == Some(this_seek) {
             // The reader has not moved: a failed seek leaves the position it had, which is what
             // makes swallowing the error produce a wrong answer rather than an empty one.
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "the script is set to fail its reposition",
+                format!("the script is set to fail reposition {this_seek}"),
             ));
         }
         self.next_index = 0;
@@ -553,7 +565,7 @@ mod tests {
     /// fails the *move* rather than a read.
     #[test]
     fn a_scripted_seek_failure_breaks_the_reposition() {
-        let mut reader = reader(vec![read_named("a", 0, 10)]).with_failing_seek();
+        let mut reader = reader(vec![read_named("a", 0, 10)]).with_failing_seek_at(0);
 
         let error = reader
             .begin_region(region(1, 100))

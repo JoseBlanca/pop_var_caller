@@ -6,7 +6,7 @@
 //! (`arch/alignment_cursor.md` §2.4).
 
 use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::filtering::ReadGroupCounts;
+use crate::ng::read::input::cursor::ReadGroupCounts;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{ContigId, GenomePosition, Position};
 

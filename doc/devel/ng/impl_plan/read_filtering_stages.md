@@ -133,7 +133,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   sanctions the reduction — it lists one replacement test "replacing the three". C1 also gained
   `with_failing_seek`, for the second way a reader can break, after a mutation swallowing a
   failed reposition survived the whole suite.*
-- ☐ **C2. The cursor takes over the loop — its own commit, do not bundle.** `AlignmentCursor`
+- ✅ **C2. The cursor takes over the loop — its own commit, do not bundle.** `AlignmentCursor`
   gains the record buffer, the reference, the fetch scratch buffer, the config, the tally and a
   `failed` flag, and calls the two filters and the conversion itself. `ReadFilter`, `FilterState`,
   `restart_after_end_of_input`, `has_failed`, `source_mut`, `with_validated_contigs` and
