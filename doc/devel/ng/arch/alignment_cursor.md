@@ -1,5 +1,10 @@
 # ng — the alignment cursor: types & interfaces
 
+*Built, 2026-08-03 — Milestones A–F are complete and the old path is deleted. **Read the
+present tense below as the tense of a draft written before the work**: where it says the
+per-region query "does X today", that path no longer exists. The types it specifies are the
+ones in the tree.*
+
 *Architecture draft, 2026-08-02. Code-facing companion to
 [`../spec/alignment_cursor.md`](../spec/alignment_cursor.md) — every **why** points there and is
 not re-argued here. Replaces the region-query half of

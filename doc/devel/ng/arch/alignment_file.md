@@ -10,6 +10,24 @@ shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary + 
 verbs for functions, newtypes for domain scalars. Signatures are illustrative; the **contract** is
 the deliverable. See the spec for the "why" behind every decision here.*
 
+> ## ⛦ Superseded in part, 2026-08-03 — read this first
+>
+> §1's `RegionReads` / `ReaderHandle` / `BorrowedReader` / `ReaderKind`, the `readers` pool and
+> `readers_opened`, §4 ("Serving a region") in its entirety, and the region-query
+> `RecordSource` impls **no longer exist**. They were replaced by
+> [`alignment_cursor.md`](alignment_cursor.md) and deleted at its Milestone F, along with
+> `src/ng/read/input/region_query.rs`.
+>
+> `AlignmentFile` itself is live, and so is everything about opening and validating it. What it
+> hands out now is `cursor(contig, reference) -> AlignmentCursor` — see
+> [`alignment_cursor.md`](alignment_cursor.md) §2.2 for the type and §2.4 for the sample-level
+> `SampleCursor` that callers actually hold. The file no longer keeps a tally either: a
+> cursor's filter lives as long as the cursor, so `AlignmentCursor::read_group_counts` reads it
+> in place rather than having it folded back per query.
+>
+> Read the superseded sections as the design record of a path that shipped, was measured, and
+> was replaced.
+
 ## Module home
 
 `src/ng/read/input/`, a folder beside `read/filtering.rs` (spec §6). A folder rather than a file

@@ -17,6 +17,33 @@ reader pool with a per-worker cursor; the rest of this document stands.***
 
 ---
 
+> ## ⛦ Superseded in part, 2026-08-03 — read this first
+>
+> This document specifies **two** things: opening and validating one alignment file, and
+> serving its reads for a region. **The first half is live. The second is history.**
+>
+> The validate-on-open gate (§3.1), the error model around it, and the `ref_id == ContigId`
+> invariant everything above leans on are exactly as built. What is gone is everything about
+> *serving a region*: the per-region `RecordSource` implementations, the `OrderVerified` guard,
+> the `RegionReads` stream, and the **reader pool** — §3.3's "reader pooling → built now" and
+> its `readers_opened` accounting included. They were replaced by
+> [`alignment_cursor.md`](alignment_cursor.md), a per-file reader that stays positioned in one
+> chromosome and keeps the reads it has already decoded and filtered, and deleted at that
+> plan's Milestone F together with `src/ng/read/input/region_query.rs`.
+>
+> **What replaced each idea, so a reader is not left guessing.** The per-region query becomes
+> `AlignmentFile::cursor(contig, reference)` → `AlignmentCursor`. Pooling becomes *one cursor
+> per worker, sharing nothing* — a cursor opens its own descriptor and holds it, so there is no
+> lending and nothing to return. The streaming order guard becomes
+> `CursorError::OutOfOrderRead`, raised by the cursor and naming the file it came from. The
+> region narrowing and the sorted early stop become `RegionRecords`; finding records becomes
+> the per-format `RecordReader`s, which **position and never bound**.
+>
+> Sections whose subject is the deleted half are kept as the design record they are — including
+> the reasoning that chose pooling, which is worth reading beside
+> `alignment_cursor.md` §3's measurement that the pool was noise (3 lock acquisitions in
+> 25,446) and that the whole per-region query setup was 0.9 % of the walk.
+
 ## 1. What this is — scope and non-goals
 
 This module turns *one alignment file on disk* into *a validated handle that answers region queries

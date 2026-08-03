@@ -111,23 +111,31 @@ copied file keeps its name.
 /// (`locus_generation.md` §2). Two reference accessors, not one: `preparer` carries its own
 /// (read preparation's rule), `reference` serves the walker's REF fetches (spec §2).
 /// **Neither is rebuilt per segment** — that is the ~564k-opens trap (spec §8).
-/// **As built** (`generator.rs:500-556`), which differs from this doc's forecast in three ways
-/// worth naming: a **third** type parameter for the read-query accessor factory, `RawRefSeq`
-/// rather than `RefSeq` (the mismatch-fraction filter needs un-canonicalised bytes), and an
-/// `Option` around the allocator.
-pub struct PileupGenerator<R: RawRefSeq, MakeReference, P: ReadPreparer>
-where
-    MakeReference: FnMut() -> R,
-{
+/// **As built** (`generator.rs`, re-read 2026-08-03), which differs from this doc's forecast
+/// in four ways worth naming: `RawRefSeq + EvictableRefSeq` rather than `RefSeq` (the
+/// mismatch-fraction filter needs un-canonicalised bytes, and the cursor releases what a walk
+/// has passed), an `Option` around the allocator, a **boxed** accessor factory, and — since
+/// the alignment cursor — **two** type parameters rather than three, because boxing the
+/// factory dropped one.
+///
+/// **⚠ The forecast's third parameter is gone and so is what it was for.** This doc was
+/// written when a generator opened a read *query* per region. It now holds a
+/// [`SampleCursor`](../../../../src/ng/read/input/sample_cursor.rs) for a whole chromosome and
+/// points it at each region (`spec/alignment_cursor.md`), so the factory is called once per
+/// file per chromosome rather than once per file per region — perf-review finding L2, closed.
+pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> {
     /// Built once for the run and handed to each walk as a shared handle. `Arc` and not `Rc`
     /// deliberately — `ref_seq.rs:188` and the per-sample fan-out to come; the accessor being
     /// `!Sync` is why one call site allows `clippy::arc_with_non_send_sync`.
     reference: Arc<R>,
-    /// A **factory**, because the read query gives each of a sample's k files its own raw
-    /// accessor: they are stateful readers and sharing one would make k streams share a
-    /// cursor. Called once per file at every `begin_segment`, which is why the ~564k-opens
-    /// trap lives here (spec §8).
-    make_reference: MakeReference,
+    /// A **factory**, because each of a sample's k file cursors needs its own raw accessor:
+    /// they are stateful readers, and sharing one would make k cursors share a file position
+    /// and one sliding window. Called once per file per **chromosome** — it used to be once
+    /// per file per region, which is where the ~564k-opens trap lived (spec §8).
+    ///
+    /// Boxed, which is what drops this struct's third type parameter; the indirection costs
+    /// one virtual call per file per chromosome, which is the point.
+    make_reference: Box<dyn FnMut() -> R + Send>,
     /// The preparer and its scratch, lent to each region's read stream. Shared because the
     /// stream borrows it for the walk's lifetime; it also carries the declined tally and the
     /// latched error `end_walk` takes.
@@ -305,12 +313,11 @@ struct RefSeqFetcher<R: RefSeq>(R);
 ### 2.1 The generator
 
 ```rust
-// As built (`generator.rs:868-872`): three parameters, `RawRefSeq`, and a `counts()` the
-// dispatcher needs because a boxed generator's own counters are otherwise unreachable (C4).
-impl<R: RawRefSeq, MakeReference, P: ReadPreparer> LocusGenerator<()>
-    for PileupGenerator<R, MakeReference, P>
-where
-    MakeReference: FnMut() -> R,
+// As built (`generator.rs`, re-read 2026-08-03): two parameters — the third went with the
+// boxed factory at the alignment cursor — and a `counts()` the dispatcher needs because a
+// boxed generator's own counters are otherwise unreachable (C4).
+impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> LocusGenerator<()>
+    for PileupGenerator<R, P>
 {
     fn begin_segment(&mut self, region: GenomeRegion);
     fn next_locus(&mut self, segment: &(), reads: &SampleReads)
@@ -323,8 +330,9 @@ The segment payload is `()` because `RegionKind::Generic` carries none — the s
 `GeneratorSlot<()>` ([locus_generation/mod.rs:377](../../../../src/ng/locus_generation/mod.rs#L377)).
 
 **Contract.** Lazy, one locus resident at a time, coordinate order. `begin_segment` **records the
-region and nothing else** — it cannot fail, and opening a read query can, so the first `next_locus`
-opens it and is where an `IngestError` surfaces. `next_locus` returns the next record whose anchor
+region and nothing else** — it cannot fail, and pointing the cursor at it can (a chromosome
+boundary mints a new cursor), so the first `next_locus` does that and is where an `IngestError`
+surfaces. `next_locus` returns the next record whose anchor
 falls inside the region, or `None` once the walk drains; a record anchored outside is dropped and
 tallied, which is what makes neighbouring regions tile without duplicates or holes (spec §2).
 Accessors, the preparer's scratch and the chain-id allocator persist **across** segments; only the
@@ -334,13 +342,27 @@ variant reaches the caller wrapped (§3).
 
 ### 2.2 The walk, and the borrow that shapes it
 
+> **⛦ SUPERSEDED, TWICE, AND KEPT FOR ITS ARGUMENT.** This section diagnosed a borrow that
+> stopped a generator holding a read stream across `next_locus` calls, and specified making the
+> stream owned as a prerequisite. That was done. Then the alignment cursor
+> ([`../spec/alignment_cursor.md`](../spec/alignment_cursor.md)) removed the stream itself: a
+> generator holds a `SampleCursor` for a **chromosome** and points it at each region, and
+> Milestone F deleted `reads_in_region`, `SampleRegionReads`, `RegionReads`, `RegionSource`,
+> `BorrowedReader` and the reader pool along with the file they lived in.
+>
+> **So read the rest of this section as the record of why the borrow had to go, not as a
+> description of anything.** Every type it names is gone, and its file/line citations point
+> into `src/ng/read/input/region_query.rs`, which no longer exists. The conclusion it reached
+> survives and is stronger than it was: *resumable + borrowed + no lifetime on `Self`* is still
+> not expressible, and what a generator owns is now a cursor rather than a stream.
+
 `reads_in_region` returns `SampleRegionReads<'_, R>`, which **borrows the `SampleReads`**
 ([read/input/mod.rs:508](../../../../src/ng/read/input/mod.rs#L508)). The chain is
 `SampleReads.files: Vec<AlignmentFile>` ([:330](../../../../src/ng/read/input/mod.rs#L330)) →
 `&'a AlignmentFile` held by `RegionReads<'a>`
 ([open_bam.rs:215](../../../../src/ng/read/input/open_bam.rs#L215)), `BorrowedReader<'a>`
 ([:171](../../../../src/ng/read/input/open_bam.rs#L171)) and `RegionSource<'a>`
-([region_query.rs:724](../../../../src/ng/read/input/region_query.rs#L724)) — the borrow exists
+(`region_query.rs:724`) — the borrow exists
 because a pooled reader has to be handed back to the file it came from. `LocusGenerator` lends
 `reads: &SampleReads` **per call** and carries no lifetime parameter, so a generator **cannot hold
 that stream between `next_locus` calls** — and the pileup, unlike the STR generator, yields many
@@ -362,9 +384,6 @@ cheapest is the borrow.
 /// The walk over one region: **owns** its read stream, so nothing borrows `SampleReads` and
 /// nothing has to be materialised. One `PileupWalker` per region, built on the first
 /// `next_locus` and drained across the calls that follow (§2.1).
-// As built (`generator.rs:472-473`): the `RefSeqFetcher` shim is **gone** — A0 deleted it and
-// the walk fetches through ng's `RefSeq` directly — so the walker's reference parameter is the
-// shared handle itself.
 struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
     walker: PileupWalker<PreparedRegionReads<R, P>, Arc<R>>,
     region: GenomeRegion,
@@ -372,12 +391,20 @@ struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
 }
 ```
 
+> **⛦ As built, this is two types and the split is the cursor's doing.** The `RefSeqFetcher`
+> shim is gone (A0 deleted it; the walk fetches through ng's `RefSeq` directly), and — since
+> the alignment cursor — **the walker lives for a chromosome, not for a region**. So
+> `ChromosomeWalk` holds the walker and the sample's cursor, and `RegionWalk` is reduced to
+> what is genuinely per-region: the clamp region, and the allocator counters as they stood
+> when the region opened. "One `PileupWalker` per region" above is no longer true; one per
+> chromosome is.
+
 This needs `reads_in_region` to hand back an owned stream, which is **two borrows, not a redesign** —
 and the codebase already uses the remedy for both, one field away:
 
 | borrow today | becomes | why it is not self-referential |
 |---|---|---|
-| `header: &'a sam::Header` in `BamRegionSource`/`CramRegionSource` ([region_query.rs:70](../../../../src/ng/read/input/region_query.rs#L70), [:388](../../../../src/ng/read/input/region_query.rs#L388)) | `Arc<sam::Header>`, cloned from `AlignmentFile` | an independent `Arc`, not a reference *into* the file. Precedent in the same struct: `entries: Arc<[crai::Record]>` ([:393](../../../../src/ng/read/input/region_query.rs#L393)) |
+| `header: &'a sam::Header` in `BamRegionSource`/`CramRegionSource` (`region_query.rs:70`, `region_query.rs:388`) | `Arc<sam::Header>`, cloned from `AlignmentFile` | an independent `Arc`, not a reference *into* the file. Precedent in the same struct: `entries: Arc<[crai::Record]>` (`region_query.rs:393`) |
 | `file: &'a AlignmentFile` in `BorrowedReader`/`RegionReads` ([open_bam.rs:171](../../../../src/ng/read/input/open_bam.rs#L171), [:215](../../../../src/ng/read/input/open_bam.rs#L215)) — held so `Drop` can return the pooled reader | `Arc<AlignmentFile>`, with `SampleReads.files: Vec<Arc<AlignmentFile>>` | the pool lives on `AlignmentFile`, so it stays shared per file; the clone is one atomic increment per query |
 
 **Re-verified after the `ng-read-groups` merge (2026-07-27): all four survive it unchanged.**
@@ -502,8 +529,12 @@ this work. It is not a design question — it is here because the plan must sequ
   - **Where `ReadPreparer::prepare_read` sits in the chain** — as a `map` on the owned stream
     feeding `PileupWalker`, so preparation stays lazy and per read. It must not become a collect
     step; that is the property spec §7 names as the one a port can quietly destroy.
-  - **No spec fold-in is owed here:** spec §2's "one read query per segment, lazily streamed" and
-    §7's "no read buffer at all" are both literally true of §2.2's shape.
+  - **A spec fold-in *is* owed here now, and it is the cursor's.** Spec §2's "one read query
+    per segment, lazily streamed" was literally true of §2.2's shape and is no longer true of
+    anything: there is no query, and the cursor is opened once per chromosome. §7's "no read
+    buffer at all" is *nearly* true and the difference is worth stating — the cursor keeps the
+    reads a nearby region can reuse, bounded by the forget rule, not by the region's length
+    (`spec/alignment_cursor.md` §6). Nothing collects.
 
 ## 5. Reconciliation with existing code
 
@@ -527,8 +558,8 @@ Every row read at the cited line (2026-07-27). Convergence, not new types.
 | the prepared read | `PreparedRead` / `MateRole` / `ReadLengthError` [walker/mod.rs:236](../../../../src/pileup/walker/mod.rs#L236) | **copy into `src/ng/read/prepared_read.rs`**, extend with `read_group` (§1.2). Reverses [read_preparation.md](../spec/read_preparation.md) §3's reuse-as-is, which owes a fold-in |
 | `ObservedSequence` | [locus_generation/mod.rs:113](../../../../src/ng/locus_generation/mod.rs#L113) | **extend** with the read group **and `placed_left`** (§3 — the type carries neither bias field today, so without it `finalise` has nowhere to put the value); a shared-type change, so the STR generator splits too — a fold-in for [locus_generation.md](locus_generation.md) and its arch. Shares one fixture rebaseline with the `ReadCoverage` reshape above |
 | the generator contract + slot | `LocusGenerator` [:198](../../../../src/ng/locus_generation/mod.rs#L198), `GeneratorSet.generic: GeneratorSlot<()>` [:375](../../../../src/ng/locus_generation/mod.rs#L375) | implement; replaces `NoLoci { NotImplemented }` |
-| read access | `SampleReads::reads_in_region` (`read/input/mod.rs`) | reuse — after the §2.2 prerequisite makes the stream owned. **`ng-read-groups` keeps the borrow**, so the prerequisite stands as written |
-| the read type the stream yields | `AlignedRead` [read/aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36) — replaces `MappedRead` as `SampleRegionReads::Item` [mod.rs:590](../../../../src/ng/read/input/mod.rs#L590) | consume as-is; its `read_group: ReadGroupId` is what the preparer threads into ng's own `PreparedRead` (§1.2) |
+| read access | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** (`read/input/mod.rs`) | the row as written is dead: `reads_in_region` was deleted at the alignment cursor's Milestone F. A generator now mints one `SampleCursor` per chromosome and calls `move_to_region` per region, which is what made the §2.2 prerequisite moot rather than merely satisfied |
+| the read type the cursor yields | `AlignedRead` [read/aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36) — replaces `MappedRead`, and is what `SampleCursor::next_read` hands back | consume as-is; its `read_group: ReadGroupId` is what the preparer threads into ng's own `PreparedRead` (§1.2) |
 | `AlignedRead` → `PreparedRead` | `ReadPreparer::prepare_read` [read/mod.rs:113](../../../../src/ng/read/mod.rs#L113) (takes `AlignedRead` since the merge; was `MappedRead`), `LeftAlignPreparer` [left_align.rs:87](../../../../src/ng/read/left_align.rs#L87) | **call** — this generator is step 2's only consumer |
 | the reference | `RefSeq` [ng/ref_seq.rs:142](../../../../src/ng/ref_seq.rs#L142) → `MultiChromRefFetcher` [fasta/mod.rs:114](../../../../src/fasta/mod.rs#L114) | shim (§1.3); contracts already agree on canonical bytes |
 | the region clamp | `drive_region_into_writer` [pileup_to_psp.rs:271](../../../../src/pileup/per_sample/pileup_to_psp.rs#L271) | reuse the **rule** (`(start..=end).contains(&record.pos)`), not the code — the rest of that file is `.psp` machinery |
@@ -540,8 +571,8 @@ Every row read at the cited line (2026-07-27). Convergence, not new types.
 
 Tests live beside the code; `parity.rs` is `#[cfg(test)]`, the `delimit_parity` shape.
 
-**As built, the test surface is four files and one example**, which is worth stating because the
-weight is not where a reader would guess:
+**As built, the test surface is four files and one example** (re-read 2026-08-03), which is
+worth stating because the weight is not where a reader would guess:
 
 | where | what it is |
 |---|---|

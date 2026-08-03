@@ -13,6 +13,25 @@ Code-facing companion: [`../arch/sample_reads.md`](../arch/sample_reads.md) (typ
 
 ---
 
+> ## ⛦ The entry point changed, 2026-08-03 — read this first
+>
+> **Every rule in this document survives; the function that carries them does not.**
+> `SampleReads::reads_in_region`, the `SampleRegionReads` enum and `MergedRegionReads` were
+> deleted at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. What a caller holds is
+> now `SampleReads::cursor(contig, make_reference) -> SampleCursor`, made **once per
+> chromosome** and pointed at each region.
+>
+> The design this document settled is unchanged and was carried across type for type: the
+> single-file arm is still the *absence* of a merge rather than a merge with k = 1; the arms are
+> still unified by an enum and never `Box<dyn Iterator>`, for the same inlining reason; the
+> argmin is still linear over a small contiguous key array with ties breaking to the lowest file
+> index; the same-file-twice check still rides on a comparison the argmin already made. Read
+> §3.2 and §5 as written and substitute `SampleCursor` / `MergedCursors` for the stream types.
+>
+> One capability moved rather than survived: `SampleReads::counts` is now
+> `SampleCursor::read_group_counts`, and it is current the moment it is asked instead of being
+> folded in as each region's stream ended.
+
 ## 1. What this is — scope and non-goals
 
 A sample is **usually several files, sometimes one**. The dominant reason for several is that the same
@@ -275,6 +294,11 @@ src/ng/read/input/
 │               (Single|Merged); the cross-file sample-name check; the IngestError enum; re-exports
 └── merge.rs  – the argmin k-way merge + the same-file-twice check (§3.2)
 ```
+
+> **⛦ As built:** `mod.rs` keeps `SampleReads::{open, cursor, sq_md5s}` and `IngestError`;
+> `reads_in_region`, `counts` and `SampleRegionReads` are gone. `merge.rs` is gone too — the
+> argmin and the same-file-twice check moved verbatim into `sample_cursor.rs` as
+> `MergedCursors`. See the banner at the top.
 
 **Decided (owner, 2026-07-20): rebuild ng-owned.** Production's `segment_merge::SegmentMergedReads` is
 `pub(crate)` (ng-reachable) and already does argmin + cross-file duplicate detection over the same

@@ -67,11 +67,19 @@ by document kind:
   - [`reference_info.md`](arch/reference_info.md) — the reference-info reader's types &
     interfaces (`ReferenceInfo`/`ContigInfo`, the cache, the writer, the background verify);
     companion to `spec/reference_info.md`. Foundational infra, not a step.
-  - [`alignment_file.md`](arch/alignment_file.md) — `AlignmentFile` (the validated handle),
-    the region-query `RecordSource` impls, the order guard, the reader pool;
-    companion to `spec/alignment_file.md`.
+  - [`alignment_file.md`](arch/alignment_file.md) — `AlignmentFile` (the validated handle) and
+    the validate-on-open gate; companion to `spec/alignment_file.md`. **Its region-query half —
+    the per-region `RecordSource` impls, the order guard and the reader pool — is superseded by
+    `alignment_cursor.md` and was deleted**; that part of both documents is a design record.
+  - [`alignment_cursor.md`](arch/alignment_cursor.md) — the long-lived reader that stays
+    positioned in one chromosome of one file and keeps the reads it has already decoded and
+    filtered: `AlignmentCursor`, `SampleCursor`, the per-format `RecordReader`s, and the forget
+    rule. **The only way to read a BAM or a CRAM in ng.** Companion to
+    `spec/alignment_cursor.md`.
   - [`sample_reads.md`](arch/sample_reads.md) — `SampleReads`, the argmin merge and its
     per-read budget; seeds the shared `GenomePosition`. Companion to `spec/sample_reads.md`.
+    **The merge it specifies now lives in `sample_cursor.rs` over cursors** rather than over
+    per-region streams; the k-way rules are unchanged and the entry point is not.
   - [`read_groups.md`](arch/read_groups.md) — `ReadGroup`/`ReadGroups`, the run-wide `ReadGroupId`,
     the per-open `ReadGroupResolution`, and ng's own `AlignedRead`; companion to
     `spec/read_groups.md`.

@@ -584,7 +584,9 @@ were verified against the `ng-read-ingestion` worktree; they stand as feedback t
 not it has merged.
 
 1. **A per-query reference accessor that costs nothing to make — the one real gap.**
-   `reads_in_region` takes a factory `F: FnMut() -> R` and calls it once per file per query
+   `cursor` takes a factory `F: FnMut() -> R` and calls it once per file per **chromosome**
+   (it was `reads_in_region`, once per file per *query*, until
+   [`alignment_cursor.md`](alignment_cursor.md) replaced it)
    (`src/ng/read/input/mod.rs:440`). A per-locus generator issues on the order of 10⁶ queries. Neither
    accessor is cheap to construct: `WindowedRefSeq::new` holds no resident contig, so a fresh one per
    query re-reads its window at every locus and defeats the sliding buffer; and `ResidentRefSeq::new`
@@ -640,7 +642,7 @@ neither.
 | what | existing code | ng reuse |
 |---|---|---|
 | region stream | [src/ng/region_typing/mod.rs:789](src/ng/region_typing/mod.rs#L789) | consume as-is; mirror its iterator + counts shape |
-| read access | `SampleReads::reads_in_region` | reuse as-is (§8) |
+| read access | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** | reuse as-is (§8); the entry point changed at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F |
 | locus/cohort split | [src/var_calling/types.rs:39](src/var_calling/types.rs#L39) | model for `CohortLocus` composing `SampleLocusObservations` (§3) |
 | cross-sample reconciliation | [src/var_calling/variant_grouping.rs:99](src/var_calling/variant_grouping.rs#L99) | **not this step** — the merge groups by overlap (§3) |
 

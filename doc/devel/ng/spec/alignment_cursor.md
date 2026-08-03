@@ -1,6 +1,10 @@
 # ng — reading a sorted BAM or CRAM forwards, once
 
-**Date:** 2026-08-01 · **Status:** design agreed with the owner, **no code yet**.
+**Date:** 2026-08-01 · **Status:** ✅ **BUILT, 2026-08-03** — Milestones A–F complete. The
+per-region query this document argues against was deleted at Milestone F, together with
+`region_query.rs`, the reader pool and `readers_opened`, so **the present tense below describes
+the state this design replaced, not the state of the tree.** The measurements are as recorded.
+*(Was: design agreed with the owner, no code yet.)*
 **Companions:** [alignment_file.md](alignment_file.md) (the current design this replaces),
 [sample_reads.md](sample_reads.md), [ref_seq.md](ref_seq.md) (the same split, for the reference),
 [locus_generation_pileup.md](locus_generation_pileup.md) (the caller).

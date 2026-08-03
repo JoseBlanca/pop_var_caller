@@ -65,14 +65,19 @@ The `Generic` region kind carries no payload, so the segment type is `()` and th
 through `begin_segment` alone.
 
 ```
-GenomeRegion ─▶ SampleReads::reads_in_region ─▶ ReadPreparer ─▶ the walk ─▶ locus, locus, locus…
+GenomeRegion ─▶ SampleCursor::move_to_region ─▶ ReadPreparer ─▶ the walk ─▶ locus, locus, locus…
                 (AlignedRead)                    (PreparedRead)   (§4)
 ```
 
-**One read *query* per segment — and a query is a lazy stream, never a batch.** This is worth
-stating flatly because the opposite reading is alarming and wrong. `reads_in_region` returns a pull
-iterator ([read/input/mod.rs:589](../../../../src/ng/read/input/mod.rs#L589),
-`Iterator<Item = Result<AlignedRead, IngestError>>`); it collects nothing. The walk pulls a read
+> **⛦ This used to read `SampleReads::reads_in_region`, and the change is the alignment
+> cursor** ([`alignment_cursor.md`](alignment_cursor.md)). A generator no longer opens a read
+> *query* per segment: it mints one cursor per **chromosome** and points it at each region,
+> which is why the same reads stopped being decoded a dozen times over. `reads_in_region` and
+> everything under it were deleted at that plan's Milestone F.
+
+**No batch, at any point — the cursor is a pull source.** This is worth stating flatly because
+the opposite reading is alarming and wrong. `SampleCursor::next_read` hands back one
+`Result<AlignedRead, CursorError>` at a time and collects nothing. The walk pulls a read
 only when it reaches that read's start, and drops it once it passes the read's `alignment_end`
 ([active_read_set.rs:149](../../../../src/pileup/walker/active_read_set.rs#L149)). **What is
 resident is the reads overlapping the current position — order (local depth × read length), hard
@@ -941,7 +946,7 @@ Every row read at the cited line, 2026-07-26.
 | the prepared read | `PreparedRead` / `MateRole` / `ReadLengthError` [walker/mod.rs:236](../../../../src/pileup/walker/mod.rs#L236) | **copy into `src/ng/read/`** and extend with `read_group` (§6); reverses [read_preparation.md](read_preparation.md) §3's reuse-as-is |
 | the walk loop and the open-record fold | [driver.rs](../../../../src/pileup/walker/driver.rs) (→ ng's `genome_walk.rs`), [open_record.rs](../../../../src/pileup/walker/open_record.rs) | **copy verbatim** into `src/ng/locus_generation/pileup/`, prove byte-identical, then change (§3) |
 | `PreparedRead`, `CigarOp`, `MateRole`, `WalkerConfig`, `WalkerError`, `RunSummary` | [walker/mod.rs:236,43,188,133](../../../../src/pileup/walker/mod.rs#L236) | already `pub` — reuse as-is, no copy |
-| the read input | `SampleReads::reads_in_region` ([read/input/mod.rs:508](../../../../src/ng/read/input/mod.rs#L508)) | reuse as-is; one query per region (§2) |
+| the read input | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** ([read/input/mod.rs](../../../../src/ng/read/input/mod.rs)) | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. One cursor per **chromosome**, re-pointed per region (§2) |
 | `AlignedRead` → `PreparedRead` | `LeftAlignPreparer` ([read/left_align.rs:87](../../../../src/ng/read/left_align.rs#L87)) | call — this generator is step 2's only consumer |
 | the read group | `AlignedRead.read_group` ([aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36)), `ReadGroupId` ([types.rs:178](../../../../src/ng/types.rs#L178)), the run's table ([read_groups.rs:43](../../../../src/ng/read/input/read_groups.rs#L43)) | **carry** into the observation's identity (§6). `PreparedRead` does not hold it, so the generator keeps it beside the walk rather than through it |
 | the reference | `RefSeq` (canonical) → `MultiChromRefFetcher` | a shim; the two contracts already agree on canonical bytes (§3) |

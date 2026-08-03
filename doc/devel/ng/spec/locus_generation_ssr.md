@@ -320,7 +320,7 @@ both are pinned: the seed derives only from the locus, and both tables are sorte
 
 | what | existing code | ng reuse |
 |---|---|---|
-| read fetch | `SampleReads::reads_in_region` | reuse as-is; **do not** port `fetch_locus_reads`' spanning gate (§2) |
+| read fetch | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** | the row as written is dead: `reads_in_region` was deleted at [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. One cursor per sample per chromosome, re-pointed at each repeat, and **one generator per sample**. Still **do not** port `fetch_locus_reads`' spanning gate (§2) |
 | depth cap | [src/ssr/pileup/fetch_reads.rs:80](src/ssr/pileup/fetch_reads.rs#L80) | port `Reservoir` + `locus_seed` directly, with the seed trap (§4) |
 | margin fetch | [src/ng/ref_seq.rs:142](src/ng/ref_seq.rs#L142) | reuse as-is; replaces `Locus.ref_bytes` |
 | read alignment | `align_read` per `read_preparation_ssr.md` | call, do not reimplement |

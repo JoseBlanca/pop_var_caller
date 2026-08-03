@@ -20,6 +20,11 @@ src/ng/read/
     │                       ReadGroupResolution, build_read_groups, ReadGroupError (§1–§3)
     ├── open_bam.rs       – AlignmentFile: loses sample_name, gains its resolution
     ├── region_query.rs   – the record sources: carry the resolution per query
+    │                       ⛦ DELETED 2026-08-03 (alignment_cursor.md, Milestone F).
+    │                       Its job is split between record_reader/ (finding and
+    │                       unpacking records) and region_records.rs (the narrowing,
+    │                       the early stop, and the read-group resolution below),
+    │                       each of which carries the resolution the same way.
     ├── mod.rs            – SampleReads: opened from read groups, not paths
     └── merge.rs          – unchanged
 ```
@@ -269,7 +274,7 @@ impl SampleReads {
 }
 ```
 
-**Contract, unchanged where it matters.** `reads_in_region` still yields one sample's reads in
+**Contract, unchanged where it matters.** The read path still yields one sample's reads in
 coordinate order, lazily, fused. What is added: every read carries its `ReadGroupId`, and a read
 belonging to another sample's read group in a shared file is not yielded and is **not** counted as a
 drop — it gets its own tally (spec §9).
@@ -277,7 +282,8 @@ drop — it gets its own tally (spec §9).
 ### 3.3 Resolving a record
 
 The resolution rides on the reused record buffer, refreshed once per query alongside the header the
-sources already borrow ([`region_query.rs:67`](../../../../src/ng/read/input/region_query.rs#L67)),
+sources already borrow (`region_query.rs`, since deleted — the resolution is carried by
+`RegionRecords` and, on the CRAM arm, by `record_reader/container.rs`),
 and is applied in `decode` — **not** in `read_next`. Reads dropped by the pre-decode gate (unmapped,
 secondary, duplicate, low MAPQ) never reach `decode`, so resolving there costs nothing for them; the
 `Sole` arm is a match and a copy either way.
@@ -334,7 +340,7 @@ Every row read at the cited line. The first four are **removals** — code that 
 | `AlignedRead` | `MappedRead` [`alignment_input.rs:78`](../../../../src/bam/alignment_input.rs#L78) | **model, not reuse**; copy `record_buf_to_mapped_read` [`:803`](../../../../src/bam/alignment_input.rs#L803) |
 | decode helpers | `compute_adaptor_boundary` is `pub(crate)` [`:883`](../../../../src/bam/alignment_input.rs#L883); `cigar_to_ops` is module-private [`:1105`](../../../../src/bam/alignment_input.rs#L1105) | reuse the first as-is; the second needs `pub(crate)` or a copy |
 | the per-record stamp | `NoodlesRawRecord.source_file_index` [`filtering.rs:382`](../../../../src/ng/read/filtering.rs#L382), stamped in `read_next` [`:438`](../../../../src/ng/read/filtering.rs#L438) | same slot, new payload: the file's `ReadGroupResolution` |
-| the region sources | `BamRegionSource` [`region_query.rs:64`](../../../../src/ng/read/input/region_query.rs#L64), which borrows `&'a sam::Header` [`:67`](../../../../src/ng/read/input/region_query.rs#L67) | carry the resolution the same way |
+| the record readers | `BamRegionSource` / `CramRegionSource` (`region_query.rs`, **deleted 2026-08-03** — now `record_reader/bam.rs`, `record_reader/cram.rs` and `region_records.rs`) | carry the resolution the same way; a CRAM settles it inside `decode_container_at`, which is what lets every auxiliary tag be dropped |
 | `ReadFilterCounts` | [`filtering.rs:117`](../../../../src/ng/read/filtering.rs#L117) | reuse the type; change its key (§3.2) |
 | `@RG` tag constants | noodles `read_group::tag::{SAMPLE, LIBRARY, PLATFORM}` (`SM`/`LB`/`PL`) | use as-is; there is **no** `SRX` constant — a non-standard tag read through `other_fields()`, as `SAMPLE` already is [`open_bam.rs:861`](../../../../src/ng/read/input/open_bam.rs#L861) |
 | `DuplicateReadAcrossFiles` | [`mod.rs:622`](../../../../src/ng/read/input/mod.rs#L622) | unchanged — still scoped to one sample's files (spec §9) |
