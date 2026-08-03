@@ -58,7 +58,10 @@ AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping qual
 - **No filter changes.** Which nine filters run, their thresholds, the order they run in and
   what each drop is called are `read_filtering.md`'s and stay exactly as they are.
 - **No change to what the cursor keeps** (§3).
-- **No performance change sought.** If a measurement moves, something is wrong.
+- **Speed is a constraint here, not a goal.** The change is for a simpler shape, and it is
+  worth doing on that alone. A *significant* slowdown would be a reason to reconsider the
+  design; an improvement is welcome and needs no defending. Neither is what this is for.
+  Either way, measure it — §8.
 
 **It does not** introduce a trait, add a type, change the meaning of any error, add a
 configuration knob, or touch `AlignedRead`.
@@ -260,6 +263,14 @@ drive `ReadFilter` as one thing; each moves to whichever piece keeps its subject
 | `ng_generic_walk_probe`, chr21 | `loci=236081 observations=251786 reads_admitted=54709` |
 
 `reads_admitted` is the direct one: step 1's keep count for the run.
+
+**And time the walk, because the constraint in §1 needs a number to be checked against.** The
+same probe prints `seconds` and `loci_per_second`; on the development machine chromosome 21 runs
+in **≈1.9 s** (one run, `seconds=1.876`, `loci_per_second=125834`, 2026-08-03 — a single
+measurement on one machine, not a benchmark). Compare before and after on the same machine in
+the same session. A few per cent either way is noise. A large regression is a reason to
+reconsider the design rather than to accept it; a large improvement is a pleasant surprise and
+changes nothing about why the change was made.
 
 **Three tests do not exist yet**, and each covers something no output comparison can see:
 
