@@ -32,11 +32,16 @@ pub mod left_align;
 mod left_align_parity;
 pub mod prepared_read;
 
-pub use aligned_read::{AlignedRead, NoodlesRawAlignedRead, RawAlignedRead};
-pub use filtering::{
-    ReadFilter, ReadFilterConfig, ReadFilterCounts, ReadFilterError, RecordSource,
-};
+pub use aligned_read::AlignedRead;
+pub use filtering::ReadFilterConfig;
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
+
+// **`ReadFilterConfig` is the only one of step 1's types re-exported here, because it is the
+// only one anything outside the crate names** — four `examples/` build one to drive a walk.
+// `ReadFilter`, `RecordSource`, `ReadFilterCounts`, `ReadFilterError`, `RawAlignedRead` and
+// `NoodlesRawAlignedRead` were re-exported too, and had no caller outside this crate at all;
+// they are `pub(crate)` now and named by their defining path. A dead re-export is what lets a
+// type stay `pub` long after its last outside caller went.
 
 use crate::ng::ref_seq::RefSeqError;
 

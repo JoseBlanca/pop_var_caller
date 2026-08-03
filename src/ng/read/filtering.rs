@@ -332,7 +332,7 @@ fn verdict_post_decode(
 /// (a std iterator's owned `Item` cannot borrow a reused buffer — the
 /// lending-iterator problem, spec §5). `Ok(true)` = filled, `Ok(false)` = end of
 /// input; an `Err` is **fatal to the run**.
-pub trait RecordSource {
+pub(crate) trait RecordSource {
     /// The reused buffer type — a [`RawAlignedRead`] the source refills in place. The
     /// `Default` bound is load-bearing: the [`ReadFilter`] iterator seeds *one*
     /// buffer with `Default::default()` and hands the same `&mut` to
@@ -469,7 +469,7 @@ fn unreadable_record(record: &RecordBuf, problem: &str) -> io::Error {
 /// input: `let read = read?;` propagates it. It is never folded into a per-read
 /// drop or a silent EOF.
 #[derive(Debug, thiserror::Error)]
-pub enum ReadFilterError {
+pub(crate) enum ReadFilterError {
     /// The record source failed to read the next record (e.g. a truncated file).
     #[error("reading the next alignment record failed")]
     Source(#[source] io::Error),
@@ -503,7 +503,7 @@ pub enum ReadFilterError {
 /// `counts()` is a **running** tally, readable at any point and final once the
 /// iterator is exhausted (iterate by `&mut` so the filter — and its counts —
 /// outlives the loop).
-pub struct ReadFilter<S: RecordSource, R> {
+pub(crate) struct ReadFilter<S: RecordSource, R> {
     source: S,
     /// The single record buffer reused across every read.
     record_buf: S::Record,

@@ -53,7 +53,7 @@ use crate::pileup::walker::CigarOp;
 /// before it is rejected, and SAM calls every line an alignment record — unmapped
 /// ones included. [`AlignedRead`] has no such case: [`decode_record`] refuses a
 /// record with no reference sequence id or no alignment start.
-pub trait RawAlignedRead {
+pub(crate) trait RawAlignedRead {
     /// The SAM flag bitfield — the same `u16` [`AlignedRead::flag`] carries; read
     /// by filters #1, #3–#6.
     fn flag(&self) -> u16;
@@ -203,7 +203,7 @@ pub(crate) fn decode_record(
 /// be overwritten. No `Clone`: the whole point is to reuse one buffer, and
 /// cloning would deep-copy the `RecordBuf` it exists to avoid copying.
 #[derive(Debug)]
-pub struct NoodlesRawAlignedRead {
+pub(crate) struct NoodlesRawAlignedRead {
     /// The reused undecoded record buffer.
     pub(crate) record: RecordBuf,
     /// The read group this record belongs to, stamped onto the decoded

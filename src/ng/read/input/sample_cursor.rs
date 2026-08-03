@@ -351,7 +351,7 @@ fn key_of(read: &AlignedRead) -> GenomePosition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::read::ReadFilterConfig;
+    use crate::ng::read::filtering::ReadFilterConfig;
     use crate::ng::read::input::aligned_reads_reader::{
         AlignedReadsReader, InMemoryAlignedReadsReader,
     };

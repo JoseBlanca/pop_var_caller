@@ -3966,7 +3966,7 @@ fn the_adaptor_filter_changes_the_records_the_walk_emits() {
 fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness() {
     use std::path::PathBuf;
 
-    use crate::ng::read::ReadFilterConfig;
+    use crate::ng::read::filtering::ReadFilterConfig;
     use crate::ng::read::input::SampleReads;
     use crate::ng::read::input::reference::OpenReference;
     use crate::ng::read::left_align::LeftAlignPreparer;

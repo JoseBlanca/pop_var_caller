@@ -105,10 +105,10 @@
               is permanent, not scaffolding (see the enum's own doc)"
 )]
 
-pub(crate) mod bam;
-pub(crate) mod container;
-pub(crate) mod cram;
-pub(crate) mod in_memory;
+mod bam;
+mod container;
+mod cram;
+mod in_memory;
 
 use std::io;
 
