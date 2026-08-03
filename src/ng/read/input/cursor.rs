@@ -1317,6 +1317,142 @@ mod tests {
         assert_eq!(cursor.counts(), CursorCounts::default());
     }
 
+    // -----------------------------------------------------------------
+    // The order guard (F5) — inherited from the per-region query's T4a..T4d
+    // -----------------------------------------------------------------
+    //
+    // The per-region query wrapped every stream in an `OrderVerified` iterator and pinned it
+    // with four tests. That wrapper is gone and its job moved into `emit`, which had **no
+    // test at all** — the guard was written, reviewed and shipped without one, and a guard
+    // that never fires looks exactly like a guard that works. These are those four rules
+    // restated against the cursor, dropping only the one that no longer exists here: the
+    // contig-order half of the old key, which a cursor cannot reach because
+    // `move_to_region` refuses a foreign chromosome before anything moves
+    // (`a_region_on_another_chromosome_is_refused_and_the_cursor_survives`).
+
+    /// **T4a — a read going backwards within one region is fatal**, and the message says
+    /// where.
+    ///
+    /// The open gate proved the file *claims* `SO:coordinate`; this is the file that claims it
+    /// and lies, which the header check structurally cannot see. Mutation-verified: deleting
+    /// the comparison in [`AlignmentCursor::emit`] makes this test fail.
+    #[test]
+    fn a_read_going_backwards_within_a_region_is_a_fatal_error() {
+        // Scripted out of order on purpose. The in-memory reader hands its list over as
+        // given (`an_out_of_order_script_is_not_quietly_sorted`), so the fault reaches the
+        // guard rather than being tidied away below it.
+        let mut cursor = cursor_over(vec![read_at("a", 1), read_at("c", 61), read_at("b", 31)]);
+
+        cursor
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+
+        let mut names = Vec::new();
+        let mut error = None;
+        while let Some(item) = cursor.next_read() {
+            match item {
+                Ok(read) => names.push(String::from_utf8_lossy(&read.qname).into_owned()),
+                Err(e) => {
+                    error = Some(e);
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(names, vec!["a", "c"], "the reads before the break flow");
+        match error.expect("the regression must be fatal") {
+            CursorError::OutOfOrderRead {
+                path,
+                position,
+                after,
+            } => {
+                assert_eq!(position, 31);
+                assert_eq!(after, 61);
+                // Asserted because `path` is a constructor argument: a wiring mistake would
+                // produce a correct-looking error naming the wrong file, in a run holding
+                // hundreds of cursors.
+                assert_eq!(path.as_ref(), Path::new("/fixture/sample.bam"));
+            }
+            other => panic!("expected OutOfOrderRead, got {other:?}"),
+        }
+    }
+
+    /// **T4c — equal positions are ordinary, not a fault.** Several reads may start at the
+    /// same base, and a guard written with `<=` would reject every pile-up in every real file.
+    #[test]
+    fn reads_sharing_a_start_position_are_not_out_of_order() {
+        let script = vec![
+            read_at("a", 1),
+            read_at("b", 1),
+            read_at("c", 1),
+            read_at("d", 2),
+        ];
+        let mut cursor = cursor_over(script.clone());
+
+        assert_eq!(
+            reads_of(&mut cursor, region(1, 100)),
+            by_linear_scan(&script, region(1, 100)),
+        );
+    }
+
+    /// **T4d — the guard is scoped to the region, not to the cursor.** A caller is entitled to
+    /// ask for a later region and then an earlier one; the second is a new walk over what is
+    /// kept, not a regression. The old query got this for free by building a fresh guard per
+    /// query — a cursor has to reset `last_emitted` on every move, and forgetting to would
+    /// turn every backward jump into a fatal error.
+    ///
+    /// The last assertion is what makes this able to fail in the other direction: a guard
+    /// that had been silently disarmed would also pass the first two.
+    #[test]
+    fn an_earlier_region_after_a_later_one_is_not_out_of_order() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        let later = region(61, 100);
+        assert_eq!(reads_of(&mut cursor, later), by_linear_scan(&script, later),);
+        let earlier = region(1, 20);
+        assert_eq!(
+            reads_of(&mut cursor, earlier),
+            by_linear_scan(&script, earlier),
+            "an earlier region is a new walk, not a regression",
+        );
+
+        // And the guard is still armed after the backward move.
+        let mut planted = cursor_over(vec![read_at("a", 1), read_at("c", 61), read_at("b", 31)]);
+        let _ = reads_of(&mut planted, region(61, 100));
+        planted
+            .move_to_region(region(1, 100))
+            .expect("on this chromosome");
+        let mut saw_error = false;
+        while let Some(item) = planted.next_read() {
+            if item.is_err() {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_error,
+            "the guard must still catch a regression inside the region it was reset for",
+        );
+    }
+
+    /// The message names the file and both positions — two bare offsets are meaningless
+    /// against a run reading hundreds of files at once.
+    #[test]
+    fn the_out_of_order_message_names_the_file_and_both_positions() {
+        let error = CursorError::OutOfOrderRead {
+            path: Arc::from(Path::new("/data/sample.bam")),
+            position: 150,
+            after: 200,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "alignment file '/data/sample.bam' yielded a read at position 150 after one at \
+             200, within one region: the file is not coordinate-sorted",
+        );
+    }
+
     /// The message names both contigs, names them apart, **and names the file** — two bare
     /// integers are only meaningful against a particular contig table, and a run holds up to
     /// 320 cursors over many files.
@@ -1331,6 +1467,29 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "cursor on '/data/sample.bam' covers contig 20 but the region is on contig 7",
+        );
+    }
+
+    /// The colliding read's name is what lets a user grep the inputs and confirm the
+    /// diagnosis, and the cursor indices have to read as *files* rather than as another
+    /// coordinate pair sitting beside `contig 0 position 99`.
+    ///
+    /// Moved from `IngestError::DuplicateReadAcrossFiles` at Milestone F, which the
+    /// per-region merge raised and which is now the same condition under one name.
+    #[test]
+    fn the_duplicate_read_message_names_the_read_and_both_files() {
+        let error = CursorError::DuplicateReadAcrossFiles {
+            qname: b"read-1".to_vec(),
+            contig: ContigId(0),
+            position: 99,
+            first_file: 0,
+            second_file: 1,
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "the read 'read-1' appears in two of this sample's files (cursor 0 and cursor 1) \
+             at contig 0 position 99",
         );
     }
 

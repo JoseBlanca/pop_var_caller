@@ -6,6 +6,7 @@
 //! (`arch/alignment_cursor.md` §2.4).
 
 use crate::ng::read::aligned_read::AlignedRead;
+use crate::ng::read::filtering::ReadGroupCounts;
 use crate::ng::ref_seq::RawRefSeq;
 use crate::ng::types::{ContigId, GenomePosition, Position};
 
@@ -17,8 +18,8 @@ use super::cursor::{AlignmentCursor, CursorError};
 /// k = 1.** A one-file sample — which is most of them — pays no merge machinery at all. The
 /// two arms are unified by an enum and not by `Box<dyn …>` because dynamic dispatch is opaque
 /// to the optimiser: the whole per-read chain would stop being inlined at the boundary, on
-/// the hottest loop in the module. `SampleRegionReads`, which this replaces, is an enum for
-/// exactly that reason and this keeps the property.
+/// the hottest loop in the module. The per-region sample stream this replaced was an enum for
+/// exactly that reason, and this keeps the property.
 /// **On the size difference clippy reports here.** `Single` holds a cursor inline (about a
 /// kilobyte, most of it the read filter's reused buffers) while `Merged` holds a `Vec` of
 /// them behind a pointer, so the two arms differ by roughly 900 bytes. Boxing `Single` would
@@ -86,6 +87,45 @@ impl<R: RawRefSeq> SampleCursor<R> {
         }
     }
 
+    /// Step-1's tally for this sample, **one entry per read group met, never summed across
+    /// them**.
+    ///
+    /// A drop rate is a read group's property: a run that went badly shows up as one library
+    /// with an anomalous rate, and adding them together erases exactly that signal. So the k
+    /// files' tallies are folded together *by read group* rather than accumulated into one —
+    /// which is also why a sample spanning two files with one library reports one entry, not
+    /// two.
+    ///
+    /// A read group appears only once some read has met it, so a cursor that has walked
+    /// nothing reports nothing rather than a row of zeroes.
+    ///
+    /// **This is what `SampleReads::counts` used to answer**, and the difference is where the
+    /// number lives: the per-region streams folded their tallies back into the file as each
+    /// one ended, so a stream still running was not yet reflected. The filter here lives as
+    /// long as the cursor, so this is current the moment it is asked.
+    pub fn read_group_counts(&self) -> Vec<ReadGroupCounts> {
+        match self {
+            Self::Single(cursor) => cursor.read_group_counts(),
+            Self::Merged(merged) => {
+                let mut total: Vec<ReadGroupCounts> = Vec::new();
+                for cursor in &merged.cursors {
+                    for (read_group, counts) in cursor.read_group_counts() {
+                        match total.iter_mut().find(|(id, _)| *id == read_group) {
+                            Some((_, running)) => running.add(&counts),
+                            // First **seen**, appended — so the order is the order reads
+                            // met these groups, file by file, not the order the headers
+                            // declared them. A file whose first read is its second `@RG`
+                            // reports that one first. Same rule the per-file fold this
+                            // replaces had.
+                            None => total.push((read_group, counts)),
+                        }
+                    }
+                }
+                total
+            }
+        }
+    }
+
     /// Release the reference bases every file's read filter has gone past — see
     /// [`AlignmentCursor::evict_reference_before`].
     ///
@@ -134,7 +174,7 @@ impl<R: RawRefSeq> SampleCursor<R> {
 /// **Keys are held beside the heads, not read through them.** `keys[i]` mirrors `heads[i]` and
 /// is refreshed only when that head is refilled, so each step scans a small contiguous array
 /// of positions in cache rather than dereferencing k reads — the same layout
-/// `MergedRegionReads` uses, and for the same reason.
+/// the per-region merge this replaced used, and for the same reason.
 pub struct MergedCursors<R: RawRefSeq> {
     cursors: Vec<AlignmentCursor<R>>,
     /// `None` = that cursor has no more reads for this region.
@@ -231,9 +271,9 @@ impl<R: RawRefSeq> MergedCursors<R> {
     /// **Why it must exist here and not only at open.** `SampleReads::open` rejects a
     /// duplicate *path*, which a copy or a symlink walks straight past. Two copies of one read
     /// are two votes at a locus: the depth doubles and so does every allele count derived from
-    /// it, which looks like real evidence rather than like a fault. `MergedRegionReads` has
-    /// always had this guard; the first version of this type dropped it, and two cursors over
-    /// one file yielded every read twice with nothing failing.
+    /// it, which looks like real evidence rather than like a fault. The per-region merge this
+    /// replaced always had this guard; the first version of this type dropped it, and two
+    /// cursors over one file yielded every read twice with nothing failing.
     fn same_read_across_files(&self, winner: usize) -> Option<CursorError> {
         let winning_key = self.keys[winner]?;
         let winning_read = self.heads[winner].as_ref()?;
@@ -369,7 +409,7 @@ mod tests {
     }
 
     /// **A one-file sample is the `Single` arm**, which is the absence of a merge rather than
-    /// a merge with k = 1 — the property `SampleRegionReads` exists as an enum to keep, on
+    /// a merge with k = 1 — the property the per-region enum this replaced existed to keep, on
     /// the hottest loop in the module.
     #[test]
     fn a_one_file_sample_takes_the_arm_with_no_merge_in_it() {
@@ -392,6 +432,36 @@ mod tests {
         assert_eq!(
             names_of(&mut sample, region(1, 100)),
             ["a1", "b2", "a3", "b4"],
+        );
+    }
+
+    /// **Three files, to prove the argmin is not accidentally a two-way compare.**
+    ///
+    /// Every other test of the merge uses two files, and with two files a scan that examines
+    /// only the first two slots is indistinguishable from one that examines all of them. So a
+    /// sample of three or more would silently lose every read of its third file and later —
+    /// which reads as a sample sequenced less deeply, not as a fault.
+    ///
+    /// Inherited from the per-region merge, whose own version of this test carried the same
+    /// sentence. Milestone F replaced that merge and this was the one rule of it left without
+    /// a successor: mutating [`MergedCursors::argmin`]'s scan to `.take(2)` left the whole
+    /// suite green.
+    ///
+    /// The files are given **out of coordinate order** — the third holds the earliest read —
+    /// so a merge that simply concatenated in file order would fail too.
+    #[test]
+    fn three_files_merge_in_coordinate_order() {
+        let mut sample = SampleCursor::new(vec![
+            // 30-base reads on a 100-base fixture contig, so the last starts at 51.
+            cursor_over("/a.bam", vec![read_at("a2", 11), read_at("a5", 41)]),
+            cursor_over("/b.bam", vec![read_at("b3", 21), read_at("b6", 51)]),
+            cursor_over("/c.bam", vec![read_at("c1", 1), read_at("c4", 31)]),
+        ]);
+
+        assert_eq!(
+            names_of(&mut sample, region(1, 100)),
+            ["c1", "a2", "b3", "c4", "a5", "b6"],
+            "every file's reads must reach the merge, interleaved by position",
         );
     }
 

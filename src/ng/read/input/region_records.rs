@@ -196,12 +196,11 @@ impl RecordSource for RegionRecords {
             // filter's, and charging them to a drop reason would make the tally mean
             // something different for a narrowed read than for a whole-file one.
             //
-            // **The overlap rule is borrowed, not rewritten.** `region_query::overlaps` is
-            // what the BAM and CRAM sources already apply, and the single thing that must
-            // never happen in this design is two paths disagreeing about which reads a region
-            // contains. When Milestone F deletes `region_query.rs` the function moves here;
-            // until then, sharing it is what makes the two paths provably identical rather
-            // than identical-looking.
+            // **One overlap rule, and there is now only one path to apply it.** It came
+            // from the per-region query, was moved here at Milestone C so the new read path
+            // did not depend on the module Milestone F would delete, and was shared by both
+            // until that deletion — because the single thing that must never happen in this
+            // design is two paths disagreeing about which reads a region contains.
             if !on_this_contig || !overlaps(&buf.record, region) {
                 continue;
             }
@@ -234,12 +233,13 @@ impl RecordSource for RegionRecords {
 
 /// Whether a record's reference footprint touches `region`.
 ///
-/// **One rule, applied by every path that has ever asked the question.** It came from
-/// `region_query.rs`, where the per-region BAM and CRAM sources still call it through a
-/// re-export — moved here at Milestone C so the new read path does not depend on the module
-/// Milestone F deletes, rather than the other way round. The single thing that must never
-/// happen in this design is two paths disagreeing about which reads a region contains, and
-/// sharing one body is what makes them provably identical rather than identical-looking.
+/// **One rule, applied by every path that has ever asked the question.** It came from the
+/// per-region query, where the BAM and CRAM sources reached it through a re-export; it was
+/// moved here at Milestone C so the new read path did not depend on the module Milestone F
+/// would delete, rather than the other way round, and F left it the only copy. The single
+/// thing that must never happen in this design is two paths disagreeing about which reads a
+/// region contains, and sharing one body is what made them provably identical rather than
+/// identical-looking while both existed.
 pub(crate) fn overlaps(record: &sam::alignment::RecordBuf, region: GenomeRegion) -> bool {
     match (record.alignment_start(), record.alignment_end()) {
         (Some(first), Some(last)) => {
@@ -370,6 +370,58 @@ mod tests {
         ]);
 
         assert_eq!(narrowed_to(&mut source, region(31, 60)), ["inside"]);
+    }
+
+    /// A record that names a contig but carries no alignment start — legal in SAM, and it has
+    /// no footprint to overlap anything with.
+    fn unmapped_but_placed(qname: &str, contig: usize) -> RecordBuf {
+        use noodles_sam::alignment::record::Flags;
+        use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+        RecordBuf::builder()
+            .set_name(qname.as_bytes())
+            .set_reference_sequence_id(contig)
+            .set_flags(Flags::UNMAPPED)
+            .set_sequence(Sequence::from(vec![b'A'; 10]))
+            .set_quality_scores(QualityScores::from(vec![30u8; 10]))
+            .build()
+    }
+
+    /// A record on no contig at all — the unplaced reads that sit at a sorted file's tail.
+    fn unplaced(qname: &str) -> RecordBuf {
+        use noodles_sam::alignment::record::Flags;
+        use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+        RecordBuf::builder()
+            .set_name(qname.as_bytes())
+            .set_flags(Flags::UNMAPPED)
+            .set_sequence(Sequence::from(vec![b'A'; 10]))
+            .set_quality_scores(QualityScores::from(vec![30u8; 10]))
+            .build()
+    }
+
+    /// **The shapes [`overlaps`]'s `_ => false` arm exists for**, which a spread of ordinary
+    /// reads never produces: a record placed on a contig but carrying no alignment start, and
+    /// one on no contig at all. Neither has a footprint, so neither can touch a region — and
+    /// neither is a *filter* drop, because it is discarded here, before the filter is reached.
+    ///
+    /// Inherited from the per-region query, which owned this rule until Milestone F. The
+    /// oracle tests around it cannot see this: they drop these records by the same rule, so
+    /// they would agree however this arm behaved.
+    #[test]
+    fn a_record_with_no_footprint_never_surfaces() {
+        let mut source = records_over(vec![
+            unmapped_but_placed("placed-but-unmapped", 0),
+            read_at("real", 0, 40),
+            unplaced("unplaced"),
+        ]);
+
+        assert_eq!(narrowed_to(&mut source, region(1, 100)), ["real"]);
+        assert_eq!(
+            source.other_sample_records(),
+            0,
+            "a footprint-less record is not another sample's read — it is charged to nothing",
+        );
     }
 
     /// A source that has not been pointed at a region yields nothing rather than guessing at

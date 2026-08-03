@@ -2591,7 +2591,7 @@ mod tests {
         }
     }
 
-    /// A `RawRefSeq` over the fixture contigs (all `A`s), for `reads_in_region`'s
+    /// A `RawRefSeq` over the fixture contigs (all `A`s), for the cursor's
     /// mismatch-fraction filter — matches the fixture reference the reads are opened against.
     /// Named (`chr1` / `chr2`) so a generator's contig-name invariant holds against the
     /// `SsrSegment`'s `chrom()`; the fetch itself keys on `ContigId`, so the names are only for

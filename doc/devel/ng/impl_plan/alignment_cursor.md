@@ -248,33 +248,74 @@ it is not a tidy-up — it is 13 files beyond the two generators, inventoried th
 Until this milestone two ways of reading a file coexist. F ends that. **Every call site below was
 found by grep on the clean tree; none is optional, because F4 deletes what they call.**
 
-- ☐ **F1. The acceptance anchors.** `ng_generic_loci_dump` and `ng_ssr_loci_dump` onto cursors.
+- ✅ **F1. The acceptance anchors.** `ng_generic_loci_dump` and `ng_ssr_loci_dump` onto cursors.
   Their output is asserted byte-identical, so converting them is itself the proof that the
   migration moved nothing. *Depends:* E2. *Source:* spec §11.
-- ☐ **F2. The measurement harnesses.** `ng_generic_walk_probe`, `benches/ng_generic_pileup_perf`,
+- ✅ **F2. The measurement harnesses.** `ng_generic_walk_probe`, `benches/ng_generic_pileup_perf`,
   `dhat_ng_merge`, `dhat_ng_open_files`. **`dhat_ng_merge` needs care** — it measures the merge's
   own allocation cost by draining one region twice, so it must keep measuring the merge and not
   the cursor's kept reads. *Depends:* F1. *Source:* arch §2.4.
-- ☐ **F3. The stage-1 differential.** `parity.rs` calls `reads_in_region` once
+- ✅ **F3. The stage-1 differential.** `parity.rs` calls `reads_in_region` once
   (`:4030-4042`) to feed one read stream to both walkers. It is `#[cfg(test)]`
   (`pileup/mod.rs:131-133`) so it breaks the test build, not the release build — which is why it
   is easy to miss. **First establish whether it still has a job:** the design records that from
   plan 3's A2 the two walkers differ on purpose and this harness "dies by design". If it is
   vestigial, delete it; if not, convert the one call site. **Ask before doing either** — 4,233
   lines is not a decision for a build order. *Depends:* F1. *Source:* `pileup/mod.rs:128-133`.
-- ☐ **F4. The research tools.** `ng_ssr_aligner_bakeoff`, `ng_ssr_anchor_firm_validate`,
+- ✅ **F4. The research tools.** `ng_ssr_aligner_bakeoff`, `ng_ssr_anchor_firm_validate`,
   `ng_ssr_cohort_stutter`, `ng_ssr_divergent_reads`, `ng_ssr_gain_loss`, `ng_normalizer_screen`.
   Several assert against committed baselines; those must not move. *Depends:* F1.
   *Source:* spec §11.
-- ☐ **F5. Delete the old path — its own commit.** `SampleReads::reads_in_region`, `RegionReads`,
+- ✅ **F5. Delete the old path — its own commit.** `SampleReads::reads_in_region`, `RegionReads`,
   `ReaderHandle`, `BorrowedReader`, the pool, `readers_opened` (**ten read sites across nine
   tests**), and `region_query.rs` itself. Plus the test at `locus_generation/mod.rs:882` and the
   doc link at `ref_seq.rs:611`. **Verification is mechanical:** `cargo build --all-targets` and
   `cargo test` green, and `grep -rn "reads_in_region\|RegionReads\|readers_opened" src/ examples/
   benches/` returning nothing. *Depends:* F2, F3, F4. *Source:* arch §4.
 
-> **Checkpoint F:** there is exactly one way to read a BAM or CRAM in ng. Both dumps byte-identical,
-> every example and bench building, the grep clean. Pause for review.
+  > **⚠ "Verification is mechanical" is true of the grep and false of the step.** `grep` proves the
+  > old API is gone; it cannot say whether the *rules* the deleted tests pinned are still checked
+  > anywhere, and **50 tests reached their reads through the deleted API** — 22 in `region_query.rs`
+  > alone. So this ran in three phases: move `DecodedContainer`, `decode_container_at` and
+  > `owner_of_cram_record` out to a new `record_reader/container.rs` (the CRAM arm imports them and
+  > they were never the query's), triage every test against the rule it names, then delete. Full
+  > accounting in the [F5 report](../../reports/implementations/ng_alignment_cursor_f5_2026-08-03.md).
+  >
+  > **⚠ The triage found `CursorError::OutOfOrderRead` had no test at all** — the guard was written,
+  > reviewed and shipped at B/D with nothing exercising it. Three of `OrderVerified`'s tests are
+  > restated against the cursor and mutation-verified; `record_reader/cram.rs`, which had no tests
+  > of its own, gained four.
+  >
+  > **⚦ Two rules died on purpose.** A record reader *positions, it never bounds*, so
+  > `the_crai_walk_stops_once_it_passes_the_region` has no successor and should not — and with it
+  > `RecordIndex::footprint` and `DecodedContainer::offset`, which existed so the old CRAM source
+  > could re-filter a held container per region. Neither would have warned:
+  > `record_reader/mod.rs` carries a module-level `#![allow(dead_code)]`.
+  >
+  > **⚦ Three unconstructible error variants went too** — `AlignmentFileError::{OutOfOrderRead,
+  > Filter}` and `IngestError::DuplicateReadAcrossFiles`, the last of which its own doc had already
+  > scheduled for this step. And `ReadFilter::into_parts`, which `clippy -D warnings` forced.
+  >
+  > **⚦ One thing was added, as a replacement, not as scope:** `SampleCursor::read_group_counts`,
+  > because deleting `SampleReads::counts` would otherwise have removed a capability with nothing
+  > answering it.
+  >
+  > **⚠ `locus_generation/mod.rs:882` needed no work** — the pointer is a stale line number; what
+  > sits there opens a `SampleReads` and never asks it for reads. `ref_seq.rs`'s doc link is at
+  > `:645`, same drift.
+
+> **Checkpoint F — reached.** There is exactly one way to read a BAM or a CRAM in ng. Four dumps
+> byte-identical (generic and STR, BAM chr21 *and* CRAM SL4.0ch01), the chr21 walk-probe anchor
+> exact at `loci=236081 observations=251786 reads_admitted=54709`, every example and bench
+> building, `cargo clippy --all-targets --all-features -- -D warnings` clean, and the grep empty.
+> Suite 1,573 → **1,541**.
+>
+> **⏸ Two things for the owner.** The cursor **accepts an inverted region** where the deleted
+> planners refused one — `move_to_region` validates the chromosome only. Harmless in practice (the
+> overlap test yields nothing), silent rather than refused, and a design edit to change. And
+> `ReadFilterBuffers` is now a lend-and-reclaim seam with no lender.
+>
+> Pause for review.
 
 ---
 

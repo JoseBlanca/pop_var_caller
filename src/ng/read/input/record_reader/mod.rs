@@ -84,6 +84,7 @@
 )]
 
 pub(crate) mod bam;
+pub(crate) mod container;
 pub(crate) mod cram;
 pub(crate) mod in_memory;
 

@@ -640,11 +640,11 @@ impl WindowedRefSeq {
     /// The same accessor, over an index parsed **once** and shared by every accessor
     /// built from it.
     ///
-    /// This is the shape a per-query factory wants: each call still yields its *own*
+    /// This is the shape a per-file factory wants: each call still yields its *own*
     /// reader — its own file cursor and its own window, which is why
-    /// [`SampleReads::reads_in_region`](crate::ng::read::input::SampleReads::reads_in_region)
+    /// [`SampleReads::cursor`](crate::ng::read::input::SampleReads::cursor)
     /// takes a factory rather than one shared accessor — but the index behind them is
-    /// parsed once for the run. Sharing one *accessor* across k streams would collapse
+    /// parsed once for the run. Sharing one *accessor* across k cursors would collapse
     /// them onto one cursor; sharing the *index* costs nothing and collapses nothing.
     ///
     /// **Both** the index and the contig table are shared, because fixing only the

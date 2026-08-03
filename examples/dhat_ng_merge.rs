@@ -132,7 +132,7 @@ fn main() {
             "the merge's allocation cost grew with the read count \
              ({delta_small} -> {delta_large} over a 4x increase): it is \
              allocating per read, which spec §3.2 forbids — look for a \
-             `clone()` or a redundant move in `MergedRegionReads::next`"
+             `clone()` or a redundant move in `MergedCursors::next_read`"
         );
 
         println!("\nOK: the merge's allocation cost is flat in the read count.");

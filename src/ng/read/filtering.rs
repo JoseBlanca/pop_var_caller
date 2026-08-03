@@ -851,18 +851,14 @@ pub type ReadGroupCounts = (Option<ReadGroupId>, ReadFilterCounts);
 /// The two buffers a [`ReadFilter`] pass reuses: the record buffer it refills
 /// per read, and the scratch filter #8 fetches reference bases into.
 ///
-/// They are grouped into one value so a caller that owns them across many
-/// passes can hand them in and take them back as a unit. That is what the
-/// region-query path does: it keeps these beside each pooled reader and lends
-/// them to a fresh per-region filter, so serving ~10⁶ region queries allocates
-/// two buffers per reader rather than two per query
-/// (`doc/devel/ng/arch/alignment_file.md` §1.2).
-///
-/// A whole-file pass has no such caller, so [`ReadFilter::new`] just builds
-/// these itself.
-///
-/// `pub(crate)` rather than `pub`, like the hand-off methods that use it: the
-/// only sanctioned caller is ng's own region-query path.
+/// **A vestige of the per-region query, and it should collapse.** They were grouped into one
+/// value so that path could keep them beside each pooled reader and lend them to a fresh
+/// per-region filter, which is what kept ~10⁶ region queries from allocating two buffers
+/// each. Milestone F deleted that path along with the method that handed them back, so the
+/// only value anything passes here now is `Default::default()` from [`ReadFilter::new`]: a
+/// filter lives as long as the cursor it belongs to and reuses its own buffers for every
+/// region. Folding the parameter away is a `filtering.rs` cleanup, recorded rather than done
+/// inside a step whose subject is the read path.
 #[derive(Debug, Default)]
 pub(crate) struct ReadFilterBuffers<Rec> {
     /// The single record buffer refilled by every [`RecordSource::read_next`].
@@ -922,14 +918,13 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     /// no error at all. Only the gate's order-included equality rules that out,
     /// which is why the precondition is equality and not resolvability.
     ///
-    /// **Why it exists.** The probe costs one reference fetch per contig. That
-    /// is nothing for a whole-file pass, which builds one filter — but the STR
-    /// path builds a filter *per region query*, on the order of 10⁶ of them, so
-    /// the probe would be paid ~10⁶ × the contig count for a property the open
-    /// gate already established once. The buffers come from the caller for the
-    /// same reason: a fresh filter per query would otherwise allocate a record
-    /// buffer and a fetch buffer every time
-    /// (`doc/devel/ng/arch/alignment_file.md` §5).
+    /// **Why it exists.** The probe costs one reference fetch per contig, which was nothing
+    /// for a whole-file pass but was paid ~10⁶ times by the per-region query the cursor
+    /// replaced — once per query, for a property the open gate had established once. That
+    /// caller is gone, and with it the only *external* one: what is left is
+    /// [`Self::new`] building through this so the two constructors cannot drift into
+    /// filtering differently. The `buffers` parameter is a vestige of the same caller (see
+    /// [`ReadFilterBuffers`]).
     ///
     /// The guarantee is documented rather than encoded in a typestate: the
     /// caller that needs this is the one that just ran the gate, and a marker
@@ -992,8 +987,9 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     ///
     /// **The one thing a long-lived filter needs that a per-query one did not.** Until the
     /// alignment cursor, a filter was built per region and thrown away, so the only way to
-    /// reach its source was [`into_parts`](Self::into_parts) — which consumes the filter, and
-    /// therefore *forced* a new one per region. A cursor keeps one filter for as long as it
+    /// reach its source was `into_parts` — which consumed the filter, and therefore *forced*
+    /// a new one per region. (That method went with the per-region path at Milestone F, which
+    /// is why this names it rather than linking it.) A cursor keeps one filter for as long as it
     /// reads a chromosome and points the layer below at each new region through it
     /// (`arch/alignment_cursor.md` §2.3).
     ///
@@ -1021,61 +1017,12 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
         &self.reference
     }
 
-    /// Give the source, the two reused buffers, and the final tally back to
-    /// whoever lent them.
-    ///
-    /// The counterpart to [`Self::with_validated_contigs`]: a pooled caller
-    /// reclaims its reader (inside `source`) and its buffers when a region
-    /// stream ends, so the next query reuses them instead of allocating. The
-    /// counts come out too, because a per-query filter's tally has to be added
-    /// to the file's running total before the filter is dropped — otherwise the
-    /// drops it recorded would vanish with it.
-    ///
-    /// Takes `self` by value, so a caller that must reclaim during `Drop` holds
-    /// the filter as an `Option` and `take()`s it there. Without that, the
-    /// buffers *and* the query's counts are lost on exactly the paths that are
-    /// easiest to forget — an early drop and the error path.
-    pub(crate) fn into_parts(self) -> (S, ReadFilterBuffers<S::Record>, Vec<ReadGroupCounts>) {
-        // Destructured exhaustively, with no `..`: this function's whole job is
-        // to hand back everything that was lent, so a field added to
-        // `ReadFilter` later must be routed here explicitly or this stops
-        // compiling. The `_` bindings name what is deliberately not returned —
-        // `reference` and `config` are the caller's to rebuild per query, and
-        // `state` is meaningless once the filter is consumed.
-        let Self {
-            source,
-            record_buf,
-            reference: _,
-            config: _,
-            counts,
-            ref_buf,
-            state: _,
-        } = self;
-        // Folded here rather than left on the source, which the caller drops:
-        // it is part of what this query saw, and after the move it is gone. It
-        // belongs to no one read group, so it rides on the first entry — or on
-        // an entry of its own when every record was another sample's and the
-        // filter met none.
-        let mut counts = counts;
-        match counts.first_mut() {
-            Some((_, first)) => first.other_sample = source.other_sample_records(),
-            None => counts.push((
-                None,
-                ReadFilterCounts {
-                    other_sample: source.other_sample_records(),
-                    ..ReadFilterCounts::default()
-                },
-            )),
-        }
-        (
-            source,
-            ReadFilterBuffers {
-                record_buf,
-                ref_buf,
-            },
-            counts,
-        )
-    }
+    // `into_parts` is gone. It handed the source, the two buffers and the final
+    // tally back to whoever lent them, which was the per-region query: a pooled
+    // reader reclaimed them as each region stream ended. Milestone F deleted that
+    // path, and a filter now lives as long as the cursor it belongs to — so its
+    // buffers are reused by construction and its tally is read in place, through
+    // [`counts`](Self::counts), rather than folded somewhere before the filter dies.
 
     /// The tally of the read group the buffered record belongs to, created on
     /// first sight.
@@ -2815,72 +2762,10 @@ mod tests {
         assert_eq!(only_tally(&filter).kept, 0);
     }
 
-    /// The buffers must come back *with their allocations*, since reusing them
-    /// across ~10⁶ region queries is the entire reason they are passed in. A
-    /// hand-off that returned fresh empty buffers would satisfy every
-    /// correctness test and quietly allocate per query.
-    #[test]
-    fn into_parts_returns_the_buffers_with_their_allocations_and_the_tally() {
-        let mut filter = ReadFilter::with_validated_contigs(
-            FakeSource::new(mixed_batch(), one_contig_header()),
-            poly_a_ref(30),
-            ReadFilterConfig::default(),
-            ReadFilterBuffers::default(),
-        );
-        let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
-        assert_eq!(kept.len(), 2);
-
-        let (_source, buffers, counts) = filter.into_parts();
-
-        assert_eq!(counts.len(), 1, "one read group in this fixture");
-        let counts = counts[0].1.clone();
-        assert_eq!(counts.kept, 2, "the tally survives the hand-off");
-        assert_eq!(counts.duplicate, 1);
-        assert!(
-            buffers.ref_buf.capacity() > 0,
-            "filter #8 fetched into ref_buf, so its allocation must come back \
-             for the next query to reuse"
-        );
-    }
-
-    /// Buffers handed *in* are the ones used, so a caller's pre-grown scratch
-    /// is not silently discarded on the way.
-    ///
-    /// Both buffers are checked, and by different means. `ref_buf`'s capacity
-    /// is observable directly; the record buffer is generic, so it is *marked*
-    /// instead — over an empty source `read_next` never fires, so the mark can
-    /// only survive if the lent buffer was adopted rather than replaced with a
-    /// fresh default. The record buffer is the larger of the two allocations
-    /// (it holds a whole record's sequence, qualities and CIGAR), so losing it
-    /// would be the more expensive slip, and a one-word `S::Record::default()`
-    /// in the constructor is all it would take.
-    #[test]
-    fn with_validated_contigs_adopts_the_lent_buffers() {
-        let mut marked_record = FakeRecord::default();
-        marked_record.read.mapq = 42; // no filtering path writes this back
-
-        let lent = ReadFilterBuffers {
-            record_buf: marked_record,
-            ref_buf: Vec::with_capacity(4096),
-        };
-        let lent_capacity = lent.ref_buf.capacity();
-
-        let filter = ReadFilter::with_validated_contigs(
-            FakeSource::new(Vec::new(), one_contig_header()),
-            poly_a_ref(30),
-            ReadFilterConfig::default(),
-            lent,
-        );
-
-        let (_source, returned, _counts) = filter.into_parts();
-        assert_eq!(
-            returned.ref_buf.capacity(),
-            lent_capacity,
-            "the lent fetch buffer was adopted, not replaced"
-        );
-        assert_eq!(
-            returned.record_buf.read.mapq, 42,
-            "the lent record buffer was adopted, not replaced"
-        );
-    }
+    // Two tests lived here and both went with `into_parts` at Milestone F:
+    // `into_parts_returns_the_buffers_with_their_allocations_and_the_tally` and
+    // `with_validated_contigs_adopts_the_lent_buffers`. Each drove the lend-and-reclaim
+    // protocol and nothing else, and nothing lends a filter its buffers any more — one filter
+    // serves a whole chromosome, so it allocates its own once and reuses them for every
+    // region.
 }

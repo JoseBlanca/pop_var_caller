@@ -1441,13 +1441,13 @@ mod tests {
     /// real cursor keeps every read it hands out and offers it to the next region that can
     /// use it (`spec/alignment_cursor.md` §6), which is what makes throwing the walker's
     /// look-ahead away safe.
-    struct ScriptedRegionReads {
+    struct ScriptedRegionSource {
         reads: Vec<PreparedRead>,
         region: Option<GenomeRegion>,
         served: usize,
     }
 
-    impl ScriptedRegionReads {
+    impl ScriptedRegionSource {
         fn new(reads: Vec<PreparedRead>) -> Self {
             Self {
                 reads,
@@ -1457,7 +1457,7 @@ mod tests {
         }
     }
 
-    impl Iterator for ScriptedRegionReads {
+    impl Iterator for ScriptedRegionSource {
         type Item = PreparedRead;
 
         fn next(&mut self) -> Option<PreparedRead> {
@@ -1475,7 +1475,7 @@ mod tests {
         }
     }
 
-    impl RegionReadSource for ScriptedRegionReads {
+    impl RegionReadSource for ScriptedRegionSource {
         type Error = std::convert::Infallible;
 
         fn move_to_region(&mut self, region: GenomeRegion) -> Result<(), Self::Error> {
@@ -1486,7 +1486,7 @@ mod tests {
     }
 
     fn walk_region(
-        walker: &mut PileupWalker<ScriptedRegionReads, &MockFasta>,
+        walker: &mut PileupWalker<ScriptedRegionSource, &MockFasta>,
         region: GenomeRegion,
         stop_after: u32,
     ) -> Vec<Locus> {
@@ -1549,7 +1549,7 @@ mod tests {
         let regions = [(1u64, 14u64), (15, 30), (31, 60)];
 
         let mut reused = run(
-            ScriptedRegionReads::new(scripted_reads()),
+            ScriptedRegionSource::new(scripted_reads()),
             &reference,
             &config,
         );
@@ -1562,7 +1562,7 @@ mod tests {
             let reused_summary = reused.summary();
 
             let mut fresh = run(
-                ScriptedRegionReads::new(scripted_reads()),
+                ScriptedRegionSource::new(scripted_reads()),
                 &reference,
                 &config,
             );
@@ -1605,7 +1605,7 @@ mod tests {
         let reference = MockFasta::new(&"A".repeat(100));
         let config = WalkerConfig::default();
         let mut walker = run(
-            ScriptedRegionReads::new(scripted_reads()),
+            ScriptedRegionSource::new(scripted_reads()),
             &reference,
             &config,
         );
@@ -1636,7 +1636,7 @@ mod tests {
         let reference = MockFasta::new(&"A".repeat(100));
         let config = WalkerConfig::default();
         let mut walker = run(
-            ScriptedRegionReads::new(scripted_reads()),
+            ScriptedRegionSource::new(scripted_reads()),
             &reference,
             &config,
         );
@@ -1685,7 +1685,7 @@ mod tests {
         let reference = MockFasta::new(&"A".repeat(100));
         let config = WalkerConfig::default();
         let mut walker = run(
-            ScriptedRegionReads::new(scripted_reads()),
+            ScriptedRegionSource::new(scripted_reads()),
             &reference,
             &config,
         );
