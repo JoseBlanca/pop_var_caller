@@ -34,8 +34,8 @@ pub mod prepared_read;
 
 pub use aligned_read::AlignedRead;
 pub use filtering::{
-    BamRecordSource, CramRecordSource, NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig,
-    ReadFilterCounts, ReadFilterError, RecordSource,
+    NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig, ReadFilterCounts, ReadFilterError,
+    RecordSource,
 };
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 

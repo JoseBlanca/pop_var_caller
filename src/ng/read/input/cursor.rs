@@ -609,11 +609,24 @@ mod tests {
     use super::*;
     use crate::ng::read::input::record_reader::InMemoryRecordReader;
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_read_group, matching_contigs, read_named_with_length,
+        FIXTURE_CONTIGS, bam_header, fixture_read_group, matching_contigs, only_tally,
+        read_named_with_length,
     };
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::Position;
     use noodles_sam::alignment::RecordBuf;
+
+    // For the drop-tally fixture below, which builds records by hand rather than through
+    // `read_named_with_length` because each one has to fail a *named* filter.
+    use crate::bam::alignment_input::{
+        FLAG_DUPLICATE, FLAG_PAIRED, FLAG_QC_FAIL, FLAG_SECONDARY, FLAG_SUPPLEMENTARY,
+    };
+    use crate::ng::read::filtering::ReadFilterCounts;
+    use noodles_core::Position as RecordPosition;
+    use noodles_sam::alignment::record::cigar::Op;
+    use noodles_sam::alignment::record::cigar::op::Kind;
+    use noodles_sam::alignment::record::{Flags, MappingQuality};
+    use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
 
     /// An all-`A` reference over the fixture contigs, so every fixture read matches perfectly
     /// and nothing is dropped for mismatching — this milestone is about *which* reads come
@@ -1546,6 +1559,179 @@ mod tests {
             reads_of(&mut cursor, one_base),
             by_linear_scan(&script, one_base),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The step-1 drop tally, by hand count — moved here from `filtering.rs`
+    // -----------------------------------------------------------------
+    //
+    // `filtering.rs` asserted this twice, over a real BAM and a real CRAM, through the
+    // whole-file `BamRecordSource`/`CramRecordSource` it owned. Those sources are gone: a
+    // filter module has no business opening files. What the two tests actually pinned is the
+    // *filter's accounting*, and it is pinned here, where the chain that accounting belongs to
+    // composes — `RecordReader` → `RegionRecords` → `ReadFilter` → `AlignmentCursor`.
+    //
+    // The fixture sits on **contig 1**, which the fixture table makes 200 bases long; its
+    // records reach base 149 and would not fit on contig 0's 100.
+
+    fn record_with_seq(qname: &str, start: usize, mapq: u8, flags: Flags, seq: &[u8]) -> RecordBuf {
+        RecordBuf::builder()
+            .set_name(qname)
+            .set_reference_sequence_id(1usize)
+            .set_flags(flags)
+            .set_mapping_quality(MappingQuality::new(mapq).expect("mapq in range"))
+            .set_alignment_start(RecordPosition::try_from(start).unwrap())
+            .set_cigar([Op::new(Kind::Match, seq.len())].into_iter().collect())
+            .set_sequence(Sequence::from(seq.to_vec()))
+            .set_quality_scores(QualityScores::from(vec![30u8; seq.len()]))
+            .build()
+    }
+
+    fn boundary_deletion_record(start: usize, seq: &[u8]) -> RecordBuf {
+        RecordBuf::builder()
+            .set_name("bad")
+            .set_reference_sequence_id(1usize)
+            .set_flags(Flags::from(FLAG_PAIRED))
+            .set_mapping_quality(MappingQuality::new(60).unwrap())
+            .set_alignment_start(RecordPosition::try_from(start).unwrap())
+            .set_cigar(
+                [Op::new(Kind::Deletion, 2), Op::new(Kind::Match, seq.len())]
+                    .into_iter()
+                    .collect(),
+            )
+            .set_sequence(Sequence::from(seq.to_vec()))
+            .set_quality_scores(QualityScores::from(vec![30u8; seq.len()]))
+            .build()
+    }
+
+    /// The fixture: two kept reads plus one read per *mapped* drop reason (#1–#4,
+    /// #6–#9), all on a single all-`A` contig. The #5 unmapped drop is covered
+    /// separately (`read_filter_charges_an_unmapped_read_end_to_end`): a realistic
+    /// unmapped read has MAPQ 0 and is charged to #2 first, and a fake MAPQ does
+    /// not survive a CRAM round-trip. Returns the records and the
+    /// `ReadFilterCounts` a correct pass must produce; the counts are asserted, not
+    /// read order.
+    fn drop_fixture() -> (Vec<RecordBuf>, ReadFilterCounts) {
+        let clean = |name: &str, start: usize| {
+            record_with_seq(
+                name,
+                start,
+                60,
+                Flags::from(FLAG_PAIRED),
+                b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )
+        };
+        let records = vec![
+            clean("kept1", 10), // kept
+            clean("kept2", 20), // kept
+            record_with_seq(
+                "dup",
+                30,
+                60,
+                Flags::from(FLAG_PAIRED | FLAG_DUPLICATE),
+                b"AAAAAAAAAA",
+            ), // #1
+            record_with_seq("lowmapq", 40, 5, Flags::from(FLAG_PAIRED), b"AAAAAAAAAA"), // #2 (mapq 5 < 20)
+            record_with_seq(
+                "supp",
+                50,
+                60,
+                Flags::from(FLAG_PAIRED | FLAG_SUPPLEMENTARY),
+                b"AAAAAAAAAA",
+            ), // #3
+            record_with_seq(
+                "sec",
+                60,
+                60,
+                Flags::from(FLAG_PAIRED | FLAG_SECONDARY),
+                b"AAAAAAAAAA",
+            ), // #4
+            record_with_seq(
+                "qcfail",
+                70,
+                60,
+                Flags::from(FLAG_PAIRED | FLAG_QC_FAIL),
+                b"AAAAAAAAAA",
+            ), // #6
+            record_with_seq("tooshort", 80, 60, Flags::from(FLAG_PAIRED), b"AAAAA"), // #7 (len 5 < 30)
+            // #8: 5 non-reference bases out of 30 = 16.7% > 10%.
+            record_with_seq(
+                "highmismatch",
+                90,
+                60,
+                Flags::from(FLAG_PAIRED),
+                b"CCCCCAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+            // #9 bad CIGAR — AND high-mismatch (5 `C`s). Because it fails both #9
+            // and #8, the exact counts below discriminate the ng #9-before-#8
+            // order: it must land in `bad_cigar` (not `high_mismatch_fraction`).
+            boundary_deletion_record(120, b"CCCCCAAAAAAAAAAAAAAAAAAAAAAAAA"), // #9
+        ];
+        let expected = ReadFilterCounts {
+            kept: 2,
+            duplicate: 1,
+            low_mapq: 1,
+            supplementary: 1,
+            secondary: 1,
+            unmapped: 0,
+            qc_fail: 1,
+            too_short: 1,
+            high_mismatch_fraction: 1,
+            bad_cigar: 1,
+            other_sample: 0,
+        };
+        (records, expected)
+    }
+
+    /// A cursor over a scripted list on **contig 1**, whose 200 bases the drop fixture needs.
+    /// `reference_bases()` is all-`A` over both fixture contigs, which is what makes the
+    /// mismatch counts below the fixture's own property rather than the reference's.
+    fn cursor_over_contig_one(records: Vec<RecordBuf>) -> AlignmentCursor<InMemoryRefSeq> {
+        AlignmentCursor::over_records(
+            RecordReader::InMemory(InMemoryRecordReader::new(
+                bam_header(&matching_contigs()),
+                records,
+            )),
+            ContigId(1),
+            fixture_read_group(),
+            reference_bases(),
+            ReadFilterConfig::default(),
+            Arc::from(Path::new("/fixture/sample.bam")),
+        )
+        .expect("the fixture header resolves against the in-memory reference")
+    }
+
+    /// **Every drop reason, hand-counted, through the whole chain.**
+    ///
+    /// Two kept reads and one read per mapped drop reason. The assertion is on the *counts*,
+    /// never on read order, so it survives any reordering of the walk that does not change
+    /// what is dropped and why.
+    ///
+    /// **The last record is the load-bearing one.** It has a leading deletion (#9, bad CIGAR)
+    /// *and* five mismatching bases out of thirty (#8, above the 10 % ceiling), so it fails
+    /// both — and the exact tally below is what pins ng's **#9-before-#8** order. Charge it to
+    /// `high_mismatch_fraction` instead and this fails while every "the right reads survive"
+    /// test stays green.
+    #[test]
+    fn a_walk_charges_every_drop_reason_by_hand_count() {
+        let (records, expected) = drop_fixture();
+        let mut cursor = cursor_over_contig_one(records);
+
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(FIXTURE_CONTIGS[1].1 as u64),
+            })
+            .expect("on this chromosome");
+
+        let mut kept = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            kept.push(read.expect("the fixture decodes"));
+        }
+
+        assert_eq!(kept.len(), 2, "exactly the two clean reads survive");
+        assert_eq!(only_tally(&cursor.read_group_counts()), expected);
     }
 
     /// The message names the file and both positions — two bare offsets are meaningless
