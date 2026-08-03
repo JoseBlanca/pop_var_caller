@@ -308,18 +308,54 @@ is what happens today, one layer up.
 change, and it leaves `read/filtering.rs` holding only rules and thresholds, with nothing to
 construct and no state to get wrong. **Confirm before code.**
 
-**Q2. Who checks up front that every contig the file names exists in the reference?**
+**Q2. Is the up-front contig check still worth what it costs, and over what?**
 
-Building a filter today does that check: it asks the reference for a zero-length window on each
-contig in the file's `@SQ` list, and refuses to build if one does not resolve
-([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)). The point is that a
-reference-fetch failure *later*, mid-walk, then means genuinely corrupt input rather than a
-reference that never matched the file.
+**Three different checks are involved, and it helps to keep them apart.**
 
-If Q1 puts the reference on the cursor, this check goes to the cursor's constructor with it.
+1. **The reference itself is sound.** `read_reference_info`
+   ([`reference_info.rs:239`](../../../../src/ng/reference_info.rs#L239)) builds the contig
+   table, checks the FASTA against its `.fai`, and rejects duplicate names. Everything that opens
+   a reference goes through it, and this design does not touch that.
+2. **The alignment file agrees with the reference.** `AlignmentFile::open`'s gate proves the
+   file's `@SQ` list *equals* that contig table — names, lengths **and order**
+   ([`alignment_file.md`](alignment_file.md) §3.1, check 2).
+3. **The accessor handed to the cursor can actually serve those contigs.** This is the check in
+   question: building a filter asks the reference for a zero-length window on every contig in the
+   header, and refuses to build if one does not resolve
+   ([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)).
 
-*Leaning: yes, it moves.* Building a cursor can already fail, and the guarantee is worth keeping
-exactly as it is. **Confirm before code.**
+**Check 2 is strictly stronger than check 3, and the code says so** — in the doc for the
+constructor that exists to skip it: the gate "also rules out the permutation the probe happily
+accepts" ([`filtering.rs:715-721`](../../../../src/ng/read/filtering.rs#L715)). The cursor path is
+only ever reached through a gated `AlignmentFile`
+([`open_bam.rs:411`](../../../../src/ng/read/input/open_bam.rs#L411) is its one production
+caller), so check 3 looks redundant there.
+
+**It is not quite redundant, and the gap is worth naming.** The gate compares the *file* against
+the *reference table*. Check 3 exercises the *accessor the caller passed to `cursor()`* — and
+nothing ties that accessor to the reference the file was opened against. A caller whose factory
+builds over a different FASTA is caught by check 3 and by nothing else.
+
+**And it is not free.** It opens every contig in the header one after another, discarding each:
+~2,580 of them on GRCh38, at roughly 52 µs per open with a shared index
+([`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622)) — an estimated **~130 ms per
+cursor**, paid once per file per chromosome. That is arithmetic on a documented
+micro-measurement, not a measurement of this check, and it is worth confirming before it decides
+anything.
+
+**Four options.**
+
+| | option | what it costs and catches |
+|---|---|---|
+| (a) | keep it as it is | the ~130 ms; catches a mismatched accessor |
+| (b) | delete it | free; a mismatched accessor surfaces mid-walk instead of at construction |
+| (c) | check **only the cursor's own contig** | one open instead of ~2,580. A cursor covers one chromosome, and the mismatch filter only ever fetches the read's own contig, so this still covers every fetch that cursor can make |
+| (d) | tie the accessor to the file's reference so the question cannot arise | the real fix, and bigger than this change |
+
+*Leaning: (c), with (d) recorded as the proper answer for later.* It keeps the fail-fast property
+where it does work and drops the part that was checking contigs no read of this cursor can name.
+**Confirm before code** — and if (c) is taken, measure before and after, because the estimate
+above is the only number anyone has.
 
 ## 10. Deferred, with a home
 

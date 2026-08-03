@@ -217,7 +217,7 @@ Every row read at the cited line, 2026-08-03.
 | the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **rename** to `verdict_on_aligned_read`; body unchanged |
 | the conversion | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is** |
 | the loop | `ReadFilter::next` [`filtering.rs:895`](../../../../src/ng/read/filtering.rs#L895) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
-| the contig probe | `ReadFilter::new` [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | **move** to the cursor's constructor (`OPEN:` spec §9 Q2) |
+| the up-front contig check | `ReadFilter::new` [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | `OPEN:` spec §9 Q2 — leaning towards narrowing it to the cursor's own contig, ~2,580 opens down to one |
 | the tally and its fold | `ReadFilterCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), `ReadGroupCounts` [`:661`](../../../../src/ng/read/filtering.rs#L661), `tally_for_current_record` [`:846`](../../../../src/ng/read/filtering.rs#L846), `counts` [`:868`](../../../../src/ng/read/filtering.rs#L868) | **move** to the cursor, including the `other_sample` rider on the first entry |
 | the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** |
 | the raw read | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), `NoodlesRawRecord` [`:479`](../../../../src/ng/read/filtering.rs#L479) | **rename and move** to `aligned_read.rs` |
@@ -234,7 +234,7 @@ Every row read at the cited line, 2026-08-03.
 
 - `OPEN: Q1` — where do the reference bases and their read buffer live: on the cursor, which
   hands them to the second filter, or inside a small object the second filter becomes?
-- `OPEN: Q2` — does the contig probe move to the cursor's constructor with the reference?
+- `OPEN: Q2` — does the up-front contig check stay as it is, narrow to the cursor's own contig, or go? Spec §9 lays out four options and leans on narrowing.
 
 **Impl-time confirmations, not decisions:**
 
