@@ -9,6 +9,10 @@ by document kind:
     taxonomy, the benchmark strategy, and the single-phase lab.
   - [`read_filtering.md`](spec/read_filtering.md) — step 1 (the whole-read keep/drop
     prelude) + the ng foundations it settles (skeleton, `types.rs` seed, conventions).
+  - [`read_filtering_stages.md`](spec/read_filtering_stages.md) — dividing step 1 into two
+    filters and a converter, so the module stops doing the decode as a side effect of
+    filtering. The *policy* stays in `read_filtering.md`; this is only the division of work.
+    **Draft — four open questions for the owner.**
   - [`read_preparation.md`](spec/read_preparation.md) — step 2, the per-read, **locus-independent**
     transform (pass-through / canonicalize / re-align → `PreparedRead`). It is a **generic-path-only**
     step: the STR path has no read preparation — it goes filtering → observation generation, aligning
@@ -56,6 +60,8 @@ by document kind:
     folder per step (trait + impls + tests together), shared vocabulary, `bench/`.
   - [`read_filtering.md`](arch/read_filtering.md) — step 1's types & interfaces,
     distilled (the code-facing companion to the spec).
+  - [`read_filtering_stages.md`](arch/read_filtering_stages.md) — the two admission types, the
+    converter and the driver they compose into; companion to `spec/read_filtering_stages.md`.
   - [`alignment.md`](arch/alignment.md) — the alignment module's types & interfaces
     (`BestPathAligner`, `MarginalAligner`, `AlignmentNormalizer`, `RepeatSpan`, `StutterModel`;
     seeds `LogProb`); companion to `spec/alignment.md`. Called by two steps, not a step itself.
