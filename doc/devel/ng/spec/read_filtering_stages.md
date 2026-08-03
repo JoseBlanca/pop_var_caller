@@ -151,7 +151,7 @@ because the tally is keyed on it.
 **A drop must be charged to a read group, and the first filter runs before any aligned read
 exists.** Already solved, and easy to undo by accident: the raw aligned read carries its read
 group, stamped by the region narrowing
-([`region_records.rs:222`](../../../../src/ng/read/input/region_records.rs#L222)), and the
+([`region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs)), and the
 `read_group` accessor exists for the tally rather than for any filter
 ([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
 
@@ -408,7 +408,7 @@ No new logic. Every rule exists and is being re-homed or renamed.
 | the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), [`:661`](../../../../src/ng/read/filtering.rs#L661) | **reuse as-is**, owned by the cursor |
 | the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** — its three variants already name the three pieces |
 | the raw read and its buffer contract | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334) | **rename and move** to `aligned_read.rs` |
-| the region narrowing | `RegionRecords` [`region_records.rs`](../../../../src/ng/read/input/region_records.rs) | **rename**; its `RecordSource` impl becomes inherent methods |
+| the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; its `RecordSource` impl becomes inherent methods at C3 |
 | the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646) | **delete** — a `failed` flag on the cursor replaces it (§5) |
 | the source trait and its doubles | `RecordSource` [`filtering.rs:366`](../../../../src/ng/read/filtering.rs#L366), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
 

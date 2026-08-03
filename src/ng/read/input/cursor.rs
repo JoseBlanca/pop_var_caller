@@ -34,13 +34,13 @@
 //! - **The overlap test must not be written twice.** A read whose CIGAR consumes no reference
 //!   — all soft-clip — clears every step-1 filter and reaches this layer. noodles maps its
 //!   zero span to *no* span, so `alignment_end()` reports the one-base footprint
-//!   `start..=start` and [`RegionRecords`] **accepts** it. A second, hand-written test above
-//!   the filter that treats a zero span as "touches nothing" would **reject** the same read —
+//!   `start..=start` and [`RegionRawAlignedReads`] **accepts** it. A second, hand-written test
+//!   above the filter that treats a zero span as "touches nothing" would **reject** the same read —
 //!   so it would be yielded when read fresh and dropped when replayed, which is a read lost
 //!   with nothing failing. Whatever tests a kept read for overlap must apply the rule
-//!   `RegionRecords` applies, not a second one that looks equivalent.
-//! - **Reuse needs more than a comparison.** `RegionRecords::move_to` repositions the reader
-//!   unconditionally, and the filter arm below does not check `kept` before pushing. So
+//!   `RegionRawAlignedReads` applies, not a second one that looks equivalent.
+//! - **Reuse needs more than a comparison.** `RegionRawAlignedReads::move_to` repositions the
+//!   reader unconditionally, and the filter arm below does not check `kept` before pushing. So
 //!   simply *not clearing* `kept` does not give reuse — it gives the same read twice. Spec §4's
 //!   "partly held — hand over the kept reads, then carry on reading, no jump" has no code path
 //!   yet; it needs the layers to agree on where reading resumes, not just a rule about what to
@@ -73,7 +73,9 @@ use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError, ReadGroupCounts};
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
-use crate::ng::read::input::region_records::{RegionRecords, read_end, read_overlaps};
+use crate::ng::read::input::region_raw_aligned_reads::{
+    RegionRawAlignedReads, read_end, read_overlaps,
+};
 use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq, RefSeqError};
 use crate::ng::types::{ContigId, GenomeRegion};
 
@@ -232,13 +234,13 @@ pub enum CursorError {
 /// unpacked at most one block, and abandoning a region costs nothing to unwind because there
 /// is no stream object to give back.
 pub struct AlignmentCursor<R: RawRefSeq> {
-    /// The whole chain below, owned: the filter holds [`RegionRecords`], which holds the
+    /// The whole chain below, owned: the filter holds [`RegionRawAlignedReads`], which holds the
     /// [`AlignedReadsReader`]. Not a cycle — the filter's source is the layer *below* this cursor,
     /// not the cursor itself.
     ///
     /// The reference accessor the mismatch filter needs sits inside, taken once here rather
     /// than rebuilt per query (perf review L2).
-    filter: ReadFilter<RegionRecords, R>,
+    filter: ReadFilter<RegionRawAlignedReads, R>,
     /// **Our** reads — decoded and filtered — in the order they came off the file.
     ///
     /// Held above the filter, so serving one again skips both decode and filtering: that is
@@ -332,7 +334,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         config: ReadFilterConfig,
         path: Arc<Path>,
     ) -> Result<Self, RefSeqError> {
-        let records = RegionRecords::new(reader, contig, resolution);
+        let records = RegionRawAlignedReads::new(reader, contig, resolution);
         Ok(Self {
             filter: ReadFilter::new(records, reference, config)?,
             kept: VecDeque::new(),
@@ -505,8 +507,8 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         }
 
         // Then read on, from wherever the reader is. Everything the filter yields already
-        // overlaps the region — `RegionRecords` narrowed it below — so what is kept here is
-        // exactly what a later region may be able to reuse.
+        // overlaps the region — `RegionRawAlignedReads` narrowed it below — so what is kept
+        // here is exactly what a later region may be able to reuse.
         match self.filter.next() {
             None => None,
             Some(Err(error)) => Some(Err(self.read_failure(error))),
@@ -1569,7 +1571,8 @@ mod tests {
     // whole-file `BamRecordSource`/`CramRecordSource` it owned. Those sources are gone: a
     // filter module has no business opening files. What the two tests actually pinned is the
     // *filter's accounting*, and it is pinned here, where the chain that accounting belongs to
-    // composes — `AlignedReadsReader` → `RegionRecords` → `ReadFilter` → `AlignmentCursor`.
+    // composes — `AlignedReadsReader` → `RegionRawAlignedReads` → `ReadFilter` →
+    // `AlignmentCursor`.
     //
     // The fixture sits on **contig 1**, which the fixture table makes 200 bases long; its
     // records reach base 149 and would not fit on contig 0's 100.

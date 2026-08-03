@@ -44,7 +44,7 @@
 //!   from that point to the end of the chromosome — not just the ones inside the region it
 //!   was handed. The region says *where to start*, and nothing else. This is not a style
 //!   preference: the cursor above serves a forward region by carrying on reading without
-//!   repositioning at all (`RegionRecords::continue_into`), so a reader that had quietly
+//!   repositioning at all (`RegionRawAlignedReads::continue_into`), so a reader that had quietly
 //!   stopped at the previous region's end would lose every record past it, silently, for
 //!   every region after the first.
 //!

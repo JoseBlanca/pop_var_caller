@@ -1436,9 +1436,9 @@ mod tests {
     /// the reader was never asked about. Charging them to a `DropReason` would make the tally
     /// mean something different for a narrowed read than for a whole-file one.
     ///
-    /// The footprint-less record is here rather than only in `region_records` because this is
-    /// where the *tally* is observable: that layer can say the record never surfaced, and only
-    /// this one can say it was charged to nothing.
+    /// The footprint-less record is here rather than only in `region_raw_aligned_reads` because
+    /// this is where the *tally* is observable: that layer can say the record never surfaced,
+    /// and only this one can say it was charged to nothing.
     #[test]
     fn records_outside_the_region_are_dropped_without_being_counted() {
         let (_reference_dir, _bam_dir, file) = opened_over(&[

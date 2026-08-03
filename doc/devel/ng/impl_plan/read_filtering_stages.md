@@ -87,7 +87,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   `BamAlignedReadsReader` / `CramAlignedReadsReader` / `InMemoryAlignedReadsReader`, and the
   module `record_reader/` → `aligned_reads_reader/`. Each reader's doc must now state that what
   it yields is undecoded, because the name no longer says so. *Depends:* A1. *Source:* spec §6.
-- ☐ **A3.** `RegionRecords` → `RegionRawAlignedReads` (file follows the type),
+- ✅ **A3.** `RegionRecords` → `RegionRawAlignedReads` (file follows the type),
   `DecodedContainer::fill_record` → `fill_raw_read`, `RecordIndex` → `RawReadIndex`.
   *Depends:* A2. *Source:* spec §6, arch §2.
 

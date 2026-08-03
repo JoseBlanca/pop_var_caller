@@ -1,5 +1,5 @@
-//! **This region's records only** — the questions that are the same whichever format the
-//! file is.
+//! **This region's raw aligned reads only** — the questions that are the same whichever format
+//! the file is.
 //!
 //! An [`AlignedReadsReader`] finds and unpacks records and asks nothing about them. Something
 //! has to ask: is this record on the chromosome we want, does it touch the region, may we stop
@@ -9,13 +9,13 @@
 //! something the design claims (`arch/alignment_cursor.md` §2.3).
 //!
 //! ```text
-//! AlignedReadsReader   raw records, from wherever they come from
+//! AlignedReadsReader     raw aligned reads, from wherever they come from
 //!    ↓
-//! RegionRecords        this region's records only  ← here
+//! RegionRawAlignedReads  this region's raw aligned reads only  ← here
 //!    ↓
-//! ReadFilter           step-1 filtering
+//! ReadFilter             step-1 filtering
 //!    ↓
-//! AlignedRead          what the cursor hands out
+//! AlignedRead            what the cursor hands out
 //! ```
 //!
 //! # Why this exists at Milestone B rather than C
@@ -49,14 +49,15 @@ use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 
-/// The records of one region of one file, narrowed from whatever the reader hands over.
+/// The raw aligned reads of one region of one file, narrowed from whatever the reader hands
+/// over.
 ///
 /// Owns the reader beneath it, and is owned by the [`ReadFilter`] above it — which is why
 /// the cursor reaching down to reposition goes `filter.source_mut().move_to(region)` rather
 /// than through a back-pointer. There is no cycle: the filter's source is the layer *below*
 /// the cursor, not the cursor itself.
 #[derive(Debug)]
-pub(crate) struct RegionRecords {
+pub(crate) struct RegionRawAlignedReads {
     reader: AlignedReadsReader,
     /// The chromosome every region must be on — the cursor's, checked before this is ever
     /// asked to move.
@@ -79,9 +80,9 @@ pub(crate) struct RegionRecords {
     /// repositioned and re-reads it; when the next region **continues** from here, nothing
     /// re-reads it and it is gone. It is one read, silently, per region boundary.
     ///
-    /// Held here rather than in the [`AlignedReadsReader`], which is where `arch §1.3` puts it: the
-    /// over-read happens in this layer, because this is the layer that knows where the region
-    /// ends. A reader cannot hold back a record it was never told to stop at.
+    /// Held here rather than in the [`AlignedReadsReader`], which is where `arch §1.3` puts it:
+    /// the over-read happens in this layer, because this is the layer that knows where the
+    /// region ends. A reader cannot hold back a record it was never told to stop at.
     ///
     /// **The read group is held with it.** The CRAM arm decides a record's read group while
     /// decoding, and that answer arrives attached to the record; putting the record back
@@ -90,7 +91,7 @@ pub(crate) struct RegionRecords {
     held: Option<(sam::alignment::RecordBuf, Option<ReadGroupId>)>,
 }
 
-impl RegionRecords {
+impl RegionRawAlignedReads {
     pub(crate) fn new(
         reader: AlignedReadsReader,
         contig: ContigId,
@@ -132,7 +133,7 @@ impl RegionRecords {
     }
 }
 
-impl RecordSource for RegionRecords {
+impl RecordSource for RegionRawAlignedReads {
     type Record = NoodlesRawAlignedRead;
 
     fn header(&self) -> &sam::Header {
@@ -283,8 +284,8 @@ mod tests {
     use crate::ng::types::Position;
     use noodles_sam::alignment::RecordBuf;
 
-    fn records_over(script: Vec<RecordBuf>) -> RegionRecords {
-        RegionRecords::new(
+    fn records_over(script: Vec<RecordBuf>) -> RegionRawAlignedReads {
+        RegionRawAlignedReads::new(
             AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
                 bam_header(&matching_contigs()),
                 script,
@@ -307,7 +308,7 @@ mod tests {
     }
 
     /// Every record this source yields for `region`, by name.
-    fn narrowed_to(source: &mut RegionRecords, region: GenomeRegion) -> Vec<String> {
+    fn narrowed_to(source: &mut RegionRawAlignedReads, region: GenomeRegion) -> Vec<String> {
         source
             .jump_to(region)
             .expect("an in-memory move cannot fail");
@@ -521,7 +522,7 @@ mod tests {
     }
 
     /// `continue_into` must **not** move the reader — that is the whole difference between it
-    /// and [`RegionRecords::jump_to`], and the reason a forward region costs no seek.
+    /// and [`RegionRawAlignedReads::jump_to`], and the reason a forward region costs no seek.
     #[test]
     fn continuing_into_a_region_does_not_move_the_reader() {
         let mut source = records_over(vec![

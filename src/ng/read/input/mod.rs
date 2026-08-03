@@ -2,7 +2,7 @@
 //! filtered streams of reads for a region.
 //!
 //! Two layers, split by subject. [`open_bam`], [`aligned_reads_reader`],
-//! [`region_records`] and [`cursor`] own the reader logic whose subject is
+//! [`region_raw_aligned_reads`] and [`cursor`] own the reader logic whose subject is
 //! **one alignment file** — the validate-on-open gate, the per-format record
 //! readers, the region narrowing and the long-lived cursor
 //! (`doc/devel/ng/spec/alignment_file.md`, `alignment_cursor.md`).
@@ -35,7 +35,7 @@ pub mod cursor;
 pub mod open_bam;
 pub mod read_groups;
 pub mod reference;
-pub(crate) mod region_records;
+pub(crate) mod region_raw_aligned_reads;
 pub mod sample_cursor;
 
 use cursor::CursorError;

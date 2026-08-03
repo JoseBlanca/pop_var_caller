@@ -57,7 +57,7 @@ use crate::ng::types::GenomeRegion;
 /// list. Deciding it at decode is what lets every auxiliary tag be dropped — 6.2 MiB per open
 /// file, measured, the largest single item in what an open file cost — and re-inflating a
 /// number into a string so the layer above can parse it back would be perverse. So the answer
-/// travels with the record, and `RegionRecords` uses it rather than asking again.
+/// travels with the record, and `RegionRawAlignedReads` uses it rather than asking again.
 ///
 /// **A sample is not one read group, and this is the arm where getting that wrong would be
 /// worst.** One individual sequenced as several libraries declares an `@RG` for each, and every
@@ -185,7 +185,7 @@ impl CramAlignedReadsReader {
                 self.served += 1;
                 // Rebuilt into the caller's buffer rather than moved in, so the buffer's
                 // allocations are reused across the whole walk.
-                container.fill_record(i, &mut buf.record);
+                container.fill_raw_read(i, &mut buf.record);
                 buf.read_group = Some(container.read_group(i));
                 return Ok(true);
             }

@@ -442,7 +442,7 @@ fn unreadable_record(record: &RecordBuf, problem: &str) -> io::Error {
 // and, more to the point, *a filter module has no business opening files*. Finding and
 // unpacking records is `read/input/aligned_reads_reader/`'s job, and since the alignment cursor
 // (`spec/alignment_cursor.md`) there is exactly one shape for it: an `AlignedReadsReader` positions,
-// `RegionRecords` narrows, and this filter consumes what they hand over. Keeping a second,
+// `RegionRawAlignedReads` narrows, and this filter consumes what they hand over. Keeping a second,
 // unused file reader here left ng with two ways to read a BAM and only one of them reachable.
 //
 // **What became of what they proved.** The four tests whose subject was the sources themselves
@@ -1673,8 +1673,9 @@ mod tests {
     // keeping when `BamRecordSource`/`CramRecordSource` were deleted, and they were never
     // about the source: what they pin is *this* filter's accounting.
     //
-    // They live where the chain they need now composes — `AlignedReadsReader` → `RegionRecords` →
-    // `ReadFilter` → `AlignmentCursor` — as `a_walk_charges_every_drop_reason_by_hand_count`.
+    // They live where the chain they need now composes — `AlignedReadsReader` →
+    // `RegionRawAlignedReads` → `ReadFilter` → `AlignmentCursor` — as
+    // `a_walk_charges_every_drop_reason_by_hand_count`.
     // A file is not needed to state the property and, since this module no longer knows what a
     // BAM is, could not be opened from here anyway.
 

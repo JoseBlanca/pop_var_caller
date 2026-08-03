@@ -18,7 +18,7 @@
 //!
 //! So the bytes go into two flat buffers, [`payload`](DecodedContainer::payload) and
 //! [`cigar_ops`](DecodedContainer::cigar_ops), and each record becomes a fixed-size
-//! [`RecordIndex`] naming its slices of them. A record is materialised as a `RecordBuf` **only
+//! [`RawReadIndex`] naming its slices of them. A record is materialised as a `RecordBuf` **only
 //! when it is actually served**, straight into the caller's reused buffer — which is also how
 //! the per-record `clone()` this replaced disappeared, so serving a read allocates nothing.
 
@@ -56,9 +56,9 @@ pub(crate) struct DecodedContainer {
     other_sample_records: u64,
     /// One entry per record of the container, in file order — *not* filtered to any region.
     /// Which records a region wants is decided above this, by the layer that knows the region.
-    index: Vec<RecordIndex>,
+    index: Vec<RawReadIndex>,
     /// Every record's name, sequence and quality scores, back to back. Sliced by the offsets in
-    /// [`RecordIndex`]; meaningless on its own.
+    /// [`RawReadIndex`]; meaningless on its own.
     payload: Vec<u8>,
     /// Every record's CIGAR operations, back to back. Separate from [`payload`](Self::payload)
     /// because an `Op` is not a byte and packing it into one would mean encoding and decoding it.
@@ -71,7 +71,7 @@ pub(crate) struct DecodedContainer {
 /// than raw integers: they are all `Copy`, so nothing is gained by unpacking them, and keeping
 /// them means [`DecodedContainer::fill`] hands them back without conversion.
 #[derive(Clone, Copy)]
-struct RecordIndex {
+struct RawReadIndex {
     /// Which read group this record belongs to, resolved **once per decode** and before the
     /// record was built.
     ///
@@ -148,11 +148,6 @@ impl DecodedContainer {
         self.index[i].owner
     }
 
-    /// Rebuild record `i` into `out`, reusing its allocations — see [`Self::fill`].
-    pub(crate) fn fill_record(&self, i: usize, out: &mut RecordBuf) {
-        self.fill(i, out);
-    }
-
     /// Append one decoded record: its bytes move into the flat buffers and its scalars into the
     /// index, and the `RecordBuf` itself is dropped by the caller.
     ///
@@ -170,7 +165,7 @@ impl DecodedContainer {
         self.cigar_ops.extend_from_slice(record.cigar().as_ref());
         let cigar = Span::new(cigar_start, self.cigar_ops.len())?;
 
-        self.index.push(RecordIndex {
+        self.index.push(RawReadIndex {
             owner,
             flags: record.flags(),
             mapping_quality: record.mapping_quality(),
@@ -206,7 +201,13 @@ impl DecodedContainer {
     /// million reads through one buffer allocates for the longest read it meets and nothing
     /// after — the same buffer-reuse property the BAM arm gets from noodles'
     /// `read_record_buf`.
-    fn fill(&self, i: usize, out: &mut RecordBuf) {
+    ///
+    /// `out` is the record half of the caller's reused
+    /// [`NoodlesRawAlignedRead`](crate::ng::read::aligned_read::NoodlesRawAlignedRead); the
+    /// read-group half is this arm's to set, and it does so at the call site
+    /// ([`CramAlignedReadsReader::read_next`](super::cram::CramAlignedReadsReader::read_next)),
+    /// because on CRAM the group is decided at decode rather than resolved from a tag.
+    pub(crate) fn fill_raw_read(&self, i: usize, out: &mut RecordBuf) {
         let entry = &self.index[i];
 
         *out.flags_mut() = entry.flags;
