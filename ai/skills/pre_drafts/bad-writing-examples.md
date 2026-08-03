@@ -227,6 +227,51 @@ and it is the same instinct: the reader wants the thing, not the boundary around
 
 ---
 
+## 7. Dressing a decision up as a necessity
+
+**Written:** "**Both alternatives to the current placement are wasteful, and they fail in
+opposite directions**, which is what makes the answer forced rather than preferred."
+
+**Owner:** *"bad writting. You're tying to be sensationalist. We are not forced to do anything,
+for all we care we could print out the bam file and do the anylisis manually. We *prefer* to have
+a simpler architecture and maybe even an improved performance. So given our goals we decide
+what's the best approach."*
+
+**What was wrong.** "Forced" was reached for because it sounds stronger than "chosen". It is
+false — nothing forces any of this — and the falseness is the smaller half.
+
+**The real damage is that it deletes the goals from the page.** A decision presented as
+inevitable carries no criteria, so a reader cannot tell what it was optimising for, and therefore
+cannot tell whether it still applies when the situation changes. `spec-authoring` says a decision
+recorded without its rationale rots. *"Forced"* is worse than a missing rationale: it tells the
+reader there is nothing to reconsider.
+
+It also quietly insults the alternatives. (a) and (b) would both produce correct output. They
+lose on a cost, against goals this document states — which is a comparison a reader can check and
+disagree with. "Forced" is not.
+
+**Became:** the lead now says there are three placements, all producing the same reads, differing
+in the work they spend. The conclusion says *"So we choose (c)… Given what this change is for — a
+simpler shape, and no significant slowdown — (c) is the one that costs nothing to get. (a) and
+(b) are not wrong; they would produce the same output, and if the goals were different they might
+be the better trade."*
+
+**Test to apply.** Whenever a design reads as the only possibility, ask: *what would have to be
+true for one of the others to win?* If there is an answer, the design is a **choice** and the
+sentence owes the reader the goals it was chosen against. If there genuinely is no answer, say
+what makes it impossible — that is a fact, and it will be specific.
+
+**Watch for:** forced, inevitable, the only way, has to be, no choice but, cannot be otherwise.
+Each is worth one check before it survives a revision.
+
+**Skill gap.** `spec-authoring` requires alternatives-considered *and* the reason the rejected
+ones lost. It does not warn about the inverse move: keeping the alternatives on the page and then
+overstating the verdict, so the section looks like it weighed something while telling the reader
+the weighing was a formality. That reads as more rigorous than an honest "we preferred this, for
+these goals", and it is much less useful.
+
+---
+
 ## Patterns so far
 
 | # | pattern | one-line test |
@@ -237,6 +282,7 @@ and it is the same instinct: the reader wants the thing, not the boundary around
 | 4 | a lead-in that argues instead of informs | delete it and re-read; watch every *"it is not just…"* |
 | 5 | a count or partitive with no head noun, or no set to belong to | read the sentence alone: "six of the nine **what**, out of which nine?" |
 | 6 | a design explained by ruling out the alternative | state the reason for the design; if you cannot, you have not found it |
+| 7 | a choice presented as a necessity | what would have to be true for another option to win? if there is an answer, it is a choice — name the goals |
 
 **A common root for 1–4, provisionally.** All four are sentences written for how they would
 *sound* to someone judging the document, rather than for what a colleague needs from it.
@@ -247,7 +293,13 @@ only names the damage at the level of sections and decisions.
 That may be the rule worth extracting: **the adversary-in-the-room failure is a sentence-level
 disease, not only a document-level one.**
 
-**Entry 5 is a different root, and worth keeping separate.** Nothing about it is defensive — it
+**Entries 3 and 7 share a third root: overstatement that reads as rigour.** One invents a
+standard stricter than the truth, the other promotes a preference to an inevitability. Both make
+the document sound more disciplined and leave the reader with less — in 3 an acceptance criterion
+nobody should hold to, in 7 a decision with its criteria removed. The tell in both is a word
+doing emphasis rather than work: *wrong*, *forced*.
+
+**Entry 5 is a different root again, and worth keeping separate.** Nothing about it is defensive — it
 is a sentence that could not stand alone, half of it caused by fixing entry 4. That points at a
 second candidate rule: **every revision pass should re-read the neighbours of anything it
 changed**, because the failure a good edit introduces is invisible to the person who made it.

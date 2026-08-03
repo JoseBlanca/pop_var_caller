@@ -97,9 +97,9 @@ noodles' types, and two copies of one rule is the thing this module guards again
 
 ## 3. Why the filters and the conversion sit below what the cursor keeps
 
-Once the three pieces are separable, the first question a reader will ask is where the cursor's
-edge falls. **Both alternatives to the current placement are wasteful, and they fail in opposite
-directions**, which is what makes the answer forced rather than preferred.
+Once the three pieces are separable, there are three places the cursor's edge can fall. All
+three produce the same reads. They differ in how much work they spend doing it, and the two we
+did not choose spend it in opposite directions.
 
 **(a) The cursor keeps raw aligned reads and the filters sit above it.** Then a read is converted
 once per region that serves it. Not twice: consecutive regions overlap by about 93 % because the
@@ -118,10 +118,14 @@ and the cursor's kept set holds reads that are about to be discarded, so the mem
 **(c) The filters sit below what the cursor keeps** — today's shape, and this design's. Converted
 **once**, and only for reads that already cleared flag and mapping quality.
 
-**So the rule is: the two filters and the conversion all sit below the kept set, and the cursor
-owns the loop.** It is stated here because separating three things that were fused is exactly
-when someone rearranges them — and moving any one of them above the kept set brings back (a) or
-(b).
+**So we choose (c): the two filters and the conversion all sit below the kept set, and the cursor
+owns the loop.** Given what this change is for — a simpler shape, and no significant slowdown
+(§1) — (c) is the one that costs nothing to get. (a) and (b) are not wrong; they would produce
+the same output, and if the goals were different they might be the better trade.
+
+It is written down because separating three things that were fused is exactly when someone
+rearranges them, and moving any of them above the kept set brings back (a) or (b) without
+anything failing.
 
 **A rationale considered and rejected, recorded so nobody re-proposes it.** *"Splitting the
 pieces lets us convert fewer reads."* It does not. The conversion already sits after the cheap
