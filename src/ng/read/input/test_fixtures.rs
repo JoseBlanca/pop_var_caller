@@ -505,6 +505,62 @@ pub(crate) fn multi_container_cram(
     (cram_dir, cram_path, fasta_dir, fasta)
 }
 
+/// [`multi_container_cram`] with **two** read groups of one sample, alternating record by
+/// record — so the read group varies *within* a container and *across* the boundary.
+///
+/// **The gap this fills is a hole between two fixtures.** `indexed_cram_declaring` is the only
+/// multi-read-group CRAM and holds three records, which noodles writes as one container (it
+/// packs 10,240 per container). `multi_container_cram` is the only multi-container CRAM and
+/// declares a single `@RG`, which its cursor tests open as `ReadGroupResolution::Sole` — an arm
+/// that never asks a record which group it is in. So **no test reached the per-record read-group
+/// arm past a container boundary at all**, and a stamp that went stale from the second container
+/// onwards was invisible to the whole suite. Found by B2's review, 2026-08-03.
+pub(crate) fn multi_container_cram_two_read_groups(
+    contig_length: usize,
+    read_count: usize,
+) -> (TempDir, PathBuf, TempDir, PathBuf) {
+    use crate::pileup::per_sample::cram_files::{HeaderOverrides, build_cram};
+
+    let specs = vec![ContigSpec {
+        name: "chr1".to_string(),
+        length: contig_length as u64,
+    }];
+    let (fasta_dir, fasta) = build_fasta(&specs).expect("build fasta");
+
+    let step = (contig_length - 40) / read_count.max(1);
+    let records: Vec<RecordBuf> = (0..read_count)
+        .map(|i| {
+            read_named_with_length_in_read_group(
+                &format!("r{i}"),
+                0,
+                1 + i * step.max(1),
+                30,
+                if i % 2 == 0 { "rg1" } else { "rg2" },
+            )
+        })
+        .collect();
+
+    let (cram_dir, cram_path) = build_cram(
+        &fasta,
+        &specs,
+        &HeaderOverrides {
+            read_groups: vec![
+                ("rg1".to_string(), Some("NA12878".to_string())),
+                ("rg2".to_string(), Some("NA12878".to_string())),
+            ],
+            ..HeaderOverrides::default()
+        },
+        &records,
+    )
+    .expect("build cram");
+
+    let index = noodles_cram::fs::index(&cram_path).expect("index a single-reference CRAM");
+    let crai_path = PathBuf::from(format!("{}.crai", cram_path.display()));
+    noodles_cram::crai::fs::write(&crai_path, &index).expect("write crai");
+
+    (cram_dir, cram_path, fasta_dir, fasta)
+}
+
 /// One 10 bp read at the start of the first contig — enough to make a file
 /// non-empty for tests that never read it.
 pub(crate) fn one_read() -> Vec<RecordBuf> {

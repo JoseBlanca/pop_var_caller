@@ -35,6 +35,7 @@ use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::cigar::Op;
 use noodles_sam::alignment::record::{Flags, MappingQuality};
 
+use crate::ng::read::aligned_read::NoodlesRawAlignedRead;
 use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
 use crate::ng::types::ReadGroupId;
 
@@ -145,10 +146,9 @@ impl DecodedContainer {
         self.index.len()
     }
 
-    /// The read group record `i` belongs to, decided at decode.
-    pub(crate) fn read_group(&self, i: usize) -> ReadGroupId {
-        self.index[i].owner
-    }
+    // `read_group(i)` was here and went with B2. It existed for exactly one caller — the CRAM
+    // arm stamping the buffer on the line after `fill_raw_read` — and `fill_raw_read` sets both
+    // halves itself now, so nothing outside this file needs to ask which group an entry has.
 
     /// Append one decoded record: its bytes move into the flat buffers and its scalars into the
     /// index, and the `RecordBuf` itself is dropped by the caller.
@@ -197,20 +197,34 @@ impl DecodedContainer {
         Span::new(start, self.payload.len())
     }
 
-    /// Rebuild record `i` **into `out`**, reusing its allocations.
+    /// Rebuild read `i` **into `out`**, reusing its allocations — **both halves of it**.
+    ///
+    /// A raw aligned read is a record *and* the read group it belongs to, and this sets both.
+    /// It used to take a bare `RecordBuf` and fill only the record, leaving its one caller to
+    /// stamp the group on the next line — so a function named for a raw aligned read filled
+    /// half of one, and a second caller could have taken the record and not known to ask for
+    /// the rest.
+    ///
+    /// **The read group comes from here because on CRAM it is decided at decode.** A CRAM
+    /// stores it as a container-level number rather than a per-record `RG` tag, so it is
+    /// resolved once while the container is decoded and travels with the entry — this arm is
+    /// the documented exception to the readers' "records come out raw, read group cleared"
+    /// contract (`aligned_reads_reader/mod.rs`). Setting it here rather than at the call site
+    /// puts the exception in one place instead of two.
     ///
     /// Every owned field is cleared and refilled rather than replaced, so a walk that serves a
     /// million reads through one buffer allocates for the longest read it meets and nothing
     /// after — the same buffer-reuse property the BAM arm gets from noodles'
     /// `read_record_buf`.
-    ///
-    /// `out` is the record half of the caller's reused
-    /// [`NoodlesRawAlignedRead`](crate::ng::read::aligned_read::NoodlesRawAlignedRead); the
-    /// read-group half is this arm's to set, and it does so at the call site
-    /// ([`CramAlignedReadsReader::read_next`](super::cram::CramAlignedReadsReader::read_next)),
-    /// because on CRAM the group is decided at decode rather than resolved from a tag.
-    pub(crate) fn fill_raw_read(&self, i: usize, out: &mut RecordBuf) {
+    pub(crate) fn fill_raw_read(&self, i: usize, raw_read: &mut NoodlesRawAlignedRead) {
         let entry = &self.index[i];
+
+        // Destructured, not reached field by field: this function's doc promises it fills
+        // **both halves**, and a third field added to `NoodlesRawAlignedRead` would otherwise
+        // compile silently here and leave that promise vouching for something false.
+        let NoodlesRawAlignedRead { record, read_group } = raw_read;
+        *read_group = Some(entry.owner);
+        let out = record;
 
         *out.flags_mut() = entry.flags;
         *out.reference_sequence_id_mut() = entry.reference_sequence_id;

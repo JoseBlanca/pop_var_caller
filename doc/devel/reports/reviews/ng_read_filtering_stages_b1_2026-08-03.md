@@ -38,9 +38,11 @@ below was produced by running a mutation or measuring a behaviour, not by readin
 
 ## 4. Open questions
 
-1. **`AlignmentFileError::CursorAccessorContigTable` is a new variant on a `pub` enum, and spec
-   §1 says this change adds no new error.** Applied on the `errors` reviewer's argument (§6, M2)
-   and recorded as a deviation. **Owner's call at Checkpoint B.**
+1. **`AlignmentFileError::CursorAccessorContigTable` is a new variant on a `pub` enum.** Applied
+   on the `errors` reviewer's argument (§6, M2). **Owner's call at Checkpoint B** — and B2's
+   review subsequently established that the design authority is *silent* on this rather than
+   against it: spec §1 says "change the meaning of any error" (which this does not do), and the
+   only "No new error type" sentence is arch §4, scoped to a different enum.
 2. **Spec §9 Q2's cost arithmetic is wrong** in a way two agents confirmed independently. Left
    for the owner, as a design document.
 

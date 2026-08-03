@@ -1909,12 +1909,17 @@ mod tests {
         .expect("a shared CRAM opens for one of its samples");
 
         let mut cursor = cursor_over_first_contig(&reads);
-        let names: Vec<String> = collect_reads(&mut cursor)
-            .into_iter()
-            .map(|(qname, _)| qname)
-            .collect();
 
-        assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+        // **The read group is asserted, not collected and dropped.** This test used to keep
+        // only the names, which made it blind to a *wrong-but-valid* group — the CRAM arm is
+        // the one that decides the group itself, so that is exactly the defect it should see.
+        // `rg1` is this open's only own group, so both reads are `0`; the fixture's `rg2`
+        // belongs to the other sample.
+        assert_eq!(
+            collect_reads(&mut cursor),
+            vec![("a".to_string(), 0), ("c".to_string(), 0)],
+            "each read carries the group the container decided, not merely some group"
+        );
         assert_eq!(
             only_tally(&cursor.read_group_counts()).other_sample,
             1,

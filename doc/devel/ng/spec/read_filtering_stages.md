@@ -1,7 +1,9 @@
 # ng — read filtering in stages: two filters and a conversion
 
-**Date:** 2026-08-03 · **Status:** design settled, **no code yet**. Both questions §9 raised are
-resolved (owner, 2026-08-03).
+**Date:** 2026-08-03 · **Status:** design settled; **Milestones A and B are built** (the renames,
+and the contig check). Both questions §9 raised are resolved (owner, 2026-08-03).
+**The present tense below describes the state Milestones C and D still have to reach**, not
+today's code — where a claim has already been overtaken, a note says so.
 **Revises** [`read_filtering.md`](read_filtering.md) §5, which gave step 1 a single type. That
 document says which nine filters run, what their thresholds are, in what order they are
 evaluated, and what each drop is called. All of that is unchanged and stays there. This one is
@@ -50,9 +52,11 @@ AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping qual
   conversion each get a name, and each can be tested on its own.
 - `read/filtering.rs` holds **the keep-or-drop rules and the thresholds they use, and nothing
   else**: it opens no files, converts nothing, and drives no loop over reads.
-- The first filter needs **no reference**: today nothing can filter on flag and mapping quality
-  without supplying a `RawRefSeq` and paying a probe fetch for every contig in the header
-  ([`filtering.rs:688-702`](../../../../src/ng/read/filtering.rs#L688)).
+- The first filter needs **no reference**: when this was written, nothing could filter on flag
+  and mapping quality without supplying a `RawRefSeq` and paying a probe fetch for every contig
+  in the header. *(Half done: **B1 deleted the per-contig probe**, so building a filter no
+  longer costs ~2,580 fetches. Supplying a `RawRefSeq` is still required, and stops being so at
+  C2.)*
 - **Byte-identical output.** Same reads kept, same drops charged to the same reasons.
 
 **Non-goals.**
@@ -401,16 +405,20 @@ No new logic. Every rule exists and is being re-homed or renamed.
 
 | what | existing code | action |
 |---|---|---|
-| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210) | **keep**, renamed for the vocabulary |
-| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **keep**, renamed; the #7/#9/#8 order unchanged |
-| the conversion | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is**, called by the cursor |
-| the loop | `ReadFilter::next` [`filtering.rs:895`](../../../../src/ng/read/filtering.rs#L895) | **move** into `AlignmentCursor::next_read` |
-| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), [`:661`](../../../../src/ng/read/filtering.rs#L661) | **reuse as-is**, owned by the cursor |
-| the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** — its three variants already name the three pieces |
-| the raw read and its buffer contract | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334) | **rename and move** to `aligned_read.rs` |
+| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs:215`](../../../../src/ng/read/filtering.rs#L215) | **keep**, renamed for the vocabulary |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:274`](../../../../src/ng/read/filtering.rs#L274) | **keep**, renamed; the #7/#9/#8 order unchanged |
+| the conversion | `RawAlignedRead::decode` [`aligned_read.rs:71`](../../../../src/ng/read/aligned_read.rs#L71) → `decode_record` [`aligned_read.rs:118`](../../../../src/ng/read/aligned_read.rs#L118) | **reuse as-is**, called by the cursor |
+| the loop | `ReadFilter::next` [`filtering.rs:776`](../../../../src/ng/read/filtering.rs#L776) | **move** into `AlignmentCursor::next_read` |
+| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:127`](../../../../src/ng/read/filtering.rs#L127), [`:564`](../../../../src/ng/read/filtering.rs#L564) | **reuse as-is**, owned by the cursor |
+| the errors | `ReadFilterError` [`filtering.rs:477`](../../../../src/ng/read/filtering.rs#L477) | **reuse as-is** — its three variants already name the three pieces |
+| the raw read and its buffer contract | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs:56`](../../../../src/ng/read/aligned_read.rs#L56) | **renamed and moved** to `aligned_read.rs` |
 | the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; its `RecordSource` impl becomes inherent methods at C3 |
-| the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646) | **delete** — a `failed` flag on the cursor replaces it (§5) |
-| the source trait and its doubles | `RecordSource` [`filtering.rs:366`](../../../../src/ng/read/filtering.rs#L366), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
+| the three-way stop | `FilterState` [`filtering.rs:549`](../../../../src/ng/read/filtering.rs#L549) | **delete** — a `failed` flag on the cursor replaces it (§5) |
+| the source trait and its doubles | `RecordSource` [`filtering.rs:338`](../../../../src/ng/read/filtering.rs#L338), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
+
+*Line citations refreshed at B2 (2026-08-03). They had drifted by up to 120 lines across
+Milestones A and B, and **Milestone C executes against this table** — `RecordSource` alone had
+moved from 366 to 338, and `ReadFilter::next` from 895 to 776.*
 
 **The parity oracle is the four dumps** (§8). There is no second implementation to differ from —
 the oracle is this code before the change.

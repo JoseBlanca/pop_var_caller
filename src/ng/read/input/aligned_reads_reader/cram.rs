@@ -184,9 +184,11 @@ impl CramAlignedReadsReader {
                 let i = self.served;
                 self.served += 1;
                 // Rebuilt into the caller's buffer rather than moved in, so the buffer's
-                // allocations are reused across the whole walk.
-                container.fill_raw_read(i, &mut buf.record);
-                buf.read_group = Some(container.read_group(i));
+                // allocations are reused across the whole walk. **Both halves** — the record
+                // and the read group the container decided — because this arm is the one that
+                // knows the group, and splitting the two left a caller able to take a record
+                // and not know to ask for the rest.
+                container.fill_raw_read(i, buf);
                 return Ok(true);
             }
 

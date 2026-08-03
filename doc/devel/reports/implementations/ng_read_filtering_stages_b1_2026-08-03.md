@@ -51,10 +51,9 @@ contig index checked first.
 
 **One deviation from the spec, taken on the review's argument and flagged for the owner.**
 
-Spec §9 Q2's snippet reuses `AlignmentFileError::ContigReconcile`, and spec §1 says the change
-adds no new error. The first implementation did that, prefixing the detail string to say which
-check fired. The `errors` reviewer showed the resulting message is **false at that point in the
-run**:
+Spec §9 Q2's snippet reuses `AlignmentFileError::ContigReconcile`. The first implementation did
+that, prefixing the detail string to say which check fired. The `errors` reviewer showed the
+resulting message is **false at that point in the run**:
 
 > alignment file '…/sample.bam' does not match the reference contig table: the accessor passed
 > to cursor() is over a different table: name disagreement at index 0 ('chr1' vs 'not_chr1')
@@ -64,9 +63,17 @@ caller wired up. Two clauses that both say "table" contradict each other before 
 arrives, and the two failures become discriminable only by substring — which the first version
 of the new test did, teaching the pattern.
 
-**So B1 adds `AlignmentFileError::CursorAccessorContigTable`.** It is a new variant on an
-existing `pub` enum, which spec §1 did not anticipate. Recorded as a deviation rather than
-absorbed silently: **owner's call at Checkpoint B.**
+**So B1 adds `AlignmentFileError::CursorAccessorContigTable`.**
+
+**How far this deviates was itself checked, and the first answer here was wrong.** This report
+originally said it went "against spec §1's *adds no new error*". B2's review found no such
+sentence: spec §1 says "change the meaning of any error", which adding a variant does not do,
+and the only "No new error type" statement is **arch §4**, scoped to `ReadFilterError` — a
+different enum. What actually exists is §9 Q2's *illustrative* snippet, and arch's own preamble
+says "Signatures are illustrative; the **contract** is the deliverable."
+
+So the design authority is **silent** on adding a variant to `AlignmentFileError`, not against
+it. Still recorded for the owner at Checkpoint B — but as a gap filled, not a rule broken.
 
 Unchanged from the first implementation: the file is the left operand of (2), so the message
 reads *file value vs accessor value*, the direction the open gate prints.
@@ -194,8 +201,8 @@ lengths *and* order, plus the same fetchability for the contig that matters.
 
 ## 7. Follow-ups
 
-- **Spec §9 Q2's cost arithmetic should be corrected**, and §1's "adds no new error" reconciled
-  with the new variant. Owner's call — both are design documents.
+- **Spec §9 Q2's cost arithmetic should be corrected**, and §9 Q2's snippet updated to the
+  variant that shipped. Owner's call — a design document.
 - **`RegionRawAlignedReads` no longer has a `header()`**; arch §3.3 lists one among the inherent
   methods C3 keeps. Re-add only if a caller appears; none exists.
 - **`ReadFilterBuffers` and `with_validated_contigs`** are alive with one caller each. Spec §10

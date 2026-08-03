@@ -105,7 +105,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   check that works, so it ships with a test that a mismatched accessor is refused, and that test
   is mutation-verified (disable the comparison; it must fail). *Depends:* A3. *Source:* spec §9
   Q2, arch §6.
-- ☐ **B2.** `DecodedContainer::fill_raw_read` takes `&mut NoodlesRawAlignedRead` instead of
+- ✅ **B2.** `DecodedContainer::fill_raw_read` takes `&mut NoodlesRawAlignedRead` instead of
   `&mut RecordBuf`, and sets **both** its fields — the record and the read group — so the CRAM
   arm stops stamping the group on the line after the call. **Added by the owner at Checkpoint A**
   (2026-08-03), from A3's review: the name says it fills a raw aligned read and it fills half of

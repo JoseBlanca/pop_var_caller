@@ -591,11 +591,18 @@ impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
     ///
     /// `ReadFilter::new` fetched a zero-length window on every contig of the source's `@SQ`
     /// list to prove each one resolved in `reference` — ~2,580 opens on GRCh38, once per
-    /// cursor. It was deleted on 2026-08-03, when `AlignmentFile::cursor` started **comparing
-    /// the two contig tables** instead (`read_filtering_stages.md` §9 Q2). The comparison is
-    /// microseconds rather than thousands of file opens, and it proves strictly more: the loop
-    /// only showed that each contig *resolves*, so an accessor whose contigs had the right
-    /// names and the wrong lengths sailed through it.
+    /// cursor. It was deleted on 2026-08-03 (B1), when `AlignmentFile::cursor` took the job
+    /// over (`read_filtering_stages.md` §9 Q2).
+    ///
+    /// **Two checks replaced it, and it took both.** The cursor compares the two contig tables
+    /// — which the loop never did, so an accessor with the right names at the wrong lengths, or
+    /// in the wrong order, sailed through it — *and* fetches a zero-length window on the one
+    /// contig that cursor is for. The second is not redundant: a table is a *description*, and
+    /// `ResidentRefSeq`/`WindowedRefSeq` take theirs as a constructor argument unrelated to the
+    /// bytes they will read, so equality does not imply the bases can be served. Together they
+    /// prove strictly more than the loop did, at one `open(2)` instead of ~2,580. The first
+    /// version of B1 kept only the comparison and thereby lost that guarantee; the review
+    /// measured it.
     ///
     /// # What the caller must have proved
     ///

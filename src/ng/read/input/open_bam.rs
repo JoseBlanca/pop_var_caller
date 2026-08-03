@@ -1265,6 +1265,84 @@ mod tests {
         }
     }
 
+    /// **A read past the first container carries its own read group.**
+    ///
+    /// The CRAM arm is the one that decides read groups itself — a CRAM stores the group as a
+    /// container-level number rather than a per-record `RG` tag — so a stamp that went stale at
+    /// a container boundary would attribute a whole library's reads to another group, silently,
+    /// with no error and no crash. B2 moved that stamp into `DecodedContainer::fill_raw_read`,
+    /// which makes this the property it is most important to pin.
+    ///
+    /// **Nothing pinned it before**, and the gap was a hole between two fixtures: the only
+    /// multi-read-group CRAM is three records, which is one container, and the only
+    /// multi-container CRAM declares one `@RG` and is opened as `Sole`, an arm that never asks
+    /// a record which group it is in. Mutation-verified: overriding every read's group from the
+    /// second container onwards left all 1,542 tests green before this existed.
+    #[test]
+    fn a_read_past_the_first_container_carries_its_own_read_group() {
+        use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
+        use crate::ng::read::input::test_fixtures::multi_container_cram_two_read_groups;
+        use crate::ng::types::ReadGroupId;
+
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram_two_read_groups(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        // `PerRecord`, not `Sole`: the whole point is to reach the arm that resolves a record's
+        // group from what the container said, which `Sole` short-circuits.
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "rg1".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "rg2".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(1)),
+                ),
+            ]
+            .into(),
+        );
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            resolution,
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), cram_cursor_reference_bases(&fasta))
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(CRAM_CURSOR_CONTIG_LENGTH as u64),
+            })
+            .expect("on this chromosome");
+
+        let mut seen = 0usize;
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("the fixture reads decode and filter");
+            let name = String::from_utf8_lossy(&read.qname).into_owned();
+            let index: usize = name[1..].parse().expect("r<N>");
+            assert_eq!(
+                read.read_group.get(),
+                if index.is_multiple_of(2) { 0 } else { 1 },
+                "{name} (record {index}) carries the wrong read group",
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, CRAM_CURSOR_READS, "every fixture read is served");
+    }
+
     /// The CRAM oracle must be able to fail, and on a fixture that reaches past one container.
     #[test]
     fn the_cram_cursor_oracle_is_not_vacuous() {

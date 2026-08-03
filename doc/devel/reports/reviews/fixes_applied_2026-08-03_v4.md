@@ -137,10 +137,14 @@ All applied; each is one edit and none changes behaviour.
 
 ## 5. Deviations recorded for the owner (applied, not deferred)
 
-1. **A new error variant, against spec §1 and §9 Q2.** Spec §1 lists "change the meaning of any
-   error" among the non-goals and §9 Q2's snippet reuses `ContigReconcile`. B1 adds
-   `CursorAccessorContigTable`. Applied because the reused variant produced a **false message**,
-   demonstrated verbatim. Owner's call at Checkpoint B.
+1. **A new error variant — and the design authority is silent, not opposed.** §9 Q2's
+   *illustrative* snippet reuses `ContigReconcile`; B1 adds `CursorAccessorContigTable`.
+   **Correction, from B2's review:** this report first said it went against spec §1's "adds no
+   new error". There is no such sentence — §1 says "change the meaning of any error", which
+   adding a variant does not do, and the only "No new error type" statement is arch §4, scoped
+   to `ReadFilterError`, a different enum. Applied because the reused variant produced a **false
+   message**, demonstrated verbatim. Owner's call at Checkpoint B, on a smaller question than
+   first stated.
 2. **Spec §9 Q2's cost arithmetic is wrong**, confirmed independently by two agents: its 52 µs
    is a per-*accessor-construction* cost (34 µs of it a table clone) being multiplied as a
    per-*contig-fetch* cost. Not edited — a design document, and the claim is an argument for a
