@@ -72,6 +72,14 @@ AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping qual
 **It does not** introduce a trait, add a type, change the meaning of any error, add a
 configuration knob, or touch `AlignedRead`.
 
+> ⚠ **One qualification, from B1.** "Change the meaning of any error" still holds — no existing
+> error means anything new. But the contig check needed an error of its own, so
+> `AlignmentFileError` gained a **variant**, `CursorAccessorContigTable`. Reusing the open gate's
+> `ContigReconcile` produced a message that is false at that point in the run; §9 Q2 has the
+> reasoning. Adding a variant is not "adding a type" in the sense meant here — no new concept
+> enters the design — but the line is close enough to be worth naming rather than leaving a
+> reader to reconcile it.
+
 ## 2. Why the division falls where it does
 
 Step 1 runs nine filters; [`read_filtering.md`](read_filtering.md) §3 is where they are defined.
@@ -317,7 +325,9 @@ is what happens today, one layer up.
 and it leaves `read/filtering.rs` holding only rules and thresholds, with nothing to construct and
 no state to get wrong.
 
-**Q2 — resolved. The check compares two contig tables instead of opening 2,580 contigs.**
+**Q2 — resolved, and then corrected by building it.** The check compares two contig tables
+instead of opening 2,580 contigs — *and keeps one of those opens*, for reasons the design did not
+foresee. **Built at B1 (2026-08-03); the corrections are marked ⚠ below.**
 
 **Three different checks are involved, and it helps to keep them apart.**
 
@@ -335,11 +345,23 @@ no state to get wrong.
    which proves each contig *resolves* and nothing about its length.
 
 **Check 3 is the weak one and the expensive one.** It opens every contig in turn and discards
-each: ~2,580 on GRCh38 at roughly 52 µs per open with a shared index
-([`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622)), an estimated **~130 ms per cursor**,
-paid once per file per chromosome. (Arithmetic on a documented micro-measurement, not a
-measurement of this check.) And for all that it never notices an accessor whose contigs have the
-right names and the wrong lengths.
+each — ~2,580 on GRCh38, once per file per chromosome — and never notices an accessor whose
+contigs have the right names at the wrong lengths, or the right names in the wrong order.
+
+> ⚠ **The cost this section first claimed was wrong, and the measurement is ~8× smaller.** It
+> read "roughly 52 µs per open with a shared index" off
+> [`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622) and multiplied by 2,580 for
+> **~130 ms per cursor**. That 52 µs is the cost of **constructing a `WindowedRefSeq`** — and
+> the same comment breaks it down: **34 µs of it is cloning the 2,580-entry contig table.** The
+> loop constructed no accessors; it called `fetch_into` on the one it was given, so it never
+> paid the table clone. Multiplying that figure multiplied in a cost the loop did not have.
+>
+> **Measured at B1**, six runs each side on one machine, `ng_generic_walk_probe` on HG002
+> chr21: **1.861 s → 1.834 s, ≈27 ms per cursor (~1.4 %)** — consistent rather than noise, the
+> slowest *after* run beating the fastest *before*. At run scale — one cursor per file per
+> chromosome — a 50-sample cohort over 25 chromosomes mints ~1,250 of them: **~25–34 s per
+> run.** Real, worth having, an order of magnitude below the estimate. Speed was never why this
+> change was made (§1); the correctness argument below is.
 
 **The fix: ask the accessor which table it is over, and compare.** Every accessor already answers
 that — `ContigTable::contigs()`, implemented by all three of them
@@ -347,21 +369,64 @@ that — `ContigTable::contigs()`, implemented by all three of them
 `first_disagreement` for the message. So the cursor's constructor does what the open gate does,
 against the accessor instead of the reference:
 
+> ⚠ **A comparison alone is not enough, and building it is how we found out.** A contig table is
+> a *description*. `InMemoryRefSeq::from_named_contigs` derives its table from the bytes it
+> holds, so for that one equality does imply the bases can be served — but
+> `ResidentRefSeq::new` and `WindowedRefSeq::new` take the `ContigList` as a **constructor
+> argument independent of the bytes on disk**. A `WindowedRefSeq` over a FASTA missing a contig,
+> behind a table that names it, matches the file perfectly and cannot serve one base of it: a
+> stale `.fai`, or one whose FASTA was replaced. Measured at B1 — the deleted loop rejected that
+> accessor, a comparison-only check accepted it, and the fault surfaced mid-walk under a
+> top-level message naming the *BAM*. On a `--regions` run whose reads are all dropped before
+> filter #8, never at all.
+>
+> **So the loop is replaced by two checks, not one, and the second keeps exactly one of its
+> ~2,580 opens** — on the contig this cursor is for, which is the only one it will read.
+
+**As built** (`open_bam.rs`, `AlignmentFile::cursor`), in this order — the argument, then the
+accessor's description, then its ability:
+
 ```rust
 pub fn cursor<R: RawRefSeq + ContigTable>(
     self: &Arc<Self>, contig: ContigId, reference: R,
 ) -> Result<AlignmentCursor<R>, AlignmentFileError> {
+    // 1. the contig is one this file declares — and it is what makes (3) safe to index
+    if … { return Err(AlignmentFileError::CursorContigNotInFile { … }); }
+
+    // 2. the accessor's table equals the file's — names, lengths, digests, ORDER
     self.contigs
         .first_disagreement(reference.contigs())
-        .map_err(|detail| AlignmentFileError::ContigReconcile { … })?;
+        .map_err(|detail| AlignmentFileError::CursorAccessorContigTable { … })?;
+
+    // 3. …and it can actually serve this cursor's contig
+    let mut probe = Vec::new();
+    reference.fetch_raw_into(contig, 1, 0, &mut probe)
+        .map_err(|source| AlignmentFileError::Reference { … })?;
     …
 }
 ```
 
-**This is strictly better on both counts.** It costs one comparison of ~2,580 entries — integer
-and string compares in memory, microseconds — against ~2,580 file opens. And it proves more:
-names *and* lengths agree, which is the same thing the gate proves for the file, so the file, the
-reference and the accessor are all held to one table instead of two-and-a-half.
+> ⚠ **The error is its own variant, not the gate's `ContigReconcile`**, which this section's
+> first sketch reused. By the time `cursor` runs, `open` has already proved the file *does* match
+> the reference — so that variant's message, *"alignment file '…' does not match the reference
+> contig table"*, is **false** here, and it sends an operator to inspect the BAM for a fault in
+> the calling code. The two failures also become discriminable only by substring. §1's "it does
+> not … add a type" was read as forbidding this and does not: adding a variant changes no
+> existing error's meaning. (Arch §4's "No new error type" is about `ReadFilterError`, a
+> different enum, and is still true.)
+
+**Together they are strictly better than the loop on both counts.** One comparison of ~2,580
+entries — integer and string compares in memory — plus **one** `open(2)`, against ~2,580 opens.
+And they prove more: names, lengths **and order** agree, which is what the gate proves for the
+file, so the file, the reference and the accessor are held to one table instead of
+two-and-a-half — *and* the contig about to be read is known servable, which the loop proved for
+all 2,580 and this proves for the one that matters.
+
+**Order is not a detail.** A permuted table resolves on every fetch, so a comparison that ignored
+it would let filter #8 score every read against another chromosome's bases with no error at all.
+That is why this is an equality test and not a resolvability test, and it is pinned by
+`a_cursor_refuses_an_accessor_whose_contig_table_is_a_permutation` — added after an
+order-insensitive rewrite passed all 1,538 tests.
 
 **Why not check it once, in whatever builds the cursors?** Because at that moment the accessor
 does not exist. `AlignmentFile::open` and `SampleReads::open` run before any accessor is made:
@@ -374,8 +439,17 @@ FASTA — and it changes `open`'s signature and every caller. With the compariso
 microseconds there is nothing left to save.
 
 **The one thing this does not do** is stop a caller passing an unrelated accessor *that happens
-to carry a matching table*. Closing that means the file owning its reference and handing out
-accessors itself, which is a larger change — §10.
+to carry a matching table and can serve the contig*. Closing that means the file owning its
+reference and handing out accessors itself, which is a larger change — §10.
+
+**A defect the check found on its first run, worth recording.** Applying it turned **23 cursor
+tests red at once**: every fixture built its accessor with `InMemoryRefSeq::from_contigs`, which
+names contigs `contig0`, `contig1`, … , while the fixture files declare `chr1`, `chr2`. All 23
+had been handing `cursor()` an accessor that disagreed on **every contig name**, and nothing had
+noticed for the life of the fixture — because the loop this replaces fetches a window per contig,
+and a window resolves whatever the contig is called. They derive from one
+`test_fixtures::fixture_reference_bases()` now, pinned by
+`the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files`.
 
 **Impl note:** the added `+ ContigTable` bound is satisfied by every accessor in the tree
 (`InMemoryRefSeq`, `ResidentRefSeq`, `WindowedRefSeq`, and the three test spies) and propagates to

@@ -1,6 +1,8 @@
 # ng — read filtering in stages: types & interfaces
 
-*Architecture draft, 2026-08-03. Code-facing companion to
+*Architecture. **Milestones A and B are built** (the renames; the contig check and the
+`fill_raw_read` signature) — §6's table marks what landed, and the present tense elsewhere
+describes what C and D still have to reach. Code-facing companion to
 [`../spec/read_filtering_stages.md`](../spec/read_filtering_stages.md) — every **why** points
 there and is not re-argued here. Revises the single-type shape in
 [`read_filtering.md`](read_filtering.md) §1; the filters that doc pins down are unchanged.
@@ -56,12 +58,12 @@ step that landed them.**
 that existed to make that vocabulary consistent. `PackedReadEntry` says what the value is: one
 read in the packed form this container stores, which is the whole reason the type exists.
 
-`fill_raw_read` **keeps its name and gains a signature change, at Milestone B.** It takes
-`&mut RecordBuf` today, so it fills only the record half of a raw aligned read and its one
-caller stamps the read group on the following line. It will take
-`&mut NoodlesRawAlignedRead` and set both halves — which makes the name true and puts "on CRAM
-the read group is decided at decode" in one place instead of two. Not a rename, so it could not
-travel with Milestone A.
+`fill_raw_read` **kept its name and gained a signature change — done at B2.** It took
+`&mut RecordBuf`, so it filled only the record half of a raw aligned read and its one caller
+stamped the read group on the following line. It takes `&mut NoodlesRawAlignedRead` and sets
+both halves now, which makes the name true and puts "on CRAM the read group is decided at
+decode" in one place instead of two. `DecodedContainer::read_group(i)` went with the split it
+existed for. Not a rename, so it could not travel with Milestone A.
 
 ## 3. The pieces
 
@@ -235,36 +237,52 @@ Every row read at the cited line, 2026-08-03.
 
 | what | existing code | action |
 |---|---|---|
-| the six flag/MAPQ filters | `verdict_pre_decode` [`filtering.rs:210`](../../../../src/ng/read/filtering.rs#L210) | **rename** to `verdict_on_raw_read`; body unchanged |
-| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:269`](../../../../src/ng/read/filtering.rs#L269) | **rename** to `verdict_on_aligned_read`; body unchanged |
-| the conversion | `RawRecord::decode` [`filtering.rs:349`](../../../../src/ng/read/filtering.rs#L349) → `decode_record` [`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67) | **reuse as-is** |
-| the loop | `ReadFilter::next` [`filtering.rs:895`](../../../../src/ng/read/filtering.rs#L895) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
-| the up-front contig check | `ReadFilter::new`'s per-contig fetch loop [`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688) | **replace** with `self.contigs.first_disagreement(reference.contigs())` in `AlignmentFile::cursor`, the same comparison the open gate makes [`open_bam.rs:206`](../../../../src/ng/read/input/open_bam.rs#L206) — spec §9 Q2 |
-| the tally and its fold | `ReadFilterCounts` [`filtering.rs:122`](../../../../src/ng/read/filtering.rs#L122), `ReadGroupCounts` [`:661`](../../../../src/ng/read/filtering.rs#L661), `tally_for_current_record` [`:846`](../../../../src/ng/read/filtering.rs#L846), `counts` [`:868`](../../../../src/ng/read/filtering.rs#L868) | **move** to the cursor, including the `other_sample` rider on the first entry |
-| the errors | `ReadFilterError` [`filtering.rs:578`](../../../../src/ng/read/filtering.rs#L578) | **reuse as-is** |
-| the raw read | `RawRecord` [`filtering.rs:334`](../../../../src/ng/read/filtering.rs#L334), `NoodlesRawRecord` [`:479`](../../../../src/ng/read/filtering.rs#L479) | **rename and move** to `aligned_read.rs` |
+| the six flag/MAPQ filters | `verdict_pre_decode` [`filtering.rs:215`](../../../../src/ng/read/filtering.rs#L215) | **rename** to `verdict_on_raw_read`; body unchanged |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:274`](../../../../src/ng/read/filtering.rs#L274) | **rename** to `verdict_on_aligned_read`; body unchanged |
+| the conversion | `RawAlignedRead::decode` [`aligned_read.rs:71`](../../../../src/ng/read/aligned_read.rs#L71) → `decode_record` [`aligned_read.rs:118`](../../../../src/ng/read/aligned_read.rs#L118) | **reuse as-is** |
+| the loop | `ReadFilter::next` [`filtering.rs:776`](../../../../src/ng/read/filtering.rs#L776) | **move** into `AlignmentCursor::next_read`; `ReadFilter` deleted |
+| the up-front contig check | `ReadFilter::new`'s per-contig fetch loop | ✅ **done at B1** — replaced by **two** checks in `AlignmentFile::cursor`: `self.contigs.first_disagreement(reference.contigs())`, the same comparison the open gate makes [`open_bam.rs:206`](../../../../src/ng/read/input/open_bam.rs#L206), **plus one zero-length fetch on this cursor's own contig**. The comparison alone loses a guarantee — `ResidentRefSeq`/`WindowedRefSeq` take their `ContigList` as a constructor argument unrelated to the bytes, so a matching table can front a FASTA that cannot serve the contig. Spec §9 Q2 |
+| the tally and its fold | `ReadFilterCounts` [`filtering.rs:127`](../../../../src/ng/read/filtering.rs#L127), `ReadGroupCounts` [`:564`](../../../../src/ng/read/filtering.rs#L564), `tally_for_current_record` [`:727`](../../../../src/ng/read/filtering.rs#L727), `counts` [`:749`](../../../../src/ng/read/filtering.rs#L749) | **move** to the cursor, including the `other_sample` rider on the first entry |
+| the errors | `ReadFilterError` [`filtering.rs:477`](../../../../src/ng/read/filtering.rs#L477) | **reuse as-is** |
+| the raw read | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs:56`](../../../../src/ng/read/aligned_read.rs#L56), `NoodlesRawAlignedRead` [`:206`](../../../../src/ng/read/aligned_read.rs#L206) | **renamed and moved** to `aligned_read.rs` |
 | the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; trait impl → inherent methods at C3 |
 | the per-format readers | `RecordReader` and arms, [now `aligned_reads_reader/mod.rs`](../../../../src/ng/read/input/aligned_reads_reader/mod.rs) | **renamed at A2**; `InMemory` arm gains a scripted error at C1 |
-| the three-way stop | `FilterState` [`filtering.rs:646`](../../../../src/ng/read/filtering.rs#L646), `restart_after_end_of_input` [`:778`](../../../../src/ng/read/filtering.rs#L778), `has_failed` [`:794`](../../../../src/ng/read/filtering.rs#L794), `source_mut` [`:816`](../../../../src/ng/read/filtering.rs#L816) | **delete**, all four |
-| the source trait and its doubles | `RecordSource` [`filtering.rs:366`](../../../../src/ng/read/filtering.rs#L366), `FakeSource`, `ErroringSource` | **delete** |
-| the probe-free constructor and lent buffers | `with_validated_contigs` [`filtering.rs:746`](../../../../src/ng/read/filtering.rs#L746), `ReadFilterBuffers` | **delete** — no caller once the cursor owns the loop |
-| the cursor's existing filter field and its four call sites | [`input/cursor.rs:241`](../../../../src/ng/read/input/cursor.rs#L241), `:387`, `:445`, `:448` | **replace** with the fields in §3.4 |
+| the three-way stop | `FilterState` [`filtering.rs:549`](../../../../src/ng/read/filtering.rs#L549), `restart_after_end_of_input` [`:659`](../../../../src/ng/read/filtering.rs#L659), `has_failed` [`:675`](../../../../src/ng/read/filtering.rs#L675), `source_mut` [`:697`](../../../../src/ng/read/filtering.rs#L697) | **delete**, all four |
+| the source trait and its doubles | `RecordSource` [`filtering.rs:338`](../../../../src/ng/read/filtering.rs#L338), `FakeSource`, `ErroringSource` | **delete**. Note: `RecordSource::header` **already went at B1** — the contig probe was its only caller — so `RegionRawAlignedReads` has no `header()` today. §3.3 lists one; re-add it at C3 only if a caller appears |
+| the probe-free constructor and lent buffers | `with_validated_contigs` [`filtering.rs:627`](../../../../src/ng/read/filtering.rs#L627), `ReadFilterBuffers` | **delete** — no caller once the cursor owns the loop. Both are down to **one** caller each since B1 deleted `ReadFilter::new` |
+| the cursor's existing filter field and its call sites | [`input/cursor.rs:245`](../../../../src/ng/read/input/cursor.rs#L245), `:355`, `:410`, `:468`, `:471` | **replace** with the fields in §3.4 |
+
+*Line citations refreshed at Checkpoint B (2026-08-03), after Milestones A and B moved them by
+up to 120 lines. **Milestone C executes against this table**, so check them before trusting one.*
 
 ## 7. Open items
 
 **No open design questions.** Both of the spec's are settled — §9 there keeps the reasoning.
 
-**Impl-time confirmations, not decisions:**
+**Impl-time confirmations. Two remain; three were answered by building them.**
+
+Still open, for Milestone C:
 
 - Whether `verdict_on_raw_read` takes `(flag, mapq)` or `&impl RawAlignedRead`. The split form is
   what exists; the whole-read form reads better beside its sibling and changes no contract.
 - What shape the in-memory reader's scripted error takes — an error at position *n*, or an arm
   that always fails. The three tests it has to serve are named in spec §8.
-- Whether `region_records.rs` is renamed on disk or the type simply moves. The spec assumes the
-  file follows the type.
-- The `+ ContigTable` bound the contig comparison needs on `cursor`'s `R`. Every accessor in the
-  tree implements it, but it propagates to `SampleReads::cursor` and to both generators'
-  signatures — mechanical, and worth doing in one commit of its own.
+
+Answered:
+
+- ✅ **`region_records.rs` was renamed on disk** (A3, `git mv` → `region_raw_aligned_reads.rs`),
+  as the spec assumed.
+- ✅ **The `+ ContigTable` bound landed in one commit of its own** (B1) and reached
+  `SampleReads::cursor` and four `PileupGenerator` sites; the SSR generator already required it.
+- ✅ **`RecordIndex` became `PackedReadEntry`, not `RawReadIndex`** — §2 has the reasoning
+  (owner's call at Checkpoint A).
+
+**One thing this document did not anticipate and Milestone C must know:** `AlignmentFile::cursor`
+is now the *only* place that proves an accessor belongs to its file, and `AlignmentCursor::
+over_records` — which C2 rewrites — is infallible and carries that as a **prose precondition**.
+Three test call sites build cursors through it directly, bypassing the check;
+`the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files` is the standing guard on
+them. C2 must not reintroduce a path that reaches `over_records` from outside `cursor`.
 
 ## 8. Test & bench shape
 
