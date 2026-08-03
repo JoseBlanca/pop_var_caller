@@ -519,9 +519,9 @@ impl AlignmentCursor {
 /// Where records come from: finds them with the index, unpacks them, keeps the
 /// recent ones, and hands over the next one on demand. One variant per format,
 /// a closed set.
-enum RecordReader {
-    Bam(BamRecordReader),
-    Cram(CramRecordReader),
+enum AlignedReadsReader {
+    Bam(BamAlignedReadsReader),
+    Cram(CramAlignedReadsReader),
     /// A fixed list of records. Permanent, not test-only: it gives the tests and
     /// the differential harness a reader with no file behind it.
     InMemory(Vec<RecordBuf>),

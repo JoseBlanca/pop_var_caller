@@ -350,7 +350,7 @@ pub enum ReadGroupResolution {
 }
 ```
 
-**The per-read error needs a real error type.** `RawRecord::decode` returns `io::Result<MappedRead>`
+**The per-read error needs a real error type.** `RawAlignedRead::decode` returns `io::Result<MappedRead>`
 today — a deviation recorded in
 [`../impl_plan/read_filtering.md`](../impl_plan/read_filtering.md), forced by reusing production's
 decoder. An `io::Error` here would produce a message with no way to find the offending read. The

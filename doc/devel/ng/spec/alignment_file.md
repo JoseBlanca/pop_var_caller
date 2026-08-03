@@ -36,8 +36,8 @@ reader pool with a per-worker cursor; the rest of this document stands.***
 > per worker, sharing nothing* — a cursor opens its own descriptor and holds it, so there is no
 > lending and nothing to return. The streaming order guard becomes
 > `CursorError::OutOfOrderRead`, raised by the cursor and naming the file it came from. The
-> region narrowing and the sorted early stop become `RegionRecords`; finding records becomes
-> the per-format `RecordReader`s, which **position and never bound**.
+> region narrowing and the sorted early stop become `RegionRawAlignedReads`; finding records becomes
+> the per-format `AlignedReadsReader`s, which **position and never bound**.
 >
 > Sections whose subject is the deleted half are kept as the design record they are — including
 > the reasoning that chose pooling, which is worth reading beside
@@ -243,15 +243,16 @@ reference footprint overlaps the interval, **in coordinate order**. Mechanically
 joins are iterator joins, and the distinction is load-bearing rather than pedantic:
 
 ```
-region source ══(fills one reused RawRecord buffer)══▶ ReadFilter ──▶ order-verify ──▶ Result<MappedRead, _>
+region source ══(fills one reused RawAlignedRead buffer)══▶ ReadFilter ──▶ order-verify ──▶ Result<MappedRead, _>
       ↑                                                     ↑                              ↑
   no MappedRead exists yet          decode() runs here, for survivors only     uniform item type from here on
 ```
 
 - **The reader→filter seam passes an undecoded buffer, not a product.** `RecordSource::read_next` fills
-  a caller-owned `RawRecord` in place, reusing its allocations
-  ([`filtering.rs`](../../../../src/ng/read/filtering.rs) `RecordSource`); `RawRecord::flag`/`mapq` are
-  cheap field reads on that undecoded record, and `RawRecord::decode` — the call that actually builds a
+  a caller-owned `RawAlignedRead` in place, reusing its allocations
+  ([`filtering.rs`](../../../../src/ng/read/filtering.rs) `RecordSource`; the read itself is
+  [`aligned_read.rs`](../../../../src/ng/read/aligned_read.rs)'s); `RawAlignedRead::flag`/`mapq` are
+  cheap field reads on that undecoded record, and `RawAlignedRead::decode` — the call that actually builds a
   `MappedRead` — is invoked by the filter **only for reads that survive the cheap cascade**. So the
   whole pass allocates one record buffer, and a dropped read is never materialised. This is also why
   `RecordSource` is a fill-a-buffer trait rather than an `Iterator`: an iterator must yield something
@@ -264,7 +265,7 @@ This chain is deliberately the *complete* product of this module: the sample lay
 (one file) or merges k of them (`sample_reads.md` §3.2), and this module is indifferent to which.
 
 **How it composes with ng.** The region source produces **raw, in-region records** and hands them to
-ng's existing `RecordSource`/`RawRecord` seam so ng's **`ReadFilter`** (unchanged, all nine filters
+ng's existing `RecordSource`/`RawAlignedRead` seam so ng's **`ReadFilter`** (unchanged, all nine filters
 including the reference-dependent #8) does the filtering and decode. Concretely: two new region-query
 `RecordSource` implementations — the index-driven siblings of the whole-file `BamRecordSource` /
 `CramRecordSource` that already live in [`read/filtering.rs`](../../../../src/ng/read/filtering.rs) —
@@ -296,7 +297,7 @@ So both costs are already avoided — no per-read allocation, and no `MappedRead
 *without* moving policy into the reader, which would break the one-place-for-thresholds rule
 (`read_filtering.md` §2.5) and split the drop tallies away from where they are kept.
 
-**The residual, for a measured pass (§8).** `NoodlesRawRecord` wraps a noodles `RecordBuf`, and BAM's
+**The residual, for a measured pass (§8).** `NoodlesRawAlignedRead` wraps a noodles `RecordBuf`, and BAM's
 `read_record_buf` fully decodes each record — name, CIGAR, sequence, qualities into the buffer's
 `Vec`s — *before* `flag()`/`mapq()` are consulted. The allocations are reused, so this is decode work,
 not allocation churn, but it is spent on records that will be dropped. noodles' lazy `bam::Record` (a
@@ -528,7 +529,7 @@ same reasons `read_filtering.rs` and the existing ng `Bam/CramRecordSource` were
   §3.1 gate would have to front a component that internally believes something else. (B) has one
   canonical table, the reference's, end to end.
 - **It extends a seam ng already owns.** The region readers become index-driven siblings of the
-  existing whole-file `Bam/CramRecordSource`, reusing the `RawRecord` buffer protocol (§3.2) rather
+  existing whole-file `Bam/CramRecordSource`, reusing the `RawAlignedRead` buffer protocol (§3.2) rather
   than adapting a foreign iterator into it.
 
 **What this costs:** the most code of the three options, and ng re-derives the seek/early-stop logic
@@ -544,7 +545,7 @@ the specs were split partly so the two could be answered separately.
 ## 6. Module layout (to confirm in the arch doc)
 
 Home (owner, 2026-07-20): a `read/input/` submodule beside `read/filtering.rs`, reusing that file's
-`RecordSource`/`RawRecord` seam. This spec owns:
+`RecordSource`/`RawAlignedRead` seam. This spec owns:
 
 ```
 src/ng/read/input/

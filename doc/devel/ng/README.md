@@ -83,7 +83,7 @@ by document kind:
     `alignment_cursor.md` and was deleted**; that part of both documents is a design record.
   - [`alignment_cursor.md`](arch/alignment_cursor.md) — the long-lived reader that stays
     positioned in one chromosome of one file and keeps the reads it has already decoded and
-    filtered: `AlignmentCursor`, `SampleCursor`, the per-format `RecordReader`s, and the forget
+    filtered: `AlignmentCursor`, `SampleCursor`, the per-format `AlignedReadsReader`s, and the forget
     rule. **The only way to read a BAM or a CRAM in ng.** Companion to
     `spec/alignment_cursor.md`.
   - [`sample_reads.md`](arch/sample_reads.md) — `SampleReads`, the argmin merge and its
@@ -103,7 +103,7 @@ by document kind:
   - [`foundations.md`](impl_plan/foundations.md) — the first ng code: skeleton,
     `types.rs` seed, and the `RefSeq` accessor (three impls).
   - [`read_filtering.md`](impl_plan/read_filtering.md) — step 1: the `read/` module,
-    the cascade, the `RecordSource`/`RawRecord` seam, the `ReadFilter` iterator.
+    the cascade, the `RecordSource`/`RawAlignedRead` seam, the `ReadFilter` iterator.
   - [`read_filtering_stages.md`](impl_plan/read_filtering_stages.md) — dividing step 1 into two
     filters and a conversion: the renames, the contig check as a table comparison, the loop
     moving into the cursor, and the two tests output identity cannot see.

@@ -104,22 +104,22 @@ wrapper (§4).
 
 Two traits describe the **input edge**; the filter is a std iterator on the **output edge**.
 The input is a `RecordSource` that fills one reused buffer — deliberately *not* an
-`Iterator<Item = RawRecord>` (§4). Both traits are ng's; their production impls are ng-owned
+`Iterator<Item = RawAlignedRead>` (§4). Both traits are ng's; their production impls are ng-owned
 adapters over the noodles reader/record (§4).
 
 ```rust
 /// A borrowed view of one alignment record — the seam that runs the flag/MAPQ cascade
 /// BEFORE decode. `decode` borrows `&self`, so the underlying buffer stays reusable.
-pub trait RawRecord {
+pub trait RawAlignedRead {
     fn flag(&self) -> Flags;         // #1, #3–#6   (Flags = whatever MappedRead.flag carries)
     fn mapq(&self) -> MapQual;       // #2
     fn decode(&self) -> MappedRead;  // expensive phase (#7–#9 read the result); copies what MappedRead keeps
 }
 
 /// The filter's input: fills a caller-owned buffer with the next record, reusing its
-/// allocations. Replaces `Iterator<Item = RawRecord>` precisely to get that reuse.
+/// allocations. Replaces `Iterator<Item = RawAlignedRead>` precisely to get that reuse.
 pub trait RecordSource {
-    type Record: RawRecord + Default;
+    type Record: RawAlignedRead + Default;
     fn read_next(&mut self, buf: &mut Self::Record) -> io::Result<bool>;   // Ok(false) = EOF; Err is fatal
 }
 
@@ -185,7 +185,7 @@ Distilled from the spec; see it for the reasoning. Add new open items with `OPEN
   output); a read dropped on flag/MAPQ never pays decode cost (spec §3).
 - **Input is a reused-buffer `RecordSource`, not an iterator of records — decided.** A std
   `Iterator`'s owned `Item` can't borrow a reused buffer (the lending-iterator problem), so an
-  `Iterator<Item = RawRecord>` would force a fresh `RecordBuf` per read. A source that fills
+  `Iterator<Item = RawAlignedRead>` would force a fresh `RecordBuf` per read. A source that fills
   one buffer keeps reuse; the *output* is `Iterator<Item = Result<MappedRead, ReadFilterError>>`
   (see the error-model decision below) (spec §5).
 - **`decode(&self)`, copy-on-keep — decided.** The output outlives the reused input buffer, so
@@ -204,7 +204,7 @@ Distilled from the spec; see it for the reasoning. Add new open items with `OPEN
   surfaced out-of-band; the review showed that let a fatal abort look like clean EOF (silent
   read loss) unless the caller separately checked, so the error moved into the item where `?`
   makes it un-ignorable — the same shape as the noodles readers this sits on (spec §5, §7).
-- **`RecordSource`/`RawRecord` impl = ng-owned adapter — decided.** The traits are ng's; the
+- **`RecordSource`/`RawAlignedRead` impl = ng-owned adapter — decided.** The traits are ng's; the
   production impl is an ng-owned adapter wrapping the noodles reader/record, so the dependency
   points ng → existing code and production never learns about ng. Rejected: adding the impl to
   the reader (would couple production to an ng trait for no gain) (spec §7).
@@ -233,7 +233,7 @@ new types to invent alongside the old. Verify against the code when implementing
 |---|---|---|
 | `ReadFilterConfig` | filtering subset of `AlignmentMergedReaderConfig` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | new; mirrors the subset |
 | `ReadFilterCounts` | `FilterCounts` ([bam/alignment_input.rs](../../../../src/bam/alignment_input.rs)) | port / rename |
-| `RawRecord`, `RecordSource` (traits) | the reader's record-yield + `classify_pre_decode`'s `RecordBuf` input | **new**; ng-owned adapters over the noodles reader/record |
+| `RawAlignedRead`, `RecordSource` (traits) | the reader's record-yield + `classify_pre_decode`'s `RecordBuf` input | **new**; ng-owned adapters over the noodles reader/record |
 | `ReadFilter` (driver) | the reader's filter-application plumbing | **new** driver; reuses the pure predicates below |
 | filter #8 test | `read_exceeds_mismatch_fraction(...)` | call directly — gated on `RawRefSeq` (raw bytes, matching `RawContigRefCache`) |
 | filter #9 test | `cigar_is_bad(...)` | call directly (pure — no reference) |
@@ -245,7 +245,7 @@ new types to invent alongside the old. Verify against the code when implementing
 
 ## 6. Open items
 
-- **`Flags` concrete type** — the `RawRecord::flag` return resolves to whatever
+- **`Flags` concrete type** — the `RawAlignedRead::flag` return resolves to whatever
   `MappedRead.flag` carries; confirm at implementation time. Not a design decision.
 - **`SetupError` vs `RefSeqError`** — `new` returns `Result<Self, RefSeqError>` on a
   header/reference mismatch; if setup grows other failure modes, a dedicated setup-error type

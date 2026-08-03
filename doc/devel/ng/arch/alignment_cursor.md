@@ -24,16 +24,19 @@ file. Two new files and one folder:
 src/ng/read/input/
     open_bam.rs           AlignmentFile — loses the pool, gains cursor() and contigs()
     cursor.rs             AlignmentCursor, CursorError
-    record_reader/
-        mod.rs            enum RecordReader + the kept-reads contract both arms honour
-        bam.rs            BamRecordReader
-        cram.rs           CramRecordReader  (absorbs DecodedContainer)
-        in_memory.rs      InMemoryRecordReader
-    region_query.rs       deleted — its parts move to record_reader/ and cursor.rs
+    aligned_reads_reader/
+        mod.rs            enum AlignedReadsReader + the kept-reads contract both arms honour
+        bam.rs            BamAlignedReadsReader
+        cram.rs           CramAlignedReadsReader
+        container.rs      DecodedContainer — the CRAM decode's unit of work, not an arm
+        in_memory.rs      InMemoryAlignedReadsReader
+    region_raw_aligned_reads.rs
+                          RegionRawAlignedReads — this region's reads only
+    region_query.rs       deleted — its parts move to aligned_reads_reader/ and cursor.rs
     reference.rs          unchanged (the per-chromosome registry is deferred, spec §12)
 ```
 
-`record_reader/` is a folder rather than a file because the two real arms are large and share
+`aligned_reads_reader/` is a folder rather than a file because the two real arms are large and share
 only a contract, and because a third arm exists for tests. It is **not** a trait-per-step
 bake-off: the set is closed and the arms do not compete (spec §5).
 
@@ -65,11 +68,11 @@ pub struct AlignmentFile {
 /// Not `Sync`: an open file position belongs to one consumer. Parallelism comes
 /// from more cursors, never from sharing one (spec §3).
 pub struct AlignmentCursor<R: RawRefSeq> {
-    /// The whole chain below, owned: the filter holds `RegionRecords`, which
-    /// holds the `RecordReader`. §2.3 shows the layering and why it is not a
+    /// The whole chain below, owned: the filter holds `RegionRawAlignedReads`, which
+    /// holds the `AlignedReadsReader`. §2.3 shows the layering and why it is not a
     /// cycle. The reference accessor the mismatch filter needs sits inside,
     /// taken once here rather than per query (perf review L2).
-    filter: ReadFilter<RegionRecords, R>,
+    filter: ReadFilter<RegionRawAlignedReads, R>,
     /// **Our** reads — decoded and filtered — kept for the next region, so a
     /// read is transformed once rather than once per region that returns it
     /// (spec §5). Drained in position order, extended by reading on.
@@ -89,22 +92,22 @@ pub struct AlignmentCursor<R: RawRefSeq> {
 One variant per format; the cursor interprets for both (spec §5). Each arm owns its own index
 walk and its own unpacking. **Neither keeps anything across regions** — what is kept is *our*
 reads, decoded and filtered, held one level up in the cursor, so a read is transformed once rather
-than once per region that returns it (spec §5). A `RecordReader` therefore holds only its position
+than once per region that returns it (spec §5). A `AlignedReadsReader` therefore holds only its position
 and a one-record pushback, for the record the sorted early stop consumes without yielding.
 
 ```rust
 /// Finds records with the index, unpacks them, keeps the recent ones, and hands
 /// over the next on demand.
-enum RecordReader {
-    Bam(BamRecordReader),
-    Cram(CramRecordReader),
+enum AlignedReadsReader {
+    Bam(BamAlignedReadsReader),
+    Cram(CramAlignedReadsReader),
     /// A fixed list. Permanent, not test-only: it gives the tests and the
     /// differential harness a reader with no file behind it.
-    InMemory(InMemoryRecordReader),
+    InMemory(InMemoryAlignedReadsReader),
 }
 ```
 
-**The contract every arm honours**, stated once in `record_reader/mod.rs` so the two cannot
+**The contract every arm honours**, stated once in `aligned_reads_reader/mod.rs` so the two cannot
 drift:
 
 - `begin(region)` — position for a region on the cursor's chromosome. Reuses what is kept when
@@ -222,9 +225,9 @@ would be a cycle — but it does not have to. The filter's source is the layer *
 not the cursor itself:
 
 ```text
-RecordReader   raw records, from what is kept or from the file      (§1.3)
+AlignedReadsReader   raw records, from what is kept or from the file      (§1.3)
    ↓
-RegionRecords  this region's records only: contig test, overlap test, sorted
+RegionRawAlignedReads  this region's records only: contig test, overlap test, sorted
                early stop, read-group resolution, per-read-group tallies
    ↓
 ReadFilter     step-1 filtering                                      (filtering.rs)
@@ -235,11 +238,11 @@ AlignedRead    what the caller gets
 ```text
 kept: VecDeque<AlignedRead>     what a replay serves — above the filter, so a
    ↑                            replayed read skips both decode and filtering
-ReadFilter<RegionRecords, R>    step-1 filtering; its counts() is the tally
+ReadFilter<RegionRawAlignedReads, R>    step-1 filtering; its counts() is the tally
    ↑
-RegionRecords                   this region only; owns the RecordReader
+RegionRawAlignedReads                   this region only; owns the AlignedReadsReader
    ↑
-RecordReader                    finds and unpacks; keeps nothing across regions
+AlignedReadsReader                    finds and unpacks; keeps nothing across regions
 ```
 
 `move_to_region` reaches through the filter to reposition the layer below:
@@ -254,8 +257,8 @@ a caller reads `cursor.counts()` whenever it likes — which is a better answer 
 source can only be reached by consuming the filter (`into_parts`, `filtering.rs:949`), which is
 what forced a new filter per region. `OrderVerified` wraps the filter as it does now.
 
-`RegionRecords` is today's `BamRegionSource`/`CramRegionSource` with the two format-specific
-halves lifted out into `RecordReader` and the region narrowing kept — so this is a
+`RegionRawAlignedReads` is today's `BamRegionSource`/`CramRegionSource` with the two format-specific
+halves lifted out into `AlignedReadsReader` and the region narrowing kept — so this is a
 re-layering of code that exists, not new machinery.
 
 ### 2.4 The sample layer, which is what callers hold
@@ -301,7 +304,7 @@ Each records the code shape; the argument is the spec's.
 2. **No pool, no lock, no counters on the file.** Rejected: `&self` + an internally-shared pool,
    which existed to keep parallelism cheap to retrofit; per-worker cursors serve that with
    nothing shared — spec §3, and `alignment_file.md` §3.3's supersession note.
-3. **Enum over trait for `RecordReader`.** The set is closed, and a trait adds a type parameter
+3. **Enum over trait for `AlignedReadsReader`.** The set is closed, and a trait adds a type parameter
    through four layers — spec §5.
 4. **A cursor covers one chromosome; region order within it is unrestricted.** Two restrictions
    were weighed and only this one kept: a chromosome change costs a chromosome, a backward jump
@@ -313,7 +316,7 @@ Each records the code shape; the argument is the spec's.
 6. **The cursor owns its reference accessor**, taken at construction instead of per query. This
    is perf-review finding L2, and it **removes `MakeReference` from `PileupGenerator`'s type
    parameters** — three become two.
-7. **`RecordReader` yields raw records; the cursor classifies.** One copy of the contig test,
+7. **`AlignedReadsReader` yields raw records; the cursor classifies.** One copy of the contig test,
    overlap test, early stop and read-group resolution for both formats, so a replayed record and
    a freshly decoded one cannot diverge — spec §5.
 
@@ -326,9 +329,9 @@ that only moves the checking to whoever implements this.
 | new name | existing code | what happens |
 |---|---|---|
 | `AlignmentCursor` | `ReaderHandle` (`open_bam.rs:166`), `BorrowedReader` (`:196`), `ReaderKind` (`:184`) | replaced; the pool and the borrow-and-return dance go |
-| `RecordReader::Bam` | `BamRegionSource` (`region_query.rs:70`) | becomes it, minus the classification, plus kept records and the cut-off |
-| `RecordReader::Cram` | `CramRegionSource` (`region_query.rs:570`), `DecodedContainer` (`:333`) | becomes it; the container cache stops being CRAM-only in *spirit* and stays CRAM-shaped in *fact* |
-| `RecordReader` (enum) | `RegionSource` (`region_query.rs:950`) | same shape, new job: sourcing only |
+| `AlignedReadsReader::Bam` | `BamRegionSource` (`region_query.rs:70`) | becomes it, minus the classification, plus kept records and the cut-off |
+| `AlignedReadsReader::Cram` | `CramRegionSource` (`region_query.rs:570`), `DecodedContainer` (`:333`) | becomes it; the container cache stops being CRAM-only in *spirit* and stays CRAM-shaped in *fact* |
+| `AlignedReadsReader` (enum) | `RegionSource` (`region_query.rs:950`) | same shape, new job: sourcing only |
 | the cursor's classify step | steps 4–5 of `BamRegionSource::read_next` and the `RecordOwner` match in `CramRegionSource::read_next` | lifted out of both, written once |
 | *(no replacement)* | `RegionReads<R>` (`open_bam.rs:248`) | **deleted**; its `Drop`-returns-to-pool goes with it |
 | the filter seam | `trait RecordSource` (`filtering.rs:365`), `ReadFilter` (`:800`, `:949`) | **changes by one accessor** — see §2.3. An earlier row claimed "unchanged", which was wrong: `ReadFilter` owns its source, exposes no `source_mut` (zero occurrences), and returns it only by being consumed |
@@ -344,10 +347,10 @@ neither `AlignmentFileError` nor `IngestError` expresses.
 
 - `OPEN:` **Must a replayed record be staged through a scratch buffer before decoding?** Worth
   +2.8 % of wall time. Decide after the first working cursor is measured end to end — spec §13.
-- *Impl-time confirmation:* the exact `RecordReader` contract method names. The contract is fixed
+- *Impl-time confirmation:* the exact `AlignedReadsReader` contract method names. The contract is fixed
   (§1.3); the spelling is the implementer's. **Settled at A3:** `begin_region` and `read_next`,
   and `other_sample_records` is *not* among them — read groups are resolved above this layer, so
-  `RegionRecords` answers for its own skipping at C1.
+  `RegionRawAlignedReads` answers for its own skipping at C1.
 - **Corrected at A2, because the code proved it wrong:** §2.1 said `contigs()` returns "the
   reference's own list, proven equal to it". It returns the **file's** `@SQ` list. The open gate
   reconciles the two under a rule that treats an absent `M5` as a wildcard, so a file declaring
@@ -356,7 +359,7 @@ neither `AlignmentFileError` nor `IngestError` expresses.
 
 ## 6. Test & bench shape
 
-Tests live beside the code they cover, plus one cross-format oracle in `record_reader/mod.rs`.
+Tests live beside the code they cover, plus one cross-format oracle in `aligned_reads_reader/mod.rs`.
 The regression anchors are the ones that caught the first attempt, which **1,471 unit tests did
 not** (spec §11):
 
