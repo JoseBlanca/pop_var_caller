@@ -103,13 +103,14 @@ impl BamRecordReader {
     fn chunks_from(&self, region: GenomeRegion) -> Result<Vec<Chunk>, AlignmentFileError> {
         let invalid_region = || AlignmentFileError::Region { region };
 
-        // Carried over from `BamRegionSource::plan`, which the first version of this dropped:
-        // an inverted or zero-width region is not a question the index can be asked, and
-        // without this it is quietly accepted and answered — a region `80..=70` returned a
-        // read spanning it.
-        if region.is_empty() {
-            return Err(invalid_region());
-        }
+        // **There is no `region.is_empty()` check here, and its absence is the point.** One
+        // was carried over from the per-region planner, where it mattered: that source
+        // *bounded* its scan by `region.end`, so an inverted region asked the index a
+        // nonsense interval and got an answer. This reader positions and never bounds —
+        // `region.end` is not read below, only the contig's length is — so an inverted region
+        // is a perfectly well-defined position for it and the check guarded nothing. It now
+        // lives one layer up, where `end` is meaningful, and covers both formats and both
+        // paths (`CursorError::InvalidRegion`).
         let reference_sequence_id =
             usize::try_from(region.contig.get()).map_err(|_| invalid_region())?;
         let (_, reference_sequence) = self
@@ -377,60 +378,5 @@ mod tests {
             buf.read_group.is_none(),
             "the BAM arm must not stamp a read group"
         );
-    }
-
-    /// **An inverted region is refused, not answered.**
-    ///
-    /// The comment on the guard says the first version of this reader dropped it and a region
-    /// `80..=70` came back with a read spanning it. The guard was pinned by the per-region
-    /// planners' own tests until Milestone F deleted them — and this copy, the one that
-    /// survived, was never the one they covered: disabling it after the deletion left the whole
-    /// suite green. So it is pinned here, where it lives.
-    ///
-    /// **Note what this does *not* say.** It is the reader's guard, reached only on a jump.
-    /// `AlignmentCursor::move_to_region` validates the chromosome and nothing else, and serves
-    /// a forward region without repositioning at all — so an inverted region is refused on some
-    /// paths and quietly answered (emptily) on others. That inconsistency is recorded for the
-    /// owner in the F5 report, not resolved here: adding a check to `move_to_region` is a
-    /// design edit.
-    #[test]
-    fn an_inverted_region_is_refused_rather_than_answered() {
-        let (_dir, path, header) = big_fixture();
-        let mut reader = reader_over(&path, &header);
-
-        // `begin_region` wraps the refusal in an `io::Error`, so the variant is read back off
-        // the source rather than matched directly — asserted, not merely `is_err()`, because
-        // "refused" and "refused *for this reason*" are different claims and an index failure
-        // would satisfy the weaker one.
-        let refusal = |reader: &mut BamRecordReader, region| {
-            let error = reader
-                .begin_region(region)
-                .expect_err("an inverted region must be refused");
-            let source = error
-                .into_inner()
-                .expect("the refusal carries the alignment-file error");
-            *source
-                .downcast::<AlignmentFileError>()
-                .expect("and it is an AlignmentFileError")
-        };
-
-        assert!(
-            matches!(
-                refusal(&mut reader, region(80, 70)),
-                AlignmentFileError::Region { .. }
-            ),
-            "a region whose end precedes its start is not a question the index can be asked",
-        );
-        assert!(
-            matches!(
-                refusal(&mut reader, region(80, 79)),
-                AlignmentFileError::Region { .. }
-            ),
-            "and a zero-width one is the same refusal",
-        );
-
-        // The neighbouring ordinary region still works, so this is a check and not a refusal
-        // of everything.
-        reader.begin_region(region(70, 80)).expect("positions");
     }
 }

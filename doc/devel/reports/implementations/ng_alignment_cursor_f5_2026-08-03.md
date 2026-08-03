@@ -342,6 +342,10 @@ unresolved links. All three predate this branch.
 
 ## 8. Open, for the owner
 
+**⛦ RESOLVED after the checkpoint, on the owner's decision** — see the follow-up commit. The
+check now lives in `AlignmentCursor::move_to_region`, above both arms and both paths, and the
+BAM reader's copy is deleted. The paragraph below is kept as the record of what F5 left open.
+
 **The cursor accepts an inverted region and the planners did not.** `BamRegionSource::plan` and
 `CramRegionSource::plan` rejected `region.is_empty()` (start > end) with
 `AlignmentFileError::Region`; `AlignmentCursor::move_to_region` validates the **chromosome only**.
@@ -351,7 +355,8 @@ than refused. This is a consequence of `move_to_region`'s shape, settled and rev
 Milestones B–D, not a decision F5 made; flagged rather than changed, because adding a check to
 `move_to_region` is a design edit.
 
-**The inverted-region guard that survived is now pinned, and the inconsistency is not.**
+**The inverted-region guard that survived was pinned here, and the inconsistency resolved
+just after** (see the note in §8).
 `BamRecordReader::chunks_from` still refuses `region.is_empty()` — its own comment records that
 the first version of the reader dropped the check and a region `80..=70` came back with a read
 spanning it. That guard was covered only by the deleted planners' tests, so after F5 it could be

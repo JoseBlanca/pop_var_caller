@@ -119,6 +119,37 @@ pub enum CursorError {
         requested_contig: ContigId,
     },
 
+    /// The region is not a region: it ends before it begins, or it starts at base 0.
+    ///
+    /// **Refused rather than answered, and refused in one place for both formats.** Neither
+    /// shape is dangerous on its own — an inverted region overlaps nothing, and a `0` start
+    /// behaves like `1` — but "answered emptily" and "refused" are different things to a
+    /// caller, and before this the answer depended on which arm and which path it reached. The
+    /// per-region query rejected both in its planners; when Milestone F deleted those, the
+    /// only survivor was a copy inside the **BAM** reader, so a BAM refused on a jump, a CRAM
+    /// never checked, and a *forward* region reached neither because it is served without
+    /// repositioning at all.
+    ///
+    /// So the check moved here, to the one entry point above both arms and both paths. It is
+    /// **not** the reader's to make: a record reader positions and never bounds, so
+    /// `region.end` does not reach it and an inverted region is a perfectly well-defined
+    /// position for it. `end` is only meaningful where the overlap test and the early stop
+    /// are, which is above the reader.
+    ///
+    /// Coordinates are 1-based and inclusive, so `start == end` is an ordinary one-base region
+    /// and not this error.
+    #[error(
+        "cursor on '{}' was asked for an invalid region: contig {} [{}, {}]",
+        path.display(),
+        region.contig.get(),
+        region.start.get(),
+        region.end.get()
+    )]
+    InvalidRegion {
+        path: Arc<Path>,
+        region: GenomeRegion,
+    },
+
     /// The same read reached this sample from two of its files.
     ///
     /// **A sample's files must not overlap.** Two copies of one read are two votes at a
@@ -325,15 +356,28 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
 
     /// Point the cursor at `region`.
     ///
-    /// **The chromosome is checked first, before any state moves**, so a refusal leaves the
+    /// **Every refusal happens before any state moves**, so a rejected region leaves the
     /// cursor exactly as it was — which is what makes "unharmed and still good for its own"
-    /// true by construction rather than by care (spec §10).
+    /// true by construction rather than by care (spec §10). The chromosome is checked first,
+    /// then the region's shape, then whether this cursor is still alive.
     pub fn move_to_region(&mut self, region: GenomeRegion) -> Result<(), CursorError> {
         if region.contig != self.contig {
             return Err(CursorError::WrongChromosome {
                 path: Arc::clone(&self.path),
                 cursor_contig: self.contig,
                 requested_contig: region.contig,
+            });
+        }
+
+        // **The one place a malformed region is refused, for both formats and both paths.**
+        // See `CursorError::InvalidRegion`: below here the arms diverge — a reader positions
+        // at `region.start` and never sees `region.end` at all — so this is the last point at
+        // which the two shapes mean anything, and the only one at which a *forward* region is
+        // looked at before being served from what is held.
+        if region.is_empty() || region.start.get() == 0 {
+            return Err(CursorError::InvalidRegion {
+                path: Arc::clone(&self.path),
+                region,
             });
         }
 
@@ -1433,6 +1477,74 @@ mod tests {
         assert!(
             saw_error,
             "the guard must still catch a regression inside the region it was reset for",
+        );
+    }
+
+    /// **An inverted or zero-start region is refused, and the cursor survives it.**
+    ///
+    /// Both shapes were rejected by the per-region query's planners. Milestone F deleted those
+    /// and left the rule with one home — a copy inside the *BAM* reader — so a BAM refused on
+    /// a jump, a CRAM never checked, and a **forward** region reached neither, because a
+    /// forward region is served without repositioning at all. Disabling the survivor left the
+    /// whole suite green.
+    ///
+    /// It now lives in `move_to_region`, above both arms and both paths. Asserted through the
+    /// reuse path as well as the jump path, which is the case the old placement structurally
+    /// could not reach.
+    #[test]
+    fn a_malformed_region_is_refused_and_the_cursor_survives_it() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        // Establish a served region first, so the *next* move is a candidate for reuse rather
+        // than a jump — the path the reader-level check could never see.
+        let served = region(1, 40);
+        assert_eq!(
+            reads_of(&mut cursor, served),
+            by_linear_scan(&script, served)
+        );
+
+        for malformed in [
+            // Ends before it begins, and forward of the last region served, so the forget rule
+            // would reuse rather than reposition.
+            region(80, 70),
+            // The same, backwards, so the jump path is covered too.
+            region(20, 10),
+            // Base 0 does not exist in 1-based inclusive coordinates.
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(0),
+                end: Position(50),
+            },
+        ] {
+            match cursor.move_to_region(malformed) {
+                Err(CursorError::InvalidRegion { path, region }) => {
+                    assert_eq!(region, malformed);
+                    assert_eq!(path.as_ref(), Path::new("/fixture/sample.bam"));
+                }
+                other => panic!("expected InvalidRegion for {malformed:?}, got {other:?}"),
+            }
+        }
+
+        // **Nothing moved.** The cursor is still serving the region it was given, and a fresh
+        // valid region is answered in full — a refusal that had disturbed the walk would show
+        // up here and nowhere else.
+        let next = region(41, 100);
+        assert_eq!(reads_of(&mut cursor, next), by_linear_scan(&script, next));
+    }
+
+    /// `start == end` is an ordinary one-base region, not a malformed one — coordinates are
+    /// 1-based and inclusive, and a check written with `<=` would reject every single-base
+    /// region a caller asks for.
+    #[test]
+    fn a_one_base_region_is_not_malformed() {
+        let script = script();
+        let mut cursor = cursor_over(script.clone());
+
+        let one_base = region(20, 20);
+        assert_eq!(
+            reads_of(&mut cursor, one_base),
+            by_linear_scan(&script, one_base),
         );
     }
 
