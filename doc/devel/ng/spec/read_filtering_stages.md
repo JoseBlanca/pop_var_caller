@@ -68,9 +68,8 @@ configuration knob, or touch `AlignedRead`.
 
 ## 2. Why the division falls where it does
 
-**It is not a matter of taste — it falls out of what each filter reads.** Six of the nine read
-two integers off the raw aligned read. The other three read fields that only the conversion
-produces.
+Six of the nine filters read two integers off the raw aligned read. The other three read fields
+that only the conversion produces.
 
 | filter | what it reads | which side of the conversion |
 |---|---|---|

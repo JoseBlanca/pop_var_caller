@@ -1,0 +1,164 @@
+# Bad writing, caught by the owner — examples and criticisms
+
+*Working document, started 2026-08-03. Not a skill yet. It collects sentences the owner sent
+back, with what he said about them, so that the patterns behind them can eventually become rules
+in [`clear-technical-writing`](../clear-technical-writing/SKILL.md) or
+[`spec-authoring`](../spec-authoring/SKILL.md).*
+
+**How to use it.** Add an entry every time a sentence gets sent back. Record the owner's words
+verbatim — his criticism is the ground truth, and paraphrasing it loses the thing that made it
+land. Then work out what the sentence was doing wrong and whether an existing skill should have
+caught it. When a pattern has three or four entries it is probably ready to become a rule.
+
+**Why it is worth keeping.** Every entry below was written *while following*
+`clear-technical-writing`. So the interesting column is not "what was wrong" — it is **what the
+skill does not currently say** that would have stopped it.
+
+---
+
+## 1. The word that names a category instead of its contents
+
+**Written:** "`read/filtering.rs` holds **policy only** — no file reading, no conversion, no
+loop."
+
+**Owner:** *"bad writting. 'holds policy only' means absolutely nothing."*
+
+**What was wrong.** "Policy" was reached for as shorthand and never unpacked. The file holds nine
+filters, their thresholds, the name of each drop reason, and two functions that apply them. Every
+one of those is concrete; "policy" is the bag they were put in so they would not have to be
+listed. The reader cannot act on a bag.
+
+It went unnoticed because the sentence *sounds* precise — it has a strong claim ("only") and
+three negations after it. The negations were doing real work; the noun they attached to was not.
+
+**Became:** "`read/filtering.rs` holds **the keep-or-drop rules and the thresholds they use, and
+nothing else**: it opens no files, converts nothing, and drives no loop over reads."
+
+**Test to apply.** Replace the word with the list of what it contains. If you cannot write the
+list, you do not know what you meant. If you can, the list is the sentence.
+
+**Other words in the same family, watch for them:** machinery, infrastructure, concerns,
+plumbing, surface, semantics, story, shape.
+
+**Skill gap.** `clear-technical-writing` Rule 4 covers *borrowed* jargon that decodes to nothing
+("kernel"). It does not cover the plain English word that is *too general to be information*.
+"Policy" is not jargon; it is a category label standing where the category's members belong.
+
+---
+
+## 2. The term the document turns on, never defined
+
+**Written:** "**No change to what the cursor keeps.** It keeps decoded, filtered reads…"
+
+**Owner:** *"in order to understand this a reader needs to know what's a 'filtered reads'. Is it a
+RawRecord or a AlignedRead?"*
+
+**What was wrong.** The whole document was about the boundary between an undecoded record and a
+decoded read. It used "record" for one and "read" for the other, consistently, and **never once
+said that was the convention.** Writing it felt fine because the distinction was clear in my
+head; the reader has only the page.
+
+**Became:** the distinction defined in §1 before the diagram that uses it, and the sentence
+changed to name the type and where it lives — `VecDeque<AlignedRead>`, held above the whole
+chain, never raw records.
+
+**Test to apply.** If a distinction is load-bearing, define both sides *before* the first
+sentence that leans on either. A distinction you are confident about is the one most likely to go
+undefined.
+
+**Skill gap.** `clear-technical-writing` Rule 3 says define every acronym and term on first use.
+Neither "record" nor "read" is an acronym or a term of art — they are ordinary words — so the
+rule as written did not fire. The rule should reach *any* word doing load-bearing work whose
+meaning is narrower here than in general use.
+
+---
+
+## 3. The claim that overstates in order to sound rigorous
+
+**Written:** "**No performance change sought.** If a measurement moves, something is wrong."
+
+**Owner:** *"that's plain stupid and completely unnecessary. Getting a simpler and more
+understandable architecture is a good thing, no need to improve performance. Regressing
+significantly in performance would be bad and we would had to reconsider, but maybe with the new
+architecture we even improve performance, that wouldn't be wrong at all."*
+
+**What was wrong.** Two things, and the second is the worse one.
+
+The claim is **literally false**: a faster result would not be wrong. It was written to sound
+disciplined — *we are so careful that any deviation is a defect* — which is a pose, not a fact.
+
+And it framed speed as a **goal the change had to hit**. It is a **constraint**, and an
+asymmetric one: an improvement needs no defending, a significant slowdown means the design has to
+be reconsidered. Stating it as a target invites someone to tune for it, which is not what the
+change is for.
+
+**Became:** "**Speed is a constraint here, not a goal.** … A *significant* slowdown would be a
+reason to reconsider the design; an improvement is welcome and needs no defending. Neither is
+what this is for. Either way, measure it." Plus a number in the verification section for it to be
+checked against, marked as one run on one machine.
+
+**Test to apply.** Read the claim as an absolute and ask whether the opposite outcome would
+really be bad. If not, you have written a pose. Then ask: is this thing a *goal* or a
+*constraint*? Constraints are usually asymmetric, and saying which direction is fine is more
+useful than forbidding both.
+
+**Skill gap.** `spec-authoring` has *"Facts, not arguments"* and *"never manufacture a
+rationale"*. This is the sibling failure it does not name: **manufacturing a standard** — an
+invented acceptance criterion, stricter than the truth, adopted because strictness reads as care.
+
+---
+
+## 4. The defensive lead — arguing with a critic who is not in the room
+
+**Written:** "**It is not a matter of taste — it falls out of what each filter reads.** Six of the
+nine read two integers off the raw aligned read. The other three read fields that only the
+conversion produces."
+
+**Owner:** *"bad writting, this is in the best of cases an empty sentence, but it is worse than
+that because it is difficult to understand."*
+
+**What was wrong.** Three faults compounding:
+
+1. **"It is not a matter of taste"** pre-empts an objection nobody made. It argues rather than
+   informs.
+2. **"falls out of"** is a metaphor doing the work a verb should do. Falls out how? It gestures
+   at "is determined by" without committing to it.
+3. **"what each filter reads"** forward-references the very thing the next two sentences and the
+   table are about to establish. At that point in the page the reader does not yet know filters
+   read different things, so the clause explains nothing and asks to be held in memory.
+
+The compound effect is what the owner named: not merely empty, but *harder to read than
+nothing* — the reader stops to decode a sentence that had no content to deliver.
+
+**Became:** the sentence deleted. The section now opens on the fact, and the heading ("Why the
+division falls where it does") already told the reader what is being answered.
+
+**Test to apply — the delete test.** Cut the sentence and read the passage. If it is not worse,
+the sentence was not carrying anything. Apply it hardest to any sentence beginning *"It is not
+just…"*, *"This is not merely…"*, *"Far from being…"* — the contrastive opening is where a
+strawman usually hides.
+
+**Skill gap.** `spec-authoring` warns against *inventing a strawman alternative in order to
+defeat it* — but at the scale of a **decision record**. The same move at the scale of a
+**sentence** is not covered, and it is far more frequent: a lead-in that defends the paragraph
+instead of starting it.
+
+---
+
+## Patterns so far
+
+| # | pattern | one-line test |
+|---|---|---|
+| 1 | a category word standing in for its contents | replace it with the list; if you cannot write the list, you do not know what you meant |
+| 2 | a load-bearing distinction never defined | define both sides before the first sentence that leans on either |
+| 3 | an invented standard, stricter than the truth | would the opposite outcome really be bad? is this a goal or a constraint? |
+| 4 | a lead-in that argues instead of informs | delete it and re-read; watch every *"it is not just…"* |
+
+**The common root, provisionally.** All four are sentences written for how they would *sound* to
+someone judging the document, rather than for what a colleague needs from it. `spec-authoring`
+already says the bar is not "could this survive review", because that puts an adversary in the
+room. These are what that adversary does to individual sentences — and the skill only names the
+damage at the level of sections and decisions.
+
+That may be the rule worth extracting: **the adversary-in-the-room failure is a sentence-level
+disease, not only a document-level one.**
