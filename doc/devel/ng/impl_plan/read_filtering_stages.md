@@ -98,7 +98,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
 
 ### Milestone B — the contig check becomes a comparison
 
-- ☐ **B1.** `AlignmentFile::cursor` compares the accessor's contig table against the file's with
+- ✅ **B1.** `AlignmentFile::cursor` compares the accessor's contig table against the file's with
   `ContigList::first_disagreement`, and the per-contig fetch loop stops running on the cursor
   path. Adds `+ ContigTable` to `cursor`'s `R`, which propagates to `SampleReads::cursor` and
   both generators' signatures. **Its own commit** — a check that never fires looks exactly like a

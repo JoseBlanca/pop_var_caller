@@ -35,6 +35,34 @@ use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 /// `length`.
 pub(crate) const FIXTURE_CONTIGS: [(&str, usize); 2] = [("chr1", 100), ("chr2", 200)];
 
+/// An all-`A` accessor over [`FIXTURE_CONTIGS`] — **named**, so its contig table is the one
+/// the fixture files declare in their `@SQ`.
+///
+/// **Use this rather than `InMemoryRefSeq::from_contigs` for anything that opens a cursor.**
+/// `from_contigs` names its contigs `contig0`, `contig1`, … , and every cursor fixture used it
+/// until 2026-08-03 — so every one of them was handing `AlignmentFile::cursor` an accessor
+/// whose table disagreed with the file's on **every name**. Nothing noticed, because the check
+/// of the day fetched a zero-length window per contig and a window resolves whatever the
+/// contig is called. B1 replaced that with a comparison of the two tables and 23 tests failed
+/// at once; this is what they were fixed to.
+pub(crate) fn fixture_reference_bases() -> crate::ng::ref_seq::InMemoryRefSeq {
+    crate::ng::ref_seq::InMemoryRefSeq::from_named_contigs(
+        FIXTURE_CONTIGS
+            .iter()
+            .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+            .collect(),
+    )
+}
+
+/// The same, over [`BIG_FIXTURE_CONTIG`] — for the tests that need a contig larger than BAI's
+/// 16 kb finest bin.
+pub(crate) fn big_fixture_reference_bases() -> crate::ng::ref_seq::InMemoryRefSeq {
+    crate::ng::ref_seq::InMemoryRefSeq::from_named_contigs(vec![(
+        BIG_FIXTURE_CONTIG.0.to_string(),
+        vec![b'A'; BIG_FIXTURE_CONTIG.1],
+    )])
+}
+
 /// One `@RG` for a test header: its id, plus whichever tags the test is about.
 /// A `None` tag is **omitted entirely**, which is how the "no `SM`" and "no
 /// `LB`" inputs are built.

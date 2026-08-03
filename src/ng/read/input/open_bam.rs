@@ -39,7 +39,7 @@ use crate::ng::read::input::aligned_reads_reader::{
 use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::reference::{OpenReference, ReferenceBasesError};
-use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::ref_seq::{ContigTable, RawRefSeq};
 use crate::ng::types::ContigId;
 
 use super::AlignmentFileError;
@@ -330,7 +330,39 @@ impl AlignmentFile {
     /// **CRAM is not served yet** (Milestone E). It is refused rather than silently mis-read,
     /// because a CRAM opened as a BAM would fail deep inside a decode with an error naming
     /// neither the format nor this decision.
-    pub fn cursor<R: RawRefSeq>(
+    ///
+    /// # Three checks, in order: the argument, the accessor's description, its ability
+    ///
+    /// Nothing else checks the accessor. [`open`](Self::open) proved the *file* against the
+    /// *reference*, but the accessor arrives here from the caller, one per file, and could be
+    /// over a different FASTA entirely — which would make filter #8 compare every read against
+    /// the wrong bases and drop and keep the wrong reads with no error at all.
+    ///
+    /// 1. **The contig is one this file declares**
+    ///    ([`CursorContigNotInFile`](AlignmentFileError::CursorContigNotInFile)).
+    /// 2. **The accessor's contig table equals this file's**
+    ///    ([`CursorAccessorContigTable`](AlignmentFileError::CursorAccessorContigTable)) —
+    ///    names, lengths, and digests where both sides carry one, **order included**. Order is
+    ///    the whole point: a permuted table resolves on every fetch and then serves each read
+    ///    the wrong contig's bases, silently.
+    /// 3. **The accessor can serve this contig's bases**
+    ///    ([`Reference`](AlignmentFileError::Reference)) — one zero-length fetch, because (2)
+    ///    proves only a *description*, and `ResidentRefSeq`/`WindowedRefSeq` take that
+    ///    description as a constructor argument unrelated to the bytes they will read.
+    ///
+    /// **What replaced what.** (2) and (3) together replace a loop that asked (3) of **every
+    /// contig in the header** — ~2,580 on GRCh38, once per cursor — and never asked (2) at all,
+    /// so it accepted an accessor whose contigs had the right names at the wrong lengths, or
+    /// the right names in the wrong order. One comparison plus one fetch is both cheaper and
+    /// strictly more than that loop proved (spec `read_filtering_stages.md` §9 Q2).
+    ///
+    /// **The file is the left operand of (2)**, so the message reads *file value vs accessor
+    /// value*, the direction the open gate prints for the same class of fault.
+    ///
+    /// **What none of them catches** is a caller passing an unrelated accessor *that happens to
+    /// carry a matching table and can serve it*. Closing that means the file owning its
+    /// reference and handing out accessors itself, which is its own change (spec §10).
+    pub fn cursor<R: RawRefSeq + ContigTable>(
         self: &Arc<Self>,
         contig: ContigId,
         reference: R,
@@ -343,6 +375,12 @@ impl AlignmentFile {
         // A contig this file does not declare has no reads and no chunks, and every layer
         // below would answer that as "nothing here" — which is indistinguishable from a
         // chromosome that is genuinely empty. Refused where the caller can still act on it.
+        //
+        // **First of the three checks, and the order is deliberate:** this one is about the
+        // *argument*, the next about the accessor's *description*, the last about the
+        // accessor's *ability*. Asking whether the caller named a real contig before asking
+        // anything of the accessor keeps a bad `ContigId` from being reported as a reference
+        // fault, and it is what lets the probe below index `contig` safely.
         if usize::try_from(contig.get())
             .ok()
             .is_none_or(|id| id >= self.contigs.entries.len())
@@ -353,6 +391,41 @@ impl AlignmentFile {
                 contigs_in_file: self.contigs.entries.len(),
             });
         }
+
+        // **Second check: is the accessor over this file's contigs at all?** One comparison of
+        // two tables — names, lengths, and digests where both sides carry one.
+        self.contigs
+            .first_disagreement(reference.contigs())
+            .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
+                path: self.path.to_path_buf(),
+                detail,
+            })?;
+
+        // **Third check: can it actually serve this cursor's contig?**
+        //
+        // The comparison above proves the accessor carries the right *description*. For one
+        // accessor that is the whole story — `InMemoryRefSeq` derives its table from the bytes
+        // it holds. But `ResidentRefSeq::new` and `WindowedRefSeq::new` take the `ContigList`
+        // as a **separate constructor argument**, so nothing ties it to the bytes on disk: a
+        // `WindowedRefSeq` over a FASTA missing a contig, behind a table that names it, matches
+        // this file perfectly and cannot serve a single base of it.
+        //
+        // A zero-length fetch settles that, and it is what the deleted per-contig loop was
+        // really for. The loop asked it of **every** contig in the header — ~2,580 on GRCh38,
+        // once per cursor — for a property that only matters for the one contig this cursor
+        // will read. Asking it once keeps the fail-fast and costs one `open(2)` instead of
+        // 2,580.
+        //
+        // Without it the fault surfaces mid-stream, per chromosome, after arbitrary work, under
+        // a top-level message naming the *BAM* — and on a `--regions` run whose reads are all
+        // dropped before filter #8, never at all.
+        let mut probe = Vec::new();
+        reference
+            .fetch_raw_into(contig, 1, 0, &mut probe)
+            .map_err(|source| AlignmentFileError::Reference {
+                path: self.path.to_path_buf(),
+                source,
+            })?;
 
         let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
             Some(AlignmentFileKind::Bam) => {
@@ -410,18 +483,14 @@ impl AlignmentFile {
             }
         };
 
-        AlignmentCursor::over_records(
+        Ok(AlignmentCursor::over_records(
             aligned_reads_reader,
             contig,
             self.resolution.clone(),
             reference,
             self.filter_config,
             Arc::clone(&self.path),
-        )
-        .map_err(|source| AlignmentFileError::Reference {
-            path: self.path.to_path_buf(),
-            source,
-        })
+        ))
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -639,9 +708,10 @@ fn hex_nibble(character: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
-        BIG_FIXTURE_CONTIG, FIXTURE_CONTIGS, bam_header, big_contig_specs, big_fixture_reference,
-        big_spread_of_reads, fixture_read_group, fixture_reference, header, indexed_bam,
-        matching_contigs, one_read, only_tally, unindexed_bam,
+        FIXTURE_CONTIGS, bam_header, big_contig_specs, big_fixture_reference,
+        big_fixture_reference_bases, big_spread_of_reads, fixture_read_group, fixture_reference,
+        fixture_reference_bases, header, indexed_bam, matching_contigs, one_read, only_tally,
+        unindexed_bam,
     };
     // `GenomeRegion` left `super::*` when the per-region query did: the file layer's own API
     // no longer names one, and only the tests below build them.
@@ -1329,18 +1399,13 @@ mod tests {
 
     /// All-`A` bases over the big fixture contig, so nothing is dropped for mismatching.
     fn big_reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(vec![vec![b'A'; BIG_FIXTURE_CONTIG.1]])
+        big_fixture_reference_bases()
     }
 
     /// An all-`A` reference matching the fixture contigs, so a read of `A`s
     /// matches perfectly and a read of `C`s mismatches at every base.
     fn reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        )
+        fixture_reference_bases()
     }
 
     /// A read whose bases all mismatch the all-`A` reference — filter #8's
@@ -1632,6 +1697,223 @@ mod tests {
         // And the contigs it *does* have are fine, so the check is a check and not a refusal
         // of everything.
         assert!(file.cursor(ContigId(0), reference_bases()).is_ok());
+    }
+
+    /// **An accessor over a different reference is refused, and the refusal compares
+    /// lengths — not just names.**
+    ///
+    /// This is the check that replaced `ReadFilter::new`'s per-contig probe (B1). The probe
+    /// fetched a zero-length window on every `@SQ` contig, which proved each one *resolved*
+    /// and nothing about how long it was, so an accessor whose contigs were the right names at
+    /// the wrong sizes sailed through it and then made filter #8 compare every read against
+    /// the wrong bases — silently, with no error and no crash.
+    ///
+    /// Both halves are asserted because each fails under a different mutation: drop the
+    /// comparison entirely and *both* cases are accepted; compare names only — which is what
+    /// the probe effectively did — and the second is.
+    ///
+    /// **The fixture accessors were themselves wrong until this check existed.** Every one of
+    /// them was built with `InMemoryRefSeq::from_contigs`, which names contigs `contig0`,
+    /// `contig1`, … , so all 23 cursor tests were passing an accessor that disagreed with the
+    /// file on every contig name. They are built through
+    /// [`fixture_reference_bases`](crate::ng::read::input::test_fixtures::fixture_reference_bases)
+    /// now.
+    #[test]
+    fn a_cursor_refuses_an_accessor_over_a_different_contig_table() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+
+        // Right lengths, wrong names.
+        let wrong_names = InMemoryRefSeq::from_named_contigs(
+            FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| (format!("not_{name}"), vec![b'A'; *length]))
+                .collect(),
+        );
+        let error = file
+            .cursor(ContigId(0), wrong_names)
+            .err()
+            .expect("an accessor naming different contigs must be refused");
+        // Pinned to the shape, not just the field name: the **file** is the left operand, so
+        // the file's value prints first — the direction the open gate prints, and a recorded
+        // decision that a bare `contains("name disagreement")` would not have protected.
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { detail, .. }
+                if detail.contains("('chr1' vs 'not_chr1')")),
+            "the message must name the field and read file-value-vs-accessor-value: {error}"
+        );
+
+        // Right names, wrong lengths — the case the probe could never catch, because a
+        // zero-length window at position 1 resolves whatever the contig's length is.
+        let wrong_lengths = InMemoryRefSeq::from_named_contigs(
+            FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length + 1]))
+                .collect(),
+        );
+        let error = file
+            .cursor(ContigId(0), wrong_lengths)
+            .err()
+            .expect("an accessor with the right names at the wrong lengths must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { detail, .. }
+                if detail.contains("length disagreement")
+                    && detail.contains("contig 'chr1': 100 vs 101")),
+            "a name-only comparison would have accepted this, and the file's length prints \
+             first: {error}"
+        );
+
+        // And the matching accessor is accepted, so the check discriminates rather than
+        // refusing everything.
+        assert!(file.cursor(ContigId(0), reference_bases()).is_ok());
+    }
+
+    /// **A permuted table is refused, and this is the case the whole check exists for.**
+    ///
+    /// A permuted `@SQ` list resolves on **every** fetch — the deleted per-contig probe
+    /// accepted it — so filter #8 would compare each read against the wrong contig's bases
+    /// with no error at all. Both cases in the sibling test above are order-blind: rewriting
+    /// the comparison as a name→length hash lookup, which is exactly the shape someone
+    /// optimising a 2,580-entry ordered walk would reach for, passes them and silently reopens
+    /// that hole. Mutation-verified: this test is the one that does not.
+    ///
+    /// `FIXTURE_CONTIGS`' two contigs have deliberately different lengths, so a swap is
+    /// detectable — its own doc says that is why.
+    #[test]
+    fn a_cursor_refuses_an_accessor_whose_contig_table_is_a_permutation() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+
+        let mut permuted: Vec<(String, Vec<u8>)> = FIXTURE_CONTIGS
+            .iter()
+            .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+            .collect();
+        permuted.reverse();
+
+        let error = file
+            .cursor(ContigId(0), InMemoryRefSeq::from_named_contigs(permuted))
+            .err()
+            .expect("a permuted contig table must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { .. }),
+            "got {error}"
+        );
+    }
+
+    /// An accessor missing a contig the file declares is refused on the **count**, which is
+    /// `first_disagreement`'s third branch and the shape a wrong-but-related reference takes in
+    /// practice — an analysis set with alts against one without.
+    ///
+    /// It is also the input class the deleted `read_filter_new_rejects_a_contig_missing_from_
+    /// the_reference` actually drove: a two-contig header against a one-contig reference.
+    #[test]
+    fn a_cursor_refuses_an_accessor_whose_contig_table_is_shorter_than_the_files() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+        let short = InMemoryRefSeq::from_named_contigs(vec![(
+            FIXTURE_CONTIGS[0].0.to_string(),
+            vec![b'A'; FIXTURE_CONTIGS[0].1],
+        )]);
+
+        let error = file
+            .cursor(ContigId(0), short)
+            .err()
+            .expect("an accessor missing a contig the file declares must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { detail, .. }
+                if detail.contains("@SQ list length differs")),
+            "got {error}"
+        );
+    }
+
+    /// **A matching table does not mean the accessor can serve the bases**, and the cursor says
+    /// so up front rather than failing mid-walk.
+    ///
+    /// `WindowedRefSeq` takes its `ContigList` as a constructor argument independent of the
+    /// FASTA it will read, so a table naming a contig the file does not hold matches this BAM
+    /// perfectly and cannot serve a single base of it — a stale `.fai`, or one whose FASTA was
+    /// replaced. The table comparison cannot see that; the one zero-length fetch can.
+    ///
+    /// This is the half of the deleted probe's property that the table comparison does **not**
+    /// subsume. The probe asked it of all ~2,580 header contigs; this asks it of the one the
+    /// cursor is for.
+    #[test]
+    fn a_cursor_refuses_an_accessor_that_cannot_serve_its_contig() {
+        use crate::fasta::{ContigEntry, ContigList};
+        use crate::ng::ref_seq::WindowedRefSeq;
+        use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 1, 1, 30)]);
+
+        // A FASTA holding chr1 only …
+        let (_fasta_dir, fasta) = build_fasta(&[ContigSpec {
+            name: FIXTURE_CONTIGS[0].0.to_string(),
+            length: FIXTURE_CONTIGS[0].1 as u64,
+        }])
+        .expect("build fasta");
+        // … behind a table claiming both, exactly as the file's `@SQ` does.
+        let table = ContigList {
+            entries: FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| ContigEntry {
+                    name: (*name).to_string(),
+                    length: *length as u64,
+                    md5: None,
+                })
+                .collect(),
+        };
+
+        // chr1 is servable, so the accessor is fine for a cursor over it …
+        assert!(
+            file.cursor(
+                ContigId(0),
+                WindowedRefSeq::new(fasta.clone(), table.clone())
+            )
+            .is_ok(),
+            "the contig the FASTA does hold is servable"
+        );
+
+        // … and chr2 is not, which is refused here rather than at the first read.
+        let error = file
+            .cursor(ContigId(1), WindowedRefSeq::new(fasta, table))
+            .err()
+            .expect("an accessor that cannot serve this contig must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::Reference { .. }),
+            "got {error}"
+        );
+    }
+
+    /// **The fixture accessors are over the fixture files' table** — the precondition
+    /// `AlignmentCursor::over_records` documents and cannot check, pinned for the three test
+    /// call sites that build a cursor without going through `AlignmentFile::cursor`.
+    ///
+    /// Before B1 this was false of *every* one of them — the accessors were built with
+    /// `InMemoryRefSeq::from_contigs`, which names contigs `contig0`, `contig1`, … against
+    /// files declaring `chr1`, `chr2` — and nothing noticed for the life of the fixture,
+    /// because the check of the day fetched a window per contig and a window resolves whatever
+    /// the contig is called. If these drift apart again, those three sites silently revert to
+    /// pre-B1 behaviour with every test through them still passing.
+    #[test]
+    fn the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files() {
+        use crate::ng::ref_seq::ContigTable;
+
+        contig_list(&bam_header(&matching_contigs()))
+            .expect("the fixture header carries no malformed M5")
+            .first_disagreement(fixture_reference_bases().contigs())
+            .expect("the small fixture accessor must be over the small fixture files' table");
+
+        contig_list(&bam_header(&big_contig_specs()))
+            .expect("the big fixture header carries no malformed M5")
+            .first_disagreement(big_fixture_reference_bases().contigs())
+            .expect("the big fixture accessor must be over the big fixture file's table");
     }
 
     // -----------------------------------------------------------------
@@ -2102,7 +2384,7 @@ mod tests {
     /// is stricter does not have to be taken on trust.
     #[test]
     fn the_superseded_resolves_only_probe_cannot_see_order() {
-        use crate::ng::ref_seq::{InMemoryRefSeq, RefSeq};
+        use crate::ng::ref_seq::RefSeq;
         use crate::ng::types::ContigId;
 
         let (_reference_dir, reference) = fixture_reference(false);
@@ -2110,12 +2392,7 @@ mod tests {
 
         // The superseded check: fetch every contig the file's `@SQ` list can
         // name, and accept if each one resolves. Order is never consulted.
-        let reference_bases = InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        );
+        let reference_bases = fixture_reference_bases();
         let mut probe = Vec::new();
         let every_contig_resolves = (0..permuted.reference_sequences().len()).all(|index| {
             reference_bases

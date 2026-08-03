@@ -36,7 +36,10 @@ use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction, ReadGr
 // CRAM is. It did until 2026-08-03, when the two whole-file `RecordSource` implementations
 // that lived below were deleted — see the note where they were. What a *record* is left the
 // same day, to `aligned_read.rs`, with the two raw types.
-use noodles_sam as sam;
+// **No `noodles_sam as sam` here any more, and its absence is the point.** The last thing in
+// this module that knew what a SAM *header* was, was `RecordSource::header` — the contig
+// probe's input — and B1 took both. What is left needs `RecordBuf` alone, to read a flag and a
+// mapping quality off — and the tests do not build a header either, for the same reason.
 use noodles_sam::alignment::RecordBuf;
 use std::io;
 
@@ -338,11 +341,13 @@ pub(crate) trait RecordSource {
     /// buffer with `Default::default()` and hands the same `&mut` to
     /// [`Self::read_next`] on every read, so the whole pass allocates one record.
     type Record: RawAlignedRead + Default;
-    /// The alignment file's SAM header. Its `@SQ` list defines the contigs the
-    /// reads may reference; [`ReadFilter::new`] validates that every one resolves
-    /// in the reference up front, so an in-loop reference error later means
-    /// genuinely corrupt input rather than a mismatched reference.
-    fn header(&self) -> &sam::Header;
+    // **`header()` was here, and it went with the contig probe (2026-08-03, B1).** Its only
+    // caller was `ReadFilter::new`, which read the `@SQ` list to know how many contigs to
+    // fetch a window for. The check that replaced it compares contig tables one layer up, at
+    // `AlignmentFile::cursor`, where the file's list is already in hand — so no source is
+    // asked for a header any more. Note for C3, which turns this trait's methods into inherent
+    // ones on `RegionRawAlignedReads`: arch §3.3 lists `header()` among them, and it should be
+    // re-added only if a caller appears, because none exists today.
     /// Fill `buf` with the next record, reusing its allocations. `Ok(true)` =
     /// filled; `Ok(false)` = end of input, after which `buf` holds an unspecified
     /// (stale) record the caller must not read; `Err` is fatal to the run.
@@ -477,11 +482,15 @@ pub(crate) enum ReadFilterError {
     /// record (the unmapped flag clear yet no position).
     #[error("decoding an alignment record failed")]
     Decode(#[source] io::Error),
-    /// Filter #8's reference fetch failed. For a filter built by
-    /// `ReadFilter::new`, contigs were validated up front, so this signals
-    /// corrupt input or a read past a contig end; for one built by
-    /// `with_validated_contigs`, it can also mean the caller's contig guarantee
-    /// did not actually hold.
+    /// Filter #8's reference fetch failed — corrupt input, or a read reaching past a contig's
+    /// end.
+    ///
+    /// It can also mean the caller's contig guarantee did not hold, since
+    /// `with_validated_contigs` takes that on trust. Since B1 that is much narrower than it
+    /// was: `AlignmentFile::cursor` compares the two contig tables *and* proves the accessor
+    /// can serve this cursor's own contig before building anything, so what is left to fail
+    /// here is a contig the cursor is **not** for — reachable only through a caller that builds
+    /// a filter itself.
     #[error("reference access failed during filtering")]
     Reference(#[source] RefSeqError),
 }
@@ -561,7 +570,8 @@ pub type ReadGroupCounts = (Option<ReadGroupId>, ReadFilterCounts);
 /// value so that path could keep them beside each pooled reader and lend them to a fresh
 /// per-region filter, which is what kept ~10⁶ region queries from allocating two buffers
 /// each. Milestone F deleted that path along with the method that handed them back, so the
-/// only value anything passes here now is `Default::default()` from [`ReadFilter::new`]: a
+/// only value anything passes here now is `Default::default()`, from the two remaining call
+/// sites: a
 /// filter lives as long as the cursor it belongs to and reuses its own buffers for every
 /// region. Folding the parameter away is a `filtering.rs` cleanup, recorded rather than done
 /// inside a step whose subject is the read path.
@@ -574,69 +584,39 @@ pub(crate) struct ReadFilterBuffers<Rec> {
 }
 
 impl<S: RecordSource, R: RawRefSeq> ReadFilter<S, R> {
-    /// Fail-fast setup: validate that every contig in the source header's `@SQ`
-    /// list resolves in the reference, then seed the reused record buffer. A
-    /// header/reference mismatch is surfaced here (`Err`) rather than mid-stream,
-    /// which is what lets an in-loop reference error be treated as fatal-corrupt
-    /// (spec §5).
-    pub fn new(source: S, reference: R, config: ReadFilterConfig) -> Result<Self, RefSeqError> {
-        // A read's `ref_id` indexes the `@SQ` list (ContigId(i) = the i-th `@SQ`),
-        // so validating those indices covers every contig a read can reference. A
-        // zero-length fetch at position 1 resolves iff the contig exists.
-        let contig_count = source.header().reference_sequences().len();
-        let mut probe = Vec::new();
-        for i in 0..contig_count {
-            // PANIC-FREE: a `@SQ` list long enough to overflow `u32` is not
-            // representable by any real alignment file (`ref_id` is a 32-bit
-            // field); the index fits by construction.
-            let contig = ContigId(u32::try_from(i).expect("contig index fits u32"));
-            reference.fetch_into(contig, 1, 0, &mut probe)?;
-        }
-        // The probe *is* the difference between the two constructors, so build
-        // through the other one rather than repeating its field list: that way
-        // they cannot drift into filtering differently.
-        Ok(Self::with_validated_contigs(
-            source,
-            reference,
-            config,
-            ReadFilterBuffers::default(),
-        ))
-    }
-
-    /// The same filter as [`Self::new`], but **without the per-contig resolve
-    /// probe**, and taking its two reused buffers from the caller.
+    /// Seed a filter over a source whose contigs are **already known to match the
+    /// reference**, taking its two reused buffers from the caller.
     ///
-    /// **What the caller must have proved.** `new`'s probe fetches every `@SQ`
-    /// contig to check it resolves in the reference. Use this constructor only
-    /// when that is already known — specifically, when the file's `@SQ` list has
-    /// been proved *equal to* the reference's contig table, name, length and
-    /// order included, as `AlignmentFile::open`'s gate does
-    /// (`doc/devel/ng/spec/alignment_file.md` §3.1). That is strictly stronger
-    /// than "every index resolves": it also rules out the permutation the probe
-    /// happily accepts.
+    /// # There used to be a second constructor, and its body was a loop
     ///
-    /// Passing a source whose contigs were never checked has two failure modes,
-    /// and **the quiet one is worse**. A contig missing from the reference
-    /// surfaces as a mid-stream [`ReadFilterError::Reference`], where `new`
-    /// would have failed up front — loud, and recoverable. But a *permuted*
-    /// `@SQ` list resolves on every fetch, so filter #8 compares each read
-    /// against the wrong contig's bases and drops and keeps the wrong reads with
-    /// no error at all. Only the gate's order-included equality rules that out,
-    /// which is why the precondition is equality and not resolvability.
+    /// `ReadFilter::new` fetched a zero-length window on every contig of the source's `@SQ`
+    /// list to prove each one resolved in `reference` — ~2,580 opens on GRCh38, once per
+    /// cursor. It was deleted on 2026-08-03, when `AlignmentFile::cursor` started **comparing
+    /// the two contig tables** instead (`read_filtering_stages.md` §9 Q2). The comparison is
+    /// microseconds rather than thousands of file opens, and it proves strictly more: the loop
+    /// only showed that each contig *resolves*, so an accessor whose contigs had the right
+    /// names and the wrong lengths sailed through it.
     ///
-    /// **Why it exists.** The probe costs one reference fetch per contig, which was nothing
-    /// for a whole-file pass but was paid ~10⁶ times by the per-region query the cursor
-    /// replaced — once per query, for a property the open gate had established once. That
-    /// caller is gone, and with it the only *external* one: what is left is
-    /// [`Self::new`] building through this so the two constructors cannot drift into
-    /// filtering differently. The `buffers` parameter is a vestige of the same caller (see
-    /// [`ReadFilterBuffers`]).
+    /// # What the caller must have proved
     ///
-    /// The guarantee is documented rather than encoded in a typestate: the
-    /// caller that needs this is the one that just ran the gate, and a marker
-    /// type would buy proof only for callers who already have it.
+    /// That the source's `@SQ` list is *equal to* the reference's contig table — name, length
+    /// and **order** included — which is what both `AlignmentFile::open`'s gate and
+    /// `AlignmentFile::cursor`'s check establish.
     ///
-    /// [`Self::new`] is unchanged and stays the right choice everywhere else.
+    /// Handing over a source whose contigs were never checked has two failure modes, and **the
+    /// quiet one is worse.** A contig missing from the reference surfaces as a mid-stream
+    /// [`ReadFilterError::Reference`] — loud, and recoverable. But a *permuted* `@SQ` list
+    /// resolves on every fetch, so filter #8 compares each read against the wrong contig's
+    /// bases and drops and keeps the wrong reads with no error at all. That is why the
+    /// precondition is equality and not resolvability, and why the deleted loop was never
+    /// enough on its own.
+    ///
+    /// The guarantee is documented rather than encoded in a typestate: the caller that needs
+    /// this is the one that just ran the check, and a marker type would buy proof only for
+    /// callers who already have it.
+    ///
+    /// The `buffers` parameter is a vestige of the per-region query that once lent them
+    /// (see [`ReadFilterBuffers`]); every caller now passes `Default::default()`.
     pub(crate) fn with_validated_contigs(
         source: S,
         reference: R,
@@ -1235,10 +1215,6 @@ mod tests {
 
     // ----- the record-source seam (C) -------------------------------------
 
-    use noodles_sam::header::record::value::Map;
-    use noodles_sam::header::record::value::map::ReferenceSequence;
-    use std::num::NonZero;
-
     /// A trivial in-memory `RawAlignedRead`: it carries a whole `AlignedRead` and reads
     /// its `flag`/`mapq` back off it, so the cascade can be driven with no BAM.
     /// `decode_fails` makes `decode` return an error (to exercise the fatal
@@ -1302,15 +1278,16 @@ mod tests {
     /// caller's buffer each call.
     struct FakeSource {
         records: Vec<FakeRecord>,
-        header: sam::Header,
         next_index: usize,
     }
 
     impl FakeSource {
-        fn new(records: Vec<FakeRecord>, header: sam::Header) -> Self {
+        /// **No header.** These doubles carried one only to answer
+        /// `RecordSource::header`, which went with the contig probe at B1 — nothing asks a
+        /// source for a header any more.
+        fn new(records: Vec<FakeRecord>) -> Self {
             Self {
                 records,
-                header,
                 next_index: 0,
             }
         }
@@ -1338,9 +1315,6 @@ mod tests {
             0
         }
 
-        fn header(&self) -> &sam::Header {
-            &self.header
-        }
         fn read_next(&mut self, buf: &mut FakeRecord) -> io::Result<bool> {
             match self.records.get(self.next_index) {
                 Some(record) => {
@@ -1378,10 +1352,7 @@ mod tests {
         // decode survivors → post-decode, over the fake source.
         let reference = poly_a_ref(30);
         let cfg = ReadFilterConfig::default();
-        let mut source = FakeSource::new(
-            vec![fake(FLAG_DUPLICATE, 60), fake(FLAG_PAIRED, 60)],
-            one_contig_header(),
-        );
+        let mut source = FakeSource::new(vec![fake(FLAG_DUPLICATE, 60), fake(FLAG_PAIRED, 60)]);
         let mut buf = FakeRecord::default();
         let mut ref_buf = Vec::new();
 
@@ -1420,18 +1391,14 @@ mod tests {
     /// below at each new region *through* it, so the reach has to be by `&mut`.
     #[test]
     fn repositioning_through_the_filter_reaches_the_source() {
-        let mut filter = ReadFilter::new(
-            FakeSource::new(
-                vec![
-                    named_fake(b"first", FLAG_PAIRED, 60),
-                    named_fake(b"second", FLAG_PAIRED, 60),
-                ],
-                one_contig_header(),
-            ),
+        let mut filter = filter_over(
+            FakeSource::new(vec![
+                named_fake(b"first", FLAG_PAIRED, 60),
+                named_fake(b"second", FLAG_PAIRED, 60),
+            ]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert_eq!(filter.source_mut().records_consumed(), 0);
         let first = filter.next().expect("a read").expect("it passes");
@@ -1469,12 +1436,11 @@ mod tests {
     /// design question for Milestone B — not something to settle in an accessor.
     #[test]
     fn a_filter_that_has_reached_the_end_stays_finished_after_a_reposition() {
-        let mut filter = ReadFilter::new(
-            FakeSource::new(vec![fake(FLAG_PAIRED, 60)], one_contig_header()),
+        let mut filter = filter_over(
+            FakeSource::new(vec![fake(FLAG_PAIRED, 60)]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert!(filter.next().is_some(), "the one record passes the filter");
         assert!(filter.next().is_none(), "and then the source is exhausted");
@@ -1496,15 +1462,11 @@ mod tests {
     /// last. Stated as a test because the opposite is just as plausible a design.
     #[test]
     fn repositioning_the_source_does_not_reset_the_running_tally() {
-        let mut filter = ReadFilter::new(
-            FakeSource::new(
-                vec![fake(FLAG_DUPLICATE, 60), fake(FLAG_PAIRED, 60)],
-                one_contig_header(),
-            ),
+        let mut filter = filter_over(
+            FakeSource::new(vec![fake(FLAG_DUPLICATE, 60), fake(FLAG_PAIRED, 60)]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert!(
             filter.next().is_some(),
@@ -1548,12 +1510,11 @@ mod tests {
     fn a_failed_filter_is_not_restarted_and_says_so() {
         let mut undecodable = fake(FLAG_PAIRED, 60);
         undecodable.decode_fails = true;
-        let mut filter = ReadFilter::new(
-            FakeSource::new(vec![undecodable], one_contig_header()),
+        let mut filter = filter_over(
+            FakeSource::new(vec![undecodable]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert!(matches!(
             filter.next(),
@@ -1575,12 +1536,11 @@ mod tests {
     /// Without this the two states are indistinguishable from the outside.
     #[test]
     fn a_filter_stopped_cleanly_is_restarted_and_says_so() {
-        let mut filter = ReadFilter::new(
-            FakeSource::new(vec![fake(FLAG_PAIRED, 60)], one_contig_header()),
+        let mut filter = filter_over(
+            FakeSource::new(vec![fake(FLAG_PAIRED, 60)]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert!(filter.next().is_some());
         assert!(filter.next().is_none(), "the source is exhausted");
@@ -1599,12 +1559,11 @@ mod tests {
     /// A running filter has nothing to restart, and must not claim it did.
     #[test]
     fn a_running_filter_reports_that_there_was_nothing_to_restart() {
-        let mut filter = ReadFilter::new(
-            FakeSource::new(vec![fake(FLAG_PAIRED, 60)], one_contig_header()),
+        let mut filter = filter_over(
+            FakeSource::new(vec![fake(FLAG_PAIRED, 60)]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert!(!filter.restart_after_end_of_input());
         assert!(filter.next().is_some(), "and it is untouched by the asking");
@@ -1617,12 +1576,11 @@ mod tests {
     fn a_filter_stopped_by_a_fatal_error_stays_finished_after_a_reposition() {
         let mut undecodable = fake(FLAG_PAIRED, 60);
         undecodable.decode_fails = true;
-        let mut filter = ReadFilter::new(
-            FakeSource::new(vec![undecodable], one_contig_header()),
+        let mut filter = filter_over(
+            FakeSource::new(vec![undecodable]),
             poly_a_ref(30),
             ReadFilterConfig::default(),
-        )
-        .expect("the fake header resolves against the poly-A reference");
+        );
 
         assert!(
             matches!(filter.next(), Some(Err(ReadFilterError::Decode(_)))),
@@ -1638,20 +1596,12 @@ mod tests {
         );
     }
 
-    /// A header with a single `chr1` reference sequence of the given length.
-    fn contig_header(length: usize) -> sam::Header {
-        sam::Header::builder()
-            .set_header(Default::default())
-            .add_reference_sequence(
-                "chr1",
-                Map::<ReferenceSequence>::new(NonZero::new(length).unwrap()),
-            )
-            .build()
-    }
-
-    fn one_contig_header() -> sam::Header {
-        contig_header(100)
-    }
+    // **`contig_header` and `one_contig_header` went too (2026-08-03, B1), and their going is
+    // worth a line.** Every test in this module built a SAM header, for one reason: the
+    // `RecordSource` it constructed had to answer `header()` so the contig probe could count
+    // `@SQ` lines. With the probe replaced by a contig-table comparison one layer up, no test
+    // here needs a header at all — which is the same subtraction the module doc claims, seen
+    // from the tests: **this module no longer knows what a header is.**
 
     // **The three `NoodlesRawAlignedRead` tests moved to `read/aligned_read.rs` with the type
     // (2026-08-03).** Their subject is the adapter's flag/MAPQ reads and its refusal to decode
@@ -1679,32 +1629,40 @@ mod tests {
     // A file is not needed to state the property and, since this module no longer knows what a
     // BAM is, could not be opened from here anyway.
 
-    #[test]
-    fn read_filter_new_rejects_a_contig_missing_from_the_reference() {
-        // Header declares two contigs; the reference has only one.
-        let header = sam::Header::builder()
-            .set_header(Default::default())
-            .add_reference_sequence(
-                "chr1",
-                Map::<ReferenceSequence>::new(NonZero::new(100usize).unwrap()),
-            )
-            .add_reference_sequence(
-                "chr2",
-                Map::<ReferenceSequence>::new(NonZero::new(100usize).unwrap()),
-            )
-            .build();
-        let source = FakeSource::new(Vec::new(), header);
-        let result = ReadFilter::new(source, poly_a_ref(100), ReadFilterConfig::default());
-        assert!(matches!(
-            result,
-            Err(RefSeqError::UnknownContig(ContigId(1)))
-        ));
+    // **Three tests of the contig probe went with it (2026-08-03, B1), and one of them owed a
+    // successor.**
+    //
+    // `read_filter_new_rejects_a_contig_missing_from_the_reference` pinned a real property —
+    // a reference that does not match the file's contigs is refused **up front**, not
+    // mid-stream. That property did not go away; it **moved up**, to
+    // `AlignmentFile::cursor`, which now compares the two contig tables instead of fetching a
+    // window per contig. Its successor is `a_cursor_refuses_an_accessor_over_a_different_
+    // contig_table` in `read/input/open_bam.rs`, and it is stronger: the probe only proved
+    // each contig *resolved*, so it accepted an accessor whose contigs had the right names
+    // and the wrong lengths, which the successor rejects.
+    //
+    // The other two — `probe_free_constructor_filters_identically_to_new` and
+    // `probe_free_constructor_skips_the_contig_probe_new_would_fail` — have **no successor and
+    // should not have one**. Both compared the two constructors, and there is one constructor
+    // now; "the probe is skipped" is not a property that can be stated about a probe that no
+    // longer exists.
+
+    /// Build a filter the way the cursor does — the stand-in for `ReadFilter::new`, which was
+    /// deleted with the contig probe at B1.
+    ///
+    /// Infallible, which is the point: construction had exactly one failure mode and it was
+    /// the probe. Every test below is about what the filter *does*, not about building one, so
+    /// they take it through here rather than restating the buffers each time.
+    fn filter_over<S: RecordSource, R: RawRefSeq>(
+        source: S,
+        reference: R,
+        config: ReadFilterConfig,
+    ) -> ReadFilter<S, R> {
+        ReadFilter::with_validated_contigs(source, reference, config, ReadFilterBuffers::default())
     }
 
     /// A `RecordSource` whose `read_next` always fails — to drive the fatal path.
-    struct ErroringSource {
-        header: sam::Header,
-    }
+    struct ErroringSource;
 
     impl RecordSource for ErroringSource {
         type Record = FakeRecord;
@@ -1714,9 +1672,6 @@ mod tests {
             0
         }
 
-        fn header(&self) -> &sam::Header {
-            &self.header
-        }
         fn read_next(&mut self, _buf: &mut FakeRecord) -> io::Result<bool> {
             Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated"))
         }
@@ -1724,11 +1679,8 @@ mod tests {
 
     #[test]
     fn read_filter_source_read_error_is_fatal() {
-        let source = ErroringSource {
-            header: one_contig_header(),
-        };
-        let mut filter =
-            ReadFilter::new(source, poly_a_ref(100), ReadFilterConfig::default()).unwrap();
+        let source = ErroringSource;
+        let mut filter = filter_over(source, poly_a_ref(100), ReadFilterConfig::default());
         // The read error surfaces as the yielded item …
         assert!(matches!(
             filter.next(),
@@ -1743,9 +1695,8 @@ mod tests {
         // A record that clears the pre-decode gate but fails to decode.
         let mut record = fake(FLAG_PAIRED, 60);
         record.decode_fails = true;
-        let source = FakeSource::new(vec![record], one_contig_header());
-        let mut filter =
-            ReadFilter::new(source, poly_a_ref(100), ReadFilterConfig::default()).unwrap();
+        let source = FakeSource::new(vec![record]);
+        let mut filter = filter_over(source, poly_a_ref(100), ReadFilterConfig::default());
         assert!(matches!(
             filter.next(),
             Some(Err(ReadFilterError::Decode(_)))
@@ -1759,16 +1710,12 @@ mod tests {
         // contig resolves in `new` (a zero-length probe), so this fails only
         // in-loop → fatal Reference error.
         let read = mapped(&[b'A'; 50], &[30u8; 50], vec![CigarOp::Match(50)]);
-        let source = FakeSource::new(
-            vec![FakeRecord {
-                read,
-                decode_fails: false,
-            }],
-            one_contig_header(),
-        );
+        let source = FakeSource::new(vec![FakeRecord {
+            read,
+            decode_fails: false,
+        }]);
         // contig length 10 < the read's 50-base reference span.
-        let mut filter =
-            ReadFilter::new(source, poly_a_ref(10), ReadFilterConfig::default()).unwrap();
+        let mut filter = filter_over(source, poly_a_ref(10), ReadFilterConfig::default());
         assert!(matches!(
             filter.next(),
             Some(Err(ReadFilterError::Reference(
@@ -1784,9 +1731,8 @@ mod tests {
         // #2 (MAPQ 60) is charged to `unmapped` through the full iterator.
         let unmapped = fake(FLAG_PAIRED | FLAG_UNMAPPED, 60);
         let clean = fake(FLAG_PAIRED, 60);
-        let source = FakeSource::new(vec![unmapped, clean], one_contig_header());
-        let mut filter =
-            ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
+        let source = FakeSource::new(vec![unmapped, clean]);
+        let mut filter = filter_over(source, poly_a_ref(30), ReadFilterConfig::default());
         let kept: Vec<AlignedRead> = (&mut filter).collect::<Result<_, _>>().unwrap();
         assert_eq!(kept.len(), 1, "only the clean read survives");
         assert_eq!(only_tally(&filter).unmapped, 1);
@@ -1795,9 +1741,8 @@ mod tests {
 
     #[test]
     fn read_filter_over_an_empty_source_yields_nothing_and_zero_counts() {
-        let source = FakeSource::new(Vec::new(), one_contig_header());
-        let mut filter =
-            ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
+        let source = FakeSource::new(Vec::new());
+        let mut filter = filter_over(source, poly_a_ref(30), ReadFilterConfig::default());
         assert!(filter.next().is_none());
         assert_eq!(only_tally(&filter), ReadFilterCounts::default());
     }
@@ -1806,15 +1751,11 @@ mod tests {
     fn read_filter_counts_is_a_running_tally_before_exhaustion() {
         // A duplicate (dropped) then a clean read (kept): the first `next()`
         // returns the kept read, and `counts()` already reflects both.
-        let source = FakeSource::new(
-            vec![
-                fake(FLAG_PAIRED | FLAG_DUPLICATE, 60),
-                fake(FLAG_PAIRED, 60),
-            ],
-            one_contig_header(),
-        );
-        let mut filter =
-            ReadFilter::new(source, poly_a_ref(30), ReadFilterConfig::default()).unwrap();
+        let source = FakeSource::new(vec![
+            fake(FLAG_PAIRED | FLAG_DUPLICATE, 60),
+            fake(FLAG_PAIRED, 60),
+        ]);
+        let mut filter = filter_over(source, poly_a_ref(30), ReadFilterConfig::default());
         assert!(matches!(filter.next(), Some(Ok(_))));
         assert_eq!(only_tally(&filter).duplicate, 1);
         assert_eq!(only_tally(&filter).kept, 1);
@@ -1826,96 +1767,9 @@ mod tests {
     // The probe-free constructor and the buffer hand-off (read_input A3)
     // -----------------------------------------------------------------
 
-    /// A mixed batch: two reads that survive the default config, and one each
-    /// dropped pre-decode (duplicate) and by MAPQ. Enough that "same output"
-    /// means the whole cascade agreed, not just that both returned nothing.
-    fn mixed_batch() -> Vec<FakeRecord> {
-        vec![
-            fake(FLAG_PAIRED, 60),
-            fake(FLAG_PAIRED | FLAG_DUPLICATE, 60),
-            fake(FLAG_PAIRED, 0),
-            fake(FLAG_PAIRED, 60),
-        ]
-    }
-
-    /// **The property that makes the probe safe to skip.** `with_validated_contigs`
-    /// exists only to avoid `new`'s O(contigs) probe; it must not change a single
-    /// filtering decision. Run the same records through both constructors and
-    /// require the kept reads *and* the full drop tally to agree.
-    #[test]
-    fn probe_free_constructor_filters_identically_to_new() {
-        let records = mixed_batch();
-
-        let mut probed = ReadFilter::new(
-            FakeSource::new(records.clone(), one_contig_header()),
-            poly_a_ref(30),
-            ReadFilterConfig::default(),
-        )
-        .unwrap();
-        let probed_reads: Vec<AlignedRead> = (&mut probed).collect::<Result<_, _>>().unwrap();
-
-        let mut probe_free = ReadFilter::with_validated_contigs(
-            FakeSource::new(records, one_contig_header()),
-            poly_a_ref(30),
-            ReadFilterConfig::default(),
-            ReadFilterBuffers::default(),
-        );
-        let probe_free_reads: Vec<AlignedRead> =
-            (&mut probe_free).collect::<Result<_, _>>().unwrap();
-
-        assert_eq!(probe_free_reads.len(), 2, "the two clean reads survive");
-        assert_eq!(
-            probe_free_reads, probed_reads,
-            "same reads, in the same order"
-        );
-        assert_eq!(
-            only_tally(&probe_free),
-            only_tally(&probed),
-            "and every drop charged to the same reason"
-        );
-    }
-
-    /// Proves the probe is genuinely *skipped* rather than merely passing on
-    /// this fixture: a header naming a contig the reference does not have is
-    /// exactly what `new` rejects up front, so a constructor that still probed
-    /// could not return here at all.
-    ///
-    /// This is also the contract's sharp edge, stated as a test — the caller
-    /// takes on proving the contigs, and `AlignmentFile::open` is what proves
-    /// them.
-    #[test]
-    fn probe_free_constructor_skips_the_contig_probe_new_would_fail() {
-        let two_contig_header = sam::Header::builder()
-            .set_header(Default::default())
-            .add_reference_sequence(
-                "chr1",
-                Map::<ReferenceSequence>::new(NonZero::new(30usize).unwrap()),
-            )
-            .add_reference_sequence(
-                "chr2",
-                Map::<ReferenceSequence>::new(NonZero::new(30usize).unwrap()),
-            )
-            .build();
-
-        // One contig in the reference, two in the header.
-        assert!(
-            ReadFilter::new(
-                FakeSource::new(Vec::new(), two_contig_header.clone()),
-                poly_a_ref(30),
-                ReadFilterConfig::default(),
-            )
-            .is_err(),
-            "new probes every @SQ contig and rejects the missing one"
-        );
-
-        let filter = ReadFilter::with_validated_contigs(
-            FakeSource::new(Vec::new(), two_contig_header),
-            poly_a_ref(30),
-            ReadFilterConfig::default(),
-            ReadFilterBuffers::default(),
-        );
-        assert_eq!(only_tally(&filter).kept, 0);
-    }
+    // `mixed_batch` was here, and it went with `probe_free_constructor_filters_identically_to_
+    // _new` (2026-08-03, B1) — its only caller. It existed to feed the *same* records through
+    // both constructors and prove they agreed, and there is one constructor now.
 
     // Two tests lived here and both went with `into_parts` at Milestone F:
     // `into_parts_returns_the_buffers_with_their_allocations_and_the_tally` and

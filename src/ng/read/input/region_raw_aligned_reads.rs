@@ -136,10 +136,6 @@ impl RegionRawAlignedReads {
 impl RecordSource for RegionRawAlignedReads {
     type Record = NoodlesRawAlignedRead;
 
-    fn header(&self) -> &sam::Header {
-        self.reader.header()
-    }
-
     /// Records skipped as another sample's, since this source was made.
     ///
     /// **Cumulative, not per region**, and that is a change of meaning from the per-query

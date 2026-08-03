@@ -23,7 +23,7 @@ use crate::ng::read::input::cursor::CursorCounts;
 use crate::ng::read::input::sample_cursor::SampleCursor;
 use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
-use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq};
+use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq};
 use crate::ng::types::{ContigId, GenomeRegion, Position};
 
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
@@ -644,7 +644,7 @@ struct RegionWalk {
 /// per segment would give two fragments of different regions the same id (spec
 /// §8). What that costs — `reset()` between segments, and counters that must be
 /// folded as deltas because `reset()` preserves them — is C3's.
-pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> {
+pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> {
     /// The reference the walk fetches REF bases from. Built once, for the run,
     /// and handed to each walk as a shared handle.
     reference: Arc<R>,
@@ -737,7 +737,7 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> {
     failed: bool,
 }
 
-impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
+impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenerator<R, P> {
     /// Build a generator over `reference` (the walk's REF fetches),
     /// `make_reference` (the cursor's per-file accessor factory) and
     /// `preparer` (per-read canonicalisation), with `config` checked before
@@ -1195,7 +1195,9 @@ impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> PileupGenerator<R, P> {
 /// the tests in this module drive: an inherent method wins name resolution
 /// against a trait method, so `generator.next_locus(&reads)` is the two-argument
 /// one below and never a mis-resolved trait call.
-impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> LocusGenerator<()> for PileupGenerator<R, P> {
+impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerator<()>
+    for PileupGenerator<R, P>
+{
     fn begin_segment(&mut self, region: GenomeRegion) {
         PileupGenerator::begin_segment(self, region);
     }
@@ -1434,7 +1436,7 @@ mod tests {
     }
 
     /// Drain a whole segment: every locus `next_locus` yields for `region`.
-    fn loci_of<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer>(
+    fn loci_of<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer>(
         generator: &mut PileupGenerator<R, P>,
         region: GenomeRegion,
         reads: &SampleReads,
@@ -2578,6 +2580,15 @@ mod tests {
     impl EvictableRefSeq for ReleaseSpy {
         fn evict_before(&self, pos: u64) {
             self.released.lock().expect("no panic holds this").push(pos);
+        }
+    }
+
+    /// Delegated, so the spy answers the table it actually reads from. A spy that
+    /// invented its own would be refused by `AlignmentFile::cursor`'s contig-table
+    /// check before the walk it exists to observe ever started.
+    impl crate::ng::ref_seq::ContigTable for ReleaseSpy {
+        fn contigs(&self) -> &crate::fasta::ContigList {
+            self.inner.contigs()
         }
     }
 

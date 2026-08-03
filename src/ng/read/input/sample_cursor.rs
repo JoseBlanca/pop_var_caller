@@ -356,7 +356,8 @@ mod tests {
         AlignedReadsReader, InMemoryAlignedReadsReader,
     };
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_read_group, matching_contigs, read_named_with_length,
+        bam_header, fixture_read_group, fixture_reference_bases, matching_contigs,
+        read_named_with_length,
     };
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::GenomeRegion;
@@ -365,12 +366,7 @@ mod tests {
     use std::sync::Arc;
 
     fn reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        )
+        fixture_reference_bases()
     }
 
     fn region(start: u64, end: u64) -> GenomeRegion {
@@ -397,7 +393,6 @@ mod tests {
             ReadFilterConfig::default(),
             Arc::from(Path::new(name)),
         )
-        .expect("the fixture header resolves")
     }
 
     fn names_of(sample: &mut SampleCursor<InMemoryRefSeq>, asked: GenomeRegion) -> Vec<String> {

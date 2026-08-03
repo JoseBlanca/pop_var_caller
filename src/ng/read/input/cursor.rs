@@ -70,13 +70,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::filtering::{ReadFilter, ReadFilterConfig, ReadFilterError, ReadGroupCounts};
+use crate::ng::read::filtering::{
+    ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadFilterError, ReadGroupCounts,
+};
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::region_raw_aligned_reads::{
     RegionRawAlignedReads, read_end, read_overlaps,
 };
-use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq, RefSeqError};
+use crate::ng::ref_seq::{EvictableRefSeq, RawRefSeq};
 use crate::ng::types::{ContigId, GenomeRegion};
 
 /// What can go wrong once a cursor exists.
@@ -326,6 +328,20 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
     /// The oracle's constructor: what a region *should* return is answerable by scanning the
     /// same list by hand, which is what makes this the thing the forget rule is judged
     /// against before an indexed file can hide a defect in it.
+    ///
+    /// **Infallible, and that is what changed here.** It used to return `Result` for one
+    /// reason: it built its filter through `ReadFilter::new`, which fetched a zero-length
+    /// window on every contig of the header to prove each one resolved in `reference`. Nothing
+    /// else about constructing a cursor can fail. The caller now proves the same thing —
+    /// and more — by comparing the two contig tables before it ever gets here
+    /// ([`AlignmentFile::cursor`](crate::ng::read::input::AlignmentFile::cursor)), so the
+    /// filter is built through the constructor that takes that as given.
+    ///
+    /// **The precondition is the caller's, and it is not a formality.**
+    /// `with_validated_contigs` assumes the file's `@SQ` list has been proved *equal* to the
+    /// accessor's table, order included. A permuted list would resolve on every fetch and make
+    /// filter #8 compare each read against the wrong contig's bases, silently — which is why
+    /// the check upstream is an equality and not a resolvability test.
     pub(crate) fn over_records(
         reader: AlignedReadsReader,
         contig: ContigId,
@@ -333,10 +349,15 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
         reference: R,
         config: ReadFilterConfig,
         path: Arc<Path>,
-    ) -> Result<Self, RefSeqError> {
+    ) -> Self {
         let records = RegionRawAlignedReads::new(reader, contig, resolution);
-        Ok(Self {
-            filter: ReadFilter::new(records, reference, config)?,
+        Self {
+            filter: ReadFilter::with_validated_contigs(
+                records,
+                reference,
+                config,
+                ReadFilterBuffers::default(),
+            ),
             kept: VecDeque::new(),
             examined: 0,
             last_region_start: None,
@@ -345,7 +366,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             contig,
             path,
             counts: CursorCounts::default(),
-        })
+        }
     }
 
     /// The chromosome this cursor covers.
@@ -611,8 +632,8 @@ mod tests {
     use super::*;
     use crate::ng::read::input::aligned_reads_reader::InMemoryAlignedReadsReader;
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_read_group, matching_contigs, only_tally,
-        read_named_with_length,
+        FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference_bases, matching_contigs,
+        only_tally, read_named_with_length,
     };
     use crate::ng::ref_seq::InMemoryRefSeq;
     use crate::ng::types::Position;
@@ -634,12 +655,7 @@ mod tests {
     /// and nothing is dropped for mismatching — this milestone is about *which* reads come
     /// back, not about filtering.
     fn reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        )
+        fixture_reference_bases()
     }
 
     fn region(start: u64, end: u64) -> GenomeRegion {
@@ -663,7 +679,6 @@ mod tests {
             ReadFilterConfig::default(),
             Arc::from(Path::new("/fixture/sample.bam")),
         )
-        .expect("the fixture header resolves against the in-memory reference")
     }
 
     /// A 30-base read on contig 0 — long enough to clear the default minimum read length,
@@ -1701,7 +1716,6 @@ mod tests {
             ReadFilterConfig::default(),
             Arc::from(Path::new("/fixture/sample.bam")),
         )
-        .expect("the fixture header resolves against the in-memory reference")
     }
 
     /// **Every drop reason, hand-counted, through the whole chain.**

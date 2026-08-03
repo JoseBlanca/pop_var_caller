@@ -59,7 +59,7 @@ use crate::ng::reference_info::ReferenceInfo;
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
 
-use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::ref_seq::{ContigTable, RawRefSeq};
 
 use open_bam::AlignmentFile;
 
@@ -193,12 +193,38 @@ pub enum AlignmentFileError {
     )]
     CursorFormatUnsupported { path: PathBuf, kind: &'static str },
 
-    /// The reference could not answer for a contig this file declares, at the point a cursor
-    /// was made for it.
+    /// The reference accessor handed to `cursor` carries a **different contig table** from
+    /// this file's.
+    ///
+    /// **Distinct from [`ContigReconcile`](Self::ContigReconcile), and the difference is who
+    /// is at fault.** That one means the *file* disagrees with the run's reference, and it is
+    /// raised at `open`. This one is raised later, on a file that already passed that gate, and
+    /// means the *caller* wired up an accessor over some other reference. Sharing one variant
+    /// would leave an operator inspecting the BAM's `@SQ` list for a fault in the calling code,
+    /// and would leave the two discriminable only by matching a substring of `detail`.
+    ///
+    /// `detail` comes from `ContigList::first_disagreement` and names the first differing field
+    /// and index, **file value first**, as at the gate.
+    #[error(
+        "the reference accessor for alignment file '{path}' is over a different contig table: \
+         {detail}"
+    )]
+    CursorAccessorContigTable { path: PathBuf, detail: String },
+
+    /// The reference could not **serve bases** for the contig a cursor was made for, at the
+    /// point it was made.
+    ///
+    /// Distinct from [`CursorAccessorContigTable`](Self::CursorAccessorContigTable): the
+    /// accessor's table agrees with the file, and it still cannot answer. That is reachable
+    /// because `ResidentRefSeq` and `WindowedRefSeq` take their `ContigList` as a constructor
+    /// argument independent of the bytes they will read, so a table can name a contig the FASTA
+    /// does not hold — a stale `.fai`, or a `.fai` whose FASTA was replaced.
     ///
     /// Surfaced here rather than at the first read for the reason the open gate exists: a
     /// mismatched reference is a fault in what the run was given, not in the region a caller
-    /// happened to ask for first.
+    /// happened to ask for first. **Scoped to this cursor's own contig** since B1 — the check
+    /// that used to ask it of every contig in the header cost ~2,580 opens per cursor for a
+    /// property that matters only for the one about to be read.
     #[error("the reference cannot serve alignment file '{path}'")]
     Reference {
         path: PathBuf,
@@ -585,6 +611,13 @@ impl SampleReads {
     /// one. A factory gives each file cursor its own, which is what the type requires; the
     /// caller writes one closure.
     ///
+    /// **Every accessor the factory hands out is checked against the file it will serve** — its
+    /// contig table against that file's, and its ability to fetch this chromosome's bases
+    /// ([`AlignmentFile::cursor`]). A factory returning accessors over the wrong reference, or
+    /// over a FASTA that has since changed, is refused here rather than producing wrong
+    /// mismatch fractions later. The `+ ContigTable` bound on `R` is what makes the first half
+    /// possible.
+    ///
     /// A read's step-1 tally is the cursor's from here on
     /// ([`SampleCursor::read_group_counts`]) — it needs no hand-back, because the filter now
     /// lives as long as the cursor rather than as long as one region.
@@ -594,7 +627,7 @@ impl SampleReads {
         mut make_reference: F,
     ) -> Result<SampleCursor<R>, IngestError>
     where
-        R: RawRefSeq,
+        R: RawRefSeq + ContigTable,
         F: FnMut() -> R,
     {
         let mut cursors = Vec::with_capacity(self.files.len());
@@ -1080,16 +1113,13 @@ mod tests {
     // SampleCursor — T11 and the resumable shape
     // -----------------------------------------------------------------
 
-    use crate::ng::read::input::test_fixtures::{FIXTURE_CONTIGS, bam_header};
+    use crate::ng::read::input::test_fixtures::{
+        FIXTURE_CONTIGS, bam_header, fixture_reference_bases,
+    };
     use crate::ng::ref_seq::InMemoryRefSeq;
 
     fn reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        )
+        fixture_reference_bases()
     }
 
     fn whole_first_contig() -> GenomeRegion {
@@ -2330,7 +2360,6 @@ mod tests {
             bam_header, fixture_reference, indexed_named_bam, matching_contigs,
             read_named_with_length,
         };
-        use crate::ng::ref_seq::InMemoryRefSeq;
         use crate::ng::types::{ContigId, Position};
 
         let (_reference_dir, reference) = fixture_reference(false);
@@ -2357,14 +2386,7 @@ mod tests {
         .expect("two files naming one sample open together");
         assert_eq!(sample.file_count(), 2);
 
-        let bases = || {
-            InMemoryRefSeq::from_contigs(
-                crate::ng::read::input::test_fixtures::FIXTURE_CONTIGS
-                    .iter()
-                    .map(|(_, length)| vec![b'A'; *length])
-                    .collect(),
-            )
-        };
+        let bases = || fixture_reference_bases();
         let mut cursor = sample
             .cursor(ContigId(0), bases)
             .expect("a cursor per file of this sample");
