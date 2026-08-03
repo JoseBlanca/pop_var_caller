@@ -27,7 +27,8 @@
 //! the two verdicts and the conversion between them, and could not tell why its source had
 //! stopped. The cursor causes region ends, so it never has to ask.
 //!
-//! The read these rules judge — [`RawAlignedRead`] undecoded, [`AlignedRead`] decoded, and the
+//! The read these rules judge — [`RawAlignedRead`](crate::ng::read::aligned_read::RawAlignedRead)
+//! undecoded, [`AlignedRead`] decoded, and the
 //! conversion between them — lives in [`crate::ng::read::aligned_read`].
 
 use crate::bam::alignment_input::{
@@ -35,7 +36,7 @@ use crate::bam::alignment_input::{
     DEFAULT_MISMATCH_BQ_FLOOR, FLAG_DUPLICATE, FLAG_QC_FAIL, FLAG_SECONDARY, FLAG_SUPPLEMENTARY,
     FLAG_UNMAPPED, cigar_is_bad, cigar_ref_span, read_exceeds_mismatch_fraction,
 };
-use crate::ng::read::aligned_read::{AlignedRead, RawAlignedRead};
+use crate::ng::read::aligned_read::AlignedRead;
 use crate::ng::ref_seq::{RawRefSeq, RefSeqError};
 use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction};
 // **No `noodles_bam`, `noodles_cram` or `noodles_fasta` here, and their absence is the
@@ -44,11 +45,9 @@ use crate::ng::types::{BaseQual, Bp, ContigId, MapQual, MismatchFraction};
 // that lived below were deleted — see the note where they were. What a *record* is left the
 // same day, to `aligned_read.rs`, with the two raw types.
 // **No `noodles_sam as sam` here any more, and its absence is the point.** The last thing in
-// this module that knew what a SAM *header* was, was `RecordSource::header` — the contig
-// probe's input — and B1 took both. What is left needs `RecordBuf` alone, to read a flag and a
-// mapping quality off — and the tests do not build a header either, for the same reason.
-
-use std::io;
+// this module that knew what a SAM *header* was, was the deleted source trait's `header` — the
+// contig probe's input — and B1 took both. Since C3 the module names no noodles type at all: the
+// two verdicts read a flag, a mapping quality and an `AlignedRead`, and nothing else.
 
 /// The filtering policy: which filters are active and their thresholds. Minimal
 /// by design — one field per active filter, no dormant levers (downsampling,
@@ -334,53 +333,6 @@ pub(in crate::ng::read) fn verdict_on_aligned_read(
     }
 
     Ok(FilterVerdict::Keep)
-}
-
-// ---------------------------------------------------------------------
-// The record-source seam (input edge)
-// ---------------------------------------------------------------------
-
-/// The filter's input: fills a caller-owned buffer with the next record, reusing
-/// its allocations. Modelled as a source that *fills* a buffer rather than an
-/// `Iterator<Item = RawAlignedRead>` precisely so one buffer survives the whole pass
-/// (a std iterator's owned `Item` cannot borrow a reused buffer — the
-/// lending-iterator problem, spec §5). `Ok(true)` = filled, `Ok(false)` = end of
-/// input; an `Err` is **fatal to the run**.
-pub(crate) trait RecordSource {
-    /// The reused buffer type — a [`RawAlignedRead`] the source refills in place. The
-    /// `Default` bound is load-bearing: the cursor seeds *one* buffer with
-    /// `Default::default()` and hands the same `&mut` to [`Self::read_next`] on every read,
-    /// so the whole pass allocates one record.
-    type Record: RawAlignedRead + Default;
-    // **`header()` was here, and it went with the contig probe (2026-08-03, B1).** Its only
-    // caller was `ReadFilter::new`, which read the `@SQ` list to know how many contigs to
-    // fetch a window for. The check that replaced it compares contig tables one layer up, at
-    // `AlignmentFile::cursor`, where the file's list is already in hand — so no source is
-    // asked for a header any more. Note for C3, which turns this trait's methods into inherent
-    // ones on `RegionRawAlignedReads`: arch §3.3 lists `header()` among them, and it should be
-    // re-added only if a caller appears, because none exists today.
-    /// Fill `buf` with the next record, reusing its allocations. `Ok(true)` =
-    /// filled; `Ok(false)` = end of input, after which `buf` holds an unspecified
-    /// (stale) record the caller must not read; `Err` is fatal to the run.
-    fn read_next(&mut self, buf: &mut Self::Record) -> io::Result<bool>;
-
-    /// How many records this source skipped because they belong to another
-    /// sample.
-    ///
-    /// Read when the stream is taken apart and folded into the tally beside the
-    /// drops — **as its own counter, never as one of them** (see
-    /// [`ReadFilterCounts::other_sample`]).
-    ///
-    /// **Required, with no default, deliberately.** A default returning `0`
-    /// would be the obvious convenience and is a trap: a source that skips
-    /// records and forgets to override it reports a *wrong* number rather than
-    /// an absent one, and the records vanish from the accounting with nothing
-    /// failing. That is not hypothetical — it happened twice while this was
-    /// being written, once to a delegating wrapper that inherited the default
-    /// and once to a source that incremented a counter nothing could read. A
-    /// source with nothing to skip returns `0` and says why; every other one is
-    /// a compile error until it answers.
-    fn other_sample_records(&self) -> u64;
 }
 
 // **`NoodlesRawAlignedRead` was here, and it moved to `read/aligned_read.rs` with the
@@ -811,137 +763,6 @@ mod tests {
             post(&read, &reference, &post_config(Some(0.0))),
             FilterVerdict::Keep
         );
-    }
-
-    // ----- the record-source seam (C) -------------------------------------
-
-    /// A trivial in-memory `RawAlignedRead`: it carries a whole `AlignedRead` and reads
-    /// its `flag`/`mapq` back off it, so the cascade can be driven with no BAM.
-    /// `decode_fails` makes `decode` return an error (to exercise the fatal
-    /// decode-error path).
-    #[derive(Clone)]
-    struct FakeRecord {
-        read: AlignedRead,
-        decode_fails: bool,
-    }
-
-    impl Default for FakeRecord {
-        fn default() -> Self {
-            Self {
-                read: mapped(b"", &[], Vec::new()),
-                decode_fails: false,
-            }
-        }
-    }
-
-    impl RawAlignedRead for FakeRecord {
-        /// Unstamped: this fake has no source that resolves read groups, so its
-        /// drops are charged to no read group — which is what `None` keys.
-        fn read_group(&self) -> Option<ReadGroupId> {
-            None
-        }
-
-        fn flag(&self) -> u16 {
-            self.read.flag
-        }
-        fn mapq(&self) -> MapQual {
-            MapQual(self.read.mapq)
-        }
-        fn decode(&self) -> io::Result<AlignedRead> {
-            if self.decode_fails {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "fake decode failure",
-                ));
-            }
-            Ok(self.read.clone())
-        }
-    }
-
-    /// A `RecordSource` yielding a fixed slice of `FakeRecord`s, refilling the
-    /// caller's buffer each call.
-    struct FakeSource {
-        records: Vec<FakeRecord>,
-        next_index: usize,
-    }
-
-    impl FakeSource {
-        /// **No header.** These doubles carried one only to answer
-        /// `RecordSource::header`, which went with the contig probe at B1 — nothing asks a
-        /// source for a header any more.
-        fn new(records: Vec<FakeRecord>) -> Self {
-            Self {
-                records,
-                next_index: 0,
-            }
-        }
-    }
-
-    impl RecordSource for FakeSource {
-        type Record = FakeRecord;
-        /// Nothing to skip: this fake carries no read-group resolution, so it
-        /// can never meet another sample's record.
-        fn other_sample_records(&self) -> u64 {
-            0
-        }
-
-        fn read_next(&mut self, buf: &mut FakeRecord) -> io::Result<bool> {
-            match self.records.get(self.next_index) {
-                Some(record) => {
-                    *buf = record.clone();
-                    self.next_index += 1;
-                    Ok(true)
-                }
-                None => Ok(false),
-            }
-        }
-    }
-
-    /// A 30 bp all-`A` mapped read carrying the given flag/MAPQ — long enough to
-    /// clear the default `min_read_length`, and matching a poly-A reference.
-    fn fake(flag: u16, mapq: u8) -> FakeRecord {
-        let mut read = mapped(&[b'A'; 30], &[30u8; 30], vec![CigarOp::Match(30)]);
-        read.flag = flag;
-        read.mapq = mapq;
-        FakeRecord {
-            read,
-            decode_fails: false,
-        }
-    }
-
-    #[test]
-    fn fake_source_drives_the_seam() {
-        // Mimic what the Milestone-D iterator will do: read_next → pre-decode →
-        // decode survivors → post-decode, over the fake source.
-        let reference = poly_a_ref(30);
-        let cfg = ReadFilterConfig::default();
-        let mut source = FakeSource::new(vec![fake(FLAG_DUPLICATE, 60), fake(FLAG_PAIRED, 60)]);
-        let mut buf = FakeRecord::default();
-        let mut ref_buf = Vec::new();
-
-        // Record 1 — duplicate: dropped pre-decode, never decoded.
-        assert!(source.read_next(&mut buf).unwrap());
-        assert_eq!(buf.flag(), FLAG_DUPLICATE);
-        assert_eq!(buf.mapq(), MapQual(60));
-        assert_eq!(
-            verdict_on_raw_read(buf.flag(), buf.mapq(), &cfg),
-            FilterVerdict::Drop(DropReason::Duplicate)
-        );
-
-        // Record 2 — clean: pre-decode keep → decode → post-decode keep.
-        assert!(source.read_next(&mut buf).unwrap());
-        assert_eq!(
-            verdict_on_raw_read(buf.flag(), buf.mapq(), &cfg),
-            FilterVerdict::Keep
-        );
-        let read = buf.decode().unwrap();
-        assert_eq!(
-            verdict_on_aligned_read(&read, &reference, &cfg, &mut ref_buf).unwrap(),
-            FilterVerdict::Keep
-        );
-
-        // End of input.
-        assert!(!source.read_next(&mut buf).unwrap());
     }
 
     // -----------------------------------------------------------------

@@ -72,8 +72,7 @@ use std::sync::Arc;
 
 use crate::ng::read::aligned_read::{AlignedRead, NoodlesRawAlignedRead, RawAlignedRead};
 use crate::ng::read::filtering::{
-    FilterVerdict, ReadFilterConfig, ReadFilterCounts, RecordSource, verdict_on_aligned_read,
-    verdict_on_raw_read,
+    FilterVerdict, ReadFilterConfig, ReadFilterCounts, verdict_on_aligned_read, verdict_on_raw_read,
 };
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
@@ -220,22 +219,6 @@ pub enum CursorError {
     },
 }
 
-/// A reader positioned in one chromosome of one file, holding the reads it has recently
-/// decoded and filtered so a nearby region can be answered without unpacking again.
-///
-/// **Not `Sync`, and that is a design statement rather than an omission.** An open file
-/// position belongs to one consumer. Parallelism comes from more cursors — one per worker,
-/// sharing nothing — never from sharing one (spec §3).
-///
-/// # What it promises
-///
-/// **Ask for any region on its chromosome, in any order, and the answer is right.** Whether
-/// it is *fast* depends on how close the region is to the last one. A region on another
-/// chromosome is refused, and refused before anything is touched, so the cursor is left
-/// exactly as it was and is still good for its own (spec §10).
-///
-/// Nothing is unpacked ahead of demand: a caller that pulls one read and moves elsewhere has
-/// unpacked at most one block, and abandoning a region costs nothing to unwind because there
 /// A fatal, run-level failure of step 1. **Three conditions, one per piece of the work**: the
 /// read off the file, the conversion, and the second filter's reference fetch.
 ///
@@ -252,8 +235,23 @@ pub(crate) enum ReadFilterError {
     /// The record source failed to read the next record (e.g. a truncated file).
     #[error("reading the next alignment record failed")]
     Source(#[source] io::Error),
-    /// A record that cleared the pre-decode gate failed to decode — a corrupt
-    /// record (the unmapped flag clear yet no position).
+    /// A record that cleared the first filter failed to convert.
+    ///
+    /// **No input can reach this, and that is measured rather than assumed** (C1, 2026-08-03;
+    /// confirmed independently by three reviewers). The conversion refuses exactly three things
+    /// — a record with no reference sequence id, one with no alignment start, and a buffer with
+    /// no read group stamped — and [`RegionRawAlignedReads::read_next`] guarantees all three
+    /// before it yields: it drops anything not on this contig, `overlaps` is false without both
+    /// an alignment start and an end, and the read group is resolved and stamped on the record
+    /// actually handed over. An earlier version of this doc named "the unmapped flag clear yet
+    /// no position" as the cause, which is one of the shapes the layer below discards first.
+    ///
+    /// So the variant is **defence in depth against the narrowing regressing**, not a response
+    /// to any input — and it is untestable through the chain that makes it unreachable. Its two
+    /// remaining constructions went with the test doubles at C2/C3, so rewriting this arm as a
+    /// silent `continue` now survives the whole suite. Kept, and recorded, because "this cannot
+    /// happen" is a claim that rots: if the narrowing ever stops guaranteeing one of the three,
+    /// this note is what says a test became possible.
     #[error("decoding an alignment record failed")]
     Decode(#[source] io::Error),
     /// Filter #8's reference fetch failed — corrupt input, or a read reaching past a contig's
@@ -273,6 +271,22 @@ pub(crate) enum ReadFilterError {
 /// arbitrary group.
 pub type ReadGroupCounts = (Option<ReadGroupId>, ReadFilterCounts);
 
+/// A reader positioned in one chromosome of one file, holding the reads it has recently
+/// decoded and filtered so a nearby region can be answered without unpacking again.
+///
+/// **Not `Sync`, and that is a design statement rather than an omission.** An open file
+/// position belongs to one consumer. Parallelism comes from more cursors — one per worker,
+/// sharing nothing — never from sharing one (spec §3).
+///
+/// # What it promises
+///
+/// **Ask for any region on its chromosome, in any order, and the answer is right.** Whether
+/// it is *fast* depends on how close the region is to the last one. A region on another
+/// chromosome is refused, and refused before anything is touched, so the cursor is left
+/// exactly as it was and is still good for its own (spec §10).
+///
+/// Nothing is unpacked ahead of demand: a caller that pulls one read and moves elsewhere has
+/// unpacked at most one block, and abandoning a region costs nothing to unwind because there
 /// is no stream object to give back.
 pub struct AlignmentCursor<R: RawRefSeq> {
     /// The chain below, owned: [`RegionRawAlignedReads`] holds the [`AlignedReadsReader`].
@@ -1156,7 +1170,7 @@ mod tests {
     // leaves the whole suite green. These two tests pin the charge, and each is the only test in
     // the tree that fails when its own variant is swapped. That is their whole job, and it is
     // why a *scripted* fault is worth the mechanism: the script chose the kind, so the test can
-    // assert it. C3 deletes the doubles, and this is what has to exist first.
+    // assert it. C3 deleted the doubles, and this is what had to exist first.
 
     /// **A failure reading off the file is fatal, charged to `Source`, and the cursor never
     /// recovers from it.**

@@ -21,8 +21,8 @@
 //! [`input`] joins them as step 1's **input edge** rather than a step of its
 //! own: opening and validating an alignment file, serving a region as an
 //! ordered stream, and merging a sample's several files into one. It feeds
-//! [`filtering`] — its region readers are the `RecordSource` the filter
-//! consumes — so it belongs beside it (`module_layout.md` principle 1, note b).
+//! [`filtering`] — its region readers feed the cursor, which applies those rules to what they
+//! hand over — so it belongs beside it (`module_layout.md` principle 1, note b).
 
 pub mod aligned_read;
 pub mod filtering;
@@ -38,10 +38,11 @@ pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
 
 // **`ReadFilterConfig` is the only one of step 1's types re-exported here, because it is the
 // only one anything outside the crate names** — four `examples/` build one to drive a walk.
-// `ReadFilter`, `RecordSource`, `ReadFilterCounts`, `ReadFilterError`, `RawAlignedRead` and
-// `NoodlesRawAlignedRead` were re-exported too, and had no caller outside this crate at all;
-// they are `pub(crate)` now and named by their defining path. A dead re-export is what lets a
-// type stay `pub` long after its last outside caller went.
+// `ReadFilter`, `RecordSource`, `ReadFilterError`, `RawAlignedRead` and `NoodlesRawAlignedRead`
+// were re-exported too and had no caller outside this crate at all; the first two are deleted
+// outright and the rest are named by their defining path. `ReadFilterCounts` stays `pub`: it is
+// part of `AlignmentCursor::read_group_counts`' return type, which spec §7 makes public.
+// A dead re-export is what lets a type stay `pub` long after its last outside caller went.
 
 use crate::ng::ref_seq::RefSeqError;
 

@@ -151,7 +151,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
   mutation that survived the whole suite. `a_reposition_that_fails_is_refused_rather_than_
   answered` (`input/cursor.rs`) pins the refusal already and grows the two missing assertions
   here.
-- ☐ **C3.** Delete the `RecordSource` trait and its two doubles; `RegionRawAlignedReads`'s trait
+- ✅ **C3.** Delete the `RecordSource` trait and its two doubles; `RegionRawAlignedReads`'s trait
   implementation becomes inherent methods. Nothing generic consumes it once C2 lands.
   *Depends:* C2, C1. *Source:* spec §6, arch §3.3.
 - ☐ **C4.** `AlignmentCursor::reset_counts`, with a test that a fresh window starts empty and that

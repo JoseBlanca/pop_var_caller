@@ -55,8 +55,7 @@
 //!   way it owes this contract a test.
 //! - **[`read_next`](AlignedReadsReader::read_next)** fills the caller's buffer with the next
 //!   record **in position order** and answers whether it filled one. It is the shape
-//!   [`RecordSource::read_next`](crate::ng::read::filtering::RecordSource::read_next)
-//!   already has, because the layer above this is a `RecordSource`.
+//!   `RegionRawAlignedReads::read_next` already has, because that is the layer above this.
 //!
 //!   **One buffer per pass, but not one allocation per pass, and the difference is per
 //!   arm.** The caller keeps a single buffer and hands the same `&mut` to every call —

@@ -13,30 +13,21 @@
 //!    ↓
 //! RegionRawAlignedReads  this region's raw aligned reads only  ← here
 //!    ↓
-//! ReadFilter             step-1 filtering
-//!    ↓
-//! AlignedRead            what the cursor hands out
+//! AlignmentCursor        step-1 filtering, the conversion, and what is kept
 //! ```
 //!
-//! # Why this exists at Milestone B rather than C
+//! # What this type owes, and the one thing it deliberately does not
 //!
-//! The plan puts this type at C1, *lifted out of `BamRegionSource`*. It had to exist earlier:
-//! a cursor yields `AlignedRead`, so it owns a [`ReadFilter`], and a `ReadFilter` needs a
-//! [`RecordSource`] underneath it — and C1 depends on B2, so the stated order was not
-//! buildable.
+//! The region narrowing, the sorted early stop and read-group resolution are here. A **tally**
+//! is not, and that is deliberate: the cursor keeps a running per-read-group tally, and since it
+//! lives as long as the chromosome, reading it at any moment already gives a whole-chromosome
+//! total. One here would be a second, worse copy of a number that already exists. Pinned by
+//! `the_step_one_tally_accumulates_across_regions`.
 //!
-//! **C1 is therefore a completeness check rather than a lift, and here is its result.** The
-//! plan lists four things this type owes: the region narrowing, the sorted early stop,
-//! read-group resolution, and the tally. The first three are here. The fourth is **not**, and
-//! deliberately: [`ReadFilter`] has been keeping a running per-read-group tally all along, and
-//! now that one filter lives as long as a cursor rather than as long as a region, reading it
-//! at any moment already gives a whole-chromosome total — arch §2.3's "the tallies need no
-//! field and no hand-over". Adding one here would be a second, worse copy of a number that
-//! already exists. Pinned by `the_step_one_tally_accumulates_across_regions`.
-//!
-//! What remains of C1 is that the BAM arm reuse *this* rather than grow a second copy, which
-//! is C2's and C3's business. The overlap rule is already shared with the sources it replaces
-//! (see `read_next`), so the two cannot disagree while both exist.
+//! **These four methods were a trait until C3** — `RecordSource`, which existed so a filter
+//! living apart from the cursor could be driven by test doubles. It had one production
+//! implementation and, once the cursor owned the loop, no generic consumer at all, so it went
+//! and the methods became inherent (spec §6).
 
 use std::io;
 
@@ -44,19 +35,15 @@ use noodles_sam as sam;
 
 use crate::bam::alignment_input::cigar_ref_span;
 use crate::ng::read::aligned_read::{AlignedRead, NoodlesRawAlignedRead};
-use crate::ng::read::filtering::RecordSource;
 use crate::ng::read::input::aligned_reads_reader::AlignedReadsReader;
-use crate::ng::read::input::read_groups::resolve_read_group;
-use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
+use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner, resolve_read_group};
 use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 
 /// The raw aligned reads of one region of one file, narrowed from whatever the reader hands
 /// over.
 ///
-/// Owns the reader beneath it, and is owned by the [`ReadFilter`] above it — which is why
-/// the cursor reaching down to reposition goes `filter.source_mut().move_to(region)` rather
-/// than through a back-pointer. There is no cycle: the filter's source is the layer *below*
-/// the cursor, not the cursor itself.
+/// Owns the reader beneath it, and is owned by the cursor above it, which repositions it
+/// directly. There is no cycle and no back-pointer: this is simply the layer below the cursor.
 #[derive(Debug)]
 pub(crate) struct RegionRawAlignedReads {
     reader: AlignedReadsReader,
@@ -132,23 +119,30 @@ impl RegionRawAlignedReads {
     pub(crate) fn continue_into(&mut self, region: GenomeRegion) {
         self.region = Some(region);
     }
-}
 
-impl RecordSource for RegionRawAlignedReads {
-    type Record = NoodlesRawAlignedRead;
-
-    /// Records skipped as another sample's, since this source was made.
+    /// Records skipped as another sample's, since this narrowing was made.
     ///
     /// **Cumulative, not per region**, and that is a change of meaning from the per-query
     /// sources this replaces: one of these outlives every region it serves, so a count reset
-    /// at each `move_to` would report only the last region's and lose the rest.
-    fn other_sample_records(&self) -> u64 {
+    /// at each move would report only the last region's and lose the rest.
+    pub(crate) fn other_sample_records(&self) -> u64 {
         // The reader's own, plus this layer's. Only the CRAM arm contributes any of its own:
         // it drops a foreign record while decoding, so this layer never sees it to skip.
         self.other_sample_records + self.reader.other_sample_records()
     }
 
-    fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
+    /// Fill `buf` with this region's next raw aligned read, reusing its allocations.
+    ///
+    /// `Ok(true)` = filled. **`Ok(false)` = this region is done, which is not the end of the
+    /// file** — and the caller knows which, because the caller is what set the region. That
+    /// distinction used to need a three-way state one layer up, because a separate filter could
+    /// not tell the two apart; the cursor causes region ends, so it never has to ask (spec §5).
+    ///
+    /// An `Err` is **fatal to the run**: a failed read off the file, or a record whose read
+    /// group cannot be resolved.
+    ///
+    /// After `Ok(false)`, `buf` holds an unspecified record the caller must not read.
+    pub(crate) fn read_next(&mut self, buf: &mut NoodlesRawAlignedRead) -> io::Result<bool> {
         let Some(region) = self.region else {
             // Never pointed at a region. Yielding nothing is the honest answer; guessing at
             // one would make the first region's reads depend on the order calls happened to
@@ -176,7 +170,7 @@ impl RecordSource for RegionRawAlignedReads {
             // **The sorted early stop.** The file is coordinate-ordered, so once a record on
             // this contig begins past the region's end, no later record can reach back into
             // it. Reported as an ordinary end of input, because that is the only end a
-            // `RecordSource` can report — which is exactly why `ReadFilter` distinguishes a
+            // narrowing could report before C3 — which is exactly why the old filter distinguished a
             // clean stop from a failure, and why a cursor undoes the former when it moves on.
             if on_this_contig
                 && buf
@@ -356,7 +350,7 @@ mod tests {
 
     /// **The sorted early stop.** Once a record on this contig begins past the region's end
     /// the walk is over — later records cannot reach back — and the stop is reported as an
-    /// ordinary end of input, which is the only end a `RecordSource` can report.
+    /// ordinary end of input, which is the only end this layer can report.
     #[test]
     fn the_walk_stops_at_the_first_record_beginning_past_the_region() {
         let mut source = records_over(vec![
@@ -560,6 +554,103 @@ mod tests {
             String::from_utf8_lossy(buf.record.name().expect("named")),
             "stopped-on",
             "the record the early stop consumed was lost",
+        );
+    }
+
+    /// **The held record keeps its read group across the region boundary**, and that line had no
+    /// test at all.
+    ///
+    /// The early stop fires on a record the reader has already handed over, so it is put back —
+    /// *with* the group it arrived with, because on CRAM the group is decided while the container
+    /// is decoded and travels attached to the record. Replaying the record without it, or with
+    /// somebody else's, is the fault this whole layer is arranged to prevent.
+    ///
+    /// Mutation-verified in both directions, and both survived the whole 2,856-test suite before
+    /// this existed: replaying `None` kills an otherwise valid multi-read-group CRAM run at every
+    /// region boundary, because such a record carries no `RG` tag to fall back on; replaying
+    /// `Some(ReadGroupId(0))` **silently attributes a read to the wrong library**, which changes
+    /// no output anyone looks at and is exactly the per-read-group signal spec §7 exists to
+    /// protect.
+    #[test]
+    fn the_held_record_carries_its_own_read_group_into_the_next_region() {
+        // A resolution with two groups, so "the right one" is not the only one.
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "rg1".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "rg2".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(1)),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let tagged = |qname: &str, start: usize, group: &str| {
+            use noodles_sam::alignment::record::data::field::Tag;
+            use noodles_sam::alignment::record_buf::data::field::Value;
+            let mut record = read_named_with_length(qname, 0, start, 10);
+            record.data_mut().insert(
+                Tag::READ_GROUP,
+                Value::String(group.as_bytes().to_vec().into()),
+            );
+            record
+        };
+
+        let mut source = RegionRawAlignedReads::new(
+            AlignedReadsReader::InMemory(InMemoryAlignedReadsReader::new(
+                bam_header(&matching_contigs()),
+                // `stopped-on` belongs to the *second* group, so a replay that stamped the
+                // first group's id, or dropped the group, is visible.
+                vec![tagged("inside", 10, "rg1"), tagged("stopped-on", 40, "rg2")],
+            )),
+            ContigId(0),
+            resolution,
+        );
+
+        assert_eq!(narrowed_to(&mut source, region(1, 25)), ["inside"]);
+        source.continue_into(region(26, 100));
+
+        let mut buf = NoodlesRawAlignedRead::default();
+        assert!(source.read_next(&mut buf).expect("reads"));
+        assert_eq!(
+            String::from_utf8_lossy(buf.record.name().expect("named")),
+            "stopped-on",
+        );
+        assert_eq!(
+            buf.read_group,
+            Some(ReadGroupId(1)),
+            "the held record was replayed under the wrong read group, or under none",
+        );
+    }
+
+    /// **The early stop only fires on a record of *this* contig**, and dropping that guard was
+    /// invisible.
+    ///
+    /// A sorted file puts each contig's records together, so a record of a *later* contig always
+    /// begins "past" this region's end by the position comparison alone — but it says nothing
+    /// about whether this contig has more records to come. Stopping on it loses every remaining
+    /// read of the region, silently.
+    ///
+    /// The fixture above cannot see this: its foreign-contig record sits *inside* the region, so
+    /// the position test never fires on it. Mutation-verified — dropping `on_this_contig &&`
+    /// passed all 2,856 tests, and fails this one.
+    #[test]
+    fn a_record_of_another_contig_does_not_trigger_the_early_stop() {
+        let mut source = records_over(vec![
+            read_at("inside", 0, 10),
+            // Past the region's end, but on another contig — so it must be skipped, not stopped
+            // on.
+            read_at("other-contig-past-the-end", 1, 90),
+            read_at("also-inside", 0, 20),
+        ]);
+
+        assert_eq!(
+            narrowed_to(&mut source, region(1, 30)),
+            ["inside", "also-inside"],
+            "a record of another contig ended the walk and lost the reads after it",
         );
     }
 
