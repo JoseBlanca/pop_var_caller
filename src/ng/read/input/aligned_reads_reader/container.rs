@@ -156,6 +156,11 @@ impl DecodedContainer {
     /// The transient `RecordBuf` is still built — noodles' conversion has no field-selective
     /// form, so the allocations happen either way. What changes is that they do not *survive*:
     /// the churn is unchanged, the residency is not.
+    ///
+    /// **The `?`s here are gated on a 4 GiB payload and are therefore not reachable from a
+    /// test** — building the input costs 4 GiB of memory. The refusal they propagate is pinned
+    /// where the truncation would happen instead, on [`Span::new`], which a test can call
+    /// directly. Recorded so a coverage audit does not re-derive it.
     fn push(&mut self, record: &RecordBuf, owner: ReadGroupId) -> io::Result<()> {
         let name = record
             .name()
@@ -215,7 +220,13 @@ impl DecodedContainer {
     /// Every owned field is cleared and refilled rather than replaced, so a walk that serves a
     /// million reads through one buffer allocates for the longest read it meets and nothing
     /// after — the same buffer-reuse property the BAM arm gets from noodles'
-    /// `read_record_buf`.
+    /// `read_record_buf`. **The buffer really does arrive with a history**: one is refilled for
+    /// a whole pass, so every read after the first carries the previous one, and the clears are
+    /// what stands between them.
+    ///
+    /// # Panics
+    ///
+    /// If `i` is not an index of this container — a caller bug, since `len` is what bounds it.
     pub(crate) fn fill_raw_read(&self, i: usize, raw_read: &mut NoodlesRawAlignedRead) {
         let entry = &self.index[i];
 
@@ -381,4 +392,468 @@ fn owner_of_cram_record(
     resolution
         .owner_of(name.as_ref().map(AsRef::<[u8]>::as_ref))
         .map_err(|unresolved| io::Error::new(io::ErrorKind::InvalidData, unresolved))
+}
+
+#[cfg(test)]
+mod tests {
+    //! **The packing round trip, driven without a CRAM.**
+    //!
+    //! [`decode_container_at`] is the only thing that builds a [`DecodedContainer`] in
+    //! production, and it needs a real file. But the part worth testing is not the decode — it is
+    //! [`DecodedContainer::push`] flattening a record into the two buffers and
+    //! [`DecodedContainer::fill_raw_read`] rebuilding it, which is where a record can lose a
+    //! field or inherit the previous one's. Both are reachable from here, so these drive the
+    //! round trip directly and the CRAM walks in `open_bam.rs` cover the decode.
+    //!
+    //! **Four things had never been checked** — found reviewing the step that made
+    //! `fill_raw_read` fill both halves of a raw aligned read, and deferred to here:
+    //!
+    //! - a record with no name, which is not the same as one with an empty name;
+    //! - a record whose sequence, qualities and CIGAR are all empty;
+    //! - the clear-and-refill promise the function's own doc makes;
+    //! - `out.data_mut().clear()`, whose doc names its own silent failure mode and whose
+    //!   deletion left the whole suite green.
+    //!
+    //! **The buffer already has a history, and an earlier draft of this note said otherwise.**
+    //! It claimed all four were latent because every caller passes a fresh buffer, and that the
+    //! step moving the filtering loop would be what first hands this function a used one. That is
+    //! false: `ReadFilter` refills **one** `NoodlesRawAlignedRead` for a whole pass, so every read
+    //! after the first already arrives carrying the previous one. Measured by instrumenting this
+    //! function and running the CRAM cursor walk — read 0 arrives empty and every read after it
+    //! arrives with 30 bases in place.
+    //!
+    //! So what was missing is not the condition but the check. **No test anywhere compares a
+    //! served read's bases against an independent expectation**, which is why deleting
+    //! `sequence.clear()` grows sequences past 300,000 bases while the rest of the suite passes —
+    //! the CRAM-versus-BAM oracle included. A regression in these clears would corrupt production
+    //! reads today, silently, and only this module would catch it.
+
+    use super::*;
+    use crate::ng::types::ReadGroupId;
+    use noodles_sam::alignment::record::cigar::op::Kind;
+    use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
+
+    fn empty_container() -> DecodedContainer {
+        DecodedContainer {
+            other_sample_records: 0,
+            index: Vec::new(),
+            payload: Vec::new(),
+            cigar_ops: Vec::new(),
+        }
+    }
+
+    /// A container holding `records`, each attributed to the read group beside it — the same
+    /// path `decode_container_at` takes, minus the file.
+    fn container_of(records: &[(RecordBuf, ReadGroupId)]) -> DecodedContainer {
+        let mut container = empty_container();
+        for (record, owner) in records {
+            container
+                .push(record, *owner)
+                .expect("the fixture is small enough to address");
+        }
+        container
+    }
+
+    /// A fully-populated record, so a field dropped in the round trip has somewhere to show up.
+    /// Every scalar is given a *distinct* value: a packing that transposed two of them would
+    /// survive a fixture that left them at their defaults.
+    fn full_record(name: &str, bases: &[u8]) -> RecordBuf {
+        RecordBuf::builder()
+            .set_name(name)
+            .set_flags(Flags::from(0x0043))
+            .set_reference_sequence_id(1usize)
+            .set_alignment_start(
+                RecordPosition::try_from(37usize).expect("a valid 1-based position"),
+            )
+            .set_mapping_quality(MappingQuality::new(57).expect("a mapping quality in range"))
+            .set_mate_reference_sequence_id(0usize)
+            .set_mate_alignment_start(
+                RecordPosition::try_from(91usize).expect("a valid 1-based position"),
+            )
+            .set_template_length(-249)
+            .set_cigar([Op::new(Kind::Match, bases.len())].into_iter().collect())
+            .set_sequence(Sequence::from(bases.to_vec()))
+            .set_quality_scores(QualityScores::from(vec![31u8; bases.len()]))
+            .build()
+    }
+
+    /// Read `i` of the container, rebuilt into a fresh buffer of its own.
+    fn raw_read_from(container: &DecodedContainer, i: usize) -> NoodlesRawAlignedRead {
+        let mut raw_read = NoodlesRawAlignedRead::default();
+        container.fill_raw_read(i, &mut raw_read);
+        raw_read
+    }
+
+    /// **Every field survives the flattening**, which is what makes the packed form a
+    /// representation rather than a lossy summary.
+    ///
+    /// The whole record is compared, not a field list: a scalar added to `PackedReadEntry` and
+    /// forgotten in either direction fails here without anyone remembering to extend an
+    /// assertion.
+    #[test]
+    fn a_record_and_its_read_group_survive_the_round_trip_through_the_packed_form() {
+        let record = full_record("r", b"ACGTACGTAC");
+        let container = container_of(&[(record.clone(), ReadGroupId(3))]);
+
+        let raw_read = raw_read_from(&container, 0);
+        assert_eq!(raw_read.record, record);
+        assert_eq!(
+            raw_read.read_group,
+            Some(ReadGroupId(3)),
+            "the read group is the other half of a raw aligned read, and this function sets both",
+        );
+    }
+
+    /// **A record with no name comes back with no name**, into a buffer that held one.
+    ///
+    /// `None` and an empty name are different states, and the packed form keeps them apart
+    /// (`PackedReadEntry::name` is an `Option<Span>`). The buffer is the caller's and outlives
+    /// any one record, so a rebuild that only handled the `Some` arm would leave this record
+    /// wearing the previous one's name — a read attributed to another read's identifier, which
+    /// is exactly the class of fault the reused buffer invites.
+    #[test]
+    fn an_unnamed_record_does_not_inherit_the_name_left_in_the_buffer() {
+        let mut unnamed = full_record("ignored", b"ACGTACGTAC");
+        *unnamed.name_mut() = None;
+        let container = container_of(&[
+            (full_record("named", b"ACGTACGTAC"), ReadGroupId(0)),
+            (unnamed, ReadGroupId(0)),
+        ]);
+
+        // One buffer, both records — which is the only way this can fail.
+        let mut raw_read = NoodlesRawAlignedRead::default();
+        container.fill_raw_read(0, &mut raw_read);
+        assert_eq!(
+            raw_read.record.name().map(|name| name.to_vec()),
+            Some(b"named".to_vec()),
+        );
+
+        container.fill_raw_read(1, &mut raw_read);
+        assert_eq!(
+            raw_read.record.name(),
+            None,
+            "the unnamed record kept the name the buffer was carrying",
+        );
+    }
+
+    /// An **empty** name is not an absent one, and the round trip must not collapse the two.
+    #[test]
+    fn an_empty_name_stays_empty_rather_than_becoming_absent() {
+        let mut empty_name = full_record("ignored", b"ACGTACGTAC");
+        *empty_name.name_mut() = Some(Vec::new().into());
+        let container = container_of(&[(empty_name, ReadGroupId(0))]);
+
+        assert_eq!(
+            raw_read_from(&container, 0)
+                .record
+                .name()
+                .map(|name| name.to_vec()),
+            Some(Vec::new()),
+            "an empty name was reported as no name at all",
+        );
+    }
+
+    /// **A record whose sequence, qualities and CIGAR are all empty round-trips**, into a buffer
+    /// that held a full record.
+    ///
+    /// A zero-length byte range is a legal one and copying it is a no-op — which means the
+    /// *clears* are the only thing standing between this record and the previous one's contents.
+    /// A record with no sequence is what a SAM line carrying `*` for SEQ decodes to, so this is a
+    /// real shape rather than a constructed one.
+    #[test]
+    fn an_empty_record_inherits_no_bases_qualities_or_cigar_from_the_one_before_it() {
+        let empty = RecordBuf::builder()
+            .set_name("empty")
+            .set_flags(Flags::from(0x0004))
+            .set_reference_sequence_id(1usize)
+            .set_alignment_start(
+                RecordPosition::try_from(5usize).expect("a valid 1-based position"),
+            )
+            .build();
+        let container = container_of(&[
+            (full_record("full", b"ACGTACGTAC"), ReadGroupId(0)),
+            (empty, ReadGroupId(0)),
+        ]);
+
+        let mut raw_read = NoodlesRawAlignedRead::default();
+        container.fill_raw_read(0, &mut raw_read);
+        assert_eq!(raw_read.record.sequence().as_ref().len(), 10);
+
+        container.fill_raw_read(1, &mut raw_read);
+        assert!(
+            raw_read.record.sequence().as_ref().is_empty(),
+            "the empty record kept the previous one's bases",
+        );
+        assert!(
+            raw_read.record.quality_scores().as_ref().is_empty(),
+            "the empty record kept the previous one's base qualities",
+        );
+        assert!(
+            raw_read.record.cigar().as_ref().is_empty(),
+            "the empty record kept the previous one's CIGAR",
+        );
+    }
+
+    /// **The clear-and-refill promise the function's own doc makes**, stated as a test: a record
+    /// served after a longer one through *one* buffer must keep no tail of the longer one.
+    ///
+    /// This is the property that makes the reuse safe, and nothing exercised it. It is not a
+    /// future condition either — a walk hits it on its second record, because one buffer serves a
+    /// whole pass (see this module's doc).
+    #[test]
+    fn a_shorter_record_keeps_no_tail_of_the_longer_one_before_it() {
+        let container = container_of(&[
+            (full_record("long", b"ACGTACGTACGTACGTACGT"), ReadGroupId(0)),
+            (full_record("short", b"TTTT"), ReadGroupId(0)),
+        ]);
+
+        let mut raw_read = NoodlesRawAlignedRead::default();
+        container.fill_raw_read(0, &mut raw_read);
+        container.fill_raw_read(1, &mut raw_read);
+
+        assert_eq!(raw_read.record.sequence().as_ref(), b"TTTT");
+        assert_eq!(raw_read.record.quality_scores().as_ref(), &[31u8; 4]);
+        assert_eq!(
+            raw_read.record.name().map(|name| name.to_vec()),
+            Some(b"short".to_vec()),
+        );
+        assert_eq!(
+            raw_read.record.cigar().as_ref(),
+            [Op::new(Kind::Match, 4)],
+            "the short record kept the long one's CIGAR operations",
+        );
+    }
+
+    /// **Serving a second read reuses the first one's allocations**, which is the property the
+    /// packed form exists for and the one every other test here is blind to.
+    ///
+    /// The tests above pin that reuse is *safe* — no content survives. None of them pins that
+    /// reuse *happens*: replacing each field wholesale instead of clearing and refilling is
+    /// behaviourally identical, leaves the whole suite green, and deletes the reason a
+    /// `RecordBuf` per record was abandoned in the first place (~680 bytes across seven
+    /// allocations, ~72,000 allocations per open file).
+    ///
+    /// Capacities are read through the `_mut()` accessors because that is where the owned
+    /// buffers are; they must not change between the two serves.
+    #[test]
+    fn serving_a_second_read_reuses_the_first_reads_allocations() {
+        let container = container_of(&[
+            (
+                full_record("a-long-read-name", b"ACGTACGTACGTACGTACGT"),
+                ReadGroupId(0),
+            ),
+            (full_record("short", b"TTTT"), ReadGroupId(0)),
+        ]);
+
+        let mut raw_read = NoodlesRawAlignedRead::default();
+        container.fill_raw_read(0, &mut raw_read);
+        let grown = (
+            raw_read.record.sequence_mut().as_mut().capacity(),
+            raw_read.record.quality_scores_mut().as_mut().capacity(),
+            raw_read.record.cigar_mut().as_mut().capacity(),
+            raw_read
+                .record
+                .name_mut()
+                .as_mut()
+                .expect("the first record is named")
+                .capacity(),
+        );
+
+        container.fill_raw_read(1, &mut raw_read);
+
+        assert_eq!(raw_read.record.sequence_mut().as_mut().capacity(), grown.0);
+        assert_eq!(
+            raw_read.record.quality_scores_mut().as_mut().capacity(),
+            grown.1
+        );
+        assert_eq!(raw_read.record.cigar_mut().as_mut().capacity(), grown.2);
+        assert_eq!(
+            raw_read
+                .record
+                .name_mut()
+                .as_mut()
+                .expect("the second record is named")
+                .capacity(),
+            grown.3,
+            "the name was replaced rather than refilled, so the reuse is gone",
+        );
+    }
+
+    /// The container drops every tag at decode, once the read group has been resolved out of
+    /// them, so a rebuilt record has none to restore. The clear is therefore about the *buffer*,
+    /// not the entry: if one ever arrived here carrying another record's tags, those tags would
+    /// silently become this record's — and the read group is precisely what is read out of them
+    /// elsewhere, so the fault would attribute a read to another library.
+    ///
+    /// Its own doc names that failure mode; deleting the line left the whole suite green.
+    #[test]
+    fn a_buffer_carrying_auxiliary_tags_comes_back_with_none() {
+        use noodles_sam::alignment::record::data::field::Tag;
+        use noodles_sam::alignment::record_buf::data::field::Value;
+
+        let container = container_of(&[(full_record("r", b"ACGTACGTAC"), ReadGroupId(1))]);
+
+        // Tags in the buffer: the one kind of history the CRAM arm never produces itself, since
+        // it drops every tag at decode — so only the clear stands between them and this record.
+        let mut raw_read = NoodlesRawAlignedRead::default();
+        raw_read.record.data_mut().insert(
+            Tag::READ_GROUP,
+            Value::String(b"someone-else".to_vec().into()),
+        );
+        assert!(
+            raw_read.record.data().get(&Tag::READ_GROUP).is_some(),
+            "the fixture must actually plant a tag, or this test pins nothing",
+        );
+
+        container.fill_raw_read(0, &mut raw_read);
+        assert!(
+            raw_read.record.data().get(&Tag::READ_GROUP).is_none(),
+            "the rebuilt record kept an auxiliary tag the buffer was carrying",
+        );
+        assert_eq!(
+            raw_read.read_group,
+            Some(ReadGroupId(1)),
+            "and the read group comes from the entry, never from a leftover tag",
+        );
+    }
+
+    /// **Every *scalar* is read from entry `i` too, not just the byte spans.**
+    ///
+    /// The fixtures above pin the spans per-entry, because their records differ in name and in
+    /// bases — but their scalars are identical, so a rebuild that took one of *those* from the
+    /// wrong entry went unseen. Measured: reading `flags`, `reference_sequence_id`,
+    /// `mapping_quality`, `mate_reference_sequence_id`, `mate_alignment_start` or
+    /// `template_length` from `index[0]` left the **whole 2,856-test suite green**. Only
+    /// `alignment_start` died, and only in the real-CRAM walks.
+    ///
+    /// That is this module's own failure mode one field further along: a read reporting another
+    /// read's position, mate, mapping quality or template length, silently and without a panic.
+    /// One `let entry = &self.index[i]` binding feeds all seven today, so no single-line slip
+    /// produces it — the exposure is to the refactor C2 performs, which is why this module was
+    /// asked for before it.
+    #[test]
+    fn every_scalar_is_read_from_the_entry_asked_for() {
+        let first = full_record("first", b"ACGTACGTAC");
+        let mut second = full_record("second", b"ACGTACGTAC");
+        *second.flags_mut() = Flags::from(0x0099);
+        *second.reference_sequence_id_mut() = Some(4);
+        *second.alignment_start_mut() = RecordPosition::try_from(1_201usize).ok();
+        *second.mapping_quality_mut() = MappingQuality::new(12);
+        *second.mate_reference_sequence_id_mut() = Some(5);
+        *second.mate_alignment_start_mut() = RecordPosition::try_from(1_777usize).ok();
+        *second.template_length_mut() = 604;
+
+        let container = container_of(&[
+            (first.clone(), ReadGroupId(0)),
+            (second.clone(), ReadGroupId(0)),
+        ]);
+
+        assert_eq!(raw_read_from(&container, 0).record, first);
+        assert_eq!(raw_read_from(&container, 1).record, second);
+    }
+
+    /// **`Span::new` refuses an offset it cannot address rather than truncating it.**
+    ///
+    /// Truncation would not fail — it would build a span pointing into *another record's* bytes
+    /// and hand those back as this record's, which is the silent wrong read the check exists to
+    /// prevent and which its own doc names. Measured: replacing the checked conversion with a
+    /// bare `as u32` left the whole suite green.
+    ///
+    /// The 4 GiB payload that would reach this through `push` is not constructible in a test, so
+    /// the refusal is pinned where the truncation would happen rather than where it propagates.
+    #[test]
+    fn a_span_past_the_index_width_is_refused_rather_than_truncated() {
+        let past_u32 = u32::MAX as usize + 1;
+        assert!(Span::new(0, past_u32).is_err());
+        assert!(Span::new(past_u32, past_u32 + 10).is_err());
+        // …and an addressable span is still built, so the refusal is not simply always-on.
+        assert_eq!(Span::new(3, 7).expect("addressable").range(), 3..7);
+    }
+
+    /// **`shrink_to_fit` gives back the slack the buffers grew by**, which nothing could see.
+    ///
+    /// The three buffers grow by doubling, so each can hold up to twice what it needs — and the
+    /// container is then resident for as long as it is served. `decode_container_at` quantifies
+    /// what the call buys (1.6 MiB of 5.4 MiB per open file, measured) and the module doc makes
+    /// residency the whole reason the packed form exists, yet deleting all three calls left the
+    /// suite green. To a reader who has not read that comment the call looks like dead code.
+    ///
+    /// Capacities are asserted as strict *decreases* rather than equal to the length, because
+    /// `Vec::shrink_to_fit` is documented as possibly leaving more — an equality would be flaky
+    /// under a different allocator.
+    #[test]
+    fn shrinking_gives_back_the_slack_the_buffers_grew_by() {
+        let mut container = container_of(&[(full_record("r", b"ACGTACGTAC"), ReadGroupId(0))]);
+        container.payload.reserve(4096);
+        container.cigar_ops.reserve(4096);
+        container.index.reserve(4096);
+        let grown = container.payload.capacity();
+
+        container.shrink_to_fit();
+
+        assert!(container.payload.capacity() < grown);
+        assert!(container.cigar_ops.capacity() < 4096);
+        assert!(container.index.capacity() < 4096);
+    }
+
+    /// Each entry carries **its own** read group, so a container serving several does not stamp
+    /// them all with the first one's. Asserting one group would pass on a `fill_raw_read` that
+    /// ignored `i` entirely.
+    #[test]
+    fn each_record_is_stamped_with_its_own_read_group() {
+        let container = container_of(&[
+            (full_record("a", b"ACGTACGTAC"), ReadGroupId(2)),
+            (full_record("b", b"ACGTACGTAC"), ReadGroupId(7)),
+        ]);
+
+        assert_eq!(
+            raw_read_from(&container, 0).read_group,
+            Some(ReadGroupId(2))
+        );
+        assert_eq!(
+            raw_read_from(&container, 1).read_group,
+            Some(ReadGroupId(7))
+        );
+    }
+
+    /// `len` counts this sample's records, and `other_sample_records` is a separate quantity
+    /// that packing never touches.
+    #[test]
+    fn a_container_counts_the_records_it_packed_and_charges_none_elsewhere() {
+        let container = container_of(&[
+            (full_record("a", b"ACGTACGTAC"), ReadGroupId(0)),
+            (full_record("b", b"ACGTACGTAC"), ReadGroupId(0)),
+        ]);
+
+        assert_eq!(container.len(), 2);
+        assert_eq!(
+            container.other_sample_records(),
+            0,
+            "packing a record must not charge it to another sample",
+        );
+    }
+
+    /// The flat buffers are shared, so entry *i* must read **its own** slices rather than the
+    /// whole payload — the failure a single-record fixture cannot see.
+    #[test]
+    fn records_read_their_own_slices_of_the_shared_buffers() {
+        let container = container_of(&[
+            (full_record("first", b"AAAAAAAAAA"), ReadGroupId(0)),
+            (full_record("second", b"CCCCCCCCCC"), ReadGroupId(0)),
+            (full_record("third", b"GGGGGGGGGG"), ReadGroupId(0)),
+        ]);
+
+        assert_eq!(
+            raw_read_from(&container, 0).record.sequence().as_ref(),
+            b"AAAAAAAAAA"
+        );
+        assert_eq!(
+            raw_read_from(&container, 1).record.sequence().as_ref(),
+            b"CCCCCCCCCC"
+        );
+        assert_eq!(
+            raw_read_from(&container, 2).record.sequence().as_ref(),
+            b"GGGGGGGGGG"
+        );
+    }
 }

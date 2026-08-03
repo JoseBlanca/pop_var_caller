@@ -126,6 +126,20 @@ record rather than a new question.
 - **Mi2 / Mi3** — a test module for `container.rs`, covering the unnamed-record arm, empty
   spans, the buffer-shrink claim, and the aux-tag clear. **Before C2.**
 
+  > **Closed at C1b (2026-08-03)**, and one word of this line was wrong. §4 above lists the third
+  > item as *"the clear-and-refill claim"*; this line calls it *"the buffer-shrink claim"*. They
+  > are different properties, and C1b's review caught the divergence — so C1b covers **both**:
+  > `a_shorter_record_keeps_no_tail_of_the_longer_one_before_it` and
+  > `shrinking_gives_back_the_slack_the_buffers_grew_by`. Under either reading the deferral is now
+  > fully discharged.
+  >
+  > **The deferral's stated reason was also wrong**, and that matters more than the wording.
+  > It said the findings were "latent, not live: every caller passes a fresh buffer today". They
+  > are not latent — `ReadFilter` refills **one** buffer for a whole pass, so every read after the
+  > first arrives with a history, and has since B2. Measured at C1b by instrumenting
+  > `fill_raw_read` and running the CRAM cursor walk. A regression in the clears would corrupt
+  > production reads today; nothing was waiting on C2.
+
 ## 6. Disputed findings
 None.
 
