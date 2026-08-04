@@ -1,8 +1,10 @@
 # ng — read filtering in stages: types & interfaces
 
-*Architecture. **Milestones A and B are built** (the renames; the contig check and the
-`fill_raw_read` signature) — §6's table marks what landed, and the present tense elsewhere
-describes what C and D still have to reach. Code-facing companion to
+*Architecture. **The whole plan is built** — A (the renames), B (the contig check and the
+`fill_raw_read` signature), C (the loop moves into the cursor) and D (the two tests output
+identity cannot see). §6's table marks what landed; ⚠ blocks record where this document was wrong
+and building it corrected them, rather than the sentence being quietly rewritten. Code-facing
+companion to
 [`../spec/read_filtering_stages.md`](../spec/read_filtering_stages.md) — every **why** points
 there and is not re-argued here. Revises the single-type shape in
 [`read_filtering.md`](read_filtering.md) §1; the filters that doc pins down are unchanged.
@@ -13,6 +15,13 @@ illustrative; the **contract** is the deliverable.*
 
 **This change adds no types.** It renames several, deletes three, and moves one loop. Read it as
 a subtraction — spec §5.
+
+> ⚠ **Two additions, and neither is a type** (recorded for the same reason spec §1's ⚠ block
+> exists — the line is close enough to be worth naming). `AlignmentFileError` gained a **variant**
+> at B1 and `ReadFilterError` a fourth at Checkpoint C; `CursorCounts` gained a **field**,
+> `reads_converted`, at D2. No new concept enters the design in any of the three. The rule did
+> bite once, and held: D2's review proposed a zero-sized witness making the conversion's position
+> a compile-time property, and it was **rejected on this sentence** — §5 has the decision.
 
 **Both of the spec's questions are settled** (spec §9): the cursor holds the reference bases and
 the buffer they are read into, and both filters stay plain functions; and the up-front contig
@@ -205,11 +214,22 @@ The loop, in `next_read`, after the kept set is exhausted:
 read_next → false: the region is done, return None
           → Err:   failed = true, return the error
 verdict_on_raw_read       → Drop: charge it, continue
-decode                    → Err:  failed = true, return the error
+convert_buffered_read     → Err:  failed = true, return the error
 verdict_on_aligned_read   → Drop: charge it, continue
                           → Err:  failed = true, return the error
                           → Keep: tally, push onto `kept`, emit
 ```
+
+> ⚠ **The conversion is a named method, not an inline `self.buffer.decode()`** — added at D2
+> (2026-08-04), and it is the only production change Milestone D makes. `convert_buffered_read`
+> increments `CursorCounts::reads_converted`, and that count is the **only** observable of the
+> ordering this whole document is about: hoisting the conversion above the first filter keeps the
+> same reads, charges the same drops to the same reasons and leaves the four acceptance dumps
+> byte-identical, so before the counter existed the entire suite passed under it.
+>
+> **The increment has to be in the callee.** Beside the call it is left behind by a hoist that
+> moves the call, and then reports the number the test expects rather than a wrong one — the
+> dropped reads `continue` before reaching it — so the test keeps passing. §5 has the decision.
 
 **Contract, unchanged from today's composite.** Lazy; one raw read resident. A fatal error is
 yielded once and then the cursor refuses every later region (`CursorError::AfterFailure`,
@@ -279,6 +299,25 @@ variant at Checkpoint C (owner, 2026-08-03) — see the correction below.
 
 - **The two filters and the conversion sit below the cursor's kept set; the cursor owns the
   loop.** The rule that stops the pieces being rearranged — spec §3.
+- **The conversion is a named private method, `convert_buffered_read`, not an inline
+  `self.buffer.decode()`** — and this is the bullet that makes the rule above *enforceable*
+  (D2, 2026-08-04). Rearranging the three pieces changes no output, so before D2 nothing in the
+  project could tell. The method increments `CursorCounts::reads_converted`; two tests assert the
+  identity **`reads_converted` = kept + second-filter drops**, one failing if the conversion is
+  hoisted above the first filter and one if a second-filter check is hoisted below it. Inlining
+  the method back removes the only pin on the ordering — both tests fail, which is the intended
+  alarm, though the failure then reads as a filter having moved.
+- **The counter ships; it is not `#[cfg(test)]`.** It lives on `CursorCounts`, the type that
+  already answers "what did this cursor do", and is folded across a sample's files by that struct's
+  exhaustive-destructure `AddAssign`. The first build used a `#[cfg(test)]` thread-local and it was
+  the weaker shape: a reset protocol, thread-global rather than per-cursor, and the crate's first
+  `#[cfg(test)]` static. Cost measured at 0.7 % on the walk probe, inside run-to-run noise.
+- **A compile-time witness was considered and rejected.** A zero-sized token minted by the first
+  filter's `Keep` arm and required by the conversion makes the hoist a build error rather than a
+  test failure; it was built and it works. It is not adopted because §1 states this design adds no
+  type, and because it pins only the first of the two directions — no type can forbid a second
+  copy of the length rule being written against noodles' types and checked early. Reopening it is
+  a §1 amendment, not an implementation choice.
 - **Two filters, not one** — spec §2.
 - **A filter takes a borrow and returns a verdict, never a read** — spec §4.
 - **The verdict carries the drop reason**, so an `Option` return is ruled out: the tally is keyed
@@ -325,16 +364,20 @@ up to 120 lines. **Milestone C executes against this table**, so check them befo
 
 **No open design questions.** Both of the spec's are settled — §9 there keeps the reasoning.
 
-**Impl-time confirmations. Two remain; three were answered by building them.**
+**Impl-time confirmations. All five are answered.** The two that were open for Milestone C:
 
-Still open, for Milestone C:
+- ✅ **`verdict_on_raw_read` keeps `(flag, mapq)`**, not `&impl RawAlignedRead`. The owner deferred
+  the change at Checkpoint C, and D1 then gave the split form a reason of its own: the reference-free
+  capability (spec §5) is pinned by a **function-pointer coercion**
+  (`read/reference_free_first_filter.rs`), and a whole-read form would put a trait bound back into
+  that signature — the coercion would still work, but it would no longer read as *"a flag, a mapping
+  quality and the thresholds, and nothing else"*. A reviewer verified the whole-read form compiles
+  and passes; it is available, and there is no longer a reason to take it.
+- ✅ **The in-memory reader's scripted error is positional** — `with_failure_at_read(n)`, plus
+  `with_failing_seek_at` for the second way a reader can break (C1). An always-failing arm would
+  have made the two-fault distinction untestable.
 
-- Whether `verdict_on_raw_read` takes `(flag, mapq)` or `&impl RawAlignedRead`. The split form is
-  what exists; the whole-read form reads better beside its sibling and changes no contract.
-- What shape the in-memory reader's scripted error takes — an error at position *n*, or an arm
-  that always fails. The three tests it has to serve are named in spec §8.
-
-Answered:
+Answered earlier:
 
 - ✅ **`region_records.rs` was renamed on disk** (A3, `git mv` → `region_raw_aligned_reads.rs`),
   as the spec assumed.
@@ -350,6 +393,22 @@ Three test call sites build cursors through it directly, bypassing the check;
 `the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files` is the standing guard on
 them. C2 must not reintroduce a path that reaches `over_records` from outside `cursor`.
 
+**Carried past this plan, for whoever picks the work up next.**
+
+- **The cursor does not latch a clean end of input, only a failure** — §3.4's ⚠ block. Still
+  undecided: either it becomes a written rule in the `AlignedReadsReader` contract, or the cursor
+  latches again.
+- **`ReadFilterError::Decode` is unreachable and unpinned**, kept as defence in depth, recorded on
+  the variant. D2's tests do not change this — they measure that the conversion *happens*, not
+  that it fails.
+- **Nothing calls `reset_read_group_counts`** — spec §7's stated capability, still awaiting its
+  first caller.
+- **`ResidentRefSeq::new` and `WindowedRefSeq::new` can build a lying accessor**; B1's third check
+  contains the damage at the cursor. Closing it is spec §10's "the file owning its reference".
+- **Spec §5's capability stops at `AlignedReadsReader`** — a reference-free *pass* is
+  constructible, a reference-free *cursor* is not, because `R: RawRefSeq` is unconditional. Found
+  at D1 and now written into spec §5.
+
 ## 8. Test & bench shape
 
 Tests stay beside the code. `filtering.rs`'s 45 tests split: the ones about a rule stay, the loop ones
@@ -358,3 +417,11 @@ move to `cursor.rs`, the three test-double ones are replaced (spec §8).
 **The regression anchors are output identity on real data, not the unit suite** — spec §8 has the
 four dumps and the walk probe's figures. Three tests that do not exist yet are named there too,
 and each covers something no output comparison can see.
+
+✅ **All three exist** (C1, D1, D2), and two of them took a different shape from the one spec §8
+sketched — the corrections are recorded there. What is worth carrying here is the general lesson,
+because it cost this milestone two rebuilt steps: **a property that changes no output cannot be
+tested by a fixture, only by a measurement or by the type system.** D1's first attempt tried to
+pin a signature property with a *scope* and pinned nothing; D2's plan tried to pin a work property
+with a *fixture* that could not exist. What worked was a signature coercion, an exhaustively-built
+config, and a counter inside the step being counted.

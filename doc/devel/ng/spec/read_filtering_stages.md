@@ -1,9 +1,12 @@
 # ng — read filtering in stages: two filters and a conversion
 
-**Date:** 2026-08-03 · **Status:** design settled; **Milestones A and B are built** (the renames,
-and the contig check). Both questions §9 raised are resolved (owner, 2026-08-03).
-**The present tense below describes the state Milestones C and D still have to reach**, not
-today's code — where a claim has already been overtaken, a note says so.
+**Date:** 2026-08-03, revised 2026-08-04 · **Status:** design settled; **the whole plan is built**
+— A (the renames), B (the contig check), C (the loop moves into the cursor) and D (the two tests
+output identity cannot see). Both questions §9 raised are resolved (owner, 2026-08-03).
+**The present tense below describes the design, and the code now matches it**; where a claim was
+overtaken or found wrong by building it, a ⚠ note says so rather than the sentence being quietly
+rewritten. Three such notes were added at D (2026-08-04): §5's reference claim, and §8's two
+test descriptions.
 **Revises** [`read_filtering.md`](read_filtering.md) §5, which gave step 1 a single type. That
 document says which nine filters run, what their thresholds are, in what order they are
 evaluated, and what each drop is called. All of that is unchanged and stays there. This one is
@@ -204,6 +207,23 @@ three.
 histogram, an insert-size pass or a read-group pre-pass would each want flag and mapping-quality
 filtering without a reference, and cannot have it.
 
+> ⚠ **That sentence overclaims, and D1 is where it showed** (2026-08-04). It is true of the
+> **filter**, and of the two layers below it: `verdict_on_raw_read` takes a flag, a mapping quality
+> and the thresholds; `AlignedReadsReader` and `RegionRawAlignedReads` carry no reference bound at
+> all. So a reference-free *pass* — reader, narrowing, first filter, tally — is constructible
+> today, and `read/reference_free_first_filter.rs` is one.
+>
+> It is **not** true of the cursor. `AlignmentCursor<R: RawRefSeq>` and
+> `AlignmentFile::cursor<R: RawRefSeq + ContigTable>` bound `R` unconditionally, because the
+> *second* filter needs the bases. So the three callers named above still cannot reach a **file's**
+> reads without producing a reference: the capability stops at `AlignedReadsReader`, one layer
+> below the entry point ng actually exposes.
+>
+> Closing that gap means a cursor that is generic over whether it filters on the reference at all —
+> a second construction, or a `RawRefSeq` implementation that serves nothing and is refused by the
+> second filter's config being `None`. **Not proposed here**, because nobody has asked for it; the
+> point of this note is that the sentence above should not be read as saying it already exists.
+
 **Two vestiges dissolve rather than needing their own cleanup.** `with_validated_contigs` and
 `ReadFilterBuffers` exist because a filter used to be built per region by a pooled caller. That
 caller is gone; both stop having a reason to exist once the cursor owns the loop.
@@ -295,14 +315,48 @@ the same session. A few per cent either way is noise. A large regression is a re
 reconsider the design rather than to accept it; a large improvement is a pleasant surprise and
 changes nothing about why the change was made.
 
-**Three tests do not exist yet**, and each covers something no output comparison can see:
+**Three tests do not exist yet**, and each covers something no output comparison can see. ✅ **All
+three now exist** — C1 landed the third, D1 and D2 the first two, and both took a different shape
+from the one written here. The corrections are below each.
 
 - **The first filter runs with no reference at all.** Untested, §5's capability quietly stops
   being true.
+  > ✅ **D1**, as `read/reference_free_first_filter.rs` — but *"drive it with no `RawRefSeq` in
+  > scope"* turned out not to pin anything: three reviewers measured a scope-shaped test's unique
+  > detection power at **zero**, because the property is the signature's and the tree's ordinary
+  > call sites already fail the mutation (one of them in production code, so `cargo build` breaks).
+  > What pins it is a **signature coercion** plus a `ReadFilterConfig` built **field by field** —
+  > the latter because a reference added *to the config*, behind `Default`, breaks the property
+  > with every `default()` caller silent. Measured: with that field added and the tree's other
+  > exhaustive literal repaired, the new file is the sole remaining compile failure.
 - **The conversion is asked for nothing when every read fails the first filter.** A *work*
   property: hoisting the conversion changes no output.
+  > ✅ **D2** — and **"every read" is wrong**, deliberately. An all-dropped script passes with the
+  > instrument removed and says nothing about *which* reads were converted, so the fixture is
+  > mixed: two survivors among **one record per first-filter reason**. Three reasons was not
+  > enough either — review converted just the `Unmapped` and `LowMapq` drops and the whole suite
+  > stayed green.
+  >
+  > It also needs **two** tests, not one, because the ordering breaks in two directions: the
+  > conversion can rise above the first filter, and one of the second filter's checks can be
+  > hoisted below it. Filter #7 is the live candidate — a raw record carries a sequence, so its
+  > length can be had without converting, and moving it up changes no output at all.
 - **A scripted read error still surfaces as fatal, through the real chain.** Replaces the three
   test-double tests the deleted trait takes with it (§6).
+  > ✅ **C1**, and it replaced **two** of the three. The third,
+  > `read_filter_decode_error_is_fatal`, has no successor: the chain cannot produce a decode
+  > failure, because the region narrowing guarantees exactly the three things the conversion
+  > refuses. That is also why D2's fixture above could not be built as this document first
+  > imagined it.
+
+**The instrument D2 needed, and why it is not a test double.** A work property has to be measured
+as work, so the conversion became a named step — `AlignmentCursor::convert_buffered_read` — which
+increments `CursorCounts::reads_converted`. **The count lives inside that method rather than beside
+the call**, and the reason is sharper than it looks: an increment written next to the call is left
+behind by a hoist that moves the call, and then reports *the number the test expects*, so the test
+keeps passing while every read is converted. §6's objection to doubles does not reach this: the
+reader, the narrowing and the conversion are all the real ones, nothing is stubbed, and the counter
+ships as an ordinary cursor observable rather than as test scaffolding.
 
 ## 9. Resolved decisions & open questions
 
