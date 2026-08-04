@@ -172,7 +172,7 @@ moving the filtering loop out of `ReadFilter` and into `AlignmentCursor`; deleti
 Both are **work** properties: hoisting the conversion above the flag checks changes no output, so
 nothing already in the tree would notice.
 
-- ☐ **D1.** The first filter runs **with no reference at all** — construct it and drive it
+- ✅ **D1.** The first filter runs **with no reference at all** — construct it and drive it
   without a `RawRefSeq` in scope. Untested, spec §5's capability quietly stops being true.
   *Depends:* C2. *Source:* spec §8.
 - ☐ **D2.** The conversion is asked for nothing when a read fails the first filter. **Use a read

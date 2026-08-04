@@ -31,6 +31,11 @@ pub mod left_align;
 #[cfg(test)]
 mod left_align_parity;
 pub mod prepared_read;
+/// Spec §5's capability, tested at the layer its callers would live at — plan D1. A sibling of
+/// `filtering` rather than a module inside it, because half of what it pins is that the first
+/// filter and the tally are reachable from `crate::ng::read` at all.
+#[cfg(test)]
+mod reference_free_first_filter;
 
 pub use aligned_read::AlignedRead;
 pub use filtering::ReadFilterConfig;
