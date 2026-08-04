@@ -385,7 +385,27 @@ pub struct AlignmentCursor<R: RawRefSeq> {
 pub struct CursorCounts {
     /// Reads that came up through the filter — decoded and step-1 filtered exactly once each,
     /// if the rule is working. **This is the number the feature is about.**
+    ///
+    /// **It is not the number of conversions, despite the name**, and the difference is exactly
+    /// the second filter's drops: a read dropped for its length, its CIGAR or its mismatch
+    /// fraction was converted first and is not counted here. `reads_converted` is that number.
+    /// The name is kept because this is the figure the retention feature is judged on, and every
+    /// caller reads it that way.
     pub reads_decoded: u64,
+    /// **Conversions attempted** — raw aligned reads handed to `RawAlignedRead::decode`, whether
+    /// or not the conversion or the second filter then rejected them. Counted inside
+    /// [`AlignmentCursor::convert_buffered_read`], which is what makes it say what it says.
+    ///
+    /// **This is the one observable of spec §2's ordering**, and the reason it exists (plan D2).
+    /// A read the first filter drops must never pay for a conversion, and moving the conversion
+    /// above the flag checks changes nothing else — same reads kept, same drops charged to the
+    /// same reasons, same four dumps, same tally. `reads_converted` is the only number that
+    /// moves, which makes it the only thing a test can assert on.
+    ///
+    /// It also states the accounting the two filters imply:
+    /// **`reads_converted` = `reads_decoded` + the second filter's drops**, counted fresh — a
+    /// replayed read is served from the kept set and converted no second time.
+    pub reads_converted: u64,
     /// Reads handed to a caller from what was already held, skipping decode and filtering
     /// altogether. The saving, counted from the other side.
     pub reads_replayed: u64,
@@ -414,12 +434,14 @@ impl std::ops::AddAssign for CursorCounts {
         // folded, which is the property this impl exists to make free.
         let Self {
             reads_decoded,
+            reads_converted,
             reads_replayed,
             regions_reusing,
             regions_jumping,
             reads_evicted,
         } = other;
         self.reads_decoded += reads_decoded;
+        self.reads_converted += reads_converted;
         self.reads_replayed += reads_replayed;
         self.regions_reusing += regions_reusing;
         self.regions_jumping += regions_jumping;
@@ -712,7 +734,7 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
             }
 
             // The conversion, for the survivors only.
-            let read = match self.buffer.decode() {
+            let read = match self.convert_buffered_read() {
                 Ok(read) => read,
                 Err(error) => return self.fail(ReadFilterError::Decode(error)),
             };
@@ -730,6 +752,47 @@ impl<R: RawRefSeq> AlignmentCursor<R> {
                 Err(error) => return self.fail(ReadFilterError::Reference(error)),
             }
         }
+    }
+
+    /// **The conversion**, called on the survivors of the first filter and on nothing else — and
+    /// the one place [`CursorCounts::reads_converted`] is incremented.
+    ///
+    /// **Why the conversion is a named method at all.** Spec §2 calls the order of the two filters
+    /// and the conversion "the whole design", and that order is a **work** property: hoisting the
+    /// conversion above the flag checks keeps the same reads, charges the same drops to the same
+    /// reasons, and leaves the four acceptance dumps byte-identical. Before this counter existed,
+    /// the entire suite passed with the conversion hoisted. So it is measured as work, and
+    /// counting work means having somewhere to count it (plan D2).
+    ///
+    /// **The count lives in here rather than beside the call, and that placement is the mechanism
+    /// — for a quieter reason than it first appears.** Write the increment as its own statement
+    /// next to the call in [`next_filtered_read`](Self::next_filtered_read), and a hoist that
+    /// moves the call leaves it behind. It does not then report an obviously wrong number: the
+    /// reads the first filter drops `continue` *before* reaching the abandoned increment, so it
+    /// counts the survivors and reports **exactly what the test expects** — the test goes on
+    /// passing while every read is being converted. Measured, 2026-08-04: both D2 tests pass
+    /// under that arrangement.
+    ///
+    /// A hoist that carried the increment along would still be caught, so the hazard is not every
+    /// hoist — it is the ordinary one, where a statement is moved and its neighbour is not. Inside
+    /// the callee there is no such shape: the count goes wherever the call goes.
+    ///
+    /// **A compile-time pin was possible and was not taken, which is worth recording.** A
+    /// zero-sized witness minted by the first filter's `Keep` arm and required by this method
+    /// makes the hoist a build error rather than a test failure; a reviewer built it and it works.
+    /// It was not adopted for two reasons: spec §1 states in as many words that this design "does
+    /// not … add a type", and — decisively — the witness pins only *half* the property. It cannot
+    /// stop someone writing a **second copy** of the length rule against noodles' types and
+    /// checking it before the conversion, which is what
+    /// `a_read_the_second_filter_drops_has_already_been_converted` catches and no type can. The
+    /// counter is needed either way. Raised at Checkpoint D.
+    ///
+    /// **Not a test double** (spec §6, whose deleted doubles cost four steps to be rid of): the
+    /// reader, the narrowing and the conversion are all the real ones. A real conversion is
+    /// counted as it happens, and the counter ships — it is [`CursorCounts`]'s, not a test's.
+    fn convert_buffered_read(&mut self) -> io::Result<AlignedRead> {
+        self.counts.reads_converted += 1;
+        self.buffer.decode()
     }
 
     /// Stop the cursor and yield the failure that stopped it. The three fatal arms share it.
@@ -1017,6 +1080,25 @@ mod tests {
 
     fn read_at(qname: &str, start: usize) -> RecordBuf {
         read_named_with_length(qname, 0, start, READ_LENGTH as usize)
+    }
+
+    /// A [`read_at`] with `flags` **added** — otherwise identical, so a test using it differs
+    /// from one using `read_at` in exactly the bits the first filter reads.
+    ///
+    /// `|=` rather than assignment, so "otherwise identical" stays true if `read_at`'s fixture
+    /// ever starts with flags of its own.
+    fn flagged_read_at(qname: &str, start: usize, flags: Flags) -> RecordBuf {
+        let mut record = read_at(qname, start);
+        *record.flags_mut() |= flags;
+        record
+    }
+
+    /// A [`read_at`] at a chosen mapping quality — the one first-filter reason that is not a flag
+    /// bit, and on real data the highest-volume one.
+    fn read_at_mapq(qname: &str, start: usize, mapq: u8) -> RecordBuf {
+        let mut record = read_at(qname, start);
+        *record.mapping_quality_mut() = Some(MappingQuality::new(mapq).expect("mapq in range"));
+        record
     }
 
     /// Every read a region yields, by name.
@@ -3162,5 +3244,133 @@ mod tests {
         // it — without it, "reading … failed" would be the whole story.
         let source = std::error::Error::source(&error).expect("the io error is the source");
         assert_eq!(source.to_string(), "truncated block");
+    }
+
+    // -----------------------------------------------------------------
+    // The conversion is paid for exactly the reads that reach the second filter (D2)
+    // -----------------------------------------------------------------
+    //
+    // **Spec §2's ordering, and before these two tests nothing in the tree could see it.** Why
+    // it needs an instrument at all, and why the count is taken inside the conversion rather
+    // than beside the call, is on [`AlignmentCursor::convert_buffered_read`]; it is not repeated
+    // here.
+    //
+    // **The plan's own fixture for this could not be built**, which is why the shape below looks
+    // nothing like it. Plan D2 asked for a read that fails the first filter *and* would fail to
+    // convert — unmapped, with no alignment start — so that a hoist would turn a clean drop into
+    // a fatal decode error. No such record reaches a filter, and that is already recorded where
+    // it belongs: [`ReadFilterError::Decode`] traces the narrowing's guarantees onto `decode`'s
+    // three refusals (C1, 2026-08-03). A record without a footprint never reaches the first
+    // filter at all — the narrowing discards it uncounted — so it is not charged to `unmapped`
+    // either, and the plan's assertion has nothing to assert.
+    // (`an_unmapped_read_that_clears_the_mapping_quality_filter_is_charged_to_unmapped` pins the
+    // case that *does* reach the filter: unmapped **with** a footprint. Nothing pins the
+    // footprint-less one, because nothing can observe it.)
+    //
+    // The two tests state the property as an accounting identity: **conversions = the reads that
+    // reached the second filter** = kept + second-filter drops. Both mutations move a step
+    // **earlier** in the loop, and both are invisible in every output the project has:
+    //
+    // - hoist the conversion above the first filter → the first test fails, and only it;
+    // - hoist one of the second filter's checks above the conversion → the second fails, and only
+    //   it. Filter #7 is the candidate: it compares a length a raw record could answer, so moving
+    //   it up looks like a free saving.
+
+    /// **A read the first filter drops is never converted** — the whole reason the pieces are in
+    /// this order (spec §2, §3).
+    ///
+    /// **All six of the first filter's reasons, not a sample of them.** An earlier version of
+    /// this test scripted three, and review broke it: converting only the `Unmapped` and
+    /// `LowMapq` drops left all 2,869 tests green. A per-reason hoist is a perfectly plausible
+    /// mistake — the `Drop` arm is one match — and #2 is the highest-volume drop on real data, so
+    /// the reason least likely to be sampled is the one that would cost the most.
+    ///
+    /// Mixed rather than all-dropped, which is a deliberate strengthening of spec §8's wording
+    /// ("when *every* read fails the first filter"): with two survivors among eight records, the
+    /// assertion says *which* reads were converted rather than only that the count is small.
+    ///
+    /// Each record fails exactly one filter, and the cascade order is duplicate → low MAPQ →
+    /// supplementary → secondary → unmapped → QC-fail, so the tally below also re-states that
+    /// each reason is reachable — a record charged to the wrong one would show up here.
+    #[test]
+    fn a_read_the_first_filter_drops_is_never_converted() {
+        let mut cursor = cursor_over(vec![
+            read_at("kept-first", 10),
+            flagged_read_at("duplicate", 12, Flags::DUPLICATE),
+            read_at_mapq("low-mapq", 14, 5),
+            flagged_read_at("supplementary", 16, Flags::SUPPLEMENTARY),
+            flagged_read_at("secondary", 18, Flags::SECONDARY),
+            // Unmapped **and placed**: the narrowing needs a footprint, so an unmapped record
+            // without one never reaches a filter at all.
+            flagged_read_at("unmapped", 20, Flags::UNMAPPED),
+            flagged_read_at("qc-fail", 22, Flags::QC_FAIL),
+            read_at("kept-second", 24),
+        ]);
+
+        let served = reads_of(&mut cursor, region(1, 100));
+
+        assert_eq!(served, ["kept-first", "kept-second"]);
+        // The whole tally, spelled out: the subject here is precisely *which* reasons were
+        // charged, and a field-by-field compare would not notice a seventh one appearing.
+        assert_eq!(
+            only_tally(&cursor.read_group_counts()),
+            ReadFilterCounts {
+                kept: 2,
+                duplicate: 1,
+                low_mapq: 1,
+                supplementary: 1,
+                secondary: 1,
+                unmapped: 1,
+                qc_fail: 1,
+                too_short: 0,
+                high_mismatch_fraction: 0,
+                bad_cigar: 0,
+                other_sample: 0,
+            }
+        );
+        assert_eq!(
+            cursor.counts().reads_converted,
+            2,
+            "only the two reads that cleared the first filter may be converted. A count of 8 \
+             means the conversion has been hoisted above it; anything between 3 and 7 means one \
+             or more drop reasons convert before rejecting; a count of 0, together with a 0 from \
+             the other D2 test, means the increment has left `convert_buffered_read` — see its doc"
+        );
+    }
+
+    /// **A read the second filter drops has already been converted, and that is correct** — the
+    /// other half of the identity, and the half no type could pin.
+    ///
+    /// **Filter #7 is the one that could genuinely move, which is exactly why it needs a test.**
+    /// Spec §2's argument for keeping the last three filters after the conversion — that taking
+    /// them off the raw read means writing the rule a second time against noodles' types — is
+    /// made about the mismatch rule and the CIGAR scan. It is not made about #7: a raw record
+    /// carries a sequence, so its length can be had without converting anything, and hoisting #7
+    /// into the first filter really would save conversions.
+    ///
+    /// So the reason it stays put is not that it cannot move. It is that **which side of the
+    /// conversion each filter runs on is [`read_filtering.md`](../../../../doc/devel/ng/spec/read_filtering.md)'s
+    /// to decide**, and this plan changes none of it. A hoist would be a design change disguised
+    /// as an optimisation — and it changes no output whatsoever, so this count is the only thing
+    /// in the project that would notice it happening.
+    #[test]
+    fn a_read_the_second_filter_drops_has_already_been_converted() {
+        // 20 bases, under the default 30-base minimum: it clears the flag and mapping-quality
+        // checks, is converted, and is then dropped by #7.
+        let mut cursor = cursor_over(vec![read_named_with_length("too-short", 0, 10, 20)]);
+
+        let served = reads_of(&mut cursor, region(1, 100));
+
+        assert!(served.is_empty(), "the short read is dropped");
+        let tally = only_tally(&cursor.read_group_counts());
+        assert_eq!((tally.kept, tally.too_short), (0, 1));
+        assert_eq!(
+            cursor.counts().reads_converted,
+            1,
+            "a read the second filter judges must have been converted first. A count of 0 means \
+             either that a check reading a decoded field has been hoisted above the conversion, \
+             or — if the other D2 test also reads 0 — that the increment has left \
+             `convert_buffered_read`"
+        );
     }
 }

@@ -175,14 +175,40 @@ nothing already in the tree would notice.
 - ✅ **D1.** The first filter runs **with no reference at all** — construct it and drive it
   without a `RawRefSeq` in scope. Untested, spec §5's capability quietly stops being true.
   *Depends:* C2. *Source:* spec §8.
-- ☐ **D2.** The conversion is asked for nothing when a read fails the first filter. **Use a read
+- ✅ **D2.** The conversion is asked for nothing when a read fails the first filter. **Use a read
   that would fail to convert:** unmapped, with no alignment start. Filter #5 drops it before the
   conversion; if the conversion were hoisted it would raise a fatal decode error instead. So the
   assertion is a clean drop charged to `unmapped` and no error — and no test double is needed.
   *Depends:* C2. *Source:* spec §8.
+  — **⚠ That fixture cannot be built, and the step was redesigned before a line was written
+  (owner, 2026-08-04).** `RegionRawAlignedReads::read_next` yields a record only after proving it
+  has this contig, a footprint (an alignment start *and* end) and a read group — which is exactly
+  the three things the conversion refuses, so **no reachable input can make `decode` fail**
+  (`ReadFilterError::Decode` already records this from C1). A read with no alignment start has no
+  footprint and is discarded a layer below the filters, uncounted, so it is not charged to
+  `unmapped` either. As written, D2 would pass whether or not the conversion had been hoisted —
+  measured: with the hoist applied, the whole suite passed.
+  — *Shipped instead: **the conversion becomes a named step,
+  `AlignmentCursor::convert_buffered_read`, which increments `CursorCounts::reads_converted`.***
+  The count lives **inside** the callee because an increment beside the call is left behind by a
+  hoist and then reports the *expected* number, so the test keeps passing. **So D2 touches
+  production code, unlike D1** — the counter ships, folded by `CursorCounts`'s `AddAssign`, and
+  measured at 0.7 % on the walk probe (six runs a side, ranges overlapping: noise).
+  Two tests, because the ordering can break in two directions, and a rejected alternative — a
+  zero-sized witness making the hoist a compile error — is recorded on the method: it contradicts
+  spec §1's "does not … add a type" and pins only the first of the two.
 
-> **Checkpoint D:** both new tests mutation-verified — hoist the conversion above the first
-> filter and D2 must fail; give the first filter a reference requirement and D1 must not compile.
+> **Checkpoint D:** both new tests mutation-verified — **three** mutations, not the two this line
+> first named, because D2 needed two tests and each answers a different one:
+>
+> - give the first filter a reference requirement → **D1 must not compile** (it fails at the
+>   signature coercion with `E0308`; the tree's ordinary call sites fail with `E0061`);
+> - hoist the conversion above the first filter → **`a_read_the_first_filter_drops_is_never_
+>   converted` must fail**, and it is the only test that does;
+> - hoist filter #7 above the conversion, reading the length off the raw record → **`a_read_the_
+>   second_filter_drops_has_already_been_converted` must fail**, and it is the only test that does.
+>   This mutation changes no output at all, which is why it needs its own test.
+>
 > Pause for review.
 
 ---
@@ -194,7 +220,7 @@ nothing already in the tree would notice.
 | A | the four dumps byte-identical, the probe's anchor exact, the suite count unchanged — a rename that changes a number is not a rename |
 | B | the same, plus a mutation-verified refusal of a mismatched accessor, plus the probe's `seconds` recorded before and after |
 | C | the same, plus `a_walk_charges_every_drop_reason_by_hand_count` green before and after C2, plus clippy clean once the deletions land |
-| D | each new test failing under the mutation it names |
+| D | each new test failing under the mutation it names — three of them, one for D1 and one for each of D2's two tests (Checkpoint D). D2 also re-measures the walk probe, because unlike D1 its counter ships |
 
 **The oracle is this code before the change.** There is no second implementation to differ from,
 so every step is measured against the four dumps and the walk probe — `ng_generic_loci_dump` and
