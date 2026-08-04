@@ -16,7 +16,6 @@
 //! buffer this table owns instead of allocating a `Vec<u8>` per call.
 //! `copy_fidelity.rs` released this file in that commit.
 
-use std::collections::BTreeMap;
 
 use ahash::AHashMap;
 use smallvec::SmallVec;
@@ -915,13 +914,104 @@ impl OpenPileupRecord {
     }
 }
 
+/// EXPERIMENT (data_layout perf review 2026-08-04): a key-sorted `Vec` standing in for
+/// the `BTreeMap`. The table holds at most **2** records at a time on both fixtures
+/// (measured), so the map's node allocation and pointer chase buy nothing.
+///
+/// Every operation the table used off `BTreeMap` is reproduced here with the same
+/// key order, so the emitted records and their order are unchanged.
+#[derive(Debug, Default)]
+pub(super) struct SortedRecords {
+    entries: Vec<(u32, OpenPileupRecord)>,
+}
+
+impl SortedRecords {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn first_key(&self) -> Option<u32> {
+        self.entries.first().map(|(pos, _)| *pos)
+    }
+
+
+    /// Entries with key strictly below `hi`, ascending — `range(..hi)`.
+    fn range_below(&self, hi: u32) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
+        let end = self.entries.partition_point(|(pos, _)| *pos < hi);
+        self.entries[..end].iter().map(|(pos, rec)| (*pos, rec))
+    }
+
+    /// Entries with `lo <= key <= hi`, descending — `range(lo..=hi).rev()`.
+    fn range_inclusive_rev(&self, lo: u32, hi: u32) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
+        let start = self.entries.partition_point(|(pos, _)| *pos < lo);
+        let end = self.entries.partition_point(|(pos, _)| *pos <= hi);
+        self.entries[start..end]
+            .iter()
+            .rev()
+            .map(|(pos, rec)| (*pos, rec))
+    }
+
+    fn remove(&mut self, pos: &u32) -> Option<OpenPileupRecord> {
+        match self.entries.binary_search_by_key(pos, |(key, _)| *key) {
+            Ok(at) => Some(self.entries.remove(at).1),
+            Err(_) => None,
+        }
+    }
+
+    fn get(&self, pos: &u32) -> Option<&OpenPileupRecord> {
+        match self.entries.binary_search_by_key(pos, |(key, _)| *key) {
+            Ok(at) => Some(&self.entries[at].1),
+            Err(_) => None,
+        }
+    }
+
+    fn keys_first(&self) -> Option<u32> {
+        self.first_key()
+    }
+
+    fn insert(&mut self, pos: u32, rec: OpenPileupRecord) {
+        match self.entries.binary_search_by_key(&pos, |(key, _)| *key) {
+            Ok(at) => self.entries[at].1 = rec,
+            Err(at) => self.entries.insert(at, (pos, rec)),
+        }
+    }
+
+    fn get_mut(&mut self, pos: &u32) -> Option<&mut OpenPileupRecord> {
+        match self.entries.binary_search_by_key(pos, |(key, _)| *key) {
+            Ok(at) => Some(&mut self.entries[at].1),
+            Err(_) => None,
+        }
+    }
+
+    fn take_values(&mut self) -> Vec<OpenPileupRecord> {
+        std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(|(_, rec)| rec)
+            .collect()
+    }
+}
+
 /// The set of currently-open records, keyed by anchor position.
 /// Range queries (find records overlapping a given event span)
-/// use the BTreeMap's ordered structure.
+/// use the ordered structure.
 #[derive(Debug)]
 pub(super) struct OpenPileupRecordTable {
     /// 1-based anchor position → record.
-    records: BTreeMap<u32, OpenPileupRecord>,
+    records: SortedRecords,
     /// Reusable scratch buffer for the per-(record, contributor)
     /// haplotype string built by [`apply_events_into`]. Hoisted
     /// here so the inner-fold's allele-equality check can run
@@ -983,7 +1073,7 @@ impl OpenPileupRecordTable {
     /// Construct with an explicit per-record reference span cap.
     pub fn with_cap(max_record_span: u32) -> Self {
         Self {
-            records: BTreeMap::new(),
+            records: SortedRecords::new(),
             allele_seq_buf: Vec::new(),
             witnessed_runs_buf: WitnessedRefRuns::new(),
             closing_keys_buf: Vec::new(),
@@ -1024,7 +1114,7 @@ impl OpenPileupRecordTable {
     /// anchored inside the region is the region's to emit however far past the
     /// boundary its footprint runs (spec §2).
     pub(super) fn first_open_anchor(&self) -> Option<u32> {
-        self.records.keys().next().copied()
+        self.records.keys_first()
     }
 
     /// Drain every record whose footprint is fully behind the
@@ -1043,7 +1133,7 @@ impl OpenPileupRecordTable {
     pub fn drain_aged_into(&mut self, walker_pos: u32, out: &mut Vec<OpenPileupRecord>) {
         out.clear();
         self.closing_keys_buf.clear();
-        for (&pos, rec) in self.records.range(..walker_pos) {
+        for (pos, rec) in self.records.range_below(walker_pos) {
             if rec.footprint_end_exclusive() <= walker_pos {
                 self.closing_keys_buf.push(pos);
             }
@@ -1060,7 +1150,7 @@ impl OpenPileupRecordTable {
     /// end-of-input). Records come out in coordinate order
     /// because `BTreeMap::into_values` iterates by key order.
     pub fn drain_all(&mut self) -> Vec<OpenPileupRecord> {
-        std::mem::take(&mut self.records).into_values().collect()
+        self.records.take_values()
     }
 
     /// Find the open record (if any) whose footprint overlaps the
@@ -1096,7 +1186,7 @@ impl OpenPileupRecordTable {
         // `event_start < event_end`, so `q < event_end` is
         // implied. Mi8 in `ia/reviews/pileup_2026-05-09.md`.
         let lo = event_start.saturating_sub(self.max_record_span);
-        for (&q, rec) in self.records.range(lo..=event_start).rev() {
+        for (q, rec) in self.records.range_inclusive_rev(lo, event_start) {
             if rec.footprint_end_exclusive() > event_start {
                 return Some(q);
             }

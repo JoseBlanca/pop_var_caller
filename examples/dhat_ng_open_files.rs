@@ -70,7 +70,7 @@ use pop_var_caller::ng::read::input::read_groups::build_read_groups;
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::GenomeRegions;
 use pop_var_caller::ng::types::ContigId;
@@ -114,7 +114,11 @@ fn run(
     paths: &[PathBuf],
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) = read_reference_verifying_or_creating_fai(
+        &cache,
+        fasta.to_path_buf(),
+        ReferenceCheck::VerifyAgainstIndex,
+    )?;
     let contigs: ContigList = info.contig_list();
     let reference = OpenReference::new(info);
 

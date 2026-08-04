@@ -94,7 +94,21 @@ pub(crate) struct RegionRawAlignedReads {
     /// decoding, and that answer arrives attached to the record; putting the record back
     /// without it would leave the next region resolving a CRAM record from a tag it does not
     /// have.
-    held: Option<(sam::alignment::RecordBuf, Option<ReadGroupId>)>,
+    ///
+    /// **`Some` means the record itself is parked in [`spare`](Self::spare), not here** — the
+    /// record is *swapped* out of the caller's buffer rather than cloned out of it. A
+    /// `RecordBuf::clone` deep-copies the name, the CIGAR, the sequence, the quality scores
+    /// **and the whole auxiliary-tag table, one heap string per tag**; measured on chr21 that
+    /// was 673,585 allocations, about 7.3 per region, for a record the swap moves for nothing.
+    held: Option<Option<ReadGroupId>>,
+    /// Where a held record is parked, and where the caller's buffer goes in exchange.
+    ///
+    /// **Two buffers alternating, never a copy.** On the early stop this and `buf.record` trade
+    /// places: the record the stop consumed lands here and the caller's buffer is left holding
+    /// whatever this was — which is exactly what its own contract already says is unspecified
+    /// after `Ok(false)`. The next region trades them back. Neither allocation is freed, so
+    /// both keep the capacity they grew, and the record's contents are never copied.
+    spare: sam::alignment::RecordBuf,
 }
 
 impl RegionRawAlignedReads {
@@ -110,6 +124,7 @@ impl RegionRawAlignedReads {
             resolution,
             other_sample_records: 0,
             held: None,
+            spare: sam::alignment::RecordBuf::default(),
         }
     }
 
@@ -175,8 +190,10 @@ impl RegionRawAlignedReads {
             // The record the previous region's early stop took, before anything new is read:
             // it is the next one in position order, and nothing else will ever produce it.
             match self.held.take() {
-                Some((held, read_group)) => {
-                    buf.record = held;
+                Some(read_group) => {
+                    // Traded back, not copied out: `spare` holds the record and takes the
+                    // caller's buffer in exchange, which is free to be overwritten.
+                    std::mem::swap(&mut buf.record, &mut self.spare);
                     buf.read_group = read_group;
                 }
                 None => {
@@ -199,8 +216,11 @@ impl RegionRawAlignedReads {
                     .alignment_start()
                     .is_some_and(|start| usize::from(start) as u64 > region.end.get())
             {
-                // Held, not dropped: see the field. The next region gets it first.
-                self.held = Some((buf.record.clone(), buf.read_group));
+                // Held, not dropped: see the field. The next region gets it first. Swapped
+                // out rather than cloned out — the caller must not read `buf` after
+                // `Ok(false)`, which is what makes trading the two buffers sound.
+                self.held = Some(buf.read_group);
+                std::mem::swap(&mut buf.record, &mut self.spare);
                 return Ok(false);
             }
 

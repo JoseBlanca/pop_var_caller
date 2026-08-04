@@ -3,7 +3,13 @@
 //!
 //! ```text
 //! cargo run --release --example ng_generic_walk_probe -- <reference.fa> <sample.bam|cram> [contig]
-//! cargo run --release --features dhat-heap --example ng_generic_walk_probe -- …   # writes dhat-heap.json
+//!
+//! # A heap profile. `--target-dir` is NOT optional: without it the instrumented binary
+//! # overwrites `target/release/examples/ng_generic_walk_probe`, and the next plain run
+//! # silently re-executes it at ~5–6× slower with nothing in the output saying so. That
+//! # has already destroyed one performance review's measurement set.
+//! cargo run --release --features dhat-heap --target-dir target-dhat \
+//!     --example ng_generic_walk_probe -- …                          # writes dhat-heap.json
 //! ```
 //!
 //! # Why not `ng_generic_loci_dump`
@@ -21,7 +27,16 @@
 //! and dropped. So its peak is the walk's own live footprint, which is what spec §7
 //! makes a claim about (bounded by depth, not by region length).
 //!
-//! Four knobs, all environment variables so the argument list stays the dump's:
+//! Five knobs, all environment variables so the argument list stays the dump's:
+//!
+//! - `PVC_TRUST_REFERENCE_INDEX=1` — do **not** prove the reference FASTA still matches its
+//!   `.fai`. That proof reads the whole FASTA: a *fixed* ~11 s on GRCh38, which is longer
+//!   than this probe's entire chr21 walk, so leaving it on means most of a measurement run
+//!   is spent re-checking a fixture that has not changed since the last run. Turning it off
+//!   gives up the guarantee that the index describes the FASTA — a mismatch then yields
+//!   silently wrong bases, and so wrong loci, with no error. Use it in a measurement loop,
+//!   never for a run whose output anyone will believe. The mode is echoed as
+//!   `reference_check=` so a pasted report says which was used.
 //!
 //! - `PVC_GENERIC_REGION_CHUNK_BP=n` — split each `Generic` region into `n`-bp pieces,
 //!   the region-grain axis. Same meaning as in the dump.
@@ -111,12 +126,19 @@ use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
+
 use pop_var_caller::ng::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, TypedRegionError, TypedRegionIterator,
 };
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+
+/// The shared "should this run check the reference?" rule — see the module's own docs for
+/// why the default is to check even in a tool built for measuring.
+#[path = "shared/reference_check.rs"]
+mod reference_check_knob;
+use reference_check_knob::{reference_check_from_env, reference_check_label};
 
 /// Everything the walk produced, in scalars — nothing here grows with the run.
 #[derive(Debug, Default)]
@@ -159,6 +181,13 @@ struct ProbeReport {
     records_outside_region: u64,
     column_depth_truncations: u64,
     seconds: f64,
+    /// How the run treated the reference: `verified_against_fai` or `trusted_unverified`.
+    ///
+    /// **Printed because `seconds` is not interpretable without it.** Verifying costs a fixed
+    /// ~11 s that runs alongside the walk, so two runs of the same code can differ by more
+    /// than any change this probe exists to measure, and nothing else in the output says
+    /// which happened. A pasted report should stand on its own.
+    reference_check: &'static str,
 }
 
 impl ProbeReport {
@@ -214,6 +243,7 @@ impl ProbeReport {
             "column_depth_truncations={}",
             self.column_depth_truncations
         );
+        let _ = writeln!(out, "reference_check={}", self.reference_check);
         let _ = writeln!(out, "seconds={:.3}", self.seconds);
         let _ = writeln!(
             out,
@@ -289,6 +319,11 @@ struct ProbeRun {
     max_loci: Option<u64>,
     /// Replace the typed-region stream with one `Generic` region per contig.
     whole_contig: bool,
+    /// Whether to prove the reference FASTA still matches its `.fai`. Verifying is a fixed
+    /// ~11 s on GRCh38 — longer than this probe's whole chr21 walk — so a measurement loop
+    /// turns it off. Reported in `render()`, because a timing taken with it off is not
+    /// comparable to one taken with it on.
+    reference_check: ReferenceCheck,
 }
 
 fn walk<P: ReadPreparer + 'static>(
@@ -304,8 +339,10 @@ fn walk<P: ReadPreparer + 'static>(
         chunk_bp,
         max_loci,
         whole_contig,
+        reference_check,
     } = run;
-    let (info, verify) = read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf())?;
+    let (info, verify) =
+        read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf(), reference_check)?;
     let contigs = Arc::new(info.contig_list());
     let index = WindowedRefSeq::read_index(fasta)?;
 
@@ -392,7 +429,10 @@ fn walk<P: ReadPreparer + 'static>(
             })
     };
 
-    let mut report = ProbeReport::default();
+    let mut report = ProbeReport {
+        reference_check: reference_check_label(reference_check),
+        ..ProbeReport::default()
+    };
     let mut stream = SampleLocusObservationsIterator::new(regions, sample, generators);
     let started = Instant::now();
     for locus in &mut stream {
@@ -593,42 +633,55 @@ fn main() -> ExitCode {
         };
     }
 
-    let cache = Arc::new(ReferenceInfoCache::new());
-    let report = match read_reference_verifying_or_creating_fai(&cache, fasta.clone()) {
-        Ok((info, verify)) => {
-            let contigs = Arc::new(info.contig_list());
-            match WindowedRefSeq::read_index(&fasta) {
-                Ok(index) => {
-                    let preparer = LeftAlignPreparer::with_default_normalizer(
-                        WindowedRefSeq::with_shared_index(fasta.clone(), contigs, index),
-                    );
-                    let walked = walk(
-                        &fasta,
-                        &[bam],
-                        contig_filter,
-                        preparer,
-                        ProbeRun {
-                            config,
-                            chunk_bp,
-                            max_loci,
-                            whole_contig,
-                        },
-                        &cache,
-                    );
-                    match (walked, verify) {
-                        (Ok(report), Some(handle)) => handle
-                            .join()
-                            .map(|_verified| report)
-                            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
-                        (Ok(report), None) => Ok(report),
-                        (Err(error), _) => Err(error),
-                    }
-                }
-                Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
-            }
+    // Both this call and `walk`'s go through the one cache, so the second is a cache hit
+    // rather than a second whole-genome read — and under `TrustIndexWithoutChecking` neither
+    // reads the FASTA at all.
+    let reference_check = match reference_check_from_env() {
+        Ok(check) => check,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
         }
-        Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
     };
+
+    let cache = Arc::new(ReferenceInfoCache::new());
+    let report =
+        match read_reference_verifying_or_creating_fai(&cache, fasta.clone(), reference_check) {
+            Ok((info, verify)) => {
+                let contigs = Arc::new(info.contig_list());
+                match WindowedRefSeq::read_index(&fasta) {
+                    Ok(index) => {
+                        let preparer = LeftAlignPreparer::with_default_normalizer(
+                            WindowedRefSeq::with_shared_index(fasta.clone(), contigs, index),
+                        );
+                        let walked = walk(
+                            &fasta,
+                            &[bam],
+                            contig_filter,
+                            preparer,
+                            ProbeRun {
+                                config,
+                                chunk_bp,
+                                max_loci,
+                                whole_contig,
+                                reference_check,
+                            },
+                            &cache,
+                        );
+                        match (walked, verify) {
+                            (Ok(report), Some(handle)) => handle
+                                .join()
+                                .map(|_verified| report)
+                                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+                            (Ok(report), None) => Ok(report),
+                            (Err(error), _) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
+                }
+            }
+            Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
+        };
 
     match report {
         Ok(report) => {
@@ -700,6 +753,7 @@ mod tests {
                 chunk_bp,
                 max_loci: None,
                 whole_contig: false,
+                reference_check: ReferenceCheck::VerifyAgainstIndex,
             },
         )
     }
@@ -710,6 +764,7 @@ mod tests {
             chunk_bp,
             max_loci: None,
             whole_contig: true,
+            reference_check: ReferenceCheck::VerifyAgainstIndex,
         }
     }
 
@@ -731,8 +786,12 @@ mod tests {
         run: ProbeRun,
     ) -> Result<ProbeReport, Box<dyn std::error::Error>> {
         let cache = Arc::new(ReferenceInfoCache::new());
-        let (info, verify) = read_reference_verifying_or_creating_fai(&cache, sample.fasta.clone())
-            .expect("the fixture's reference reads, and its .fai is created");
+        let (info, verify) = read_reference_verifying_or_creating_fai(
+            &cache,
+            sample.fasta.clone(),
+            ReferenceCheck::VerifyAgainstIndex,
+        )
+        .expect("the fixture's reference reads, and its .fai is created");
         let contigs = Arc::new(info.contig_list());
         let index =
             WindowedRefSeq::read_index(&sample.fasta).expect("the .fai just written parses");
@@ -767,8 +826,12 @@ mod tests {
 
         // The same stream, counted without the walk in the way.
         let cache = Arc::new(ReferenceInfoCache::new());
-        let (info, verify) = read_reference_verifying_or_creating_fai(&cache, sample.fasta.clone())
-            .expect("the fixture's reference reads");
+        let (info, verify) = read_reference_verifying_or_creating_fai(
+            &cache,
+            sample.fasta.clone(),
+            ReferenceCheck::VerifyAgainstIndex,
+        )
+        .expect("the fixture's reference reads");
         let contigs = Arc::new(info.contig_list());
         let index =
             WindowedRefSeq::read_index(&sample.fasta).expect("the .fai just written parses");
@@ -961,6 +1024,7 @@ mod tests {
                     chunk_bp: None,
                     max_loci: None,
                     whole_contig: false,
+                    reference_check: ReferenceCheck::VerifyAgainstIndex,
                 },
             ),
         ] {
@@ -1012,6 +1076,7 @@ mod tests {
                 chunk_bp: None,
                 max_loci: Some(100),
                 whole_contig: true,
+                reference_check: ReferenceCheck::VerifyAgainstIndex,
             },
         );
 
@@ -1147,10 +1212,13 @@ mod tests {
         );
     }
 
-    /// **The printed keys are the interface**, all eighteen of them. Spec §11's anchor is a
-    /// line of text, so a renamed key breaks every comparison against every recorded run
-    /// and looks to the reader like a missing value. Pinning three of eighteen left the
-    /// other fifteen renameable in silence.
+    /// **The printed keys are the interface.** Spec §11's anchor is a line of text, so a
+    /// renamed key breaks every comparison against every recorded run and looks to the reader
+    /// like a missing value. Pinning three of them left the rest renameable in silence.
+    ///
+    /// `reference_check` is in the set for a different reason than the counters: it does not
+    /// describe the walk, it describes whether `seconds` is comparable to another run's at
+    /// all. Dropping it would leave the timings looking interchangeable when they are not.
     #[test]
     fn the_report_prints_exactly_the_documented_key_set() {
         let rendered = ProbeReport::default().render();
@@ -1183,6 +1251,7 @@ mod tests {
                 "record_widen_events",
                 "records_outside_region",
                 "column_depth_truncations",
+                "reference_check",
                 "seconds",
                 "loci_per_second",
             ],
@@ -1203,6 +1272,7 @@ mod tests {
     #[test]
     fn each_printed_key_carries_its_own_counter() {
         let report = ProbeReport {
+            reference_check: "verified_against_fai",
             loci: 1,
             observations: 2,
             rows_complete: 3,

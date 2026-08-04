@@ -138,6 +138,37 @@ pub enum ReferenceSource {
     },
 }
 
+/// Whether to prove the FASTA still matches its `.fai`, or to take the index at its word.
+///
+/// **What the check is for.** A `.fai` index records, for every contig, where its bases start
+/// in the FASTA and how they are wrapped into lines. Every fetch seeks by those numbers. If the
+/// FASTA is replaced or re-wrapped and the old index is kept, the numbers still *look* valid and
+/// every fetch quietly returns the wrong bases — so the run produces wrong calls with no error
+/// anywhere. Verifying reads the whole FASTA and rebuilds the index from it, which catches that.
+///
+/// **What it costs.** A whole-genome read: on GRCh38 roughly **11 seconds of CPU**, and the same
+/// 11 seconds whether the run then walks one contig or all of them. It is a *fixed* cost, so it
+/// is negligible for a real run and dominant for a short one — which is why this is a knob and
+/// not a constant.
+///
+/// The default is [`VerifyAgainstIndex`](Self::VerifyAgainstIndex): a caller who says nothing
+/// gets the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReferenceCheck {
+    /// Read the FASTA and prove it matches its `.fai`. The default, and what every run that
+    /// produces variant calls should use.
+    #[default]
+    VerifyAgainstIndex,
+    /// Take the `.fai` at its word without reading the FASTA.
+    ///
+    /// **This gives up a correctness guarantee, not just a check.** A stale or mismatched index
+    /// yields silently wrong sequence, and therefore silently wrong calls — there is no error to
+    /// notice. Use it only where a wrong answer is cheap and obvious: benchmarking the same
+    /// fixture repeatedly, profiling, an edit-measure loop. Never for a run whose output anyone
+    /// will believe.
+    TrustIndexWithoutChecking,
+}
+
 // ---------------------------------------------------------------------
 // The error — ReferenceInfoError
 // ---------------------------------------------------------------------
@@ -992,24 +1023,7 @@ pub fn read_fai_verify_in_background(
     fasta: PathBuf,
     fai: PathBuf,
 ) -> Result<(Arc<ReferenceInfo>, VerificationHandle), ReferenceInfoError> {
-    // Foreground: the cheap `.fai` read, available immediately (names/lengths/geometry, no
-    // digests). A missing or malformed `.fai` surfaces synchronously.
-    let cached = cache.get_or_read(ReferenceSource::Fai(fai.clone()))?;
-
-    // The cached value is keyed on `Fai(..)` and so carries no FASTA path — correctly, since
-    // a caller who asked for a `.fai` alone has no FASTA. *This* caller does, and a consumer
-    // that needs the bases (CRAM decoding) would otherwise be told to "supply the reference
-    // FASTA" when it just had. Fill the field in on a clone rather than in the cache, so the
-    // pure-`.fai` entry stays truthful for whoever shares it.
-    let info = if cached.fasta_path.is_none() {
-        Arc::new(ReferenceInfo {
-            fasta_path: Some(fasta.clone()),
-            md5: cached.md5,
-            contigs: cached.contigs.clone(),
-        })
-    } else {
-        cached
-    };
+    let info = read_fai_remembering_the_fasta(cache, &fasta, &fai)?;
 
     // Background: verify the FASTA against the `.fai` through the cache (§3.3 + §3.4), so the
     // verified result — and its error — reach the caller via `join`, and the cache is
@@ -1030,6 +1044,31 @@ pub fn read_fai_verify_in_background(
     ))
 }
 
+/// The cheap half both entry points share: read the `.fai` (names, order, lengths, geometry;
+/// no digests) and hand back a `ReferenceInfo` that remembers which FASTA it goes with.
+///
+/// The cached value is keyed on `Fai(..)` and so carries no FASTA path — correctly, since a
+/// caller who asked for a `.fai` alone has no FASTA. *These* callers do, and a consumer that
+/// needs the bases (CRAM decoding) would otherwise be told to "supply the reference FASTA" when
+/// it just had. The field is filled in on a clone rather than in the cache, so the pure-`.fai`
+/// entry stays truthful for whoever shares it.
+fn read_fai_remembering_the_fasta(
+    cache: &Arc<ReferenceInfoCache>,
+    fasta: &Path,
+    fai: &Path,
+) -> Result<Arc<ReferenceInfo>, ReferenceInfoError> {
+    let cached = cache.get_or_read(ReferenceSource::Fai(fai.to_path_buf()))?;
+    if cached.fasta_path.is_none() {
+        Ok(Arc::new(ReferenceInfo {
+            fasta_path: Some(fasta.to_path_buf()),
+            md5: cached.md5,
+            contigs: cached.contigs.clone(),
+        }))
+    } else {
+        Ok(cached)
+    }
+}
+
 // ---------------------------------------------------------------------
 // The batteries-included orchestrator (spec §3.11)
 // ---------------------------------------------------------------------
@@ -1048,16 +1087,40 @@ pub fn read_fai_verify_in_background(
 /// (`cache.get_or_read(Fasta { fai: None })`, which reads and caches but writes nothing).
 ///
 /// The return is asymmetric on purpose: `Some(handle)` = verification pending (join to
-/// verify); `None` = already verified, nothing to await. A caller wanting uniformly-verified
-/// info writes `if let Some(h) = handle { h.join()?; }`.
+/// verify); `None` = nothing to await. A caller wanting uniformly-verified info writes
+/// `if let Some(h) = handle { h.join()?; }`.
+///
+/// # Skipping the check
+///
+/// `check` decides whether the FASTA is read at all (see [`ReferenceCheck`]). With
+/// [`TrustIndexWithoutChecking`](ReferenceCheck::TrustIndexWithoutChecking) **and a `.fai`
+/// already present**, this returns the index's own view immediately and `None`: no whole-genome
+/// read, no background thread, ~11 s saved on GRCh38, and **no proof the index still describes
+/// the FASTA**. The `md5` fields stay `None`, because nothing computed them.
+///
+/// **Skipping is not available when the `.fai` is missing**, and that is not an oversight:
+/// writing the index requires reading the FASTA, so there is nothing left to skip. That arm
+/// scans and returns verified info regardless of `check`.
 pub fn read_reference_verifying_or_creating_fai(
     cache: &Arc<ReferenceInfoCache>,
     fasta: PathBuf,
+    check: ReferenceCheck,
 ) -> Result<(Arc<ReferenceInfo>, Option<VerificationHandle>), ReferenceInfoError> {
     let fai = sibling_fai_path(&fasta);
     if fai.exists() {
-        let (info, handle) = read_fai_verify_in_background(cache, fasta, fai)?;
-        Ok((info, Some(handle)))
+        match check {
+            ReferenceCheck::VerifyAgainstIndex => {
+                let (info, handle) = read_fai_verify_in_background(cache, fasta, fai)?;
+                Ok((info, Some(handle)))
+            }
+            // The index alone, taken on trust. Nothing to join, so `None` — which is the same
+            // shape the `.fai`-absent arm returns, and means the same thing to the caller:
+            // there is no pending verification to await.
+            ReferenceCheck::TrustIndexWithoutChecking => {
+                let info = read_fai_remembering_the_fasta(cache, &fasta, &fai)?;
+                Ok((info, None))
+            }
+        }
     } else {
         // No `.fai`: scan now (verified, with the MD5s), then index the reference ourselves.
         let info = cache.get_or_read(ReferenceSource::Fasta { fasta, fai: None })?;
@@ -2196,7 +2259,12 @@ mod tests {
         let (_dir, fasta, fai) = golden_like_pair(60);
         let fai_before = std::fs::read(&fai).unwrap();
 
-        let (info, handle) = read_reference_verifying_or_creating_fai(&cache, fasta).unwrap();
+        let (info, handle) = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta,
+            ReferenceCheck::VerifyAgainstIndex,
+        )
+        .unwrap();
         assert_eq!(info.md5, None, "immediate info is the .fai read");
         let handle = handle.expect(".fai present => a handle to join");
         assert_eq!(
@@ -2208,14 +2276,101 @@ mod tests {
         assert!(verified.md5.is_some(), "join upgrades to verified info");
     }
 
+    /// A FASTA whose sibling `.fai` describes a *different* wrapping of the same bases — the
+    /// exact corruption the check exists to catch, and the only way to prove a skip really
+    /// skipped: if the FASTA were read at all, this pair would raise.
+    fn pair_whose_fai_lies_about_the_wrapping() -> (tempfile::TempDir, PathBuf) {
+        let (dir, fasta, fai) = golden_like_pair(60);
+        let (_other_dir, _other_fasta, fai_of_a_different_wrapping) = golden_like_pair(40);
+        std::fs::copy(&fai_of_a_different_wrapping, &fai).unwrap();
+        (dir, fasta)
+    }
+
+    #[test]
+    fn trusting_the_index_returns_without_reading_the_fasta_at_all() {
+        let cache = Arc::new(ReferenceInfoCache::new());
+        let (_dir, fasta) = pair_whose_fai_lies_about_the_wrapping();
+
+        let (info, handle) = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta,
+            ReferenceCheck::TrustIndexWithoutChecking,
+        )
+        .expect("trusting the index cannot fail on a mismatch it never looks for");
+
+        // **This is the assertion that proves the skip.** The sibling `.fai` describes a
+        // different wrapping, so any read of the FASTA raises `FastaFaiMismatch`. Getting
+        // `Ok` back means no such read happened.
+        assert!(handle.is_none(), "nothing was spawned, so nothing to await");
+        assert_eq!(
+            info.md5, None,
+            "no digest, because nothing hashed the bases"
+        );
+        assert!(
+            info.contigs.iter().all(|c| c.md5.is_none()),
+            "per-contig digests are absent for the same reason"
+        );
+    }
+
+    #[test]
+    fn the_default_still_catches_a_fai_that_lies_about_the_wrapping() {
+        let cache = Arc::new(ReferenceInfoCache::new());
+        let (_dir, fasta) = pair_whose_fai_lies_about_the_wrapping();
+
+        // The negative control for the test above, on the *same* fixture: the mismatch is
+        // real, and the default finds it. Without this pair, a skip that silently did nothing
+        // and a skip that correctly skipped would look identical.
+        let (_info, handle) = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta,
+            ReferenceCheck::VerifyAgainstIndex,
+        )
+        .unwrap();
+        let error = handle
+            .expect(".fai present => a handle to join")
+            .join()
+            .expect_err("the wrapping disagrees, so verification must fail");
+        assert!(
+            matches!(error, ReferenceInfoError::FastaFaiMismatch { .. }),
+            "expected a geometry mismatch, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn trusting_the_index_still_writes_a_missing_fai() {
+        let cache = Arc::new(ReferenceInfoCache::new());
+        let (_dir, fasta) = golden_fasta_without_fai();
+        let fai = sibling_fai_path(&fasta);
+
+        // Skipping is not available here, and that is not an oversight: writing the index
+        // requires reading the FASTA, so there is nothing left to skip. The knob is about
+        // *re*-proving a `.fai` that already exists.
+        let (info, handle) = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta,
+            ReferenceCheck::TrustIndexWithoutChecking,
+        )
+        .unwrap();
+        assert!(fai.exists(), "the .fai still gets written");
+        assert!(
+            info.md5.is_some(),
+            "and the info is verified, because the scan happened anyway"
+        );
+        assert!(handle.is_none(), "the scan path awaits nothing");
+    }
+
     #[test]
     fn orchestrator_fai_absent_scans_and_writes_a_samtools_identical_fai() {
         let cache = Arc::new(ReferenceInfoCache::new());
         let (_dir, fasta) = golden_fasta_without_fai();
         let fai = sibling_fai_path(&fasta);
 
-        let (info, handle) =
-            read_reference_verifying_or_creating_fai(&cache, fasta.clone()).unwrap();
+        let (info, handle) = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta.clone(),
+            ReferenceCheck::VerifyAgainstIndex,
+        )
+        .unwrap();
         assert!(info.md5.is_some(), "the scan path returns verified info");
         assert!(handle.is_none(), "nothing to await on the scan path");
         assert!(fai.exists(), "the .fai was written beside the FASTA");
@@ -2269,7 +2424,11 @@ mod tests {
         // Make the reference dir read-only: the scan still reads the FASTA, but writing the
         // sibling `.fai` fails — and that failure is fatal.
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = read_reference_verifying_or_creating_fai(&cache, fasta.clone());
+        let result = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta.clone(),
+            ReferenceCheck::VerifyAgainstIndex,
+        );
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             matches!(result, Err(ReferenceInfoError::FaiWrite { .. })),
