@@ -27,7 +27,7 @@
 //! and dropped. So its peak is the walk's own live footprint, which is what spec §7
 //! makes a claim about (bounded by depth, not by region length).
 //!
-//! Five knobs, all environment variables so the argument list stays the dump's:
+//! Six knobs, all environment variables so the argument list stays the dump's:
 //!
 //! - `PVC_TRUST_REFERENCE_INDEX=1` — do **not** prove the reference FASTA still matches its
 //!   `.fai`. That proof reads the whole FASTA: a *fixed* ~11 s on GRCh38, which is longer
@@ -43,6 +43,14 @@
 //! - `PVC_PROBE_MAX_LOCI=n` — stop after `n` loci. A dhat run over a whole chromosome
 //!   costs an hour; a prefix costs a minute and allocation *shape* does not need the
 //!   whole contig.
+//! - `PVC_PROBE_MAX_ACTIVE_READS=n` — override `PileupGeneratorConfig::max_active_reads`,
+//!   the hard cap on reads open at once. **The default, 4,096, is not enough for a real
+//!   whole-genome sample:** a 100×-coverage tomato CRAM fails on `SL4.0ch01` at 33,037,565,
+//!   where 12,792 reads overlap one position against a local typical of 86–133. The cap
+//!   itself lives in `chain_id_allocator.rs`, which is byte-identical to production and
+//!   locked by `copy_fidelity.rs`, so it cannot be raised there without an owner decision —
+//!   this knob raises it per run so the true high-water can be *measured* rather than
+//!   guessed at.
 //! - `PVC_PROBE_MAX_RECORD_SPAN=n` — override `PileupGeneratorConfig::max_record_span`,
 //!   which is also the **halo width**: the read query runs over
 //!   `[region.start, region.end + max_record_span]`. At the default 5,000 against a
@@ -180,6 +188,11 @@ struct ProbeReport {
     record_widen_events: u64,
     records_outside_region: u64,
     column_depth_truncations: u64,
+    /// Reads refused at admission because the walk already held `max_active_reads` open.
+    /// Printed beside `active_reads_high_water`, which says whether the cap was reached
+    /// at all — the pair is what makes a deep region readable from the printout alone.
+    reads_shed_at_admission: u64,
+    active_reads_high_water: u32,
     seconds: f64,
     /// How the run treated the reference: `verified_against_fai` or `trusted_unverified`.
     ///
@@ -242,6 +255,16 @@ impl ProbeReport {
             out,
             "column_depth_truncations={}",
             self.column_depth_truncations
+        );
+        let _ = writeln!(
+            out,
+            "reads_shed_at_admission={}",
+            self.reads_shed_at_admission
+        );
+        let _ = writeln!(
+            out,
+            "active_reads_high_water={}",
+            self.active_reads_high_water
         );
         let _ = writeln!(out, "reference_check={}", self.reference_check);
         let _ = writeln!(out, "seconds={:.3}", self.seconds);
@@ -485,6 +508,8 @@ fn walk<P: ReadPreparer + 'static>(
         record_widen_events,
         records_outside_region,
         column_depth_truncations,
+        reads_shed_at_admission,
+        active_reads_high_water,
         ..
     } = *generic;
     report.reads_admitted = reads_admitted;
@@ -495,6 +520,8 @@ fn walk<P: ReadPreparer + 'static>(
     report.record_widen_events = record_widen_events;
     report.records_outside_region = records_outside_region;
     report.column_depth_truncations = column_depth_truncations;
+    report.reads_shed_at_admission = reads_shed_at_admission;
+    report.active_reads_high_water = active_reads_high_water;
     report.generic_region_bp = generic_bp.get();
     report.generic_regions = generic_regions.get();
 
@@ -605,6 +632,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let max_active_reads = match parse_env_u64("PVC_PROBE_MAX_ACTIVE_READS") {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
     // A flag, but read the way the counts are: `PVC_PROBE_WHOLE_CONTIG=0` used to turn it
     // **on**, because merely being set was enough — while the three knobs above go to
     // lengths to reject a zero. A flag that means the opposite of what it says changes
@@ -628,6 +662,15 @@ fn main() -> ExitCode {
             Ok(span) => span,
             Err(_) => {
                 eprintln!("error: PVC_PROBE_MAX_RECORD_SPAN={span} does not fit a u32");
+                return ExitCode::from(2);
+            }
+        };
+    }
+    if let Some(cap) = max_active_reads {
+        config.max_active_reads = match u32::try_from(cap) {
+            Ok(cap) => cap,
+            Err(_) => {
+                eprintln!("error: PVC_PROBE_MAX_ACTIVE_READS={cap} does not fit a u32");
                 return ExitCode::from(2);
             }
         };
@@ -1251,6 +1294,8 @@ mod tests {
                 "record_widen_events",
                 "records_outside_region",
                 "column_depth_truncations",
+                "reads_shed_at_admission",
+                "active_reads_high_water",
                 "reference_check",
                 "seconds",
                 "loci_per_second",
@@ -1294,6 +1339,8 @@ mod tests {
             record_widen_events: 19,
             records_outside_region: 20,
             column_depth_truncations: 21,
+            reads_shed_at_admission: 22,
+            active_reads_high_water: 23,
             seconds: 5.18,
         };
         let rendered = report.render();
@@ -1320,6 +1367,8 @@ mod tests {
             "record_widen_events=19",
             "records_outside_region=20",
             "column_depth_truncations=21",
+            "reads_shed_at_admission=22",
+            "active_reads_high_water=23",
             "seconds=5.180",
         ] {
             assert!(

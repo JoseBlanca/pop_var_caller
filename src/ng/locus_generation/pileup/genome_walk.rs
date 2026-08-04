@@ -531,6 +531,21 @@ pub struct RunSummary {
     /// pathologically deep regions; QC pipelines may want to look
     /// at those samples / regions specifically.
     pub column_depth_truncations: u64,
+    /// **ng's — production's `RunSummary` has no counterpart.**
+    ///
+    /// Reads the walk refused to admit because `max_active_reads` were already open.
+    /// Non-zero means some region was deeper than the walk will hold, and the evidence
+    /// there is a subsample of the reads that were available.
+    ///
+    /// **Not comparable with `column_depth_truncations`, which counts *positions*.** This
+    /// counts *reads*, and the two caps act on different quantities: the column cap limits
+    /// how many reads are used at one position, this one limits how many are held open at
+    /// once. Where a region trips this cap the column cap becomes unreachable, because a
+    /// position can no longer gather more contributors than the walk holds reads.
+    ///
+    /// Production cannot state it, so `parity.rs` binds it by name and drops it from the
+    /// counter comparison.
+    pub reads_shed_at_admission: u64,
     /// **ng's, added by D2 — production's `RunSummary` has no counterpart.**
     ///
     /// Reads that were admitted and left the active set having never been a contributor
@@ -643,10 +658,22 @@ impl WalkerState {
             last_admitted_chrom_id: None,
             last_admitted_locus: None,
             active_reads: ActiveReads::new(),
-            chain_ids: ChainIdAllocator::with_caps(
-                config.max_active_reads,
-                config.mate_lookup_window,
-            ),
+            // **The allocator is handed a cap it can never reach, on purpose.**
+            //
+            // `max_active_reads` is still the ceiling — `admit_read` enforces it, by
+            // refusing the read rather than by failing the walk. Passing the same number
+            // here as well would leave the allocator's two responses to a deep region live
+            // underneath a walk that no longer wants either: a hard
+            // `ActiveReadsExhausted` that can no longer be reached, and a one-shot warning
+            // at three-quarters of the cap telling the user *"the run will fail"*, which
+            // by then is untrue. Neither can be edited — `chain_id_allocator.rs` is locked
+            // byte-identical to production's — so they are put out of reach instead.
+            //
+            // What is lost is a backstop on a bug in the shed itself. It was worth little:
+            // its response to an over-full active set was to abort the run, which is the
+            // behaviour being removed here, and the same over-full set is visible after
+            // the fact in `active_reads_high_water`.
+            chain_ids: ChainIdAllocator::with_caps(u32::MAX, config.mate_lookup_window),
             open_records: OpenPileupRecordTable::with_cap(config.max_record_span),
             summary: RunSummary::default(),
             config,
@@ -781,6 +808,39 @@ impl WalkerState {
         // `PreparedRead::length` for the rationale.
         read.length()
             .map_err(|e| malformed_read_from_length_err(e, &read))?;
+
+        // **ng's — the depth cap that acts at the door.** With `max_active_reads` reads
+        // already open, this one is refused and counted, and the walk goes on. It is the
+        // same answer the per-column cap gives a few steps downstream, moved to the only
+        // place that can bound what the walk *holds* rather than what it *uses*: the two
+        // structures that filled up on a real whole-genome sample — the active set and the
+        // allocator's map of first mates waiting for a partner — are both fed from here,
+        // and a read never admitted enters neither.
+        //
+        // **Deterministic: the first `max_active_reads` open reads win.** Reads arrive in
+        // coordinate order, so which ones those are is a function of the input alone.
+        // Slots free as the walker passes each read's end, so a deep region is sampled
+        // along its length rather than truncated at its start. This is the policy the
+        // per-column cap already uses (`contributors.truncate`), for the reason recorded
+        // there: reads are not ordered by allele, so taking the first N is near enough to
+        // unbiased and costs no sampling machinery.
+        //
+        // A refused read is *seen* but not admitted, so it is absent from
+        // `reads_admitted` and from `last_admitted_locus` — which keeps that field's name
+        // true and cannot cause a false out-of-order rejection, the stream being sorted.
+        //
+        // **What is knowingly given up.** A refused read carries no `read_id` and its
+        // CIGAR is never decomposed, so nothing downstream can say which loci it would
+        // have reached: unlike the per-column cap, this cannot feed a per-record
+        // `reads_discarded_by_cap`. The run-level count below is the whole report. And a
+        // refused read that would have paired with an admitted one leaves that mate
+        // unpartnered, so the pair's two views of an overlap are not collapsed — one read
+        // of the pair simply is not there, which is what shedding means.
+        if self.active_reads.len() >= self.config.max_active_reads as usize {
+            self.summary.reads_shed_at_admission += 1;
+            return Ok(());
+        }
+
         self.last_admitted_locus = Some(read_locus);
         self.active_reads.admit(read, &mut self.chain_ids)?;
         self.summary.reads_admitted += 1;
@@ -1429,6 +1489,107 @@ mod tests {
                 "each column folds exactly the cap's worth, or the fixture is not capping"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The depth cap that acts at the door
+    // ------------------------------------------------------------------
+
+    /// **A region deeper than the walk will hold is walked, not failed.**
+    ///
+    /// This is the whole change, at its smallest: six reads at one position against a
+    /// ceiling of two. Before it, the seventh line of this test was
+    /// `WalkerError::ActiveReadsExhausted` and there were no loci at all — the walk of a
+    /// real 100×-coverage tomato sample died this way 33 Mb into its first chromosome,
+    /// where 4,143 reads pass the filters at a single base.
+    ///
+    /// The two numbers are asserted separately on purpose. A shed read must be absent
+    /// from `reads_admitted` *and* present in `reads_shed_at_admission`: dropping it
+    /// from both would leave a walk that silently loses reads and reports a clean run,
+    /// which is the failure this counter exists to make impossible.
+    #[test]
+    fn reads_past_the_active_read_cap_are_shed_and_the_walk_survives() {
+        let config = WalkerConfig {
+            max_active_reads: 2,
+            ..WalkerConfig::default()
+        };
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let reference = MockFasta::new("ACG");
+        let mut walker = run(reads, &reference, &config);
+        let loci: Vec<_> = walker
+            .by_ref()
+            .map(|item| item.expect("the walk must survive a region deeper than its cap"))
+            .collect();
+        let summary = walker.summary();
+
+        assert_eq!(summary.reads_admitted, 2, "the cap's worth is let in");
+        assert_eq!(
+            summary.reads_shed_at_admission, 4,
+            "and the other four are refused and counted, not lost and not fatal"
+        );
+        assert!(!loci.is_empty(), "the region still produces loci");
+        for locus in &loci {
+            let folded: u32 = locus
+                .observations
+                .iter()
+                .map(|observation| observation.num_obs)
+                .sum();
+            assert_eq!(
+                folded, 2,
+                "the evidence is the reads that were admitted, and only those"
+            );
+        }
+    }
+
+    /// **Nothing is shed below the cap** — the guard against a cap that fires early and
+    /// silently subsamples ordinary data, which no output comparison would catch until
+    /// the numbers had already moved.
+    #[test]
+    fn a_region_within_the_cap_sheds_nothing() {
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let reference = MockFasta::new("ACG");
+        let mut walker = run(reads, &reference, &WalkerConfig::default());
+        let _: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+
+        assert_eq!(summary.reads_admitted, 6);
+        assert_eq!(summary.reads_shed_at_admission, 0);
+    }
+
+    /// **The ceiling is on reads held open at once, not on reads seen.** A slot freed by
+    /// a read the walker has passed is available to the next one, so a deep pile costs
+    /// the reads inside it and nothing after it.
+    ///
+    /// Three reads at position 1 against a ceiling of two: one is refused. The fourth
+    /// read starts at 100, long after the first three have expired, and is admitted —
+    /// four reads seen, three admitted, one shed. A cap that counted admissions rather
+    /// than residents would shed this last read too, and the depth of a whole
+    /// chromosome would collapse after its first crowded base.
+    #[test]
+    fn a_slot_freed_by_an_expired_read_admits_the_next_one() {
+        let config = WalkerConfig {
+            max_active_reads: 2,
+            ..WalkerConfig::default()
+        };
+        let reference = MockFasta::new(&("ACG".to_string() + &"T".repeat(96) + "ACG"));
+        let mut reads: Vec<_> = (0..3)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        reads.push(snp_read("late", 100, b"ACG", &[30; 3]));
+
+        let mut walker = run(reads, &reference, &config);
+        let _: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+
+        assert_eq!(
+            summary.reads_admitted, 3,
+            "two at the crowded base, and the late read into a slot that has since freed"
+        );
+        assert_eq!(summary.reads_shed_at_admission, 1);
     }
 
     // ------------------------------------------------------------------

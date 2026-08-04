@@ -172,8 +172,13 @@ impl ActiveReads {
         Some(&self.reads[idx])
     }
 
-    /// Test-only helper: number of reads currently in the set.
-    #[cfg(test)]
+    /// Number of reads currently in the set — the quantity the walk's
+    /// admission cap is enforced against.
+    ///
+    /// **This is exactly the chain-id allocator's `active_count`**, which is why the
+    /// walk can bound that counter without being able to read it: every read that
+    /// enters here bumps it and every read that leaves here releases it. Was
+    /// `#[cfg(test)]` until the walk began shedding at admission.
     pub fn len(&self) -> usize {
         self.reads.len()
     }

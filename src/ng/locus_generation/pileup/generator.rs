@@ -94,7 +94,25 @@ pub struct PileupGeneratorConfig {
     /// How far a first mate stays available for pairing. Defaults to
     /// [`DEFAULT_MATE_LOOKUP_WINDOW`](crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW).
     pub mate_lookup_window: u32,
-    /// Active-read ceiling. Defaults to [`DEFAULT_MAX_ACTIVE_READS`].
+    /// Active-read ceiling: how many reads the walk will hold open at once. Defaults
+    /// to [`DEFAULT_MAX_ACTIVE_READS`].
+    ///
+    /// **A cap, not a limit that fails.** Reaching it makes the walk refuse the next
+    /// read and count it in `reads_shed_at_admission`; production's walker aborts
+    /// instead. Refusing at the door is the only place a cap can bound what the walk
+    /// *holds*, which is what a 100×-coverage sample with a collapsed repeat needs: the
+    /// per-column caps below act after the reads are already open and so cannot stop
+    /// the walk's own bookkeeping from filling.
+    ///
+    /// **Raising it past about 10,000 puts the walk back where it was.** Every open read
+    /// whose mate lies further along occupies an entry in the allocator's pending-mate
+    /// map, and that map's own defensive cap is 10,000 and is *not* configurable —
+    /// exceeding it is still a hard `PendingMatesExhausted`. The default of 4,096 sits
+    /// below it with room to spare.
+    ///
+    /// **It also subsumes `max_snp_column_depth` wherever it bites.** A position cannot
+    /// gather more contributors than the walk holds reads, so with this at 4,096 the
+    /// 8,000-read SNP column cap is unreachable. The 250-read indel cap still applies.
     pub max_active_reads: u32,
 }
 
@@ -252,6 +270,16 @@ pub struct PileupGeneratorCounts {
     /// Columns where the contributor list was truncated by the applicable
     /// per-column depth cap.
     pub column_depth_truncations: u64,
+    /// Reads the walk refused at admission because `max_active_reads` were already
+    /// open — a depth cap acting on what the walk *holds*, where
+    /// `column_depth_truncations` above counts positions where a cap acted on what
+    /// it *uses*.
+    ///
+    /// Non-zero says the reads at some locus are a subsample of what the input
+    /// offered. It cannot say *which* locus: a refused read has no `read_id` and its
+    /// alignment is never decomposed, so nothing knows where it would have landed.
+    /// The region is findable from `active_reads_high_water` sitting at the cap.
+    pub reads_shed_at_admission: u64,
     /// Reads silent over a whole record footprint — every base `N` or
     /// adaptor-masked, so never a contributor at any position and invisible to
     /// the per-locus `reads_without_observation` tally (spec §6).
@@ -338,6 +366,7 @@ impl PileupGeneratorCounts {
             active_reads_high_water,
             mate_lookup_evictions,
             column_depth_truncations,
+            reads_shed_at_admission,
             reads_silent_over_footprint,
             reads_with_holed_witness,
             hole_positions,
@@ -359,6 +388,10 @@ impl PileupGeneratorCounts {
         self.mate_lookup_evictions +=
             mate_lookup_evictions.saturating_sub(chain_ids_at_open.mate_lookup_evictions);
         self.column_depth_truncations += column_depth_truncations;
+        // A plain sum, for the plainest of the reasons on this page: the walk increments
+        // this itself, and `begin_region` zeroes the whole summary — so each region
+        // reports its own refusals and nothing is carried forward to be re-added.
+        self.reads_shed_at_admission += reads_shed_at_admission;
         // A plain sum — and **the reason it is safe changed at D1**, so do not read the
         // fold without reading this. It used to be that each region's walk owned its own
         // active set. It does not: one walker, and so one `ActiveReads`, now lives for a
@@ -2849,6 +2882,9 @@ mod tests {
             active_reads_high_water: 5,
             mate_lookup_evictions: 6,
             column_depth_truncations: 8,
+            // ng's, and a plain sum for the same reason as the line below: the walk
+            // increments it and `begin_region` zeroes the summary it lives on.
+            reads_shed_at_admission: 9,
             // ng's, and a plain sum — each region's walk owns its own active set (D2).
             reads_silent_over_footprint: 2,
             // Not folded by this test's subject; named so the destructure stays exhaustive.
@@ -2888,6 +2924,10 @@ mod tests {
         );
         assert_eq!(counts.reads_admitted, 6, "per-walk counters add");
         assert_eq!(counts.column_depth_truncations, 16);
+        assert_eq!(
+            counts.reads_shed_at_admission, 18,
+            "refusals add per walk, like every other counter the walk owns itself"
+        );
         assert_eq!(
             counts.reads_silent_over_footprint, 4,
             "each walk owns its active set, so the silent exits add like the walker's own \
