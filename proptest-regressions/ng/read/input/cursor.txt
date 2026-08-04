@@ -7,3 +7,4 @@
 cc 04bbaf6b7410a961ea8867698e7ed29400a56d19c6273376e9f52ba41fbf1501 # shrinks to starts = [1], asked = [(31, 31), (1, 1)]
 cc a67367e0a4bd14ad81d19dd340771963f60228f94537397b61771af20a687f41 # shrinks to starts = [21], asked = [(1, 21), (50, 50)]
 cc a3b8811de14085b21d384d556b805bad9824e67fc3a54aa082b3c1f1f597224e # shrinks to starts = [], asked = [(1, 1)]
+cc 6f0a16701dc1602b6296975118746692699d18725a4371657c1c58dcb3cc564a # shrinks to starts = [41], asked = [(70, 0)]
