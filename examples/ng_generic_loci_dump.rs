@@ -78,7 +78,7 @@ use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, TypedRegionError, TypedRegionIterator,
@@ -86,6 +86,12 @@ use pop_var_caller::ng::region_typing::{
 #[cfg(test)]
 use pop_var_caller::ng::types::ReadGroupId;
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
+
+/// The shared "should this run check the reference?" rule — see the module's own docs for
+/// why the default is to check even in a tool that is re-run constantly.
+#[path = "shared/reference_check.rs"]
+mod reference_check_knob;
+use reference_check_knob::reference_check_from_env;
 
 /// One TSV row: an observed sequence at a locus, with its support.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,6 +410,11 @@ fn split_generic(
 /// cursor holds its accessor for as long as it holds its file (perf review L2). The sharing
 /// above is kept anyway: it is still 189 µs against 19 µs, now paid per chromosome, and it is
 /// what a per-worker fan-out will multiply.
+// Eight arguments, one over clippy's default. Grouping them into a config struct is what the
+// sibling probe does (`ProbeRun`), and it earns its keep there because that tool constructs one
+// in five places. This one has two call sites — `main` and the test helper — and every argument
+// is named at both, so a struct would add a type to carry nothing new.
+#[allow(clippy::too_many_arguments)]
 fn run_dump<P: ReadPreparer + 'static>(
     fasta: &Path,
     bams: &[PathBuf],
@@ -415,8 +426,13 @@ fn run_dump<P: ReadPreparer + 'static>(
     // the preparer's accessor; taking its cache makes this call a hit instead of a second read
     // and a second verification of the same file.
     cache: &Arc<ReferenceInfoCache>,
+    // Whether to prove the FASTA matches its `.fai`. Threaded in rather than read from the
+    // environment here, so `main` decides once and every read in the run agrees — two reads
+    // of one file disagreeing about whether it was checked would be worse than either answer.
+    reference_check: ReferenceCheck,
 ) -> Result<DumpReport, Box<dyn std::error::Error>> {
-    let (info, verify) = read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf())?;
+    let (info, verify) =
+        read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf(), reference_check)?;
     let contigs = Arc::new(info.contig_list());
     let index = WindowedRefSeq::read_index(fasta)?;
 
@@ -612,39 +628,49 @@ fn main() -> ExitCode {
     // Joined **after** the run, not before: verification hashes the whole FASTA on a background
     // thread, and overlapping the walk with it is the entire point of the handle. Blocking here
     // would trade a real defect for a slow tool.
-    let cache = Arc::new(ReferenceInfoCache::new());
-    let report = match read_reference_verifying_or_creating_fai(&cache, fasta.clone()) {
-        Ok((info, verify)) => {
-            let contigs = Arc::new(info.contig_list());
-            match WindowedRefSeq::read_index(&fasta) {
-                Ok(index) => {
-                    let preparer = LeftAlignPreparer::with_default_normalizer(
-                        WindowedRefSeq::with_shared_index(fasta.clone(), contigs, index),
-                    );
-                    let walked = run_dump(
-                        &fasta,
-                        &[bam],
-                        contig_filter,
-                        preparer,
-                        PileupGeneratorConfig::default(),
-                        chunk_bp,
-                        &cache,
-                    );
-                    match (walked, verify) {
-                        (Ok(report), Some(handle)) => handle
-                            .join()
-                            .map(|_verified| report)
-                            .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
-                        (Ok(report), None) => Ok(report),
-                        // The walk's own error wins: it happened first and describes the run.
-                        (Err(error), _) => Err(error),
-                    }
-                }
-                Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
-            }
+    let reference_check = match reference_check_from_env() {
+        Ok(check) => check,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
         }
-        Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
     };
+
+    let cache = Arc::new(ReferenceInfoCache::new());
+    let report =
+        match read_reference_verifying_or_creating_fai(&cache, fasta.clone(), reference_check) {
+            Ok((info, verify)) => {
+                let contigs = Arc::new(info.contig_list());
+                match WindowedRefSeq::read_index(&fasta) {
+                    Ok(index) => {
+                        let preparer = LeftAlignPreparer::with_default_normalizer(
+                            WindowedRefSeq::with_shared_index(fasta.clone(), contigs, index),
+                        );
+                        let walked = run_dump(
+                            &fasta,
+                            &[bam],
+                            contig_filter,
+                            preparer,
+                            PileupGeneratorConfig::default(),
+                            chunk_bp,
+                            &cache,
+                            reference_check,
+                        );
+                        match (walked, verify) {
+                            (Ok(report), Some(handle)) => handle
+                                .join()
+                                .map(|_verified| report)
+                                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>),
+                            (Ok(report), None) => Ok(report),
+                            // The walk's own error wins: it happened first and describes the run.
+                            (Err(error), _) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
+                }
+            }
+            Err(error) => Err(Box::new(error) as Box<dyn std::error::Error>),
+        };
 
     match report {
         Ok(report) => {
@@ -767,8 +793,12 @@ mod tests {
     /// positions.
     fn masking(fasta: &Path, boundaries: &[(&'static str, u32)]) -> MaskingPreparer {
         let cache = Arc::new(ReferenceInfoCache::new());
-        let (info, _verify) =
-            read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf()).unwrap();
+        let (info, _verify) = read_reference_verifying_or_creating_fai(
+            &cache,
+            fasta.to_path_buf(),
+            ReferenceCheck::VerifyAgainstIndex,
+        )
+        .unwrap();
         let contigs = Arc::new(info.contig_list());
         let index = WindowedRefSeq::read_index(fasta).unwrap();
         MaskingPreparer {
@@ -915,6 +945,10 @@ mod tests {
             PileupGeneratorConfig::default(),
             chunk_bp,
             &cache,
+            // Checked, not trusted: these fixtures write a FASTA and its `.fai` in the same
+            // breath, so the check is nearly free here and a test that skipped it would stop
+            // covering the path every real run takes.
+            ReferenceCheck::VerifyAgainstIndex,
         )
         .expect("the dump succeeds")
     }

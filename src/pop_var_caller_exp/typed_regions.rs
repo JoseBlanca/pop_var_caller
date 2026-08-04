@@ -22,7 +22,7 @@ use thiserror::Error;
 use crate::fasta::ContigList;
 use crate::ng::WindowedRefSeq;
 use crate::ng::reference_info::{
-    ReferenceInfoCache, ReferenceInfoError, VerificationHandle,
+    ReferenceCheck, ReferenceInfoCache, ReferenceInfoError, VerificationHandle,
     read_reference_verifying_or_creating_fai,
 };
 use crate::ng::region_typing::segment_criteria::{
@@ -64,6 +64,19 @@ pub struct TypedRegionsArgs {
     /// correctness (spec T10).
     #[arg(long)]
     pub regions: Option<PathBuf>,
+
+    /// Skip proving the reference FASTA still matches its `.fai`.
+    ///
+    /// The check reads the whole FASTA — a fixed cost (~11 s on GRCh38) that does
+    /// not shrink with the work, so it dominates short runs and rounds to nothing
+    /// on long ones. Skipping it is for repeated runs over a fixture you trust:
+    /// benchmarking, profiling, an edit-measure loop.
+    ///
+    /// **It gives up a correctness guarantee.** If the FASTA and its index
+    /// disagree, every fetch returns the wrong bases and the run reports no error
+    /// at all. Do not use it for output anyone will believe.
+    #[arg(long, help_heading = "Advanced")]
+    pub trust_reference_index: bool,
 
     /// Narrowest STR period classified. One range detects and classifies
     /// (spec §2.2); the default of 1 types homopolymers as period-1 loci.
@@ -511,7 +524,13 @@ pub fn prepare_walk_inputs(
     args: &TypedRegionsArgs,
     cache: &Arc<ReferenceInfoCache>,
 ) -> Result<WalkInputs, TypedRegionsCliError> {
-    let (info, verify) = read_reference_verifying_or_creating_fai(cache, args.reference.clone())?;
+    let check = if args.trust_reference_index {
+        ReferenceCheck::TrustIndexWithoutChecking
+    } else {
+        ReferenceCheck::VerifyAgainstIndex
+    };
+    let (info, verify) =
+        read_reference_verifying_or_creating_fai(cache, args.reference.clone(), check)?;
     let contigs = info.contig_list();
 
     // `bounds` borrows `contigs`; the region set owns its data, so the one table

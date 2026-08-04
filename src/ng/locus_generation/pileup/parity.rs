@@ -3972,7 +3972,9 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
     use crate::ng::read::left_align::LeftAlignPreparer;
     use crate::ng::read::{ReadPreparer, prepared_read::PreparedRead as NgPreparedRead};
     use crate::ng::ref_seq::WindowedRefSeq;
-    use crate::ng::reference_info::{ReferenceInfoCache, read_reference_verifying_or_creating_fai};
+    use crate::ng::reference_info::{
+        ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    };
     use crate::ng::types::{ContigId, GenomeRegion, Position};
     use std::sync::Arc as StdArc;
 
@@ -3989,9 +3991,12 @@ fn ng_diverges_from_production_on_real_reads_only_where_a_read_did_not_witness()
     // the HG002 BAMs), and with a `.fai` already present it verifies in the **background**
     // rather than making a 3 GB whole-genome pass before the first read is decoded.
     let cache = StdArc::new(ReferenceInfoCache::new());
-    let (reference_info, verification) =
-        read_reference_verifying_or_creating_fai(&cache, fasta.clone())
-            .expect("the reference is readable and has (or can derive) a .fai");
+    let (reference_info, verification) = read_reference_verifying_or_creating_fai(
+        &cache,
+        fasta.clone(),
+        ReferenceCheck::VerifyAgainstIndex,
+    )
+    .expect("the reference is readable and has (or can derive) a .fai");
     let contigs = reference_info.contig_list();
     // One reference for every file this run opens, and so one copy of the bases.
     let reference = OpenReference::new(reference_info);

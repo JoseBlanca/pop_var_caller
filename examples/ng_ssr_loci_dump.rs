@@ -51,6 +51,12 @@ use pop_var_caller::ng::types::{Bp, ContigId};
 mod witness_side;
 use witness_side::{WitnessSide, witness_side};
 
+/// The shared "should this run check the reference?" rule — see the module's own docs for
+/// why the default is to check even in a tool that is re-run constantly.
+#[path = "shared/reference_check.rs"]
+mod reference_check_knob;
+use reference_check_knob::reference_check_from_env;
+
 /// One TSV row: an observed tract sequence at a locus, with its support.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservationRow {
@@ -193,8 +199,12 @@ fn run_dump<A: RepeatDelimiter>(
     aligner: A,
     gen_config: SsrGeneratorConfig,
 ) -> Result<DumpReport, Box<dyn std::error::Error>> {
+    // This run reads the reference exactly once, so the knob is read here rather than
+    // threaded down from `main`: there is no second read for it to disagree with.
+    let reference_check = reference_check_from_env()?;
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) =
+        read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf(), reference_check)?;
     let contigs = info.contig_list();
     // One reference for every file this run opens — and so one copy of the bases.
     let reference = OpenReference::new(info);
