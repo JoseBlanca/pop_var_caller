@@ -582,18 +582,31 @@ Owner decisions taken 2026-08-04, in conversation, and applied the same day.
 | **H2** — scanner asked for intervals its consumer discards | **applied**, with the safety argument corrected (see below) and pinned by two new tests. |
 | **H4** — two-entry `BTreeMap` | **applied.** |
 | **L1** — per-region `RecordBuf` clone | **applied.** |
-| **H5** — `folded_reads` as a sorted `Vec` | **built and applied.** It had never been implemented; the −3.7 % price was a calibration. Measured on top of the other three it is worth ~4 %, matching. |
+| **H5** — `folded_reads` as a sorted `Vec` | **built, applied, then REVERTED in `5d35490`.** The −3.7 % price was a calibration on one depth. On the GIAB depth sweep it is **−3.2 % at 30× and +16.4 % at 300×** — the same cliff, and the same mechanism (`_platform_memmove` second overall at 300×), that made production revert this shape in `perf_pileup_2026-05-12.md`. Not worth a 16 % cliff for a 3 % gain. The **open-record table stays a sorted `Vec`**: it holds at most two entries at any depth, so it has no depth term. |
 
 ### All five changes together, re-measured serially on a quiet host
 
 Baseline is a binary built from `d19d4ab`; binaries alternated within each pair.
 
-| fixture | baseline walk | all five | change |
+| fixture | baseline walk | applied | change |
 |---|---:|---:|---:|
 | chr21 (8 pairs) | 1.837 s | **1.071 s** | **−41.7 %** |
 | chr1 (4 pairs) | 11.556 s | **6.599 s** | **−42.9 %** |
 | tomato CRAM (4 pairs) | 6.819 s | **2.679 s** | **−60.7 %** |
 | chr21 peak RSS | 21.39 MB | **18.68 MB** | **−12.7 %** |
+
+**⚠ That table includes H5, which was then reverted.** The shipped state, re-measured across
+the GIAB depth sweep on chr21, is a win at every depth with no crossover:
+
+| depth | baseline | shipped | change |
+|---|---:|---:|---:|
+| 5× | 1.353 s | 0.765 s | **−43.5 %** |
+| 30× | 1.831 s | 1.092 s | **−40.4 %** |
+| 50× | 2.178 s | 1.373 s | **−37.0 %** |
+| 300× | 7.267 s | 6.070 s | **−16.5 %** |
+
+The benefit falls with depth because most of it is fixed cost (the reference reads and the
+repeat scan), which deeper coverage amortises against more per-read work.
 
 Raw values, chr21: base `1.846 1.833 1.833 1.844 1.834 1.828 1.840 1.841`;
 variant `1.072 1.076 1.074 1.067 1.069 1.093 1.063 1.064`. **Ranges disjoint on every
