@@ -27,7 +27,7 @@
 //! and dropped. So its peak is the walk's own live footprint, which is what spec §7
 //! makes a claim about (bounded by depth, not by region length).
 //!
-//! Five knobs, all environment variables so the argument list stays the dump's:
+//! Six knobs, all environment variables so the argument list stays the dump's:
 //!
 //! - `PVC_TRUST_REFERENCE_INDEX=1` — do **not** prove the reference FASTA still matches its
 //!   `.fai`. That proof reads the whole FASTA: a *fixed* ~11 s on GRCh38, which is longer
@@ -43,6 +43,14 @@
 //! - `PVC_PROBE_MAX_LOCI=n` — stop after `n` loci. A dhat run over a whole chromosome
 //!   costs an hour; a prefix costs a minute and allocation *shape* does not need the
 //!   whole contig.
+//! - `PVC_PROBE_MAX_ACTIVE_READS=n` — override `PileupGeneratorConfig::max_active_reads`,
+//!   the hard cap on reads open at once. **The default, 4,096, is not enough for a real
+//!   whole-genome sample:** a 100×-coverage tomato CRAM fails on `SL4.0ch01` at 33,037,565,
+//!   where 12,792 reads overlap one position against a local typical of 86–133. The cap
+//!   itself lives in `chain_id_allocator.rs`, which is byte-identical to production and
+//!   locked by `copy_fidelity.rs`, so it cannot be raised there without an owner decision —
+//!   this knob raises it per run so the true high-water can be *measured* rather than
+//!   guessed at.
 //! - `PVC_PROBE_MAX_RECORD_SPAN=n` — override `PileupGeneratorConfig::max_record_span`,
 //!   which is also the **halo width**: the read query runs over
 //!   `[region.start, region.end + max_record_span]`. At the default 5,000 against a
@@ -605,6 +613,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let max_active_reads = match parse_env_u64("PVC_PROBE_MAX_ACTIVE_READS") {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
     // A flag, but read the way the counts are: `PVC_PROBE_WHOLE_CONTIG=0` used to turn it
     // **on**, because merely being set was enough — while the three knobs above go to
     // lengths to reject a zero. A flag that means the opposite of what it says changes
@@ -628,6 +643,15 @@ fn main() -> ExitCode {
             Ok(span) => span,
             Err(_) => {
                 eprintln!("error: PVC_PROBE_MAX_RECORD_SPAN={span} does not fit a u32");
+                return ExitCode::from(2);
+            }
+        };
+    }
+    if let Some(cap) = max_active_reads {
+        config.max_active_reads = match u32::try_from(cap) {
+            Ok(cap) => cap,
+            Err(_) => {
+                eprintln!("error: PVC_PROBE_MAX_ACTIVE_READS={cap} does not fit a u32");
                 return ExitCode::from(2);
             }
         };
