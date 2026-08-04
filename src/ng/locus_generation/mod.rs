@@ -16,6 +16,11 @@
 
 pub mod pileup;
 pub mod ssr;
+mod witness;
+
+/// The witness vocabulary, re-exported so no consumer's import path names the file it
+/// lives in (arch *Module home*).
+pub use witness::{LocusLen, ReadWitness, WitnessedLocusPositions};
 
 use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
@@ -41,7 +46,7 @@ pub struct SampleLocusObservations {
     pub reference_bases: Box<[u8]>,
     /// The distinct sequences the reads showed, each with its support. **Observations,
     /// not alleles** — they become alleles when something calls them.
-    pub observed_sequences: Vec<ObservedSequence>,
+    pub observations: Vec<SequenceObservation>,
     /// Reads that covered this locus but produced no observation at all. A scalar with
     /// no positions: *no coverage* and *coverage that said nothing* are different
     /// states, and only one means "look at the mapping" (spec §3).
@@ -57,8 +62,8 @@ pub struct SampleLocusObservations {
 impl SampleLocusObservations {
     /// Read depth at each position of `region`, in order — **derived, not stored**.
     ///
-    /// A [`Complete`](ReadCoverage::Complete) observation counts its `num_obs` at every
-    /// position; an [`Observed`](ReadCoverage::Observed) run counts it over the stretch
+    /// A [`Complete`](ReadWitness::Complete) observation counts its `num_obs` at every
+    /// position; a [`Partial`](ReadWitness::Partial) run counts it over the stretch
     /// it witnessed. The returned vector has exactly `region.len()` entries.
     ///
     /// This is *observation* depth and only exact per locus: it omits reads that
@@ -69,13 +74,13 @@ impl SampleLocusObservations {
     pub fn num_obs_along_locus(&self) -> Vec<u32> {
         let len = self.region.len() as usize;
         let mut depth = vec![0u32; len];
-        for obs in &self.observed_sequences {
+        for obs in &self.observations {
             // **This clamp is the guard, not a second one.** An earlier comment here
-            // called the bound "a producer invariant, enforced where `ReadCoverage` is
-            // minted", which overstated it twice over: `Observed`'s fields are public, so
+            // called the bound "a producer invariant, enforced where `ReadWitness` is
+            // minted", which overstated it twice over: `Partial`'s fields are public, so
             // a run need not have come from `from_left`/`from_right` at all; and even one
             // that did was clamped against *some* `LocusLen`, which nothing ties to the
-            // locus it ends up on. `ReadCoverage` cannot know its own locus, so the
+            // locus it ends up on. `ReadWitness` cannot know its own locus, so the
             // invariant is not expressible on the type — it can only be checked here,
             // against the region actually in hand.
             //
@@ -83,27 +88,33 @@ impl SampleLocusObservations {
             // over whole cohorts, and a debug-only guard compiles out of the release build
             // this repo actually runs (a trap it has recorded hitting twice). Clamping
             // keeps the derivation total on any input.
-            let (from, to) = match obs.read_coverage {
-                ReadCoverage::Complete => (0, len),
-                ReadCoverage::Observed {
-                    offset_in_locus,
-                    positions_covered,
-                } => {
-                    let from = (offset_in_locus as usize).min(len);
-                    (
-                        from,
-                        from.saturating_add(positions_covered as usize).min(len),
-                    )
+            //
+            // **Per run since C2, and that is the point of the set.** Clamping the run the
+            // witness *encloses* would count depth straight through a hole — the read
+            // credited with positions it never saw, at exactly the spliced loci the set
+            // exists to describe. So each run is clamped and added on its own; a witness of
+            // one run, which is every witness on DNA-seq, walks the same slice as before.
+            match &obs.read_witness {
+                ReadWitness::Complete => {
+                    for slot in &mut depth[0..len] {
+                        *slot = slot.saturating_add(obs.num_obs);
+                    }
                 }
-            };
-            for slot in &mut depth[from..to] {
-                *slot = slot.saturating_add(obs.num_obs);
+                ReadWitness::Partial { positions } => {
+                    for (start, end) in positions.runs() {
+                        let from = (start as usize).min(len);
+                        let to = (end as usize).min(len).max(from);
+                        for slot in &mut depth[from..to] {
+                            *slot = slot.saturating_add(obs.num_obs);
+                        }
+                    }
+                }
             }
         }
         depth
     }
 
-    /// This locus's length, for the [`ReadCoverage`] predicates that need it.
+    /// This locus's length, for the [`ReadWitness`] predicates that need it.
     ///
     /// **The one source a consumer should use.** The mint derives the same quantity from
     /// the segment it is building the locus from, before the locus exists; every reader
@@ -115,19 +126,20 @@ impl SampleLocusObservations {
     }
 
     /// The observations a likelihood may score directly — the
-    /// [`Complete`](ReadCoverage::Complete) ones.
+    /// [`Complete`](ReadWitness::Complete) ones.
     ///
     /// A partial is a lower bound that mis-scores as a *short* allele until a censored
     /// likelihood models it (step 7), so reaching the partials is a deliberate act:
     /// this iterator is the guard (spec §3).
-    pub fn complete_observations(&self) -> impl Iterator<Item = &ObservedSequence> + '_ {
-        self.observed_sequences
+    pub fn complete_observations(&self) -> impl Iterator<Item = &SequenceObservation> + '_ {
+        self.observations
             .iter()
-            .filter(|obs| obs.read_coverage == ReadCoverage::Complete)
+            .filter(|obs| obs.read_witness == ReadWitness::Complete)
     }
 }
 
-/// One distinct sequence the reads showed at a locus, with its support.
+/// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
+/// pooled support of every read that showed it.
 ///
 /// The fields between `num_obs` and `chain_ids` are the per-read moments the SNP
 /// filters read (strand bias, base-quality error, the MAPQ multi-mapper test); an STR
@@ -135,23 +147,23 @@ impl SampleLocusObservations {
 /// (`AlleleObservation` + `AlleleSupportStats`), minus `placed_start`, which no model
 /// consumes (spec §6).
 ///
-/// **This is a table of cells, not a table of sequences.** The identity is
-/// `(bases, read_coverage, read_group)` — three axes, not one — so a consumer that
-/// wants per-allele totals must aggregate over coverage *and* group, and one that
-/// treats each entry as an allele will count the same allele several times. The
-/// aggregation is exact: every support field is additive, and the merged cells share
-/// their `bases` and `read_coverage` by construction (spec §6).
+/// **One entry is not one allele.** The identity has three axes, not one —
+/// `(bases, read_witness, read_group)` — so a consumer that wants per-allele totals
+/// must aggregate over witness *and* group, and one that treats each entry as an
+/// allele will count the same allele several times. The aggregation is exact: every
+/// support field is additive, and the merged entries share their `bases` and
+/// `read_witness` by construction (spec §6).
 #[derive(Debug, Clone, PartialEq)]
-pub struct ObservedSequence {
+pub struct SequenceObservation {
     /// The observed bases — allele content, in **read** coordinates.
     pub bases: Box<[u8]>,
     /// How much of the locus a read of this sequence spanned. **Part of the
-    /// identity**: a [`Complete`](ReadCoverage::Complete) and an
-    /// [`Observed`](ReadCoverage::Observed) run of the same `bases` are different
+    /// identity**: a [`Complete`](ReadWitness::Complete) and an
+    /// [`Partial`](ReadWitness::Partial) run of the same `bases` are different
     /// evidence and stay separate entries (spec §3).
-    pub read_coverage: ReadCoverage,
+    pub read_witness: ReadWitness,
     /// Which read group — one `@RG`, i.e. one lane — these reads came from. **Part of
-    /// the identity**, so an allele supported from several groups is several rows.
+    /// the identity**, so an allele supported from several groups is several observations.
     ///
     /// Carried because a per-chemistry model needs the allele × group cross **with its
     /// quality moments**: a per-group count beside one merged observation gives the
@@ -189,163 +201,6 @@ pub struct ObservedSequence {
     /// Phase-chain ids of the reads folded here — what lets a later step chain
     /// observations at neighbouring loci into a haplotype.
     pub chain_ids: Vec<ChainId>,
-}
-
-/// How much of a locus a single read spanned — **one read's span, not depth**.
-///
-/// `Complete` means the read reached **both** borders of the locus; anything else is
-/// the one **run** of locus positions the read actually witnessed, in **locus**
-/// coordinates (spec §3). A partial run is a *censored* observation: the sequence is
-/// at least this long, but not how long.
-///
-/// **One `Observed` run replaces the earlier `PartialLeft`/`PartialRight` pair
-/// (owner, 2026-07-28).** Two side-tagged variants cannot describe what a read
-/// witnesses once the *events*, not the alignment span, define it: a read can be blind
-/// in the **middle** of a footprint (an interior `N`, a ref-skip) or blind at either
-/// end, and a widened record can be wider than the read on both sides. Prefix-versus-
-/// suffix survives as a derivation — [`is_flush_left`](Self::is_flush_left) /
-/// [`is_flush_right`](Self::is_flush_right) — so the STR path's "a prefix and a suffix
-/// are different constraints" is preserved, not lost. `Complete` is kept rather than
-/// folded in: it is the overwhelmingly common case and it keeps
-/// [`complete_observations`](SampleLocusObservations::complete_observations) a cheap
-/// equality instead of arithmetic against the footprint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ReadCoverage {
-    /// The read reached both borders of the locus.
-    Complete,
-    /// The stretch the read did witness, in **locus positions** — the axis `bases` is
-    /// not on (that is allele content, in read coordinates).
-    ///
-    /// **The fields are public, and the clamping in [`from_left`](Self::from_left) /
-    /// [`from_right`](Self::from_right) is therefore a convention rather than a type
-    /// invariant.** Left that way deliberately (2026-07-28): private fields would prove
-    /// only that a run had been clamped against *some* [`LocusLen`], and nothing ties
-    /// that length to the locus the run is finally attached to — `ReadCoverage` cannot
-    /// know its own locus. So the real check has to live where the region is in hand,
-    /// which is `num_obs_along_locus`, and it does.
-    ///
-    /// Revisit when the **generic** path mints its first run: it needs runs flush with
-    /// neither border (a read blind in the middle of a footprint), which neither
-    /// constructor expresses, so the full constructor set — and with it the case for
-    /// sealing the variant — is only knowable then. Building it now would be designing
-    /// against one producer and guessing at the second.
-    Observed {
-        /// Locus positions between the locus's left border and the first one
-        /// witnessed. `0` = flush with the left border, i.e. a prefix constraint.
-        offset_in_locus: u16,
-        /// How many locus positions were witnessed, running from `offset_in_locus`.
-        positions_covered: u16,
-    },
-}
-
-/// A locus's length in reference positions — the axis a [`ReadCoverage`] run lives on.
-///
-/// **A newtype because the alternative is silently wrong.** Every constructor and
-/// predicate on `ReadCoverage` takes a covered extent *and* a locus length, both counts
-/// of locus positions and both formerly `u16` — so `from_left(10, 4)` and
-/// `from_left(4, 10)` each compiled, and the clamping the constructors do for their own
-/// good would then hide the transposition rather than surface it. Two `u16`s in a row
-/// with no way to tell them apart is exactly the shape that produces a wrong depth and
-/// no panic.
-///
-/// It also gives the saturating cast **one** home. The count arrives as a `u64` (a
-/// region length, a tract length) and has to be narrowed; doing that at each call site
-/// spread the same `.min(u16::MAX as u64) as u16` across the mint and every dump tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LocusLen(u16);
-
-impl LocusLen {
-    /// From a count of reference positions, saturating at `u16::MAX`.
-    ///
-    /// Saturation rather than an error: a locus longer than 65,535 positions cannot be
-    /// described by a run either, and the clamp keeps the derivation total. A tract that
-    /// long is a satellite, which the caller does not handle.
-    pub fn from_positions(positions: u64) -> Self {
-        Self(positions.min(u16::MAX as u64) as u16)
-    }
-
-    /// The length of `region` — the canonical source once a locus exists, and what
-    /// [`SampleLocusObservations::locus_len`] returns.
-    pub fn of_region(region: GenomeRegion) -> Self {
-        Self::from_positions(region.len())
-    }
-
-    pub fn get(self) -> u16 {
-        self.0
-    }
-}
-
-impl ReadCoverage {
-    /// A run flush with the locus's **left** border, `positions_covered` long — the
-    /// old `PartialLeft(n)`.
-    ///
-    /// `locus_len` clamps the run into the locus. It is needed because a producer's
-    /// reach can be measured in *read* bases, which diverge from locus positions under
-    /// stutter; a run must never claim positions the locus does not have.
-    pub fn from_left(positions_covered: u16, locus_len: LocusLen) -> Self {
-        Self::Observed {
-            offset_in_locus: 0,
-            positions_covered: positions_covered.min(locus_len.get()),
-        }
-    }
-
-    /// A run flush with the locus's **right** border, `positions_covered` long — the
-    /// old `PartialRight(n)`.
-    ///
-    /// Clamped first, then the offset derived, so the subtraction cannot underflow:
-    /// computing `locus_len - positions_covered` on an over-long reach would wrap to a
-    /// huge offset, or — with a saturating subtraction — silently relabel a
-    /// right-anchored read as a left-anchored one.
-    ///
-    /// **One consequence of the encoding, and it reaches further than labelling.** A run
-    /// that covers the whole locus is flush with *both* borders, so once
-    /// `positions_covered >= locus_len` this returns exactly what
-    /// [`from_left`](Self::from_left) would. Three things follow, and the third is a
-    /// behaviour change:
-    ///
-    /// 1. the run is reported as flush left by [`is_flush_left`](Self::is_flush_left);
-    /// 2. every label derived from flushness calls it a *left* partial;
-    /// 3. **it shares a bucket key with a left-flush run of the same bases, so the two
-    ///    merge into one row** — where `PartialLeft(n)` and `PartialRight(n)` kept them
-    ///    apart.
-    ///
-    /// That is reachable on the STR path, where the reach is measured in *read* bases:
-    /// an allele longer than the reference tract gives a reach past the locus length.
-    /// It is arguably the right answer — identical constraints are one cell, and a read
-    /// that witnessed every position is constrained from neither side — but it is not
-    /// the pre-reshape answer, and the plan's stated equivalence
-    /// `PartialRight(n) ⇔ Observed { len - n, n }` stops holding at `n = len`. Pinned by
-    /// `ssr::tally::tests::an_expanded_allele_merges_the_two_sides_into_one_row`.
-    pub fn from_right(positions_covered: u16, locus_len: LocusLen) -> Self {
-        let covered = positions_covered.min(locus_len.get());
-        Self::Observed {
-            offset_in_locus: locus_len.get() - covered,
-            positions_covered: covered,
-        }
-    }
-
-    /// Whether the run starts at the locus's left border — a **prefix** constraint on
-    /// the allele. Always true of `Complete`.
-    pub fn is_flush_left(&self) -> bool {
-        match self {
-            Self::Complete => true,
-            Self::Observed {
-                offset_in_locus, ..
-            } => *offset_in_locus == 0,
-        }
-    }
-
-    /// Whether the run ends at the locus's right border — a **suffix** constraint.
-    /// Always true of `Complete`.
-    pub fn is_flush_right(&self, locus_len: LocusLen) -> bool {
-        match self {
-            Self::Complete => true,
-            Self::Observed {
-                offset_in_locus,
-                positions_covered,
-            } => offset_in_locus.saturating_add(*positions_covered) >= locus_len.get(),
-        }
-    }
 }
 
 /// The kind of locus, plus whatever that kind adds to the shared evidence fields.
@@ -406,6 +261,42 @@ pub trait LocusGenerator<S> {
         segment: &S,
         reads: &SampleReads,
     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError>;
+
+    /// What this generator has counted so far, beside the shared [`LocusCounts`] — or
+    /// `None` if it counts nothing of its own.
+    ///
+    /// Readable at any point; final once the run is drained. **This exists because a
+    /// boxed generator's own counters were otherwise unreachable**: `GeneratorSlot`
+    /// erases the type, so the generic generator's nine counts had no reader that was
+    /// not a test, and a walk that emitted nothing for a covered region counted the
+    /// truncations that explained it into a struct nobody could see (Milestone C
+    /// review).
+    ///
+    /// Defaulted to `None` so a generator with nothing to report — [`NoLoci`], a test
+    /// fake — says so by saying nothing.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        None
+    }
+}
+
+/// What a generator counted, tagged by which generator counted it.
+///
+/// **The same shape [`LocusKind`] uses**, and for the same reason: a common surface
+/// with a per-kind payload, where the payload's type is the kind's own. A trait
+/// method cannot return an associated type through `dyn`, and a downcast would move
+/// a compile-time question to run time — so the kinds are enumerated here, exactly as
+/// this module already enumerates them for loci ([`LocusKind::Ssr`] carrying
+/// [`SsrDetail`]) and for slots ([`GeneratorSet`] has one named field per kind).
+///
+/// Borrowed, not owned: a caller reads a running tally rather than taking a snapshot
+/// it then has to keep fresh.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum GeneratorCounts<'a> {
+    /// The generic (SNP/indel) pileup generator's run-level counts.
+    Pileup(&'a pileup::PileupGeneratorCounts),
+    /// The STR generator's run-level counts.
+    Ssr(&'a ssr::SsrGeneratorCounts),
 }
 
 /// A generator that produces no loci and reports why.
@@ -452,19 +343,120 @@ impl<S> LocusGenerator<S> for NoLoci {
 /// the upstream walk ([`TypedRegion`](Self::TypedRegion)) or a generator's own fetch
 /// ([`Reference`](Self::Reference)) — and they stay distinct because they fail in different
 /// places.
+///
+/// # Every generator failure names the region it happened over (owner, 2026-07-29)
+///
+/// A region is the unit of this whole step: it is what `begin_segment` takes, what the
+/// counters are keyed to, and what the clamp and the halo reason about. An error that did not
+/// name one could be *believed of the wrong region*, and that is not hypothetical — the
+/// generic generator shipped exactly that defect, a failed read charged to the next region
+/// after it had emitted all of its own loci, and the missing region is why nobody noticed
+/// ([Milestone C review](../../../doc/devel/reports/reviews/ng_locus_generation_pileup_generator_c_2026-07-29.md)).
+///
+/// So the four generator-raised variants carry a [`GenomeRegion`] and **none of them has a
+/// `#[from]` conversion**. That is the enforcement, not an oversight: with a blanket `From`, a
+/// bare `?` compiles and silently produces an error with no region, which is the state this
+/// change exists to make unreachable. Attaching at the `?` site costs one `map_err` and is the
+/// only moment the region is known for certain.
+///
+/// [`TypedRegion`](Self::TypedRegion) is the exception and carries none, because the region
+/// *stream* is what failed — there is no region to name, that being the point.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LocusGenerationError {
     /// The upstream typed-region walk failed.
     #[error("typed-region walk failed during locus generation")]
     TypedRegion(#[from] TypedRegionError),
-    /// A read query failed mid-stream, or the alignment input was malformed (the open
-    /// already succeeded upstream; this fires while a generator pulls reads).
-    #[error("read access failed during locus generation")]
-    Reads(#[from] IngestError),
+    /// The read query for a region could not be **opened** — a missing or unreadable
+    /// index, a contig the file does not have, a region the planner rejects.
+    ///
+    /// Split from [`Reads`](Self::Reads) because the two are different operational
+    /// problems: "the index query for this region could not be opened" is a broken
+    /// input or a bad request, "the record stream broke 40 kb in" is a truncated or
+    /// corrupt file. One variant rendered them identically, and its own doc used to
+    /// deny that the first could happen at all.
+    ///
+    /// **Since D1 this also covers pointing a long-lived cursor at a region** — the same
+    /// job, done once per region against a reader that stays open instead of once against
+    /// a reader that is opened for it. One condition reaching here is *not* an open
+    /// failure in the sense above: `CursorError::AfterFailure` says the cursor's file broke
+    /// during an **earlier** region, which by the split's own logic belongs to
+    /// [`Reads`](Self::Reads). It is unreachable through the generic generator, whose
+    /// `failed` latch fires first and reports the original failure; if a caller ever meets
+    /// it, the message it wants is the one already reported, not this one.
+    #[error("the read query for {region} could not be opened")]
+    OpenReadQuery {
+        region: GenomeRegion,
+        #[source]
+        source: IngestError,
+    },
+    /// A generator was handed a **different sample** from the one it was opened for.
+    ///
+    /// **Each sample needs its own generator.** A generator opens a reader for one sample and
+    /// keeps it positioned for a whole chromosome — that is what makes it fast — but it is
+    /// lent a `&SampleReads` afresh on every call. Sharing one generator between samples would
+    /// therefore answer every sample out of the first one's files: no error, no empty rows, and
+    /// a cohort in which every individual looks identical to the first. This is that mistake,
+    /// caught.
+    ///
+    /// It is a caller bug, not a data problem. Correct code builds a generator per sample and
+    /// never sees it.
+    #[error(
+        "this generator was opened for another sample, so it cannot answer for {region}: \
+         give each sample its own generator"
+    )]
+    ForeignSample { region: GenomeRegion },
+    /// A read query failed **mid-stream**, or the alignment input was malformed: the
+    /// open already succeeded and reads were flowing.
+    #[error("read access over {region} failed during locus generation")]
+    Reads {
+        region: GenomeRegion,
+        #[source]
+        source: IngestError,
+    },
     /// A reference fetch failed — a broken reference, or a region past a contig end.
-    #[error("reference fetch failed during locus generation")]
-    Reference(#[from] RefSeqError),
+    #[error("reference fetch over {region} failed during locus generation")]
+    Reference {
+        region: GenomeRegion,
+        #[source]
+        source: RefSeqError,
+    },
+    /// The pileup walk failed: a malformed read, reads out of coordinate order, a
+    /// record wider than the span cap, or an exhausted chain-id space. Fatal and
+    /// terminal for the walk that raised it
+    /// (`locus_generation_pileup.md` §7).
+    ///
+    /// None of the variants above covers it — they name the *inputs* failing, and this
+    /// names the walk over inputs it already accepted.
+    #[error("the pileup walk over {region} failed")]
+    Walker {
+        region: GenomeRegion,
+        #[source]
+        source: pileup::WalkerError,
+    },
+}
+
+impl LocusGenerationError {
+    /// The region the failure is attributed to, or `None` for a failure of the region
+    /// *stream* itself.
+    ///
+    /// The region a generator attaches is **the one it was working over** — the segment
+    /// it was given, not the wider span it queried, since the segment is the unit a
+    /// caller can act on. The one exception is a helper that only ever knows a span
+    /// (the STR read fetch), which says so where it attaches.
+    ///
+    /// Here so a consumer — a log line, a per-region tally — can ask without matching
+    /// every variant, which is what would rot the moment a variant is added.
+    pub fn region(&self) -> Option<GenomeRegion> {
+        match self {
+            LocusGenerationError::TypedRegion(_) => None,
+            LocusGenerationError::OpenReadQuery { region, .. }
+            | LocusGenerationError::ForeignSample { region }
+            | LocusGenerationError::Reads { region, .. }
+            | LocusGenerationError::Reference { region, .. }
+            | LocusGenerationError::Walker { region, .. } => Some(*region),
+        }
+    }
 }
 
 /// The running tally — "no silent caps": every region and every base is accounted for, so
@@ -518,7 +510,7 @@ impl LocusCounts {
 /// the `NoLoci` configuration kept as data, so plugging in a real generator is a one-line
 /// change at the set (spec §5).
 ///
-/// The trait object carries **no `Send` bound**: v1 is single-threaded (arch §9). If a
+/// The trait object carries **no `Send` bound**: v1 is single-threaded (`locus_generation.md` §9). If a
 /// `GeneratorSet` is ever moved onto a producer thread rather than built per thread, this
 /// becomes `dyn LocusGenerator<S> + Send` — a deliberate omission now, not an oversight.
 pub enum GeneratorSlot<S> {
@@ -555,6 +547,15 @@ impl<S> GeneratorSlot<S> {
         match self {
             GeneratorSlot::Generator(generator) => generator.next_locus(segment, reads),
             GeneratorSlot::Unfilled(_) => Ok(None),
+        }
+    }
+
+    /// What the generator in this slot has counted, or `None` — for an unfilled slot,
+    /// or a generator that counts nothing of its own.
+    fn counts(&self) -> Option<GeneratorCounts<'_>> {
+        match self {
+            GeneratorSlot::Generator(generator) => generator.counts(),
+            GeneratorSlot::Unfilled(_) => None,
         }
     }
 }
@@ -605,6 +606,27 @@ impl GeneratorSet {
     /// The running tally — readable at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         &self.counts
+    }
+
+    /// What the **STR** generator has counted, if one is filled and counts anything.
+    pub fn ssr_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.ssr.counts()
+    }
+
+    /// What the **generic** generator has counted, if one is filled and counts anything.
+    ///
+    /// One accessor per slot rather than one keyed by [`RegionKind`]: the kinds are
+    /// already three named fields here, and a key would have to carry a payload
+    /// (`RegionKind::SsrSegment` holds a segment) that has nothing to do with reading a
+    /// tally.
+    pub fn generic_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.generic.counts()
+    }
+
+    /// What the **`SsrBundle`** generator has counted, if one is filled and counts
+    /// anything. `None` today: the slot has no generator (spec §10).
+    pub fn ssr_bundle_counts(&self) -> Option<GeneratorCounts<'_>> {
+        self.ssr_bundle.counts()
     }
 
     /// Begin a region: count it, and ready its generator if one is filled. Every region is
@@ -678,32 +700,34 @@ impl GeneratorSet {
 /// per-run swap lives in its trait-object slots, not in a type parameter.
 pub struct SampleLocusObservationsIterator<T> {
     regions: T,
-    // FIXME(pileup-generator): the field order below loses a step-1 tally as
-    // soon as a generator holds a read stream across `next_locus` calls —
-    // which is exactly what the generic (pileup) locus generator is being
-    // built to do. **Delete this comment once it is fixed.**
+    // **`generators` must be dropped before `reads`** (C4, plan 3 — the choice the
+    // pileup generator's FIXME left to this step). Declaring it first is no longer
+    // what enforces that: the `Drop` impl below releases it explicitly, so a future
+    // edit that reorders these fields cannot silently undo the property. The order
+    // is kept anyway, as the cheaper of the two mechanisms.
     //
     // Since 2026-07-28 a region stream owns its files by `Arc` rather than
-    // borrowing them (`read/input/`, the generic generator's Milestone A), so
-    // it may outlive the `SampleReads` that made it. Rust drops fields in
-    // declaration order, so `reads` dies here *before* `generators` — and any
-    // stream a generator is still holding then folds its drop tally into an
-    // `AlignmentFile` that only that stream owns, and which is freed in the
-    // same breath. The reads already emitted are unaffected and the pooled
-    // reader still goes back; what is lost is the ability to *read* that
-    // query's tally through `SampleReads::counts`, so the failure is a silent
-    // under-report of drop rates, not a crash.
+    // borrowing them, so it may outlive the `SampleReads` that made it — and a
+    // generator holds one such reader across `next_locus` calls. Rust drops
+    // fields in declaration order: with `reads` first, a reader a generator was
+    // still holding would fold its drop tally into an `AlignmentFile` that only
+    // that reader owns and that is freed in the same breath. The reads already
+    // emitted are unaffected and the pooled reader still goes back; what is lost
+    // is the ability to *read* that tally through `SampleReads::counts` — a
+    // silent under-report of drop rates, not a crash.
     //
-    // Two fixes, both cheap, and the choice belongs with whoever writes the
-    // generic generator: declare `generators` before `reads` so the streams
-    // drop first, or have the generator drop its held stream at the end of
-    // each segment. Whichever is taken, it wants a test that keeps a second
-    // `Arc` and asserts the tally landed — see
-    // `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`
-    // for the shape, since a tally folded into an unreachable file is
-    // indistinguishable from one never folded at all.
-    reads: SampleReads,
+    // **How long a generator holds one widened at D1, and the release below is
+    // now the ordinary case rather than the exceptional one.** The STR generator
+    // still holds a per-region stream and drops it when the region drains, so a
+    // run driven to exhaustion leaves it holding nothing. The generic generator
+    // holds a *cursor per chromosome*: `end_walk` clears only the region walk, so
+    // the cursor survives every region and is released when the generator is.
+    // Draining the run no longer empties it.
+    //
+    // **No test can fail if this breaks, and that is a property of the types
+    // rather than an omission** — see the `Drop` impl for what it would take.
     generators: GeneratorSet,
+    reads: SampleReads,
     /// Latched on clean exhaustion or a fatal error — the fused contract.
     done: bool,
 }
@@ -724,6 +748,15 @@ impl<T> SampleLocusObservationsIterator<T> {
     /// The running tally — current at any point, final once the stream is exhausted.
     pub fn counts(&self) -> &LocusCounts {
         self.generators.counts()
+    }
+
+    /// The generator set, for the per-generator counts the shared tally does not carry
+    /// ([`GeneratorSet::generic_counts`] and its siblings).
+    ///
+    /// The whole set rather than three more forwarding methods: it is handed out by
+    /// `&`, so a caller can read every slot's tally and change none of them.
+    pub fn generators(&self) -> &GeneratorSet {
+        &self.generators
     }
 }
 
@@ -769,6 +802,37 @@ impl<T> std::iter::FusedIterator for SampleLocusObservationsIterator<T> where
 {
 }
 
+impl<T> Drop for SampleLocusObservationsIterator<T> {
+    /// **Release the generators while `reads` is still alive.** A generator holds
+    /// a region stream that owns its files by `Arc`, and that stream folds its
+    /// drop tally into an `AlignmentFile` on the way out; if `reads` — the only
+    /// other holder — has gone first, the tally lands in an object nobody can
+    /// read and is freed with it. Silent: no crash, no wrong locus, just a drop
+    /// rate under-reported by whatever the abandoned region had counted.
+    ///
+    /// Field order already gives this (Rust drops fields in declaration order,
+    /// and `generators` is declared first). This is here because that made the
+    /// property depend on a line's *position* in a struct, guarded by a comment —
+    /// and the failure is invisible, so a reorder would not announce itself. With
+    /// both, the order is an optimisation and this is the guarantee.
+    ///
+    /// **Nothing can test it, and the reason is worth stating rather than
+    /// leaving as an absence** (owner-facing decision, 2026-07-30). Observing the
+    /// tally after the drop needs a second handle onto the same files;
+    /// `SampleReads` is deliberately not `Clone` and does not expose them, so the
+    /// test costs a widening of that type — the shape is
+    /// `read::input::open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`,
+    /// one layer down, where the handle exists. Deleting this impl fails no test;
+    /// it is a defence, not a checked invariant, and it is cheap because the
+    /// replacement set allocates nothing.
+    fn drop(&mut self) {
+        drop(std::mem::replace(
+            &mut self.generators,
+            GeneratorSet::all_unimplemented(),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,12 +846,25 @@ mod tests {
         }
     }
 
-    /// An observation of `bases` with `num_obs` reads at a given coverage — the moment
+    /// A one-run partial witness, in the offset-and-length spelling these depth fixtures
+    /// were written in. C2 made `Partial`'s payload a set; a fixture that says "four
+    /// positions from offset three" still reads as the constraint it is.
+    fn partial_run(offset_in_locus: u16, positions_covered: u16) -> ReadWitness {
+        ReadWitness::Partial {
+            positions: WitnessedLocusPositions::one_run_from_offset_and_length(
+                offset_in_locus,
+                positions_covered,
+            )
+            .expect("a run covering at least one position"),
+        }
+    }
+
+    /// An observation of `bases` with `num_obs` reads at a given witness — the moment
     /// fields are irrelevant to the depth derivation, so they are fixed.
-    fn obs(bases: &[u8], read_coverage: ReadCoverage, num_obs: u32) -> ObservedSequence {
-        ObservedSequence {
+    fn obs(bases: &[u8], read_witness: ReadWitness, num_obs: u32) -> SequenceObservation {
+        SequenceObservation {
             bases: Box::from(bases),
-            read_coverage,
+            read_witness,
             read_group: ReadGroupId(0),
             num_obs,
             num_fwd: 0,
@@ -799,11 +876,11 @@ mod tests {
         }
     }
 
-    fn locus(region: GenomeRegion, observed: Vec<ObservedSequence>) -> SampleLocusObservations {
+    fn locus(region: GenomeRegion, observed: Vec<SequenceObservation>) -> SampleLocusObservations {
         SampleLocusObservations {
             region,
             reference_bases: Box::from(&b""[..]),
-            observed_sequences: observed,
+            observations: observed,
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
             kind: LocusKind::Generic,
@@ -1111,7 +1188,10 @@ mod tests {
                 self.emitted = true;
                 return Ok(Some(locus(region(1, 1), Vec::new())));
             }
-            Err(LocusGenerationError::Reads(IngestError::NoFiles))
+            Err(LocusGenerationError::Reads {
+                region: region(1, 1),
+                source: IngestError::NoFiles,
+            })
         }
     }
 
@@ -1220,7 +1300,7 @@ mod tests {
             "the one locus before the failure"
         );
         match iterator.next() {
-            Some(Err(LocusGenerationError::Reads(_))) => {}
+            Some(Err(LocusGenerationError::Reads { .. })) => {}
             other => panic!("expected a fatal generator error, got {other:?}"),
         }
         assert!(
@@ -1266,9 +1346,9 @@ mod tests {
         let generic = SampleLocusObservations {
             region: region(100, 100),
             reference_bases: Box::from(&b"A"[..]),
-            observed_sequences: vec![ObservedSequence {
+            observations: vec![SequenceObservation {
                 bases: Box::from(&b"T"[..]),
-                read_coverage: ReadCoverage::Complete,
+                read_witness: ReadWitness::Complete,
                 read_group: ReadGroupId(0),
                 num_obs: 9,
                 num_fwd: 5,
@@ -1283,12 +1363,12 @@ mod tests {
             kind: LocusKind::Generic,
         };
         assert_eq!(generic.region.len(), 1);
-        assert_eq!(generic.observed_sequences[0].num_obs, 9);
+        assert_eq!(generic.observations[0].num_obs, 9);
 
         let ssr = SampleLocusObservations {
             region: region(10_442, 10_461),
             reference_bases: Box::from(&b"ATATATATATATATATATAT"[..]),
-            observed_sequences: Vec::new(),
+            observations: Vec::new(),
             reads_without_observation: 3,
             reads_discarded_by_cap: 0,
             kind: LocusKind::Ssr(SsrDetail {
@@ -1298,13 +1378,13 @@ mod tests {
             }),
         };
         // Zero coverage is a real observation: the locus exists with an empty table.
-        assert!(ssr.observed_sequences.is_empty());
+        assert!(ssr.observations.is_empty());
         assert!(matches!(ssr.kind, LocusKind::Ssr(_)));
 
         let bundle = SampleLocusObservations {
             region: region(200, 260),
             reference_bases: Box::from(&b"N"[..]),
-            observed_sequences: Vec::new(),
+            observations: Vec::new(),
             reads_without_observation: 0,
             reads_discarded_by_cap: 0,
             kind: LocusKind::SsrBundle,
@@ -1313,13 +1393,13 @@ mod tests {
     }
 
     /// A complete and a partial observation of the *same* bases are distinct evidence,
-    /// so they must not compare equal — the property the `(bases, read_coverage)`
+    /// so they must not compare equal — the property the `(bases, read_witness)`
     /// dedup key rests on (spec §3).
     #[test]
-    fn same_bases_differ_by_read_coverage() {
-        let complete = ObservedSequence {
+    fn same_bases_differ_by_read_witness() {
+        let complete = SequenceObservation {
             bases: Box::from(&b"ATATAT"[..]),
-            read_coverage: ReadCoverage::Complete,
+            read_witness: ReadWitness::Complete,
             read_group: ReadGroupId(0),
             num_obs: 1,
             num_fwd: 1,
@@ -1329,33 +1409,36 @@ mod tests {
             placed_left: 0,
             chain_ids: Vec::new(),
         };
-        let partial = ObservedSequence {
-            read_coverage: ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+        let partial = SequenceObservation {
+            read_witness: ReadWitness::from_left(6, LocusLen::from_positions(6))
+                .expect("a run covering at least one position"),
             ..complete.clone()
         };
         assert_ne!(complete, partial);
-        assert_ne!(complete.read_coverage, partial.read_coverage);
+        assert_ne!(complete.read_witness, partial.read_witness);
     }
 
-    /// Depth derives correctly from read-coverage (spec §13.5): the vector has
+    /// Depth derives correctly from the read witness (spec §13.5): the vector has
     /// `region.len()` entries; a `Complete` raises every position, a left-flush run of
     /// `n` only the leftmost `n`, a right-flush run of `n` only the rightmost `n`. A
     /// 10-position locus with one complete (×3), one left-partial reaching 4 (×2), one
     /// right-partial reaching 3 (×5).
     #[test]
-    fn depth_derives_from_read_coverage() {
+    fn depth_derives_from_read_witness() {
         let l = locus(
             region(1, 10),
             vec![
-                obs(b"AAAAAAAAAA", ReadCoverage::Complete, 3),
+                obs(b"AAAAAAAAAA", ReadWitness::Complete, 3),
                 obs(
                     b"AAAA",
-                    ReadCoverage::from_left(4, LocusLen::from_positions(10)),
+                    ReadWitness::from_left(4, LocusLen::from_positions(10))
+                        .expect("a run covering at least one position"),
                     2,
                 ),
                 obs(
                     b"AAA",
-                    ReadCoverage::from_right(3, LocusLen::from_positions(10)),
+                    ReadWitness::from_right(3, LocusLen::from_positions(10))
+                        .expect("a run covering at least one position"),
                     5,
                 ),
             ],
@@ -1374,8 +1457,8 @@ mod tests {
         let l = locus(
             region(42, 42),
             vec![
-                obs(b"A", ReadCoverage::Complete, 7),
-                obs(b"T", ReadCoverage::Complete, 2),
+                obs(b"A", ReadWitness::Complete, 7),
+                obs(b"T", ReadWitness::Complete, 2),
             ],
         );
         assert_eq!(l.num_obs_along_locus(), vec![9]);
@@ -1407,92 +1490,40 @@ mod tests {
             region(1, 3),
             vec![obs(
                 b"AAA",
-                ReadCoverage::from_left(9, LocusLen::from_positions(3)),
+                ReadWitness::from_left(9, LocusLen::from_positions(3))
+                    .expect("a run covering at least one position"),
                 4,
             )],
         );
         assert_eq!(clamped.num_obs_along_locus(), vec![4, 4, 4]);
     }
 
-    /// **The constructors place the run against their own border**, and the offset is
-    /// derived from the *clamped* reach, never the raw one.
+    /// **The clamp in `num_obs_along_locus` is the guard, and this is the input that needs
+    /// it** — a witness whose runs reach past the locus *without* having come through a
+    /// constructor.
     ///
-    /// The right case is the one that matters: `from_right(4, 10)` must start at 6. Deriving
-    /// the offset before clamping would wrap on an over-long reach, and a saturating
-    /// subtraction would quietly relabel a right-anchored read as left-anchored — the
-    /// silent-depth failure this step was flagged for.
-    #[test]
-    fn from_right_places_the_run_against_the_right_border() {
-        assert_eq!(
-            ReadCoverage::from_left(4, LocusLen::from_positions(10)),
-            ReadCoverage::Observed {
-                offset_in_locus: 0,
-                positions_covered: 4
-            }
-        );
-        assert_eq!(
-            ReadCoverage::from_right(4, LocusLen::from_positions(10)),
-            ReadCoverage::Observed {
-                offset_in_locus: 6,
-                positions_covered: 4
-            }
-        );
-    }
-
-    /// **Once the reach covers the whole locus the two constructors agree** — a read that
-    /// witnessed every position is constrained from neither border, so there is one run and
-    /// not two.
+    /// The test above cannot reach it: `from_left(9, LocusLen(3))` is clamped by the
+    /// constructor, so the run arriving here is already `0..3` and deleting both `.min(len)`
+    /// calls leaves everything green (Milestone C review). That is exactly the gap the
+    /// clamp's own comment describes — `Partial`'s field is public and
+    /// `WitnessedLocusPositions` cannot know which locus it ends up attached to, so a run
+    /// need not have been clamped against *this* one.
     ///
-    /// Stated as a test because it is a real behaviour change, not a curiosity: on the STR
-    /// path an expanded allele can give a reach longer than the reference tract, and a
-    /// left-anchored and a right-anchored read of the *same bases* then land in the **same
-    /// tally cell** and merge into one row — where `PartialLeft(n)` and `PartialRight(n)`
-    /// kept them apart. See `ssr::tally::tests::an_expanded_allele_merges_the_two_sides`.
+    /// Unclamped, the first run indexes `depth[0..20]` on a 3-slot vector: a panic, in a
+    /// release build, on a derivation run over whole cohorts. The second run is past the
+    /// locus entirely and must contribute nothing rather than wrap.
     #[test]
-    fn from_left_and_from_right_agree_once_the_reach_covers_the_whole_locus() {
-        assert_eq!(
-            ReadCoverage::from_left(9, LocusLen::from_positions(3)),
-            ReadCoverage::Observed {
-                offset_in_locus: 0,
-                positions_covered: 3
-            }
-        );
-        assert_eq!(
-            ReadCoverage::from_right(9, LocusLen::from_positions(3)),
-            ReadCoverage::from_left(9, LocusLen::from_positions(3))
-        );
-    }
-
-    /// The flushness predicates — the **entire** surviving representation of
-    /// prefix-versus-suffix, since the reshape dropped the side-tagged variants.
-    ///
-    /// Both `Complete` arms are asserted here because no call site reaches them: every
-    /// `coverage_label` matches `Complete` first, so inverting either arm to `false` would
-    /// otherwise change nothing anywhere in the tree.
-    #[test]
-    fn flushness_is_derived_from_where_the_run_sits() {
-        assert!(ReadCoverage::Complete.is_flush_left());
-        assert!(ReadCoverage::Complete.is_flush_right(LocusLen::from_positions(10)));
-
-        let left = ReadCoverage::from_left(4, LocusLen::from_positions(10));
-        assert!(left.is_flush_left(), "a prefix constraint");
-        assert!(!left.is_flush_right(LocusLen::from_positions(10)));
-
-        let right = ReadCoverage::from_right(4, LocusLen::from_positions(10));
-        assert!(!right.is_flush_left());
-        assert!(
-            right.is_flush_right(LocusLen::from_positions(10)),
-            "a suffix constraint"
-        );
-
-        // An interior run — flush with neither border. The STR path cannot mint one, but the
-        // predicates are shared and the generic path will.
-        let interior = ReadCoverage::Observed {
-            offset_in_locus: 3,
-            positions_covered: 4,
+    fn depth_clamps_a_witness_that_reaches_past_the_locus_it_is_attached_to() {
+        let over_long = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 20), (40, 44)])
+                .expect("two runs, both overrunning a 3-position locus"),
         };
-        assert!(!interior.is_flush_left());
-        assert!(!interior.is_flush_right(LocusLen::from_positions(10)));
+        let l = locus(region(1, 3), vec![obs(b"AAA", over_long, 4)]);
+        assert_eq!(
+            l.num_obs_along_locus(),
+            vec![4, 4, 4],
+            "the first run is cut at the locus's end and the second falls outside it",
+        );
     }
 
     /// Depth over an **interior** run — flush with neither border. This is the case the
@@ -1501,20 +1532,32 @@ mod tests {
     /// it is also the only one where an off-by-one in the arm is purely silent.
     #[test]
     fn depth_over_an_interior_run_raises_only_the_witnessed_stretch() {
-        let l = locus(
-            region(1, 10),
-            vec![obs(
-                b"AAAA",
-                ReadCoverage::Observed {
-                    offset_in_locus: 3,
-                    positions_covered: 4,
-                },
-                7,
-            )],
-        );
+        let l = locus(region(1, 10), vec![obs(b"AAAA", partial_run(3, 4), 7)]);
         // positions: 1  2  3  4  5  6  7  8  9 10
         //            .  .  .  7  7  7  7  .  .  .
         assert_eq!(l.num_obs_along_locus(), vec![0, 0, 0, 7, 7, 7, 7, 0, 0, 0]);
+    }
+
+    /// **Depth over a witness with a hole raises the runs and not the gap** — the derivation
+    /// C2's set exists for, and the one number that says whether the hole survived the trip
+    /// from the fold to a depth profile.
+    ///
+    /// A spliced read witnessing positions 1–3 and 8–10 of a ten-position locus must leave
+    /// 4–7 at zero. Summing over the extent that *encloses* its runs raises all ten instead,
+    /// which is the read being credited with an intron it never sequenced — no panic, no
+    /// clamp, just a depth that is 60 % too wide. That mutation is what this test fails
+    /// under; nothing else in the suite notices it, because every witness the fold mints
+    /// before C3 has one run and the two readings agree on those.
+    #[test]
+    fn depth_over_a_witness_with_a_hole_leaves_the_hole_at_zero() {
+        let spliced = ReadWitness::Partial {
+            positions: WitnessedLocusPositions::from_half_open_runs([(0, 3), (7, 10)])
+                .expect("two runs"),
+        };
+        let l = locus(region(1, 10), vec![obs(b"AAACCC", spliced, 5)]);
+        // positions: 1  2  3  4  5  6  7  8  9 10
+        //            5  5  5  .  .  .  .  5  5  5
+        assert_eq!(l.num_obs_along_locus(), vec![5, 5, 5, 0, 0, 0, 0, 5, 5, 5]);
     }
 
     /// `complete_observations()` yields only the complete entries — the guard that a
@@ -1524,16 +1567,18 @@ mod tests {
         let l = locus(
             region(1, 6),
             vec![
-                obs(b"ATATAT", ReadCoverage::Complete, 4),
+                obs(b"ATATAT", ReadWitness::Complete, 4),
                 obs(
                     b"ATATAT",
-                    ReadCoverage::from_left(6, LocusLen::from_positions(6)),
+                    ReadWitness::from_left(6, LocusLen::from_positions(6))
+                        .expect("a run covering at least one position"),
                     2,
                 ),
-                obs(b"ATGTAT", ReadCoverage::Complete, 3),
+                obs(b"ATGTAT", ReadWitness::Complete, 3),
                 obs(
                     b"ATAT",
-                    ReadCoverage::from_right(4, LocusLen::from_positions(6)),
+                    ReadWitness::from_right(4, LocusLen::from_positions(6))
+                        .expect("a run covering at least one position"),
                     1,
                 ),
             ],

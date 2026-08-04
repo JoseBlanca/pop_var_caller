@@ -247,6 +247,48 @@ pub const DEFAULT_MAX_STR_LEN: u64 = 100;
 /// output.
 pub const DEFAULT_WINDOW_BP: u64 = 100_000;
 
+impl TypedRegionConfig {
+    /// The scanner's weights with its **emission floor raised to the weakest floor the
+    /// consumer applies** — the copy floor `prefilter` will impose anyway, hoisted into
+    /// the detector so the intervals that cannot survive it are never materialised.
+    ///
+    /// **⚠ This is safe only on the path that pre-filters, and it is deliberately not applied
+    /// anywhere else.** `ScannedWindow::detections` has a second reader:
+    /// [`RegionScanner`](crate::ng::tandem_repeat::RegionScanner) consumes the **raw**
+    /// detections with no copy floor at all, so raising the floor underneath *it* would drop
+    /// tracts from its output. Only [`TypedRegionIterator::advance`] calls this, and
+    /// `partition_resident` deliberately still scans un-raised — which is also what makes it
+    /// an independent oracle for the streaming path. **Do not "tidy" this by moving the raised
+    /// floor into `scan_window` or into `TypedRegionConfig::scan` itself**; that would silently
+    /// change what `RegionScanner` emits.
+    ///
+    /// **Output-neutral on this path, and provably so.** Here `prefilter` is the only reader
+    /// of the detections (`absorb` takes the *cleaned* set), so the question is only whether
+    /// removing a below-`F` interval `a` can change the *cleaned* set. Two ways it could, and
+    /// neither can:
+    ///
+    /// - it is itself dropped — `prefilter` drops it too, `F` being the minimum over the
+    ///   scanned period range;
+    /// - it stops **eliminating** some longer-period `iv` in the redundancy post-pass — but
+    ///   elimination needs `2·len(a) >= len(iv)` (`tandem_repeat.rs`, the `(a.end - a.start) *
+    ///   2 < iv_len` skip), and `copies(a) < F` gives `len(a) < F·q`, so `len(iv) < 2F·q`; the
+    ///   post-pass only considers **proper divisors** of `iv.period`, so `p >= 2q`, giving
+    ///   `copies(iv) = len(iv)/p < F` — and `prefilter` drops the survivor anyway.
+    ///
+    /// Pinned by `raising_the_scan_floor_cannot_change_the_prefiltered_set`.
+    fn effective_scan(&self) -> ScanParams {
+        let periods = self.criteria.periods;
+        let floor = (periods.min()..=periods.max())
+            .map(|p| self.criteria.min_copies.for_period(p))
+            .min()
+            .unwrap_or(0);
+        ScanParams {
+            min_copies: self.scan.min_copies.max(floor),
+            ..self.scan
+        }
+    }
+}
+
 impl Default for TypedRegionConfig {
     fn default() -> Self {
         Self {
@@ -1023,7 +1065,12 @@ impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
             plan.fetched.end - plan.fetched.start,
             bases,
         )?;
-        let window = scan_window(plan, bases, config.criteria.periods, &config.scan);
+        let window = scan_window(
+            plan,
+            bases,
+            config.criteria.periods,
+            &config.effective_scan(),
+        );
 
         // 2. Clean. **Over the whole fetched slice, margins included**, which is what
         //    makes the verdict the resident one: redundancy elimination is a neighbour
@@ -2719,6 +2766,100 @@ mod tests {
     /// against a 6 kb contig — genuinely windowed, which a small fixture would not be:
     /// with the 1 kb margin, a contig under ~2 kb is fetched whole every time and every
     /// window-invariance assertion passes for free.
+    /// **The safety argument for `effective_scan` made checkable.** Raising the scanner's
+    /// copy floor to the weakest floor `prefilter` applies must not change the *prefiltered*
+    /// set — including through the redundancy post-pass, where a dropped short interval could
+    /// in principle stop eliminating a longer-period one.
+    ///
+    /// Five fixtures with different structure, because the post-pass only fires where a tract
+    /// has a period-multiple re-detection, and a fixture without one would pass whatever the
+    /// floor was.
+    #[test]
+    fn raising_the_scan_floor_cannot_change_the_prefiltered_set() {
+        let config = catalog_config();
+        let raised = config.effective_scan();
+        assert!(
+            raised.min_copies > config.scan.min_copies,
+            "the fixture must actually raise the floor, or this test proves nothing \
+             (scan {} -> {})",
+            config.scan.min_copies,
+            raised.min_copies
+        );
+
+        for (name, bases) in [
+            ("micro_repeats", contig_with_two_copy_micro_repeats()),
+            ("micro_plus_long", {
+                let mut b = contig_with_two_copy_micro_repeats();
+                b[1000..1040].copy_from_slice(&b"AT".repeat(20));
+                b[2000..2036].copy_from_slice(&b"ACG".repeat(12));
+                b
+            }),
+        ] {
+            let unraised = find_tandem_repeats(&bases, config.criteria.periods, &config.scan);
+            let hoisted = find_tandem_repeats(&bases, config.criteria.periods, &raised);
+
+            assert!(
+                unraised.len() > hoisted.len(),
+                "{name}: the raise must remove *something* from the raw set, \
+                 or the fixture does not exercise the hoist ({} vs {})",
+                unraised.len(),
+                hoisted.len()
+            );
+            assert_eq!(
+                segment_criteria::prefilter(&unraised, &config.criteria),
+                segment_criteria::prefilter(&hoisted, &config.criteria),
+                "{name}: the prefiltered set changed, so the hoist is not output-neutral"
+            );
+        }
+    }
+
+    /// Short repeats — **exactly two copies** of each period the catalog scans — scattered
+    /// through non-repetitive filler.
+    ///
+    /// These are the intervals the hoist exists to stop materialising: the scanner's own floor
+    /// is 2 copies, the weakest floor `prefilter` applies is 3, so every one of these is
+    /// detected and then immediately discarded. A fixture built only from long clean tracts
+    /// (which is what the other helpers here produce) contains none of them and would let the
+    /// neutrality test pass without exercising anything.
+    fn contig_with_two_copy_micro_repeats() -> Vec<u8> {
+        let mut bases = filler(6000);
+        let motifs: [&[u8]; 5] = [b"AT", b"ACG", b"ACGT", b"ACGTA", b"ACGTAC"];
+        // Spaced far enough apart that each is its own detection rather than one cluster.
+        for (i, motif) in motifs.iter().enumerate() {
+            let two = motif.repeat(2);
+            let off = 3000 + i * 200;
+            bases[off..off + two.len()].copy_from_slice(&two);
+        }
+        bases
+    }
+
+    /// **The positive control for the test above.** Raising the floor *past* what the
+    /// consumer applies does change the prefiltered set — so the comparison is capable of
+    /// failing, and a green result above is evidence rather than a tautology.
+    #[test]
+    fn raising_the_scan_floor_too_far_does_change_the_prefiltered_set() {
+        let config = catalog_config();
+        let bases = contig_with_two_copy_micro_repeats();
+
+        let honest = find_tandem_repeats(&bases, config.criteria.periods, &config.effective_scan());
+        let too_high = find_tandem_repeats(
+            &bases,
+            config.criteria.periods,
+            &ScanParams {
+                // One copy above the weakest consumer floor: the smallest overreach there is.
+                min_copies: config.effective_scan().min_copies + 1,
+                ..config.scan
+            },
+        );
+
+        assert_ne!(
+            segment_criteria::prefilter(&honest, &config.criteria),
+            segment_criteria::prefilter(&too_high, &config.criteria),
+            "raising past the consumer floor must be detectable, or the neutrality test \
+             above cannot fail and proves nothing"
+        );
+    }
+
     fn windowing_fixture() -> Vec<u8> {
         let mut bases = filler(6000);
         let mut tract_at = |off: usize| {
@@ -3605,7 +3746,7 @@ mod tests {
             }
         }
         impl EvictableRefSeq for FailsLate {
-            fn evict_before(&mut self, _pos: u64) {}
+            fn evict_before(&self, _pos: u64) {}
         }
 
         let bases = windowing_fixture();
@@ -3682,7 +3823,7 @@ mod tests {
             }
         }
         impl EvictableRefSeq for EvictionSpy {
-            fn evict_before(&mut self, pos: u64) {
+            fn evict_before(&self, pos: u64) {
                 self.evictions.borrow_mut().push(pos);
             }
         }

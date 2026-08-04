@@ -2,6 +2,15 @@
 //! walker's position, plus a secondary `read_id → vec_index` map
 //! for O(1) mate lookup. See `ia/specs/pileup_walker.md` §"Active
 //! read table" and §"Active-set bookkeeping".
+//!
+//! **Released from `copy_fidelity.rs` at D2** — this file is no longer
+//! byte-for-byte production's. What ng added: [`ActiveRead::ever_contributed`]
+//! and the [`ActiveReads::silent_exits`] tally it feeds, which is what makes
+//! `reads_silent_over_footprint` countable (spec §6, plan D2). Everything else
+//! is still the transcription, and the release table in `copy_fidelity.rs`'s
+//! header is the record.
+
+use std::cell::Cell;
 
 use ahash::AHashMap;
 
@@ -26,6 +35,30 @@ pub struct ActiveRead {
     /// admitted. Filled by the active-set admission code on the
     /// second-mate path.
     pub mate_read_id: Option<u32>,
+    /// **ng's, added by D2** — whether this read has ever been a
+    /// contributor at any position, which is what makes
+    /// `reads_silent_over_footprint` countable.
+    ///
+    /// A read every one of whose bases is `N` or adaptor-masked is
+    /// admitted, walked past, and expires without appearing in a
+    /// single contributor list. It is therefore invisible to *both*
+    /// per-locus counters — it produced no observation, but it never
+    /// reached the fold that would have recorded it in
+    /// `reads_without_observation` either (spec §6) — so before this
+    /// flag the only honest thing to say about such a read was
+    /// nothing.
+    ///
+    /// A [`Cell`] because the contributor loop walks the active set
+    /// through `iter()` (`&self`), and taking that loop to `&mut`
+    /// would put a mutable borrow of the whole set across the
+    /// cursor queries it makes. One `bool` of interior mutability is
+    /// the smaller change, and the walk is single-threaded (`locus_generation.md` §9).
+    ///
+    /// **Set before the depth cap, deliberately.** A read the cap
+    /// truncates *was* a contributor; it belongs in
+    /// `reads_discarded_by_cap`, and counting it as silent as well
+    /// would say a read the walk saw plainly was never there.
+    pub ever_contributed: Cell<bool>,
 }
 
 #[derive(Debug)]
@@ -41,6 +74,20 @@ pub struct ActiveReads {
     /// Wrap is not a concern at any realistic input size (`u32`
     /// covers 4 billion reads).
     next_read_id: u32,
+    /// **ng's, added by D2** — reads that left the active set having
+    /// never been a contributor at any position.
+    ///
+    /// Counted here rather than in the walker because this is where a
+    /// read *leaves*: both exits ([`expire_passed`](Self::expire_passed)
+    /// and [`flush_all`](Self::flush_all)) go through one place each,
+    /// and a tally kept outside would have to be told about both.
+    ///
+    /// **Two resets, and they disagree about this field on purpose.** It survives
+    /// [`reset`](Self::reset), the chromosome-boundary one, like `next_read_id`. It is
+    /// **zeroed** by [`begin_region`](Self::begin_region), because
+    /// `PileupGeneratorCounts::fold_region_walk` sums it region by region and a walker now
+    /// lives long enough to be asked twice.
+    silent_exits: u64,
 }
 
 impl ActiveReads {
@@ -49,16 +96,63 @@ impl ActiveReads {
             reads: Vec::new(),
             by_read_id: AHashMap::new(),
             next_read_id: 0,
+            silent_exits: 0,
         }
     }
 
+    /// Reads that left having never contributed anywhere — the run total, current at
+    /// any point (ng's; see [`silent_exits`](Self::silent_exits)).
+    pub fn silent_exits(&self) -> u64 {
+        self.silent_exits
+    }
+
     /// Reset all in-flight state. Called at chromosome boundaries.
+    ///
+    /// `silent_exits` survives, like `next_read_id`: it is a run total the walker reads
+    /// into its summary. The reads themselves are always already gone — every caller
+    /// runs [`flush_all`](Self::flush_all) first, which is where they are tallied — and
+    /// the assertion says so, because clearing an occupied set here would drop those
+    /// reads without counting them.
     pub fn reset(&mut self) {
+        debug_assert!(
+            self.reads.is_empty(),
+            "reset() cleared {} reads that never went through flush_all, so their \
+             silent-exit tally was lost",
+            self.reads.len(),
+        );
         self.reads.clear();
         self.by_read_id.clear();
         // next_read_id keeps advancing — read ids stay unique
         // across the whole run, which makes log messages
         // unambiguous.
+    }
+
+    /// Start a fresh region's walk in this set — **ng's, D1.**
+    ///
+    /// A walker that lives for a chromosome reuses one active set across every region on
+    /// it, where a walker rebuilt per region got a brand-new one. This puts the set back
+    /// into the state that brand-new one had, keeping only the allocated capacity.
+    ///
+    /// **It differs from [`reset`](Self::reset) in the two fields that one deliberately
+    /// preserves, and both differences matter.**
+    ///
+    /// - `silent_exits` is zeroed. It is documented there as a *run* total, which was true
+    ///   while a run and a region were the same thing for this type;
+    ///   `PileupGeneratorCounts::fold_region_walk` sums it **per region**, so a set that
+    ///   carried it across regions would triangular-sum it by the region count.
+    /// - `next_read_id` is zeroed, because a per-region walker restarted it at zero and the
+    ///   ids are region-scoped anyway — `by_read_id` and the mate cross-links never outlive
+    ///   the region that made them, and no id reaches an emitted locus.
+    ///
+    /// **There is no emptiness assertion, unlike `reset`.** A region can be abandoned
+    /// mid-walk — `begin_segment` on a half-drained one — leaving reads in the set that
+    /// never went through `flush_all`. Dropping them uncounted is exactly what dropping the
+    /// per-region walker did, so this reproduces it rather than reporting it.
+    pub fn begin_region(&mut self) {
+        self.reads.clear();
+        self.by_read_id.clear();
+        self.next_read_id = 0;
+        self.silent_exits = 0;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -125,6 +219,7 @@ impl ActiveReads {
             cursor,
             chain_id,
             mate_read_id: partner_read_id,
+            ever_contributed: Cell::new(false),
         };
 
         let new_index = self.reads.len();
@@ -169,6 +264,7 @@ impl ActiveReads {
                 // whose `seen_at` is past the window.
                 let chrom_id = self.reads[i].read.chrom_id;
                 chain_ids.note_read_exit(chrom_id, walker_pos)?;
+                self.note_exit(i);
                 self.swap_remove(i);
             }
         }
@@ -194,9 +290,23 @@ impl ActiveReads {
             // here.
             let chrom_id = active.read.chrom_id;
             chain_ids.note_read_exit(chrom_id, walker_pos)?;
+            if !active.ever_contributed.get() {
+                self.silent_exits += 1;
+            }
         }
         self.by_read_id.clear();
         Ok(())
+    }
+
+    /// **ng's, added by D2** — tally a read leaving at `idx` that never contributed.
+    ///
+    /// Separate from [`swap_remove`](Self::swap_remove) rather than folded into it,
+    /// because `swap_remove` is also the index-maintenance routine and a tally hidden
+    /// inside it would fire on any future caller that merely *moves* a read.
+    fn note_exit(&mut self, idx: usize) {
+        if !self.reads[idx].ever_contributed.get() {
+            self.silent_exits += 1;
+        }
     }
 
     fn swap_remove(&mut self, idx: usize) {

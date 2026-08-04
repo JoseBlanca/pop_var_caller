@@ -2,10 +2,17 @@
 //! context (qname, chromosome, position) to point at the offending
 //! input from the error alone, per `ia/specs/design_principles.md`
 //! principle 6 ("typed errors at module boundaries").
+//!
+//! **No longer a verbatim copy — A0 (plan 3).** Copied from
+//! `src/pileup/walker/errors.rs`, then changed in exactly one place:
+//! [`WalkerError::Fasta`]'s source is ng's [`RefSeqError`], because ng's walker
+//! fetches through [`RefSeq`](crate::ng::ref_seq::RefSeq) rather than through
+//! production's `MultiChromRefFetcher`. `copy_fidelity.rs` released this file in
+//! that commit; everything else here is still production's, line for line.
 
 use thiserror::Error;
 
-use crate::fasta::ChromRefFetchError;
+use crate::ng::ref_seq::RefSeqError;
 
 #[derive(Error, Debug)]
 #[non_exhaustive]
@@ -71,7 +78,7 @@ pub enum WalkerError {
         start: u32,
         start_plus_len: u32,
         #[source]
-        source: ChromRefFetchError,
+        source: RefSeqError,
     },
 
     #[error(

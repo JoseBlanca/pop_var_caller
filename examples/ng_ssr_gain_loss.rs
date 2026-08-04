@@ -23,7 +23,7 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::alignment::ssr_unit_robust::SsrUnitRobustAligner;
 use pop_var_caller::ng::locus_generation::LocusGenerator;
-use pop_var_caller::ng::locus_generation::ReadCoverage;
+use pop_var_caller::ng::locus_generation::ReadWitness;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
@@ -32,7 +32,7 @@ use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
 use pop_var_caller::ng::types::{Bp, ContigId};
@@ -125,15 +125,15 @@ fn oracle(read: &[u8], left_flank: &[u8], right_flank: &[u8]) -> Truth {
     }
 }
 
-fn is_complete(o: &Option<(ReadCoverage, Vec<u8>)>) -> bool {
-    matches!(o, Some((ReadCoverage::Complete, _)))
+fn is_complete(o: &Option<(ReadWitness, Vec<u8>)>) -> bool {
+    matches!(o, Some((ReadWitness::Complete, _)))
 }
-fn is_partial(o: &Option<(ReadCoverage, Vec<u8>)>) -> bool {
-    matches!(o, Some((ReadCoverage::Observed { .. }, _)))
+fn is_partial(o: &Option<(ReadWitness, Vec<u8>)>) -> bool {
+    matches!(o, Some((ReadWitness::Partial { .. }, _)))
 }
-fn measured_len(o: &Option<(ReadCoverage, Vec<u8>)>) -> Option<usize> {
+fn measured_len(o: &Option<(ReadWitness, Vec<u8>)>) -> Option<usize> {
     match o {
-        Some((ReadCoverage::Complete, b)) => Some(b.len()),
+        Some((ReadWitness::Complete, b)) => Some(b.len()),
         _ => None,
     }
 }
@@ -143,10 +143,7 @@ fn make_gen<A: RepeatDelimiter>(
     contigs: &ContigList,
     aligner: A,
     bundle: Bp,
-) -> Result<
-    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<SsrGenerator<WindowedRefSeq, A>, Box<dyn std::error::Error>> {
     Ok(SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {
@@ -238,7 +235,11 @@ fn run(
     contig_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) = read_reference_verifying_or_creating_fai(
+        &cache,
+        fasta.to_path_buf(),
+        ReferenceCheck::VerifyAgainstIndex,
+    )?;
     let contigs = info.contig_list();
     // One reference for every file this run opens — and so one copy of the bases.
     let reference = OpenReference::new(info);

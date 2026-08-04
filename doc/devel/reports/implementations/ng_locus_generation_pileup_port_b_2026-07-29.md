@@ -240,6 +240,15 @@ coverage it had none of.
    the spec, the arch doc's file inventory, and whether `RefSeqFetcher` should be renamed and moved.
    None blocks plan 3.
 
+   > **All four are closed as of 2026-07-30, and plan 2 now carries nothing.** Three were answered
+   > together in `f749ed5` — no banner (with the reason recorded in `copy_fidelity.rs`, where the
+   > question arises), the count corrected to 113 in all five places, and the *Module home*
+   > inventory fixed (and fixed again in `155ea31`, which found it had drifted further at every
+   > milestone since). The fourth was answered by **deletion** rather than by a rename: plan 3's A0
+   > (`da778ab`) removed `RefSeqFetcher` entirely, because an adapter that exists only to make ng's
+   > copies speak production's signatures has nothing to adapt once the two walkers diverge on
+   > purpose.
+
 ## 9. What Checkpoint B hands to plan 3
 
 - **The baseline is banked.** 1.4 M synthetic records and 437 k real ones, zero divergences, over a

@@ -9,13 +9,32 @@
 //! tick may emit 0, 1, or many records; the iterator buffers them
 //! in a small `VecDeque` and drains across successive `next()`
 //! calls.
+//!
+//! **No longer a verbatim copy — released from `copy_fidelity.rs` at A0 (plan 3),
+//! and it has diverged since.** Copied from `src/pileup/walker/driver.rs`, then:
+//!
+//! - **A0:** the reference accessor is bound by ng's [`RefSeq`] rather than
+//!   production's `MultiChromRefFetcher`, and the field and parameters carrying
+//!   it are named `reference` rather than `ref_fetcher` — there is no fetcher
+//!   any more.
+//! - **C2 (plan 3):** `stop_after`, the region walk's right bound.
+//! - **C3 (plan 3):** `adopting_chain_ids` / `into_chain_ids`, because ng lends
+//!   the allocator rather than owning it.
+//! - **D1 (the alignment cursor):** [`LookAhead`] in place of `Peekable`,
+//!   [`RegionReadSource`], [`PileupWalker::move_to_region`] and
+//!   [`WalkerState::begin_region`] — a walker now lives for a chromosome and is
+//!   pointed at each of its regions in turn, where production builds one per
+//!   chromosome and ng used to build one per region.
+//!
+//! The per-position walk itself — admit, process, expire, close, advance — is
+//! still the transcription.
 
 use std::collections::VecDeque;
-use std::iter::Peekable;
 
-use ahash::AHashMap;
+use crate::pileup_record::ChainId;
 
-use crate::pileup_record::{ChainId, PileupRecord};
+use crate::ng::locus_generation::SampleLocusObservations;
+use crate::ng::types::GenomeRegion;
 
 use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
@@ -25,7 +44,7 @@ use super::open_record::{
     OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
 };
 use super::{PreparedRead, ReadLengthError, WalkerConfig};
-use crate::fasta::MultiChromRefFetcher;
+use crate::ng::ref_seq::RefSeq;
 
 /// Construct a [`PileupWalker`] over a coordinate-sorted stream of
 /// prepared reads. The walker is an `Iterator<Item = Result<PileupRecord,
@@ -38,12 +57,118 @@ use crate::fasta::MultiChromRefFetcher;
 /// have `(chrom_id, alignment_start)` non-decreasing relative to
 /// the previous one. A regression is a hard error — stale or
 /// malformed input shouldn't pass silently.
-pub fn run<R, F>(reads: R, ref_fetcher: F, config: &WalkerConfig) -> PileupWalker<R::IntoIter, F>
+pub fn run<R, F>(reads: R, reference: F, config: &WalkerConfig) -> PileupWalker<R::IntoIter, F>
 where
     R: IntoIterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    PileupWalker::new(reads.into_iter(), ref_fetcher, config)
+    PileupWalker::new(reads.into_iter(), reference, config)
+}
+
+/// A read source a walk can be pointed at one region after another — **ng's, D1.**
+///
+/// The walker's ordinary source is a plain `Iterator<Item = PreparedRead>` and stays one:
+/// production's walk, the stage-1 differential and every unit test hand it a list, and none
+/// of them has a region to be pointed at. This is the extra thing a *long-lived* walker
+/// needs, so it is a separate trait bounding one method rather than a bound on the walker.
+///
+/// Fallible, with the error left to the implementor: repositioning reaches a file, and the
+/// walker consumes an infallible item type, so an error met here has nowhere to go except
+/// back to the caller that asked for the region.
+pub trait RegionReadSource: Iterator<Item = PreparedRead> {
+    /// What repositioning can fail with.
+    type Error;
+
+    /// Point the source at `region`. Every subsequent read belongs to it.
+    ///
+    /// # An implementor must **replay**, and this is not a detail
+    ///
+    /// A read this source has already handed out **must be offered again** to any later
+    /// region that overlaps it. Consecutive regions overlap by design — each is asked for a
+    /// halo past its end while the next is asked from its own start — so a source that
+    /// consumed each read once would be short by every read that straddles a boundary.
+    ///
+    /// The walker relies on this in a way that is invisible from the outside: it holds one
+    /// read of look-ahead, and [`move_to_region`](PileupWalker::move_to_region) *throws that
+    /// look-ahead away* rather than carrying a previous region's read into the next region's
+    /// walk. That read is not lost only because this method will offer it again.
+    ///
+    /// A source that does not replay therefore drops one read per region boundary, and it
+    /// drops it **silently**: no error, no counter, just a genotype computed from less
+    /// evidence than the file holds. The first attempt at this feature lost 3,830 of 236,081
+    /// loci while all 1,471 unit tests passed (`spec/alignment_cursor.md` §6, §11).
+    ///
+    /// [`AlignmentCursor`](crate::ng::read::input::cursor::AlignmentCursor) honours this: it
+    /// keeps every read it decodes and evicts one only once it ends before the current
+    /// region begins.
+    fn move_to_region(&mut self, region: GenomeRegion) -> Result<(), Self::Error>;
+}
+
+/// A read source with one read of look-ahead, and a way to throw that look-ahead away.
+///
+/// **`Peekable` cannot do the second, and the second is what D1 needs.** The walk decides
+/// where to advance to by looking at the next read without taking it. While a walker is
+/// rebuilt per region that look-ahead is discarded along with the walker, so `Peekable` was
+/// enough; a walker that stays alive across regions has to be able to drop it deliberately,
+/// or it carries the previous region's peeked read into the next one's walk.
+///
+/// Behaviourally identical to `Peekable` today — every existing walk exercises it, and the
+/// stage-1 differential and both dumps agree byte for byte. `forget_lookahead` is the one
+/// thing it adds, and it is unused until the walker is pointed at a second region.
+///
+/// **Throwing the look-ahead away will lose no read, but only because of what sits
+/// underneath**: a cursor keeps every read it hands out, so the next region is offered it
+/// again. Against a source that does not keep its reads, discarding it would discard a read —
+/// which is why this type is not offered as a general utility.
+struct LookAhead<I: Iterator<Item = PreparedRead>> {
+    inner: I,
+    peeked: Option<PreparedRead>,
+}
+
+impl<I: Iterator<Item = PreparedRead>> LookAhead<I> {
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            peeked: None,
+        }
+    }
+
+    fn peek(&mut self) -> Option<&PreparedRead> {
+        if self.peeked.is_none() {
+            self.peeked = self.inner.next();
+        }
+        self.peeked.as_ref()
+    }
+
+    fn next(&mut self) -> Option<PreparedRead> {
+        match self.peeked.take() {
+            Some(read) => Some(read),
+            None => self.inner.next(),
+        }
+    }
+
+    /// Drop the look-ahead, so the next `peek` asks the source again.
+    fn forget_lookahead(&mut self) {
+        self.peeked = None;
+    }
+}
+
+impl<I: RegionReadSource> LookAhead<I> {
+    /// Point the source at `region`, **throwing the look-ahead away first**.
+    ///
+    /// The order is the whole reason this type exists. A read peeked but not taken was
+    /// pulled for the region being left; carried into the next one it would be admitted
+    /// first, ahead of reads that begin before it, and the walk would reject its own input
+    /// as out of order — or worse, not.
+    ///
+    /// **Discarding it loses no read, and only because of what sits underneath**: a cursor
+    /// keeps every read it hands out and offers it again to the next region that can use it
+    /// (`spec/alignment_cursor.md` §6). Against a source that does not, this would discard a
+    /// read, which is why `LookAhead` is not offered as a general utility.
+    fn move_to_region(&mut self, region: GenomeRegion) -> Result<(), I::Error> {
+        self.forget_lookahead();
+        self.inner.move_to_region(region)
+    }
 }
 
 /// Pull-shaped walker over a coordinate-sorted stream of prepared
@@ -51,30 +176,47 @@ where
 pub struct PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    reads: Peekable<I>,
-    ref_fetcher: F,
+    reads: LookAhead<I>,
+    reference: F,
     state: WalkerState,
     /// Records produced by walker ticks but not yet consumed by
     /// `Iterator::next`. A single tick may emit 0–many records
     /// (e.g. a wide deletion at an earlier anchor unblocks several
     /// narrower records simultaneously); they're appended here in
     /// emission order and drained via `pop_front`.
-    pending: VecDeque<PileupRecord>,
+    pending: VecDeque<SampleLocusObservations>,
     /// `true` once end-of-input has been flushed *or* a `next()`
     /// call has returned an error. Both terminal states stop the
     /// iterator from doing further work.
     done: bool,
+    /// The last position worth walking, or `None` for production's
+    /// unbounded walk — **ng's addition, C2 (plan 3).**
+    ///
+    /// A region walk queries a halo of `max_record_span` past the region's
+    /// end, so a record anchored inside the region still sees the reads that
+    /// fold into it from beyond the boundary (spec §2). Querying the halo is
+    /// not enough: the walk has no right bound of its own, so it would walk
+    /// all 5,000 halo positions at full depth, finalise every record in them
+    /// and throw them away at the region clamp — a tax that, with regions
+    /// tiling the genome, can exceed the region interiors.
+    ///
+    /// So the walk stops once it is past this position **and nothing anchored
+    /// at or before it is still open**. The second half is what makes the stop
+    /// safe rather than merely early: a record anchored inside the region can
+    /// have a footprint running far past the boundary, and it is not finished
+    /// until the walker has passed all of it.
+    stop_after: Option<u32>,
 }
 
 impl<I, F> PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    pub fn new(reads: I, ref_fetcher: F, config: &WalkerConfig) -> Self {
-        let mut reads = reads.peekable();
+    pub fn new(reads: I, reference: F, config: &WalkerConfig) -> Self {
+        let mut reads = LookAhead::new(reads);
         let mut state = WalkerState::new(*config);
         // Initial chromosome anchor: the first peeked read sets
         // `chrom_id`, `walker_pos = 1`, and
@@ -86,11 +228,100 @@ where
         }
         Self {
             reads,
-            ref_fetcher,
+            reference,
             state,
             pending: VecDeque::new(),
             done: false,
+            stop_after: None,
         }
+    }
+
+    /// Walk with a chain-id allocator handed in from outside, replacing the one
+    /// [`new`](Self::new) built — **ng's addition, C3 (plan 3).**
+    ///
+    /// Production builds a walker per chromosome, so its allocator can be the
+    /// walker's own. ng walks one *region* at a time, and a fresh allocator per
+    /// region would give two fragments of two regions the same chain id, which a
+    /// later phasing step would chain together (spec §8). So the allocator lives
+    /// on the generator and is lent to each walk; [`into_chain_ids`](Self::into_chain_ids)
+    /// is how it comes back.
+    ///
+    /// Must be called before the walk starts — the walker is lazy, so "before
+    /// the first `next()`" is all that means, and the assert says so in the
+    /// build that can check it. Swapped in **mid-walk** it discards the ids
+    /// already issued for the reads still active, and the allocations they
+    /// represent go missing from the summary: one fragment, two identities,
+    /// which is the corruption a run-lifetime allocator exists to prevent
+    /// (review).
+    ///
+    /// `#[must_use]`, because a consuming builder called as a bare statement
+    /// compiles, discards the walker and adopts nothing.
+    #[must_use]
+    pub fn adopting_chain_ids(mut self, chain_ids: ChainIdAllocator) -> Self {
+        debug_assert!(
+            self.state.summary.reads_admitted == 0,
+            "adopting_chain_ids after {} reads: the ids already issued for the active reads \
+             would be discarded",
+            self.state.summary.reads_admitted,
+        );
+        self.state.chain_ids = chain_ids;
+        self
+    }
+
+    /// Take the chain-id allocator back out at the end of a region's walk, so
+    /// the next region continues the same `next_id` sequence.
+    ///
+    /// Consuming rather than swapping: a swap needs a placeholder allocator, and
+    /// a placeholder that starts at zero is exactly the state this exists to
+    /// avoid ever being in.
+    pub fn into_chain_ids(self) -> ChainIdAllocator {
+        self.state.chain_ids
+    }
+
+    /// The chain-id allocator's counters as they stand now — **ng's, D1.**
+    ///
+    /// The baseline a region's own contribution is measured against. A walker that lives
+    /// for a chromosome never lets go of the allocator between regions, so the caller can
+    /// no longer read the counters off the allocator it was about to lend; it reads them
+    /// through here instead, at the moment the region opens. See
+    /// `PileupGeneratorCounts::fold_region_walk` for what they are for and what goes wrong
+    /// without them.
+    pub fn chain_id_counters(&self) -> ChainIdAllocatorCounters {
+        self.state.chain_ids.counters()
+    }
+
+    /// The read source, for a caller that needs to ask it something — **ng's, D1.**
+    ///
+    /// A walker that lives for a chromosome swallows its source for that long, and the
+    /// source is where the cursor's tallies live. Without this the one thing that says
+    /// whether the cursor is *working* — reads decoded against reads replayed
+    /// (`spec/alignment_cursor.md` §11.5) — is unreachable from above, and the feature can
+    /// be switched off with every test still green. It was, in review.
+    ///
+    /// Shared, not mutable: repositioning goes through
+    /// [`move_to_region`](Self::move_to_region), which has a reset to run alongside it.
+    pub fn reads(&self) -> &I {
+        &self.reads.inner
+    }
+
+    /// Whether the walk has passed its right bound with nothing left that
+    /// could still belong to the region.
+    ///
+    /// **Both halves matter.** `walker_pos > stop` alone would cut a record
+    /// anchored inside the region short of its own footprint — the long
+    /// deletions the halo exists for are exactly the records still open here.
+    /// The open-record table is keyed by anchor, so "anything anchored at or
+    /// before `stop`" is its first key.
+    fn reached_stop(&self) -> bool {
+        let Some(stop) = self.stop_after else {
+            return false;
+        };
+        self.state.walker_pos > stop
+            && self
+                .state
+                .open_records
+                .first_open_anchor()
+                .is_none_or(|anchor| anchor > stop)
     }
 
     /// Cumulative counters for the run so far. Safe to call
@@ -105,6 +336,18 @@ where
     /// the remaining chromosome and sets `done = true`.
     fn fill_pending(&mut self) -> Result<(), WalkerError> {
         loop {
+            // Terminal condition (ng's, C2): the walk is past its right bound
+            // and nothing anchored at or before it is still open. Flushed the
+            // same way end-of-input is — the records still open are anchored
+            // past the bound, so the region clamp discards them, but they are
+            // emitted rather than dropped on the floor so the clamp can count
+            // them.
+            if self.reached_stop() {
+                self.state.flush_chromosome_into(&mut self.pending)?;
+                self.done = true;
+                return Ok(());
+            }
+
             // Terminal condition: no more reads to pull and the
             // active set is empty. Stopping at "reads empty" alone
             // would leak open records whose anchors sit ahead of
@@ -177,7 +420,7 @@ where
             // ordering also keeps the active-read count accurate
             // when an emitted record's footprint coincides with a
             // read's `alignment_end`.
-            self.state.process_position(&self.ref_fetcher)?;
+            self.state.process_position(&self.reference)?;
             self.state.expire_passed_reads()?;
             self.state.close_aged_records_into(&mut self.pending);
 
@@ -194,12 +437,60 @@ where
     }
 }
 
+impl<I, F> PileupWalker<I, F>
+where
+    I: RegionReadSource,
+    F: RefSeq,
+{
+    /// Point this walker at `region`, and stop the walk once it is past `stop_after` with
+    /// nothing anchored at or before that position still open — **ng's, D1.**
+    ///
+    /// This is what replaces building a walker per region. Everything scoped to the region
+    /// being left is thrown away and everything scoped to the *run* is kept, which is the
+    /// whole of the difficulty: see [`WalkerState::begin_region`] for the field-by-field
+    /// decision and for the one field that must survive.
+    ///
+    /// **`stop_after` is passed rather than derived from `region`.** The walk's right bound
+    /// and the span the source is pointed at are not the same coordinate — the caller asks
+    /// the source for a halo past the region so a record anchored inside it still sees the
+    /// reads that fold into it (`spec/alignment_cursor.md` §2), and then stops the walk at
+    /// the region's own end so the halo is not walked at full depth and thrown away. Which
+    /// span is which is the caller's to know; this type only needs the two numbers.
+    ///
+    /// **What the order here does and does not mean.** Both the reposition and the reset
+    /// must happen before the re-anchoring peek at the end, and they do. Which of the two
+    /// runs first is *not* load-bearing — an earlier version of this comment claimed the
+    /// reposition had to lead "because the reset re-anchors, and that means peeking", which
+    /// is untrue: the peek is after both. It leads because a source that cannot be
+    /// repositioned leaves the walker untouched, which is the smaller mess.
+    pub fn move_to_region(
+        &mut self,
+        region: GenomeRegion,
+        stop_after: u32,
+    ) -> Result<(), I::Error> {
+        self.reads.move_to_region(region)?;
+        self.state.begin_region();
+        // Records produced by the region being left and never collected. The per-region
+        // walker took them to the grave; so does this.
+        self.pending.clear();
+        self.done = false;
+        self.stop_after = Some(stop_after);
+        // The same anchor `new` takes, for the same reason: the first read's chromosome is
+        // where the walk starts. A region with no reads leaves the state `begin_region`
+        // set, which is what a freshly built walker over an empty source holds too.
+        if let Some(first) = self.reads.peek() {
+            self.state.enter_chrom(first.chrom_id);
+        }
+        Ok(())
+    }
+}
+
 impl<I, F> Iterator for PileupWalker<I, F>
 where
     I: Iterator<Item = PreparedRead>,
-    F: MultiChromRefFetcher,
+    F: RefSeq,
 {
-    type Item = Result<PileupRecord, WalkerError>;
+    type Item = Result<SampleLocusObservations, WalkerError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(record) = self.pending.pop_front() {
@@ -240,6 +531,38 @@ pub struct RunSummary {
     /// pathologically deep regions; QC pipelines may want to look
     /// at those samples / regions specifically.
     pub column_depth_truncations: u64,
+    /// **ng's, added by D2 — production's `RunSummary` has no counterpart.**
+    ///
+    /// Reads that were admitted and left the active set having never been a contributor
+    /// at any position: every base `N` or adaptor-masked, so the fold never heard of
+    /// them and *neither per-locus counter can see them* — they produced no observation,
+    /// but they also never reached the path that records `reads_without_observation`
+    /// (spec §6). Read off the active set, which is where a read leaves.
+    ///
+    /// Because production cannot state it, `parity.rs` binds this field by name and
+    /// drops it from the counter comparison; the exhaustive destructure there is what
+    /// forces that decision to be made rather than defaulted.
+    pub reads_silent_over_footprint: u64,
+    /// **ng's, and production has no counterpart** — folded reads whose witness is more
+    /// than one run, i.e. reads blind in the *middle* of a record's footprint. A spliced
+    /// read across a record widened over its intron is the case that produces one, and
+    /// recording it instead of discarding it is what this whole representation exists for.
+    ///
+    /// **Why it is on the walk's own summary and not only on the parity census.** The
+    /// census counts the same thing, but it lives behind `#[cfg(test)]` and only measures
+    /// loci where *production's* walker also produced a record — so it can never answer
+    /// "how often does this fire on a real spliced BAM", which is the open measurement the
+    /// change was made for (spec §8). Here, any BAM the generator is pointed at reports it,
+    /// and the dump tool prints it (owner, 2026-07-31).
+    ///
+    /// Expected to read **zero on DNA-seq**, structurally: a ref-skip emits no event, so an
+    /// intron cannot widen a record on its own, and modern Illumina puts `N`s at read ends
+    /// where they cannot make a hole.
+    pub reads_with_holed_witness: u64,
+    /// The positions inside those holes, summed over the reads — what a holed read was
+    /// blind over, which is the quantity that says how much evidence the old drop threw
+    /// away rather than merely how many reads it threw away.
+    pub hole_positions: u64,
 }
 
 impl RunSummary {
@@ -253,35 +576,17 @@ impl RunSummary {
         self
     }
 
-    /// Total `other`'s per-region tallies into `self`. Counts add;
-    /// `active_reads_high_water` takes the **max** — regions are walked
-    /// one at a time, so the peak concurrent active-read count for the
-    /// whole run is the largest single region's peak, not the sum.
-    pub fn merge(&mut self, other: &RunSummary) {
-        // Exhaustive destructure (no `..`): a new RunSummary field is a
-        // compile error here until it is explicitly folded in — important
-        // because the fold is not uniform (`active_reads_high_water` takes
-        // the max, the rest add), so a copy-paste `+=` on a new field
-        // would be silently wrong (review M3).
-        let RunSummary {
-            reads_admitted,
-            records_emitted,
-            record_widen_events,
-            mate_overlap_positions,
-            chain_allocations,
-            active_reads_high_water,
-            mate_lookup_evictions,
-            column_depth_truncations,
-        } = *other;
-        self.reads_admitted += reads_admitted;
-        self.records_emitted += records_emitted;
-        self.record_widen_events += record_widen_events;
-        self.mate_overlap_positions += mate_overlap_positions;
-        self.chain_allocations += chain_allocations;
-        self.active_reads_high_water = self.active_reads_high_water.max(active_reads_high_water);
-        self.mate_lookup_evictions += mate_lookup_evictions;
-        self.column_depth_truncations += column_depth_truncations;
-    }
+    // **Production's `merge` is deliberately not copied here — deleted at the
+    // Milestone C review.** It totals one region's summary into another, which is
+    // right for production (a fresh walker, and so a fresh chain-id allocator,
+    // per region) and **wrong for ng**: ng shares one allocator across regions and
+    // `reset()` preserves its counters, so summing region summaries
+    // triangular-sums `chain_allocations` and `mate_lookup_evictions` (spec §8).
+    // It had no ng caller, and a `pub fn merge` sitting on the type that
+    // `PileupGeneratorCounts::fold_region_walk` exists to fold *correctly* is a
+    // trap name-completion offers first. The exhaustive-destructure idiom it
+    // carried lives on in `fold_region_walk` and in `parity.rs`'s summary
+    // comparison.
 }
 
 /// A genomic locus: a position on a specific chromosome. The
@@ -315,6 +620,13 @@ struct WalkerState {
     /// allocated once and reused via `clear()` between steps. L6
     /// in `ia/reviews/perf_pileup_2026-05-10.md`.
     contributors_buf: Vec<ReadContribution>,
+    /// Reusable per-step buffer for the read ids the column-depth cap removed. Hoisted for
+    /// the same reason as `contributors_buf`: this runs once per covered reference base,
+    /// and a truncated column is rare, so the buffer is usually empty and never grows.
+    truncated_read_ids_buf: Vec<u32>,
+    /// EXPERIMENT E2: reusable scratch for `resolve_mate_overlap_at_pos`, replacing
+    /// the per-column `AHashMap<ChainId, Vec<usize>>` and its two companion `Vec`s.
+    mate_overlap_buf: MateOverlapScratch,
     /// Reusable per-step buffer for `close_aged_records`'s drained
     /// records. Paired with `OpenPileupRecordTable::closing_keys_buf`;
     /// together they remove the two per-walker-step `Vec` allocations
@@ -339,6 +651,8 @@ impl WalkerState {
             summary: RunSummary::default(),
             config,
             contributors_buf: Vec::new(),
+            truncated_read_ids_buf: Vec::new(),
+            mate_overlap_buf: MateOverlapScratch::default(),
             drained_buf: Vec::new(),
         }
     }
@@ -364,6 +678,78 @@ impl WalkerState {
         self.chrom_id = chrom_id;
         self.walker_pos = 1;
         self.last_admitted_chrom_id = Some(chrom_id);
+    }
+
+    /// Put this state back where a freshly built walker's would be, **except the chain-id
+    /// allocator** — ng's, D1.
+    ///
+    /// # The trap, stated first because it is invisible in the output
+    ///
+    /// ng shares one chain-id allocator across every region of a chromosome, so two
+    /// fragments of two regions never carry the same id. `ChainIdAllocator::reset` exists
+    /// for that: it drops `pending_mates` and `active_count` and **preserves `next_id` and
+    /// the three counters**. `PileupGeneratorCounts::fold_region_walk` then folds two of
+    /// those counters as *deltas* against the value they held when the region opened.
+    ///
+    /// A reset that replaced the allocator — `WalkerState::new(config)` is one keystroke
+    /// away and compiles — would zero those counters, collapse both deltas, and leave
+    /// `active_reads_high_water` looking right because it is a max. That is what makes the
+    /// corruption look selective enough to rationalise, and it has happened here before.
+    ///
+    /// The mirror-image trap sits one field away: `ActiveReads::reset` *preserves*
+    /// `silent_exits` as a run total, and `fold_region_walk` sums that one **per region**.
+    /// So the active set is put back with [`ActiveReads::begin_region`], which zeroes it,
+    /// and not with `reset`.
+    ///
+    /// The destructure is exhaustive on purpose: a field added to this struct is a compile
+    /// error here until someone decides which side of that line it falls on.
+    fn begin_region(&mut self) {
+        let Self {
+            chrom_id,
+            walker_pos,
+            last_admitted_chrom_id,
+            last_admitted_locus,
+            active_reads,
+            chain_ids,
+            open_records,
+            summary,
+            // Not region-scoped: the knobs the walker was built with.
+            config: _,
+            // Scratch, deliberately untouched. Each is cleared at the point of use, and
+            // keeping its capacity across a region boundary is the entire reason these are
+            // fields rather than locals.
+            contributors_buf: _,
+            truncated_read_ids_buf: _,
+            mate_overlap_buf: _,
+            drained_buf: _,
+        } = self;
+
+        // What `new` starts with. `enter_chrom` overwrites the first three as soon as the
+        // new region's first read is peeked; they are set here so a region with no reads at
+        // all is still in a defined state rather than the previous region's.
+        *chrom_id = 0;
+        *walker_pos = 1;
+        *last_admitted_chrom_id = None;
+        // **The one that would fire on real data rather than in a test.** The source is
+        // asked for a halo past the region, so the last read admitted for region N can
+        // begin far past region N+1's start. Carried across, the coordinate-order check in
+        // `admit_read` would reject the next region's first read as going backwards.
+        *last_admitted_locus = None;
+
+        active_reads.begin_region();
+
+        // Records still open belong to the region being left. Drained rather than
+        // finalised: finalising would emit records nobody asked for and tally their
+        // witnesses into a summary that is about to be discarded. The per-region walker
+        // dropped them, and so does this.
+        for _ in open_records.drain_all() {}
+        open_records.reset();
+
+        // Cleared, never replaced — see the trap above.
+        chain_ids.reset();
+
+        // The walk's own counters are per region, because `fold_region_walk` sums them.
+        *summary = RunSummary::default();
     }
 
     fn admit_read(&mut self, read: PreparedRead) -> Result<(), WalkerError> {
@@ -401,10 +787,7 @@ impl WalkerState {
         Ok(())
     }
 
-    fn process_position<F: MultiChromRefFetcher>(
-        &mut self,
-        ref_fetcher: &F,
-    ) -> Result<(), WalkerError> {
+    fn process_position<F: RefSeq>(&mut self, reference: &F) -> Result<(), WalkerError> {
         // Step 1: query each active read's cursor for events
         // anchored at walker_pos. Reads with no event here are
         // silent (deletion interior or N-skip), so they are not
@@ -434,14 +817,18 @@ impl WalkerState {
                 })
                 .unwrap_or(0);
 
+            // **ng's, added by D2.** Set here — before the mate-overlap collapse and
+            // before the depth cap — because both of those remove reads the walk plainly
+            // saw, and each has its own counter. What this flag exists to find is the read
+            // that reaches *no* contributor list anywhere: every base `N` or adaptor-masked,
+            // admitted and expired without the fold ever hearing of it, and so invisible to
+            // both per-locus counters (spec §6).
+            active_read.ever_contributed.set(true);
             contributors.push(ReadContribution {
                 read_id: active_read.read_id,
                 chain_id: active_read.chain_id,
                 events_at_pos,
                 bq_baq_at_walker_pos: bq_at_walker,
-                mq_log_err: active_read.read.mq_log_err,
-                mapq: active_read.read.mapq,
-                is_reverse_strand: active_read.read.is_reverse_strand,
                 alignment_start: active_read.read.alignment_start,
                 mate_role: active_read.read.mate_role,
                 bq_zero_in_window: false,
@@ -456,7 +843,7 @@ impl WalkerState {
         // observation, contributing ln(1)=0 log-likelihood mass)
         // and is flagged so any window event the fold pulls from
         // its cursor also gets BQ-zeroed.
-        resolve_mate_overlap_at_pos(contributors, &mut self.summary);
+        resolve_mate_overlap_at_pos(contributors, &mut self.summary, &mut self.mate_overlap_buf);
 
         // Step 2b: per-column depth cap. Adopted from samtools'
         // mpileup (see `WalkerConfig` doc-comment). Apply *after*
@@ -469,8 +856,17 @@ impl WalkerState {
         // truncate-to-first-N is approximately unbiased and avoids
         // the random-sample machinery a per-allele clip would
         // require.
+        //
+        // **The ids the cap removes are kept** (B3). The locus type reports reads a cap
+        // discarded *per record*, and this is the only moment they are knowable: truncation
+        // happens before step 3, so a truncated read opens and widens nothing and is
+        // invisible to every record it would have reached. They are candidates rather than
+        // a count — see `OpenPileupRecord::reads_discarded_by_cap`.
         let cap = column_depth_cap(contributors, &self.config);
+        self.truncated_read_ids_buf.clear();
         if contributors.len() > cap {
+            self.truncated_read_ids_buf
+                .extend(contributors[cap..].iter().map(|contrib| contrib.read_id));
             contributors.truncate(cap);
             self.summary.column_depth_truncations += 1;
         }
@@ -486,8 +882,9 @@ impl WalkerState {
             walker_pos,
             self.chrom_id,
             contributors,
+            &self.truncated_read_ids_buf,
             &self.active_reads,
-            ref_fetcher,
+            reference,
         )?;
         self.summary.record_widen_events += outcome.widen_count;
 
@@ -498,7 +895,7 @@ impl WalkerState {
     /// the walker and append them to `out` in emission order.
     /// Returns without touching `out` if there are no aged records
     /// to drain.
-    fn close_aged_records_into(&mut self, out: &mut VecDeque<PileupRecord>) {
+    fn close_aged_records_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
         self.open_records
             .drain_aged_into(self.walker_pos, &mut self.drained_buf);
         if self.drained_buf.is_empty() {
@@ -508,7 +905,17 @@ impl WalkerState {
         // we drain the hoisted buffer rather than `into_iter()`ing
         // it; the backing `Vec` stays allocated and reusable.
         for open in self.drained_buf.drain(..) {
-            out.push_back(open.finalise());
+            // The witness tally is resolved at `finalise`. **Resolved there** because a
+            // witness is a read's extent measured against the record's *final* footprint,
+            // which only `finalise` knows and no later caller can reconstruct — the reads may
+            // have expired. Two of its counts the locus already carries
+            // (`reads_without_observation`, `reads_discarded_by_cap`) and the complete/partial
+            // split is read only by tests; the **holed** pair is kept, because nothing else in
+            // a non-test build can state how often a read was blind in the middle of a record.
+            let (record, witness) = open.finalise();
+            self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+            self.summary.hole_positions += u64::from(witness.hole_positions);
+            out.push_back(record);
             self.summary.records_emitted += 1;
         }
     }
@@ -563,13 +970,17 @@ impl WalkerState {
     /// emission order.
     fn flush_chromosome_into(
         &mut self,
-        out: &mut VecDeque<PileupRecord>,
+        out: &mut VecDeque<SampleLocusObservations>,
     ) -> Result<(), WalkerError> {
         // Drain remaining open records (anything that was still
         // open at end-of-chromosome is by definition ready to
         // close — there are no future reads on this chromosome).
         for open in self.open_records.drain_all() {
-            out.push_back(open.finalise());
+            // Same as `close_aged_records_into` — see the note there.
+            let (record, witness) = open.finalise();
+            self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+            self.summary.hole_positions += u64::from(witness.hole_positions);
+            out.push_back(record);
             self.summary.records_emitted += 1;
         }
         // Release any active-set reads so the active-count
@@ -593,8 +1004,16 @@ impl WalkerState {
     }
 
     fn summary(&self) -> RunSummary {
-        self.summary
-            .merge_chain_id_counters(self.chain_ids.counters())
+        let mut summary = self
+            .summary
+            .merge_chain_id_counters(self.chain_ids.counters());
+        // Read off the active set at every ask rather than accumulated as the walk goes:
+        // the set is where a read *leaves*, and asking it means the number cannot drift
+        // from the exits that produced it. Reads still active have not left, so a summary
+        // taken mid-walk reports the reads that have — which is what every other counter
+        // here does too.
+        summary.reads_silent_over_footprint = self.active_reads.silent_exits();
+        summary
     }
 }
 
@@ -618,6 +1037,21 @@ fn malformed_read_from_length_err(err: ReadLengthError, read: &PreparedRead) -> 
         chrom_id: read.chrom_id,
         pos: read.alignment_start,
     }
+}
+
+/// The scratch space `resolve_mate_overlap_at_pos` needs for one column, hoisted so it is
+/// reused instead of rebuilt.
+///
+/// It used to build a hash map keyed by chain id plus one `Vec` per distinct chain id — lists
+/// almost always of length one — and two more `Vec`s besides. Grouping by sorting a single
+/// `(chain_id, index)` vector gives the same runs for a `clear()` and a sort per column
+/// rather than `1 + N + 2` allocations.
+#[derive(Debug, Default)]
+struct MateOverlapScratch {
+    /// `(chain_id, contributor index)`, sorted so equal chain ids form one run.
+    by_chain_id: Vec<(ChainId, usize)>,
+    to_remove: Vec<usize>,
+    bq_updates: Vec<(usize, u8, bool)>,
 }
 
 /// Resolve mate-overlap at the current walker position.
@@ -645,7 +1079,11 @@ fn malformed_read_from_length_err(err: ReadLengthError, read: &PreparedRead) -> 
 // contributors on indel-overlap, which requires the owning `Vec`,
 // not a slice.
 #[allow(clippy::ptr_arg)]
-fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary: &mut RunSummary) {
+fn resolve_mate_overlap_at_pos(
+    contributors: &mut Vec<ReadContribution>,
+    summary: &mut RunSummary,
+    scratch: &mut MateOverlapScratch,
+) {
     // Fast path: mate overlap requires two contributors at this
     // walker_pos sharing a chain_id. Solo-read inputs never
     // hit it; in paired-end inputs the geometry of insert sizes
@@ -671,13 +1109,29 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // RandomState would make iteration non-deterministic between runs
     // and is also slower for this hot path. Mi4 in
     // `ia/reviews/pileup_2026-05-09.md`.
-    let mut by_chain_id: AHashMap<ChainId, Vec<usize>> = AHashMap::new();
-    for (i, c) in contributors.iter().enumerate() {
-        by_chain_id.entry(c.chain_id).or_default().push(i);
-    }
+    //
+    // EXPERIMENT E2: built as a sorted `(chain_id, index)` list in a reused buffer
+    // rather than an `AHashMap<ChainId, Vec<usize>>` rebuilt per column. Groups are
+    // the runs of equal chain id; within a run the indices stay ascending, which is
+    // the order `values()` produced, and the two loops below are order-independent
+    // across groups (each contributor belongs to exactly one group, and `to_remove`
+    // is sorted and deduped before it is applied).
+    let MateOverlapScratch {
+        by_chain_id,
+        to_remove,
+        bq_updates,
+    } = scratch;
+    by_chain_id.clear();
+    by_chain_id.extend(
+        contributors
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.chain_id, i)),
+    );
+    by_chain_id.sort_unstable();
 
     // Indices to discard outright (indel-overlap losers).
-    let mut to_remove: Vec<usize> = Vec::new();
+    to_remove.clear();
     // (idx, new_bq_at_walker_pos, zero_in_window) — applied to
     // each contributor of a match-only overlap pair (S7). Agree-
     // case keeper gets the summed BQ (capped at 200, zero_in_window
@@ -687,10 +1141,18 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // (zeros every window event from this contributor's cursor)
     // and `bq_override_at_walker_pos` (rewrites walker_pos events'
     // BQ on top of the cursor pull).
-    let mut bq_updates: Vec<(usize, u8, bool /*zero_in_window*/)> = Vec::new();
+    bq_updates.clear();
 
-    for indices in by_chain_id.values() {
-        if indices.len() < 2 {
+    let mut run_start = 0usize;
+    while run_start < by_chain_id.len() {
+        let chain = by_chain_id[run_start].0;
+        let mut run_end = run_start + 1;
+        while run_end < by_chain_id.len() && by_chain_id[run_end].0 == chain {
+            run_end += 1;
+        }
+        let group = &by_chain_id[run_start..run_end];
+        run_start = run_end;
+        if group.len() < 2 {
             continue;
         }
         // Spec invariant: only mate pairs share a chain id, so at
@@ -699,16 +1161,16 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
         // (e.g. supplementary alignments slipping past upstream
         // filters) surfaces in tests instead of in production.
         debug_assert!(
-            indices.len() <= 2,
+            group.len() <= 2,
             "more than two contributors share chain_id {:?}",
-            indices,
+            group,
         );
         // All-pairs comparison so a future relaxation of the
         // invariant doesn't silently miss the (i, j>i+1) cases
         // that `indices.windows(2)` skips.
-        for i in 0..indices.len() {
-            for j in (i + 1)..indices.len() {
-                let (a, b) = (indices[i], indices[j]);
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let (a, b) = (group[i].1, group[j].1);
                 summary.mate_overlap_positions += 1;
                 let any_indel_here = pair_has_indel(&contributors[a], &contributors[b]);
                 if any_indel_here {
@@ -763,7 +1225,7 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // (rewriting walker_pos events' BQ on top of the cursor
     // pull). Update the local contribution's `bq_baq_at_walker_pos`
     // and `events_at_pos` for consistency with the override.
-    for (idx, new_bq, zero_in_window) in bq_updates {
+    for (idx, new_bq, zero_in_window) in bq_updates.drain(..) {
         contributors[idx].bq_baq_at_walker_pos = new_bq;
         for ev in contributors[idx].events_at_pos.iter_mut() {
             set_match_event_bq(ev, new_bq);
@@ -779,7 +1241,7 @@ fn resolve_mate_overlap_at_pos(contributors: &mut Vec<ReadContribution>, summary
     // Sort descending so swap_remove keeps earlier indices valid.
     to_remove.sort_unstable();
     to_remove.dedup();
-    for idx in to_remove.into_iter().rev() {
+    for idx in to_remove.drain(..).rev() {
         contributors.swap_remove(idx);
     }
 }
@@ -917,6 +1379,347 @@ fn column_depth_cap(contributors: &[ReadContribution], config: &WalkerConfig) ->
 mod tests {
     use super::super::cigar_cursor::EventsAt;
     use super::*;
+    use crate::ng::locus_generation::pileup::tests::{Locus, MockFasta, snp_read};
+    use crate::ng::types::{ContigId, Position};
+
+    /// **The cap's discarded read ids reach the record** — the plumbing B3 adds, end to
+    /// end through `run` rather than through `process_position`.
+    ///
+    /// Worth its own test because the per-record fixtures drive the fold directly and hand
+    /// it the truncated ids themselves, so they cannot see the walk failing to *collect*
+    /// them. Deleting the collection leaves every one of those fixtures green.
+    ///
+    /// Six reads at one position with a cap of two: four are truncated, none of them folds
+    /// anywhere, and the record they would have reached says so.
+    #[test]
+    fn reads_the_column_cap_removed_are_reported_on_the_record() {
+        use crate::ng::locus_generation::pileup::tests::{MockFasta, snp_read};
+
+        let config = WalkerConfig {
+            max_snp_column_depth: 2,
+            ..WalkerConfig::default()
+        };
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let loci: Vec<_> = run(reads, &MockFasta::new("ACG"), &config)
+            .map(|item| item.expect("the walk succeeds"))
+            .collect();
+
+        assert!(!loci.is_empty(), "the fixture must emit loci");
+        // **The count, per locus — not `> 0` summed.** Summing and asserting non-zero
+        // survives an off-by-one in the slice the walk collects (`contributors[cap + 1..]`
+        // reports three where there are four and still passes), which leaves the very
+        // number B3 exists to get right unpinned on every record that left the walker.
+        for locus in &loci {
+            assert_eq!(
+                locus.reads_discarded_by_cap, 4,
+                "six reads at a cap of two truncates four, and none of them folded \
+                 anywhere: {locus:?}"
+            );
+        }
+        for locus in &loci {
+            let folded: u32 = locus
+                .observations
+                .iter()
+                .map(|observation| observation.num_obs)
+                .sum();
+            assert_eq!(
+                folded, 2,
+                "each column folds exactly the cap's worth, or the fixture is not capping"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // D1 — the walker pointed at one region after another
+    // ------------------------------------------------------------------
+
+    /// A [`RegionReadSource`] over a fixed list: for each region, the reads overlapping it,
+    /// in position order. **A cursor with no file behind it**, and the one property that
+    /// makes it a fair stand-in is that reads are *replayed* rather than consumed — the
+    /// real cursor keeps every read it hands out and offers it to the next region that can
+    /// use it (`spec/alignment_cursor.md` §6), which is what makes throwing the walker's
+    /// look-ahead away safe.
+    struct ScriptedRegionSource {
+        reads: Vec<PreparedRead>,
+        region: Option<GenomeRegion>,
+        served: usize,
+    }
+
+    impl ScriptedRegionSource {
+        fn new(reads: Vec<PreparedRead>) -> Self {
+            Self {
+                reads,
+                region: None,
+                served: 0,
+            }
+        }
+    }
+
+    impl Iterator for ScriptedRegionSource {
+        type Item = PreparedRead;
+
+        fn next(&mut self) -> Option<PreparedRead> {
+            let region = self.region?;
+            while let Some(read) = self.reads.get(self.served) {
+                self.served += 1;
+                let on_contig = read.chrom_id == region.contig.get();
+                let overlaps = u64::from(read.alignment_start) <= region.end.get()
+                    && u64::from(read.alignment_end) >= region.start.get();
+                if on_contig && overlaps {
+                    return Some(read.clone());
+                }
+            }
+            None
+        }
+    }
+
+    impl RegionReadSource for ScriptedRegionSource {
+        type Error = std::convert::Infallible;
+
+        fn move_to_region(&mut self, region: GenomeRegion) -> Result<(), Self::Error> {
+            self.region = Some(region);
+            self.served = 0;
+            Ok(())
+        }
+    }
+
+    fn walk_region(
+        walker: &mut PileupWalker<ScriptedRegionSource, &MockFasta>,
+        region: GenomeRegion,
+        stop_after: u32,
+    ) -> Vec<Locus> {
+        walker
+            .move_to_region(region, stop_after)
+            .expect("the scripted source cannot fail");
+        walker
+            .by_ref()
+            .map(|item| item.expect("the walk succeeds"))
+            .collect()
+    }
+
+    fn scripted_region(start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    /// The fixture the D1 tests share, over a 100-base all-`A` reference.
+    ///
+    /// **The lengths are not uniform, and that is the whole design.** Consecutive regions
+    /// overlap, because each is asked for a halo past its end while the next one is asked
+    /// from its own start — so a region serves reads an earlier one already admitted. `r8`
+    /// runs 8..=27 and `r12` runs 12..=21: a walk of `1..=14` admits both and ends with
+    /// `last_admitted_locus` at **12**, and the next region, from 15, is served `r8` at
+    /// **8** first. That is the coordinate-order check in `admit_read` firing on ordinary
+    /// forward progress, and it is what `begin_region` has to clear.
+    ///
+    /// **One read is silent at every position**, its adaptor boundary at its own first base
+    /// — the shape `reads_silent_over_footprint` exists for. Without it the active set's
+    /// `silent_exits` reads zero everywhere, and the difference between
+    /// `ActiveReads::begin_region` (which zeroes that tally, as a per-region fold needs) and
+    /// `ActiveReads::reset` (which preserves it, as a run total) is invisible.
+    fn scripted_reads() -> Vec<PreparedRead> {
+        let mut silent = snp_read("silent", 16, &[b'A'; 10], &[30; 10]);
+        silent.adaptor_boundary = Some(silent.alignment_start);
+        vec![
+            snp_read("r1", 1, &[b'A'; 10], &[30; 10]),
+            snp_read("r5", 5, &[b'A'; 10], &[30; 10]),
+            snp_read("r8", 8, &[b'A'; 20], &[30; 20]),
+            snp_read("r12", 12, &[b'A'; 10], &[30; 10]),
+            silent,
+            snp_read("r40", 40, &[b'A'; 10], &[30; 10]),
+        ]
+    }
+
+    /// **A walker pointed at a second region must be indistinguishable from a fresh one
+    /// pointed at the same region.** D1's whole contract, and the only oracle that covers
+    /// every field `WalkerState::begin_region` has to decide about at once: a summary left
+    /// un-cleared, an active read left behind, a stale look-ahead or a stale
+    /// `last_admitted_locus` all show up here as a difference against the fresh walker.
+    #[test]
+    fn a_reused_walker_answers_a_region_exactly_as_a_fresh_one_does() {
+        let reference = MockFasta::new(&"A".repeat(100));
+        let config = WalkerConfig::default();
+        // Halo-widened spans, as the generator asks for: the source is pointed 30 past each
+        // region's end while the walk stops at the end itself.
+        let regions = [(1u64, 14u64), (15, 30), (31, 60)];
+
+        let mut reused = run(
+            ScriptedRegionSource::new(scripted_reads()),
+            &reference,
+            &config,
+        );
+
+        for (start, end) in regions {
+            let query = scripted_region(start, end + 30);
+            let stop_after = end as u32;
+
+            let from_reused = walk_region(&mut reused, query, stop_after);
+            let reused_summary = reused.summary();
+
+            let mut fresh = run(
+                ScriptedRegionSource::new(scripted_reads()),
+                &reference,
+                &config,
+            );
+            let from_fresh = walk_region(&mut fresh, query, stop_after);
+
+            assert_eq!(
+                from_reused, from_fresh,
+                "region {start}..={end}: a reused walker emitted different loci from a \
+                 fresh one"
+            );
+            // The two counters `fold_region_walk` sums region by region. A summary carried
+            // across the boundary reads high here, and the caller would triangular-sum it.
+            assert_eq!(
+                (
+                    reused_summary.reads_admitted,
+                    reused_summary.records_emitted,
+                    reused_summary.reads_silent_over_footprint,
+                ),
+                (
+                    fresh.summary().reads_admitted,
+                    fresh.summary().records_emitted,
+                    fresh.summary().reads_silent_over_footprint,
+                ),
+                "region {start}..={end}: the reused walker's per-region counters differ \
+                 from a fresh walker's",
+            );
+        }
+    }
+
+    /// **The chain-id allocator is the one thing that must *not* be restarted.**
+    ///
+    /// It is the run's, lent to the walker for a chromosome, and
+    /// `PileupGeneratorCounts::fold_region_walk` folds two of its counters as deltas
+    /// against the value they held when the region opened. A `begin_region` that replaced
+    /// it — `WalkerState::new(config)` is one keystroke away and compiles — would zero
+    /// them, and the deltas would collapse to nothing while `active_reads_high_water`
+    /// survived as a max, which is what would make the corruption look selective.
+    #[test]
+    fn the_chain_id_allocators_counters_survive_a_region_boundary() {
+        let reference = MockFasta::new(&"A".repeat(100));
+        let config = WalkerConfig::default();
+        let mut walker = run(
+            ScriptedRegionSource::new(scripted_reads()),
+            &reference,
+            &config,
+        );
+
+        walk_region(&mut walker, scripted_region(1, 44), 14);
+        let after_first = walker.chain_id_counters().chain_allocations;
+        walk_region(&mut walker, scripted_region(31, 90), 60);
+        let after_second = walker.chain_id_counters().chain_allocations;
+
+        assert!(
+            after_first > 0,
+            "the first region must allocate something, or this test cannot fail"
+        );
+        assert!(
+            after_second > after_first,
+            "the second region allocated ids too, so the run-to-date total must have \
+             grown: {after_first} then {after_second}",
+        );
+    }
+
+    /// **A region walk admits reads far past the next region's start, and the next region
+    /// must still be walkable.** The generator points the source at a halo past each
+    /// region's end, so this is not an edge case — it is every region boundary on real
+    /// data. Carried across, `last_admitted_locus` makes the next region's first read look
+    /// like a read going backwards and the walk fails with `OutOfOrder`.
+    #[test]
+    fn a_region_that_admitted_reads_past_the_next_regions_start_still_walks_it() {
+        let reference = MockFasta::new(&"A".repeat(100));
+        let config = WalkerConfig::default();
+        let mut walker = run(
+            ScriptedRegionSource::new(scripted_reads()),
+            &reference,
+            &config,
+        );
+
+        // Segment `1..=14`, asked for its halo out to 44. It admits `r1`, `r5`, `r8` and
+        // `r12`, so it ends with `last_admitted_locus` at 12.
+        let first = walk_region(&mut walker, scripted_region(1, 44), 14);
+        assert!(!first.is_empty(), "the first region must emit something");
+        assert_eq!(
+            walker.summary().reads_admitted,
+            4,
+            "the first region must admit through `r12` at 12, or the next region's `r8` at \
+             8 is not a step backwards and this test cannot fail",
+        );
+
+        // Segment `15..=30`. `r8` runs 8..=27, so it overlaps and is served **first** — at
+        // position 8, four positions before the last read the previous region admitted.
+        walker
+            .move_to_region(scripted_region(15, 60), 30)
+            .expect("the scripted source cannot fail");
+        let second: Vec<_> = walker.by_ref().collect();
+
+        assert!(
+            second.iter().all(|item| item.is_ok()),
+            "the second region must walk without the first one's reads making its own look \
+             out of order: {:?}",
+            second.iter().find(|item| item.is_err()),
+        );
+        assert!(!second.is_empty(), "the second region must emit something");
+    }
+
+    /// **A region abandoned half-walked must leak no record into the next region** — the
+    /// `open_records` half of `begin_region`, which the review found deletable with the
+    /// whole suite green.
+    ///
+    /// The failure it hides is not a stale counter, which is what makes it worth its own
+    /// test: a record left open is *finalised by the next region's walk*, the moment
+    /// `close_aged_records_into` passes its footprint. So the next region leads its output
+    /// with a locus at a coordinate nobody asked about — and with reads folded into it under
+    /// `read_id`s that `ActiveReads::begin_region` has since restarted at zero.
+    ///
+    /// Abandoning is not exotic: `begin_segment` on a half-drained walk does exactly this,
+    /// and the generator's own tests cover that path.
+    #[test]
+    fn a_region_abandoned_half_walked_leaks_no_record_into_the_next_one() {
+        let reference = MockFasta::new(&"A".repeat(100));
+        let config = WalkerConfig::default();
+        let mut walker = run(
+            ScriptedRegionSource::new(scripted_reads()),
+            &reference,
+            &config,
+        );
+
+        // Take **one** locus of the first region and walk away, leaving its later positions
+        // open in the table.
+        walker
+            .move_to_region(scripted_region(1, 44), 14)
+            .expect("the scripted source cannot fail");
+        let abandoned = walker
+            .next()
+            .expect("the first region emits at least one locus")
+            .expect("the walk succeeds");
+        assert_eq!(
+            abandoned.region.start,
+            Position(1),
+            "the fixture's first locus anchors at 1, so anything the next region leads with \
+             below its own start came from here",
+        );
+
+        // A region well clear of the first, so nothing it emits can legitimately anchor
+        // before position 40.
+        let second = walk_region(&mut walker, scripted_region(40, 90), 60);
+
+        assert!(!second.is_empty(), "the second region must emit something");
+        for locus in &second {
+            assert!(
+                locus.region.start >= Position(40),
+                "the second region emitted a locus at {:?}, which is the abandoned \
+                 region's record finalised by this region's walk",
+                locus.region.start,
+            );
+        }
+    }
 
     fn contribution(
         bq: u8,
@@ -929,9 +1732,6 @@ mod tests {
             chain_id: 0,
             events_at_pos: events,
             bq_baq_at_walker_pos: bq,
-            mq_log_err: -3.0,
-            mapq: 60,
-            is_reverse_strand: false,
             alignment_start,
             mate_role: if is_first_mate {
                 super::super::MateRole::FirstOfPair

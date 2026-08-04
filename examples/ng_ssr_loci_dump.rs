@@ -32,7 +32,7 @@ use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SsrGenerator, SsrGeneratorConfig,
 };
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadWitness, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -44,6 +44,18 @@ use pop_var_caller::ng::reference_info::{
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
 use pop_var_caller::ng::types::{Bp, ContigId};
+
+/// The side derivation, shared with the other two STR dumps so the three cannot drift apart
+/// again (D4). Each tool keeps its own strings — see `witness_label`.
+#[path = "shared/witness_side.rs"]
+mod witness_side;
+use witness_side::{WitnessSide, witness_side};
+
+/// The shared "should this run check the reference?" rule — see the module's own docs for
+/// why the default is to check even in a tool that is re-run constantly.
+#[path = "shared/reference_check.rs"]
+mod reference_check_knob;
+use reference_check_knob::reference_check_from_env;
 
 /// One TSV row: an observed tract sequence at a locus, with its support.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,7 +69,7 @@ struct ObservationRow {
     /// The locus's complete-observation depth (sum of the complete rows' read counts) — shown on
     /// every row of the locus, so a partial row is read against the depth that actually pinned it.
     depth: u32,
-    read_coverage: &'static str,
+    read_witness: &'static str,
     observed: Vec<u8>,
     reads: u32,
 }
@@ -94,7 +106,7 @@ impl DumpReport {
         self.ssr_loci += 1;
         // Zero coverage is "no read reached the tract" — distinct from "reads reached it and said
         // nothing" (that is `reads_without_observation`) and from "the cap dropped them all".
-        if locus.observed_sequences.is_empty()
+        if locus.observations.is_empty()
             && locus.reads_without_observation == 0
             && locus.reads_discarded_by_cap == 0
         {
@@ -108,7 +120,7 @@ impl DumpReport {
             LocusKind::Ssr(detail) => detail.motif.as_bytes().to_vec(),
             _ => Vec::new(),
         };
-        for obs in &locus.observed_sequences {
+        for obs in &locus.observations {
             self.rows.push(ObservationRow {
                 contig: segment.chrom().to_string(),
                 start: locus.region.start.get(),
@@ -116,7 +128,7 @@ impl DumpReport {
                 motif: motif.clone(),
                 ref_tract: locus.reference_bases.to_vec(),
                 depth,
-                read_coverage: coverage_label(obs.read_coverage, locus_len),
+                read_witness: witness_label(&obs.read_witness, locus_len),
                 observed: obs.bases.to_vec(),
                 reads: obs.num_obs,
             });
@@ -139,7 +151,7 @@ impl DumpReport {
             self.obs_complete, self.obs_partial
         );
         out.push_str(
-            "contig\tstart\tend\tmotif\tref_tract\tdepth\tread_coverage\tobserved\treads\n",
+            "contig\tstart\tend\tmotif\tref_tract\tdepth\tread_witness\tobserved\treads\n",
         );
         for row in &self.rows {
             let _ = writeln!(
@@ -151,7 +163,7 @@ impl DumpReport {
                 String::from_utf8_lossy(&row.motif),
                 String::from_utf8_lossy(&row.ref_tract),
                 row.depth,
-                row.read_coverage,
+                row.read_witness,
                 String::from_utf8_lossy(&row.observed),
                 row.reads,
             );
@@ -160,24 +172,18 @@ impl DumpReport {
     }
 }
 
-/// The tag a read-coverage carries in the `read_coverage` column.
-fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
-    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
-    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
-    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
-    // so it never appears here, but naming it keeps the label honest for the generic path.
-    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
-    // compile error here. The guard form is what this migration used and it is exactly what
-    // let the compiler stop forcing these sites to be revisited.
-    match coverage {
-        ReadCoverage::Complete => "complete",
-        run @ ReadCoverage::Observed { .. } => {
-            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
-                (true, _) => "partial:left",
-                (false, true) => "partial:right",
-                (false, false) => "partial:interior",
-            }
-        }
+/// The tag a witness carries in the `read_witness` column.
+fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
+    // The derivation is shared (`shared/witness_side.rs`); **the spelling is this tool's**, and
+    // it is the one the three STR dumps converged on at D4 because it was already internally
+    // consistent — one separator for all three cases. These four strings are the byte-identity
+    // oracle's `read_witness` column, so they do not move.
+    match witness_side(witness, locus_len) {
+        WitnessSide::Complete => "complete",
+        WitnessSide::Left => "partial:left",
+        WitnessSide::Right => "partial:right",
+        WitnessSide::BothBorders => "partial:both",
+        WitnessSide::Interior => "partial:interior",
     }
 }
 
@@ -193,8 +199,12 @@ fn run_dump<A: RepeatDelimiter>(
     aligner: A,
     gen_config: SsrGeneratorConfig,
 ) -> Result<DumpReport, Box<dyn std::error::Error>> {
+    // This run reads the reference exactly once, so the knob is read here rather than
+    // threaded down from `main`: there is no second read for it to disagree with.
+    let reference_check = reference_check_from_env()?;
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) =
+        read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf(), reference_check)?;
     let contigs = info.contig_list();
     // One reference for every file this run opens — and so one copy of the bases.
     let reference = OpenReference::new(info);
@@ -253,8 +263,10 @@ fn run_dump<A: RepeatDelimiter>(
     report.reads_capped = counts.reads_discarded_by_cap;
     report.obs_complete = counts.observations_complete;
     report.obs_partial = counts.observations_partial;
-    report.reads_without_observation =
-        counts.no_border_anchored + counts.low_quality + counts.window_truncated;
+    // The sum lives on the counts type, behind an exhaustive destructure, so a reason added
+    // later cannot be left out of it here — which is what happened to this tool's sibling
+    // when C0 added the fourth (Milestone C review, F5).
+    report.reads_without_observation = counts.reads_without_observation();
     Ok(report)
 }
 
@@ -602,14 +614,14 @@ mod tests {
         assert_eq!(lines[1], "# obs_complete=4 obs_partial=3");
         assert_eq!(
             lines[2],
-            "contig\tstart\tend\tmotif\tref_tract\tdepth\tread_coverage\tobserved\treads"
+            "contig\tstart\tend\tmotif\tref_tract\tdepth\tread_witness\tobserved\treads"
         );
         // The complete row, built from the report's own coordinates so the assertion pins the TSV
         // format (tabs, column order, values) without hard-coding region typing's tract bounds.
         let complete = report
             .rows
             .iter()
-            .find(|row| row.read_coverage == "complete")
+            .find(|row| row.read_witness == "complete")
             .expect("a complete row");
         let expected = format!(
             "chr1\t{}\t{}\tAC\tACACACACACACACACACACACAC\t4\tcomplete\tACACACACACACACACACACACAC\t4",
@@ -636,12 +648,12 @@ mod tests {
         let left = report
             .rows
             .iter()
-            .find(|row| row.read_coverage == "partial:left")
+            .find(|row| row.read_witness == "partial:left")
             .expect("a left partial row");
         let right = report
             .rows
             .iter()
-            .find(|row| row.read_coverage == "partial:right")
+            .find(|row| row.read_witness == "partial:right")
             .expect("a right partial row");
         // A partial is a lower bound — shorter than the complete tract it sits under.
         assert!(left.observed.len() < left.ref_tract.len());
@@ -660,7 +672,7 @@ mod tests {
         let complete = report
             .rows
             .iter()
-            .find(|row| row.read_coverage == "complete")
+            .find(|row| row.read_witness == "complete")
             .expect("a complete row");
         assert_eq!(complete.observed, TRACT);
         assert_eq!(complete.ref_tract, TRACT);
@@ -726,7 +738,7 @@ mod tests {
     /// identical `reads`, differing solely in the label; sorting put the left-flush run first
     /// either way, so **swapping left for right at the mint site left the dump byte-identical**
     /// (checked, during B1, by applying the swap). The acceptance anchor was blind to the one
-    /// property the `ReadCoverage` reshape most affects.
+    /// property the `ReadWitness` reshape most affects.
     ///
     /// `pl2` breaks the symmetry by reaching a *different* number of tract positions, so the two
     /// left-flush rows carry bases no right-flush row shares and a swap moves the output. This
@@ -739,17 +751,17 @@ mod tests {
         let partials: Vec<&ObservationRow> = report
             .rows
             .iter()
-            .filter(|row| row.read_coverage.starts_with("partial"))
+            .filter(|row| row.read_witness.starts_with("partial"))
             .collect();
 
         assert_eq!(partials.len(), 3, "two left partials and one right");
         let left: Vec<&&ObservationRow> = partials
             .iter()
-            .filter(|row| row.read_coverage == "partial:left")
+            .filter(|row| row.read_witness == "partial:left")
             .collect();
         let right: Vec<&&ObservationRow> = partials
             .iter()
-            .filter(|row| row.read_coverage == "partial:right")
+            .filter(|row| row.read_witness == "partial:right")
             .collect();
         assert_eq!(left.len(), 2);
         assert_eq!(right.len(), 1);
@@ -803,12 +815,11 @@ mod tests {
         let collapse = |rows: &[ObservationRow]| {
             let mut totals: Vec<(Vec<u8>, &'static str, u32)> = Vec::new();
             for row in rows {
-                match totals
-                    .iter_mut()
-                    .find(|(bases, cov, _)| bases == &row.observed && *cov == row.read_coverage)
-                {
+                match totals.iter_mut().find(|(bases, witness, _)| {
+                    bases == &row.observed && *witness == row.read_witness
+                }) {
                     Some((_, _, reads)) => *reads += row.reads,
-                    None => totals.push((row.observed.clone(), row.read_coverage, row.reads)),
+                    None => totals.push((row.observed.clone(), row.read_witness, row.reads)),
                 }
             }
             totals
@@ -833,7 +844,7 @@ mod tests {
         let distinct_cells: std::collections::HashSet<(Vec<u8>, &str)> = report
             .rows
             .iter()
-            .map(|row| (row.observed.clone(), row.read_coverage))
+            .map(|row| (row.observed.clone(), row.read_witness))
             .collect();
         assert_eq!(
             report.rows.len(),

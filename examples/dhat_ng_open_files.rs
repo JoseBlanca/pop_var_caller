@@ -70,9 +70,10 @@ use pop_var_caller::ng::read::input::read_groups::build_read_groups;
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::GenomeRegions;
+use pop_var_caller::ng::types::ContigId;
 use pop_var_caller::regions::ContigBounds;
 
 fn main() -> ExitCode {
@@ -113,7 +114,11 @@ fn run(
     paths: &[PathBuf],
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) = read_reference_verifying_or_creating_fai(
+        &cache,
+        fasta.to_path_buf(),
+        ReferenceCheck::VerifyAgainstIndex,
+    )?;
     let contigs: ContigList = info.contig_list();
     let reference = OpenReference::new(info);
 
@@ -169,21 +174,35 @@ fn run(
         return Ok((0, 0));
     }
 
-    // `PVC_SPAN_LIMIT` caps the spans walked, so "one query per file" can be
-    // compared against a full walk: the first query is what fills each file's
-    // pooled reader and container cache.
+    // `PVC_SPAN_LIMIT` caps the spans walked, so "one span per file" can be compared against a
+    // full walk: the first span is what opens each sample's cursor and fills what it holds.
     let span_limit: usize = std::env::var("PVC_SPAN_LIMIT")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(usize::MAX);
 
+    // **One cursor per sample per chromosome, which is what this harness now measures.** Before
+    // the alignment cursor this opened a reader per span from a per-file pool, and what an open
+    // file *held* was that pool plus a decoded CRAM container. A cursor holds its own reader,
+    // its reference accessor and the reads it has kept for the next span — so the question the
+    // harness asks is unchanged ("what are k open, queried files holding?") while the answer's
+    // composition is not, and a number from before the cursor is not comparable to one after.
+    //
+    // Minted lazily and rebuilt at a chromosome change, exactly as a generator does: a cursor
+    // covers one chromosome and nothing in it survives a change of chromosome.
+    let mut cursors: Vec<Option<(ContigId, _)>> = samples.iter().map(|_| None).collect();
+
     let mut total_reads = 0u64;
     let mut total_spans = 0u64;
     for region in spans.iter().take(span_limit) {
         total_spans += 1;
-        for sample in &samples {
-            let stream = sample.reads_in_region(region, make_reference)?;
-            for read in stream {
+        for (sample, slot) in samples.iter().zip(cursors.iter_mut()) {
+            if slot.as_ref().is_none_or(|(on, _)| *on != region.contig) {
+                *slot = Some((region.contig, sample.cursor(region.contig, make_reference)?));
+            }
+            let cursor = &mut slot.as_mut().expect("just ensured").1;
+            cursor.move_to_region(region)?;
+            while let Some(read) = cursor.next_read() {
                 let _ = read?;
                 total_reads += 1;
             }

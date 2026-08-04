@@ -22,6 +22,9 @@ use std::sync::Arc;
 
 use noodles_sam as sam;
 
+use noodles_sam::alignment::RecordBuf;
+use std::io;
+
 use crate::ng::read::input::AlignmentFileError;
 use crate::ng::read::input::open_bam::read_header;
 use crate::ng::types::ReadGroupId;
@@ -467,6 +470,25 @@ impl ReadGroupResolution {
     ///
     /// The `Sole` arm ignores `tag` entirely, which is the whole reason a file
     /// re-headered without rewriting its records can be read at all.
+    /// Whether every record in the file belongs to this sample, whatever it says.
+    ///
+    /// True when the header declares one read group, which is the common case and the one a
+    /// caller can skip work for: there is nothing to look up, so a decoder need not ask a
+    /// record which group it is in at all.
+    pub fn every_record_is_mine(&self) -> bool {
+        matches!(self, Self::Sole(_))
+    }
+
+    /// Which read group a record belongs to, given the **name** its `RG` names.
+    ///
+    /// The same decision [`owner_of`](Self::owner_of) makes, reached from a borrowed name
+    /// rather than from a record. A CRAM stores the read group as a *number* — an index into
+    /// the header's `@RG` list — and noodles turns that number into the declared name without
+    /// copying it, so a CRAM decoder can decide who owns a record before it builds anything.
+    pub fn owner_of_name(&self, name: Option<&str>) -> Result<RecordOwner, UnresolvedReadGroup> {
+        self.owner_of(name.map(str::as_bytes))
+    }
+
     pub fn owner_of(&self, tag: Option<&[u8]>) -> Result<RecordOwner, UnresolvedReadGroup> {
         match self {
             Self::Sole(id) => Ok(RecordOwner::Mine(*id)),
@@ -572,6 +594,70 @@ pub enum ReadGroupError {
         #[source]
         source: AlignmentFileError,
     },
+}
+
+// ---------------------------------------------------------------------
+// Which read group a filled record belongs to
+// ---------------------------------------------------------------------
+
+/// The read group one filled record belongs to, or a fatal error naming it.
+///
+/// **The `Sole` arm returns before touching the record**, which is not merely an
+/// optimisation. A file declaring one read group is read without its records'
+/// `RG` tags being consulted at all — that is what lets a file re-headered
+/// without rewriting its records be read, and it means a malformed tag in such a
+/// file cannot end a run over a value nothing needs. It is also the universal
+/// path: every record would otherwise pay a linear scan of its auxiliary fields,
+/// since noodles' `Data::get` is a find, not a map lookup.
+///
+/// It runs where the record is filled rather than at decode because the answer is
+/// needed before anything can be attributed to a library.
+///
+/// Errors name the read. Nothing above this point can: the failure travels up as
+/// a source failure and then a filter failure, and neither knows which record was
+/// being read.
+pub(crate) fn resolve_read_group(
+    record: &RecordBuf,
+    resolution: &ReadGroupResolution,
+) -> io::Result<RecordOwner> {
+    use noodles_sam::alignment::record::data::field::Tag;
+    use noodles_sam::alignment::record_buf::data::field::Value;
+
+    // Before the tag is read, not after: see the note above.
+    if let ReadGroupResolution::Sole(id) = resolution {
+        return Ok(RecordOwner::Mine(*id));
+    }
+
+    let tag = match record.data().get(&Tag::READ_GROUP) {
+        Some(Value::String(name)) => Some(name.as_ref()),
+        // A non-string `RG` is a malformed record, not an absent tag; reading it
+        // as absent would report a broken file as a missing tag.
+        Some(_) => {
+            return Err(unreadable_record(
+                record,
+                "has an RG tag that is not a string",
+            ));
+        }
+        None => None,
+    };
+
+    resolution
+        .owner_of(tag)
+        .map_err(|unresolved| unreadable_record(record, &unresolved.to_string()))
+}
+
+/// A fatal per-record error that names the record it is about.
+///
+/// Records need not be named, and an unnamed one is exactly the sort that turns
+/// up in a malformed file — so it says so rather than rendering an empty pair of
+/// quotes and leaving the reader to guess whether the name was blank or the
+/// message was broken.
+fn unreadable_record(record: &RecordBuf, problem: &str) -> io::Error {
+    let name = match record.name() {
+        Some(name) => format!("read '{}'", String::from_utf8_lossy(name.as_ref())),
+        None => "an unnamed read".to_string(),
+    };
+    io::Error::new(io::ErrorKind::InvalidData, format!("{name} {problem}"))
 }
 
 #[cfg(test)]

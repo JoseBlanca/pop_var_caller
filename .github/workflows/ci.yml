@@ -34,11 +34,17 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Test (lib + integration, excluding criterion benches)
+      - name: Test (lib + integration + examples, excluding criterion benches)
         # `--all-targets` would attempt to run criterion benches which
-        # need fixture files not present in CI; `--lib --tests` covers
-        # the unit + integration suites.
-        run: cargo test --lib --tests --all-features
+        # need fixture files not present in CI; the three flags below
+        # cover the unit, integration and example suites.
+        #
+        # `--examples` was added 2026-07-31: the dump tools carry real
+        # tests — 32 of them — and `--tests` does not reach them, so the
+        # only guards anywhere on the generic dump's per-run witness
+        # bound had never run on a pull request (Milestone D reliability
+        # review). They cost about 0.03 s.
+        run: cargo test --lib --tests --examples --all-features
 
       - name: Doc build (deny warnings)
         env:

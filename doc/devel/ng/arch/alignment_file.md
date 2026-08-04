@@ -10,6 +10,24 @@ shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md) (vocabulary + 
 verbs for functions, newtypes for domain scalars. Signatures are illustrative; the **contract** is
 the deliverable. See the spec for the "why" behind every decision here.*
 
+> ## ⛦ Superseded in part, 2026-08-03 — read this first
+>
+> §1's `RegionReads` / `ReaderHandle` / `BorrowedReader` / `ReaderKind`, the `readers` pool and
+> `readers_opened`, §4 ("Serving a region") in its entirety, and the region-query
+> `RecordSource` impls **no longer exist**. They were replaced by
+> [`alignment_cursor.md`](alignment_cursor.md) and deleted at its Milestone F, along with
+> `src/ng/read/input/region_query.rs`.
+>
+> `AlignmentFile` itself is live, and so is everything about opening and validating it. What it
+> hands out now is `cursor(contig, reference) -> AlignmentCursor` — see
+> [`alignment_cursor.md`](alignment_cursor.md) §2.2 for the type and §2.4 for the sample-level
+> `SampleCursor` that callers actually hold. The file no longer keeps a tally either: a
+> cursor's filter lives as long as the cursor, so `AlignmentCursor::read_group_counts` reads it
+> in place rather than having it folded back per query.
+>
+> Read the superseded sections as the design record of a path that shipped, was measured, and
+> was replaced.
+
 ## Module home
 
 `src/ng/read/input/`, a folder beside `read/filtering.rs` (spec §6). A folder rather than a file
@@ -71,7 +89,7 @@ pub struct AlignmentFile {
 /// buffer and a reference-fetch buffer ~10⁶ times (spec §3.3).
 struct ReaderHandle {
     reader: ReaderKind,           // Bam(..) | Cram(..)
-    record_buf: NoodlesRawRecord, // the reused record buffer (filtering.rs:344)
+    record_buf: NoodlesRawAlignedRead, // the reused record buffer (aligned_read.rs)
     ref_buf: Vec<u8>,             // reused scratch for filter #8's reference fetch
 }
 
@@ -188,8 +206,8 @@ struct BamRegionSource<'a> { /* borrowed handle, &index, region, chunk cursor */
 /// `.crai`** rather than rescanning from entry 0 per query (spec §3.3).
 struct CramRegionSource<'a> { /* borrowed handle, &index, region, crai cursor */ }
 
-impl RecordSource for BamRegionSource<'_> { type Record = NoodlesRawRecord; /* … */ }
-impl RecordSource for CramRegionSource<'_> { type Record = NoodlesRawRecord; /* … */ }
+impl RecordSource for BamRegionSource<'_> { type Record = NoodlesRawAlignedRead; /* … */ }
+impl RecordSource for CramRegionSource<'_> { type Record = NoodlesRawAlignedRead; /* … */ }
 
 /// Hard-errors `OutOfOrderRead` when a read's `(contig, pos)` is **strictly less** than the
 /// previous one's. Equal keys are legal. State lives here, in the per-region iterator — never
@@ -282,8 +300,9 @@ Every row read at the cited line.
 | canonical contig table | `ReferenceInfo::contig_list()` [`ng/reference_info.rs:91`](../../../../src/ng/reference_info.rs) | call per open |
 | verified digests | `ContigInfo::md5` [`ng/reference_info.rs:66`](../../../../src/ng/reference_info.rs) — `Option<[u8; 16]>` | read in `check_assembly` |
 | the join point | `VerificationHandle::join` [`ng/reference_info.rs:931`](../../../../src/ng/reference_info.rs), from `read_reference_verifying_or_creating_fai` (`:1011`) | the caller's, not ours — we only supply `check_assembly` |
-| `RecordSource` / `RawRecord` | [`ng/read/filtering.rs:310`, `:285`](../../../../src/ng/read/filtering.rs) | implement; do **not** redefine |
-| reused record buffer | `NoodlesRawRecord` [`ng/read/filtering.rs:344`](../../../../src/ng/read/filtering.rs) | reuse as the pooled `record_buf` |
+| `RecordSource` | [`ng/read/filtering.rs`](../../../../src/ng/read/filtering.rs) | implement; do **not** redefine |
+| `RawAlignedRead` | [`ng/read/aligned_read.rs`](../../../../src/ng/read/aligned_read.rs) | implement; do **not** redefine |
+| reused record buffer | `NoodlesRawAlignedRead` [`ng/read/aligned_read.rs`](../../../../src/ng/read/aligned_read.rs) | reuse as the pooled `record_buf` |
 | whole-file siblings | `BamRecordSource` [`:379`](../../../../src/ng/read/filtering.rs), `CramRecordSource` [`:429`](../../../../src/ng/read/filtering.rs) | **model, not reuse** — the region impls are index-driven siblings |
 | the filter | `ReadFilter` [`ng/read/filtering.rs:581`](../../../../src/ng/read/filtering.rs) + `ReadFilterConfig` (`:47`), `ReadFilterCounts` (`:117`), `ReadFilterError` (`:550`) | compose per region; **extend** with a probe-free constructor (§5) |
 | reference access | `RawRefSeq` [`ng/ref_seq.rs:180`](../../../../src/ng/ref_seq.rs), `RefSeqError` (`:39`) | reuse; passed per query (§5) |

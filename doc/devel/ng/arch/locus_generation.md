@@ -290,6 +290,21 @@ pub struct LocusCounts {
   case to absorb, and §4's fatal-error model is never at risk from one. Supersedes spec §8 item 4 /
   §12's "zero reads" lean.
 
+- **The iterator releases its generators before its reads, in an explicit `Drop` — decided
+  2026-07-30.** A generator holds a region stream that owns its files by `Arc` and folds a drop
+  tally into an `AlignmentFile` on the way out, so if `reads` dies first that tally lands where
+  nobody can read it: a drop rate silently under-reported, on the one path that reaches it — an
+  iterator dropped **mid-region**. Field declaration order already gives this (`generators` first),
+  and that was the whole enforcement from C4 until now, guarded by a comment. The `Drop` impl
+  ([locus_generation/mod.rs](../../../../src/ng/locus_generation/mod.rs)) makes the order an
+  optimisation rather than the guarantee, so a reorder cannot silently undo it. *Rejected:* leaving
+  the order alone (the failure is invisible, so the comment is the only thing standing between a
+  reorder and a wrong number). **No test can fail either way, and that is a property of the types:**
+  observing the tally after the drop needs a second handle onto the same files, and `SampleReads` is
+  deliberately not `Clone` and does not expose them — the falsifiable version costs a widening of
+  that type, and its shape already exists one layer down in `open_bam`'s
+  `a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`.
+
 ## 7. Open items
 
 - `OPEN:` **One locus type carrying N samples vs. a single-sample type the cohort composes** —
@@ -312,7 +327,7 @@ alongside them.
 | `ObservedSequence` | `AlleleObservation` [pileup_record.rs:138](../../../../src/pileup_record.rs#L138) + `AlleleSupportStats` [:44](../../../../src/pileup_record.rs#L44) | **model** — the moments (`num_obs`/`q_sum`/`fwd`/`mapq_sum`/`mapq_sum_sq`) map field-for-field; ng keeps `placed_left`, drops `placed_start` (no model consumes it, and it is re-derivable), and adds `read_coverage` + `read_group` |
 | `ChainId` | [pileup_record.rs:30](../../../../src/pileup_record.rs#L30) (`type ChainId = u64`) | reuse as-is; production's REF-chain-id drop (§8 there) is the memory lesson §6 records |
 | `CohortLocus` composing `SampleLocusObservations` | `CohortPileupRecord.per_sample: Vec<Option<PileupRecord>>` [var_calling/types.rs:39](../../../../src/var_calling/types.rs#L39) | **model for the cohort type** — not this step; the merge groups by overlap (spec §3, §11) |
-| `SampleReads` (read access) | [read/input/mod.rs:345](../../../../src/ng/read/input/mod.rs#L345), `reads_in_region` [:440](../../../../src/ng/read/input/mod.rs#L440) | reuse as-is; §8 there is this step's feedback (per-query `Arc` accessor) — read on `main`, not this worktree |
+| `SampleReads` (read access) | [read/input/mod.rs](../../../../src/ng/read/input/mod.rs), `cursor` | reuse as-is. **The entry point changed**: `reads_in_region` was deleted at [`alignment_cursor.md`](../spec/alignment_cursor.md)'s Milestone F, and a generator now holds a `SampleCursor` for a chromosome. §8 there was this step's feedback (the per-query accessor); the cursor closed it by taking one accessor per file per chromosome instead |
 | `LocusGenerationError::Reads` | `IngestError` [read/input/mod.rs:584](../../../../src/ng/read/input/mod.rs#L584) | wrap — read on `main` |
 | `LocusGenerationError::Reference` | `RefSeqError` [ref_seq.rs:39](../../../../src/ng/ref_seq.rs#L39) | wrap |
 | `LocusGenerationError::TypedRegion` | `TypedRegionError` [region_typing/mod.rs:1640](../../../../src/ng/region_typing/mod.rs#L1640) | wrap |

@@ -28,32 +28,54 @@ the top: **the §2.2 prerequisite survives the rewrite intact**, and **the read 
 whole copied walker plus the generator that wraps it. **Production is not edited** (spec §3): ng
 copies rather than reaches in, so no visibility lift and no field on a frozen type.
 
+**Thirteen files**, as built (this block is the tree at plan 3's completion, not the plan's
+forecast — see the correction note below):
+
 ```
 src/ng/locus_generation/pileup/
-  mod.rs                – PileupGenerator, its config and counts, the RefSeq→fetcher shim
+  mod.rs                – the module: mod declarations, the pub(crate) walker vocabulary the
+                          copies resolve through, this module's own pub surface, and
+                          mod walker_vocabulary_tests. It owns no type.
+  generator.rs          – PileupGenerator, PileupGeneratorConfig, PileupGeneratorCounts,
+                          MAX_RECORD_SPAN_CEILING, PileupGeneratorConfigError, the
+                          LocusGenerator impl  (ng's own, C1–C4)
   genome_walk.rs        – the walk along genome coordinates: advance the position, admit and
                           expire reads, reconcile mates, drive the fold  (production's driver.rs)
-  open_record.rs        – the open-record table + fold
+  open_record.rs        – the open-record table + fold, and refold_live_reads (ng's, A3)
   cigar_cursor.rs       – the per-op offset table + the adaptor mask
   decompose.rs          – ReadEvent + the indel base-quality proxy
-  active_read_set.rs    – the active set
+  active_read_set.rs    – the active set, + ever_contributed (ng's, D2)
   chain_id_allocator.rs – chain ids + mate pairing
   errors.rs             – WalkerError
-  tests.rs              – #[cfg(test)] production's own end-to-end walker suite, copied
-                          verbatim: Milestone A's gate (spec §12). Dies with plan 3.
-  copy_fidelity.rs      – #[cfg(test)] ng's own: the textual check that the eight copies
-                          are still production's, from outside the files it checks
+  tests.rs              – #[cfg(test)] production's own end-to-end walker suite. Started as a
+                          verbatim copy — Milestone A's gate (spec §12) — and is now ng's:
+                          released from copy_fidelity.rs at B2, and rewritten at Checkpoint D
+                          to assert on SampleLocusObservations directly.
+  mock_reference.rs     – #[cfg(test)] ng's own: ng's RefSeq over tests.rs's MockFasta, so
+                          production's copied suite can drive ng's walker (A0)
+  copy_fidelity.rs      – #[cfg(test)] ng's own: the textual check that the copies still
+                          listed in PAIRS are production's, from outside the files it checks
   parity.rs             – #[cfg(test)] the differential harness (spec §3)
 ```
 
-**Eight of those are copies** — `genome_walk` through `errors`, plus `tests.rs` — landing verbatim
-and changed only once the differential passes (spec §3). `mod.rs`, `copy_fidelity.rs` and `parity.rs`
-are ng's own.
+**Three files are still guarded copies**, not eight: `cigar_cursor.rs`, `decompose.rs` and
+`chain_id_allocator.rs` — the `PAIRS` array at
+[copy_fidelity.rs:102](../../../../src/ng/locus_generation/pileup/copy_fidelity.rs#L102) is the
+list, and it is authoritative because a released file is **deleted** from it rather than commented
+out. Five started as copies and have been released as ng changed them: three at A0, `tests.rs` at
+B2, `active_read_set.rs` at D2. `genome_walk.rs`, `open_record.rs` and `errors.rs` began as copies
+and carry ng's changes now; **`mod.rs`, `generator.rs`, `mock_reference.rs`, `copy_fidelity.rs` and
+`parity.rs` are ng's own** and never were copies.
 
-*(Inventory corrected 2026-07-29: `tests.rs` and `copy_fidelity.rs` were missing. `tests.rs` is not
-optional — A4's gate is production's suite green **against the copy**, which is only meaningful if it
-runs against ng's walker. `copy_fidelity.rs` cannot live inside `tests.rs`, because `tests.rs` is one
-of the files it checks.)*
+*(Inventory corrected twice. 2026-07-29: `tests.rs` and `copy_fidelity.rs` were missing —
+`tests.rs` is not optional, because A4's gate is production's suite green **against the copy**,
+which is only meaningful if it runs against ng's walker, and `copy_fidelity.rs` cannot live inside
+`tests.rs` because `tests.rs` is one of the files it checks. 2026-07-30, after plan 3 completed:
+`mod.rs` was credited with the generator and its config and counts — they are `generator.rs`'s, from
+C1 — and with a `RefSeq`→fetcher shim **deleted at A0**; `generator.rs` and `mock_reference.rs` were
+absent entirely; the copy count, `tests.rs`'s description and the ng's-own list were all stale. The
+lesson worth keeping: this block was written from the plan and then not re-read against the tree, so
+every milestone that added a file left it further behind.)*
 `src/ng/read/` gains the read type they all name:
 
 ```
@@ -89,18 +111,53 @@ copied file keeps its name.
 /// (`locus_generation.md` §2). Two reference accessors, not one: `preparer` carries its own
 /// (read preparation's rule), `reference` serves the walker's REF fetches (spec §2).
 /// **Neither is rebuilt per segment** — that is the ~564k-opens trap (spec §8).
-pub struct PileupGenerator<R: RefSeq, P: ReadPreparer> {
-    reference: R,
-    preparer: P,
-    prep_scratch: P::Scratch,
+/// **As built** (`generator.rs`, re-read 2026-08-03), which differs from this doc's forecast
+/// in four ways worth naming: `RawRefSeq + EvictableRefSeq` rather than `RefSeq` (the
+/// mismatch-fraction filter needs un-canonicalised bytes, and the cursor releases what a walk
+/// has passed), an `Option` around the allocator, a **boxed** accessor factory, and — since
+/// the alignment cursor — **two** type parameters rather than three, because boxing the
+/// factory dropped one.
+///
+/// **⚠ The forecast's third parameter is gone and so is what it was for.** This doc was
+/// written when a generator opened a read *query* per region. It now holds a
+/// [`SampleCursor`](../../../../src/ng/read/input/sample_cursor.rs) for a whole chromosome and
+/// points it at each region (`spec/alignment_cursor.md`), so the factory is called once per
+/// file per chromosome rather than once per file per region — perf-review finding L2, closed.
+pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> {
+    /// Built once for the run and handed to each walk as a shared handle. `Arc` and not `Rc`
+    /// deliberately — `ref_seq.rs:188` and the per-sample fan-out to come; the accessor being
+    /// `!Sync` is why one call site allows `clippy::arc_with_non_send_sync`.
+    reference: Arc<R>,
+    /// A **factory**, because each of a sample's k file cursors needs its own raw accessor:
+    /// they are stateful readers, and sharing one would make k cursors share a file position
+    /// and one sliding window. Called once per file per **chromosome** — it used to be once
+    /// per file per region, which is where the ~564k-opens trap lived (spec §8).
+    ///
+    /// Boxed, which is what drops this struct's third type parameter; the indirection costs
+    /// one virtual call per file per chromosome, which is the point.
+    make_reference: Box<dyn FnMut() -> R + Send>,
+    /// The preparer and its scratch, lent to each region's read stream. Shared because the
+    /// stream borrows it for the walk's lifetime; it also carries the declined tally and the
+    /// latched error `end_walk` takes.
+    preparation: Rc<RefCell<ReadPreparation<P>>>,
     /// Lives across segments so `next_id` never repeats — but `reset()` is called at every
     /// region end, which clears `pending_mates` and `active_count` while preserving the
     /// counter. Carrying those two across regions cross-pairs mates between contigs and leaks
     /// `active_count` toward `ActiveReadsExhausted` (spec §8).
-    chain_ids: ChainIdAllocator,
+    ///
+    /// **An `Option`, `None` exactly while a walk holds it** — a placeholder starting at zero
+    /// is the state the whole arrangement exists to avoid, and it would fail silently.
+    chain_ids: Option<ChainIdAllocator>,
     config: PileupGeneratorConfig,
     counts: PileupGeneratorCounts,
-    /* current region, current walk (§2.2), region clamp bounds */
+    /// The region being walked, and the walk itself (§2.2). `current_region` is cleared by
+    /// `end_walk`: left set, a `next_locus` after the walk drained re-opened the query and
+    /// re-emitted the whole region.
+    current_region: Option<GenomeRegion>,
+    walk: Option<RegionWalk<R, P>>,
+    /// The first error wins; a later one describes a run that is already over.
+    pending_failure: Option<LocusGenerationError>,
+    failed: bool,
 }
 
 /// This generator's knobs — owned, taken at construction (`locus_generation.md` §5). Every
@@ -125,8 +182,11 @@ up as a diff. **There is no sixth knob** — the walk is bounded by the region, 
 (§2.2), so nothing here tunes how far it reaches.
 
 ```rust
-/// Run-level counts, alongside the shared `LocusCounts`. The first seven mirror production's
-/// `RunSummary` field for field (spec §7); the last two are ng's.
+/// Run-level counts, alongside the shared `LocusCounts`. **Ten fields of three kinds** — the
+/// split matters because only the first two kinds come off a walk at all (spec §7):
+/// seven mirror production's `RunSummary` field for field (everything on it bar
+/// `records_emitted`); one mirrors ng's *own* ninth `RunSummary` field, which production has
+/// no counterpart for; two are the generator's, off no walk.
 pub struct PileupGeneratorCounts {
     pub reads_admitted: u64,
     pub record_widen_events: u64,
@@ -136,8 +196,15 @@ pub struct PileupGeneratorCounts {
     pub mate_lookup_evictions: u64,
     pub column_depth_truncations: u64,
     /// Reads silent over a whole record footprint — all-`N` or fully adaptor-masked, so never
-    /// contributors and invisible to the per-locus tally (spec §6).
+    /// contributors and invisible to the per-locus tally (spec §6). **ng's own `RunSummary`
+    /// field**, added at D2, which `parity.rs`'s counter comparison drops by name.
     pub reads_silent_over_footprint: u64,
+    /// Reads the **preparer** declined — `Ok(None)`, "no usable observation". Added at D2, and
+    /// it reads **zero on every real run**: no v1 preparer declines anything. It exists
+    /// because a declined read never reaches a walk, so `reads_admitted` cannot account for
+    /// it, and "no preparer declines today" is a fact a counter can state and a missing field
+    /// cannot.
+    pub reads_declined_by_preparer: u64,
     /// Records dropped by the region clamp. Observably zero-sum across neighbouring regions,
     /// which is how the gap-free tiling argument stays checkable (spec §7).
     pub records_outside_region: u64,
@@ -246,10 +313,16 @@ struct RefSeqFetcher<R: RefSeq>(R);
 ### 2.1 The generator
 
 ```rust
-impl<R: RefSeq, P: ReadPreparer> LocusGenerator<()> for PileupGenerator<R, P> {
+// As built (`generator.rs`, re-read 2026-08-03): two parameters — the third went with the
+// boxed factory at the alignment cursor — and a `counts()` the dispatcher needs because a
+// boxed generator's own counters are otherwise unreachable (C4).
+impl<R: RawRefSeq + EvictableRefSeq, P: ReadPreparer> LocusGenerator<()>
+    for PileupGenerator<R, P>
+{
     fn begin_segment(&mut self, region: GenomeRegion);
     fn next_locus(&mut self, segment: &(), reads: &SampleReads)
         -> Result<Option<SampleLocusObservations>, LocusGenerationError>;
+    fn counts(&self) -> Option<GeneratorCounts<'_>>;
 }
 ```
 
@@ -257,8 +330,9 @@ The segment payload is `()` because `RegionKind::Generic` carries none — the s
 `GeneratorSlot<()>` ([locus_generation/mod.rs:377](../../../../src/ng/locus_generation/mod.rs#L377)).
 
 **Contract.** Lazy, one locus resident at a time, coordinate order. `begin_segment` **records the
-region and nothing else** — it cannot fail, and opening a read query can, so the first `next_locus`
-opens it and is where an `IngestError` surfaces. `next_locus` returns the next record whose anchor
+region and nothing else** — it cannot fail, and pointing the cursor at it can (a chromosome
+boundary mints a new cursor), so the first `next_locus` does that and is where an `IngestError`
+surfaces. `next_locus` returns the next record whose anchor
 falls inside the region, or `None` once the walk drains; a record anchored outside is dropped and
 tallied, which is what makes neighbouring regions tile without duplicates or holes (spec §2).
 Accessors, the preparer's scratch and the chain-id allocator persist **across** segments; only the
@@ -268,13 +342,27 @@ variant reaches the caller wrapped (§3).
 
 ### 2.2 The walk, and the borrow that shapes it
 
+> **⛦ SUPERSEDED, TWICE, AND KEPT FOR ITS ARGUMENT.** This section diagnosed a borrow that
+> stopped a generator holding a read stream across `next_locus` calls, and specified making the
+> stream owned as a prerequisite. That was done. Then the alignment cursor
+> ([`../spec/alignment_cursor.md`](../spec/alignment_cursor.md)) removed the stream itself: a
+> generator holds a `SampleCursor` for a **chromosome** and points it at each region, and
+> Milestone F deleted `reads_in_region`, `SampleRegionReads`, `RegionReads`, `RegionSource`,
+> `BorrowedReader` and the reader pool along with the file they lived in.
+>
+> **So read the rest of this section as the record of why the borrow had to go, not as a
+> description of anything.** Every type it names is gone, and its file/line citations point
+> into `src/ng/read/input/region_query.rs`, which no longer exists. The conclusion it reached
+> survives and is stronger than it was: *resumable + borrowed + no lifetime on `Self`* is still
+> not expressible, and what a generator owns is now a cursor rather than a stream.
+
 `reads_in_region` returns `SampleRegionReads<'_, R>`, which **borrows the `SampleReads`**
 ([read/input/mod.rs:508](../../../../src/ng/read/input/mod.rs#L508)). The chain is
 `SampleReads.files: Vec<AlignmentFile>` ([:330](../../../../src/ng/read/input/mod.rs#L330)) →
 `&'a AlignmentFile` held by `RegionReads<'a>`
 ([open_bam.rs:215](../../../../src/ng/read/input/open_bam.rs#L215)), `BorrowedReader<'a>`
 ([:171](../../../../src/ng/read/input/open_bam.rs#L171)) and `RegionSource<'a>`
-([region_query.rs:724](../../../../src/ng/read/input/region_query.rs#L724)) — the borrow exists
+(`region_query.rs:724`) — the borrow exists
 because a pooled reader has to be handed back to the file it came from. `LocusGenerator` lends
 `reads: &SampleReads` **per call** and carries no lifetime parameter, so a generator **cannot hold
 that stream between `next_locus` calls** — and the pileup, unlike the STR generator, yields many
@@ -296,15 +384,27 @@ cheapest is the borrow.
 /// The walk over one region: **owns** its read stream, so nothing borrows `SampleReads` and
 /// nothing has to be materialised. One `PileupWalker` per region, built on the first
 /// `next_locus` and drained across the calls that follow (§2.1).
-struct RegionWalk<R: RefSeq> { /* PileupWalker<PreparedReads<R>, RefSeqFetcher<R>>, clamp bounds */ }
+struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
+    walker: PileupWalker<PreparedRegionReads<R, P>, Arc<R>>,
+    region: GenomeRegion,
+    /* the allocator's counters as they stood when this walk took it (C3) */
+}
 ```
+
+> **⛦ As built, this is two types and the split is the cursor's doing.** The `RefSeqFetcher`
+> shim is gone (A0 deleted it; the walk fetches through ng's `RefSeq` directly), and — since
+> the alignment cursor — **the walker lives for a chromosome, not for a region**. So
+> `ChromosomeWalk` holds the walker and the sample's cursor, and `RegionWalk` is reduced to
+> what is genuinely per-region: the clamp region, and the allocator counters as they stood
+> when the region opened. "One `PileupWalker` per region" above is no longer true; one per
+> chromosome is.
 
 This needs `reads_in_region` to hand back an owned stream, which is **two borrows, not a redesign** —
 and the codebase already uses the remedy for both, one field away:
 
 | borrow today | becomes | why it is not self-referential |
 |---|---|---|
-| `header: &'a sam::Header` in `BamRegionSource`/`CramRegionSource` ([region_query.rs:70](../../../../src/ng/read/input/region_query.rs#L70), [:388](../../../../src/ng/read/input/region_query.rs#L388)) | `Arc<sam::Header>`, cloned from `AlignmentFile` | an independent `Arc`, not a reference *into* the file. Precedent in the same struct: `entries: Arc<[crai::Record]>` ([:393](../../../../src/ng/read/input/region_query.rs#L393)) |
+| `header: &'a sam::Header` in `BamRegionSource`/`CramRegionSource` (`region_query.rs:70`, `region_query.rs:388`) | `Arc<sam::Header>`, cloned from `AlignmentFile` | an independent `Arc`, not a reference *into* the file. Precedent in the same struct: `entries: Arc<[crai::Record]>` (`region_query.rs:393`) |
 | `file: &'a AlignmentFile` in `BorrowedReader`/`RegionReads` ([open_bam.rs:171](../../../../src/ng/read/input/open_bam.rs#L171), [:215](../../../../src/ng/read/input/open_bam.rs#L215)) — held so `Drop` can return the pooled reader | `Arc<AlignmentFile>`, with `SampleReads.files: Vec<Arc<AlignmentFile>>` | the pool lives on `AlignmentFile`, so it stays shared per file; the clone is one atomic increment per query |
 
 **Re-verified after the `ng-read-groups` merge (2026-07-27): all four survive it unchanged.**
@@ -380,6 +480,27 @@ of its own (§4), on the `bundle_threshold` model.
   counted at run level** in `PileupGeneratorCounts::reads_silent_over_footprint` (§1.1). The
   per-locus value is therefore an honest **lower bound** — say so in its doc comment, since the
   shared type's own wording promises more (spec §11).
+- **The generator does not log; its counters are the channel** (2026-07-30, carried from
+  Checkpoint C as *"nothing logs"*). Four facts decided it. **The crate has no logging framework:**
+  neither `tracing` nor `log` is a dependency, so adopting one is a crate-wide call — a new
+  dependency, a subscriber every binary must install, and a level policy — and not something a
+  correctness item inside one generator can settle. **Everything a line would say is already
+  counted:** ten public `PileupGeneratorCounts` fields, which is spec §13's read-accounting
+  requirement expressed as a type, and the dump tool prints every one of them. **A library's
+  `eprintln!` cannot be silenced by its caller**, and this generator is per-sample and per-region:
+  `locus_generation.md` §9 gives each worker its own accessor, so the fan-out to come multiplies
+  every line by the worker count. **No error is swallowed to compensate** — a stream error shed by
+  an abandoned region is carried to `pending_failure` by `end_walk` and returned by the next
+  `next_locus`, so the caller sees it rather than a log reader.
+  *Rejected:* one-shot `eprintln!`s at each site, on the shape of production's
+  `chain_id_allocator::maybe_warn_high_water` (which ng's copy inherits and still emits — the one
+  warning this module prints). **The single candidate worth revisiting is
+  `reads_declined_by_preparer`:** no v1 preparer declines anything, so a non-zero value is news by
+  construction, and its shape is a `bool` latch plus one line at `end_walk`. Left unwritten because
+  a counter that reads zero on every real run is one no caller is missing, and because the counter
+  is already printed. **Revisit when** the crate adopts a logging framework, or when the first
+  consumer that is not a dump tool lands; the other two sites are `records_outside_region` (routine
+  on every run — a counter, never a line) and the shed error (already a return value).
 - **`LocusGenerationError` gains a `Walker` variant.** No fork: none of `TypedRegion` / `Reads` /
   `Reference` ([locus_generation/mod.rs:263](../../../../src/ng/locus_generation/mod.rs#L263))
   describes a malformed read or an exhausted chain-id space. ng's own `#[non_exhaustive]` enum, so
@@ -408,8 +529,12 @@ this work. It is not a design question — it is here because the plan must sequ
   - **Where `ReadPreparer::prepare_read` sits in the chain** — as a `map` on the owned stream
     feeding `PileupWalker`, so preparation stays lazy and per read. It must not become a collect
     step; that is the property spec §7 names as the one a port can quietly destroy.
-  - **No spec fold-in is owed here:** spec §2's "one read query per segment, lazily streamed" and
-    §7's "no read buffer at all" are both literally true of §2.2's shape.
+  - **A spec fold-in *is* owed here now, and it is the cursor's.** Spec §2's "one read query
+    per segment, lazily streamed" was literally true of §2.2's shape and is no longer true of
+    anything: there is no query, and the cursor is opened once per chromosome. §7's "no read
+    buffer at all" is *nearly* true and the difference is worth stating — the cursor keeps the
+    reads a nearby region can reuse, bounded by the forget rule, not by the region's length
+    (`spec/alignment_cursor.md` §6). Nothing collects.
 
 ## 5. Reconciliation with existing code
 
@@ -433,8 +558,8 @@ Every row read at the cited line (2026-07-27). Convergence, not new types.
 | the prepared read | `PreparedRead` / `MateRole` / `ReadLengthError` [walker/mod.rs:236](../../../../src/pileup/walker/mod.rs#L236) | **copy into `src/ng/read/prepared_read.rs`**, extend with `read_group` (§1.2). Reverses [read_preparation.md](../spec/read_preparation.md) §3's reuse-as-is, which owes a fold-in |
 | `ObservedSequence` | [locus_generation/mod.rs:113](../../../../src/ng/locus_generation/mod.rs#L113) | **extend** with the read group **and `placed_left`** (§3 — the type carries neither bias field today, so without it `finalise` has nowhere to put the value); a shared-type change, so the STR generator splits too — a fold-in for [locus_generation.md](locus_generation.md) and its arch. Shares one fixture rebaseline with the `ReadCoverage` reshape above |
 | the generator contract + slot | `LocusGenerator` [:198](../../../../src/ng/locus_generation/mod.rs#L198), `GeneratorSet.generic: GeneratorSlot<()>` [:375](../../../../src/ng/locus_generation/mod.rs#L375) | implement; replaces `NoLoci { NotImplemented }` |
-| read access | `SampleReads::reads_in_region` (`read/input/mod.rs`) | reuse — after the §2.2 prerequisite makes the stream owned. **`ng-read-groups` keeps the borrow**, so the prerequisite stands as written |
-| the read type the stream yields | `AlignedRead` [read/aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36) — replaces `MappedRead` as `SampleRegionReads::Item` [mod.rs:590](../../../../src/ng/read/input/mod.rs#L590) | consume as-is; its `read_group: ReadGroupId` is what the preparer threads into ng's own `PreparedRead` (§1.2) |
+| read access | ~~`SampleReads::reads_in_region`~~ → **`SampleReads::cursor`** (`read/input/mod.rs`) | the row as written is dead: `reads_in_region` was deleted at the alignment cursor's Milestone F. A generator now mints one `SampleCursor` per chromosome and calls `move_to_region` per region, which is what made the §2.2 prerequisite moot rather than merely satisfied |
+| the read type the cursor yields | `AlignedRead` [read/aligned_read.rs:36](../../../../src/ng/read/aligned_read.rs#L36) — replaces `MappedRead`, and is what `SampleCursor::next_read` hands back | consume as-is; its `read_group: ReadGroupId` is what the preparer threads into ng's own `PreparedRead` (§1.2) |
 | `AlignedRead` → `PreparedRead` | `ReadPreparer::prepare_read` [read/mod.rs:113](../../../../src/ng/read/mod.rs#L113) (takes `AlignedRead` since the merge; was `MappedRead`), `LeftAlignPreparer` [left_align.rs:87](../../../../src/ng/read/left_align.rs#L87) | **call** — this generator is step 2's only consumer |
 | the reference | `RefSeq` [ng/ref_seq.rs:142](../../../../src/ng/ref_seq.rs#L142) → `MultiChromRefFetcher` [fasta/mod.rs:114](../../../../src/fasta/mod.rs#L114) | shim (§1.3); contracts already agree on canonical bytes |
 | the region clamp | `drive_region_into_writer` [pileup_to_psp.rs:271](../../../../src/pileup/per_sample/pileup_to_psp.rs#L271) | reuse the **rule** (`(start..=end).contains(&record.pos)`), not the code — the rest of that file is `.psp` machinery |
@@ -446,16 +571,42 @@ Every row read at the cited line (2026-07-27). Convergence, not new types.
 
 Tests live beside the code; `parity.rs` is `#[cfg(test)]`, the `delimit_parity` shape.
 
+**As built, the test surface is four files and one example** (re-read 2026-08-03), which is
+worth stating because the weight is not where a reader would guess:
+
+| where | what it is |
+|---|---|
+| `parity.rs` | the differential: the forward projection, the permanent anchor, the six-class census, the determinism digest, and the `#[ignore]`d real-data run. The largest file in the module. |
+| `tests.rs` | production's end-to-end suite, now asserting on `SampleLocusObservations` through four test-only accessors rather than through a lossy projection (Checkpoint D) |
+| `generator.rs`'s own `mod tests` | the generator's knobs, counters, region walk, halo and stop rule |
+| `copy_fidelity.rs` | the textual guard over `PAIRS` |
+| `examples/ng_generic_loci_dump.rs` | the dump tool **and its ten asserted fixtures** — a `#[cfg(test)] mod` inside the example, so `cargo test --example ng_generic_loci_dump` is a second suite that `cargo test --lib` does not run |
+
+**`benches/ng_generic_pileup_perf.rs` drives this generator** (2026-07-30), which closes the
+Checkpoint B carry — both of plan 3's measurements came from throwaway probes that were deleted
+after use, so every later question began by rebuilding one. It enters at `PileupGenerator` over a
+synthetic BAM in a temporary directory, because ng's `run` is `pub(crate)` and a bench is an
+external consumer; it sweeps coverage and region grain; and it asserts, before each timed set, that
+the walk emits one locus per position of the span **and** that the reads reached it, since a walk
+generating nothing measures as a fast walk.
+
 **Stage 1 is a gate, not a permanent test.** The verbatim copy is proven to emit `PileupRecord`
 streams equal to production's on one shared `PreparedRead` stream, plus `RunSummary` — and that
 harness dies when §1.2 lands, because the port then *deliberately* differs. It must therefore be
 shown to discriminate before it is retired: mutate mate overlap, adaptor masking, widening, the
 re-fold and the column cap in turn, and watch it fail (spec §12).
 
-**What survives is a narrower permanent differential**: on loci where every folded read spans the
-final footprint, ng and production must agree **forever** — that set is untouched by every change in
-§1.2, so it is a real regression anchor rather than a snapshot. Loci outside it are the divergence,
-enumerated and counted, and that count is the deliverable (spec §12).
+**What survives is a narrower permanent differential:** *every* locus of a fixture on which
+production fabricates nothing, with the complete-witness test riding on top as a tripwire for
+fixture drift. Loci outside it are the divergence, enumerated and counted, and that count is the
+deliverable. *Why, and the sixth divergence class that forces this shape:* spec §3; the deliverable:
+spec §12, §13.2.
+
+> **Corrected 2026-07-30.** This paragraph said the anchor was "loci where every folded read
+> **spans** the final footprint" and that they "must agree **forever**" — wrong twice, and both
+> errors matter to a coder. `spans` is an *alignment* test, the exact vocabulary spec §6's boxed
+> warning forbids; and the claim is false, because a read can witness every position and production
+> still be wrong about it.
 
 **The dump tool** `examples/ng_generic_loci_dump.rs` is the definition of done, asserted on a
 committed fixture — including a deletion long enough to widen a record past an already-expired read,

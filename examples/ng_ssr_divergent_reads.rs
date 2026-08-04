@@ -27,7 +27,7 @@ use pop_var_caller::ng::alignment::PerQualityEmission;
 use pop_var_caller::ng::alignment::ssr_best_path_flat_gap::SsrFlatGapAligner;
 use pop_var_caller::ng::alignment::ssr_best_path_unit_slip::SsrUnitSlipAligner;
 use pop_var_caller::ng::locus_generation::LocusGenerator;
-use pop_var_caller::ng::locus_generation::ReadCoverage;
+use pop_var_caller::ng::locus_generation::ReadWitness;
 use pop_var_caller::ng::locus_generation::ssr::{
     RepeatDelimiter, SegmentDelimitations, SsrGenerator, SsrGeneratorConfig,
 };
@@ -36,7 +36,7 @@ use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
@@ -47,7 +47,7 @@ use pop_var_caller::ng::types::{Bp, ContigId};
 /// `None` = the read anchored no border / was gated out.
 type Measurement = Option<(&'static str, Vec<u8>)>;
 
-fn measurement(obs: &Option<(ReadCoverage, Vec<u8>)>) -> Measurement {
+fn measurement(obs: &Option<(ReadWitness, Vec<u8>)>) -> Measurement {
     obs.as_ref().map(|(cov, bases)| {
         // The side is a derivation since the reshape: a run flush with the left border is a
         // prefix. On this path a partial always anchors one border, so "not flush left" is
@@ -56,9 +56,9 @@ fn measurement(obs: &Option<(ReadCoverage, Vec<u8>)>) -> Measurement {
         //
         // Destructured rather than guarded on `_`, so a future variant is a compile error.
         let class = match cov {
-            ReadCoverage::Complete => "complete",
-            run @ ReadCoverage::Observed { .. } if run.is_flush_left() => "partialL",
-            ReadCoverage::Observed { .. } => "partialR",
+            ReadWitness::Complete => "complete",
+            run @ ReadWitness::Partial { .. } if run.is_flush_left() => "partialL",
+            ReadWitness::Partial { .. } => "partialR",
         };
         (class, bases.clone())
     })
@@ -95,10 +95,7 @@ fn make_generator<A: RepeatDelimiter>(
     aligner: A,
     config: SsrGeneratorConfig,
     bundle_threshold: Bp,
-) -> Result<
-    SsrGenerator<WindowedRefSeq, impl FnMut() -> WindowedRefSeq, A>,
-    Box<dyn std::error::Error>,
-> {
+) -> Result<SsrGenerator<WindowedRefSeq, A>, Box<dyn std::error::Error>> {
     Ok(SsrGenerator::new(
         WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()),
         {
@@ -141,7 +138,11 @@ fn run(
     contig_filter: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) = read_reference_verifying_or_creating_fai(
+        &cache,
+        fasta.to_path_buf(),
+        ReferenceCheck::VerifyAgainstIndex,
+    )?;
     let contigs = info.contig_list();
     // One reference for every file this run opens — and so one copy of the bases.
     let reference = OpenReference::new(info);

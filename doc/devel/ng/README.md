@@ -9,6 +9,13 @@ by document kind:
     taxonomy, the benchmark strategy, and the single-phase lab.
   - [`read_filtering.md`](spec/read_filtering.md) — step 1 (the whole-read keep/drop
     prelude) + the ng foundations it settles (skeleton, `types.rs` seed, conventions).
+  - [`read_filtering_stages.md`](spec/read_filtering_stages.md) — dividing step 1 into two
+    filters and a conversion, so `filtering.rs` is left holding only the keep-or-drop rules
+    and the cursor owns the loop. Adds no types: it renames the raw read to say what it is,
+    deletes the source trait and the three-way stop, and fixes the boundary — the filters and
+    the conversion live *below* what the cursor keeps, or reads get converted a dozen times
+    each. Which filters run, and their thresholds, stay in `read_filtering.md`.
+    **Settled, no code yet.**
   - [`read_preparation.md`](spec/read_preparation.md) — step 2, the per-read, **locus-independent**
     transform (pass-through / canonicalize / re-align → `PreparedRead`). It is a **generic-path-only**
     step: the STR path has no read preparation — it goes filtering → observation generation, aligning
@@ -56,6 +63,9 @@ by document kind:
     folder per step (trait + impls + tests together), shared vocabulary, `bench/`.
   - [`read_filtering.md`](arch/read_filtering.md) — step 1's types & interfaces,
     distilled (the code-facing companion to the spec).
+  - [`read_filtering_stages.md`](arch/read_filtering_stages.md) — the renames, the two verdict
+    functions, and the loop as the cursor owns it; companion to
+    `spec/read_filtering_stages.md`.
   - [`alignment.md`](arch/alignment.md) — the alignment module's types & interfaces
     (`BestPathAligner`, `MarginalAligner`, `AlignmentNormalizer`, `RepeatSpan`, `StutterModel`;
     seeds `LogProb`); companion to `spec/alignment.md`. Called by two steps, not a step itself.
@@ -67,11 +77,19 @@ by document kind:
   - [`reference_info.md`](arch/reference_info.md) — the reference-info reader's types &
     interfaces (`ReferenceInfo`/`ContigInfo`, the cache, the writer, the background verify);
     companion to `spec/reference_info.md`. Foundational infra, not a step.
-  - [`alignment_file.md`](arch/alignment_file.md) — `AlignmentFile` (the validated handle),
-    the region-query `RecordSource` impls, the order guard, the reader pool;
-    companion to `spec/alignment_file.md`.
+  - [`alignment_file.md`](arch/alignment_file.md) — `AlignmentFile` (the validated handle) and
+    the validate-on-open gate; companion to `spec/alignment_file.md`. **Its region-query half —
+    the per-region `RecordSource` impls, the order guard and the reader pool — is superseded by
+    `alignment_cursor.md` and was deleted**; that part of both documents is a design record.
+  - [`alignment_cursor.md`](arch/alignment_cursor.md) — the long-lived reader that stays
+    positioned in one chromosome of one file and keeps the reads it has already decoded and
+    filtered: `AlignmentCursor`, `SampleCursor`, the per-format `AlignedReadsReader`s, and the forget
+    rule. **The only way to read a BAM or a CRAM in ng.** Companion to
+    `spec/alignment_cursor.md`.
   - [`sample_reads.md`](arch/sample_reads.md) — `SampleReads`, the argmin merge and its
     per-read budget; seeds the shared `GenomePosition`. Companion to `spec/sample_reads.md`.
+    **The merge it specifies now lives in `sample_cursor.rs` over cursors** rather than over
+    per-region streams; the k-way rules are unchanged and the entry point is not.
   - [`read_groups.md`](arch/read_groups.md) — `ReadGroup`/`ReadGroups`, the run-wide `ReadGroupId`,
     the per-open `ReadGroupResolution`, and ng's own `AlignedRead`; companion to
     `spec/read_groups.md`.
@@ -85,7 +103,10 @@ by document kind:
   - [`foundations.md`](impl_plan/foundations.md) — the first ng code: skeleton,
     `types.rs` seed, and the `RefSeq` accessor (three impls).
   - [`read_filtering.md`](impl_plan/read_filtering.md) — step 1: the `read/` module,
-    the cascade, the `RecordSource`/`RawRecord` seam, the `ReadFilter` iterator.
+    the cascade, the `RecordSource`/`RawAlignedRead` seam, the `ReadFilter` iterator.
+  - [`read_filtering_stages.md`](impl_plan/read_filtering_stages.md) — dividing step 1 into two
+    filters and a conversion: the renames, the contig check as a table comparison, the loop
+    moving into the cursor, and the two tests output identity cannot see.
   - [`read_input.md`](impl_plan/read_input.md) — step 1's input edge (`read/input/`): the
     validate-on-open gate, the BAM/CRAM region queries, the order guard, and the k-file
     merge. Covers both `alignment_file` and `sample_reads`.

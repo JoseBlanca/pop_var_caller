@@ -1,11 +1,11 @@
 //! **Per-sample STR stutter dump** — walk region typing once and delimit every sample's reads at
 //! the *same* microsatellite tracts, emitting one tidy row per (sample, locus, observation).
 //!
-//! A row is one `(bases, read_coverage, read_group)` **cell**, not one allele: `ObservedSequence`
-//! carries the read group as part of its identity, so on a sample declaring several `@RG`s one
-//! allele becomes several rows. The `read_group` column below is what keeps those rows
-//! distinguishable — without it they would be indistinguishable in the output and the per-row
-//! counters would silently count cells while reading as alleles.
+//! A row is one `(bases, read_witness, read_group)` **cell**, not one allele:
+//! `SequenceObservation` carries the read group as part of its identity, so on a sample declaring
+//! several `@RG`s one allele becomes several rows. The `read_group` column below is what keeps
+//! those rows distinguishable — without it they would be indistinguishable in the output and the
+//! per-row counters would silently count cells while reading as alleles.
 //!
 //! ```text
 //! ng_ssr_cohort_stutter [--contigs a,b] [--regions r.bed] <reference.fa> <sample.cram> [sample ...]
@@ -33,10 +33,11 @@
 //! millions of rows, and buffering them all would cost gigabytes for no benefit.
 //!
 //! Output: the run's **read-group table** as `#rg` lines, a bare TSV column line, then the rows.
-//! Each covered locus contributes, per sample, one row per distinct (sequence, coverage, read
-//! group) plus, when non-zero, a synthetic `no_border` row (reads that reached the aligner and
-//! anchored nothing) and a `capped` row (reads the depth cap discarded). A locus no read of that
-//! sample reaches emits nothing for that sample.
+//! Each covered locus contributes, per sample, one row per distinct (sequence, witness, read
+//! group) — the witness tagged `complete` / `partial:left` / `partial:right` — plus, when non-zero,
+//! a synthetic `no_border` row (reads that reached the aligner and anchored nothing) and a `capped`
+//! row (reads the depth cap discarded). A locus no read of that sample reaches emits nothing for
+//! that sample.
 //!
 //! **The read group is on every observation row**, because that is the grain chemistry actually
 //! varies at. An allele seen from two groups is two rows, so a per-group model gets the allele ×
@@ -59,9 +60,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use pop_var_caller::fasta::ContigList;
+#[cfg(test)]
+use pop_var_caller::ng::locus_generation::WitnessedLocusPositions;
 use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
 use pop_var_caller::ng::locus_generation::{
-    LocusGenerator, LocusKind, LocusLen, ReadCoverage, SampleLocusObservations,
+    LocusGenerator, LocusKind, LocusLen, ReadWitness, SampleLocusObservations,
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
@@ -69,7 +72,7 @@ use pop_var_caller::ng::read::input::read_groups::{NameOrigin, build_read_groups
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
-    ReferenceInfoCache, read_reference_verifying_or_creating_fai,
+    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{
@@ -78,9 +81,19 @@ use pop_var_caller::ng::region_typing::{
 use pop_var_caller::ng::types::{Bp, ContigId};
 use pop_var_caller::regions::ContigBounds;
 
+/// The side derivation, shared with the other two STR dumps so the three cannot drift apart
+/// again (D4). Each tool keeps its own strings — see `witness_label`.
+#[path = "shared/witness_side.rs"]
+mod witness_side;
+use witness_side::{WitnessSide, witness_side};
+
 /// Run-level totals for one sample — the accounting identity `reads_fetched = complete + partial +
-/// no_border + capped`, tallied from the rows because the generator's own counters are shared by
-/// every sample it serves.
+/// no_border + capped`, tallied from the rows.
+///
+/// Tallied from the rows rather than read off the generator, which is a habit from when one
+/// generator served every sample and its counters could not be attributed. Each sample now has its
+/// own generator, so its counters *would* be per sample — but the rows are what the dashboards
+/// parse, so counting them keeps the header and the body answering from one source.
 #[derive(Debug, Clone, Default)]
 struct SampleCounts {
     name: String,
@@ -102,7 +115,7 @@ fn write_locus<W: Write>(
     locus: &SampleLocusObservations,
     segment: &SsrSegment,
 ) -> std::io::Result<()> {
-    let has_reads = !locus.observed_sequences.is_empty()
+    let has_reads = !locus.observations.is_empty()
         || locus.reads_without_observation > 0
         || locus.reads_discarded_by_cap > 0;
     if !has_reads {
@@ -141,10 +154,10 @@ fn write_locus<W: Write>(
         )
     };
 
-    for obs in &locus.observed_sequences {
-        let label = coverage_label(obs.read_coverage, locus.locus_len());
-        match obs.read_coverage {
-            ReadCoverage::Complete => {
+    for obs in &locus.observations {
+        let label = witness_label(&obs.read_witness, locus.locus_len());
+        match obs.read_witness {
+            ReadWitness::Complete => {
                 counts.obs_complete += 1;
                 counts.reads_complete += u64::from(obs.num_obs);
             }
@@ -181,24 +194,18 @@ fn origin_label(origin: NameOrigin) -> &'static str {
     }
 }
 
-/// The tag a read-coverage carries in the `coverage` column.
-fn coverage_label(coverage: ReadCoverage, locus_len: LocusLen) -> &'static str {
-    // Since the reshape the side is a **derivation**, not a variant: a run flush with the left
-    // border is a prefix constraint, one flush with the right border a suffix. A run flush with
-    // neither is interior — the STR path cannot mint one (it anchors a border or yields nothing),
-    // so it never appears here, but naming it keeps the label honest for the generic path.
-    // Destructured rather than guarded on `_`, so a future `ReadCoverage` variant is a
-    // compile error here. The guard form is what this migration used and it is exactly what
-    // let the compiler stop forcing these sites to be revisited.
-    match coverage {
-        ReadCoverage::Complete => "complete",
-        run @ ReadCoverage::Observed { .. } => {
-            match (run.is_flush_left(), run.is_flush_right(locus_len)) {
-                (true, _) => "partial_left",
-                (false, true) => "partial_right",
-                (false, false) => "partial:interior",
-            }
-        }
+/// The tag a witness carries in the `coverage` column.
+fn witness_label(witness: &ReadWitness, locus_len: LocusLen) -> &'static str {
+    // The derivation is shared (`shared/witness_side.rs`); the spelling is this tool's. **These
+    // two strings moved at D4**: `partial_left` / `partial_right` became `partial:left` /
+    // `partial:right`, because this function already said `partial:interior` beside them, so a
+    // consumer grepping `partial:` got this tool's interiors and none of its sides.
+    match witness_side(witness, locus_len) {
+        WitnessSide::Complete => "complete",
+        WitnessSide::Left => "partial:left",
+        WitnessSide::Right => "partial:right",
+        WitnessSide::BothBorders => "partial:both",
+        WitnessSide::Interior => "partial:interior",
     }
 }
 
@@ -213,7 +220,11 @@ fn run_cohort(
     regions_bed: Option<&Path>,
 ) -> Result<Vec<SampleCounts>, Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
-    let (info, verify) = read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf())?;
+    let (info, verify) = read_reference_verifying_or_creating_fai(
+        &cache,
+        fasta.to_path_buf(),
+        ReferenceCheck::VerifyAgainstIndex,
+    )?;
     let contigs: ContigList = info.contig_list();
     // **One reference for the whole cohort, and so one copy of its bases.** A
     // `fasta::Repository` memoises whole contigs and never evicts, so the
@@ -284,15 +295,31 @@ fn run_cohort(
         reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
     )]
     let reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
-    let mut generator = SsrGenerator::with_default_aligner(
-        Arc::clone(&reference),
-        {
-            let reference = Arc::clone(&reference);
-            move || Arc::clone(&reference)
-        },
-        SsrGeneratorConfig::default(),
-        bundle_threshold,
-    )?;
+    // **One generator per sample, and that is a requirement rather than a tidiness.** A
+    // generator opens a reader for one sample's files and keeps it positioned for a whole
+    // chromosome, so a generator shared between samples would answer every sample out of the
+    // first one's files — this tool's whole question is whether samples differ, and it would
+    // have reported one sample N times, with no error and rows of exactly the right shape.
+    // `SsrGenerator` now refuses a sample it was not opened for, so the mistake is a loud one;
+    // this is the shape that does not make it.
+    //
+    // The *reference* is still shared across all of them: it is read-only sliding-window access
+    // to the same FASTA, and giving each sample its own would re-read the whole `.fai` and
+    // re-`open(2)` the file per sample.
+    let mut generators = samples
+        .iter()
+        .map(|_| {
+            SsrGenerator::with_default_aligner(
+                Arc::clone(&reference),
+                {
+                    let reference = Arc::clone(&reference);
+                    move || Arc::clone(&reference)
+                },
+                SsrGeneratorConfig::default(),
+                bundle_threshold,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let stdout = std::io::stdout();
     let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
@@ -398,7 +425,11 @@ fn run_cohort(
             if !wanted_contig(region.region.contig) {
                 continue;
             }
-            for (sample, counts) in samples.iter().zip(counts.iter_mut()) {
+            for ((sample, counts), generator) in samples
+                .iter()
+                .zip(counts.iter_mut())
+                .zip(generators.iter_mut())
+            {
                 generator.begin_segment(region.region);
                 while let Some(locus) = generator.next_locus(segment, sample)? {
                     write_locus(&mut out, counts, &locus, segment)?;
@@ -491,5 +522,52 @@ fn main() -> ExitCode {
             eprintln!("error: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The four strings this tool prints in its `coverage` column**, pinned.
+    ///
+    /// D4 moved two of them — `partial_left` / `partial_right` became `partial:left` /
+    /// `partial:right`, so the three STR dumps stop disagreeing about a separator — and the
+    /// Milestone D reliability review then found that nothing in the tree noticed either the
+    /// rename or a mutation labelling *every* partial `complete`, because this binary had no
+    /// tests at all. It has one now, and it is not decoration: the dashboards key on this column
+    /// (`ng_ssr_cohort_stutter_dashboard.py:172` selects `coverage == "complete"` to decide which
+    /// reads carry an exact length), so a partial mislabelled `complete` feeds a censored lower
+    /// bound into a stutter distribution silently.
+    ///
+    /// The derivation itself lives in `shared/witness_side.rs` and is exercised by
+    /// `ng_ssr_loci_dump`'s fixtures; what is this tool's own, and only this tool's, is the
+    /// spelling.
+    #[test]
+    fn the_coverage_column_spells_the_four_cases_the_dashboards_read() {
+        let len = LocusLen::from_positions(10);
+        let partial = |runs: &[(u16, u16)]| {
+            witness_label(
+                &ReadWitness::Partial {
+                    positions: WitnessedLocusPositions::from_half_open_runs(runs.iter().copied())
+                        .expect("a non-empty set of runs"),
+                },
+                len,
+            )
+        };
+        assert_eq!(witness_label(&ReadWitness::Complete, len), "complete");
+        assert_eq!(partial(&[(0, 4)]), "partial:left");
+        assert_eq!(partial(&[(6, 10)]), "partial:right");
+        assert_eq!(partial(&[(3, 7)]), "partial:interior");
+        assert_eq!(
+            partial(&[(0, 10)]),
+            "partial:both",
+            "a repeat read that ran out covers the tract end to end without measuring it",
+        );
+        assert_eq!(
+            partial(&[(0, 3), (7, 10)]),
+            "partial:both",
+            "so does a read blind in the middle — neither is a measurement",
+        );
     }
 }

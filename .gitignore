@@ -19,7 +19,13 @@ TRTools/
 HipSTR/
 GangSTR/
 TRF-mod/
-/CLAUDE.md
+# `/CLAUDE.md` was ignored until 2026-08-04. It is tracked now, deliberately:
+# it is the only file loaded into an assistant's context automatically, and
+# while it was ignored it existed **only in the main checkout**. Every git
+# worktree silently lost it — including the project's own writing rules, which
+# were then broken for two days in a worktree that had never seen them.
+# `ai/skills/` is tracked and reaches every worktree; the file that says to use
+# the skills has to travel the same way.
 /.claude/
 benchmarks/tomato1/crams/
 benchmarks/tomato1/results/**
