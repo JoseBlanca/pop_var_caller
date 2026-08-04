@@ -821,12 +821,16 @@ fn production_counters(summary: crate::pileup::walker::RunSummary) -> SummaryCou
 /// nominally distinct and Rust cannot bound on field access — and writing it twice is what
 /// makes *both* exhaustive.
 ///
-/// **Three fields are ng's alone and are dropped by name.** `reads_silent_over_footprint` (D2)
+/// **Four fields are ng's alone and are dropped by name.** `reads_silent_over_footprint` (D2)
 /// counts reads that were admitted and never contributed anywhere; `reads_with_holed_witness`
 /// and `hole_positions` count reads blind in the middle of a record, which production cannot
-/// represent at all — that is what this whole change is about. Production has no counterpart to
-/// any of the three, so there is nothing to compare and comparing them against a structural zero
-/// would fail every walk. They are bound and dropped here, at one site, with this comment — the
+/// represent at all — that is what this whole change is about. `reads_shed_at_admission` counts
+/// reads ng refuses at the door once `max_active_reads` are open, where production aborts the
+/// walk instead: on any input that reaches the cap the two walkers no longer compute the same
+/// thing, and on every input below it — which is every input this harness runs — ng's counter is
+/// zero. Production has no counterpart to any of the four, so there is nothing to compare and
+/// comparing them against a structural zero would fail every walk. They are bound and dropped
+/// here, at one site, with this comment — the
 /// same treatment `placed_start` gets in [`project`], and the reason the destructure is
 /// exhaustive is so that treatment has to be *chosen*.
 fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
@@ -839,6 +843,7 @@ fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
         active_reads_high_water,
         mate_lookup_evictions,
         column_depth_truncations,
+        reads_shed_at_admission: _,
         reads_silent_over_footprint: _,
         reads_with_holed_witness: _,
         hole_positions: _,

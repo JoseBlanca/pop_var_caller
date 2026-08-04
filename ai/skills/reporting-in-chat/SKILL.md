@@ -102,6 +102,43 @@ the answer last, and the temptation is to retell it in that order.
 > ❌ eight paragraphs of measurement, then the recommendation
 > ✅ "Stop optimising, and don't trust the current ranking. Two reasons…"
 
+### Which question — and it is not the one you settled last
+
+"Is the first sentence the answer?" is a question you will always answer *yes* to,
+because you know which question you were answering. It has to be made falsifiable,
+and there are two tests that do it. Both are cheap and both are mechanical.
+
+**Quote the reader's question at the top of the draft, in their words, before
+writing a line of reply.** Not a paraphrase — the actual sentence from their
+message. Then the first sentence of the reply either answers *that* or it does not,
+and you can see which. The failure this catches is answering the sub-question your
+working settled last: asked *what do we do about a walk that aborts*, replying
+*which file the code goes in*. Both are real answers. Only one was asked.
+
+**The noun test: every noun in the first sentence appears in the reader's own
+message, or is plain English.** A noun that is neither is a term you coined while
+working, and it is doing load-bearing work in the one sentence that cannot afford
+it. Circle them one at a time; this takes ten seconds and does not depend on
+feeling anything.
+
+> ❌ "shed in ng's own admission path, and touch neither copy of the locked file"
+> — *admission path* appears nowhere in the reader's message; it names one of three
+> options they had not seen described.
+> ✅ "refuse the next read and count it, instead of aborting the run" — every noun
+> is theirs or plain.
+
+### When several things are true, lead with the one that changes what they do
+
+BLUF settles that the answer comes first; it does not settle *which* answer when
+there are three. Rank by consequence to the reader, not by how hard each was to
+find — the two orders are usually opposites, because the cheap decisive fact often
+arrives last.
+
+**The reader will often have told you.** A line like *"worth confirming — it
+changes how big this is"* is a ranking instruction: whatever answers it outranks
+everything else in the reply. Re-read their message for that sentence before you
+order the paragraphs, and if they wrote one, the paragraph answering it goes first.
+
 ## Explaining late is worse than not mentioning it
 
 Offering to explain *after* delivering shorthand does not repair the shorthand; it
@@ -123,15 +160,24 @@ for a number. Replace them. Prefer natural frequencies to small percentages.
 ## The pass before sending
 
 The curse of knowledge specifically disables self-monitoring — you cannot feel the
-gap, so this has to be mechanical, not a vibe check.
+gap, so this has to be mechanical, not a vibe check. **A step you can pass by
+deciding you passed it is not one of these steps.** Every step below either
+produces something you can point at, or compares two texts.
 
+0. **Before drafting**, paste the reader's question at the top, in their words, and
+   any sentence of theirs that ranks the answers ("that changes how big this is").
+   Steps 2 and 6 compare against these; without them both degrade to a vibe check.
 1. Label every paragraph **D**, **K** or **W**. Delete every W.
-2. Read the first sentence alone. Is it the answer?
-3. Circle every name. For each, was it defined in this reply, or is it plain
-   English? A label like `H3` fails. A coined term like "the probe" fails.
+2. Read the first sentence alone, against the quoted question. Does it answer
+   *that* one, or the sub-question your working settled last?
+3. Circle every noun in the first sentence. Each must appear in the reader's
+   message or be plain English. Then circle every name in the rest: was it defined
+   in this reply? A label like `H3` fails. A coined term like "the probe" fails.
 4. For each **D**: is there a recommendation and a trade-off? Could they answer
    without asking you anything first?
 5. Any hedge word standing in for a number?
+6. Are the surviving paragraphs ordered by consequence to the reader — and if they
+   named what would change their assessment, is that paragraph first?
 
 ## Failure log
 
@@ -162,6 +208,41 @@ checkout, and all this work happened in a worktree. **Rule for the next reader o
 this file:** when a writing rule is broken repeatedly, check first whether it was
 ever in context. Fixed by symlinking `CLAUDE.md` into each worktree; a new worktree
 still needs the link.
+
+### 2026-08-04 — a recommendation whose first sentence answered a sub-question
+
+The owner asked which of three places a depth-shedding fix should live. The reply
+opened:
+
+> ❌ "**Recommendation: shed in ng's own admission path, and touch neither copy of
+> the locked file.**"
+>
+> Owner: *"have you read the reporting-in-chat skill. If you have, what has failed?
+> why haven't you given me the context to understand the first fucking sentence of
+> the conversation?"*
+
+> ✅ "**When too many reads are already open, refuse the next one and count it,
+> instead of aborting the run.** That is the whole fix, and it needs no edit to the
+> file that is locked byte-identical to production's."
+
+Three failures, and the skill as written would have caught none of them — the pass
+step covering this was *"read the first sentence alone. Is it the answer?"*, which
+the writer always answers yes, knowing which question they meant.
+
+1. *"ng's own admission path"* was coined while working: one of three options, named
+   as if the reader had seen the other two described.
+2. The first sentence answered *which file the code goes in* — the sub-question the
+   working settled last — when the question asked was *what do we do about a walk
+   that aborts*.
+3. The largest fact, that production fails on the same input in 0.45 s, sat in the
+   third paragraph because the working found it third. The owner had even written
+   *"worth confirming — it changes how big this is"*, which is a ranking
+   instruction, and it was read as a task rather than as one.
+
+**Fixed structurally, not by resolve:** the *Which question* and *lead with the one
+that changes what they do* sections above, and steps 0, 2, 3 and 6 of the pass —
+each of which compares the draft against the reader's own quoted words instead of
+asking the writer how they feel about it.
 
 ## Sources
 
