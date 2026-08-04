@@ -339,6 +339,7 @@ static CANONICAL: [u8; 256] = {
 /// Do two bytes canonicalise to the **same ACGT base**? A non-ACGT byte matches nothing
 /// — an `N` beside an `N` is absence of evidence, not evidence of a repeat.
 #[inline]
+#[allow(dead_code)]
 fn bases_match(x: u8, y: u8) -> bool {
     let cx = CANONICAL[x as usize];
     cx != 0 && cx == CANONICAL[y as usize]
@@ -486,6 +487,11 @@ pub fn find_tandem_repeats(
 ) -> Vec<RepeatInterval> {
     let mut out = Vec::new();
     let n = seq.len();
+    // Canonicalise ONCE, not twice per period. `bases_match` did two dependent table
+    // loads per scored position; over 6 periods that is 12 canonicalisations of every
+    // base, all of the same byte.
+    let mut canonical: Vec<u8> = Vec::with_capacity(n);
+    canonical.extend(seq.iter().map(|&b| CANONICAL[b as usize]));
     for period in periods.min()..=periods.max() {
         let p = period as usize;
         if p >= n {
@@ -494,13 +500,12 @@ pub fn find_tandem_repeats(
         // Score index `k` (0-based over `p..n`) corresponds to position `j = k + p`.
         let reward = i64::from(params.match_reward);
         let penalty = -i64::from(params.mismatch_penalty);
-        let scores = (p..n).map(|j| {
-            if bases_match(seq[j], seq[j - p]) {
-                reward
-            } else {
-                penalty
-            }
-        });
+        let back = &canonical[..n - p];
+        let here = &canonical[p..];
+        let scores = back
+            .iter()
+            .zip(here.iter())
+            .map(|(&b, &h)| if h != 0 && h == b { reward } else { penalty });
         maximal_scoring_subsequences(scores, |k0, k1, score| {
             // Segment [k0, k1] → tract [k0, k1 + p + 1): the earliest base involved is
             // `j0 - p = k0`, the latest is `j1 = k1 + p`, so the exclusive end is `k1+p+1`.

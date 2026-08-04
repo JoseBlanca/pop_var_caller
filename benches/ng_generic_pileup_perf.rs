@@ -29,10 +29,12 @@
 //!   is bounded by depth, not by region length, so depth is the axis that claim
 //!   lives on.
 //! - **Region grain** at fixed coverage and span: the same base pairs walked as one
-//!   region, as ten, as a hundred. Each region re-opens a read query and re-fetches
-//!   reference; the halo means reads near a boundary are prepared twice. The grain
-//!   is the caller's choice in the real pipeline, so a harness that cannot vary it
-//!   cannot answer questions about it.
+//!   region, as ten, as a hundred. The halo means reads near a boundary are prepared
+//!   twice, and the grain is the caller's choice in the real pipeline, so a harness
+//!   that cannot vary it cannot answer questions about it. **This is the axis D1
+//!   flattened**: a region used to re-open a read query and re-fetch the reference, and
+//!   now it repositions a cursor that stayed open and hands back reads it already
+//!   decoded, so the slope here is what the change is for.
 //!
 //! Both fixtures are deterministic: the contig comes from a fixed-seed LCG and the
 //! reads are laid down by an integer rule, so two runs on one commit compare.
@@ -42,12 +44,10 @@
 //! ```
 
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use tempfile::TempDir;
 
 use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
 use pop_var_caller::ng::read::ReadFilterConfig;
@@ -60,172 +60,29 @@ use pop_var_caller::ng::reference_info::{
 };
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
+/// The fixture builders, shared with `examples/ng_generic_walk_probe.rs` so a bench
+/// number and that probe's assertions describe the same reads.
+#[path = "../examples/shared/synthetic_alignment.rs"]
+mod synthetic_alignment;
+use synthetic_alignment::{SyntheticGeometry, SyntheticSample};
+
 /// Reference span of every fixture, in base pairs. Big enough that per-region
-/// constants (opening the query, the first reference fetch) do not dominate, small
-/// enough that writing the BAM stays a setup cost measured in tenths of a second.
+/// constants do not dominate — since D1 those are a cursor reposition rather than a
+/// fresh query and a first reference fetch — small enough that writing the BAM stays
+/// a setup cost measured in tenths of a second.
 const SPAN: u64 = 100_000;
 
 /// Read length. Illumina-shaped, and the length production's own walker bench sweeps
 /// around.
 const READ_LEN: u64 = 150;
 
-// ---------------------------------------------------------------------------
-// The fixture: a contig, its reads, and the files they live in
-// ---------------------------------------------------------------------------
-
-/// `len` deterministic bases from a fixed-seed LCG.
-///
-/// Not a real sequence and not meant to be: this bench drives the generator
-/// directly, so nothing here types regions or looks for repeats. What the bases must
-/// do is vary — a homopolymer contig would give the left-aligner and the fold an
-/// unrepresentatively easy time — and be the same on every run, which a seeded
-/// generator gives and `rand` would not.
-fn synthetic_contig(len: usize) -> Vec<u8> {
-    const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
-    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
-    (0..len)
-        .map(|_| {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            BASES[(state >> 33) as usize % BASES.len()]
-        })
-        .collect()
-}
-
-/// Reads written for one coverage — the fixture's own definition of depth, and the
-/// floor the admission check holds the walk to.
-fn num_reads(coverage: u64) -> u64 {
-    SPAN * coverage / READ_LEN
-}
-
-/// The base that is not this one — used to plant a mismatch.
-fn other_base(base: u8) -> u8 {
-    match base {
-        b'A' => b'C',
-        b'C' => b'G',
-        b'G' => b'T',
-        _ => b'A',
-    }
-}
-
-/// Reads tiling `[1, SPAN]` at approximately `coverage`×, each carrying **one**
-/// mismatch.
-///
-/// The mismatch is what makes the fold do the work the generator exists for: a run
-/// of reads that match the reference everywhere produces one row per locus and never
-/// exercises a second bucket, a split row or a chain id. One per read, at a position
-/// that moves with the read index, keeps every locus's row count small and realistic
-/// rather than turning the fixture into a variant caller stress test.
-///
-/// Starts ascend, which is both what a coordinate-sorted BAM needs and what the
-/// walker requires of its input.
-fn synthetic_reads(contig: &[u8], coverage: u64) -> Vec<noodles_sam::alignment::RecordBuf> {
-    use noodles_core::Position as CorePosition;
-    use noodles_sam::alignment::record::cigar::Op;
-    use noodles_sam::alignment::record::cigar::op::Kind;
-    use noodles_sam::alignment::record::{Flags, MappingQuality};
-    use noodles_sam::alignment::record_buf::{QualityScores, Sequence};
-
-    let last_start = SPAN - READ_LEN + 1;
-    let num_reads = num_reads(coverage);
-    let mut reads = Vec::with_capacity(num_reads as usize);
-    for i in 0..num_reads {
-        // Even spacing over the startable positions; several reads share a start
-        // once `num_reads` exceeds them, which is what real depth looks like.
-        //
-        // The divisor is `num_reads - 1`, not `num_reads`, so the last read starts
-        // at `last_start` and its final base is `SPAN`. With `num_reads` the walk
-        // stopped fifteen positions short of the span at 10× — invisible to a timing
-        // number, which is why the coverage check downstream asserts on the loci.
-        let start = 1 + (i * (last_start - 1) / (num_reads - 1).max(1));
-        let mut seq = contig[start as usize - 1..(start + READ_LEN - 1) as usize].to_vec();
-        let at = (i % READ_LEN) as usize;
-        seq[at] = other_base(seq[at]);
-        reads.push(
-            noodles_sam::alignment::RecordBuf::builder()
-                .set_name(format!("r{i}").as_bytes())
-                .set_reference_sequence_id(0)
-                .set_flags(Flags::empty())
-                .set_mapping_quality(MappingQuality::new(60).unwrap())
-                .set_alignment_start(CorePosition::try_from(start as usize).unwrap())
-                .set_cigar(
-                    [Op::new(Kind::Match, READ_LEN as usize)]
-                        .into_iter()
-                        .collect(),
-                )
-                .set_sequence(Sequence::from(seq))
-                .set_quality_scores(QualityScores::from(vec![40u8; READ_LEN as usize]))
-                .build(),
-        );
-    }
-    reads
-}
-
-/// Write `chr1` as a one-line FASTA. The `.fai` is created by the reference read.
-fn write_fasta(path: &Path, bases: &[u8]) {
-    use std::io::Write as _;
-    let mut file = std::fs::File::create(path).unwrap();
-    writeln!(file, ">chr1").unwrap();
-    file.write_all(bases).unwrap();
-    writeln!(file).unwrap();
-}
-
-/// Write a coordinate-sorted single-contig, single-read-group BAM.
-fn write_bam(path: &Path, contig_len: usize, reads: &[noodles_sam::alignment::RecordBuf]) {
-    use bstr::BString;
-    use noodles_bam as bam;
-    use noodles_sam as sam;
-    use sam::alignment::io::Write as _;
-    use sam::header::record::value::Map;
-    use sam::header::record::value::map::header::Version;
-    use sam::header::record::value::map::header::tag::SORT_ORDER;
-    use sam::header::record::value::map::read_group::tag::SAMPLE;
-    use sam::header::record::value::map::{Header as HeaderMap, ReadGroup, ReferenceSequence};
-    use std::num::NonZero;
-
-    let mut hd = Map::<HeaderMap>::new(Version::new(1, 6));
-    hd.other_fields_mut()
-        .insert(SORT_ORDER, BString::from("coordinate"));
-    let sq = Map::<ReferenceSequence>::new(NonZero::new(contig_len).unwrap());
-    let mut rg = Map::<ReadGroup>::default();
-    rg.other_fields_mut()
-        .insert(SAMPLE, BString::from("sample0"));
-    let header = sam::Header::builder()
-        .set_header(hd)
-        .add_reference_sequence(b"chr1".to_vec(), sq)
-        .add_read_group(b"rg0".to_vec(), rg)
-        .build();
-
-    let mut writer = bam::io::Writer::new(std::fs::File::create(path).unwrap());
-    writer.write_header(&header).unwrap();
-    for record in reads {
-        writer.write_alignment_record(&header, record).unwrap();
-    }
-    writer.try_finish().unwrap();
-}
-
-/// A reference and a sample's reads on disk, held together so the temporary
-/// directory outlives them.
-struct Fixture {
-    _dir: TempDir,
-    fasta: PathBuf,
-    bam: PathBuf,
-}
-
-/// Build the files for one coverage. Untimed by construction — every bench body
-/// takes this already built.
-fn fixture(coverage: u64) -> Fixture {
-    let bases = synthetic_contig(SPAN as usize);
-    let dir = TempDir::new().unwrap();
-    let fasta = dir.path().join("ref.fa");
-    let bam = dir.path().join("sample.bam");
-    write_fasta(&fasta, &bases);
-    write_bam(&bam, bases.len(), &synthetic_reads(&bases, coverage));
-    Fixture {
-        _dir: dir,
-        fasta,
-        bam,
+/// The fixture's shape at one depth. Span and read length are this bench's; only
+/// coverage moves along its first axis.
+fn geometry(coverage: u64) -> SyntheticGeometry {
+    SyntheticGeometry {
+        span: SPAN,
+        read_len: READ_LEN,
+        coverage,
     }
 }
 
@@ -238,19 +95,18 @@ fn fixture(coverage: u64) -> Fixture {
 /// They are returned together because `next_locus` borrows the `SampleReads`, and a
 /// bench body that rebuilt either between iterations would be timing the setup.
 struct Driver {
-    generator: PileupGenerator<
-        WindowedRefSeq,
-        Box<dyn FnMut() -> WindowedRefSeq>,
-        LeftAlignPreparer<WindowedRefSeq>,
-    >,
+    generator: PileupGenerator<WindowedRefSeq, LeftAlignPreparer<WindowedRefSeq>>,
     reads: SampleReads,
 }
 
 /// Open the fixture and build a generator over it — the same construction
 /// `ng_generic_loci_dump` uses, including the one thing that is not obvious: the
-/// `.fai` is parsed once and shared, because a fresh `WindowedRefSeq::new` per region
-/// re-parses it and more than doubles a region's cost.
-fn driver(fixture: &Fixture) -> Driver {
+/// `.fai` is parsed once and shared, because a fresh `WindowedRefSeq::new` re-parses
+/// it on its first fetch. Since D1 the factory is called once per file per
+/// *chromosome* rather than once per region, so this matters far less than it did —
+/// it is kept because it is the shape the dump tool uses and this bench exists to
+/// measure that shape.
+fn driver(fixture: &SyntheticSample) -> Driver {
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) =
         read_reference_verifying_or_creating_fai(&cache, fixture.fasta.clone()).unwrap();
@@ -285,11 +141,11 @@ fn driver(fixture: &Fixture) -> Driver {
         contigs.clone(),
         index.clone(),
     ));
-    let make_reference: Box<dyn FnMut() -> WindowedRefSeq> = {
+    // Not boxed here any more: `PileupGenerator::new` boxes the factory itself, which is
+    // what keeps it off the type this `Driver` names (arch §3.6).
+    let make_reference = {
         let fasta = fixture.fasta.clone();
-        Box::new(move || {
-            WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
-        })
+        move || WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
     };
     let generator = PileupGenerator::new(
         reference,
@@ -366,22 +222,28 @@ fn walk(driver: &mut Driver, regions: &[GenomeRegion]) -> u64 {
 ///   emitted. `reads_admitted` is read as a delta around this walk, and the floor is
 ///   the number written, not an equality: a walk split into regions admits a read
 ///   again in every region whose halo reaches it.
-fn check_the_walk_covers_the_span(driver: &mut Driver, regions: &[GenomeRegion], coverage: u64) {
+fn check_the_walk_covers_the_span(
+    driver: &mut Driver,
+    regions: &[GenomeRegion],
+    geometry: SyntheticGeometry,
+) {
     let admitted_before = driver.generator.counts().reads_admitted;
     let loci = walk(driver, regions);
     let admitted = driver.generator.counts().reads_admitted - admitted_before;
     assert_eq!(
         loci,
-        SPAN,
-        "the fixture's reads tile the whole span, so every one of its {SPAN} positions \
+        geometry.span,
+        "the fixture's reads tile the whole span, so every one of its {} positions \
          must yield exactly one locus across the {} region(s) walked",
+        geometry.span,
         regions.len(),
     );
     assert!(
-        admitted >= num_reads(coverage),
+        admitted >= geometry.num_reads(),
         "the depth axis is only meaningful if the reads reach the walk: {admitted} admitted \
-         against {} written at {coverage}×",
-        num_reads(coverage),
+         against {} written at {}×",
+        geometry.num_reads(),
+        geometry.coverage,
     );
 }
 
@@ -397,9 +259,10 @@ fn bench_coverage(c: &mut Criterion) {
 
     let whole = regions(SPAN);
     for &coverage in &[10u64, 30, 100] {
-        let fixture = fixture(coverage);
+        let geometry = geometry(coverage);
+        let fixture = SyntheticSample::build(geometry);
         let mut driver = driver(&fixture);
-        check_the_walk_covers_the_span(&mut driver, &whole, coverage);
+        check_the_walk_covers_the_span(&mut driver, &whole, geometry);
         group.bench_with_input(BenchmarkId::from_parameter(coverage), &coverage, |b, _| {
             b.iter(|| black_box(walk(&mut driver, &whole)))
         });
@@ -415,11 +278,12 @@ fn bench_region_grain(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     const GRAIN_COVERAGE: u64 = 30;
-    let fixture = fixture(GRAIN_COVERAGE);
+    let geometry = geometry(GRAIN_COVERAGE);
+    let fixture = SyntheticSample::build(geometry);
     let mut driver = driver(&fixture);
     for &grain in &[SPAN, 10_000, 1_000] {
         let regions = regions(grain);
-        check_the_walk_covers_the_span(&mut driver, &regions, GRAIN_COVERAGE);
+        check_the_walk_covers_the_span(&mut driver, &regions, geometry);
         group.bench_with_input(BenchmarkId::from_parameter(grain), &grain, |b, _| {
             b.iter(|| black_box(walk(&mut driver, &regions)));
         });

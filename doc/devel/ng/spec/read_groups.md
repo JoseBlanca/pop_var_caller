@@ -350,7 +350,7 @@ pub enum ReadGroupResolution {
 }
 ```
 
-**The per-read error needs a real error type.** `RawRecord::decode` returns `io::Result<MappedRead>`
+**The per-read error needs a real error type.** `RawAlignedRead::decode` returns `io::Result<MappedRead>`
 today — a deviation recorded in
 [`../impl_plan/read_filtering.md`](../impl_plan/read_filtering.md), forced by reusing production's
 decoder. An `io::Error` here would produce a message with no way to find the offending read. The
@@ -426,7 +426,10 @@ What that requires:
 - **Nothing may assume a path appears once in a run.** Error text, per-file reporting, any future
   cache: key on the read group or the sample, not the path.
 
-**The cost, accepted:** per multi-sample file, per sample, one index parse, one reader pool, and for
+**The cost, accepted** (the "reader pool" below became *one cursor per worker* at
+[`alignment_cursor.md`](alignment_cursor.md)'s Milestone F — a cursor opens its own descriptor
+and holds it, so nothing is pooled and nothing is lent; the accounting is otherwise unchanged):
+per multi-sample file, per sample, one index parse, one reader pool, and for
 CRAM one reference repository; records shared by several samples are decoded once per sample. All
 of it is invisible on single-sample inputs, and every file in the surveyed archive is
 single-sample.

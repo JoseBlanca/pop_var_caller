@@ -202,11 +202,15 @@ fn open_contig(
 /// this pushes `b`. Bases arrive **verbatim** — lower-case soft-mask preserved,
 /// IUPAC codes preserved — because the walk's oracle compares locus bytes against
 /// a catalog built from the verbatim FASTA (`typed_regions.md` §6).
-fn read_raw_bases(reader: &mut File, dst: &mut Vec<u8>, n_bases: usize) -> io::Result<()> {
+fn read_raw_bases(
+    reader: &mut File,
+    dst: &mut Vec<u8>,
+    n_bases: usize,
+    read_buf: &mut [u8],
+) -> io::Result<()> {
     let want_total = dst.len() + n_bases;
-    let mut read_buf = [0u8; FILE_READ_CHUNK];
     while dst.len() < want_total {
-        let n = reader.read(&mut read_buf)?;
+        let n = reader.read(read_buf)?;
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -243,6 +247,9 @@ pub struct RawChromReader {
     buf: Vec<u8>,
     /// 1-based contig coordinate of `buf[0]`. Meaningful only when `!buf.is_empty()`.
     buf_start_base: u32,
+    /// Reusable file-read scratch. Was a `[0u8; FILE_READ_CHUNK]` stack array
+    /// zero-initialised on every `read_raw_bases` call.
+    read_buf: Box<[u8]>,
 }
 
 impl RawChromReader {
@@ -293,6 +300,7 @@ impl RawChromReader {
             file,
             buf: Vec::new(),
             buf_start_base: 1,
+            read_buf: vec![0u8; FILE_READ_CHUNK].into_boxed_slice(),
         })
     }
 
@@ -386,6 +394,12 @@ impl RawChromReader {
         self.buf_start_base = pos;
     }
 
+    /// How many bases this reader is holding — the memory bound made observable, and what
+    /// [`evict_before`](Self::evict_before) is judged on. Cheap: a `Vec`'s length.
+    pub fn resident_bases(&self) -> usize {
+        self.buf.len()
+    }
+
     /// Current resident buffer length. Test/diagnostic.
     #[cfg(test)]
     pub fn buf_len(&self) -> usize {
@@ -406,11 +420,15 @@ impl RawChromReader {
         self.buf.reserve(target_len);
         self.buf_start_base = start_1based;
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut self.buf, target_len).map_err(|source| {
-            ChromRefFetchError::Io {
-                chrom_name: chrom,
-                source,
-            }
+        read_raw_bases(
+            &mut self.file,
+            &mut self.buf,
+            target_len,
+            &mut self.read_buf,
+        )
+        .map_err(|source| ChromRefFetchError::Io {
+            chrom_name: chrom,
+            source,
         })
     }
 
@@ -423,7 +441,7 @@ impl RawChromReader {
         let take = extra_bases.min(remaining);
         self.buf.reserve(take);
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut self.buf, take).map_err(|source| {
+        read_raw_bases(&mut self.file, &mut self.buf, take, &mut self.read_buf).map_err(|source| {
             ChromRefFetchError::Io {
                 chrom_name: chrom,
                 source,
@@ -444,12 +462,12 @@ impl RawChromReader {
         self.seek_to(offset)?;
         let mut prefix = Vec::with_capacity(extra_bases);
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut prefix, extra_bases).map_err(|source| {
-            ChromRefFetchError::Io {
+        read_raw_bases(&mut self.file, &mut prefix, extra_bases, &mut self.read_buf).map_err(
+            |source| ChromRefFetchError::Io {
                 chrom_name: chrom,
                 source,
-            }
-        })?;
+            },
+        )?;
         // `splice` does the memmove and reuses capacity where it can.
         self.buf.splice(..0, prefix);
         self.buf_start_base = new_start;

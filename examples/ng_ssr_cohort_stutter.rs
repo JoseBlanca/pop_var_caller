@@ -80,8 +80,12 @@ mod witness_side;
 use witness_side::{WitnessSide, witness_side};
 
 /// Run-level totals for one sample — the accounting identity `reads_fetched = complete + partial +
-/// no_border + capped`, tallied from the rows because the generator's own counters are shared by
-/// every sample it serves.
+/// no_border + capped`, tallied from the rows.
+///
+/// Tallied from the rows rather than read off the generator, which is a habit from when one
+/// generator served every sample and its counters could not be attributed. Each sample now has its
+/// own generator, so its counters *would* be per sample — but the rows are what the dashboards
+/// parse, so counting them keeps the header and the body answering from one source.
 #[derive(Debug, Clone, Default)]
 struct SampleCounts {
     name: String,
@@ -256,15 +260,31 @@ fn run_cohort(
         reason = "RawRefSeq is implemented for Arc only; this walk is single-threaded"
     )]
     let reference = Arc::new(WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone()));
-    let mut generator = SsrGenerator::with_default_aligner(
-        Arc::clone(&reference),
-        {
-            let reference = Arc::clone(&reference);
-            move || Arc::clone(&reference)
-        },
-        SsrGeneratorConfig::default(),
-        bundle_threshold,
-    )?;
+    // **One generator per sample, and that is a requirement rather than a tidiness.** A
+    // generator opens a reader for one sample's files and keeps it positioned for a whole
+    // chromosome, so a generator shared between samples would answer every sample out of the
+    // first one's files — this tool's whole question is whether samples differ, and it would
+    // have reported one sample N times, with no error and rows of exactly the right shape.
+    // `SsrGenerator` now refuses a sample it was not opened for, so the mistake is a loud one;
+    // this is the shape that does not make it.
+    //
+    // The *reference* is still shared across all of them: it is read-only sliding-window access
+    // to the same FASTA, and giving each sample its own would re-read the whole `.fai` and
+    // re-`open(2)` the file per sample.
+    let mut generators = samples
+        .iter()
+        .map(|_| {
+            SsrGenerator::with_default_aligner(
+                Arc::clone(&reference),
+                {
+                    let reference = Arc::clone(&reference);
+                    move || Arc::clone(&reference)
+                },
+                SsrGeneratorConfig::default(),
+                bundle_threshold,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let stdout = std::io::stdout();
     let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
@@ -341,7 +361,11 @@ fn run_cohort(
             if !wanted_contig(region.region.contig) {
                 continue;
             }
-            for (sample, counts) in samples.iter().zip(counts.iter_mut()) {
+            for ((sample, counts), generator) in samples
+                .iter()
+                .zip(counts.iter_mut())
+                .zip(generators.iter_mut())
+            {
                 generator.begin_segment(region.region);
                 while let Some(locus) = generator.next_locus(segment, sample)? {
                     write_locus(&mut out, counts, &locus, segment)?;

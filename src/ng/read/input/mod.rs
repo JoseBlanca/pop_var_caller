@@ -1,31 +1,44 @@
 //! Step 1's **input edge**: turning alignment files on disk into ordered,
 //! filtered streams of reads for a region.
 //!
-//! Two layers, split by subject. [`open_bam`] and [`region_query`] own the
-//! reader logic whose subject is **one alignment file** — the validate-on-open
-//! gate, the reader pool, the BAM/CRAM region queries and the order guard
-//! (`doc/devel/ng/spec/alignment_file.md`). [`merge`] and this module's
-//! `SampleReads` own what is true only of **the sample** — the cross-file
-//! checks and the k-way merge (`doc/devel/ng/spec/sample_reads.md`). Both
-//! layers' error types live here, where the arch docs put them.
+//! Two layers, split by subject. [`open_bam`], [`aligned_reads_reader`],
+//! [`region_raw_aligned_reads`] and [`cursor`] own the reader logic whose subject is
+//! **one alignment file** — the validate-on-open gate, the per-format record
+//! readers, the region narrowing and the long-lived cursor
+//! (`doc/devel/ng/spec/alignment_file.md`, `alignment_cursor.md`).
+//! [`sample_cursor`] and this module's `SampleReads` own what is true only of
+//! **the sample** — the cross-file checks and the k-way merge
+//! (`doc/devel/ng/spec/sample_reads.md`). Both layers' error types live here,
+//! where the arch docs put them.
+//!
+//! **There is exactly one way to read a BAM or a CRAM here**, and that is
+//! Milestone F's whole result: the per-region query, its reader pool and its
+//! order-guard wrapper are gone, and a caller holds a cursor for a chromosome
+//! and points it at each region.
 //!
 //! The layering is strict: the sample layer consumes what the file layer
 //! produces and contains no reader logic of its own. It is also where the
 //! module's two guarantees come from — every file's `ref_id` was proved equal
-//! to its `ContigId` at open, and every per-file stream was proved
-//! coordinate-monotonic while streaming — which is what makes it sound for the
-//! merge to compare positions *across* files without re-checking anything.
+//! to its `ContigId` at open, and every cursor proves the reads it hands out
+//! are coordinate-monotonic while streaming — which is what makes it sound for
+//! the merge to compare positions *across* files without re-checking anything.
 //!
 //! This is step 1's input edge rather than a new step, so it lives under
-//! `read/` beside `filtering.rs` and reuses that module's
-//! [`RecordSource`](super::RecordSource)/[`RawRecord`](super::RawRecord) seam
-//! (`doc/devel/ng/arch/module_layout.md` principle 1, note b).
+//! `read/` beside `filtering.rs` and reuses the seam those two modules define:
+//! the region narrowing this module owns, and the buffer it fills,
+//! [`RawAlignedRead`](crate::ng::read::aligned_read::RawAlignedRead), from
+//! `aligned_read.rs` (`doc/devel/ng/arch/module_layout.md` principle 1, note b).
 
-pub mod merge;
+pub(crate) mod aligned_reads_reader;
+pub mod cursor;
 pub mod open_bam;
 pub mod read_groups;
 pub mod reference;
-pub mod region_query;
+pub(crate) mod region_raw_aligned_reads;
+pub mod sample_cursor;
+
+use cursor::CursorError;
+use sample_cursor::SampleCursor;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
@@ -35,30 +48,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::bam::errors::AlignmentIndexError;
-use crate::ng::read::filtering::{ReadFilterConfig, ReadFilterError, ReadGroupCounts};
+use crate::ng::read::filtering::ReadFilterConfig;
 use crate::ng::read::input::read_groups::{
     ReadGroup, ReadGroupError, ReadGroupResolution, ReadGroups, RecordOwner, SampleReadGroups,
     build_read_groups,
 };
 use crate::ng::read::input::reference::OpenReference;
 use crate::ng::reference_info::ReferenceInfo;
-use crate::ng::types::{GenomePosition, GenomeRegion, ReadGroupId};
+use crate::ng::types::{ContigId, GenomeRegion, ReadGroupId};
 use crate::pop_var_caller::common::format_md5_hex;
 
-use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::ref_seq::RawRefSeq;
+use crate::ng::ref_seq::{ContigTable, RawRefSeq};
 
-use merge::MergedRegionReads;
 use open_bam::AlignmentFile;
 
 /// Everything that can go wrong for **one** alignment file.
 ///
-/// Split by *when* it fires. The first five are returned by
-/// `AlignmentFile::open` before any read flows, so a handle never exists in an
-/// unvalidated state. [`Self::OutOfOrderRead`] and [`Self::Filter`] arrive in
-/// the item stream instead, after which the iterator fuses — the first `Err` is
-/// yielded once and then `None`, so a caller writing `let read = read?;` cannot
-/// mistake a fatal condition for a clean end of input.
+/// **Every variant fires before a read flows** — at `AlignmentFile::open`, or
+/// when a cursor is minted. A handle never exists in an unvalidated state, and
+/// nothing here can reach a caller mid-stream: once reads are moving, a failure
+/// is a [`CursorError`], which names the file it came from.
 ///
 /// Design: `doc/devel/ng/spec/alignment_file.md` §4,
 /// `doc/devel/ng/arch/alignment_file.md` §2.
@@ -77,7 +86,8 @@ pub enum AlignmentFileError {
     ///
     /// Cheap and checked first, but **not** a substitute for the streaming
     /// order guard: this catches a file that does not *claim* to be sorted,
-    /// while [`Self::OutOfOrderRead`] catches the file that claims it and lies.
+    /// while [`CursorError::OutOfOrderRead`] catches the file that claims it
+    /// and lies.
     ///
     /// `sort_order` carries what the header actually said — `queryname` and a
     /// missing tag are the same rejection but not the same diagnosis, and a
@@ -139,26 +149,15 @@ pub enum AlignmentFileError {
     // from "an `@RG` with no `SM`" as separate variants with separate remedies,
     // where the pair here folded both into one variant carrying an `Option`. A
     // file naming *several* samples has stopped being a fault entirely.
-    /// A record regressed in genome position: the file claims `SO:coordinate`
-    /// and is not sorted (spec §3.2). Carries **both** keys so the message can
-    /// say where the file breaks rather than only that it does.
-    #[error(
-        "alignment file '{path}' is not sorted: a read at contig {} position {} \
-         follows one at contig {} position {}",
-        current.contig.get(), current.position.get(),
-        previous.contig.get(), previous.position.get()
-    )]
-    OutOfOrderRead {
-        path: PathBuf,
-        previous: GenomePosition,
-        current: GenomePosition,
-    },
-
-    /// Step 1 hit a fatal condition — a failed source read, a failed decode, or
-    /// filter #8's reference fetch.
-    #[error("read filtering failed")]
-    Filter(#[source] ReadFilterError),
-
+    //
+    // `OutOfOrderRead` and `Filter` are gone too, and they left with the reader
+    // that raised them. Both were yielded *in the item stream* by the per-region
+    // query's order guard, which Milestone F deleted; the rules they carried did
+    // not go with it — a cursor raises `CursorError::OutOfOrderRead` for the
+    // first and `CursorError::ReadRecord` for the second, each naming the file
+    // it came from, which the per-region pair could only do because a fresh
+    // guard was built for every query. Kept as unconstructible variants they
+    // would have been two error cases nothing could ever produce.
     /// The requested region is invalid, or names a contig absent from the
     /// reference.
     #[error(
@@ -166,6 +165,71 @@ pub enum AlignmentFileError {
         region.contig.get(), region.start.get(), region.end.get()
     )]
     Region { region: GenomeRegion },
+
+    /// A cursor was asked for over a chromosome this file does not have.
+    ///
+    /// Every layer below would answer this as "nothing here", which is indistinguishable from
+    /// a chromosome that is genuinely empty — so it is refused where the caller can still act
+    /// on it rather than reported as an absence of reads.
+    #[error(
+        "alignment file '{path}' has {contigs_in_file} contigs and no contig {}",
+        contig.get()
+    )]
+    CursorContigNotInFile {
+        path: PathBuf,
+        contig: crate::ng::types::ContigId,
+        contigs_in_file: usize,
+    },
+
+    /// A cursor was asked for over a format that cannot serve one yet.
+    ///
+    /// Its own variant rather than an `Open` failure carrying a sentence, because nothing
+    /// failed to open: the file is fine and the feature is absent. An operator who reads
+    /// "opening … failed" goes looking at the file.
+    #[error(
+        "reading '{path}' through a cursor is not implemented for {kind} yet; \
+         it arrives with the CRAM arm"
+    )]
+    CursorFormatUnsupported { path: PathBuf, kind: &'static str },
+
+    /// The reference accessor handed to `cursor` carries a **different contig table** from
+    /// this file's.
+    ///
+    /// **Distinct from [`ContigReconcile`](Self::ContigReconcile), and the difference is who
+    /// is at fault.** That one means the *file* disagrees with the run's reference, and it is
+    /// raised at `open`. This one is raised later, on a file that already passed that gate, and
+    /// means the *caller* wired up an accessor over some other reference. Sharing one variant
+    /// would leave an operator inspecting the BAM's `@SQ` list for a fault in the calling code,
+    /// and would leave the two discriminable only by matching a substring of `detail`.
+    ///
+    /// `detail` comes from `ContigList::first_disagreement` and names the first differing field
+    /// and index, **file value first**, as at the gate.
+    #[error(
+        "the reference accessor for alignment file '{path}' is over a different contig table: \
+         {detail}"
+    )]
+    CursorAccessorContigTable { path: PathBuf, detail: String },
+
+    /// The reference could not **serve bases** for the contig a cursor was made for, at the
+    /// point it was made.
+    ///
+    /// Distinct from [`CursorAccessorContigTable`](Self::CursorAccessorContigTable): the
+    /// accessor's table agrees with the file, and it still cannot answer. That is reachable
+    /// because `ResidentRefSeq` and `WindowedRefSeq` take their `ContigList` as a constructor
+    /// argument independent of the bytes they will read, so a table can name a contig the FASTA
+    /// does not hold — a stale `.fai`, or a `.fai` whose FASTA was replaced.
+    ///
+    /// Surfaced here rather than at the first read for the reason the open gate exists: a
+    /// mismatched reference is a fault in what the run was given, not in the region a caller
+    /// happened to ask for first. **Scoped to this cursor's own contig** since B1 — the check
+    /// that used to ask it of every contig in the header cost ~2,580 opens per cursor for a
+    /// property that matters only for the one about to be read.
+    #[error("the reference cannot serve alignment file '{path}'")]
+    Reference {
+        path: PathBuf,
+        #[source]
+        source: crate::ng::ref_seq::RefSeqError,
+    },
 
     /// A CRAM was opened against a reference that carries no FASTA — a
     /// `.fai`-only `ReferenceInfo`.
@@ -332,15 +396,57 @@ pub fn check_assembly(
 /// decision now, not a compile error.
 #[derive(Debug)]
 pub struct SampleReads {
-    /// `Arc` because a region stream **owns** the file it reads through: it has
-    /// to hand the pooled reader back on `Drop`, and the generic locus
-    /// generator holds one region's stream across many `next_locus` calls while
-    /// it is lent `&SampleReads` per call (arch `locus_generation_pileup.md`
-    /// §2.2). One pool per file either way — the `Arc` is shared, not cloned
-    /// deeply.
+    /// `Arc` because a reader **owns** the file it reads through, and outlives the
+    /// borrow of this `SampleReads` that made it: a generator is lent `&SampleReads`
+    /// per `next_locus` call while holding its reader across many of them (arch
+    /// `locus_generation_pileup.md` §2.2). That is a region stream for the STR
+    /// generator, which hands its pooled reader back on `Drop`, and since D1 a
+    /// **chromosome-lived cursor** for the generic one, which has no pool to hand
+    /// anything back to. One pool per file either way — the `Arc` is shared, not
+    /// cloned deeply.
     files: Vec<Arc<AlignmentFile>>,
     /// The one name all k files agree on.
     sample_name: String,
+}
+
+/// Which sample a reader was opened for — see [`SampleReads::identity`].
+///
+/// **Two samples are the same one when they read the same files**, not when they carry the
+/// same name. Names are the wrong test in both directions: a cohort can hold two `SampleReads`
+/// built from different files under one name (the same individual sequenced twice, opened as
+/// two samples), and one file set can be opened twice under names that differ only by how the
+/// caller spelled them. The files are what the reads actually come from, so the files are what
+/// this compares.
+///
+/// It holds shared handles rather than raw addresses, so a freed sample's address cannot be
+/// reused by a later one and quietly compare equal.
+#[derive(Clone)]
+pub struct SampleIdentity {
+    files: Vec<Arc<AlignmentFile>>,
+}
+
+impl PartialEq for SampleIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.files.len() == other.files.len()
+            && std::iter::zip(&self.files, &other.files).all(|(a, b)| Arc::ptr_eq(a, b))
+    }
+}
+
+impl Eq for SampleIdentity {}
+
+impl std::fmt::Debug for SampleIdentity {
+    /// The paths, because that is what an operator can act on. A pointer would say only that
+    /// two things differ, which the comparison already said.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_list()
+            .entries(
+                self.files
+                    .iter()
+                    .map(|file| file.path().display().to_string()),
+            )
+            .finish()
+    }
 }
 
 impl SampleReads {
@@ -463,7 +569,23 @@ impl SampleReads {
         &self.sample_name
     }
 
-    /// How many files this sample has — and the index space of [`counts()`](Self::counts).
+    /// Which sample this is, as a token a caller can keep and compare later.
+    ///
+    /// **What it is for.** A locus generator opens a cursor for one sample and keeps it for a
+    /// whole chromosome, but it is handed a `&SampleReads` afresh on every call. Without
+    /// something to compare, a generator handed a *second* sample would keep answering out of
+    /// the first sample's files — every sample in a cohort reporting the first one's reads,
+    /// with no error and output of exactly the right shape. Holding this token lets the
+    /// generator notice and refuse.
+    ///
+    /// Cheap: one atomic increment per file, and a sample has one file in almost every run.
+    pub fn identity(&self) -> SampleIdentity {
+        SampleIdentity {
+            files: self.files.clone(),
+        }
+    }
+
+    /// How many files this sample has.
     ///
     /// **Not** the space a read's `read_group` lives in: that identifier is
     /// run-wide, so it indexes the whole run's read-group table, not this
@@ -473,102 +595,50 @@ impl SampleReads {
         self.files.len()
     }
 
-    /// This sample's step-1 tallies, **one per read group** and never summed.
+    /// One cursor for this sample over one chromosome — **the layer a caller holds, and
+    /// since Milestone F the only way to read a file here.**
     ///
-    /// A drop rate is a *read group's* property, not a file's: one bad run shows
-    /// up as one read group with an anomalous MAPQ or mismatch rate, and both
-    /// summing across read groups and reporting per file would average that
-    /// away — the second because a file may declare several. A caller that wants
-    /// a total adds them up; this refuses to decide that for them.
+    /// Made **once per chromosome**, it answers every region on that chromosome from readers
+    /// that stay where they are. What it replaced returned a fresh stream per region and
+    /// reopened the question every time — index query, seek, decode, filter — for regions
+    /// that usually sat in the block the reader was already in.
     ///
-    /// A read group appears here only if this sample's reads met it, so a group
-    /// whose every record was filtered out before the tally saw it is absent
-    /// rather than zero. `None` keys the records whose source never stamped a
-    /// read group, which [`RawRecord::decode`](crate::ng::read::filtering::RawRecord)
-    /// refuses — they are counted apart rather than charged to an arbitrary group.
-    pub fn counts(&self) -> Vec<ReadGroupCounts> {
-        let mut counts: Vec<ReadGroupCounts> = Vec::new();
-        for file in &self.files {
-            for (read_group, file_counts) in file.counts() {
-                match counts.iter_mut().find(|(id, _)| *id == read_group) {
-                    Some((_, running)) => running.add(&file_counts),
-                    None => counts.push((read_group, file_counts)),
-                }
-            }
-        }
-        counts
-    }
-
-    /// Every read of the sample overlapping `region`, coordinate-ordered
-    /// across all files.
+    /// **One reference accessor per file, taken here once** for the cursor's whole life
+    /// rather than rebuilt per region (perf review L2). `RawRefSeq` impls are stateful
+    /// readers, so the k files cannot share one: `WindowedRefSeq` holds an open per-contig
+    /// reader and is `Send` but not `Sync`, precisely because each consumer is meant to own
+    /// one. A factory gives each file cursor its own, which is what the type requires; the
+    /// caller writes one closure.
     ///
-    /// `&self` for the same reason `AlignmentFile::reads_in_region` is: the
-    /// per-file pools make concurrent queries possible without a signature
-    /// change.
+    /// **Every accessor the factory hands out is checked against the file it will serve** — its
+    /// contig table against that file's, and its ability to fetch this chromosome's bases
+    /// ([`AlignmentFile::cursor`]). A factory returning accessors over the wrong reference, or
+    /// over a FASTA that has since changed, is refused here rather than producing wrong
+    /// mismatch fractions later. The `+ ContigTable` bound on `R` is what makes the first half
+    /// possible.
     ///
-    /// **The stream it returns does not borrow `self`.** Each per-file chain
-    /// holds an `Arc<AlignmentFile>`, so the caller may keep the stream after
-    /// this borrow ends — which is what lets a resumable locus generator hold
-    /// one region's reads across many `next_locus` calls while being lent
-    /// `&SampleReads` per call (arch `locus_generation_pileup.md` §2.2). The
-    /// stream still keeps the files alive, so its reads and its pooled readers
-    /// stay valid.
-    ///
-    /// **One consequence to know before relying on it: a stream that outlives
-    /// this `SampleReads` loses its tally to observation.** The reads are still
-    /// right and the reader still goes back, but the only handle left on the
-    /// file is the stream's own, so what its `Drop` folds in can no longer be
-    /// read through [`counts`](Self::counts) — see
-    /// [`AlignmentFile::counts`](open_bam::AlignmentFile::counts). A caller that
-    /// reports drop rates must drop its streams before the sample.
-    ///
-    /// **`make_reference` is a factory, not an accessor and not a `Clone`
-    /// bound** — arch §7 left this as an impl-time confirmation, and the impls
-    /// settle it. `RawRefSeq` implementations are *stateful readers*:
-    /// `WindowedRefSeq` holds an open per-contig reader behind a `RefCell` and
-    /// is `Send` but not `Sync`, precisely because each worker is meant to own
-    /// one. So:
-    ///
-    /// - `R: Clone` cannot be satisfied — neither impl is `Clone`, and cloning
-    ///   an open file reader per query would be the wrong thing even if it
-    ///   were.
-    /// - `&R` is not available either (there is no `impl RawRefSeq for &T`),
-    ///   and it would make the k chains share one file cursor, which is exactly
-    ///   what passing the accessor per query exists to avoid.
-    ///
-    /// A factory gives each per-file chain its own, which is what the type
-    /// actually requires. The caller writes one closure.
-    pub fn reads_in_region<R, F>(
+    /// A read's step-1 tally is the cursor's from here on
+    /// ([`SampleCursor::read_group_counts`]) — it needs no hand-back, because the filter now
+    /// lives as long as the cursor rather than as long as one region.
+    pub fn cursor<R, F>(
         &self,
-        region: GenomeRegion,
+        contig: ContigId,
         mut make_reference: F,
-    ) -> Result<SampleRegionReads<R>, IngestError>
+    ) -> Result<SampleCursor<R>, IngestError>
     where
-        R: RawRefSeq,
+        R: RawRefSeq + ContigTable,
         F: FnMut() -> R,
     {
-        let mut streams = Vec::with_capacity(self.files.len());
+        let mut cursors = Vec::with_capacity(self.files.len());
         for (source_file_index, file) in self.files.iter().enumerate() {
-            let stream = file
-                .reads_in_region(region, make_reference())
-                .map_err(|source| IngestError::File {
+            cursors.push(file.cursor(contig, make_reference()).map_err(|source| {
+                IngestError::File {
                     source_file_index,
                     source,
-                })?;
-            streams.push(stream);
+                }
+            })?);
         }
-
-        // **The single-file arm is the *absence* of a merge, not a merge with
-        // k = 1.** A one-file sample pays no merge machinery at all, and the
-        // two arms are unified by an enum rather than `Box<dyn Iterator>`:
-        // dynamic dispatch is opaque to the optimiser, so the whole per-read
-        // chain would stop being inlined at the boundary — on the hottest loop
-        // in the module (spec §3.4).
-        Ok(if streams.len() == 1 {
-            SampleRegionReads::Single(streams.pop().expect("length checked as 1"))
-        } else {
-            SampleRegionReads::Merged(MergedRegionReads::new(streams))
-        })
+        Ok(SampleCursor::new(cursors))
     }
 
     /// What the deferred assembly check needs, per file: the path, and the
@@ -588,56 +658,6 @@ impl SampleReads {
         self.files.iter().map(|file| (file.path(), file.sq_md5s()))
     }
 }
-
-/// One sample's reads for a region: the per-file chain when there is one file,
-/// the merge when there are several.
-///
-/// An **enum, never `Box<dyn Iterator>`**. The cost of dynamic dispatch here is
-/// not mainly the indirect call but that it is opaque to the optimiser: a boxed
-/// iterator cannot be inlined into the consumer's loop, so the whole per-read
-/// chain stops being optimised across the boundary — on a path carrying
-/// millions of reads through ~10⁶ region queries. The `match` below is a
-/// predictable branch that inlines away, and it is no more code to write.
-///
-/// It lives with the entry point rather than inside `merge`, because the
-/// single-file arm is the *absence* of a merge, not a variant of one.
-// The variants differ in size because a `RegionReads` carries the whole
-// per-file chain inline while a `MergedRegionReads` carries `Vec`s. Boxing the
-// larger one is the usual remedy and is the wrong trade here: this value is
-// built **once per region query** and then iterated over millions of reads, so
-// the size difference costs one stack slot per query, while a `Box` would add a
-// pointer chase to every `next()` on the hottest loop in the module. That is
-// the same reasoning that rules out `Box<dyn Iterator>` two paragraphs up.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "built once per query, iterated per read; boxing would move the \
-              cost to the hot path"
-)]
-pub enum SampleRegionReads<R: RawRefSeq> {
-    /// One file: the per-file chain, verbatim. No merge exists.
-    Single(open_bam::RegionReads<R>),
-    Merged(merge::MergedRegionReads<R>),
-}
-
-impl<R: RawRefSeq> Iterator for SampleRegionReads<R> {
-    type Item = Result<AlignedRead, IngestError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            // The one-file sample has exactly one file, so its index is 0 —
-            // and its reads already carry that as `source_file_index`.
-            Self::Single(stream) => stream.next().map(|item| {
-                item.map_err(|source| IngestError::File {
-                    source_file_index: 0,
-                    source,
-                })
-            }),
-            Self::Merged(stream) => stream.next(),
-        }
-    }
-}
-
-impl<R: RawRefSeq> std::iter::FusedIterator for SampleRegionReads<R> {}
 
 /// Enforce the invariant that gives this type its meaning: **one open serves
 /// exactly one sample.**
@@ -784,24 +804,12 @@ pub enum IngestError {
     #[error("a sample must have at least one alignment file")]
     NoFiles,
 
-    /// The identical read surfaced from two files, which means the caller
-    /// passed the same file twice (or two files with overlapping content).
-    ///
-    /// Not a deduplication: across files there is no such thing as a legitimate
-    /// duplicate, because reads from different experiments are different reads.
-    /// So this is an **input-sanity error**, never a silent drop (spec §3.2).
-    #[error(
-        "read '{}' appeared in both input file #{} and input file #{} \
-         at contig {} position {}",
-        String::from_utf8_lossy(qname), files.0, files.1,
-        key.contig.get(), key.position.get()
-    )]
-    DuplicateReadAcrossFiles {
-        qname: Vec<u8>,
-        key: GenomePosition,
-        files: (usize, usize),
-    },
-
+    // The top-level `DuplicateReadAcrossFiles` is gone, and Milestone F is where its doc
+    // said it would go. It was raised by the per-region merge, which no longer exists; the
+    // live version of the rule is
+    // [`CursorError::DuplicateReadAcrossFiles`](CursorError::DuplicateReadAcrossFiles),
+    // reached through [`Cursor`](Self::Cursor). Two variants for one condition was the
+    // transitional state, not the destination.
     /// Anything one file raised, at open or mid-stream, tagged with which one.
     #[error("alignment file #{source_file_index} failed")]
     File {
@@ -809,44 +817,30 @@ pub enum IngestError {
         #[source]
         source: AlignmentFileError,
     },
+
+    /// A cursor could not be pointed at a region, or failed reading one.
+    ///
+    /// **Not tagged with a file index, unlike [`File`](Self::File)**, because a
+    /// [`CursorError`] carries its own provenance: all but one variant names the path it
+    /// came from, which is what a run holding one cursor per chromosome per generator per
+    /// worker actually needs — a bare index would not say which of them spoke.
+    ///
+    /// **The exception is
+    /// [`DuplicateReadAcrossFiles`](CursorError::DuplicateReadAcrossFiles)**, which names two
+    /// cursor *indexes* and no path. It used to have a twin at this level, raised by the
+    /// per-region merge; Milestone F deleted that path, so there is now exactly one variant
+    /// for the condition and a caller matching on it cannot miss half the cases.
+    #[error("this sample's cursor failed")]
+    Cursor(#[from] CursorError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::ng::read::aligned_read::AlignedRead;
+    use crate::ng::read::filtering::ReadFilterCounts;
     use crate::ng::types::{ContigId, Position};
-
-    fn genome_position(contig: u32, position: u64) -> GenomePosition {
-        GenomePosition {
-            contig: ContigId(contig),
-            position: Position(position),
-        }
-    }
-
-    /// The error messages are the user-facing surface of this module, and these
-    /// two exist precisely to name *where* a fault is — which read follows
-    /// which, and which two files collided.
-    ///
-    /// Asserted against the whole rendered string rather than by substring,
-    /// because the mistake worth catching is **transposing `previous` and
-    /// `current`**: that turns "where the file breaks" into a lie while leaving
-    /// every substring assertion green.
-    #[test]
-    fn out_of_order_message_says_which_read_follows_which() {
-        let message = AlignmentFileError::OutOfOrderRead {
-            path: PathBuf::from("/data/sample.bam"),
-            previous: genome_position(2, 5000),
-            current: genome_position(2, 120),
-        }
-        .to_string();
-
-        assert_eq!(
-            message,
-            "alignment file '/data/sample.bam' is not sorted: \
-             a read at contig 2 position 120 follows one at contig 2 position 5000"
-        );
-    }
 
     // -----------------------------------------------------------------
     // SampleReads::open (E1) — T12b
@@ -980,8 +974,12 @@ mod tests {
         }
     }
 
-    /// Counts stay **per file**, never summed: a bad run shows up as one file
+    /// Counts stay **per read group**, never summed: a bad run shows up as one library
     /// with an anomalous drop rate, and summing erases exactly that signal.
+    ///
+    /// Read off the sample's cursor since Milestone F. The rule is unchanged; what moved is
+    /// where the number lives — the per-region streams folded theirs back into the file as
+    /// each one ended, and a filter that lasts as long as a cursor simply has it.
     ///
     /// The files are given *different* read counts on purpose. Asserting only
     /// that there are k tallies would pass against an implementation returning
@@ -1001,25 +999,33 @@ mod tests {
         )
         .expect("opens");
 
-        // A read group appears only once this sample's reads have met it. The
-        // tallies are per *query*, folded in as each stream ends, so before any
-        // read there is nothing to report — not two zeroed tallies.
-        assert!(sample.counts().is_empty(), "no read group has been met yet");
+        // A read group appears only once this sample's reads have met it, so before any read
+        // there is no *keyed* tally — not two zeroed ones. What is there is the `None`-keyed
+        // rider `ReadFilter::counts` always carries for records skipped as another sample's,
+        // which belongs to no read group and is zero here.
+        let mut cursor = sample
+            .cursor(ContigId(0), reference_bases)
+            .expect("a cursor for contig 0");
+        assert!(
+            cursor
+                .read_group_counts()
+                .iter()
+                .all(|(id, tally)| id.is_none() && *tally == ReadFilterCounts::default()),
+            "no read group has been met yet: {:?}",
+            cursor.read_group_counts(),
+        );
 
-        let read = |sample: &SampleReads| {
-            sample
-                .reads_in_region(whole_first_contig(), reference_bases)
-                .expect("query")
-                .for_each(|read| {
-                    read.expect("resolves");
-                });
-        };
-        read(&sample);
+        cursor
+            .move_to_region(whole_first_contig())
+            .expect("on this chromosome");
+        while let Some(read) = cursor.next_read() {
+            read.expect("resolves");
+        }
 
         // Each fixture file declares its own `@RG`, so the run's table minted
         // two identifiers and the reads split between them — 3 and 1, never
         // summed to 4. Summing is what erases one bad run among several.
-        let counts = sample.counts();
+        let counts = cursor.read_group_counts();
         assert_eq!(counts.len(), 2, "one tally per read group met");
         let kept: Vec<u64> = counts.iter().map(|(_, tally)| tally.kept).collect();
         assert_eq!(kept, vec![3, 1]);
@@ -1103,19 +1109,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // SampleRegionReads (E3) — T11
+    // SampleCursor — T11 and the resumable shape
     // -----------------------------------------------------------------
 
-    use crate::ng::read::input::test_fixtures::{FIXTURE_CONTIGS, bam_header};
+    use crate::ng::read::input::test_fixtures::{
+        FIXTURE_CONTIGS, bam_header, fixture_reference_bases,
+    };
     use crate::ng::ref_seq::InMemoryRefSeq;
 
     fn reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        )
+        fixture_reference_bases()
     }
 
     fn whole_first_contig() -> GenomeRegion {
@@ -1134,37 +1137,41 @@ mod tests {
         (reference_dir, sample)
     }
 
-    /// `(qname, read group)` per read of a stream — shared by `drain` and by
-    /// the detached-stream tests, so "the same reads" means literally the same
+    /// `(qname, read group)` per read of the region a cursor is pointed at — shared by
+    /// `drain` and by the detached-cursor tests, so "the same reads" means literally the same
     /// code path on both sides of their comparison.
-    fn collect_reads(
-        stream: impl Iterator<Item = Result<AlignedRead, IngestError>>,
-    ) -> Vec<(String, usize)> {
-        stream
-            .map(|item| {
-                let read = item.expect("no fatal error");
-                (
-                    String::from_utf8_lossy(&read.qname).into_owned(),
-                    read.read_group.get() as usize,
-                )
-            })
-            .collect()
+    fn collect_reads(cursor: &mut SampleCursor<InMemoryRefSeq>) -> Vec<(String, usize)> {
+        let mut reads = Vec::new();
+        while let Some(item) = cursor.next_read() {
+            let read = item.expect("no fatal error");
+            reads.push((
+                String::from_utf8_lossy(&read.qname).into_owned(),
+                read.read_group.get() as usize,
+            ));
+        }
+        reads
+    }
+
+    /// A cursor over the whole first contig, already pointed at it.
+    fn cursor_over_first_contig(sample: &SampleReads) -> SampleCursor<InMemoryRefSeq> {
+        let mut cursor = sample
+            .cursor(ContigId(0), reference_bases)
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(whole_first_contig())
+            .expect("on this chromosome");
+        cursor
     }
 
     fn drain(sample: &SampleReads) -> Vec<(String, usize)> {
-        collect_reads(
-            sample
-                .reads_in_region(whole_first_contig(), reference_bases)
-                .expect("query"),
-        )
+        collect_reads(&mut cursor_over_first_contig(sample))
     }
 
     /// **T11 — the caller cannot tell the arms apart.**
     ///
-    /// A one-file sample yields exactly what the same file yields as one of two
-    /// inputs whose other file is empty over the region — asserted through the
-    /// same `SampleRegionReads` type, so the merge-free arm is provably
-    /// equivalent rather than merely believed to be.
+    /// A one-file sample yields exactly what the same file yields as one of two inputs whose
+    /// other file is empty over the region — asserted through the same [`SampleCursor`] type,
+    /// so the merge-free arm is provably equivalent rather than merely believed to be.
     #[test]
     fn t11_the_single_file_arm_matches_the_merged_arm() {
         let reads = [
@@ -1186,15 +1193,15 @@ mod tests {
 
         assert!(
             matches!(
-                single.reads_in_region(whole_first_contig(), reference_bases),
-                Ok(SampleRegionReads::Single(_))
+                single.cursor(ContigId(0), reference_bases),
+                Ok(SampleCursor::Single(_))
             ),
             "one file must take the merge-free arm"
         );
         assert!(
             matches!(
-                merged.reads_in_region(whole_first_contig(), reference_bases),
-                Ok(SampleRegionReads::Merged(_))
+                merged.cursor(ContigId(0), reference_bases),
+                Ok(SampleCursor::Merged(_))
             ),
             "two files must take the merge"
         );
@@ -1207,30 +1214,25 @@ mod tests {
         assert_eq!(drain(&single).len(), 3);
     }
 
-    /// **A3 — the stream outlives the borrow that made it, and the sample too.**
+    /// **The cursor outlives the borrow that made it, and the sample too.**
     ///
-    /// The one property Milestone A adds. `reads_in_region` still takes
-    /// `&self`, so the borrow ends when the call returns; what changed is that
-    /// the returned stream carries no lifetime, holding an `Arc` per file
-    /// instead. Dropping the `SampleReads` before a single read has been pulled
-    /// is the sharpest statement of that: **it would not compile at all** if
-    /// the stream still borrowed (`cannot move out of sample because it is
-    /// borrowed`).
+    /// `cursor` takes `&self`, so the borrow ends when the call returns; the cursor it hands
+    /// back carries no lifetime, holding its own open descriptor per file. Dropping the
+    /// `SampleReads` before a single read has been pulled is the sharpest statement of that:
+    /// **it would not compile at all** if the cursor still borrowed (`cannot move out of
+    /// sample because it is borrowed`).
     ///
-    /// **What this test does not do is fail at run time**, and saying so is the
-    /// honest version: once it compiles, safe Rust makes `after == expected`
-    /// unfalsifiable. Gutting `RegionReads::drop` would leave it green. The
-    /// run-time half of the `Arc`'s job — that the reader still goes back and
-    /// the tally still lands — needs a second handle to be observable at all,
-    /// and is asserted in
-    /// `open_bam::tests::a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally`.
+    /// **What this does not do is fail at run time**, and saying so is the honest version:
+    /// once it compiles, safe Rust makes `after == expected` unfalsifiable. It is a
+    /// compile-time anchor, and it is the shape both generators actually need — a resumable
+    /// generator holds a cursor across many `next_locus` calls while being lent
+    /// `&SampleReads` per call.
     ///
-    /// The reads are compared against a control drain rather than merely
-    /// counted, because "the stream survives" and "the stream survives and
-    /// still yields the right reads" are different claims and only the second
-    /// one is worth anything.
+    /// The reads are compared against a control drain rather than merely counted, because
+    /// "the cursor survives" and "the cursor survives and still yields the right reads" are
+    /// different claims and only the second one is worth anything.
     #[test]
-    fn a_region_stream_outlives_the_sample_reads_it_was_made_from() {
+    fn a_cursor_outlives_the_sample_reads_it_was_made_from() {
         let reads = [
             read_named_with_length("r1", 0, 1, 30),
             read_named_with_length("r2", 0, 30, 30),
@@ -1246,30 +1248,28 @@ mod tests {
         let expected = drain(&sample);
         assert_eq!(expected.len(), 3, "the fixture must actually carry reads");
 
-        let stream = sample
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query");
+        let mut cursor = cursor_over_first_contig(&sample);
 
         // The load-bearing line: the sample — and with it the `Vec` of files —
         // is gone before the first read is pulled.
         drop(sample);
 
         assert_eq!(
-            collect_reads(stream),
+            collect_reads(&mut cursor),
             expected,
-            "a stream that outlived its sample must still yield the same reads"
+            "a cursor that outlived its sample must still yield the same reads"
         );
     }
 
-    /// **The k-file arm of the same property**, which is the production shape:
-    /// a sample is usually several experiment files, so `Merged` — not
-    /// `Single` — is what a generator will normally be holding.
+    /// **The k-file arm of the same property**, which is the production shape: a sample is
+    /// usually several experiment files, so `Merged` — not `Single` — is what a generator
+    /// will normally be holding.
     ///
-    /// Worth its own test because `MergedRegionReads` holds k streams, hence k
-    /// pooled readers and k tallies, past the sample's death; the interleave
-    /// has to survive that, not merely compile.
+    /// Worth its own test because the merged arm holds k cursors, hence k open descriptors
+    /// and k tallies, past the sample's death; the interleave has to survive that, not merely
+    /// compile.
     #[test]
-    fn a_merged_region_stream_outlives_the_sample_reads_it_was_made_from() {
+    fn a_merged_cursor_outlives_the_sample_reads_it_was_made_from() {
         let (_first_dir, first) = indexed_named_bam(
             &bam_header(&matching_contigs()),
             &[
@@ -1295,20 +1295,18 @@ mod tests {
             "the fixture must carry both files' reads"
         );
 
-        let stream = sample
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query");
+        let mut cursor = cursor_over_first_contig(&sample);
         assert!(
-            matches!(stream, SampleRegionReads::Merged(_)),
+            matches!(cursor, SampleCursor::Merged(_)),
             "two files must take the merge, or this tests the wrong arm"
         );
 
         drop(sample);
 
         assert_eq!(
-            collect_reads(stream),
+            collect_reads(&mut cursor),
             expected,
-            "a merged stream that outlived its sample must still interleave the same reads"
+            "a merged cursor that outlived its sample must still interleave the same reads"
         );
     }
 
@@ -1317,37 +1315,37 @@ mod tests {
     ///
     /// That is `LocusGenerator::next_locus(&mut self, segment, reads:
     /// &SampleReads)` in miniature — the contract that cannot carry a lifetime
-    /// (arch `locus_generation_pileup.md` §2.2) — and the generic locus
-    /// generator yields many loci per segment, so it must hold the stream
-    /// between calls. A **compile-time anchor**: with a borrowed stream the
-    /// `Generator` struct below needs a lifetime parameter and the test does not
-    /// build. Named for what the body proves, since the run-time assertion
-    /// repeats `drain`; the property that a *second* query cannot disturb a held
-    /// stream is next door, where it is falsifiable.
+    /// (arch `locus_generation_pileup.md` §2.2) — and a locus generator yields many
+    /// loci per segment, so it must hold its reader between calls. **This is now literally
+    /// what both generators do**: each holds a [`SampleCursor`] for a chromosome and points
+    /// it at each region. A **compile-time anchor**: with a borrowed cursor the `Generator`
+    /// struct below needs a lifetime parameter and the test does not build. Named for what
+    /// the body proves, since the run-time assertion repeats `drain`; the property that a
+    /// *second* cursor cannot disturb a held one is next door, where it is falsifiable.
     #[test]
-    fn a_region_stream_can_be_stored_in_a_struct_without_a_lifetime() {
+    fn a_cursor_can_be_stored_in_a_struct_without_a_lifetime() {
         struct Generator {
-            stream: Option<SampleRegionReads<InMemoryRefSeq>>,
+            cursor: Option<SampleCursor<InMemoryRefSeq>>,
         }
 
         impl Generator {
-            /// `begin_segment`: opens the query, keeps the stream.
+            /// `begin_segment`: mints the cursor, points it at the region, keeps it.
             fn begin(&mut self, reads: &SampleReads, region: GenomeRegion) {
-                self.stream = Some(
-                    reads
-                        .reads_in_region(region, reference_bases)
-                        .expect("query"),
-                );
+                let mut cursor = reads
+                    .cursor(region.contig, reference_bases)
+                    .expect("a cursor for this contig");
+                cursor.move_to_region(region).expect("on this chromosome");
+                self.cursor = Some(cursor);
             }
 
-            /// `next_locus`: lent the sample again, but pulls from the stream
+            /// `next_locus`: lent the sample again, but pulls from the cursor
             /// it is already holding.
             ///
             /// `_reads` is unused **on purpose** — it stands in for
             /// `next_locus`'s per-call lend, and it is the parameter whose
             /// presence, not whose use, is the point. Do not "clean it up".
             fn next_qname(&mut self, _reads: &SampleReads) -> Option<String> {
-                let read = self.stream.as_mut()?.next()?.expect("no fatal error");
+                let read = self.cursor.as_mut()?.next_read()?.expect("no fatal error");
                 Some(String::from_utf8_lossy(&read.qname).into_owned())
             }
         }
@@ -1364,7 +1362,7 @@ mod tests {
         );
         let (_reference_dir, sample) = sample_over(std::slice::from_ref(&path));
 
-        let mut generator = Generator { stream: None };
+        let mut generator = Generator { cursor: None };
         generator.begin(&sample, whole_first_contig());
 
         let mut qnames = Vec::new();
@@ -1375,23 +1373,22 @@ mod tests {
         assert_eq!(
             qnames,
             vec!["r1".to_string(), "r2".to_string(), "r3".to_string()],
-            "a held stream must resume where the previous call left it"
+            "a held cursor must resume where the previous call left it"
         );
     }
 
-    /// **A held stream and a fresh query are independent** — the run-time half
-    /// of the resumable shape, and unlike the compile-time anchors above this
+    /// **A held cursor and a second one over the same sample are independent** — the
+    /// run-time half of the resumable shape, and unlike the compile-time anchors above this
     /// one can actually fail.
     ///
-    /// It is exactly what a generator does when it opens a new region while
-    /// still holding the previous one, and it falsifies two real mistakes: a
-    /// pool that hands out a reader still on loan, and any sharing of a cursor
-    /// or scratch buffer between two live queries on one file. The threaded
-    /// case is covered at the file level
-    /// (`concurrent_region_queries_each_get_a_reader_and_bank_every_tally`);
-    /// this is the single-threaded interleaving Milestone A enables.
+    /// It falsifies any sharing of a file position, a record buffer or a reference reader
+    /// between two live cursors on one file: each opens its own descriptor and owns its own
+    /// accessor, which is exactly what the parallel fan-out will rely on. The threaded case
+    /// is covered at the file level
+    /// (`open_bam::tests::cursors_on_one_file_read_the_same_thing_from_many_threads`); this
+    /// is the single-threaded interleaving.
     #[test]
-    fn a_second_query_does_not_disturb_a_stream_already_held() {
+    fn a_second_cursor_does_not_disturb_one_already_held() {
         let reads = [
             read_named_with_length("r1", 0, 1, 30),
             read_named_with_length("r2", 0, 30, 30),
@@ -1404,55 +1401,47 @@ mod tests {
         );
         let (_reference_dir, sample) = sample_over(std::slice::from_ref(&path));
 
-        let name = |item: Option<Result<AlignedRead, IngestError>>| {
+        let name = |item: Option<Result<AlignedRead, CursorError>>| {
             item.map(|read| {
                 String::from_utf8_lossy(&read.expect("no fatal error").qname).into_owned()
             })
         };
 
-        let mut held = sample
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query");
-        assert_eq!(name(held.next()).as_deref(), Some("r1"));
+        let mut held = cursor_over_first_contig(&sample);
+        assert_eq!(name(held.next_read()).as_deref(), Some("r1"));
 
-        // A whole second query, opened and drained while the first is parked.
-        let second = collect_reads(
-            sample
-                .reads_in_region(whole_first_contig(), reference_bases)
-                .expect("a second query while the first is held"),
-        );
+        // A whole second cursor, minted and drained while the first is parked.
+        let second = collect_reads(&mut cursor_over_first_contig(&sample));
         assert_eq!(
             second
                 .iter()
                 .map(|(qname, _)| qname.as_str())
                 .collect::<Vec<_>>(),
             vec!["r1", "r2", "r3"],
-            "the second stream is a full scan of its own"
+            "the second cursor is a full walk of its own"
         );
 
         assert_eq!(
-            name(held.next()).as_deref(),
+            name(held.next_read()).as_deref(),
             Some("r2"),
-            "the held stream resumed where it was, undisturbed"
+            "the held cursor resumed where it was, undisturbed"
         );
-        assert_eq!(name(held.next()).as_deref(), Some("r3"));
-        assert!(held.next().is_none());
+        assert_eq!(name(held.next_read()).as_deref(), Some("r3"));
+        assert!(held.next_read().is_none());
     }
 
-    /// The stream a generator stores has to be able to cross a thread boundary
-    /// — **the merged arm included**, since that is the k-file production
-    /// shape and the one a worker pool would move.
+    /// The cursor a generator stores has to be able to cross a thread boundary — **the
+    /// merged arm included**, since that is the k-file production shape and the one a worker
+    /// pool would move.
     ///
-    /// `open_bam`'s sibling assertion covers the per-file `RegionReads`; these
-    /// are the two types losing their lifetime is what made storable, so this
-    /// is the moment the anchor starts to matter for them. An `Rc` or a
-    /// non-`Sync` field creeping into the merge would otherwise surface at the
-    /// first parallel call site, a milestone or two away.
+    /// `open_bam`'s sibling assertion covers the per-file `AlignmentCursor`; these are the
+    /// two sample-level types, and an `Rc` or a non-`Send` field creeping into the merge
+    /// would otherwise surface at the first parallel call site, a plan or two away.
     #[test]
-    fn a_sample_region_stream_is_send_in_both_arms() {
+    fn a_sample_cursor_is_send_in_both_arms() {
         fn assert_send<T: Send>() {}
-        assert_send::<SampleRegionReads<InMemoryRefSeq>>();
-        assert_send::<merge::MergedRegionReads<InMemoryRefSeq>>();
+        assert_send::<SampleCursor<InMemoryRefSeq>>();
+        assert_send::<sample_cursor::MergedCursors<InMemoryRefSeq>>();
     }
 
     /// **The capability this step adds.** A file declaring several read groups
@@ -1498,16 +1487,9 @@ mod tests {
         )
         .expect("a file with two read groups of one sample opens");
 
-        let observed: Vec<(String, u32)> = reads
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query")
-            .map(|read| {
-                let read = read.expect("every record resolves");
-                (
-                    String::from_utf8_lossy(&read.qname).into_owned(),
-                    read.read_group.get(),
-                )
-            })
+        let observed: Vec<(String, u32)> = collect_reads(&mut cursor_over_first_contig(&reads))
+            .into_iter()
+            .map(|(qname, read_group)| (qname, read_group as u32))
             .collect();
 
         // rg1 was declared first, so the table minted it 0 and rg2 got 1.
@@ -1562,10 +1544,11 @@ mod tests {
         )
         .expect("opens");
 
-        let outcome: Vec<_> = reads
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query")
-            .collect();
+        let mut cursor = cursor_over_first_contig(&reads);
+        let mut outcome = Vec::new();
+        while let Some(item) = cursor.next_read() {
+            outcome.push(item);
+        }
 
         let error = outcome
             .iter()
@@ -1585,13 +1568,29 @@ mod tests {
         );
     }
 
-    /// The same, over a **CRAM**. Its sources decode a whole container and move
-    /// records out of it rather than refilling a buffer in place, so the point at
-    /// which a record's read group can be resolved is a different one — and every
-    /// other test of these sources passes a single read group, where resolving
-    /// early and resolving late are indistinguishable.
+    // **`a_cram_with_several_read_groups_resolves_each_record_by_its_tag` died with the
+    // per-region query, and it is subsumed rather than merely gone.** It read the same
+    // three-record, two-read-group CRAM through the per-region source; the test immediately
+    // below reads exactly that fixture through a cursor and asserts exactly the same
+    // `(qname, read group)` triple. Both arms decide the read group inside
+    // `decode_container_at`, which is now the only place a CRAM record's owner is settled, so
+    // there was one rule under two names.
+
+    /// **The same, through a cursor** — because a sample's libraries are the case a cursor
+    /// could most plausibly get wrong, and the test above drives the path the cursor replaces.
+    ///
+    /// **A sample is not one read group.** One individual sequenced as several libraries
+    /// declares an `@RG` for each, and every one of them is ours: the reads must all be kept,
+    /// each carrying the library it came from, because that is the grouping a per-chemistry
+    /// error model is fitted on. "Belongs to another sample" is the only thing that makes a
+    /// record foreign.
+    ///
+    /// That matters more on the CRAM arm than anywhere else, because it is the one arm that
+    /// decides a record's read group **itself**, while decoding a container — so a mistake
+    /// here would drop a whole library's reads before any other layer could see them, and the
+    /// output would look like a sample that was simply sequenced less deeply.
     #[test]
-    fn a_cram_with_several_read_groups_resolves_each_record_by_its_tag() {
+    fn a_cursor_keeps_every_read_group_of_its_sample_not_just_one() {
         use crate::ng::read::input::test_fixtures::{
             indexed_cram_declaring, read_named_with_length_in_read_group,
         };
@@ -1603,6 +1602,8 @@ mod tests {
                 read_named_with_length_in_read_group("b", 0, 20, 30, "rg2"),
                 read_named_with_length_in_read_group("c", 0, 40, 30, "rg1"),
             ],
+            // Two libraries, **one sample**. Not two samples — that is the other case, and it
+            // is what `a_shared_cram_serves_each_open_only_its_own_reads` covers.
             &[("rg1", Some("NA12878")), ("rg2", Some("NA12878"))],
         );
         let reference = OpenReference::from(
@@ -1626,17 +1627,21 @@ mod tests {
         )
         .expect("opens");
 
-        let observed: Vec<(String, u32)> = reads
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query")
-            .map(|read| {
-                let read = read.expect("every record resolves");
-                (
-                    String::from_utf8_lossy(&read.qname).into_owned(),
-                    read.read_group.get(),
-                )
-            })
-            .collect();
+        let mut cursor = reads
+            .cursor(ContigId(0), reference_bases)
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(whole_first_contig())
+            .expect("on this chromosome");
+
+        let mut observed = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("every record resolves");
+            observed.push((
+                String::from_utf8_lossy(&read.qname).into_owned(),
+                read.read_group.get(),
+            ));
+        }
 
         assert_eq!(
             observed,
@@ -1645,7 +1650,8 @@ mod tests {
                 ("b".to_string(), 1),
                 ("c".to_string(), 0),
             ],
-            "a CRAM record carries the group its own tag names"
+            "every library of this sample is kept, each read carrying its own — a cursor that \
+             kept only the first read group would drop 'b' and look like shallower sequencing",
         );
     }
 
@@ -1826,12 +1832,12 @@ mod tests {
             )
             .expect("a shared file opens for each of its samples");
 
-            let names: Vec<String> = reads
-                .reads_in_region(whole_first_contig(), reference_bases)
-                .expect("query")
-                .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
+            let mut cursor = cursor_over_first_contig(&reads);
+            let names: Vec<String> = collect_reads(&mut cursor)
+                .into_iter()
+                .map(|(qname, _)| qname)
                 .collect();
-            let all = reads.counts();
+            let all = cursor.read_group_counts();
             let counts = &only_tally(&all);
             let dropped = counts.duplicate
                 + counts.low_mapq
@@ -1862,9 +1868,9 @@ mod tests {
         );
     }
 
-    /// The same shared-file behaviour over a **CRAM**, which reaches the other
-    /// region source — and with it the delegating enum's CRAM arm, whose
-    /// forwarding of the skipped-record count was added blind.
+    /// The same shared-file behaviour over a **CRAM**, which reaches the other aligned-reads reader
+    /// — and with it the enum's CRAM arm, whose forwarding of the skipped-record count was
+    /// added blind.
     #[test]
     fn a_shared_cram_serves_each_open_only_its_own_reads() {
         use crate::ng::read::input::test_fixtures::{
@@ -1901,17 +1907,22 @@ mod tests {
         )
         .expect("a shared CRAM opens for one of its samples");
 
-        let names: Vec<String> = reads
-            .reads_in_region(whole_first_contig(), reference_bases)
-            .expect("query")
-            .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
-            .collect();
+        let mut cursor = cursor_over_first_contig(&reads);
 
-        assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+        // **The read group is asserted, not collected and dropped.** This test used to keep
+        // only the names, which made it blind to a *wrong-but-valid* group — the CRAM arm is
+        // the one that decides the group itself, so that is exactly the defect it should see.
+        // `rg1` is this open's only own group, so both reads are `0`; the fixture's `rg2`
+        // belongs to the other sample.
         assert_eq!(
-            only_tally(&reads.counts()).other_sample,
+            collect_reads(&mut cursor),
+            vec![("a".to_string(), 0), ("c".to_string(), 0)],
+            "each read carries the group the container decided, not merely some group"
+        );
+        assert_eq!(
+            only_tally(&cursor.read_group_counts()).other_sample,
             1,
-            "the other sample's single read is reported through the enum's CRAM arm"
+            "the other sample's single read is reported through the aligned-reads reader's CRAM arm"
         );
     }
 
@@ -2010,13 +2021,13 @@ mod tests {
             )
             .expect("opens");
 
-            let names: Vec<String> = reads
-                .reads_in_region(whole_first_contig(), reference_bases)
-                .expect("query")
-                .map(|read| String::from_utf8_lossy(&read.expect("resolves").qname).into_owned())
+            let mut cursor = cursor_over_first_contig(&reads);
+            let names: Vec<String> = collect_reads(&mut cursor)
+                .into_iter()
+                .map(|(qname, _)| qname)
                 .collect();
 
-            let counts = reads.counts();
+            let counts = cursor.read_group_counts();
             let kept: Vec<(u32, u64)> = counts
                 .iter()
                 .filter_map(|(id, tally)| Some((id.as_ref()?.get(), tally.kept)))
@@ -2062,13 +2073,11 @@ mod tests {
                 false,
             )
             .expect("opens");
-            reads
-                .reads_in_region(whole_first_contig(), reference_bases)
-                .expect("query")
-                .for_each(|read| {
-                    read.expect("resolves");
-                });
-            for (_, tally) in reads.counts() {
+            let mut cursor = cursor_over_first_contig(&reads);
+            while let Some(read) = cursor.next_read() {
+                read.expect("resolves");
+            }
+            for (_, tally) in cursor.read_group_counts() {
                 assert_eq!(
                     tally.duplicate
                         + tally.low_mapq
@@ -2124,8 +2133,10 @@ mod tests {
         );
     }
 
-    /// The single-file arm wraps its errors with index 0, so a caller matching
-    /// on `IngestError::File` sees the same shape from both arms.
+    /// A per-file failure is wrapped with the index of the file that raised it, so a caller
+    /// matching on `IngestError::File` learns *which* file was at fault. With one file that
+    /// index is 0 — trivially, which is the point: the wrapping is unconditional rather than
+    /// something the merged arm does and the single one skips.
     #[test]
     fn the_single_file_arm_wraps_its_errors_like_the_merged_one() {
         let (_reference_dir, reference) = fixture_reference(false);
@@ -2137,18 +2148,16 @@ mod tests {
             SampleReads::open_only_sample(&[path], &reference, ReadFilterConfig::default(), false)
                 .expect("opens");
 
-        // A region naming a contig the reference does not have.
-        let nonexistent = GenomeRegion {
-            contig: ContigId(9),
-            start: Position(1),
-            end: Position(10),
-        };
-        match sample.reads_in_region(nonexistent, reference_bases) {
-            Err(IngestError::File {
+        // A chromosome the file does not have.
+        let error = sample
+            .cursor(ContigId(9), reference_bases)
+            .err()
+            .expect("a contig the file lacks must not yield a cursor");
+        match error {
+            IngestError::File {
                 source_file_index, ..
-            }) => assert_eq!(source_file_index, 0),
-            Err(other) => panic!("expected a wrapped per-file error, got {other:?}"),
-            Ok(_) => panic!("a region naming an absent contig must not plan"),
+            } => assert_eq!(source_file_index, 0),
+            other => panic!("expected a wrapped per-file error, got {other:?}"),
         }
     }
 
@@ -2324,26 +2333,6 @@ mod tests {
         assert_eq!(error.contig, "chr1");
     }
 
-    /// The colliding read's name is what lets a user grep the inputs and
-    /// confirm the diagnosis, and the file indices have to read as *files*
-    /// rather than as another coordinate pair sitting beside `contig 0
-    /// position 99`.
-    #[test]
-    fn duplicate_read_message_names_the_read_and_both_files() {
-        let message = IngestError::DuplicateReadAcrossFiles {
-            qname: b"read-1".to_vec(),
-            key: genome_position(0, 99),
-            files: (0, 1),
-        }
-        .to_string();
-
-        assert_eq!(
-            message,
-            "read 'read-1' appeared in both input file #0 and input file #1 \
-             at contig 0 position 99"
-        );
-    }
-
     /// The variant carries `files` as well as `names`, and the whole point of
     /// the check is that someone picked up a stray file — so the message must
     /// name the *path*, not just repeat the sample names the user already
@@ -2360,6 +2349,70 @@ mod tests {
             message,
             "the files of one sample name different samples: \
              '/data/a.bam' names 'NA12878', '/data/b.bam' names 'NA12892'"
+        );
+    }
+
+    /// **`SampleReads::cursor` must build one cursor per file, and nothing tested that.**
+    ///
+    /// Changing its loop to `.take(1)` — building only the first file's cursor — left the
+    /// whole suite green. A sample sequenced across several runs would then be genotyped from
+    /// one of its BAMs, silently: the reads it returned would be real, and the ones it never
+    /// looked for invisible.
+    #[test]
+    fn a_sample_cursor_covers_every_file_of_the_sample() {
+        use crate::ng::read::input::test_fixtures::{
+            bam_header, fixture_reference, indexed_named_bam, matching_contigs,
+            read_named_with_length,
+        };
+        use crate::ng::types::{ContigId, Position};
+
+        let (_reference_dir, reference) = fixture_reference(false);
+        let header = bam_header(&matching_contigs());
+        // Two files, disjoint reads, so a cursor that skipped one would still answer
+        // plausibly — which is the point.
+        let (_dir_a, path_a) = indexed_named_bam(
+            &header,
+            &[read_named_with_length("from-a", 0, 1, 30)],
+            "a.bam",
+        );
+        let (_dir_b, path_b) = indexed_named_bam(
+            &header,
+            &[read_named_with_length("from-b", 0, 41, 30)],
+            "b.bam",
+        );
+
+        let sample = SampleReads::open_only_sample(
+            &[path_a, path_b],
+            &reference,
+            ReadFilterConfig::default(),
+            true,
+        )
+        .expect("two files naming one sample open together");
+        assert_eq!(sample.file_count(), 2);
+
+        let bases = || fixture_reference_bases();
+        let mut cursor = sample
+            .cursor(ContigId(0), bases)
+            .expect("a cursor per file of this sample");
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(100),
+            })
+            .expect("on this chromosome");
+
+        let mut names = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            names.push(
+                String::from_utf8_lossy(&read.expect("the fixture reads decode").qname)
+                    .into_owned(),
+            );
+        }
+        assert_eq!(
+            names,
+            ["from-a", "from-b"],
+            "a sample's cursor must reach every file it was opened with",
         );
     }
 }

@@ -1,0 +1,346 @@
+# ng — the alignment cursor: implementation plan
+
+*Draft, 2026-08-02. Turns the settled design —
+[spec](../spec/alignment_cursor.md) (what and why) and
+[arch](../arch/alignment_cursor.md) (types and interfaces) — into build order. **No design
+happens here.** If a step turns out to need a decision, stop and take it back to the spec.*
+
+---
+
+## Scope
+
+**In.** Replacing the per-region read query with a long-lived cursor: a per-file reader that stays
+positioned, keeps the reads it has already decoded and filtered, and hands them back when the next
+region can use them. The sample-level cursor that merges k files. The walker and generator changes
+that follow from there being no per-region stream.
+
+**And moving *every* BAM/CRAM read in ng onto it.** When this plan is done there is one way to read
+an alignment file and the old one is gone: `SampleReads::reads_in_region`, `RegionReads`, the
+reader pool and `readers_opened` are deleted, and nothing references them. That is Milestone F, and
+it is not a tidy-up — it is 13 files beyond the two generators, inventoried there.
+
+**Out.**
+
+- **The per-chromosome reference-base registry** — deferred whole (spec §12). Its trigger is the
+  first parallel run over CRAM. A cursor takes its bases once at construction until then.
+- **The parallel fan-out.** This plan builds the shape it needs and runs single-threaded.
+- **Coalescing regions at the caller.** Refuted — generic regions are not adjacent (spec §13, N2).
+- **Removing the per-read copy into the caller's buffer** — measured at +2.8 % and not worth a
+  redesign before there is a working baseline (spec §13).
+
+## Principles (how the order was chosen)
+
+- **The algorithmic heart before the plumbing.** The forget rule (spec §6) is one comparison, and
+  it is the only part that can silently lose reads. It is built and tested against an in-memory
+  reader before any file is involved.
+- **Simplest implementation first, as the oracle for the next.** `RecordReader::InMemory` exists
+  so the rule can be driven from a scripted list of records. BAM follows, CRAM last.
+- **Verify against ground truth, not self-consistency.** Every milestone is proven by output
+  identity against the current code on real data, not by its own tests. **1,471 unit tests passed
+  while the first attempt lost 3,830 loci** (spec §11).
+- **Isolate the step whose failure is silent.** Retention that drops a read it should have kept
+  produces a wrong genotype, not a crash. Those steps land as their own commits.
+- **Types first, then implementation**, within every milestone.
+- **Incremental, with pauses.** One milestone, then stop.
+
+## Preconditions (already in place)
+
+- The design is settled: spec and arch are final, and eleven adversarial-review findings are
+  resolved in them.
+- **The baseline numbers exist and are reproducible.** `examples/ng_generic_walk_probe.rs` is in
+  the working tree; chromosome 21 prints `loci=236081 observations=251786 reads_admitted=54709`
+  and chromosome 1 `loci=1541788 observations=1647161`.
+- The suite is green at `d95ce8b`: `cargo test --lib ng::` gives 1,471 passed.
+- The oracle to extend exists:
+  `t5_the_indexed_query_returns_exactly_what_a_linear_scan_returns`.
+- **The probe must be committed first** — it is the only instrument that measures the walk rather
+  than a tool's output buffer, and every milestone below is verified with it.
+
+---
+
+## The steps
+
+### Milestone A — the instrument, and the types (no behaviour change)
+
+- ✅ **A1.** Commit `examples/ng_generic_walk_probe.rs` with a test module and the fixture builders
+  it shares with the bench. *Depends:* —. *Source:* spec §11. — `a400f73`
+- ✅ **A2.** `CursorError` (`WrongChromosome`, `Io`), and `AlignmentFile::contigs()`.
+  *Depends:* A1. *Source:* arch §1.4, §2.1. — `aaae5db` (`Io` landed as `ReadRecord`)
+- ✅ **A3.** `RecordReader` as an enum with only the `InMemory` arm: finds nothing, unpacks
+  nothing, yields a scripted list in position order. *Depends:* A2. *Source:* arch §1.3. — `382667b`
+- ✅ **A4.** `ReadFilter::source_mut`, and a test that repositioning through it reaches the source.
+  One accessor; nothing else in `filtering.rs` moves. *Depends:* A2. *Source:* arch §2.3. — `1d150af`
+  **⚠ It found that one accessor is not enough.** `ReadFilter` fuses on a *clean* end of input,
+  which is how every region ends, so the first region a cursor drains silences it for the rest of
+  the chromosome — measured at two regions through one filter: 2 reads, then 0. B1 must decide how
+  the flag is cleared. Spec §3's "the filter seam — solved, at the price of one accessor" is false
+  as written.
+
+> **Checkpoint A:** the types compile, nothing behaves differently, the probe is committed and
+> still prints the baseline numbers. Pause for review.
+
+### Milestone B — the forget rule, against the in-memory reader
+
+- ✅ **B1.** `AlignmentCursor` over `RecordReader::InMemory`: `move_to_region`, `next_read`,
+  `contig()`, and the kept reads. *Depends:* A3, A4. *Source:* arch §1.2, §2.2.
+- ✅ **B2. The forget rule — its own commit, do not bundle.** Reuse when the new region starts at
+  or after the last one served; otherwise drop and reposition. Evict a kept read once it ends
+  before the current region's start. **Oracle:** a scripted reader driven through ascending,
+  backward, overlapping, adjacent and far-apart regions must return exactly what a linear scan of
+  the same scripted list returns. *Depends:* B1. *Source:* spec §6.
+- ✅ **B3.** The counters — reads kept, replayed, decoded, repositions — and the test that a
+  forward walk decodes each read once. *Depends:* B2. *Source:* spec §11.5. — `3af749d`, `3ba6047`, `2149be1`
+
+> **Checkpoint B:** the rule is correct on a reader with no file behind it, and its failure modes
+> are exercised before any real input can hide them. Pause for review.
+
+### Milestone C — the BAM arm
+
+- ✅ **C1.** `RegionRecords`: the region narrowing, the sorted early stop, read-group resolution
+  and the tally — lifted out of `BamRegionSource`, written once. *Depends:* B2.
+  *Source:* spec §5, arch §2.3. **⚠ Landed at B1** — a cursor owns a `ReadFilter`, which needs a `RecordSource`, so this could not wait for a step that depends on B2. The *tally* it lists was deliberately **not** built: `ReadFilter` already keeps one, and one filter now lives as long as a cursor (arch §2.3).
+- ✅ **C2.** `BamRecordReader`: index query, positioned reading, and the one-record pushback for
+  the record the early stop consumes without yielding. Keeps nothing across regions.
+  *Depends:* C1. *Source:* arch §1.3. **⚠ The pushback is in `RegionRecords`, not here** — the over-read happens in the layer that knows where the region ends, and a reader cannot hold back a record it was never told to stop at.
+- ✅ **C3. Wire the cursor to BAM — its own commit.** **Oracle:** the extended
+  `t5_…returns_exactly_what_a_linear_scan_returns`, driving *a run of ascending regions through
+  one cursor* rather than a single query. *Depends:* C2. *Source:* spec §11.3. **⚠ The run-of-regions oracle landed in `open_bam.rs`, beside `cursor()`, not as an edit to `t5_…`** — that fixture builds no reference and no cursor, so extending it would have meant rebuilding both there.
+- ✅ **C4.** `SampleCursor`: k file cursors, the argmin merge, and the `Single` arm kept free of
+  dynamic dispatch. *Depends:* C3. *Source:* arch §2.4. — `c7e992a`, `8c4621d`, `d6443f4`, `741ec56`
+
+> **Checkpoint C — reached.** BAM reads through the cursor; the probe prints the baseline
+> numbers at every region size, which at this point means only that nothing broke.
+>
+> **⚠ "The first point the saving can be measured" was not achievable as written**, and the
+> reason is in the dependency graph rather than in the work: at C nothing a user runs goes
+> through the cursor, because `PileupGenerator` still calls `SampleReads::reads_in_region`
+> (`generator.rs:854`). The probe measures the old path either way. Wiring the generators is
+> D1 and D2 — so an end-to-end number is D's to report.
+>
+> **The measurement was therefore made where the change is**, by `examples/ng_cursor_vs_query`:
+> the same typed regions, halo included, once through each path, with every read compared over
+> its whole content in an untimed second pass. HG002 30×, chr21: **3.81–3.89 s → 0.167–0.169 s,
+> ~23×**, `agreement=exact`. The cursor decodes **34,876** reads to serve 543,389 — against
+> 35,228 records on chr21 by `samtools view -c` — reusing for 102,937 of 102,938 regions and
+> jumping once.
+>
+> **⚠ The ratio is a property of the region shape and must be quoted with it.** Audited: ~23×
+> forward through dense typed regions, 11.7× at half that density, 3.8× at a 13× stride, ~1×
+> whole-contig, and **0.5× — a two-fold regression — on the same regions walked backwards**,
+> which §4 explicitly permits. A backward walk reuses nothing, so the cursor decodes everything
+> the query does and clones each read into its kept set on top.
+>
+> **⚠ And this is the read path, not a run.** An earlier draft here quoted 26.3× against a
+> harness that left cursor construction outside its timer, ran an 11-second whole-genome MD5
+> across the measurement, and compared reads by a position-only digest while claiming to
+> compare them "name by name". All three are fixed; the number moved from 26.3× to ~23×. The
+> end-to-end figure is D's to report — the spec's own retention prototype puts the *walk* at
+> 5.18 s → 2.69 s, which is 1.9×, and nothing at this commit reconciles the two.
+>
+> Pause for review.
+
+### Milestone D — the callers
+
+- ✅ **D1.** The walker holds the cursor for the run instead of taking an iterator at
+  construction: `move_to_region` forwarded, and a per-region reset of `WalkerState`, `pending`,
+  `done` and `stop_after`. **The largest edit in this plan.** *Depends:* C4.
+  *Source:* spec §3.
+- ✅ **D2.** The generic generator: cursor per chromosome, minted at the boundary, and
+  `make_reference` deleted — which drops a type parameter from `PileupGenerator`.
+  *Depends:* D1. *Source:* spec §3, perf review L2.
+
+  > **⚠ D1 and D2 landed as one step, one review, one commit — agreed with the owner before any
+  > code was written.** They are not separable: nothing in `src/` builds a `PileupWalker` for
+  > more than one region, so D1's `move_to_region` has **no caller** until D2 replaces
+  > `open_walk`, and committing it alone would ship a method carrying `#[allow(dead_code)]`
+  > exercised only by its own tests — the shape B1 shipped and a reviewer found unreachable by
+  > putting `panic!` in the body while thirteen tests passed. The counters are the stronger
+  > reason: the two field-by-field decisions in the per-region reset that can corrupt a total
+  > silently are only checkable against `fold_region_walk`, which is D2's call site. The same
+  > coupling already hit B1/B2 and C1/C2+C3.
+  >
+  > **⚠ `make_reference` is boxed, not deleted.** The stated consequence holds —
+  > `PileupGenerator<R, MakeReference, P>` is now `PileupGenerator<R, P>` — but the factory
+  > itself has to stay: `SampleReads::cursor` takes one, and a sample's k cursors interleave
+  > over the same coordinates, so one accessor between them would be one file position and one
+  > sliding window. It is now called once per file per *chromosome*, which is perf-review L2
+  > closed. Cost: a `'static` bound every caller already satisfies.
+- ✅ **D3.** The STR generator, same change. *Depends:* D2. *Source:* `ssr.rs:375`.
+
+  > **⚠ "Same change" hid a defect the generic generator's shape could not have.** A generator
+  > keeps its reader for a whole chromosome, but the `LocusGenerator` trait hands it a
+  > `&SampleReads` on *every* call — and the first version keyed the kept reader on the
+  > chromosome alone, so the sample argument was read once and ignored after that.
+  > `ng_ssr_cohort_stutter` shares one generator across every sample, asking all of them about
+  > one repeat before moving on, so the first sample would have answered for all of them: one
+  > plant's reads, N times, under N names, with no error. Both review agents found it
+  > independently and both proved it.
+  >
+  > **Fixed on the owner's decision: one generator per sample, and a generator refuses a sample
+  > it was not opened for.** Re-opening on a change of sample — the obvious alternative — would
+  > open one reader per sample *per repeat* in a region-major walk, which is worse than the
+  > per-repeat query it replaced. `SampleReads::identity` is the new interface the check needs;
+  > the guard is on both generators. Nothing already measured is affected: the recorded tomato
+  > results predate this branch.
+  >
+  > **Measured:** `ng_ssr_loci_dump` on chromosome 21, **−28 % of CPU time**, dump
+  > byte-identical. Wall time does not move — that tool's wall is the reference checksum on
+  > another thread. Repeats are far apart, so the saving is smaller than the generic
+  > generator's, which is why a number was owed rather than an argument.
+
+> **Checkpoint D:** both generators run through cursors; the STR dump and the generic dump are
+> byte-identical to their committed baselines. **The old API is still there and still used by the
+> callers in Milestone F** — nothing is deleted yet. Pause for review.
+
+### Milestone E — the CRAM arm
+
+- ✅ **E1.** `CramRecordReader`: the `.crai` walk and container decode, keeping nothing across
+  regions. The existing single-container cache stays exactly as it is — a within-query
+  optimisation. *Depends:* C2. *Source:* spec §5. — `520ceb8` (groundwork), `8f7e149`
+
+  > **⚠ "Keeping nothing across regions" and "the single-container cache stays" cannot both be
+  > true, and the resolution is that the cache was never a cache.** What the reader holds is the
+  > container it is *currently serving*: decoded, drained, and dropped when the next one is
+  > decoded. What survives between regions is the cursor's reads, one layer up. The per-region
+  > source's version genuinely was a cache — it held its last container so the *next query*
+  > could skip a decode — and that job now belongs to the kept reads.
+  >
+  > **⚠ Landed with E2, and the read-group question needed the owner.** A CRAM stores the read
+  > group as a number rather than a tag, so the arm decides it while decoding and hands it up
+  > with the record — the one exception to "records come out raw" (arch §1.3, spec §5). Settled
+  > with the owner; the alternative was keeping every auxiliary tag, at 6.2 MiB per open file.
+- ✅ **E2. Wire CRAM — its own commit.** **Oracle:** the BAM/CRAM parity test (`t8_…`) must still
+  show the two formats returning identical reads, now through cursors. *Depends:* E1, D3.
+  *Source:* spec §11. — `8f7e149`
+
+  > **⚠ The oracle is a new test, not the extended `t8_…`** — the same decision C3 made for BAM,
+  > and for the same reason: `t8_…` compares two *files* through the per-region query and builds
+  > no cursor and no reference accessor. What the milestone needs is a **run of regions through
+  > one CRAM cursor against a linear scan**, which is the BAM cursor oracle's shape. `t8_…`
+  > still passes and still earns its keep on the old path.
+  >
+  > **⚠ A three-container fixture, and boundary regions taken from the index.** A fixture inside
+  > one container exercises the decode and none of the walk. And with regions that all sit
+  > inside a container, the walk-back over containers reaching into the region can be deleted
+  > with the whole suite green — checked, and it could.
+- ✅ **E3.** Measure on a tomato CRAM and record it. CRAM is unmeasured in the perf review; this
+  is the first number for it. *Depends:* E2. *Source:* spec §1. — report
+  [`ng_alignment_cursor_e_2026-08-02.md`](../../reports/implementations/ng_alignment_cursor_e_2026-08-02.md)
+
+  > **Read path 23.7×** (12.78 s → 0.54 s, `agreement=exact`, four runs across two samples and
+  > two chromosomes: 23.7–26.4×). **End to end 1.41×** (9.51 s → 6.76 s), output identical.
+  >
+  > **⚠ The gap between those two is the finding, not a discrepancy.** The old CRAM path already
+  > kept its last container (spec §1 says so), so retention was partly there and there was less
+  > to win than on BAM — where nothing was kept and records were decoded thirty times over. And
+  > this chromosome yields 1.7 M loci against chromosome 21's 236 k, so the walk dominates.
+  >
+  > **⚠ Peak memory is 228 MB, and it is the reference, not the reads.** A CRAM decodes against
+  > the reference, so the chromosome's bases are resident — SL4.0 chromosome 1 is 90.9 Mb. That
+  > is what spec §12's deferred per-chromosome registry is for, and its stated trigger was the
+  > first parallel run over CRAM. The cursor does not make it worse (238 → 228 MB).
+
+> **Checkpoint E:** both formats read through cursors, with CRAM measured for the first time.
+> Pause for review.
+
+### Milestone F — move every remaining reader across, then delete the old path
+
+Until this milestone two ways of reading a file coexist. F ends that. **Every call site below was
+found by grep on the clean tree; none is optional, because F4 deletes what they call.**
+
+- ✅ **F1. The acceptance anchors.** `ng_generic_loci_dump` and `ng_ssr_loci_dump` onto cursors.
+  Their output is asserted byte-identical, so converting them is itself the proof that the
+  migration moved nothing. *Depends:* E2. *Source:* spec §11.
+- ✅ **F2. The measurement harnesses.** `ng_generic_walk_probe`, `benches/ng_generic_pileup_perf`,
+  `dhat_ng_merge`, `dhat_ng_open_files`. **`dhat_ng_merge` needs care** — it measures the merge's
+  own allocation cost by draining one region twice, so it must keep measuring the merge and not
+  the cursor's kept reads. *Depends:* F1. *Source:* arch §2.4.
+- ✅ **F3. The stage-1 differential.** `parity.rs` calls `reads_in_region` once
+  (`:4030-4042`) to feed one read stream to both walkers. It is `#[cfg(test)]`
+  (`pileup/mod.rs:131-133`) so it breaks the test build, not the release build — which is why it
+  is easy to miss. **First establish whether it still has a job:** the design records that from
+  plan 3's A2 the two walkers differ on purpose and this harness "dies by design". If it is
+  vestigial, delete it; if not, convert the one call site. **Ask before doing either** — 4,233
+  lines is not a decision for a build order. *Depends:* F1. *Source:* `pileup/mod.rs:128-133`.
+- ✅ **F4. The research tools.** `ng_ssr_aligner_bakeoff`, `ng_ssr_anchor_firm_validate`,
+  `ng_ssr_cohort_stutter`, `ng_ssr_divergent_reads`, `ng_ssr_gain_loss`, `ng_normalizer_screen`.
+  Several assert against committed baselines; those must not move. *Depends:* F1.
+  *Source:* spec §11.
+- ✅ **F5. Delete the old path — its own commit.** `SampleReads::reads_in_region`, `RegionReads`,
+  `ReaderHandle`, `BorrowedReader`, the pool, `readers_opened` (**ten read sites across nine
+  tests**), and `region_query.rs` itself. Plus the test at `locus_generation/mod.rs:882` and the
+  doc link at `ref_seq.rs:611`. **Verification is mechanical:** `cargo build --all-targets` and
+  `cargo test` green, and `grep -rn "reads_in_region\|RegionReads\|readers_opened" src/ examples/
+  benches/` returning nothing. *Depends:* F2, F3, F4. *Source:* arch §4.
+
+  > **⚠ "Verification is mechanical" is true of the grep and false of the step.** `grep` proves the
+  > old API is gone; it cannot say whether the *rules* the deleted tests pinned are still checked
+  > anywhere, and **50 tests reached their reads through the deleted API** — 22 in `region_query.rs`
+  > alone. So this ran in three phases: move `DecodedContainer`, `decode_container_at` and
+  > `owner_of_cram_record` out to a new `record_reader/container.rs` (the CRAM arm imports them and
+  > they were never the query's), triage every test against the rule it names, then delete. Full
+  > accounting in the [F5 report](../../reports/implementations/ng_alignment_cursor_f5_2026-08-03.md).
+  >
+  > **⚠ The triage found `CursorError::OutOfOrderRead` had no test at all** — the guard was written,
+  > reviewed and shipped at B/D with nothing exercising it. Three of `OrderVerified`'s tests are
+  > restated against the cursor and mutation-verified; `record_reader/cram.rs`, which had no tests
+  > of its own, gained four.
+  >
+  > **⚦ Two rules died on purpose.** A record reader *positions, it never bounds*, so
+  > `the_crai_walk_stops_once_it_passes_the_region` has no successor and should not — and with it
+  > `RecordIndex::footprint` and `DecodedContainer::offset`, which existed so the old CRAM source
+  > could re-filter a held container per region. Neither would have warned:
+  > `record_reader/mod.rs` carries a module-level `#![allow(dead_code)]`.
+  >
+  > **⚦ Three unconstructible error variants went too** — `AlignmentFileError::{OutOfOrderRead,
+  > Filter}` and `IngestError::DuplicateReadAcrossFiles`, the last of which its own doc had already
+  > scheduled for this step. And `ReadFilter::into_parts`, which `clippy -D warnings` forced.
+  >
+  > **⚦ One thing was added, as a replacement, not as scope:** `SampleCursor::read_group_counts`,
+  > because deleting `SampleReads::counts` would otherwise have removed a capability with nothing
+  > answering it.
+  >
+  > **⚠ `locus_generation/mod.rs:882` needed no work** — the pointer is a stale line number; what
+  > sits there opens a `SampleReads` and never asks it for reads. `ref_seq.rs`'s doc link is at
+  > `:645`, same drift.
+
+> **Checkpoint F — reached.** There is exactly one way to read a BAM or a CRAM in ng. Four dumps
+> byte-identical (generic and STR, BAM chr21 *and* CRAM SL4.0ch01), the chr21 walk-probe anchor
+> exact at `loci=236081 observations=251786 reads_admitted=54709`, every example and bench
+> building, `cargo clippy --all-targets --all-features -- -D warnings` clean, and the grep empty.
+> Suite 1,573 → **1,541**.
+>
+> **⏸ Two things for the owner.** The cursor **accepts an inverted region** where the deleted
+> planners refused one — `move_to_region` validates the chromosome only. Harmless in practice (the
+> overlap test yields nothing), silent rather than refused, and a design edit to change. And
+> `ReadFilterBuffers` is now a lend-and-reclaim seam with no lender.
+>
+> Pause for review.
+
+---
+
+## Verification summary
+
+| milestone | proven by |
+|---|---|
+| A | suite green, probe prints the baseline numbers unchanged |
+| B | a scripted reader matches a linear scan of the same script, over ascending, backward, overlapping, adjacent and far-apart regions |
+| C | the extended oracle over **a sequence** of regions through one cursor; probe output identical at four region sizes; first saving measured |
+| D | both dumps byte-identical to their committed baselines; suite green |
+| E | BAM/CRAM parity test green through cursors; first CRAM measurement recorded |
+| F | `cargo build --all-targets` green; both dumps and every baseline-asserting tool byte-identical; grep for the old API returns nothing |
+
+**Two things no unit test can prove, so they are checked by hand at every checkpoint:** the probe's
+output identity on real data, and the counters showing reads decoded approaching the true count
+rather than a multiple of it. All thresholds are absolute counts from one tandem-repeat-targeted
+fixture — regression anchors against themselves, not properties of the generator (spec §11).
+
+## Out of scope (next plans)
+
+- **The per-chromosome reference-base registry** — its own change, triggered by the first parallel
+  run over CRAM (spec §12).
+- **The parallel fan-out** — the plan that uses one cursor per worker.
+- **Serving a sorted batch of regions in one sweep** — `alignment_file.md` §3.3 raised it; this
+  plan is its prerequisite, not its delivery.
+- **One cursor shared by both generators** — halves the kept reads, ties two generators'
+  lifetimes together; revisit with the fan-out (spec §12).

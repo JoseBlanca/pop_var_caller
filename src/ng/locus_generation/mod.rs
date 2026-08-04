@@ -375,12 +375,37 @@ pub enum LocusGenerationError {
     /// input or a bad request, "the record stream broke 40 kb in" is a truncated or
     /// corrupt file. One variant rendered them identically, and its own doc used to
     /// deny that the first could happen at all.
+    ///
+    /// **Since D1 this also covers pointing a long-lived cursor at a region** — the same
+    /// job, done once per region against a reader that stays open instead of once against
+    /// a reader that is opened for it. One condition reaching here is *not* an open
+    /// failure in the sense above: `CursorError::AfterFailure` says the cursor's file broke
+    /// during an **earlier** region, which by the split's own logic belongs to
+    /// [`Reads`](Self::Reads). It is unreachable through the generic generator, whose
+    /// `failed` latch fires first and reports the original failure; if a caller ever meets
+    /// it, the message it wants is the one already reported, not this one.
     #[error("the read query for {region} could not be opened")]
     OpenReadQuery {
         region: GenomeRegion,
         #[source]
         source: IngestError,
     },
+    /// A generator was handed a **different sample** from the one it was opened for.
+    ///
+    /// **Each sample needs its own generator.** A generator opens a reader for one sample and
+    /// keeps it positioned for a whole chromosome — that is what makes it fast — but it is
+    /// lent a `&SampleReads` afresh on every call. Sharing one generator between samples would
+    /// therefore answer every sample out of the first one's files: no error, no empty rows, and
+    /// a cohort in which every individual looks identical to the first. This is that mistake,
+    /// caught.
+    ///
+    /// It is a caller bug, not a data problem. Correct code builds a generator per sample and
+    /// never sees it.
+    #[error(
+        "this generator was opened for another sample, so it cannot answer for {region}: \
+         give each sample its own generator"
+    )]
+    ForeignSample { region: GenomeRegion },
     /// A read query failed **mid-stream**, or the alignment input was malformed: the
     /// open already succeeded and reads were flowing.
     #[error("read access over {region} failed during locus generation")]
@@ -426,6 +451,7 @@ impl LocusGenerationError {
         match self {
             LocusGenerationError::TypedRegion(_) => None,
             LocusGenerationError::OpenReadQuery { region, .. }
+            | LocusGenerationError::ForeignSample { region }
             | LocusGenerationError::Reads { region, .. }
             | LocusGenerationError::Reference { region, .. }
             | LocusGenerationError::Walker { region, .. } => Some(*region),
@@ -681,19 +707,22 @@ pub struct SampleLocusObservationsIterator<T> {
     // is kept anyway, as the cheaper of the two mechanisms.
     //
     // Since 2026-07-28 a region stream owns its files by `Arc` rather than
-    // borrowing them, so it may outlive the `SampleReads` that made it — and the
-    // generic generator holds one such stream across `next_locus` calls. Rust
-    // drops fields in declaration order: with `reads` first, a stream a
-    // generator was still holding would fold its drop tally into an
-    // `AlignmentFile` that only that stream owns and that is freed in the same
-    // breath. The reads already emitted are unaffected and the pooled reader
-    // still goes back; what is lost is the ability to *read* that query's tally
-    // through `SampleReads::counts` — a silent under-report of drop rates, not a
-    // crash.
+    // borrowing them, so it may outlive the `SampleReads` that made it — and a
+    // generator holds one such reader across `next_locus` calls. Rust drops
+    // fields in declaration order: with `reads` first, a reader a generator was
+    // still holding would fold its drop tally into an `AlignmentFile` that only
+    // that reader owns and that is freed in the same breath. The reads already
+    // emitted are unaffected and the pooled reader still goes back; what is lost
+    // is the ability to *read* that tally through `SampleReads::counts` — a
+    // silent under-report of drop rates, not a crash.
     //
-    // The generator also ends its walk (and so drops its stream) when a region
-    // drains, so in a run driven to exhaustion nothing is held by then. The
-    // release below covers the other case: an iterator dropped mid-region.
+    // **How long a generator holds one widened at D1, and the release below is
+    // now the ordinary case rather than the exceptional one.** The STR generator
+    // still holds a per-region stream and drops it when the region drains, so a
+    // run driven to exhaustion leaves it holding nothing. The generic generator
+    // holds a *cursor per chromosome*: `end_walk` clears only the region walk, so
+    // the cursor survives every region and is released when the generator is.
+    // Draining the run no longer empties it.
     //
     // **No test can fail if this breaks, and that is a property of the types
     // rather than an omission** — see the `Drop` impl for what it would take.

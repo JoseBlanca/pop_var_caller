@@ -19,13 +19,15 @@ use std::sync::Arc;
 use crate::ng::locus_generation::{
     GeneratorCounts, LocusGenerationError, LocusGenerator, SampleLocusObservations,
 };
-use crate::ng::read::input::{SampleReads, SampleRegionReads};
+use crate::ng::read::input::cursor::CursorCounts;
+use crate::ng::read::input::sample_cursor::SampleCursor;
+use crate::ng::read::input::{SampleIdentity, SampleReads};
 use crate::ng::read::{PreparedRead, ReadPrepError, ReadPreparer};
-use crate::ng::ref_seq::RawRefSeq;
-use crate::ng::types::{GenomeRegion, Position};
+use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq};
+use crate::ng::types::{ContigId, GenomeRegion, Position};
 
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
-use super::genome_walk::{PileupWalker, RunSummary};
+use super::genome_walk::{PileupWalker, RegionReadSource, RunSummary};
 use super::{DEFAULT_MAX_ACTIVE_READS, WalkerConfig};
 
 /// The widest `max_record_span` this generator accepts: 65,535 reference
@@ -344,7 +346,9 @@ impl PileupGeneratorCounts {
             chain_allocations >= chain_ids_at_open.chain_allocations
                 && mate_lookup_evictions >= chain_ids_at_open.mate_lookup_evictions,
             "the allocator's counters only grow; a baseline above the current value means \
-             the walk was handed a different allocator than the one it gave back",
+             this walk is being folded against a baseline taken from a different allocator \
+             — since D1 the walker keeps the allocator for a whole chromosome, so the two \
+             can only disagree if a chromosome boundary was crossed between them",
         );
         self.reads_admitted += reads_admitted;
         self.record_widen_events += record_widen_events;
@@ -355,8 +359,14 @@ impl PileupGeneratorCounts {
         self.mate_lookup_evictions +=
             mate_lookup_evictions.saturating_sub(chain_ids_at_open.mate_lookup_evictions);
         self.column_depth_truncations += column_depth_truncations;
-        // A plain sum, like the walker's own counters: each region's walk owns its active
-        // set, so each reports only the reads that left *its* set (D2).
+        // A plain sum — and **the reason it is safe changed at D1**, so do not read the
+        // fold without reading this. It used to be that each region's walk owned its own
+        // active set. It does not: one walker, and so one `ActiveReads`, now lives for a
+        // whole chromosome. The sum is correct because `ActiveReads::begin_region` *zeroes*
+        // `silent_exits` at every region start, where `ActiveReads::reset` preserves it as a
+        // run total. Swap the one call for the other and this line triangular-sums by the
+        // region count, in a plausible-looking `u64`, exactly as the delta folds above would
+        // if the allocator were replaced instead of reset.
         self.reads_silent_over_footprint += reads_silent_over_footprint;
         // Plain sums for the same reason: each region's walk finalises its own records, so a
         // holed read is counted by exactly the walk whose record it folded into.
@@ -404,34 +414,47 @@ struct ReadPreparation<P: ReadPreparer> {
     declined: u64,
 }
 
-/// One region's read stream, prepared: the query's `AlignedRead`s canonicalised
-/// into the `PreparedRead`s the walk consumes, with fatal errors shed into the
-/// shared [`ReadPreparation`] and reported as end-of-stream.
+/// The sample's reads, prepared: the cursor's `AlignedRead`s canonicalised into the
+/// `PreparedRead`s the walk consumes, with fatal errors shed into the shared
+/// [`ReadPreparation`] and reported as end-of-stream.
 ///
-/// **Lazy, and it must stay lazy.** The query is a pull iterator that collects
-/// nothing, so what is resident is the reads overlapping the walker's current
-/// position — bounded by depth, not by the region's length. Collecting here to
-/// make an ownership problem go away would turn a depth-shaped footprint into a
-/// region-shaped one, on regions that run to hundreds of kilobases (spec §7).
-struct PreparedRegionReads<R: RawRefSeq, P: ReadPreparer> {
-    reads: SampleRegionReads<R>,
+/// **One of these for a chromosome, not for a region — D2.** It holds a
+/// [`SampleCursor`], which is made once per chromosome and stays positioned, so the
+/// stream is pointed at each region in turn rather than rebuilt for it. That is the
+/// whole feature: the reads two consecutive regions share are decoded and filtered once
+/// (`spec/alignment_cursor.md` §1).
+///
+/// **Lazy, and it must stay lazy.** The cursor is a pull source that collects nothing,
+/// so what is resident is the reads overlapping the walker's current position — bounded
+/// by depth, not by the region's length — plus what the cursor keeps for the next region,
+/// which is bounded by the halo. Collecting here to make an ownership problem go away
+/// would turn a depth-shaped footprint into a region-shaped one, on regions that run to
+/// hundreds of kilobases (spec §7).
+struct PreparedSampleReads<R: RawRefSeq, P: ReadPreparer> {
+    reads: SampleCursor<R>,
     /// The region this stream's failures are attributed to — **the segment, not
     /// the halo-widened span it queries**. The span is an implementation detail
     /// of the halo; the segment is the unit a caller can act on.
     region: GenomeRegion,
+    /// How far past the segment's end the cursor is pointed: `max_record_span`, the
+    /// generator's own knob, carried here because this is where the widening now happens
+    /// — see [`query`](Self::query).
+    halo: u32,
     preparation: Rc<RefCell<ReadPreparation<P>>>,
-    /// Set once the query is exhausted or an error was latched. Both are
-    /// terminal: a stream that shed an error must not resume, or the walk would
-    /// carry on over a hole it was never told about.
+    /// Set once the region is exhausted or an error was latched. Both are
+    /// terminal **for the region**: a stream that shed an error must not resume, or the
+    /// walk would carry on over a hole it was never told about. Cleared by
+    /// [`move_to_region`](RegionReadSource::move_to_region) — a shed error has by then
+    /// been taken by `end_walk`, which is what stops it outliving its region.
     done: bool,
 }
 
-impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
+impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedSampleReads<R, P> {
     type Item = PreparedRead;
 
     fn next(&mut self) -> Option<PreparedRead> {
         while !self.done {
-            let read = match self.reads.next() {
+            let read = match self.reads.next_read() {
                 None => {
                     self.done = true;
                     return None;
@@ -439,7 +462,10 @@ impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
                 Some(Ok(read)) => read,
                 Some(Err(source)) => {
                     let region = self.region;
-                    return self.shed(LocusGenerationError::Reads { region, source });
+                    return self.shed(LocusGenerationError::Reads {
+                        region,
+                        source: source.into(),
+                    });
                 }
             };
             let mut preparation = self.preparation.borrow_mut();
@@ -484,7 +510,65 @@ impl<R: RawRefSeq, P: ReadPreparer> Iterator for PreparedRegionReads<R, P> {
     }
 }
 
-impl<R: RawRefSeq, P: ReadPreparer> PreparedRegionReads<R, P> {
+impl<R: RawRefSeq, P: ReadPreparer> RegionReadSource for PreparedSampleReads<R, P> {
+    type Error = LocusGenerationError;
+
+    /// Point the cursor at `segment`'s **halo-widened span**, and start the region.
+    ///
+    /// Returned rather than shed, unlike the failures `next` meets. A stream error
+    /// happens with the walk already running and has nowhere to go but the latch; this
+    /// one happens before the region has begun, so it goes back the way it came — which
+    /// is where the per-region query's `OpenReadQuery` used to surface, and by the same
+    /// `next_locus` call.
+    fn move_to_region(&mut self, segment: GenomeRegion) -> Result<(), LocusGenerationError> {
+        let query = self.query(segment);
+        // **Pointed first, adopted after.** `AlignmentCursor::move_to_region` can fail
+        // *late* — after it has already dropped what it kept and set its own region — so a
+        // failure leaves the cursor somewhere unknown. Setting these first would leave the
+        // stream claiming to be mid-region on a region it was never pointed at, and marked
+        // not-done, which is a readable stream over a cursor in an unknown place. Every
+        // such failure is terminal for the run today, so this costs nothing and stops the
+        // property resting on that.
+        self.reads
+            .move_to_region(query)
+            .map_err(|source| LocusGenerationError::OpenReadQuery {
+                region: segment,
+                source: source.into(),
+            })?;
+        self.region = segment;
+        self.done = false;
+        Ok(())
+    }
+}
+
+impl<R: RawRefSeq, P: ReadPreparer> PreparedSampleReads<R, P> {
+    /// The span the cursor is pointed at for `segment`: **the segment plus the halo.**
+    ///
+    /// A record anchored inside the segment can have a footprint reaching
+    /// `max_record_span` past its end — a long deletion does exactly that — and reads
+    /// that fold into it may lie *entirely beyond* the segment. Asking only for "reads
+    /// overlapping the segment" never returns them, and the record is then emitted by the
+    /// right region with part of its support missing, **and no counter notices**, because
+    /// the record itself is not lost (spec §2). The extra reads are walked and their
+    /// records clamped away unless anchored in the segment.
+    ///
+    /// **The widening lives here rather than at the call site now, and that is D2's one
+    /// re-layering.** It moved with the query: `move_to_region` above is the seam the
+    /// walker forwards through, and it takes the segment, because the segment is what a
+    /// failure is attributed to. Deciding *which* span to ask for is still the caller's
+    /// business and the caller is still this generator — the read layer is not consulted
+    /// (spec §2).
+    ///
+    /// Widened only on the right, which is what makes consecutive queries nested forward
+    /// and the cursor's forget rule as cheap at the call site as inside it (spec §13).
+    fn query(&self, segment: GenomeRegion) -> GenomeRegion {
+        GenomeRegion {
+            contig: segment.contig,
+            start: segment.start,
+            end: Position(segment.end.get().saturating_add(u64::from(self.halo))),
+        }
+    }
+
     /// Latch a fatal error and report end-of-stream. The **first** error wins:
     /// a later one describes a walk that was already over.
     fn shed(&mut self, error: LocusGenerationError) -> Option<PreparedRead> {
@@ -497,23 +581,39 @@ impl<R: RawRefSeq, P: ReadPreparer> PreparedRegionReads<R, P> {
     }
 }
 
-/// The walk over one region: **owns** its read stream, so nothing borrows the
-/// `SampleReads` it was built from and nothing has to be materialised (arch
-/// §2.2). One per region, built on the first `next_locus` and drained across the
-/// calls that follow.
-struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
-    walker: PileupWalker<PreparedRegionReads<R, P>, Arc<R>>,
+/// The walk over one chromosome — **D2, and the thing that replaces a walker per region.**
+///
+/// It **owns** its read stream, which owns the sample's cursor, so nothing borrows the
+/// `SampleReads` it was built from and nothing has to be materialised (arch §2.2). One per
+/// chromosome, minted by the first `next_locus` that names a new one, and pointed at each
+/// of that chromosome's regions in turn.
+struct ChromosomeWalk<R: RawRefSeq, P: ReadPreparer> {
+    /// The chromosome every region this walker is pointed at must lie on. Compared before
+    /// each region, so the cursor's own `WrongChromosome` guard is never reached in
+    /// correct operation (`spec/alignment_cursor.md` §4).
+    contig: ContigId,
+    walker: PileupWalker<PreparedSampleReads<R, P>, Arc<R>>,
+}
+
+/// The region walk in flight: what the walker is currently pointed at, and what its
+/// contribution to the run's counters is measured against.
+///
+/// Not the walker itself any more — that lives for the chromosome ([`ChromosomeWalk`]).
+/// This is `Some` exactly while a region has been opened and not yet ended, which is what
+/// tells `end_walk` whether there is anything to fold.
+struct RegionWalk {
     /// The region records are clamped to — the walk emits records anchored just
     /// outside it, because the query returns every read *overlapping* the
     /// region and the halo widens that further still.
     region: GenomeRegion,
-    /// The chain-id allocator's counters as they stood when this walk took it —
-    /// the baseline its own contribution is measured against (C3).
+    /// The chain-id allocator's counters as they stood when this region opened — the
+    /// baseline its own contribution is measured against (C3).
     ///
-    /// Snapshotted here rather than at `begin_segment`, which the plan's wording
-    /// suggests, because `begin_segment` opens nothing: between it and the
-    /// query, nothing touches the allocator, so the two moments hold the same
-    /// numbers and this one cannot drift from the walk it belongs to.
+    /// **Read through the walker now, not off an allocator being lent** (D1). A walker
+    /// that lives for a chromosome never hands the allocator back between regions, so
+    /// this is taken via [`PileupWalker::chain_id_counters`] the moment the region opens.
+    /// It is still the same moment: nothing touches the allocator between `begin_segment`
+    /// and the region opening.
     chain_ids_at_open: ChainIdAllocatorCounters,
 }
 
@@ -534,58 +634,61 @@ struct RegionWalk<R: RawRefSeq, P: ReadPreparer> {
 /// `Arc` clone is the owned handle that does not rebuild the reader
 /// ([`ref_seq`](crate::ng::ref_seq)'s shared-handle impls exist for this).
 ///
-/// `make_reference` is a third accessor and deliberately a **factory**: the read
-/// query gives each of a sample's k files its own raw accessor, because they are
-/// stateful readers and sharing one would make k streams share a file cursor
-/// ([`SampleReads::reads_in_region`]).
+/// `make_reference` is a third accessor and deliberately a **factory**: each of a
+/// sample's k files gets its own raw accessor, because they are stateful readers and
+/// sharing one would make k cursors share a file position and one sliding window
+/// ([`SampleReads::cursor`]).
 ///
 /// The chain-id allocator likewise lives here rather than inside the walk: ng
 /// walks one region where production walks a chromosome, and a fresh allocator
 /// per segment would give two fragments of different regions the same id (spec
 /// §8). What that costs — `reset()` between segments, and counters that must be
 /// folded as deltas because `reset()` preserves them — is C3's.
-pub struct PileupGenerator<R: RawRefSeq, MakeReference, P: ReadPreparer>
-where
-    MakeReference: FnMut() -> R,
-{
+pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> {
     /// The reference the walk fetches REF bases from. Built once, for the run,
     /// and handed to each walk as a shared handle.
     reference: Arc<R>,
-    /// Builds a fresh read-query accessor for each file of the sample, which is
-    /// what [`SampleReads::reads_in_region`]'s mismatch-fraction filter reads.
+    /// Builds a fresh read accessor for each file of the sample, which is what the
+    /// cursor's mismatch-fraction filter reads.
     ///
-    /// **It is called once per file at every `begin_segment`'s first
-    /// `next_locus` — so an accessor that opens a file per call is the
-    /// ~564k-opens trap** (spec §8), in the one accessor the generator cannot
-    /// hold for the run: the query gives each of a sample's k files its own,
-    /// because they are stateful readers and sharing one cursor between k
-    /// streams is what the factory exists to avoid.
+    /// **Called once per file per *chromosome* now, not once per region — that is
+    /// perf-review finding L2 closed** (D2). It used to be called at every
+    /// `begin_segment`'s first `next_locus`, and the cost is not in building the accessor
+    /// — [`WindowedRefSeq::new`](crate::ng::ref_seq::WindowedRefSeq) is a path and a contig
+    /// table, no I/O — but in its **first fetch**, which reaches
+    /// `RawChromReader::for_contig` and parses the whole `.fai` (~2,580 records on GRCh38)
+    /// before opening the FASTA. That was 9,820 FASTA opens on chromosome 21; it is now one
+    /// per file per chromosome.
     ///
-    /// **Where the cost actually is:** not in building the accessor —
-    /// [`WindowedRefSeq::new`](crate::ng::ref_seq::WindowedRefSeq) is a path and
-    /// a contig table, no I/O — but in its **first fetch**, which reaches
-    /// `RawChromReader::for_contig` and parses the whole `.fai` (~2,580 records
-    /// on GRCh38) before opening the FASTA. `ContigList` cannot spare it that:
-    /// its entries carry name, length and MD5, and no byte offsets.
+    /// **Boxed, which is what drops `PileupGenerator`'s third type parameter** (arch §3.6).
+    /// The indirection costs one virtual call per file per chromosome — the factory is not
+    /// on any hot path any more, which is the point. It stays a *factory* rather than
+    /// becoming a shared handle because a sample's k cursors interleave over the same
+    /// coordinates: one accessor between them would be one file position and one sliding
+    /// window serving k readers, and its eviction would be driven by whichever asked last.
     ///
-    /// **What a caller should pass, and the answer depends on k.** With **one**
-    /// file, hand back a clone of an accessor already held — `Arc<T>` implements
-    /// [`RawRefSeq`] for this — and the per-region cost disappears. With
-    /// **several**, that same clone hands k interleaved streams one cursor and
-    /// one resident window, which is what the factory exists to prevent; trade
-    /// deliberately, or fix it properly one level down by giving
-    /// `RawChromReader` a constructor that takes an already-parsed index, so a
-    /// fresh per-file accessor costs an `open(2)` and no parse.
+    /// **`+ Send` costs nothing *here* and is kept for the fan-out.** A bare `Box<dyn FnMut>`
+    /// makes this generator `!Send` whatever `R` and `P` are. Nothing is blocked today — the
+    /// `Rc<RefCell<ReadPreparation>>` below already blocks it — but `locus_generation.md` §9
+    /// gives each worker its own generator, so this would become a second blocker to remove
+    /// for no gain.
     ///
-    /// No non-test caller exists yet, and the per-region constant has only been
-    /// measured with an in-memory reference — a free factory. D3 is where the
-    /// file-backed number gets taken.
-    make_reference: MakeReference,
+    /// **The STR generator deliberately does *not* carry the bound**, and the difference is a
+    /// caller rather than a preference: `ng_ssr_cohort_stutter` hands every file a clone of one
+    /// `Arc<WindowedRefSeq>`, which is `!Send` because `WindowedRefSeq` holds a `RefCell` and is
+    /// therefore `!Sync`. Every caller of *this* constructor builds a fresh accessor per call,
+    /// capturing only a `PathBuf` and two `Arc`s.
+    make_reference: Box<dyn FnMut() -> R + Send>,
     /// The preparer and its scratch, lent to each region's read stream.
     preparation: Rc<RefCell<ReadPreparation<P>>>,
-    /// Lives across segments so `next_id` never repeats — **`None` exactly while
-    /// a walk holds it**, which is the invariant `open_walk` and `end_walk`
-    /// keep between them.
+    /// Lives across chromosomes so `next_id` never repeats — **`None` exactly while a
+    /// [`ChromosomeWalk`] holds it**, which is the invariant `enter_chromosome` keeps.
+    ///
+    /// **The window it is absent for widened at D2**, from a region to a chromosome: a
+    /// walker built per region borrowed it per region, and one built per chromosome borrows
+    /// it for the chromosome. `reset()` between regions still happens — inside the walker,
+    /// at [`WalkerState::begin_region`], where the counters it preserves are documented
+    /// along with what breaks if it is replaced instead.
     ///
     /// An `Option` rather than a swap with a fresh allocator: a placeholder
     /// starting at zero is the state this whole arrangement exists to avoid, and
@@ -593,11 +696,27 @@ where
     chain_ids: Option<ChainIdAllocator>,
     config: PileupGeneratorConfig,
     counts: PileupGeneratorCounts,
-    /// The region [`begin_segment`](Self::begin_segment) was given, before any
-    /// query has been opened for it.
+    /// The region [`begin_segment`](Self::begin_segment) was given, before the walker has
+    /// been pointed at it.
     current_region: Option<GenomeRegion>,
-    /// The walk over `current_region`, opened by the first `next_locus`.
-    walk: Option<RegionWalk<R, P>>,
+    /// The walker and the sample's cursor, for as long as the run stays on one chromosome.
+    /// Minted by the first `next_locus` on each, and rebuilt at every boundary — nothing in
+    /// a cursor survives a chromosome change (`spec/alignment_cursor.md` §4).
+    chromosome: Option<ChromosomeWalk<R, P>>,
+    /// The region walk in flight — `Some` between the `next_locus` that opened a region and
+    /// the `end_walk` that closes it.
+    walk: Option<RegionWalk>,
+    /// What the cursors of *already-retired* chromosomes did. A cursor's tallies die with
+    /// it at the boundary, so they are taken there; the live one is asked directly. See
+    /// [`cursor_counts`](Self::cursor_counts).
+    retired_cursor_counts: CursorCounts,
+    /// The sample this generator opened its first cursor for. **One sample per generator** —
+    /// a second one is refused rather than answered out of the first one's files. See
+    /// [`open_walk`](Self::open_walk).
+    ///
+    /// `None` until the first cursor opens, so a generator is unclaimed until it reads
+    /// something.
+    sample: Option<SampleIdentity>,
     /// A fatal error that has happened and not yet been reported.
     ///
     /// The stream's errors are **shed** (it hands the walker an infallible item
@@ -618,27 +737,31 @@ where
     failed: bool,
 }
 
-impl<R: RawRefSeq, MakeReference, P: ReadPreparer> PileupGenerator<R, MakeReference, P>
-where
-    MakeReference: FnMut() -> R,
-{
+impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenerator<R, P> {
     /// Build a generator over `reference` (the walk's REF fetches),
-    /// `make_reference` (the read query's per-file accessor factory) and
+    /// `make_reference` (the cursor's per-file accessor factory) and
     /// `preparer` (per-read canonicalisation), with `config` checked before
     /// anything is held.
+    ///
+    /// **`make_reference` is boxed here**, which is what keeps it off this type's
+    /// parameter list (arch §3.6). The `'static` that comes with the box is the one real
+    /// constraint: the factory is called for the whole life of the generator, at every
+    /// chromosome boundary, so it must not borrow anything shorter-lived — which every
+    /// caller already satisfies by capturing owned paths and shared indexes. `Send` is required
+    /// for the reason on the field, and every caller satisfies that too.
     ///
     /// Fails only on a configuration a witness run could not describe — see
     /// [`PileupGeneratorConfig::check`].
     pub fn new(
         reference: Arc<R>,
-        make_reference: MakeReference,
+        make_reference: impl FnMut() -> R + Send + 'static,
         preparer: P,
         config: PileupGeneratorConfig,
     ) -> Result<Self, PileupGeneratorConfigError> {
         config.check()?;
         Ok(Self {
             reference,
-            make_reference,
+            make_reference: Box::new(make_reference),
             preparation: Rc::new(RefCell::new(ReadPreparation {
                 preparer,
                 scratch: P::Scratch::default(),
@@ -652,7 +775,10 @@ where
             config,
             counts: PileupGeneratorCounts::default(),
             current_region: None,
+            chromosome: None,
             walk: None,
+            retired_cursor_counts: CursorCounts::default(),
+            sample: None,
             pending_failure: None,
             failed: false,
         })
@@ -666,6 +792,35 @@ where
     /// The run-level counts accumulated across every segment walked so far.
     pub fn counts(&self) -> &PileupGeneratorCounts {
         &self.counts
+    }
+
+    /// **What the cursors did**, summed over every chromosome walked so far — reads decoded
+    /// against reads replayed from memory, and regions reused against regions jumped.
+    ///
+    /// # Why this exists, and why it is not on [`counts`](Self::counts)
+    ///
+    /// **The saving this whole design is for is invisible in the output.** A generator that
+    /// mints a cursor per region and one that keeps a cursor per chromosome emit exactly the
+    /// same loci — that is the correctness requirement — so the only way to tell them apart
+    /// is to count what was *avoided* (`spec/alignment_cursor.md` §11.5).
+    ///
+    /// Review proved the point: replacing the chromosome comparison in
+    /// [`open_walk`](Self::open_walk) with `if true`, so that every region built a fresh
+    /// cursor, left **all 1,557 tests green**. `CursorCounts` existed, and nothing above the
+    /// cursor could read it.
+    ///
+    /// It is kept off `PileupGeneratorCounts` deliberately: that struct is printed verbatim
+    /// by the dump tools, whose output is asserted byte-identical against committed
+    /// baselines, and this is a fact about the *reader* rather than about the loci.
+    ///
+    /// Cursors retired at a chromosome boundary are added up as they go; the live one is
+    /// asked directly, so the answer is current at any moment.
+    pub fn cursor_counts(&self) -> CursorCounts {
+        let mut total = self.retired_cursor_counts;
+        if let Some(chromosome) = &self.chromosome {
+            total += chromosome.walker.reads().reads.counts();
+        }
+        total
     }
 
     /// Start a region: record it and **open nothing**.
@@ -684,16 +839,22 @@ where
         self.current_region = Some(region);
     }
 
-    /// End the walk in flight, if any: fold its counters into the run's totals,
-    /// take the chain-id allocator back, and `reset()` it for the next region.
+    /// End the region walk in flight, if any: fold its counters into the run's totals and
+    /// take its shed error out of the shared preparation cell.
     ///
-    /// **The only place `walk` is cleared**, which is what keeps "the allocator
-    /// is absent exactly while a walk holds it" true without anyone having to
-    /// remember it. `reset()` clears `pending_mates` and `active_count` while
-    /// preserving `next_id` — carried across regions blindly, a pending first
-    /// mate from one region pairs with a read in another (the eviction test
-    /// compares raw positions) and `active_count` climbs toward
-    /// `ActiveReadsExhausted` (spec §8).
+    /// **The only place `walk` is cleared**, which is what keeps "a region is open exactly
+    /// while `walk` is `Some`" true without anyone having to remember it.
+    ///
+    /// **What it no longer does — D2.** It used to take the chain-id allocator back and
+    /// `reset()` it, because the walker was dropped here. The walker now lives for the
+    /// chromosome and keeps the allocator, so the reset moved to
+    /// [`WalkerState::begin_region`], which runs at the *next* region's start. The reset
+    /// itself is unchanged and still necessary: carried across regions un-reset, a pending
+    /// first mate from one region pairs with a read in another (the eviction test compares
+    /// raw positions) and `active_count` climbs toward `ActiveReadsExhausted` (spec §8).
+    ///
+    /// **The fold has to happen here and not there**, before the walker is pointed at
+    /// anything else: it reads the walk's summary, which `begin_region` is about to clear.
     ///
     /// **It also takes the walk's shed error with it**, which is the third piece
     /// of per-region state and the one that went missing (review): the error
@@ -707,18 +868,23 @@ where
         // **The region ends with its walk.** `begin_segment` sets it again
         // immediately; every other caller of this wants the segment over. Left
         // set, a `next_locus` after the walk drained saw `walk.is_none()`, opened
-        // the query again and **re-emitted the whole region** — with every read
+        // the region again and **re-emitted the whole of it** — with every read
         // admitted a second time and its fragment handed a second chain id
         // (review).
         self.current_region = None;
         let Some(walk) = self.walk.take() else {
             return;
         };
+        // PANIC-FREE: a region walk is only ever opened through `open_walk`, which puts a
+        // chromosome walk in place first and never clears one while `walk` is `Some`.
+        let summary = self
+            .chromosome
+            .as_ref()
+            .expect("a region walk is open, so its chromosome's walker is here")
+            .walker
+            .summary();
         self.counts
-            .fold_region_walk(&walk.walker.summary(), walk.chain_ids_at_open);
-        let mut chain_ids = walk.walker.into_chain_ids();
-        chain_ids.reset();
-        self.chain_ids = Some(chain_ids);
+            .fold_region_walk(&summary, walk.chain_ids_at_open);
         let mut preparation = self.preparation.borrow_mut();
         // Taken, not read: the cell outlives every walk, so a tally left in it would be
         // folded again at the next region's end — the same shape as the shed error below.
@@ -769,18 +935,21 @@ where
         let Some(region) = self.current_region else {
             return Ok(None);
         };
-        if self.walk.is_none() {
-            match self.open_walk(region, reads) {
-                Ok(walk) => self.walk = Some(walk),
-                Err(error) => return Err(self.fail(error)),
-            }
+        if self.walk.is_none()
+            && let Err(error) = self.open_walk(region, reads)
+        {
+            return Err(self.fail(error));
         }
         loop {
             // PANIC-FREE: opened immediately above, and every path that clears
             // the walk returns rather than looping.
-            let walk = self.walk.as_mut().expect("the walk was just opened");
-            let clamp = walk.region;
-            match walk.walker.next() {
+            let clamp = self.walk.as_ref().expect("the walk was just opened").region;
+            let walker = &mut self
+                .chromosome
+                .as_mut()
+                .expect("the walk was just opened, so its chromosome's walker is here")
+                .walker;
+            match walker.next() {
                 Some(Ok(locus)) => {
                     if clamp.contains(locus.region.start) {
                         return Ok(Some(locus));
@@ -817,73 +986,202 @@ where
         }
     }
 
-    /// Open the query for `region` and build the walk over it.
+    /// Point the walk at `region`, minting the chromosome's walker and cursor first if this
+    /// is the first region on it.
     ///
-    /// **The query is `[region.start, region.end + max_record_span]` — the
-    /// halo.** A record anchored inside the region can have a footprint
-    /// reaching `max_record_span` past its end (a long deletion does exactly
-    /// that), and reads that fold into it may lie *entirely beyond* the region.
-    /// A query for "reads overlapping the region" never returns them, and the
-    /// record is then emitted by the right region with part of its support
-    /// missing — **and no counter notices**, because the record itself is not
-    /// lost (spec §2). The extra reads are walked and their records clamped
-    /// away unless anchored in the region.
+    /// The walk is **stopped** at the region's own end rather than run to the end of the
+    /// halo the cursor is pointed at — see [`PileupWalker::move_to_region`], and
+    /// [`PreparedSampleReads::query`] for the halo itself.
     ///
-    /// The walk is **stopped** at the region's end rather than run to the end of
-    /// the halo: see [`PileupWalker::stopping_after`].
+    /// # One sample per generator, and it is checked here
+    ///
+    /// A cursor is opened for **one sample's files** and kept for a whole chromosome. Handing
+    /// this generator a second sample would answer that sample out of the first one's files —
+    /// with no error, and output of exactly the right shape. So the sample is remembered and a
+    /// foreign one is refused ([`ForeignSample`](LocusGenerationError::ForeignSample)).
+    ///
+    /// **No caller does this today, and the STR generator's did.** The check is here because
+    /// the two generators are handed a `&SampleReads` per call by the same trait, so the
+    /// mistake is equally available on both — it was simply made on the other one first.
     fn open_walk(
         &mut self,
         region: GenomeRegion,
         reads: &SampleReads,
-    ) -> Result<RegionWalk<R, P>, LocusGenerationError> {
-        let query = GenomeRegion {
-            contig: region.contig,
-            start: region.start,
-            end: Position(
-                region
-                    .end
-                    .get()
-                    .saturating_add(u64::from(self.config.max_record_span)),
-            ),
-        };
-        // Reborrowed into a local: the factory is a field, and `reads_in_region`
-        // would otherwise hold a borrow of `self` across the call that stores
-        // the walk back into `self`.
-        let make_reference = &mut self.make_reference;
-        let stream = reads
-            .reads_in_region(query, make_reference)
-            .map_err(|source| LocusGenerationError::OpenReadQuery { region, source })?;
-        let prepared = PreparedRegionReads {
-            reads: stream,
-            region,
-            preparation: Rc::clone(&self.preparation),
-            done: false,
-        };
+    ) -> Result<(), LocusGenerationError> {
+        let sample = reads.identity();
+        if self.sample.as_ref().is_some_and(|opened| *opened != sample) {
+            return Err(LocusGenerationError::ForeignSample { region });
+        }
+        if self
+            .chromosome
+            .as_ref()
+            .is_none_or(|chromosome| chromosome.contig != region.contig)
+        {
+            self.enter_chromosome(region, reads)?;
+            // Adopted only once a cursor exists, so a failed open leaves the generator
+            // unclaimed and a retry with the same sample still works.
+            self.sample = Some(sample);
+        }
+        self.release_reference_behind(region);
         // Saturating, and in the safe direction: the walker's positions are
         // `u32`, so a region ending past 4 Gb cannot be walked at all, and a
         // stop bound clamped to `u32::MAX` makes the walk run long rather than
         // stop early.
         let stop_after = region.end.get().min(u64::from(u32::MAX)) as u32;
-        // Taken **after** the query, which is the only fallible step: taken
-        // before, an unqueryable region would carry the run's chain-id sequence
-        // off with the error.
-        let chain_ids = self
-            .chain_ids
-            .take()
-            .expect("the allocator is absent only while a walk holds it, and no walk is open");
-        let chain_ids_at_open = chain_ids.counters();
+        // PANIC-FREE: minted immediately above when it was absent or on another chromosome.
+        let walker = &mut self
+            .chromosome
+            .as_mut()
+            .expect("the chromosome walk was just ensured")
+            .walker;
+        walker.move_to_region(region, stop_after)?;
+        // **After the move, not before**, so a region that could not be reached leaves no
+        // half-open walk behind for `end_walk` to fold.
+        let chain_ids_at_open = walker.chain_id_counters();
+        self.walk = Some(RegionWalk {
+            region,
+            chain_ids_at_open,
+        });
+        Ok(())
+    }
+
+    /// Let every reference reader drop the bases this walk has gone past.
+    ///
+    /// # The problem, which is not the cursor's and predates it
+    ///
+    /// A reference reader here is a **sliding window over the FASTA**, not the whole
+    /// chromosome. It extends forward as it is asked for more, and it only ever shrinks when
+    /// someone tells it to. Nobody told it to. So a run walking a chromosome forward ended up
+    /// holding **one byte in memory for every base it had walked** — measured directly at
+    /// 1,999,995 bytes resident after a 2 Mb walk, against 150 bytes with releasing turned on.
+    /// On human chromosome 1 that is around 250 MB, against a walk that otherwise peaks near
+    /// 25 MB.
+    ///
+    /// It never showed up, because every measurement behind this generator used a
+    /// tandem-repeat-targeted file. Its coverage is sparse enough that consecutive reads are
+    /// far apart, and the reader jumps rather than extending — which is exactly the case that
+    /// cannot grow.
+    ///
+    /// **Three readers, because they cannot be one.** The walk asks *what base is here*, the
+    /// read preparer asks for the window under each read it left-aligns, and each input file's
+    /// read filter asks for the window under each read it mismatch-checks. They are separate
+    /// because each is a stateful reader with its own file position, and sharing one would
+    /// give several consumers one position between them.
+    ///
+    /// # The bound, and why it is generous
+    ///
+    /// Everything any of them will read from here on lies at or after this region's start,
+    /// less a margin: a read overlapping the region may begin before it, and a record's
+    /// footprint may reach back to the read that opened it. `max_record_span` is a bound on
+    /// both, so this releases everything before `region.start - max_record_span`.
+    ///
+    /// **Being wrong here costs a re-read, never an answer.** Releasing is a hint: a base
+    /// asked for after it was released is simply read again. That is what lets the margin be
+    /// generous rather than exact.
+    fn release_reference_behind(&mut self, region: GenomeRegion) {
+        let keep_from = region
+            .start
+            .get()
+            .saturating_sub(u64::from(self.config.max_record_span));
+        self.reference.evict_before(keep_from);
+        self.preparation
+            .borrow()
+            .preparer
+            .evict_reference_before(keep_from);
+        if let Some(chromosome) = &self.chromosome {
+            chromosome
+                .walker
+                .reads()
+                .reads
+                .evict_reference_before(keep_from);
+        }
+    }
+
+    /// How many reference bases this generator's readers are holding between them — the walk's,
+    /// the preparer's, and the cursor's.
+    ///
+    /// **The bound made observable.** Without it "the window is bounded" is an argument about
+    /// where [`release_reference_behind`](Self::release_reference_behind) is called from, and a
+    /// call site quietly dropped costs memory without changing a single answer — which is how
+    /// it went unnoticed in the first place.
+    pub fn resident_reference_bases(&self) -> usize {
+        self.reference.resident_bases()
+            + self
+                .preparation
+                .borrow()
+                .preparer
+                .resident_reference_bases()
+            + self.chromosome.as_ref().map_or(0, |chromosome| {
+                chromosome.walker.reads().reads.resident_reference_bases()
+            })
+    }
+
+    /// Retire the walker on the chromosome being left and build the one for `region`'s.
+    ///
+    /// **This is where the cursor is made — once per chromosome, never per region**, which
+    /// is the whole of D2 (`spec/alignment_cursor.md` §1). A cursor keeps the reads it has
+    /// decoded and hands them back to the next region that can use them; nothing in one
+    /// survives a chromosome change, so the boundary is where a new one is minted rather
+    /// than a place the old one is repositioned (§4).
+    ///
+    /// The chain-id allocator crosses the boundary with the run, not with the walker:
+    /// production's own walk preserves `next_id` across chromosomes so two fragments on two
+    /// chromosomes never share an identity, and taking it out of the retiring walker and
+    /// into the new one is how that is kept.
+    fn enter_chromosome(
+        &mut self,
+        region: GenomeRegion,
+        reads: &SampleReads,
+    ) -> Result<(), LocusGenerationError> {
+        if let Some(retiring) = self.chromosome.take() {
+            // Taken before the walker is consumed: a cursor's tallies die with it, and they
+            // are what says whether the cursor did anything (see `cursor_counts`).
+            self.retired_cursor_counts += retiring.walker.reads().reads.counts();
+
+            let mut chain_ids = retiring.walker.into_chain_ids();
+            // **Redundant with `WalkerState::begin_region`, and kept anyway.** The next
+            // region's `move_to_region` resets the allocator one call later, so on the
+            // ordinary path this changes nothing — an earlier comment here claimed it was
+            // what stopped a pending first mate pairing across a chromosome, which
+            // `begin_region` already does. It earns its place on the failure path: if the
+            // `cursor` call below fails, the allocator stays in `self.chain_ids` with this
+            // chromosome's pending mates in it, and no `begin_region` is coming.
+            chain_ids.reset();
+            self.chain_ids = Some(chain_ids);
+        }
+        // Reborrowed into a local: the factory is a field, and `cursor` would otherwise
+        // hold a borrow of `self` across the call that stores the walker back into `self`.
+        let make_reference = &mut self.make_reference;
+        let cursor = reads
+            .cursor(region.contig, make_reference)
+            .map_err(|source| LocusGenerationError::OpenReadQuery { region, source })?;
+        let prepared = PreparedSampleReads {
+            reads: cursor,
+            region,
+            halo: self.config.max_record_span,
+            preparation: Rc::clone(&self.preparation),
+            // Not pointed at a region yet, so there is nothing to read. `move_to_region`
+            // clears this; without it the walker's construction peek would ask a cursor
+            // that has no region and read the answer as end of input.
+            done: true,
+        };
+        // Taken **after** the cursor, which is the only fallible step: taken before, an
+        // unopenable chromosome would carry the run's chain-id sequence off with the error.
+        let chain_ids = self.chain_ids.take().expect(
+            "the allocator is absent only while a chromosome walk holds it, and the one \
+             that did has just been retired",
+        );
         let walker = super::genome_walk::run(
             prepared,
             Arc::clone(&self.reference),
             &self.config.to_walker_config(),
         )
-        .stopping_after(stop_after)
         .adopting_chain_ids(chain_ids);
-        Ok(RegionWalk {
+        self.chromosome = Some(ChromosomeWalk {
+            contig: region.contig,
             walker,
-            region,
-            chain_ids_at_open,
-        })
+        });
+        Ok(())
     }
 }
 
@@ -897,10 +1195,8 @@ where
 /// the tests in this module drive: an inherent method wins name resolution
 /// against a trait method, so `generator.next_locus(&reads)` is the two-argument
 /// one below and never a mis-resolved trait call.
-impl<R: RawRefSeq, MakeReference, P: ReadPreparer> LocusGenerator<()>
-    for PileupGenerator<R, MakeReference, P>
-where
-    MakeReference: FnMut() -> R,
+impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerator<()>
+    for PileupGenerator<R, P>
 {
     fn begin_segment(&mut self, region: GenomeRegion) {
         PileupGenerator::begin_segment(self, region);
@@ -1099,19 +1395,14 @@ mod tests {
     fn a_generator_with<P: ReadPreparer>(
         config: PileupGeneratorConfig,
         preparer: P,
-    ) -> Result<
-        PileupGenerator<InMemoryRefSeq, impl FnMut() -> InMemoryRefSeq, P>,
-        PileupGeneratorConfigError,
-    > {
+    ) -> Result<PileupGenerator<InMemoryRefSeq, P>, PileupGeneratorConfigError> {
         PileupGenerator::new(Arc::new(fixture_bases()), fixture_bases, preparer, config)
     }
 
     fn a_generator(
         config: PileupGeneratorConfig,
-    ) -> Result<
-        PileupGenerator<InMemoryRefSeq, impl FnMut() -> InMemoryRefSeq, PassthroughPreparer>,
-        PileupGeneratorConfigError,
-    > {
+    ) -> Result<PileupGenerator<InMemoryRefSeq, PassthroughPreparer>, PileupGeneratorConfigError>
+    {
         a_generator_with(config, PassthroughPreparer)
     }
 
@@ -1145,8 +1436,8 @@ mod tests {
     }
 
     /// Drain a whole segment: every locus `next_locus` yields for `region`.
-    fn loci_of<R: RawRefSeq, MF: FnMut() -> R, P: ReadPreparer>(
-        generator: &mut PileupGenerator<R, MF, P>,
+    fn loci_of<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer>(
+        generator: &mut PileupGenerator<R, P>,
         region: GenomeRegion,
         reads: &SampleReads,
     ) -> Vec<SampleLocusObservations> {
@@ -1996,6 +2287,473 @@ mod tests {
                 .next_locus(&reads)
                 .expect("the second walk opens")
                 .is_some()
+        );
+    }
+
+    // --- D2: the cursor per chromosome, and what crosses the boundary ---------
+
+    /// **A run that changes chromosome mints a new cursor and keeps walking.**
+    ///
+    /// A cursor covers one chromosome and refuses a region on any other
+    /// (`spec/alignment_cursor.md` §4), so the generator has to notice the boundary and
+    /// build a new one. Nothing before D2 could see this: a walker built per region was
+    /// handed a fresh query each time and never had a chromosome of its own to be wrong
+    /// about.
+    ///
+    /// **Loci from both, and chain ids that do not repeat across the boundary.** The
+    /// allocator is the run's, not the walker's, so retiring one chromosome's walker must
+    /// hand it on rather than let it go — otherwise two fragments on two chromosomes carry
+    /// the same identity, which is the corruption the shared allocator exists to prevent.
+    #[test]
+    fn a_region_on_a_new_chromosome_mints_a_cursor_and_keeps_the_chain_ids_going() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_with_one_mismatch("on-chr1", 0, 10, 10),
+            read_with_one_mismatch("on-chr2", 1, 10, 10),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let ids_of = |loci: &[SampleLocusObservations]| -> Vec<ChainId> {
+            let mut ids: Vec<ChainId> = loci
+                .iter()
+                .flat_map(|locus| locus.observations.iter())
+                .flat_map(|observation| observation.chain_ids.iter().copied())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+
+        let first = loci_of(&mut generator, region(0, 1, 100), &reads);
+        let second = loci_of(&mut generator, region(1, 1, 200), &reads);
+
+        assert!(!first.is_empty(), "chr1's read must yield loci");
+        assert!(
+            !second.is_empty(),
+            "chr2's read must yield loci too — a cursor stuck on chr1 would answer with \
+             nothing, or refuse"
+        );
+        assert_eq!(
+            generator.counts().reads_admitted,
+            2,
+            "one read on each chromosome, each admitted by its own walk"
+        );
+
+        let (first_ids, second_ids) = (ids_of(&first), ids_of(&second));
+        assert_eq!(first_ids.len(), 1);
+        assert_eq!(second_ids.len(), 1);
+        assert_ne!(
+            first_ids[0], second_ids[0],
+            "a chromosome boundary that dropped the allocator instead of handing it on \
+             would give both fragments the same id"
+        );
+    }
+
+    /// **Going back to a chromosome already walked is a new cursor, not a rewind.**
+    ///
+    /// Nothing in a cursor survives a chromosome change, so the boundary is where one is
+    /// minted rather than a place an old one is repositioned (`spec/alignment_cursor.md`
+    /// §4). The failure this pins is the cheap-looking optimisation: keeping a cursor per
+    /// chromosome in a map, or comparing against the wrong one, and answering the third
+    /// region out of the first's kept reads.
+    #[test]
+    fn returning_to_a_chromosome_already_walked_yields_its_loci_again() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("on-chr1", 0, 10, 30),
+            read_named_with_length("on-chr2", 1, 10, 30),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        let first = anchors(&loci_of(&mut generator, region(0, 1, 100), &reads));
+        let between = anchors(&loci_of(&mut generator, region(1, 1, 200), &reads));
+        let again = anchors(&loci_of(&mut generator, region(0, 1, 100), &reads));
+
+        assert!(!first.is_empty(), "chr1 must yield loci");
+        assert!(
+            !between.is_empty(),
+            "chr2 must yield loci too — discarded, a chromosome that silently returned \
+             nothing would leave the round trip below passing",
+        );
+        assert_eq!(
+            first, again,
+            "the same region on the same chromosome must yield the same loci, whatever was \
+             walked in between"
+        );
+    }
+
+    /// **`reads_silent_over_footprint` is summed region by region, so each region's walk
+    /// must report only its own.**
+    ///
+    /// The active set keeps this tally, and `ActiveReads::reset` deliberately *preserves*
+    /// it as a run total — which was the same thing while every region got a fresh set. A
+    /// walker that lives for a chromosome shares one set across every region on it, so the
+    /// per-region reset has to zero the tally or `fold_region_walk`'s plain sum
+    /// triangular-sums it.
+    ///
+    /// **Three regions, one silent read each, and the number that fails is 6 against 3.**
+    /// Two regions would give 3 against 2, which is close enough to read as an off-by-one
+    /// somewhere else.
+    #[test]
+    fn each_regions_silent_reads_are_folded_once_and_not_again_at_the_next_region() {
+        let records: Vec<RecordBuf> = [10u32, 50, 90]
+            .iter()
+            .flat_map(|start| {
+                [
+                    read_named_with_length(&format!("silent{start}"), 1, *start as usize, 30),
+                    read_named_with_length(&format!("speaks{start}"), 1, *start as usize, 30),
+                ]
+            })
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = a_generator_with(
+            PileupGeneratorConfig {
+                max_record_span: 5,
+                ..PileupGeneratorConfig::default()
+            },
+            SilencesRead("silent"),
+        )
+        .expect("config");
+
+        loci_of(&mut generator, region(1, 1, 40), &reads);
+        loci_of(&mut generator, region(1, 41, 80), &reads);
+        loci_of(&mut generator, region(1, 81, 120), &reads);
+
+        assert_eq!(
+            generator.counts().reads_admitted,
+            6,
+            "two reads anchored in each of the three regions, and no read spans a join"
+        );
+        assert_eq!(
+            generator.counts().reads_silent_over_footprint,
+            3,
+            "one silent read per region — a tally carried across the boundaries would \
+             report six"
+        );
+    }
+
+    /// **The cursor is kept across regions, and this is the test that can tell.**
+    ///
+    /// Review replaced the chromosome comparison in `open_walk` with `if true`, so that
+    /// every region minted a fresh cursor — the per-region query D2 exists to remove — and
+    /// **all 1,557 tests passed.** They had to: the loci are identical either way, which is
+    /// the correctness requirement. The only thing that moves is what the reader *avoided*,
+    /// and until `cursor_counts` nothing above the cursor could see it
+    /// (`spec/alignment_cursor.md` §11.5).
+    ///
+    /// **Asserted on `regions_reusing`, not on `reads_decoded`.** Decode counts depend on
+    /// how the fixture's reads fall across the regions; "the second and third regions did
+    /// not jump" is the property, and it is what a cursor per region cannot produce — a
+    /// fresh cursor has no last region to compare against, so its first move always jumps.
+    #[test]
+    fn the_cursor_is_kept_across_regions_rather_than_minted_for_each() {
+        // The reads at 35 and 75 are what makes replay happen at all: each runs 30 bases,
+        // so it overlaps two consecutive regions and is owed to both. Without one straddling
+        // every join a cursor can reuse honestly and still replay nothing.
+        let records: Vec<RecordBuf> = [10u32, 35, 50, 75, 90]
+            .iter()
+            .map(|start| read_named_with_length(&format!("r{start}"), 1, *start as usize, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+        let mut generator = a_generator(PileupGeneratorConfig {
+            max_record_span: 5,
+            ..PileupGeneratorConfig::default()
+        })
+        .expect("config");
+
+        loci_of(&mut generator, region(1, 1, 40), &reads);
+        loci_of(&mut generator, region(1, 41, 80), &reads);
+        loci_of(&mut generator, region(1, 81, 120), &reads);
+
+        let counts = generator.cursor_counts();
+        assert_eq!(
+            (counts.regions_jumping, counts.regions_reusing),
+            (1, 2),
+            "three ascending regions through one cursor jump once — at the first, which \
+             has nothing to reuse — and reuse twice: {counts:?}",
+        );
+        assert!(
+            counts.reads_replayed > 0,
+            "and the point of reusing is that reads come back without being decoded again: \
+             {counts:?}",
+        );
+    }
+
+    /// **A cursor's tallies survive the chromosome it belonged to.**
+    ///
+    /// They live on the cursor, and a cursor dies at every boundary, so a run over several
+    /// chromosomes would report only the last one's unless they are taken as it is retired.
+    /// That would understate the saving by the number of chromosomes — silently, and in the
+    /// flattering direction.
+    #[test]
+    fn cursor_tallies_are_taken_from_a_chromosome_before_it_is_retired() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("on-chr1", 0, 10, 30),
+            read_named_with_length("on-chr2", 1, 10, 30),
+        ]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        loci_of(&mut generator, region(0, 1, 100), &reads);
+        let after_first = generator.cursor_counts();
+        loci_of(&mut generator, region(1, 1, 200), &reads);
+        let after_second = generator.cursor_counts();
+
+        assert!(
+            after_first.reads_decoded > 0,
+            "the first chromosome must decode something, or this test cannot fail: \
+             {after_first:?}",
+        );
+        assert!(
+            after_second.reads_decoded > after_first.reads_decoded,
+            "the second chromosome's reads must add to the first's, not replace them: \
+             {after_first:?} then {after_second:?}",
+        );
+    }
+
+    /// **A second sample through one generator is refused, not answered.**
+    ///
+    /// A generator opens a reader for one sample's files and keeps it for a whole chromosome,
+    /// but the `LocusGenerator` trait hands it a `&SampleReads` afresh on every call. Without
+    /// this check it would answer the second sample out of the **first** sample's files, with
+    /// no error and output of exactly the right shape.
+    ///
+    /// No caller of *this* generator loops samples today. The STR generator's did, and review
+    /// caught it there; the two are handed their reads by the same trait, so the mistake is
+    /// equally available here.
+    ///
+    /// Sample B's read is 60 bases from the region, so any locus it produces is A's.
+    #[test]
+    fn a_second_sample_through_one_generator_is_refused() {
+        let (_ra, _ba, sample_a) = sample_reads_with(&[read_named_with_length("a0", 0, 10, 30)]);
+        let (_rb, _bb, sample_b) = sample_reads_with(&[read_named_with_length("b0", 1, 10, 30)]);
+        let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+
+        assert!(
+            !loci_of(&mut generator, region(0, 1, 40), &sample_a).is_empty(),
+            "sample A's read must yield loci, or this test cannot fail",
+        );
+
+        generator.begin_segment(region(0, 1, 40));
+        match generator.next_locus(&sample_b) {
+            Err(LocusGenerationError::ForeignSample { region: named }) => {
+                assert_eq!(
+                    named,
+                    region(0, 1, 40),
+                    "the refusal names the region asked for"
+                );
+            }
+            other => panic!("expected a refusal naming the foreign sample, got {other:?}"),
+        }
+    }
+
+    /// **A generator per sample is the shape that works** — the other half of the test above,
+    /// because "refuses everything" would pass that one on its own.
+    #[test]
+    fn a_generator_per_sample_gives_each_sample_its_own_reads() {
+        let (_ra, _ba, sample_a) = sample_reads_with(&[read_named_with_length("a0", 0, 10, 30)]);
+        let (_rb, _bb, sample_b) = sample_reads_with(&[read_named_with_length("b0", 1, 10, 30)]);
+
+        let anchors_for = |reads: &SampleReads| {
+            let mut generator = a_generator(PileupGeneratorConfig::default()).expect("config");
+            anchors(&loci_of(&mut generator, region(0, 1, 40), reads))
+        };
+
+        assert!(
+            !anchors_for(&sample_a).is_empty(),
+            "sample A's read is on this contig and must yield loci",
+        );
+        assert!(
+            anchors_for(&sample_b).is_empty(),
+            "sample B's only read is on another contig and must yield nothing — which is the \
+             whole point",
+        );
+    }
+
+    /// A reference that records what it was told to release, and delegates everything else.
+    ///
+    /// The fixture reference is in memory, so it holds no window and `resident_reference_bases`
+    /// reads zero however badly the release is wired. Asking *what was released, and when* is
+    /// falsifiable where asking *how much is held* is not.
+    struct ReleaseSpy {
+        inner: InMemoryRefSeq,
+        released: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    impl EvictableRefSeq for ReleaseSpy {
+        fn evict_before(&self, pos: u64) {
+            self.released.lock().expect("no panic holds this").push(pos);
+        }
+    }
+
+    /// Delegated, so the spy answers the table it actually reads from. A spy that
+    /// invented its own would be refused by `AlignmentFile::cursor`'s contig-table
+    /// check before the walk it exists to observe ever started.
+    impl crate::ng::ref_seq::ContigTable for ReleaseSpy {
+        fn contigs(&self) -> &crate::fasta::ContigList {
+            self.inner.contigs()
+        }
+    }
+
+    impl RawRefSeq for ReleaseSpy {
+        fn fetch_raw_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+            self.inner.fetch_raw_into(contig, start_1based, length, dst)
+        }
+    }
+
+    impl crate::ng::ref_seq::RefSeq for ReleaseSpy {
+        fn fetch_into(
+            &self,
+            contig: ContigId,
+            start_1based: u64,
+            length: u64,
+            dst: &mut Vec<u8>,
+        ) -> Result<(), crate::ng::ref_seq::RefSeqError> {
+            self.inner.fetch_into(contig, start_1based, length, dst)
+        }
+    }
+
+    /// **Every region tells the reference readers what they may release, and the mark moves
+    /// forward with the walk.**
+    ///
+    /// A reference reader is a sliding window over the FASTA. It extends forward as it is asked
+    /// for more, and it only shrinks when it is told to — and nothing was telling it. A run
+    /// walking a chromosome forward therefore held one byte in memory for every base it had
+    /// walked: measured directly at 1,999,995 bytes resident after a 2 Mb walk, against 150
+    /// bytes once the release is wired (`ref_seq`'s own tests own that measurement).
+    ///
+    /// **It went unseen because of the fixture.** Every measurement behind this generator used
+    /// a tandem-repeat-targeted file, whose coverage is sparse enough that the reader jumps
+    /// between reads rather than extending — the one case that cannot grow.
+    ///
+    /// This asserts the two things the generator is responsible for: that it releases at all,
+    /// and that the mark advances. What is *safe* to release is the margin below.
+    #[test]
+    fn every_region_releases_the_reference_behind_it() {
+        let records: Vec<RecordBuf> = (0..5)
+            .map(|index| read_named_with_length(&format!("r{index}"), 1, 30 + index * 20, 30))
+            .collect();
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&records);
+
+        // Two recorders, because there are two readers to release: the walk's own, and the
+        // one each input file's read filter holds inside the cursor.
+        let released = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let released_by_cursor = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spy = ReleaseSpy {
+            inner: fixture_bases(),
+            released: Arc::clone(&released),
+        };
+        let make_reference = {
+            let released_by_cursor = Arc::clone(&released_by_cursor);
+            move || ReleaseSpy {
+                inner: fixture_bases(),
+                released: Arc::clone(&released_by_cursor),
+            }
+        };
+        let mut generator = PileupGenerator::new(
+            Arc::new(spy),
+            make_reference,
+            PassthroughPreparer,
+            PileupGeneratorConfig {
+                max_record_span: 5,
+                ..PileupGeneratorConfig::default()
+            },
+        )
+        .expect("config");
+
+        for index in 0..5u64 {
+            let start = 30 + index * 20;
+            loci_of(&mut generator, region(1, start, start + 19), &reads);
+        }
+
+        let marks = released.lock().expect("no panic holds this").clone();
+        assert_eq!(
+            marks.len(),
+            5,
+            "one release per region, so a walk of any length holds one region's worth: {marks:?}",
+        );
+        assert!(
+            marks.windows(2).all(|pair| pair[1] > pair[0]),
+            "the mark must move forward with the walk, or it releases the same nothing every \
+             time: {marks:?}",
+        );
+        // Region 1 starts at 30 and the margin is `max_record_span` = 5.
+        assert_eq!(
+            marks[0], 25,
+            "the mark is the region's start less one `max_record_span`, which bounds both how \
+             far back a read overlapping the region can begin and how far a record's footprint \
+             can reach: {marks:?}",
+        );
+
+        // The cursor's reader is released too, and it is the one that was growing hardest —
+        // the read filter reads the reference once per surviving read, so it touches every
+        // covered base of the chromosome.
+        let by_cursor = released_by_cursor
+            .lock()
+            .expect("no panic holds this")
+            .clone();
+        assert_eq!(
+            by_cursor, marks,
+            "the cursor's reader is released at the same mark and as often as the walk's — \
+             the release runs after the cursor is minted, so even the first region reaches it: \
+             {by_cursor:?}",
+        );
+    }
+
+    /// **A failure names the region it happened in, not the first region of the
+    /// chromosome.**
+    ///
+    /// The stream's `region` field is what every shed error carries, and it is set when the
+    /// chromosome's stream is built — so without reassigning it at each
+    /// `move_to_region` every failure on a chromosome is blamed on whichever region opened
+    /// it. Review proved the omission passes the whole suite: the only shipped test for a
+    /// preparation failure walks a single region, where the two regions are the same one.
+    #[test]
+    fn a_failure_names_the_region_it_happened_in_not_the_chromosomes_first() {
+        let (_reference_dir, _bam_dir, reads) = sample_reads_with(&[
+            read_named_with_length("fine", 1, 10, 30),
+            read_named_with_length("boom", 1, 90, 30),
+        ]);
+        let mut generator = a_generator_with(
+            PileupGeneratorConfig {
+                max_record_span: 5,
+                ..PileupGeneratorConfig::default()
+            },
+            FailsToPrepareRead("boom"),
+        )
+        .expect("config");
+
+        // A clean first region, so the chromosome's stream is opened against it.
+        let first = region(1, 1, 40);
+        assert!(
+            !loci_of(&mut generator, first, &reads).is_empty(),
+            "the first region must walk cleanly, or the failure below has nothing to be \
+             misattributed to",
+        );
+
+        let second = region(1, 81, 120);
+        generator.begin_segment(second);
+        let mut error = None;
+        loop {
+            match generator.next_locus(&reads) {
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(reported) => {
+                    error = Some(reported);
+                    break;
+                }
+            }
+        }
+
+        let error = error.expect("the second region's read fails preparation");
+        assert_eq!(
+            error.region(),
+            Some(second),
+            "the failure is in {second}, not in the region that happened to open the \
+             chromosome's stream: {error}",
         );
     }
 

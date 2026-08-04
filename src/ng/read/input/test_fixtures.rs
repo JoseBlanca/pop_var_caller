@@ -35,6 +35,34 @@ use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 /// `length`.
 pub(crate) const FIXTURE_CONTIGS: [(&str, usize); 2] = [("chr1", 100), ("chr2", 200)];
 
+/// An all-`A` accessor over [`FIXTURE_CONTIGS`] — **named**, so its contig table is the one
+/// the fixture files declare in their `@SQ`.
+///
+/// **Use this rather than `InMemoryRefSeq::from_contigs` for anything that opens a cursor.**
+/// `from_contigs` names its contigs `contig0`, `contig1`, … , and every cursor fixture used it
+/// until 2026-08-03 — so every one of them was handing `AlignmentFile::cursor` an accessor
+/// whose table disagreed with the file's on **every name**. Nothing noticed, because the check
+/// of the day fetched a zero-length window per contig and a window resolves whatever the
+/// contig is called. B1 replaced that with a comparison of the two tables and 23 tests failed
+/// at once; this is what they were fixed to.
+pub(crate) fn fixture_reference_bases() -> crate::ng::ref_seq::InMemoryRefSeq {
+    crate::ng::ref_seq::InMemoryRefSeq::from_named_contigs(
+        FIXTURE_CONTIGS
+            .iter()
+            .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+            .collect(),
+    )
+}
+
+/// The same, over [`BIG_FIXTURE_CONTIG`] — for the tests that need a contig larger than BAI's
+/// 16 kb finest bin.
+pub(crate) fn big_fixture_reference_bases() -> crate::ng::ref_seq::InMemoryRefSeq {
+    crate::ng::ref_seq::InMemoryRefSeq::from_named_contigs(vec![(
+        BIG_FIXTURE_CONTIG.0.to_string(),
+        vec![b'A'; BIG_FIXTURE_CONTIG.1],
+    )])
+}
+
 /// One `@RG` for a test header: its id, plus whichever tags the test is about.
 /// A `None` tag is **omitted entirely**, which is how the "no `SM`" and "no
 /// `LB`" inputs are built.
@@ -191,6 +219,50 @@ pub(crate) fn fixture_reference(with_digests: bool) -> (TempDir, OpenReference) 
     )
 }
 
+/// **A contig long enough that the index has resolution**, for the tests that need it.
+///
+/// BAI's finest bins are 16 kb and a BGZF block is 64 kB, so a fixture smaller than that
+/// resolves *every* region to the same single chunk — and a test on one cannot tell a reader
+/// that positions from one that bounds. That is not hypothetical: the first version of the
+/// cursor's differential oracle ran on a 100-base contig and passed with the bounding defect
+/// in place.
+pub(crate) const BIG_FIXTURE_CONTIG: (&str, usize) = ("chrBig", 200_000);
+
+/// An [`OpenReference`] over [`BIG_FIXTURE_CONTIG`], from a `.fai`-only read.
+pub(crate) fn big_fixture_reference() -> (TempDir, OpenReference) {
+    let (dir, fasta) = build_fasta(&[ContigSpec {
+        name: BIG_FIXTURE_CONTIG.0.to_string(),
+        length: BIG_FIXTURE_CONTIG.1 as u64,
+    }])
+    .expect("build fasta");
+    (
+        dir,
+        OpenReference::from(
+            read_reference_info(ReferenceSource::Fai(
+                crate::ng::reference_info::sibling_fai_path(&fasta),
+            ))
+            .expect("read reference"),
+        ),
+    )
+}
+
+/// [`BIG_FIXTURE_CONTIG`] in the `@SQ` shape.
+pub(crate) fn big_contig_specs() -> Vec<(&'static str, usize, Option<&'static str>)> {
+    vec![(BIG_FIXTURE_CONTIG.0, BIG_FIXTURE_CONTIG.1, None)]
+}
+
+/// Reads spread across [`BIG_FIXTURE_CONTIG`], 30 bases each starting every `stride`, which
+/// is enough data to span several BGZF blocks and many index bins.
+pub(crate) fn big_spread_of_reads(stride: usize) -> Vec<RecordBuf> {
+    let mut records = Vec::new();
+    let mut start = 1;
+    while start + 30 < BIG_FIXTURE_CONTIG.1 {
+        records.push(read_named_with_length(&format!("r{start}"), 0, start, 30));
+        start += stride;
+    }
+    records
+}
+
 /// A 10 bp perfectly-matching read at `start` on `reference_sequence_id`.
 ///
 /// `qname` matters for the region-query oracle, which identifies reads by name
@@ -330,8 +402,9 @@ pub(crate) fn named_bam(
 /// `ReferenceSequenceContext` and `Slice::header` are private.
 ///
 /// Production's CRAM fixtures are single-contig too, which is why this has not
-/// bitten before. The `.crai` contig walk is covered instead by a hand-built
-/// index in `region_query`'s tests, which needs no file at all.
+/// bitten before. The `.crai` contig walk is covered instead by hand-built
+/// indexes, which need no file at all: the grouping in `open_bam`'s tests and
+/// the positioning in `aligned_reads_reader::cram`'s.
 pub(crate) fn indexed_cram(records: &[RecordBuf]) -> (TempDir, PathBuf, TempDir, PathBuf) {
     indexed_cram_declaring(records, &[("rg1", Some("NA12878"))])
 }
@@ -419,6 +492,62 @@ pub(crate) fn multi_container_cram(
         &specs,
         &HeaderOverrides {
             read_groups: vec![("rg1".to_string(), Some("NA12878".to_string()))],
+            ..HeaderOverrides::default()
+        },
+        &records,
+    )
+    .expect("build cram");
+
+    let index = noodles_cram::fs::index(&cram_path).expect("index a single-reference CRAM");
+    let crai_path = PathBuf::from(format!("{}.crai", cram_path.display()));
+    noodles_cram::crai::fs::write(&crai_path, &index).expect("write crai");
+
+    (cram_dir, cram_path, fasta_dir, fasta)
+}
+
+/// [`multi_container_cram`] with **two** read groups of one sample, alternating record by
+/// record — so the read group varies *within* a container and *across* the boundary.
+///
+/// **The gap this fills is a hole between two fixtures.** `indexed_cram_declaring` is the only
+/// multi-read-group CRAM and holds three records, which noodles writes as one container (it
+/// packs 10,240 per container). `multi_container_cram` is the only multi-container CRAM and
+/// declares a single `@RG`, which its cursor tests open as `ReadGroupResolution::Sole` — an arm
+/// that never asks a record which group it is in. So **no test reached the per-record read-group
+/// arm past a container boundary at all**, and a stamp that went stale from the second container
+/// onwards was invisible to the whole suite. Found by B2's review, 2026-08-03.
+pub(crate) fn multi_container_cram_two_read_groups(
+    contig_length: usize,
+    read_count: usize,
+) -> (TempDir, PathBuf, TempDir, PathBuf) {
+    use crate::pileup::per_sample::cram_files::{HeaderOverrides, build_cram};
+
+    let specs = vec![ContigSpec {
+        name: "chr1".to_string(),
+        length: contig_length as u64,
+    }];
+    let (fasta_dir, fasta) = build_fasta(&specs).expect("build fasta");
+
+    let step = (contig_length - 40) / read_count.max(1);
+    let records: Vec<RecordBuf> = (0..read_count)
+        .map(|i| {
+            read_named_with_length_in_read_group(
+                &format!("r{i}"),
+                0,
+                1 + i * step.max(1),
+                30,
+                if i % 2 == 0 { "rg1" } else { "rg2" },
+            )
+        })
+        .collect();
+
+    let (cram_dir, cram_path) = build_cram(
+        &fasta,
+        &specs,
+        &HeaderOverrides {
+            read_groups: vec![
+                ("rg1".to_string(), Some("NA12878".to_string())),
+                ("rg2".to_string(), Some("NA12878".to_string())),
+            ],
             ..HeaderOverrides::default()
         },
         &records,

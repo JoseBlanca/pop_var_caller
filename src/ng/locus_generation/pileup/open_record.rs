@@ -236,6 +236,21 @@ pub(super) fn witness_of(
     // an error or an assertion (Milestone C review, F3). The width the assertions above pin
     // is what makes the conversion infallible, and `PileupGeneratorConfig::check` is what
     // makes *that* true before any locus is walked.
+    // FAST PATH — one run that already spans the whole footprint is `Complete`, and that is
+    // 1,646,289 of 1,647,161 witnesses on HG002 chr1. It clamps to `0..width`, which is
+    // exactly the shape `from_witnessed_runs` calls complete; short-circuiting skips three
+    // `SmallVec` builds, a `sort_unstable` and a merge pass.
+    {
+        let width = record_end_exclusive.saturating_sub(record_pos);
+        let mut runs = witnessed.runs();
+        if runs.len() == 1 && width > 0 && width <= u32::from(u16::MAX) {
+            // PANIC-FREE: `len() == 1` on an `ExactSizeIterator`.
+            let (start, end) = runs.next().expect("exactly one run");
+            if start <= record_pos && end >= record_end_exclusive {
+                return ReadWitness::Complete;
+            }
+        }
+    }
     let clamped: SmallVec<[(u16, u16); 2]> = witnessed
         .runs()
         .filter_map(|(start, end)| {
@@ -636,7 +651,27 @@ impl OpenPileupRecord {
     /// input in two processes: delete that sort and it fails; delete `finalise`'s *observation* sort
     /// and it stays green. No test inside one process can see any of this, because `ahash`
     /// seeds once per process.
+    #[cfg(test)]
     fn keyed_observations(&self, record_end_exclusive: u32) -> Vec<KeyedObservation> {
+        let mut counts = RecordWitnessCounts {
+            reads_complete: 0,
+            reads_partial: 0,
+            reads_with_holed_witness: 0,
+            hole_positions: 0,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+        };
+        self.keyed_observations_counting(record_end_exclusive, &mut counts)
+    }
+
+    /// As `keyed_observations`, but tallying each read's witness **in the loop that already
+    /// resolved it** — `finalise` used to walk `folded_reads` a second time and call
+    /// `witness_of` again on every one of them for exactly these four numbers.
+    fn keyed_observations_counting(
+        &self,
+        record_end_exclusive: u32,
+        witness_counts: &mut RecordWitnessCounts,
+    ) -> Vec<KeyedObservation> {
         let mut ids: Vec<u32> = self.folded_reads.keys().copied().collect();
         ids.sort_unstable();
 
@@ -657,6 +692,17 @@ impl OpenPileupRecord {
             // 0 %, and hash-keying the observations measured *worse*.)
             let bases = self.alleles[state.allele_index].seq.as_slice();
             let read_witness = witness_of(&state.witnessed, self.pos, record_end_exclusive);
+            match &read_witness {
+                ReadWitness::Complete => witness_counts.reads_complete += 1,
+                ReadWitness::Partial { positions } => {
+                    witness_counts.reads_partial += 1;
+                    let blind = positions.span() - positions.positions_covered();
+                    if blind > 0 {
+                        witness_counts.reads_with_holed_witness += 1;
+                        witness_counts.hole_positions += blind;
+                    }
+                }
+            }
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
             let existing = observations.iter().position(|observation| {
@@ -776,32 +822,7 @@ impl OpenPileupRecord {
         );
         // **The observations come from the reads, not from the bucket totals** (B1). See
         // `keyed_observations` for why, and for what makes the two agree at one read group.
-        let mut keyed = self.keyed_observations(record_end_exclusive);
-        for state in self.folded_reads.values() {
-            match witness_of(&state.witnessed, record_pos, record_end_exclusive) {
-                ReadWitness::Complete => witness_counts.reads_complete += 1,
-                ReadWitness::Partial { positions } => {
-                    witness_counts.reads_partial += 1;
-                    // **The holed reads, counted where the walk can report them** (owner,
-                    // 2026-07-31). The divergence census counts the same thing, but it is
-                    // `#[cfg(test)]` and only measures loci where *production's* walker also
-                    // produced a record — so it cannot answer "how often does this fire on a
-                    // spliced BAM", which is the measurement the change was made for (spec §8,
-                    // open). These two ride the walk's own summary instead, so any BAM handed
-                    // to the generator reports them.
-                    //
-                    // `span` is first-position-to-last, `positions_covered` is what the runs
-                    // cover, so the difference is the positions between them the read was blind
-                    // over — non-zero exactly when the witness has more than one run, since
-                    // canonical runs are separated by at least one position.
-                    let blind = positions.span() - positions.positions_covered();
-                    if blind > 0 {
-                        witness_counts.reads_with_holed_witness += 1;
-                        witness_counts.hole_positions += blind;
-                    }
-                }
-            }
-        }
+        let mut keyed = self.keyed_observations_counting(record_end_exclusive, &mut witness_counts);
         // Every folded read is resolved exactly once and lands in exactly one of the two
         // classes; the no-observation set is disjoint from `folded_reads` by construction,
         // its members having been removed when they produced nothing.

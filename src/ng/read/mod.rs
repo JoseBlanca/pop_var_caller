@@ -21,8 +21,8 @@
 //! [`input`] joins them as step 1's **input edge** rather than a step of its
 //! own: opening and validating an alignment file, serving a region as an
 //! ordered stream, and merging a sample's several files into one. It feeds
-//! [`filtering`] — its region readers are the `RecordSource` the filter
-//! consumes — so it belongs beside it (`module_layout.md` principle 1, note b).
+//! [`filtering`] — its region readers feed the cursor, which applies those rules to what they
+//! hand over — so it belongs beside it (`module_layout.md` principle 1, note b).
 
 pub mod aligned_read;
 pub mod filtering;
@@ -31,24 +31,35 @@ pub mod left_align;
 #[cfg(test)]
 mod left_align_parity;
 pub mod prepared_read;
+/// Spec §5's capability, tested at the layer its callers would live at — plan D1. A sibling of
+/// `filtering` rather than a module inside it, because half of what it pins is that the first
+/// filter and the tally are reachable from `crate::ng::read` at all.
+#[cfg(test)]
+mod reference_free_first_filter;
 
 pub use aligned_read::AlignedRead;
-pub use filtering::{
-    BamRecordSource, CramRecordSource, NoodlesRawRecord, RawRecord, ReadFilter, ReadFilterConfig,
-    ReadFilterCounts, ReadFilterError, RecordSource,
-};
+pub use filtering::ReadFilterConfig;
 pub use prepared_read::{MateRole, PreparedRead, ReadLengthError};
+
+// **`ReadFilterConfig` is the only one of step 1's types re-exported here, because it is the
+// only one anything outside the crate names** — four `examples/` build one to drive a walk.
+// `ReadFilter`, `RecordSource`, `ReadFilterError`, `RawAlignedRead` and `NoodlesRawAlignedRead`
+// were re-exported too and had no caller outside this crate at all; the first two are deleted
+// outright and the rest are named by their defining path. `ReadFilterCounts` stays `pub`: it is
+// part of `AlignmentCursor::read_group_counts`' return type, which spec §7 makes public.
+// A dead re-export is what lets a type stay `pub` long after its last outside caller went.
 
 use crate::ng::ref_seq::RefSeqError;
 
 /// The read group a fixture uses when the group plays no part in what it checks.
 ///
 /// **Not a sentinel.** `ReadGroupId(0)` is the *first* id the run's table mints
-/// ([`ReadGroupId`](crate::ng::types::ReadGroupId)), so it is indistinguishable from a real group —
-/// the crate already recorded this trap once, on `NoodlesRawRecord::default`
-/// ([filtering.rs](filtering)). Naming it is what keeps a future assertion from passing whether the
-/// group was threaded through or silently defaulted. A test that actually asserts *on* the group
-/// must use a distinctive id, as [`left_align`]'s `the_read_group_rides_through_both_paths` does.
+/// ([`ReadGroupId`](crate::ng::types::ReadGroupId)), so it is indistinguishable from a real
+/// group — the crate already recorded this trap once, on `NoodlesRawAlignedRead::default`
+/// ([aligned_read.rs](aligned_read)). Naming it is what keeps a future assertion from passing
+/// whether the group was threaded through or silently defaulted. A test that actually asserts
+/// *on* the group must use a distinctive id, as [`left_align`]'s
+/// `the_read_group_rides_through_both_paths` does.
 #[cfg(test)]
 pub(crate) const PLACEHOLDER_READ_GROUP: crate::ng::types::ReadGroupId =
     crate::ng::types::ReadGroupId(0);
@@ -62,7 +73,7 @@ pub(crate) const PLACEHOLDER_READ_GROUP: crate::ng::types::ReadGroupId =
 /// un-normalised, which is what production does
 /// ([read_processor.rs](../../../pileup/per_sample/read_processor.rs)) and what ng
 /// deliberately diverges from (spec §7, §9). Step 1 made the same call for the same reason
-/// ([`ReadFilterError::Reference`](filtering::ReadFilterError)).
+/// ([`ReadFilterError::Reference`](input::cursor::ReadFilterError)).
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ReadPrepError {
@@ -128,6 +139,26 @@ pub trait ReadPreparer {
         read: AlignedRead,
         scratch: &mut Self::Scratch,
     ) -> Result<Option<PreparedRead>, ReadPrepError>;
+
+    /// Release any reference bases this preparer has read and gone past.
+    ///
+    /// **A preparer that reads the reference holds what it read.** Left-alignment fetches the
+    /// window each read covers, so a preparer walking a chromosome forward accumulates one
+    /// byte for every base it passes — about 250 MB on human chromosome 1 — unless something
+    /// tells it what it may release. Only the caller knows what it will ask for next, so the
+    /// caller says when.
+    ///
+    /// **A hint, never a fact an answer depends on.** An evicted base that is asked for again
+    /// is simply read again, so a `pos` that is too high costs time and never correctness.
+    /// The default does nothing, which is honest for a preparer that reads no reference —
+    /// most of them, including every passthrough.
+    fn evict_reference_before(&self, _pos: u64) {}
+
+    /// How many reference bases this preparer is holding. Zero unless it reads a reference —
+    /// the bound made observable, so "it is bounded" is a test rather than an argument.
+    fn resident_reference_bases(&self) -> usize {
+        0
+    }
 }
 
 #[cfg(test)]

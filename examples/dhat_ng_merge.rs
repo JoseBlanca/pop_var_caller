@@ -132,7 +132,7 @@ fn main() {
             "the merge's allocation cost grew with the read count \
              ({delta_small} -> {delta_large} over a 4x increase): it is \
              allocating per read, which spec §3.2 forbids — look for a \
-             `clone()` or a redundant move in `MergedRegionReads::next`"
+             `clone()` or a redundant move in `MergedCursors::next_read`"
         );
 
         println!("\nOK: the merge's allocation cost is flat in the read count.");
@@ -213,18 +213,30 @@ fn drain(paths: &[PathBuf], reference: &OpenReference) -> usize {
         start: Position(1),
         end: Position(CONTIG_LENGTH as u64),
     };
-    sample
-        .reads_in_region(region, || {
+    // **One region, drained once, through a cursor pointed at it** — the shape every reader in
+    // ng has since the alignment cursor landed.
+    //
+    // **What this measures must not drift, and the risk is specific.** The comparison here is
+    // between one file and two: what the *merge* allocates. A cursor also keeps the reads it
+    // has handed out, so a harness that drained the same region twice through one cursor would
+    // be measuring the kept set on the second pass and calling it the merge. One pass over one
+    // region keeps the two arms comparable and keeps the kept set out of the answer — it is
+    // the same size on both arms and is allocated before either drains.
+    let mut cursor = sample
+        .cursor(ContigId(0), || {
             InMemoryRefSeq::from_contigs(vec![vec![b'A'; CONTIG_LENGTH]])
         })
-        .expect("query")
-        .inspect(|item| {
-            // Unwrapped rather than ignored: an error here would silently make
-            // the two arms drain different numbers of reads, and the whole
-            // comparison rests on them draining the same ones.
-            assert!(item.is_ok(), "no fatal error while draining");
-        })
-        .count()
+        .expect("a cursor for contig 0");
+    cursor.move_to_region(region).expect("on this chromosome");
+    let mut reads = 0;
+    while let Some(item) = cursor.next_read() {
+        // Unwrapped rather than ignored: an error here would silently make
+        // the two arms drain different numbers of reads, and the whole
+        // comparison rests on them draining the same ones.
+        assert!(item.is_ok(), "no fatal error while draining");
+        reads += 1;
+    }
+    reads
 }
 
 fn start_of(record: &RecordBuf) -> usize {

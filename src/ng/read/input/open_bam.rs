@@ -22,11 +22,9 @@
 
 use std::fs::File;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use noodles_bam as bam;
-use noodles_bgzf as bgzf;
 use noodles_cram as cram;
 use noodles_sam as sam;
 
@@ -34,28 +32,17 @@ use crate::bam::index_preflight::{
     AlignmentFileKind, AlignmentIndex, load_alignment_index, preflight_alignment_indexes,
 };
 use crate::fasta::{ContigEntry, ContigList};
-use crate::ng::read::aligned_read::AlignedRead;
-use crate::ng::read::filtering::{
-    NoodlesRawRecord, ReadFilter, ReadFilterBuffers, ReadFilterConfig, ReadGroupCounts,
+use crate::ng::read::filtering::ReadFilterConfig;
+use crate::ng::read::input::aligned_reads_reader::{
+    AlignedReadsReader, BamAlignedReadsReader, CramAlignedReadsReader,
 };
+use crate::ng::read::input::cursor::AlignmentCursor;
 use crate::ng::read::input::read_groups::ReadGroupResolution;
 use crate::ng::read::input::reference::{OpenReference, ReferenceBasesError};
-use crate::ng::ref_seq::RawRefSeq;
-use crate::ng::types::GenomeRegion;
+use crate::ng::ref_seq::{ContigTable, RawRefSeq};
+use crate::ng::types::ContigId;
 
 use super::AlignmentFileError;
-use super::region_query::{
-    BamRegionSource, CramRegionPlan, CramRegionSource, DecodedContainer, OrderVerified, RegionPlan,
-    RegionSource,
-};
-
-/// Which planner ran, and its result. Paired with the pooled reader's own
-/// format immediately below; both come from the same path, so they always
-/// agree.
-enum QueryPlan {
-    Bam(RegionPlan),
-    Cram(CramRegionPlan),
-}
 
 /// One opened, **validated** alignment file.
 ///
@@ -65,16 +52,13 @@ enum QueryPlan {
 /// re-checking. There is no way to hold one of these unvalidated: `open` either
 /// returns a validated handle or an error.
 ///
-/// The parsed index is owned here and lives for the whole run: a region query
-/// is an in-memory lookup plus a seek, never a file open or an index parse
-/// (spec §3.3). Not `Clone` — it owns an index and a reader pool, and two
-/// copies would be two pools and two tallies over one file.
+/// The parsed index is owned here and lives for the whole run: minting a cursor
+/// is an in-memory lookup plus one file open, never an index parse (spec §3.3).
+/// Not `Clone` — it owns an index, and two copies would be two parses of it.
 ///
-/// **Sharing is by `Arc`, not by reference.** Querying takes
-/// `self: &Arc<Self>` ([`reads_in_region`](Self::reads_in_region)): the stream
-/// a query returns outlives the call and has to keep the file alive to hand
-/// its pooled reader back, so a bare `&AlignmentFile` can read the file's
-/// metadata but cannot ask it for reads.
+/// **Sharing is by `Arc`, not by reference**, because a cursor outlives the call
+/// that made it and carries no lifetime, so the file it was minted from has to be
+/// shareable rather than borrowed ([`cursor`](Self::cursor)).
 pub struct AlignmentFile {
     /// `Arc` so the per-query order guard can hold it for its error message
     /// without an allocation per query.
@@ -105,35 +89,46 @@ pub struct AlignmentFile {
     /// single-read-group case. The header, which has no such cheap-clone form,
     /// is the one that needs an `Arc` of its own.
     resolution: ReadGroupResolution,
-    /// The `@SQ M5` tags, indexed by `ContigId` — which is sound precisely
-    /// because the gate just proved this file's `@SQ` order *is* the
-    /// reference's. `None` where the file carries no usable `M5`.
+    /// **This file's own `@SQ` list**, which the open gate reconciled against
+    /// the reference's: same names, same lengths, same order, and the same
+    /// digests wherever both sides carry one (`alignment_file.md` §3.1,
+    /// check 2). So `entries[i]` is `ContigId(i)`, and a caller asking which
+    /// chromosomes it may make a cursor for gets the answer from the file it is
+    /// about to read rather than from a reference handle it would have to carry
+    /// alongside.
+    ///
+    /// **Reconciled is not identical, and the difference is the digests.**
+    /// `first_disagreement` treats an absent `M5` as a wildcard
+    /// (`fasta/mod.rs`), so a file declaring digests passes against a
+    /// `.fai`-only reference that has none — and what is stored here is then
+    /// the *file's* claim, not the reference's. Names, lengths and order are
+    /// the part that is proved equal, and they are the part a cursor needs.
+    contigs: ContigList,
+    /// The `@SQ M5` tags, indexed by `ContigId`. `None` where the file carries
+    /// no usable `M5`.
+    ///
+    /// **A projection of `contigs` above, and it should not have to exist.**
+    /// It is stored because `sq_md5s()` hands out a *slice*, which a value built
+    /// per call could not outlive the call to lend, and because
+    /// `SampleReads::assembly_inputs` (`mod.rs`) lends one from every open file
+    /// at once for `check_assembly` — which is `pub` and takes
+    /// `&[Option<[u8; 16]>]`. Deleting the field and having `check_assembly`
+    /// take a `&ContigList` was tried during review and works (the suite stays
+    /// green, ~18 lines shorter), but it changes a public signature and eight
+    /// call sites, which is more than the step that introduced `contigs` should
+    /// carry. Recorded as a follow-up rather than left as an unexplained pair.
     ///
     /// Captured at open and compared much later, by `check_assembly` (D1),
     /// once the caller has joined `reference_info`'s background verification.
     sq_md5s: Vec<Option<[u8; 16]>>,
-    /// Handed to the per-query `ReadFilter` from C4 onwards. Held on the file
-    /// rather than passed per query because the filtering policy is the file's
-    /// for the whole run, not the caller's per region.
+    /// Handed to each cursor's `ReadFilter`. Held on the file rather than passed
+    /// per cursor because the filtering policy is the file's for the whole run.
     filter_config: ReadFilterConfig,
-    /// Idle readers and their scratch, borrowed per query and returned on
-    /// `Drop`. A `Mutex` so `reads_in_region` can take `&self` (spec §3.3).
-    ///
-    /// The lock only ever guards a `Vec` pop or push — never a read, and never
-    /// a file open (see `borrow_reader`) — so it is held for a few instructions
-    /// and never across iteration.
-    readers: Mutex<Vec<ReaderHandle>>,
-    /// How many readers have actually been opened, ever.
-    ///
-    /// The pool's whole purpose is that this stays tiny however many queries
-    /// run, so it is worth being able to state rather than assume — T13 asserts
-    /// it directly.
-    readers_opened: AtomicUsize,
     /// This CRAM's `.crai` entries, grouped by contig — `crai_by_contig[i]`
     /// holds contig `i`'s entries in file order. Empty for a BAM.
     crai_by_contig: Vec<Arc<[cram::crai::Record]>>,
-    /// **The run's reference**, held so each query can ask it for the bases
-    /// narrowed to that query's contig — not a repository of this file's own.
+    /// **The run's reference**, held so each cursor can ask it for the bases
+    /// narrowed to that cursor's contig — not a repository of this file's own.
     ///
     /// A handle, not a copy: it is an `Arc` inside, so every file in a run
     /// points at one cache of bases. That is what keeps a cohort's resident
@@ -143,142 +138,6 @@ pub struct AlignmentFile {
     /// `None` for a BAM, which stores its own sequences and needs no
     /// reference to decode.
     reference: Option<OpenReference>,
-    /// This file's step-1 tally, summed as each region stream ends.
-    ///
-    /// The `&self` API's answer to `counts()`: a per-read running total would
-    /// need a lock on the hot path or an atomic per counter, so each stream
-    /// keeps its own tally and folds it in here on `Drop` — one lock per query,
-    /// beside the one the pool already takes.
-    /// One tally per read group met, in first-seen order — **never summed
-    /// across them**: a drop rate is a read group's property, and a file that
-    /// declares several would otherwise average one bad run away.
-    counts: Mutex<Vec<ReadGroupCounts>>,
-}
-
-/// One idle reader positioned past the header, **plus the scratch its next
-/// query will reuse**.
-///
-/// Pooling the buffers with the reader is what keeps a region query
-/// allocation-free: a fresh `ReadFilter` per query would otherwise allocate a
-/// record buffer and a reference-fetch buffer ~10⁶ times (spec §3.3). The index
-/// and the header are deliberately *not* here — they stay on `AlignmentFile`,
-/// shared, so no pooled reader ever re-parses them.
-struct ReaderHandle {
-    reader: ReaderKind,
-    buffers: ReadFilterBuffers<NoodlesRawRecord>,
-    /// The CRAM container this reader last decoded, if any — pooled with the
-    /// reader so it is per worker and costs the query path no lock
-    /// ([`DecodedContainer`]). Always `None` for a BAM.
-    container: Option<DecodedContainer>,
-}
-
-/// A reader for whichever container this file is.
-///
-/// One pool holding an enum, rather than production's split `BamFile` /
-/// `CramFile` (`segment_reader.rs`): ng has a single `AlignmentFile` for both
-/// formats because a caller asking for a region does not care which it is, so
-/// splitting the pool would mean splitting the type above it too. Arch §7 left
-/// this open and flagged it for revisiting when the CRAM container cache lands
-/// — that cache is per-worker and *not* pooled, so it will sit beside this
-/// rather than inside it.
-pub(crate) enum ReaderKind {
-    Bam(bam::io::Reader<bgzf::io::Reader<File>>),
-    Cram(cram::io::Reader<File>),
-}
-
-/// A reader borrowed from the pool, returned when this drops.
-///
-/// The handle is an `Option` purely so `Drop` can move it out — `drop` gets
-/// `&mut self` and cannot take ownership otherwise. Returning on `Drop` rather
-/// than at the end of a successful read is what makes the error and early-exit
-/// paths safe: a caller that abandons a region stream half-way still gives the
-/// reader back.
-struct BorrowedReader<'a> {
-    file: &'a AlignmentFile,
-    handle: Option<ReaderHandle>,
-}
-
-impl BorrowedReader<'_> {
-    /// Take the handle's parts, leaving the borrow to return an empty slot.
-    ///
-    /// Used when the parts are moved into a region stream that will hand them
-    /// back itself; the `Drop` below then has nothing to return.
-    ///
-    /// **Must be the last, infallible step.** Taking the handle severs it from
-    /// this borrow, so the obligation to return it transfers to whatever
-    /// receives it. A `?` between here and the point that obligation is
-    /// re-established loses a reader silently — the pool would just open
-    /// another, and only `readers_opened` climbing would show it. Do every
-    /// fallible part of building a region stream *before* calling this.
-    fn take(mut self) -> ReaderHandle {
-        self.handle
-            .take()
-            .expect("a borrowed reader always holds its handle until taken")
-    }
-}
-
-impl Drop for BorrowedReader<'_> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            self.file.return_handle(handle);
-        }
-    }
-}
-
-/// One region's reads: source → step-1 filter → order guard, coordinate-ordered
-/// and lazy.
-///
-/// Forward-only. A region query is one forward scan, and re-entry means a new
-/// query. A fatal error is yielded once and then the iterator is done — the
-/// `ReadFilter` convention carried outward, so `let read = read?;` surfaces it
-/// and it cannot be mistaken for a clean end of input.
-///
-/// **The pooled reader goes back on `Drop`, including on the error path and
-/// when a caller abandons the stream half-way**, along with this query's drop
-/// tally. An `Option` because `drop` gets `&mut self` and has to move the
-/// stream out to unwrap it.
-///
-/// **It owns its file, and carries no lifetime.** A borrow would tie the stream
-/// to the `&AlignmentFile` the query was made through, and the generic locus
-/// generator has to hold one region's stream across many `next_locus` calls
-/// while `LocusGenerator` lends it `&SampleReads` per call — *resumable +
-/// borrowed stream + no lifetime on `Self`* is not expressible, so the borrow
-/// is what gives (arch `locus_generation_pileup.md` §2.2). The pool lives on
-/// the `AlignmentFile`, so sharing it by `Arc` keeps one pool per file.
-pub struct RegionReads<R: RawRefSeq> {
-    file: Arc<AlignmentFile>,
-    stream: Option<OrderVerified<ReadFilter<RegionSource, R>>>,
-}
-
-impl<R: RawRefSeq> Iterator for RegionReads<R> {
-    type Item = Result<AlignedRead, AlignmentFileError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.stream.as_mut()?.next()
-    }
-}
-
-impl<R: RawRefSeq> std::iter::FusedIterator for RegionReads<R> {}
-
-impl<R: RawRefSeq> Drop for RegionReads<R> {
-    fn drop(&mut self) {
-        let Some(stream) = self.stream.take() else {
-            return;
-        };
-
-        // Unwrap the chain in the order it was built: guard → filter → source
-        // → reader. `into_parts` also yields the buffers and the tally, which
-        // is why the filter has to be taken apart rather than just dropped —
-        // the drops this query recorded would vanish with it.
-        let (source, buffers, counts) = stream.into_inner().into_parts();
-        let (reader, container) = source.into_parts();
-        self.file.return_handle(ReaderHandle {
-            reader,
-            buffers,
-            container,
-        });
-        self.file.add_counts(&counts);
-    }
 }
 
 impl AlignmentFile {
@@ -305,12 +164,12 @@ impl AlignmentFile {
     /// rather than rejected; that is a caller policy, not this module's.
     ///
     /// **Hands back an `Arc`, because that is the only shape the type is
-    /// useful in.** Querying takes `self: &Arc<Self>`
-    /// ([`reads_in_region`](Self::reads_in_region)), so a bare `AlignmentFile`
-    /// could be asked for its path, its digests and its tallies and nothing
-    /// else. Putting the share in the constructor states that invariant once,
-    /// where a caller cannot skip it, instead of leaving every call site to
-    /// wrap the result itself.
+    /// useful in.** Minting a cursor takes `self: &Arc<Self>`
+    /// ([`cursor`](Self::cursor)), so a bare `AlignmentFile` could be asked for
+    /// its path, its digests and its contig table and nothing else. Putting the
+    /// share in the constructor states that invariant once, where a caller
+    /// cannot skip it, instead of leaving every call site to wrap the result
+    /// itself.
     pub fn open(
         path: &Path,
         reference: &OpenReference,
@@ -429,22 +288,209 @@ impl AlignmentFile {
             header: Arc::new(header),
             index,
             resolution,
+            contigs: file_contigs,
             sq_md5s,
             filter_config,
-            // Empty: the first query opens the first reader. `open` itself
-            // never leaves one behind, so a file that is opened and never
-            // queried costs no descriptor.
-            readers: Mutex::new(Vec::new()),
-            readers_opened: AtomicUsize::new(0),
             crai_by_contig,
             reference: file_reference,
-            counts: Mutex::new(Vec::new()),
         }))
     }
 
     /// How this file's records are assigned to read groups (see the field).
     pub fn read_group_resolution(&self) -> &ReadGroupResolution {
         &self.resolution
+    }
+
+    /// The chromosomes this file may be read over.
+    ///
+    /// **The file's own `@SQ` list**, which the open gate proved agrees with the reference's
+    /// on names, lengths and order, and on digests wherever both sides carry one
+    /// (`alignment_file.md` §3.1, check 2). The digests are therefore the *file's*: a file may
+    /// declare an `M5` where a `.fai`-only reference has none, and an absent digest is a
+    /// wildcard on either side. Use [`sq_md5s`](Self::sq_md5s) and `check_assembly` to compare
+    /// digests against a verified reference; use this to know which contigs exist and what
+    /// `ContigId(i)` means.
+    ///
+    /// Position `i` is `ContigId(i)`, so a caller minting one cursor per chromosome can walk
+    /// this without holding the reference open beside it.
+    pub fn contigs(&self) -> &ContigList {
+        &self.contigs
+    }
+
+    /// One cursor for one chromosome of this file.
+    ///
+    /// **Called once per chromosome per worker, never per region — that is the whole point.**
+    /// A cursor opens its own descriptor and keeps it for as long as it lives, so it can stay
+    /// positioned between regions and hand back reads it has already decoded and filtered
+    /// rather than seeking to a block it is usually already sitting in.
+    ///
+    /// Fallible only here. Opening the descriptor is the one thing that can fail at
+    /// construction; after this returns, a cursor cannot fail to exist.
+    ///
+    /// **CRAM is not served yet** (Milestone E). It is refused rather than silently mis-read,
+    /// because a CRAM opened as a BAM would fail deep inside a decode with an error naming
+    /// neither the format nor this decision.
+    ///
+    /// # Three checks, in order: the argument, the accessor's description, its ability
+    ///
+    /// Nothing else checks the accessor. [`open`](Self::open) proved the *file* against the
+    /// *reference*, but the accessor arrives here from the caller, one per file, and could be
+    /// over a different FASTA entirely — which would make filter #8 compare every read against
+    /// the wrong bases and drop and keep the wrong reads with no error at all.
+    ///
+    /// 1. **The contig is one this file declares**
+    ///    ([`CursorContigNotInFile`](AlignmentFileError::CursorContigNotInFile)).
+    /// 2. **The accessor's contig table equals this file's**
+    ///    ([`CursorAccessorContigTable`](AlignmentFileError::CursorAccessorContigTable)) —
+    ///    names, lengths, and digests where both sides carry one, **order included**. Order is
+    ///    the whole point: a permuted table resolves on every fetch and then serves each read
+    ///    the wrong contig's bases, silently.
+    /// 3. **The accessor can serve this contig's bases**
+    ///    ([`Reference`](AlignmentFileError::Reference)) — one zero-length fetch, because (2)
+    ///    proves only a *description*, and `ResidentRefSeq`/`WindowedRefSeq` take that
+    ///    description as a constructor argument unrelated to the bytes they will read.
+    ///
+    /// **What replaced what.** (2) and (3) together replace a loop that asked (3) of **every
+    /// contig in the header** — ~2,580 on GRCh38, once per cursor — and never asked (2) at all,
+    /// so it accepted an accessor whose contigs had the right names at the wrong lengths, or
+    /// the right names in the wrong order. One comparison plus one fetch is both cheaper and
+    /// strictly more than that loop proved (spec `read_filtering_stages.md` §9 Q2).
+    ///
+    /// **The file is the left operand of (2)**, so the message reads *file value vs accessor
+    /// value*, the direction the open gate prints for the same class of fault.
+    ///
+    /// **What none of them catches** is a caller passing an unrelated accessor *that happens to
+    /// carry a matching table and can serve it*. Closing that means the file owning its
+    /// reference and handing out accessors itself, which is its own change (spec §10).
+    pub fn cursor<R: RawRefSeq + ContigTable>(
+        self: &Arc<Self>,
+        contig: ContigId,
+        reference: R,
+    ) -> Result<AlignmentCursor<R>, AlignmentFileError> {
+        let open_error = |source: std::io::Error| AlignmentFileError::Open {
+            path: self.path.to_path_buf(),
+            source,
+        };
+
+        // A contig this file does not declare has no reads and no chunks, and every layer
+        // below would answer that as "nothing here" — which is indistinguishable from a
+        // chromosome that is genuinely empty. Refused where the caller can still act on it.
+        //
+        // **First of the three checks, and the order is deliberate:** this one is about the
+        // *argument*, the next about the accessor's *description*, the last about the
+        // accessor's *ability*. Asking whether the caller named a real contig before asking
+        // anything of the accessor keeps a bad `ContigId` from being reported as a reference
+        // fault, and it is what lets the probe below index `contig` safely.
+        if usize::try_from(contig.get())
+            .ok()
+            .is_none_or(|id| id >= self.contigs.entries.len())
+        {
+            return Err(AlignmentFileError::CursorContigNotInFile {
+                path: self.path.to_path_buf(),
+                contig,
+                contigs_in_file: self.contigs.entries.len(),
+            });
+        }
+
+        // **Second check: is the accessor over this file's contigs at all?** One comparison of
+        // two tables — names, lengths, and digests where both sides carry one.
+        self.contigs
+            .first_disagreement(reference.contigs())
+            .map_err(|detail| AlignmentFileError::CursorAccessorContigTable {
+                path: self.path.to_path_buf(),
+                detail,
+            })?;
+
+        // **Third check: can it actually serve this cursor's contig?**
+        //
+        // The comparison above proves the accessor carries the right *description*. For one
+        // accessor that is the whole story — `InMemoryRefSeq` derives its table from the bytes
+        // it holds. But `ResidentRefSeq::new` and `WindowedRefSeq::new` take the `ContigList`
+        // as a **separate constructor argument**, so nothing ties it to the bytes on disk: a
+        // `WindowedRefSeq` over a FASTA missing a contig, behind a table that names it, matches
+        // this file perfectly and cannot serve a single base of it.
+        //
+        // A zero-length fetch settles that, and it is what the deleted per-contig loop was
+        // really for. The loop asked it of **every** contig in the header — ~2,580 on GRCh38,
+        // once per cursor — for a property that only matters for the one contig this cursor
+        // will read. Asking it once keeps the fail-fast and costs one `open(2)` instead of
+        // 2,580.
+        //
+        // Without it the fault surfaces mid-stream, per chromosome, after arbitrary work, under
+        // a top-level message naming the *BAM* — and on a `--regions` run whose reads are all
+        // dropped before filter #8, never at all.
+        let mut probe = Vec::new();
+        reference
+            .fetch_raw_into(contig, 1, 0, &mut probe)
+            .map_err(|source| AlignmentFileError::Reference {
+                path: self.path.to_path_buf(),
+                source,
+            })?;
+
+        let aligned_reads_reader = match AlignmentFileKind::from_path(&self.path) {
+            Some(AlignmentFileKind::Bam) => {
+                let mut reader = bam::io::reader::Builder
+                    .build_from_path(&self.path)
+                    .map_err(open_error)?;
+                reader.read_header().map_err(open_error)?;
+                AlignedReadsReader::Bam(BamAlignedReadsReader::new(
+                    reader,
+                    Arc::clone(&self.header),
+                    self.index.clone(),
+                    Arc::clone(&self.path),
+                ))
+            }
+            Some(AlignmentFileKind::Cram) => {
+                let mut reader = cram::io::reader::Builder::default()
+                    .build_from_path(&self.path)
+                    .map_err(open_error)?;
+                reader.read_header().map_err(open_error)?;
+                // **The bases are taken once, for this cursor's chromosome, and held for its
+                // life.** A CRAM decodes against the reference, and a cursor covers one
+                // chromosome — so asking here rather than per region is the whole of what the
+                // cursor changes about the reference (spec §10). Asking the *run's*
+                // `OpenReference`, rather than holding a repository of our own, is what lets
+                // the run drop a chromosome's bases when every cursor on it is gone.
+                let repository = self
+                    .reference
+                    .as_ref()
+                    .and_then(|reference| reference.bases_for_contig(contig))
+                    .ok_or_else(|| AlignmentFileError::Open {
+                        path: self.path.to_path_buf(),
+                        source: std::io::Error::other(
+                            "a CRAM was opened without reference bases to decode against",
+                        ),
+                    })?;
+                let entries = self
+                    .crai_by_contig
+                    .get(usize::try_from(contig.get()).unwrap_or(usize::MAX))
+                    .cloned()
+                    .unwrap_or_else(|| Vec::new().into());
+                AlignedReadsReader::Cram(CramAlignedReadsReader::new(
+                    reader,
+                    Arc::clone(&self.header),
+                    repository,
+                    entries,
+                    self.resolution.clone(),
+                    Arc::clone(&self.path),
+                ))
+            }
+            _ => {
+                return Err(AlignmentFileError::CursorFormatUnsupported {
+                    path: self.path.to_path_buf(),
+                    kind: "this format",
+                });
+            }
+        };
+
+        Ok(AlignmentCursor::over_records(
+            aligned_reads_reader,
+            contig,
+            self.resolution.clone(),
+            reference,
+            self.filter_config,
+            Arc::clone(&self.path),
+        ))
     }
 
     /// The `@SQ M5` tags, indexed by `ContigId`, for the deferred assembly
@@ -456,264 +502,10 @@ impl AlignmentFile {
     pub fn path(&self) -> &Path {
         &self.path
     }
-
-    /// Every read overlapping `region`, coordinate-ordered and step-1-filtered.
-    ///
-    /// The chain is source → [`ReadFilter`] → order guard, and it is the
-    /// *complete* product of this module: the sample layer either uses it as-is
-    /// or merges k of them, and this module is indifferent to which.
-    ///
-    /// Takes a **shared** receiver, not `&mut self` — the load-bearing
-    /// signature choice (spec §3.3). A reader comes from the internal pool and
-    /// the returned iterator gives it back on `Drop`, so N threads may query
-    /// one file concurrently without touching a single call site.
-    ///
-    /// **`&Arc<Self>` rather than `&self`**, because the stream outlives the
-    /// call: it must keep the file alive to hand its reader back on `Drop`, and
-    /// a borrow would put the caller's lifetime on the returned type (arch
-    /// `locus_generation_pileup.md` §2.2, and [`RegionReads`]). One atomic
-    /// increment per query, against a query that then decodes thousands of
-    /// records. The cost of the narrowing is that a bare `&AlignmentFile` can
-    /// no longer query — deliberate: whoever queries shares ownership.
-    ///
-    /// `reference` is the caller's own accessor, passed **per query** rather
-    /// than stored: `RawRefSeq` impls are stateful readers, so one shared
-    /// accessor would need a mutex on the hot path the moment queries run
-    /// concurrently, and `&self` queries would fight over one file cursor
-    /// (arch §5).
-    ///
-    /// The filter is built **probe-free**: the open gate already proved
-    /// something strictly stronger than the per-contig resolve probe, and
-    /// paying that probe per query would mean ~10⁶ × the contig count in
-    /// reference fetches.
-    pub fn reads_in_region<R: RawRefSeq>(
-        self: &Arc<Self>,
-        region: GenomeRegion,
-        reference: R,
-    ) -> Result<RegionReads<R>, AlignmentFileError> {
-        // **Everything fallible happens first**, before a reader leaves the
-        // pool: the format check, resolving the region, and querying the index
-        // all touch no reader, so any of them failing costs nothing to recover
-        // from — whereas a `?` after the handle is taken would lose that reader
-        // silently (`BorrowedReader::take`).
-        //
-        // The format decides which planner runs, and it has to be decided
-        // first: a CRAM's index is a `.crai`, which the BAM planner cannot read.
-        let plan = match AlignmentFileKind::from_path(&self.path) {
-            Some(AlignmentFileKind::Cram) => QueryPlan::Cram(CramRegionSource::plan(
-                &self.header,
-                &self.crai_by_contig,
-                region,
-            )?),
-            _ => QueryPlan::Bam(BamRegionSource::plan(
-                &self.header,
-                &self.index,
-                region,
-                &self.path,
-            )?),
-        };
-
-        let borrowed = self.borrow_reader()?;
-        let handle = borrowed.take();
-        let ReaderHandle {
-            reader,
-            buffers,
-            container,
-        } = handle;
-
-        let source = match (reader, plan) {
-            (ReaderKind::Bam(reader), QueryPlan::Bam(plan)) => {
-                RegionSource::Bam(BamRegionSource::new(
-                    reader,
-                    Arc::clone(&self.header),
-                    plan,
-                    self.resolution.clone(),
-                ))
-            }
-            (ReaderKind::Cram(reader), QueryPlan::Cram(plan)) => {
-                RegionSource::Cram(CramRegionSource::new(
-                    reader,
-                    Arc::clone(&self.header),
-                    // Narrowed to this query's contig: asking here, rather
-                    // than holding a repository of our own, is what lets the
-                    // run drop the previous chromosome's bases when the walk
-                    // moves on (`reference.rs`).
-                    self.reference
-                        .as_ref()
-                        .and_then(|reference| reference.bases_for_contig(region.contig))
-                        .expect("open opened the bases for every CRAM"),
-                    plan,
-                    self.resolution.clone(),
-                    container,
-                ))
-            }
-            // Both the reader and the plan are chosen from the same path's
-            // extension, so they cannot disagree.
-            _ => unreachable!("the reader's format and the plan's are both the path's"),
-        };
-
-        let filter =
-            ReadFilter::with_validated_contigs(source, reference, self.filter_config, buffers);
-
-        Ok(RegionReads {
-            file: Arc::clone(self),
-            stream: Some(OrderVerified::new(filter, Arc::clone(&self.path))),
-        })
-    }
-
-    /// This file's step-1 tally, summed over the region queries served so far.
-    ///
-    /// **Per query, not per read**: each stream adds its own tally here when it
-    /// ends, so a stream still running is not yet reflected. That is the price
-    /// of `&self` — a running total updated per read would need either a lock
-    /// on the hot path or an atomic per counter, and neither buys anything a
-    /// caller reading counts *after* draining actually wants.
-    ///
-    /// A stream that is never dropped — leaked, or held for the process
-    /// lifetime — never contributes at all, and takes its pooled reader with
-    /// it. That is inherent to returning things on `Drop`.
-    ///
-    /// **And a stream that outlives every *other* handle on its file
-    /// contributes where nobody can look.** Since the stream owns an
-    /// `Arc<AlignmentFile>` of its own, its `Drop` folds the tally into a file
-    /// that is then freed in the same breath — the count is not lost so much as
-    /// unobservable. Keep the `SampleReads`, or an `Arc` of your own, alive at
-    /// least as long as the streams whose counts you mean to read.
-    pub fn counts(&self) -> Vec<ReadGroupCounts> {
-        self.counts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// Take an idle reader from the pool, opening one only if the pool is
-    /// empty.
-    ///
-    /// This is the only place the file is ever opened after `AlignmentFile::open`,
-    /// so in a single-threaded run it happens exactly once however many regions
-    /// are queried — the guarantee the whole per-query cost model rests on
-    /// (spec §3.3). With N threads it settles at N.
-    ///
-    /// A freshly opened reader is positioned past the header. A *returned* CRAM
-    /// reader sits wherever its last query stopped, which is harmless only
-    /// because `CramRegionSource` seeks to a container before every read and
-    /// never reads without seeking — the BAM source does the same per chunk.
-    /// Neither source may assume an incoming reader's position.
-    fn borrow_reader(&self) -> Result<BorrowedReader<'_>, AlignmentFileError> {
-        // The `let` ends the guard's scope, so the lock is released before
-        // `open_reader` runs. Written as a `match` scrutinee it would still be
-        // held inside the `None` arm — temporaries live to the end of the whole
-        // `match` — and every other thread would block for the length of a file
-        // open plus a header read, serializing at exactly the point the pool
-        // exists to keep parallel. Production takes the same care
-        // (`segment_reader.rs` `borrow_handle`, via an early return).
-        let pooled = self.lock_pool().pop();
-        let handle = match pooled {
-            Some(handle) => handle,
-            None => self.open_reader()?,
-        };
-        Ok(BorrowedReader {
-            file: self,
-            handle: Some(handle),
-        })
-    }
-
-    /// Fold a finished stream's tallies into the file's, read group by read
-    /// group.
-    ///
-    /// A read group met for the first time is appended, so the file's order is
-    /// the order its read groups were first seen across every query — stable for
-    /// a given file, and not something a caller should read anything into beyond
-    /// "these are the groups this file yielded".
-    fn add_counts(&self, counts: &[ReadGroupCounts]) {
-        let mut total = self
-            .counts
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        for (read_group, stream) in counts {
-            match total.iter_mut().find(|(id, _)| id == read_group) {
-                Some((_, running)) => running.add(stream),
-                None => total.push((*read_group, stream.clone())),
-            }
-        }
-    }
-
-    fn return_handle(&self, handle: ReaderHandle) {
-        self.lock_pool().push(handle);
-    }
-
-    /// Open a reader and skip its header, leaving it where a returned one would
-    /// be. The header is read and discarded: this file already holds the parsed
-    /// one, and the reader has to be advanced past it either way.
-    fn open_reader(&self) -> Result<ReaderHandle, AlignmentFileError> {
-        let open_error = |source: std::io::Error| AlignmentFileError::Open {
-            path: self.path.to_path_buf(),
-            source,
-        };
-
-        let reader = match AlignmentFileKind::from_path(&self.path) {
-            Some(AlignmentFileKind::Bam) => {
-                let mut reader = bam::io::reader::Builder
-                    .build_from_path(&self.path)
-                    .map_err(open_error)?;
-                reader.read_header().map_err(open_error)?;
-                ReaderKind::Bam(reader)
-            }
-            Some(AlignmentFileKind::Cram) => {
-                let file = File::open(&self.path).map_err(open_error)?;
-                let mut reader = cram::io::Reader::new(file);
-                reader.read_header().map_err(open_error)?;
-                ReaderKind::Cram(reader)
-            }
-            // `open` already rejected any other extension, so this is
-            // reachable only if the path changed kind underneath us. Reported
-            // the same way `read_header` reports it, rather than as a CRAM
-            // magic-number failure.
-            None => {
-                return Err(open_error(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "expected a '.bam' or '.cram' extension",
-                )));
-            }
-        };
-
-        self.readers_opened.fetch_add(1, Ordering::Relaxed);
-        Ok(ReaderHandle {
-            reader,
-            buffers: ReadFilterBuffers::default(),
-            container: None,
-        })
-    }
-
-    /// Lock the pool, recovering the guard if a panic elsewhere poisoned the
-    /// mutex.
-    ///
-    /// The lock only ever guards a `Vec` pop or push, neither of which can
-    /// unwind, so this type's own code cannot poison it. Recovering rather than
-    /// panicking keeps a poison introduced elsewhere from cascading into every
-    /// later query — and, on the return path, from silently dropping the reader.
-    fn lock_pool(&self) -> std::sync::MutexGuard<'_, Vec<ReaderHandle>> {
-        self.readers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// How many readers this file has opened, ever — one per concurrent caller,
-    /// not one per query.
-    pub(super) fn readers_opened(&self) -> usize {
-        self.readers_opened.load(Ordering::Relaxed)
-    }
-
-    #[cfg(test)]
-    fn pooled_readers(&self) -> usize {
-        self.lock_pool().len()
-    }
 }
 
-/// Hand-written so the reader pool does not have to be `Debug` (noodles'
-/// readers are not), and so the output says what identifies the file rather
-/// than dumping a parsed index.
+/// Hand-written so the parsed index does not have to be `Debug`, and so the
+/// output says what identifies the file rather than dumping one.
 impl std::fmt::Debug for AlignmentFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Destructured exhaustively so a field that is added, removed or
@@ -726,20 +518,20 @@ impl std::fmt::Debug for AlignmentFile {
             header: _,
             index: _,
             resolution,
-            sq_md5s,
+            contigs,
+            sq_md5s: _,
             filter_config: _,
-            readers: _,
-            readers_opened: _,
             crai_by_contig: _,
             reference: _,
-            counts: _,
         } = self;
 
         f.debug_struct("AlignmentFile")
             .field("path", path)
             .field("read_groups", resolution)
-            .field("contigs", &sq_md5s.len())
-            .field("readers_opened", &self.readers_opened())
+            // Counted off `contigs` now rather than off `sq_md5s`. The two are the same
+            // length by construction, but one of them *is* the contig list and the other is
+            // a projection of it, and the field is labelled "contigs".
+            .field("contigs", &contigs.entries.len())
             .finish_non_exhaustive()
     }
 }
@@ -916,9 +708,14 @@ fn hex_nibble(character: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::ng::read::input::test_fixtures::{
-        FIXTURE_CONTIGS, bam_header, fixture_read_group, fixture_reference, header, indexed_bam,
-        matching_contigs, one_read, only_tally, read_named, unindexed_bam,
+        FIXTURE_CONTIGS, bam_header, big_contig_specs, big_fixture_reference,
+        big_fixture_reference_bases, big_spread_of_reads, fixture_read_group, fixture_reference,
+        fixture_reference_bases, header, indexed_bam, matching_contigs, one_read, only_tally,
+        unindexed_bam,
     };
+    // `GenomeRegion` left `super::*` when the per-region query did: the file layer's own API
+    // no longer names one, and only the tests below build them.
+    use crate::ng::types::GenomeRegion;
 
     // --- @HD SO ---
 
@@ -1069,146 +866,329 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The reader pool (C1)
+    // The chromosomes a cursor may be made for (alignment cursor, A2)
     // -----------------------------------------------------------------
 
-    /// **The guarantee the per-query cost model rests on.** Ten sequential
-    /// borrows must open the file *once*: each returns its reader on drop, and
-    /// the next takes that one back rather than opening another. If this
-    /// regressed, ~10⁶ STR region queries would become ~10⁶ file opens, and
-    /// nothing about the *answers* would change — which is why it is asserted
-    /// rather than assumed.
+    /// The list carries the reference's names, lengths and **order** — the part the open
+    /// gate proves equal, and the part that makes `ContigId(i)` mean the same thing to the
+    /// file and to the reference. That is what `contigs()` exists to offer: a caller minting
+    /// one cursor per chromosome walks this without holding the reference open beside it.
+    ///
+    /// **Compared field by field, not with `assert_eq!` on the lists.** `ContigEntry`'s
+    /// `PartialEq` treats an absent `M5` as a wildcard, so comparing whole lists passes
+    /// whether the field holds the file's or the reference's — a review mutation swapping one
+    /// for the other left exactly that assertion green. Naming the three fields that really
+    /// are proved equal is what makes this test able to fail.
     #[test]
-    fn sequential_borrows_open_the_file_once_and_reuse_the_reader() {
+    fn the_contig_list_has_the_reference_names_and_lengths_in_the_reference_order() {
         let fixture = open_fixture(&matching_contigs(), false);
         let file = fixture.file.as_ref().expect("opens");
 
-        assert_eq!(
-            file.readers_opened(),
-            0,
-            "opening the file opens no reader — a file that is never queried \
-             costs no descriptor"
-        );
-        assert_eq!(file.pooled_readers(), 0);
-
-        for _ in 0..10 {
-            let borrowed = file.borrow_reader().expect("borrow");
-            assert_eq!(
-                file.pooled_readers(),
-                0,
-                "while borrowed, the pool is empty — the handle is out on loan"
-            );
-            drop(borrowed);
-            assert_eq!(file.pooled_readers(), 1, "and comes back on drop");
-        }
-
-        assert_eq!(
-            file.readers_opened(),
-            1,
-            "ten borrows, one open — the pool did its job"
-        );
-    }
-
-    /// Two borrows held *at once* need two readers, because a handle out on
-    /// loan cannot be lent again. Both come back, so the pool ends up holding
-    /// both — which is what lets N threads query one file concurrently.
-    #[test]
-    fn concurrent_borrows_each_get_their_own_reader_and_all_return() {
-        let fixture = open_fixture(&matching_contigs(), false);
-        let file = fixture.file.as_ref().expect("opens");
-
-        let first = file.borrow_reader().expect("borrow");
-        let second = file.borrow_reader().expect("borrow");
-        assert_eq!(
-            file.readers_opened(),
-            2,
-            "the pool was empty for the second"
-        );
-
-        drop(first);
-        drop(second);
-        assert_eq!(file.pooled_readers(), 2);
-
-        // A third borrow now reuses rather than opening a third.
-        let third = file.borrow_reader().expect("borrow");
-        assert_eq!(file.readers_opened(), 2);
-        drop(third);
-    }
-
-    /// The pool exists so `reads_in_region(&self)` can be called from several
-    /// threads at once, and none of the tests above actually does that. Each
-    /// thread must get a reader of its own, and every one must come back: a
-    /// handle lost under contention would leak a descriptor per query, and a
-    /// lock held across the file open would show up here as a hang rather than
-    /// a failure.
-    #[test]
-    fn borrows_from_many_threads_each_get_a_reader_and_all_return() {
-        const THREADS: usize = 8;
-
-        let fixture = open_fixture(&matching_contigs(), false);
-        let file = fixture.file.as_ref().expect("opens");
-
-        std::thread::scope(|scope| {
-            for _ in 0..THREADS {
-                scope.spawn(|| {
-                    let borrowed = file.borrow_reader().expect("borrow");
-                    // Hold it long enough that the borrows genuinely overlap.
-                    std::thread::yield_now();
-                    drop(borrowed);
-                });
-            }
-        });
-
-        let opened = file.readers_opened();
-        assert!(
-            (1..=THREADS).contains(&opened),
-            "at most one reader per concurrent borrow, at least one overall; \
-             got {opened}"
-        );
-        assert_eq!(
-            file.pooled_readers(),
-            opened,
-            "every reader opened came back — none lost on any path"
-        );
-    }
-
-    /// The CRAM arm of `open_reader`, which no other test reaches. It also
-    /// pins the interchangeability claim the borrow rests on: a freshly opened
-    /// reader must be positioned past the header, exactly where a returned one
-    /// would be, or the two could not be pooled together.
-    #[test]
-    fn a_cram_file_pools_readers_the_same_way() {
-        use crate::pileup::per_sample::cram_files::{HeaderOverrides, build_cram};
-
-        let specs: Vec<ContigSpec> = FIXTURE_CONTIGS
+        let expected: Vec<(&str, u64)> = matching_contigs()
             .iter()
-            .map(|(name, length)| ContigSpec {
-                name: (*name).to_string(),
-                length: *length as u64,
-            })
+            .map(|(name, length, _)| (*name, *length as u64))
             .collect();
-        let (_fasta_dir, fasta) = build_fasta(&specs).expect("build fasta");
-        let (_cram_dir, cram_path) = build_cram(
-            &fasta,
-            &specs,
-            &HeaderOverrides {
-                read_groups: vec![("rg1".to_string(), Some("NA12878".to_string()))],
-                ..HeaderOverrides::default()
-            },
-            &[read_named("read-1", 0, 1)],
-        )
-        .expect("build cram");
+        assert!(
+            !expected.is_empty(),
+            "an empty list would make the comparison below vacuous",
+        );
 
-        // The gate requires an index. This test is about pooling, not querying,
-        // so an empty `.crai` is enough — C5 builds real ones.
-        cram::crai::fs::write(
-            cram_path.with_extension("cram.crai"),
-            &cram::crai::Index::default(),
-        )
-        .expect("write an empty crai");
+        let observed: Vec<(&str, u64)> = file
+            .contigs()
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.length))
+            .collect();
+        assert_eq!(observed, expected);
+    }
 
-        // The `Fasta` arm, because a CRAM can only be decoded against the
-        // bases — see `a_cram_against_a_fai_only_reference_is_refused_at_open`.
+    /// `contigs()` and `sq_md5s()` are the list and a projection of it, so they cannot
+    /// disagree — not about how many contigs there are, and not about any one contig's
+    /// digest. Both are indexed by `ContigId`, and a divergence would silently pair a file's
+    /// contig with a *different* reference contig inside `check_assembly`.
+    ///
+    /// A **distinct digest per contig**, so a projection that returned the same digest for
+    /// every entry, or the entries in another order, fails here. The duplication itself is
+    /// recorded as a follow-up on the `sq_md5s` field; while it stands, this is what stops
+    /// the two drifting.
+    #[test]
+    fn the_contig_list_and_the_digest_list_index_alike() {
+        let digests = distinct_digests();
+        let fixture = open_fixture(&contigs_declaring(&digests), false);
+        let file = fixture
+            .file
+            .as_ref()
+            .expect("opens against a .fai reference");
+
+        assert_eq!(file.contigs().entries.len(), file.sq_md5s().len());
+        for (entry, digest) in file.contigs().entries.iter().zip(file.sq_md5s()) {
+            assert_eq!(&entry.md5, digest);
+        }
+        assert!(
+            file.sq_md5s().iter().all(Option::is_some),
+            "the fixture declared an M5 for every contig, so a `None` here is the projection \
+             losing one",
+        );
+    }
+
+    /// **What `contigs()` holds is the file's claim, not the reference's** — and this is the
+    /// test that can tell the two apart. The reference is the `.fai` arm, which carries no
+    /// digests at all, while the file declares one per contig; if the field were populated
+    /// from the reference, as this module's doc comments claimed until the A2 review, every
+    /// digest here would be `None`.
+    #[test]
+    fn the_contig_list_carries_the_digests_the_file_declared_not_the_reference_s() {
+        let (reference_dir, reference) = fixture_reference(false);
+        assert!(
+            reference
+                .info()
+                .contig_list()
+                .entries
+                .iter()
+                .all(|entry| entry.md5.is_none()),
+            "the .fai reference arm is supposed to carry no digests; without that this test \
+             proves nothing",
+        );
+
+        let digests = distinct_digests();
+        let fixture = open_fixture(&contigs_declaring(&digests), false);
+        let file = fixture
+            .file
+            .as_ref()
+            .expect("opens against a .fai reference");
+
+        assert!(
+            file.contigs()
+                .entries
+                .iter()
+                .all(|entry| entry.md5.is_some()),
+            "the file declared an M5 for every contig, so `contigs()` cannot be holding the \
+             reference's list",
+        );
+        drop(reference_dir);
+    }
+
+    /// The `Debug` line is what a panic message or a log carries, and its `contigs` field is
+    /// a **count** — the one shape that looks plausible whatever number it holds. A review
+    /// mutation adding 999 to it survived every other test here.
+    #[test]
+    fn the_debug_line_counts_the_contigs_the_file_actually_has() {
+        let fixture = open_fixture(&matching_contigs(), false);
+        let file = fixture.file.as_ref().expect("opens");
+
+        let rendered = format!("{file:?}");
+        assert!(
+            rendered.contains(&format!("contigs: {}", file.contigs().entries.len())),
+            "the Debug line does not report this file's {} contigs:\n{rendered}",
+            file.contigs().entries.len(),
+        );
+    }
+
+    /// One distinct 32-hex-digit `M5` per fixture contig, so a test can tell the digests
+    /// apart rather than only telling present from absent.
+    fn distinct_digests() -> Vec<String> {
+        (1..=matching_contigs().len())
+            .map(|nth| format!("{nth:032x}"))
+            .collect()
+    }
+
+    /// The fixture's `@SQ` shape with a digest attached to each contig.
+    fn contigs_declaring(digests: &[String]) -> Vec<(&str, usize, Option<&str>)> {
+        matching_contigs()
+            .into_iter()
+            .zip(digests)
+            .map(|((name, length, _), digest)| (name, length, Some(digest.as_str())))
+            .collect()
+    }
+
+    // -----------------------------------------------------------------
+    // The cursor over a real BAM (alignment cursor, C3)
+    // -----------------------------------------------------------------
+
+    /// **The cursor tests run on a 200,000-base contig, and the reason is a defect this
+    /// milestone shipped and a review caught.**
+    ///
+    /// The first version of these tests used the 100-base fixture contig. BAI's finest bins
+    /// are 16 kb and a BGZF block is 64 kB, so *every* region there resolves to the same
+    /// single chunk — and the run-of-regions oracle below, whose entire job is to catch a
+    /// reader that stops at the previous region's end, **passed with exactly that defect in
+    /// place**. An oracle that cannot fail for the thing the milestone is about is worse than
+    /// no oracle, because it is counted as coverage.
+    ///
+    /// Reads are 30 bases because the default `min_read_length` silently drops anything
+    /// shorter — a fixture that ignores it produces an empty walk, which reads as a broken
+    /// cursor rather than as a badly-chosen read length.
+    const BIG_STRIDE: usize = 90;
+
+    fn big_spread() -> Vec<RecordBuf> {
+        big_spread_of_reads(BIG_STRIDE)
+    }
+
+    /// **The oracle: a whole-file linear scan, filtered to the region.** It never seeks and
+    /// never consults the index, so nothing about chunks, positioning or the early stop is
+    /// shared with the thing it checks.
+    fn names_by_linear_scan(path: &Path, region: GenomeRegion) -> Vec<String> {
+        let mut reader = bam::io::reader::Builder
+            .build_from_path(path)
+            .expect("open bam");
+        let header = reader.read_header().expect("read header");
+        let mut names = Vec::new();
+        for record in reader.record_bufs(&header) {
+            let record = record.expect("a fixture record");
+            let (Some(first), Some(last)) = (record.alignment_start(), record.alignment_end())
+            else {
+                continue;
+            };
+            if record.reference_sequence_id() == Some(region.contig.get() as usize)
+                && usize::from(first) as u64 <= region.end.get()
+                && usize::from(last) as u64 >= region.start.get()
+            {
+                names.push(
+                    String::from_utf8_lossy(record.name().expect("named").as_ref()).into_owned(),
+                );
+            }
+        }
+        names
+    }
+
+    /// **The test the first attempt at this feature did not have.**
+    ///
+    /// Every other read-path test in this crate drives a *single* region query. That is
+    /// precisely why 1,471 of them passed while 3,830 of 236,081 loci went missing:
+    /// consecutive queries through one reader are the untested surface, and they are the
+    /// entire feature. So a run of regions is asked of **one cursor**, in order, and each
+    /// answer is compared against a scan of the whole file.
+    #[test]
+    fn a_run_of_regions_through_one_bam_cursor_matches_a_linear_scan() {
+        let (reference_dir, reference) = big_fixture_reference();
+        let (_bam_dir, path) = indexed_bam(&bam_header(&big_contig_specs()), &big_spread());
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), big_reference_bases())
+            .expect("a cursor for contig 0");
+
+        // Ascending, adjacent, overlapping, far apart, backward, repeated, and empty — the
+        // shapes the plan names, all through the one cursor, and spanning enough of the
+        // contig that the index has to resolve more than one chunk.
+        for (start, end) in [
+            (1u64, 5_000u64),
+            (5_001, 10_000),
+            (9_000, 20_000),
+            (9_001, 20_001),
+            (150_000, 160_000),
+            (1, 8_000),
+            (1, 8_000),
+            (199_999, 200_000),
+            (1, 200_000),
+        ] {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            cursor.move_to_region(asked).expect("on this chromosome");
+            let mut actual = Vec::new();
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("the fixture reads decode and filter");
+                actual.push(String::from_utf8_lossy(&read.qname).into_owned());
+            }
+
+            assert_eq!(
+                actual,
+                names_by_linear_scan(&path, asked),
+                "the cursor disagreed with a linear scan at [{start}, {end}] — and it had \
+                 already served every region before it",
+            );
+        }
+        drop(reference_dir);
+    }
+
+    // -----------------------------------------------------------------
+    // The cursor over a real CRAM (alignment cursor, E2)
+    // -----------------------------------------------------------------
+
+    /// A raw reference accessor over the CRAM fixture's FASTA, for the cursor's mismatch
+    /// filter — the same shape the BAM cursor tests use, over the fixture the CRAM needs.
+    fn cram_cursor_reference_bases(fasta: &Path) -> crate::ng::ref_seq::WindowedRefSeq {
+        let info = read_reference_info(ReferenceSource::Fasta {
+            fasta: fasta.to_path_buf(),
+            fai: None,
+        })
+        .expect("read reference");
+        crate::ng::ref_seq::WindowedRefSeq::new(fasta.to_path_buf(), info.contig_list())
+    }
+
+    /// The CRAM cursor fixture: a long contig with **more records than fit in one container**.
+    ///
+    /// noodles writes 10,240 records per container, so a fixture under that produces one
+    /// container and one `.crai` entry — which exercises the container decode and **none** of
+    /// the walk: not the multi-entry loop, not the positioning, not the carry-on past a
+    /// container boundary. That is the CRAM shape of the trap the BAM tests above describe,
+    /// and it would let the oracle pass with a reader that stops at the first container.
+    const CRAM_CURSOR_CONTIG_LENGTH: usize = 400_000;
+    const CRAM_CURSOR_READS: usize = 25_000;
+
+    /// A whole-file linear scan of a CRAM, filtered to the region — the same oracle shape the
+    /// BAM tests use, sharing nothing with the thing it checks: it never seeks and never opens
+    /// the `.crai`.
+    fn cram_names_by_linear_scan(path: &Path, fasta: &Path, region: GenomeRegion) -> Vec<String> {
+        use noodles_fasta as fasta;
+
+        let repository = fasta::Repository::new(
+            fasta::io::indexed_reader::Builder::default()
+                .build_from_path(fasta)
+                .map(fasta::repository::adapters::IndexedReader::new)
+                .expect("the fixture FASTA is indexed"),
+        );
+        let mut reader = cram::io::reader::Builder::default()
+            .set_reference_sequence_repository(repository)
+            .build_from_path(path)
+            .expect("open cram");
+        let header = reader.read_header().expect("read header");
+        let mut names = Vec::new();
+        for record in reader.records(&header) {
+            let record = record.expect("a fixture record");
+            let record = RecordBuf::try_from_alignment_record(&header, &record)
+                .expect("a fixture record converts");
+            let (Some(first), Some(last)) = (record.alignment_start(), record.alignment_end())
+            else {
+                continue;
+            };
+            if record.reference_sequence_id() == Some(region.contig.get() as usize)
+                && usize::from(first) as u64 <= region.end.get()
+                && usize::from(last) as u64 >= region.start.get()
+            {
+                names.push(
+                    String::from_utf8_lossy(record.name().expect("named").as_ref()).into_owned(),
+                );
+            }
+        }
+        names
+    }
+
+    /// **The parity oracle, now through cursors — E2.**
+    ///
+    /// A run of regions is asked of **one CRAM cursor**, in order, and each answer is compared
+    /// against a scan of the whole file. This is the CRAM half of what
+    /// [`a_run_of_regions_through_one_bam_cursor_matches_a_linear_scan`] does, and it is the
+    /// test the milestone exists to pass: the two formats share every line above the record
+    /// reader, so a disagreement here is a container-walk bug.
+    ///
+    /// The regions deliberately cross container boundaries, go backwards, repeat, and end with
+    /// the whole contig — because a reader that positioned correctly but *bounded* at the
+    /// region's end would answer the first region right and every later one short.
+    #[test]
+    fn a_run_of_regions_through_one_cram_cursor_matches_a_linear_scan() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
         let reference = OpenReference::from(
             read_reference_info(ReferenceSource::Fasta {
                 fasta: fasta.clone(),
@@ -1217,83 +1197,293 @@ mod tests {
             .expect("read reference"),
         );
         let file = AlignmentFile::open(
-            &cram_path,
+            &path,
             &reference,
             ReadFilterConfig::default(),
             false,
             fixture_read_group(),
         )
-        .expect("a matching CRAM opens");
+        .expect("the fixture opens");
 
-        let borrowed = file.borrow_reader().expect("borrow a CRAM reader");
+        let mut cursor = file
+            .cursor(ContigId(0), cram_cursor_reference_bases(&fasta))
+            .expect("a cursor for contig 0");
+
+        // Ascending, adjacent, overlapping, far apart, backward, repeated, and the whole
+        // contig — plus **a region just inside each container's first base**, taken from the
+        // `.crai` itself rather than hard-coded so it stays a boundary whatever the writer's
+        // container size turns out to be.
+        //
+        // Those boundary regions are what makes this able to fail for a reader that positions
+        // at the container *starting* at or after the region and forgets the one before it: a
+        // read beginning a few bases earlier reaches into the region and lives in the previous
+        // container. Without them the fixture's regions all sit comfortably inside a container
+        // and a reader that never stepped back would pass.
+        let mut regions: Vec<(u64, u64)> = vec![
+            (1, 20_000),
+            (20_001, 40_000),
+            (30_000, 90_000),
+            (30_001, 90_001),
+            (300_000, 340_000),
+            (1, 25_000),
+            (1, 25_000),
+            (399_000, 400_000),
+        ];
+        let crai = cram::crai::fs::read(format!("{}.crai", path.display()))
+            .expect("the fixture writes a .crai");
+        for entry in &crai {
+            let Some(first) = entry.alignment_start() else {
+                continue;
+            };
+            let first = usize::from(first) as u64;
+            if first > 1 {
+                regions.push((first + 4, first + 60));
+                regions.push((first, first + 60));
+            }
+        }
+        regions.push((1, 400_000));
+
+        for (start, end) in regions {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            cursor.move_to_region(asked).expect("on this chromosome");
+            let mut actual = Vec::new();
+            while let Some(read) = cursor.next_read() {
+                let read = read.expect("the fixture reads decode and filter");
+                actual.push(String::from_utf8_lossy(&read.qname).into_owned());
+            }
+
+            assert_eq!(
+                actual,
+                cram_names_by_linear_scan(&path, &fasta, asked),
+                "the CRAM cursor disagreed with a linear scan at [{start}, {end}] — and it \
+                 had already served every region before it",
+            );
+        }
+    }
+
+    /// **A read past the first container carries its own read group.**
+    ///
+    /// The CRAM arm is the one that decides read groups itself — a CRAM stores the group as a
+    /// container-level number rather than a per-record `RG` tag — so a stamp that went stale at
+    /// a container boundary would attribute a whole library's reads to another group, silently,
+    /// with no error and no crash. B2 moved that stamp into `DecodedContainer::fill_raw_read`,
+    /// which makes this the property it is most important to pin.
+    ///
+    /// **Nothing pinned it before**, and the gap was a hole between two fixtures: the only
+    /// multi-read-group CRAM is three records, which is one container, and the only
+    /// multi-container CRAM declares one `@RG` and is opened as `Sole`, an arm that never asks
+    /// a record which group it is in. Mutation-verified: overriding every read's group from the
+    /// second container onwards left all 1,542 tests green before this existed.
+    #[test]
+    fn a_read_past_the_first_container_carries_its_own_read_group() {
+        use crate::ng::read::input::read_groups::{ReadGroupResolution, RecordOwner};
+        use crate::ng::read::input::test_fixtures::multi_container_cram_two_read_groups;
+        use crate::ng::types::ReadGroupId;
+
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram_two_read_groups(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+        let reference = OpenReference::from(
+            read_reference_info(ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            })
+            .expect("read reference"),
+        );
+        // `PerRecord`, not `Sole`: the whole point is to reach the arm that resolves a record's
+        // group from what the container said, which `Sole` short-circuits.
+        let resolution = ReadGroupResolution::PerRecord(
+            vec![
+                (
+                    "rg1".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(0)),
+                ),
+                (
+                    "rg2".to_string().into_boxed_str(),
+                    RecordOwner::Mine(ReadGroupId(1)),
+                ),
+            ]
+            .into(),
+        );
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            resolution,
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), cram_cursor_reference_bases(&fasta))
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(CRAM_CURSOR_CONTIG_LENGTH as u64),
+            })
+            .expect("on this chromosome");
+
+        let mut seen = 0usize;
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("the fixture reads decode and filter");
+            let name = String::from_utf8_lossy(&read.qname).into_owned();
+            let index: usize = name[1..].parse().expect("r<N>");
+            assert_eq!(
+                read.read_group.get(),
+                if index.is_multiple_of(2) { 0 } else { 1 },
+                "{name} (record {index}) carries the wrong read group",
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, CRAM_CURSOR_READS, "every fixture read is served");
+    }
+
+    /// The CRAM oracle must be able to fail, and on a fixture that reaches past one container.
+    #[test]
+    fn the_cram_cursor_oracle_is_not_vacuous() {
+        let (_cram_dir, path, _fasta_dir, fasta) =
+            multi_container_cram(CRAM_CURSOR_CONTIG_LENGTH, CRAM_CURSOR_READS);
+
+        let covered = cram_names_by_linear_scan(
+            &path,
+            &fasta,
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(CRAM_CURSOR_CONTIG_LENGTH as u64),
+            },
+        );
+        assert_eq!(
+            covered.len(),
+            CRAM_CURSOR_READS,
+            "the whole contig holds every fixture read",
+        );
+
+        let crai = cram::crai::fs::read(format!("{}.crai", path.display()))
+            .expect("the fixture writes a .crai");
         assert!(
-            matches!(
-                borrowed.handle.as_ref().map(|h| &h.reader),
-                Some(ReaderKind::Cram(_))
-            ),
-            "a .cram path yields a CRAM reader, not the BAM fallback"
-        );
-        drop(borrowed);
-
-        assert_eq!(file.readers_opened(), 1, "the pool still works for CRAM");
-        assert_eq!(file.pooled_readers(), 1);
-    }
-
-    /// A failed open must not count, or `readers_opened` stops meaning
-    /// "readers that exist" and T13's assertion becomes unfalsifiable.
-    #[test]
-    fn a_failed_open_does_not_count_as_an_opened_reader() {
-        let fixture = open_fixture(&matching_contigs(), false);
-        let file = fixture.file.as_ref().expect("opens");
-
-        // Delete the BAM out from under the handle, then ask for a reader.
-        std::fs::remove_file(file.path()).expect("remove the bam");
-
-        assert!(file.borrow_reader().is_err(), "the file is gone");
-        assert_eq!(
-            file.readers_opened(),
-            0,
-            "the counter tracks readers that exist, not attempts"
+            crai.len() > 1,
+            "the fixture must span more than one container, or the walk this checks is one \
+             decode and the oracle cannot fail for a reader that stops there: {} entries",
+            crai.len(),
         );
     }
 
-    /// `take()` is how a region stream adopts the parts; the borrow must then
-    /// return nothing, or the same reader would be pushed back twice and handed
-    /// to two callers at once.
+    /// The oracle must be able to fail: a region the fixture covers has to return reads, or
+    /// the test above could be comparing two empty vectors and calling it agreement.
     #[test]
-    fn a_taken_handle_is_not_also_returned_by_the_borrow() {
-        let fixture = open_fixture(&matching_contigs(), false);
-        let file = fixture.file.as_ref().expect("opens");
+    fn the_bam_cursor_oracle_is_not_vacuous() {
+        let (_bam_dir, path) = indexed_bam(&bam_header(&big_contig_specs()), &big_spread());
 
-        let handle = file.borrow_reader().expect("borrow").take();
+        let covered = names_by_linear_scan(
+            &path,
+            GenomeRegion {
+                contig: ContigId(0),
+                start: Position(1),
+                end: Position(200_000),
+            },
+        );
         assert_eq!(
-            file.pooled_readers(),
-            0,
-            "the borrow returned nothing — the stream owns the handle now"
+            covered.len(),
+            big_spread().len(),
+            "the whole contig holds every fixture read",
         );
 
-        file.return_handle(handle);
-        assert_eq!(file.pooled_readers(), 1, "and the stream hands it back");
+        let narrow = names_by_linear_scan(
+            &path,
+            GenomeRegion {
+                contig: ContigId(0),
+                // Inside the read starting at 91, which is 30 bases long. The reads are
+                // 90 apart, so most single bases fall in a gap.
+                start: Position(100),
+                end: Position(101),
+            },
+        );
+        assert!(
+            !narrow.is_empty() && narrow.len() < covered.len(),
+            "and the regions must not all return the same thing: {narrow:?}",
+        );
+    }
+
+    /// **A forward walk over a real BAM decodes each read once**, which is the claim the whole
+    /// feature rests on and the number the perf review says has to come down.
+    #[test]
+    fn a_forward_walk_over_a_bam_decodes_each_read_once() {
+        let (reference_dir, reference) = big_fixture_reference();
+        let (_bam_dir, path) = indexed_bam(&bam_header(&big_contig_specs()), &big_spread());
+        let file = AlignmentFile::open(
+            &path,
+            &reference,
+            ReadFilterConfig::default(),
+            false,
+            fixture_read_group(),
+        )
+        .expect("the fixture opens");
+
+        let mut cursor = file
+            .cursor(ContigId(0), big_reference_bases())
+            .expect("a cursor for contig 0");
+
+        // Overlapping, ascending — what a real region walk looks like.
+        for (start, end) in [
+            (1u64, 60_000u64),
+            (50_000, 110_000),
+            (100_000, 160_000),
+            (150_000, 200_000),
+        ] {
+            let asked = GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            };
+            cursor.move_to_region(asked).expect("on this chromosome");
+            while let Some(read) = cursor.next_read() {
+                read.expect("the fixture reads decode and filter");
+            }
+        }
+
+        let counts = cursor.counts();
+        assert_eq!(
+            counts.reads_decoded,
+            big_spread().len() as u64,
+            "every read in the file, and a forward walk must decode each of them once",
+        );
+        assert!(
+            counts.reads_replayed > 0,
+            "reads shared by consecutive regions must be served from what is held",
+        );
+        assert_eq!(
+            counts.regions_jumping, 1,
+            "only the first region has nothing to reuse"
+        );
+        drop(reference_dir);
     }
 
     // -----------------------------------------------------------------
-    // The composed chain — reads_in_region (C4): T9, T10, T13
+    // The composed chain, through a cursor — T9, T10, and what the reader
+    // pool's tests said before Milestone F deleted the pool
     // -----------------------------------------------------------------
 
     use noodles_sam::alignment::RecordBuf;
 
     use crate::ng::read::input::test_fixtures::read_named_with_length;
     use crate::ng::ref_seq::InMemoryRefSeq;
+    use crate::ng::types::Position;
+
+    /// All-`A` bases over the big fixture contig, so nothing is dropped for mismatching.
+    fn big_reference_bases() -> InMemoryRefSeq {
+        big_fixture_reference_bases()
+    }
 
     /// An all-`A` reference matching the fixture contigs, so a read of `A`s
     /// matches perfectly and a read of `C`s mismatches at every base.
     fn reference_bases() -> InMemoryRefSeq {
-        InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        )
+        fixture_reference_bases()
     }
 
     /// A read whose bases all mismatch the all-`A` reference — filter #8's
@@ -1329,31 +1519,54 @@ mod tests {
         }
     }
 
+    /// Every read a cursor yields for one region of one file, by name — the whole real chain
+    /// (aligned-reads reader → region narrowing → step-1 filter → order guard).
+    fn cursor_names(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
+        let mut cursor = file
+            .cursor(region.contig, reference_bases())
+            .expect("a cursor for this contig");
+        cursor.move_to_region(region).expect("on this chromosome");
+        let mut names = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            let read = read.expect("no fatal read error");
+            names.push(String::from_utf8_lossy(&read.qname).into_owned());
+        }
+        names
+    }
+
     /// **T9 — the full step-1 filter runs, not just the cheap subset.**
     ///
-    /// A read that mismatches the reference at every base is filter #8's
-    /// business, and #8 is the *reference-dependent* filter — the one a region
-    /// reader that applied only flag/MAPQ checks would miss. Its drop being
-    /// charged to `high_mismatch_fraction` is what proves `ReadFilter` is
-    /// composed into the chain rather than a subset of it. This is the property
-    /// that decided the rebuild over reusing production's reader.
+    /// A read that mismatches the reference at every base is filter #8's business, and #8 is
+    /// the *reference-dependent* filter — the one a reader applying only flag/MAPQ checks
+    /// would miss. Its drop being charged to `high_mismatch_fraction` is what proves
+    /// `ReadFilter` is composed into the chain rather than a subset of it. This is the
+    /// property that decided the rebuild over reusing production's reader.
+    ///
+    /// Converted from the per-region query at Milestone F. The tally is read off the cursor,
+    /// which is where it lives now: the filter lasts as long as the cursor, so nothing has to
+    /// be folded back into the file when a region ends.
     #[test]
-    fn t9_the_served_stream_runs_the_reference_dependent_filter() {
+    fn t9_a_cursor_runs_the_reference_dependent_filter() {
         let (_reference_dir, _bam_dir, file) = opened_over(&[
             read_named_with_length("clean", 0, 1, 30),
             all_mismatching_read("mismatching", 40),
         ]);
 
-        let reads: Vec<AlignedRead> = file
-            .reads_in_region(whole_first_contig(), reference_bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("no fatal error");
+        let mut cursor = file
+            .cursor(ContigId(0), reference_bases())
+            .expect("a cursor for contig 0");
+        cursor
+            .move_to_region(whole_first_contig())
+            .expect("on this chromosome");
+        let mut reads = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            reads.push(read.expect("no fatal error"));
+        }
 
         assert_eq!(reads.len(), 1, "only the clean read survives");
         assert_eq!(reads[0].qname, b"clean");
 
-        let counts = only_tally(&file.counts());
+        let counts = only_tally(&cursor.read_group_counts());
         assert_eq!(
             counts.high_mismatch_fraction, 1,
             "the drop is charged to filter #8, so the whole cascade ran"
@@ -1361,10 +1574,14 @@ mod tests {
         assert_eq!(counts.kept, 1);
     }
 
-    /// Chunk-edge slop is dropped **uncounted**: a read the index over-returned
-    /// is not a read the filter rejected, and charging it to a `DropReason`
-    /// would make the tally mean something different for an indexed read than
-    /// for a whole-file one.
+    /// **What the reader over-returned is dropped uncounted.** A read outside the region, and
+    /// a record with no footprint at all, are not reads the filter rejected — they are reads
+    /// the reader was never asked about. Charging them to a `DropReason` would make the tally
+    /// mean something different for a narrowed read than for a whole-file one.
+    ///
+    /// The footprint-less record is here rather than only in `region_raw_aligned_reads` because
+    /// this is where the *tally* is observable: that layer can say the record never surfaced,
+    /// and only this one can say it was charged to nothing.
     #[test]
     fn records_outside_the_region_are_dropped_without_being_counted() {
         let (_reference_dir, _bam_dir, file) = opened_over(&[
@@ -1373,18 +1590,21 @@ mod tests {
         ]);
 
         let region = GenomeRegion {
-            contig: crate::ng::types::ContigId(0),
-            start: crate::ng::types::Position(1),
-            end: crate::ng::types::Position(35),
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(35),
         };
-        let reads: Vec<AlignedRead> = file
-            .reads_in_region(region, reference_bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("no fatal error");
+        let mut cursor = file
+            .cursor(ContigId(0), reference_bases())
+            .expect("a cursor for contig 0");
+        cursor.move_to_region(region).expect("on this chromosome");
+        let mut reads = Vec::new();
+        while let Some(read) = cursor.next_read() {
+            reads.push(read.expect("no fatal error"));
+        }
 
         assert_eq!(reads.len(), 1);
-        let counts = only_tally(&file.counts());
+        let counts = only_tally(&cursor.read_group_counts());
         assert_eq!(counts.kept, 1);
         assert_eq!(
             counts.duplicate
@@ -1401,45 +1621,19 @@ mod tests {
         );
     }
 
-    /// **T13 — the file is opened once and the index parsed once**, however
-    /// many regions are queried. The index cannot be re-parsed by construction
-    /// (it is owned by the handle), so what is asserted is the observable half:
-    /// many queries, one reader.
+    /// **T10 — a fatal mid-stream error is yielded once, and then the cursor refuses.** A
+    /// truncated file must not look like a short region.
     ///
-    /// This is the guarantee the whole per-query cost model rests on, and the
-    /// one that decides whether ~10⁶ STR queries are affordable. A regression
-    /// changes no answers — only cost — so nothing but an explicit assertion
-    /// would catch it.
+    /// The per-region query fused its iterator and the next query started afresh; a cursor
+    /// goes further, because it outlives the region — it **refuses every later region**
+    /// rather than answering them from what it happens to be holding, which would be a
+    /// plausible, silently short answer for the rest of the chromosome.
     #[test]
-    fn t13_many_region_queries_open_the_file_once() {
-        let (_reference_dir, _bam_dir, file) =
-            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
-
-        for _ in 0..25 {
-            let reads: Vec<AlignedRead> = file
-                .reads_in_region(whole_first_contig(), reference_bases())
-                .expect("query")
-                .collect::<Result<_, _>>()
-                .expect("no fatal error");
-            assert_eq!(reads.len(), 1);
-        }
-
-        assert_eq!(
-            file.readers_opened(),
-            1,
-            "25 queries, one reader — the pool served every one after the first"
-        );
-        assert_eq!(file.pooled_readers(), 1, "and it is back in the pool");
-    }
-
-    /// **T10 — a fatal mid-stream error is yielded once, then the stream is
-    /// done.** A truncated file must not look like a short region.
-    #[test]
-    fn t10_a_truncated_file_yields_one_error_and_then_nothing() {
+    fn t10_a_truncated_file_fails_once_and_then_refuses_later_regions() {
         let (_reference_dir, reference) = fixture_reference(false);
-        // Enough records to span several BGZF blocks: truncating a
-        // single-block file would destroy the *header*, which is a different
-        // fault (the gate's) from the mid-stream one this test is about.
+        // Enough records to span several BGZF blocks: truncating a single-block file would
+        // destroy the *header*, which is a different fault (the gate's) from the mid-stream
+        // one this test is about.
         let mut records: Vec<RecordBuf> = Vec::new();
         for start in 1..=60 {
             for copy in 0..120 {
@@ -1462,8 +1656,12 @@ mod tests {
         )
         .expect("opens");
 
-        // Truncate *after* opening, so the gate and the index are intact and
-        // the fault can only appear mid-stream.
+        // The cursor is minted before the truncation, as a real run's would be: the gate and
+        // the index are intact and the fault can only appear mid-stream.
+        let mut cursor = file
+            .cursor(ContigId(0), reference_bases())
+            .expect("a cursor for contig 0");
+
         let full = std::fs::metadata(&path).expect("stat").len();
         std::fs::OpenOptions::new()
             .write(true)
@@ -1472,227 +1670,335 @@ mod tests {
             .set_len(full * 3 / 4)
             .expect("truncate");
 
-        let mut reads = file
-            .reads_in_region(whole_first_contig(), reference_bases())
-            .expect("the query itself still plans");
+        cursor
+            .move_to_region(whole_first_contig())
+            .expect("the move itself still succeeds");
 
         let mut reads_before_error = 0;
         let mut errors = 0;
         let mut after_error = 0;
-        while let Some(item) = reads.next() {
+        while let Some(item) = cursor.next_read() {
             match item {
                 Ok(_) => reads_before_error += 1,
                 Err(_) => {
                     errors += 1;
-                    // Everything the iterator yields after the first error.
-                    after_error = reads.by_ref().count();
+                    while cursor.next_read().is_some() {
+                        after_error += 1;
+                    }
                     break;
                 }
             }
         }
 
-        // Without this the test would pass against a chain that yielded
-        // *nothing* — it would still reach the truncation and still fuse. That
-        // is exactly the shape of the fixture bug this module already hit once.
+        // Without this the test would pass against a chain that yielded *nothing* — it would
+        // still reach the truncation and still stop. That is exactly the shape of the fixture
+        // bug this module already hit once.
         assert!(
             reads_before_error > 0,
             "reads must flow before the truncation is reached"
         );
         assert_eq!(errors, 1, "the truncation surfaced as a fatal error");
-        assert_eq!(after_error, 0, "and the stream fused rather than resuming");
+        assert_eq!(after_error, 0, "and the walk stopped rather than resuming");
 
-        // The reader still comes back on the error path — the case where its
-        // state is least obvious.
-        drop(reads);
-        assert_eq!(
-            file.pooled_readers(),
-            1,
-            "a stream that ended in an error still returns its reader"
+        assert!(
+            matches!(
+                cursor.move_to_region(whole_first_contig()),
+                Err(crate::ng::read::input::cursor::CursorError::AfterFailure { .. })
+            ),
+            "a cursor whose file failed must refuse later regions, not answer them short",
         );
     }
 
-    /// The signature exists so N threads can query one file at once, and
-    /// nothing so far has actually done that through `reads_in_region` — the
-    /// pool tests stop at `borrow_reader`. A `Rc` or `RefCell` creeping into
-    /// the chain would break this and surface only at the first parallel call
-    /// site, a step or two away.
+    /// **A cursor is `Send`, so a worker can own one.** The parallel fan-out is one cursor per
+    /// worker sharing nothing, so an `Rc` or a `RefCell` creeping into the chain would break
+    /// that — and would surface at the first parallel call site, a plan or two away, rather
+    /// than here.
     #[test]
-    fn a_region_stream_is_send_so_threads_can_share_one_file() {
+    fn a_cursor_is_send_so_a_worker_can_own_one() {
         fn assert_send<T: Send>() {}
-        assert_send::<RegionReads<InMemoryRefSeq>>();
+        assert_send::<AlignmentCursor<InMemoryRefSeq>>();
         assert_send::<&AlignmentFile>();
     }
 
-    /// And the same thing dynamically: eight concurrent queries, every reader
-    /// returned, **every tally folded in**. The counts assertion is the
-    /// valuable half — it is what would catch a fold lost under contention.
+    /// And the same thing dynamically: eight threads, one open file, a cursor each, every one
+    /// of them reading the whole contig correctly.
+    ///
+    /// The reader pool this replaces made concurrency a property of the *file*; it is now a
+    /// property of there being one cursor per worker, each with its own descriptor. What can
+    /// still fail is any sharing that crept in below — which is what this can catch.
     #[test]
-    fn concurrent_region_queries_each_get_a_reader_and_bank_every_tally() {
-        let (_reference_dir, _bam_dir, file) =
-            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+    fn cursors_on_one_file_read_the_same_thing_from_many_threads() {
+        let (_reference_dir, _bam_dir, file) = opened_over(&[
+            read_named_with_length("a", 0, 1, 30),
+            read_named_with_length("b", 0, 40, 30),
+        ]);
 
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    let reads: Vec<AlignedRead> = file
-                        .reads_in_region(whole_first_contig(), reference_bases())
-                        .expect("query")
-                        .collect::<Result<_, _>>()
-                        .expect("no fatal error");
-                    assert_eq!(reads.len(), 1);
+                    assert_eq!(
+                        cursor_names(&file, whole_first_contig()),
+                        vec!["a".to_string(), "b".to_string()],
+                    );
                 });
             }
         });
-
-        assert_eq!(
-            only_tally(&file.counts()).kept,
-            8,
-            "every stream folded its tally in — none lost to the race"
-        );
-        assert_eq!(
-            file.pooled_readers(),
-            file.readers_opened(),
-            "and every reader opened came back"
-        );
     }
 
-    /// **T4d, re-sited from C3.** The order guard's state lives in the
-    /// per-region iterator, so querying a later region and then an earlier one
-    /// **on the same handle** is a new forward scan, not a regression. C3 could
-    /// only assert this with two separate guards, which could not fail if the
-    /// state ever migrated to the handle. This can.
+    /// **A cursor for a chromosome the file does not have is refused, and refused here.**
+    ///
+    /// Every layer below would answer an unknown contig as "nothing here", which is
+    /// indistinguishable from a chromosome that is genuinely empty — so a caller looping over
+    /// a stale contig list would silently produce no calls for it. Inherited from the region
+    /// planners the per-region query had, which raised the same refusal per query.
     #[test]
-    fn t4d_a_later_region_then_an_earlier_one_on_one_handle_is_not_a_regression() {
-        let (_reference_dir, _bam_dir, file) = opened_over(&[
-            read_named_with_length("early", 0, 1, 30),
-            read_named_with_length("late", 0, 60, 30),
-        ]);
-
-        let later = GenomeRegion {
-            contig: crate::ng::types::ContigId(0),
-            start: crate::ng::types::Position(55),
-            end: crate::ng::types::Position(100),
-        };
-        let earlier = GenomeRegion {
-            contig: crate::ng::types::ContigId(0),
-            start: crate::ng::types::Position(1),
-            end: crate::ng::types::Position(40),
-        };
-
-        let first: Vec<AlignedRead> = file
-            .reads_in_region(later, reference_bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("the later region streams");
-        assert_eq!(first.len(), 1);
-
-        let second: Vec<AlignedRead> = file
-            .reads_in_region(earlier, reference_bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("an earlier region on the same handle is a new forward scan");
-        assert_eq!(second.len(), 1);
-    }
-
-    /// A query that fails to plan must not cost a reader — the pool is only
-    /// touched once everything fallible has succeeded.
-    #[test]
-    fn a_failed_query_returns_no_reader_because_it_never_took_one() {
+    fn a_cursor_for_a_contig_the_file_does_not_have_is_an_error() {
         let (_reference_dir, _bam_dir, file) =
             opened_over(&[read_named_with_length("r", 0, 1, 30)]);
 
-        let nonexistent_contig = GenomeRegion {
-            contig: crate::ng::types::ContigId(9),
-            start: crate::ng::types::Position(1),
-            end: crate::ng::types::Position(10),
-        };
-        assert!(matches!(
-            file.reads_in_region(nonexistent_contig, reference_bases()),
-            Err(AlignmentFileError::Region { .. })
-        ));
-        assert_eq!(
-            file.readers_opened(),
-            0,
-            "planning failed before the pool was touched"
-        );
-    }
-
-    /// Abandoning a stream half-way still returns the reader, and still banks
-    /// the drops recorded so far — both happen in `Drop`, so neither depends on
-    /// the caller draining.
-    #[test]
-    fn abandoning_a_stream_returns_the_reader_and_banks_its_counts() {
-        let (_reference_dir, _bam_dir, file) = opened_over(&[
-            all_mismatching_read("bad", 1),
-            read_named_with_length("good", 0, 40, 30),
-        ]);
-
-        {
-            let mut reads = file
-                .reads_in_region(whole_first_contig(), reference_bases())
-                .expect("query");
-            // Pull exactly one read, then walk away.
-            let _ = reads.next();
-            assert_eq!(file.pooled_readers(), 0, "the reader is out on loan");
+        let error = file
+            .cursor(ContigId(9), reference_bases())
+            .err()
+            .expect("a contig the file does not declare must be refused");
+        match error {
+            AlignmentFileError::CursorContigNotInFile {
+                contig,
+                contigs_in_file,
+                ..
+            } => {
+                assert_eq!(contig, ContigId(9));
+                assert_eq!(contigs_in_file, FIXTURE_CONTIGS.len());
+            }
+            other => panic!("expected CursorContigNotInFile, got {other:?}"),
         }
 
-        assert_eq!(file.pooled_readers(), 1, "returned on drop");
-        assert_eq!(
-            only_tally(&file.counts()).high_mismatch_fraction,
-            1,
-            "the drop seen before abandoning was banked, not lost"
+        // And the contigs it *does* have are fine, so the check is a check and not a refusal
+        // of everything.
+        assert!(file.cursor(ContigId(0), reference_bases()).is_ok());
+    }
+
+    /// **An accessor over a different reference is refused, and the refusal compares
+    /// lengths — not just names.**
+    ///
+    /// This is the check that replaced `ReadFilter::new`'s per-contig probe (B1). The probe
+    /// fetched a zero-length window on every `@SQ` contig, which proved each one *resolved*
+    /// and nothing about how long it was, so an accessor whose contigs were the right names at
+    /// the wrong sizes sailed through it and then made filter #8 compare every read against
+    /// the wrong bases — silently, with no error and no crash.
+    ///
+    /// Both halves are asserted because each fails under a different mutation: drop the
+    /// comparison entirely and *both* cases are accepted; compare names only — which is what
+    /// the probe effectively did — and the second is.
+    ///
+    /// **The fixture accessors were themselves wrong until this check existed.** Every one of
+    /// them was built with `InMemoryRefSeq::from_contigs`, which names contigs `contig0`,
+    /// `contig1`, … , so all 23 cursor tests were passing an accessor that disagreed with the
+    /// file on every contig name. They are built through
+    /// [`fixture_reference_bases`](crate::ng::read::input::test_fixtures::fixture_reference_bases)
+    /// now.
+    #[test]
+    fn a_cursor_refuses_an_accessor_over_a_different_contig_table() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+
+        // Right lengths, wrong names.
+        let wrong_names = InMemoryRefSeq::from_named_contigs(
+            FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| (format!("not_{name}"), vec![b'A'; *length]))
+                .collect(),
+        );
+        let error = file
+            .cursor(ContigId(0), wrong_names)
+            .err()
+            .expect("an accessor naming different contigs must be refused");
+        // Pinned to the shape, not just the field name: the **file** is the left operand, so
+        // the file's value prints first — the direction the open gate prints, and a recorded
+        // decision that a bare `contains("name disagreement")` would not have protected.
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { detail, .. }
+                if detail.contains("('chr1' vs 'not_chr1')")),
+            "the message must name the field and read file-value-vs-accessor-value: {error}"
+        );
+
+        // Right names, wrong lengths — the case the probe could never catch, because a
+        // zero-length window at position 1 resolves whatever the contig's length is.
+        let wrong_lengths = InMemoryRefSeq::from_named_contigs(
+            FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length + 1]))
+                .collect(),
+        );
+        let error = file
+            .cursor(ContigId(0), wrong_lengths)
+            .err()
+            .expect("an accessor with the right names at the wrong lengths must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { detail, .. }
+                if detail.contains("length disagreement")
+                    && detail.contains("contig 'chr1': 100 vs 101")),
+            "a name-only comparison would have accepted this, and the file's length prints \
+             first: {error}"
+        );
+
+        // And the matching accessor is accepted, so the check discriminates rather than
+        // refusing everything.
+        assert!(file.cursor(ContigId(0), reference_bases()).is_ok());
+    }
+
+    /// **A permuted table is refused, and this is the case the whole check exists for.**
+    ///
+    /// A permuted `@SQ` list resolves on **every** fetch — the deleted per-contig probe
+    /// accepted it — so filter #8 would compare each read against the wrong contig's bases
+    /// with no error at all. Both cases in the sibling test above are order-blind: rewriting
+    /// the comparison as a name→length hash lookup, which is exactly the shape someone
+    /// optimising a 2,580-entry ordered walk would reach for, passes them and silently reopens
+    /// that hole. Mutation-verified: this test is the one that does not.
+    ///
+    /// `FIXTURE_CONTIGS`' two contigs have deliberately different lengths, so a swap is
+    /// detectable — its own doc says that is why.
+    #[test]
+    fn a_cursor_refuses_an_accessor_whose_contig_table_is_a_permutation() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+
+        let mut permuted: Vec<(String, Vec<u8>)> = FIXTURE_CONTIGS
+            .iter()
+            .map(|(name, length)| ((*name).to_string(), vec![b'A'; *length]))
+            .collect();
+        permuted.reverse();
+
+        let error = file
+            .cursor(ContigId(0), InMemoryRefSeq::from_named_contigs(permuted))
+            .err()
+            .expect("a permuted contig table must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { .. }),
+            "got {error}"
         );
     }
 
-    /// **The `Arc` is load-bearing past the borrow check.** A stream that
-    /// outlives every other handle on its file still reads, still returns its
-    /// reader, and still folds its tally in.
+    /// An accessor missing a contig the file declares is refused on the **count**, which is
+    /// `first_disagreement`'s third branch and the shape a wrong-but-related reference takes in
+    /// practice — an analysis set with alts against one without.
     ///
-    /// Asserted here rather than at the `SampleReads` level, and that is the
-    /// whole point: a tally folded into a file nobody can reach is
-    /// indistinguishable from one that was never folded at all, so the property
-    /// only becomes falsifiable through a **second handle** kept on purpose.
-    /// The sibling test in `mod.rs` that drops the sample first is a
-    /// compile-time anchor and cannot see this — gutting `RegionReads::drop`
-    /// leaves it green.
+    /// It is also the input class the deleted `read_filter_new_rejects_a_contig_missing_from_
+    /// the_reference` actually drove: a two-contig header against a one-contig reference.
     #[test]
-    fn a_stream_outliving_every_other_handle_still_banks_its_reader_and_tally() {
-        let (_reference_dir, _bam_dir, file) = opened_over(&[
-            all_mismatching_read("bad", 1),
-            read_named_with_length("good", 0, 40, 30),
-        ]);
-        let watcher = Arc::clone(&file);
+    fn a_cursor_refuses_an_accessor_whose_contig_table_is_shorter_than_the_files() {
+        use crate::ng::ref_seq::InMemoryRefSeq;
 
-        let stream = file
-            .reads_in_region(whole_first_contig(), reference_bases())
-            .expect("query");
-        drop(file);
-        assert_eq!(
-            Arc::strong_count(&watcher),
-            2,
-            "the stream must hold an owning handle of its own, not a borrow"
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 0, 1, 30)]);
+        let short = InMemoryRefSeq::from_named_contigs(vec![(
+            FIXTURE_CONTIGS[0].0.to_string(),
+            vec![b'A'; FIXTURE_CONTIGS[0].1],
+        )]);
+
+        let error = file
+            .cursor(ContigId(0), short)
+            .err()
+            .expect("an accessor missing a contig the file declares must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::CursorAccessorContigTable { detail, .. }
+                if detail.contains("@SQ list length differs")),
+            "got {error}"
+        );
+    }
+
+    /// **A matching table does not mean the accessor can serve the bases**, and the cursor says
+    /// so up front rather than failing mid-walk.
+    ///
+    /// `WindowedRefSeq` takes its `ContigList` as a constructor argument independent of the
+    /// FASTA it will read, so a table naming a contig the file does not hold matches this BAM
+    /// perfectly and cannot serve a single base of it — a stale `.fai`, or one whose FASTA was
+    /// replaced. The table comparison cannot see that; the one zero-length fetch can.
+    ///
+    /// This is the half of the deleted probe's property that the table comparison does **not**
+    /// subsume. The probe asked it of all ~2,580 header contigs; this asks it of the one the
+    /// cursor is for.
+    #[test]
+    fn a_cursor_refuses_an_accessor_that_cannot_serve_its_contig() {
+        use crate::fasta::{ContigEntry, ContigList};
+        use crate::ng::ref_seq::WindowedRefSeq;
+        use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
+
+        let (_reference_dir, _bam_dir, file) =
+            opened_over(&[read_named_with_length("r", 1, 1, 30)]);
+
+        // A FASTA holding chr1 only …
+        let (_fasta_dir, fasta) = build_fasta(&[ContigSpec {
+            name: FIXTURE_CONTIGS[0].0.to_string(),
+            length: FIXTURE_CONTIGS[0].1 as u64,
+        }])
+        .expect("build fasta");
+        // … behind a table claiming both, exactly as the file's `@SQ` does.
+        let table = ContigList {
+            entries: FIXTURE_CONTIGS
+                .iter()
+                .map(|(name, length)| ContigEntry {
+                    name: (*name).to_string(),
+                    length: *length as u64,
+                    md5: None,
+                })
+                .collect(),
+        };
+
+        // chr1 is servable, so the accessor is fine for a cursor over it …
+        assert!(
+            file.cursor(
+                ContigId(0),
+                WindowedRefSeq::new(fasta.clone(), table.clone())
+            )
+            .is_ok(),
+            "the contig the FASTA does hold is servable"
         );
 
-        let reads: Vec<AlignedRead> = stream.collect::<Result<_, _>>().expect("no fatal error");
-        assert_eq!(reads.len(), 1, "the all-mismatching read is filtered out");
+        // … and chr2 is not, which is refused here rather than at the first read.
+        let error = file
+            .cursor(ContigId(1), WindowedRefSeq::new(fasta, table))
+            .err()
+            .expect("an accessor that cannot serve this contig must be refused");
+        assert!(
+            matches!(&error, AlignmentFileError::Reference { .. }),
+            "got {error}"
+        );
+    }
 
-        assert_eq!(
-            watcher.pooled_readers(),
-            1,
-            "the reader went back to the file the stream kept alive"
-        );
-        assert_eq!(
-            only_tally(&watcher.counts()).high_mismatch_fraction,
-            1,
-            "and the tally was folded into that same file, not into a dead copy"
-        );
+    /// **The fixture accessors are over the fixture files' table** — the precondition
+    /// `AlignmentCursor::over_records` documents and cannot check, pinned for the three test
+    /// call sites that build a cursor without going through `AlignmentFile::cursor`.
+    ///
+    /// Before B1 this was false of *every* one of them — the accessors were built with
+    /// `InMemoryRefSeq::from_contigs`, which names contigs `contig0`, `contig1`, … against
+    /// files declaring `chr1`, `chr2` — and nothing noticed for the life of the fixture,
+    /// because the check of the day fetched a window per contig and a window resolves whatever
+    /// the contig is called. If these drift apart again, those three sites silently revert to
+    /// pre-B1 behaviour with every test through them still passing.
+    #[test]
+    fn the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files() {
+        use crate::ng::ref_seq::ContigTable;
+
+        contig_list(&bam_header(&matching_contigs()))
+            .expect("the fixture header carries no malformed M5")
+            .first_disagreement(fixture_reference_bases().contigs())
+            .expect("the small fixture accessor must be over the small fixture files' table");
+
+        contig_list(&bam_header(&big_contig_specs()))
+            .expect("the big fixture header carries no malformed M5")
+            .first_disagreement(big_fixture_reference_bases().contigs())
+            .expect("the big fixture accessor must be over the big fixture file's table");
     }
 
     // -----------------------------------------------------------------
     // BAM/CRAM parity (C5) — T8
     // -----------------------------------------------------------------
 
-    use crate::ng::read::input::test_fixtures::indexed_cram;
+    use crate::ng::read::input::test_fixtures::{indexed_cram, multi_container_cram};
 
     /// A spread of reads with pile-ups, so parity means more than "both
     /// returned nothing".
@@ -1713,23 +2019,26 @@ mod tests {
         records
     }
 
+    /// One region's read names through a cursor of its own — the shape the parity comparison
+    /// needs, since the point is that two *files* agree rather than that one cursor's run of
+    /// regions does (which `a_run_of_regions_through_one_bam_cursor_matches_a_linear_scan`
+    /// covers).
     fn names_from(file: &Arc<AlignmentFile>, region: GenomeRegion) -> Vec<String> {
-        file.reads_in_region(region, reference_bases())
-            .expect("query")
-            .map(|read| String::from_utf8_lossy(&read.expect("no fatal error").qname).into_owned())
-            .collect()
+        cursor_names(file, region)
     }
 
     /// **T8 — the same reads written as BAM and as CRAM produce the same
     /// ordered stream.**
     ///
-    /// The two containers share nothing below the `RecordSource` seam: BAM
-    /// reads one record at a time from bgzf chunks, CRAM decodes whole
-    /// containers against the reference and walks a `.crai`. Everything above —
-    /// the filter, the order guard — is the same code. So an disagreement here
-    /// is a container-reader bug, which is exactly what this is looking for,
-    /// and BAM is the oracle because it is the simpler reader and was verified
-    /// first against a linear scan (T5).
+    /// The two containers share nothing below the aligned-reads-reader seam: BAM reads one record at
+    /// a time from bgzf chunks, CRAM decodes whole containers against the reference and walks
+    /// a `.crai`. Everything above — the region narrowing, the filter, the order guard — is
+    /// the same code. So a disagreement here is a aligned-reads-reader bug, which is exactly what
+    /// this is looking for, and BAM is the oracle because it is the simpler reader and was
+    /// verified first against a linear scan.
+    ///
+    /// **Through cursors since Milestone F**, which is the point of converting it rather than
+    /// deleting it: the two arms it compares are the two that survive.
     #[test]
     fn t8_a_cram_yields_the_same_ordered_reads_as_the_same_bam() {
         let records = parity_records();
@@ -1838,87 +2147,20 @@ mod tests {
         assert_eq!(file.read_group_resolution(), &fixture_read_group());
     }
 
-    /// **The `.crai` walk, with more than one entry to walk.**
-    ///
-    /// The parity fixture fits in a single container, so it exercises the
-    /// container decode but none of the walk's control flow. This one spans
-    /// several containers over a long contig, so a query for a slice of it must
-    /// visit some entries, skip others, and **stop early** rather than decoding
-    /// every container to the end — which is the difference between a seek and
-    /// a whole-file scan, ~10⁶ times over.
-    #[test]
-    fn a_multi_container_cram_walks_its_crai_and_stops_early() {
-        use crate::ng::read::input::test_fixtures::multi_container_cram;
-
-        const CONTIG_LENGTH: usize = 400_000;
-        // Comfortably over noodles' 10240 records per container.
-        const READS: usize = 30_000;
-
-        let (_cram_dir, cram_path, _fasta_dir, fasta) = multi_container_cram(CONTIG_LENGTH, READS);
-        let reference = OpenReference::from(
-            read_reference_info(ReferenceSource::Fasta {
-                fasta: fasta.clone(),
-                fai: None,
-            })
-            .expect("read reference"),
-        );
-        let file = AlignmentFile::open(
-            &cram_path,
-            &reference,
-            ReadFilterConfig::default(),
-            false,
-            fixture_read_group(),
-        )
-        .expect("opens");
-
-        let bases = || InMemoryRefSeq::from_contigs(vec![vec![b'A'; CONTIG_LENGTH]]);
-        let near_the_start = GenomeRegion {
-            contig: crate::ng::types::ContigId(0),
-            start: crate::ng::types::Position(1),
-            end: crate::ng::types::Position(200),
-        };
-
-        let reads: Vec<AlignedRead> = file
-            .reads_in_region(near_the_start, bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("no fatal error");
-
-        assert!(
-            !reads.is_empty(),
-            "the region is covered, so the walk must find its container"
-        );
-        for read in &reads {
-            assert!(
-                read.pos <= 200 && read.pos + 29 >= 1,
-                "a read outside the region survived: pos {}",
-                read.pos
-            );
-        }
-
-        // Deep in the covered range, to prove the walk reaches later containers
-        // rather than only ever decoding the first. (Well inside where reads
-        // actually are — the spread stops short of the contig end.)
-        let late_start = (CONTIG_LENGTH as u64 * 3) / 4;
-        let near_the_end = GenomeRegion {
-            contig: crate::ng::types::ContigId(0),
-            start: crate::ng::types::Position(late_start),
-            end: crate::ng::types::Position(late_start + 200),
-        };
-        let late: Vec<AlignedRead> = file
-            .reads_in_region(near_the_end, bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("no fatal error");
-        assert!(
-            !late.is_empty(),
-            "the walk must reach the contig's last containers too"
-        );
-        assert!(
-            late[0].pos >= late_start - 30,
-            "and those are genuinely different reads from the first query"
-        );
-    }
+    // **`a_multi_container_cram_walks_its_crai_and_stops_early` died with the per-region
+    // query, and both halves of it are accounted for.** It asserted two things: that a walk
+    // reaches later containers rather than only ever decoding the first, and that it *stops
+    // early* rather than decoding the contig to the end.
+    //
+    // The first is subsumed — `a_run_of_regions_through_one_cram_cursor_matches_a_linear_scan`
+    // runs a whole sequence of regions, including late ones and the whole contig, over a
+    // three-container fixture, and compares every answer against a scan of the file.
+    //
+    // The second is a rule the cursor **deliberately does not have**: an aligned-reads reader
+    // positions, it never bounds (`aligned_reads_reader/mod.rs`), because the cursor serves a
+    // forward region by not repositioning at all. Where the walk *starts* is still asserted —
+    // by `containers_ending_before_the_region_are_skipped_rather_than_walked`, in
+    // `aligned_reads_reader::cram` — and where it stops is now the layer above's business.
 
     /// **T2b's sequencing half.** The digest check is deferred *on purpose*:
     /// the reference a file is opened against usually carries no digests yet
@@ -1964,14 +2206,9 @@ mod tests {
         )
         .expect("a wrong M5 is a wildcard against a .fai-only reference");
 
-        let reads: Vec<AlignedRead> = file
-            .reads_in_region(whole_first_contig(), reference_bases())
-            .expect("query")
-            .collect::<Result<_, _>>()
-            .expect("reads flow even though the assembly is wrong");
         assert_eq!(
-            reads.len(),
-            1,
+            cursor_names(&file, whole_first_contig()),
+            vec!["r".to_string()],
             "the reads flowed first — startup never blocked"
         );
 
@@ -1982,6 +2219,105 @@ mod tests {
             .expect_err("the wrong assembly is caught, after the fact");
         assert_eq!(error.contig, "chr1");
         assert_eq!(error.observed, [0xff; 16]);
+    }
+
+    // -----------------------------------------------------------------
+    // Grouping the `.crai` by contig — moved here at Milestone F
+    // -----------------------------------------------------------------
+    //
+    // These three tests came from the per-region CRAM source, which reached the grouping
+    // through a planner. The planner is gone; the grouping is not — `cursor` looks a
+    // chromosome's entries up in it directly — so the tests are stated against
+    // `group_crai_by_contig` itself, which was always their real subject.
+
+    /// A `.crai` entry for `contig` covering `[start, start + span - 1]`, at `offset` — which
+    /// the tests use to tell entries apart.
+    fn crai_entry(
+        contig: Option<usize>,
+        start: usize,
+        span: usize,
+        offset: u64,
+    ) -> cram::crai::Record {
+        cram::crai::Record::new(
+            contig,
+            noodles_core::Position::new(start),
+            span,
+            offset,
+            0,
+            0,
+        )
+    }
+
+    /// **The fix for production's O(n) prefix rescan** — and, more importantly, for an
+    /// ordering assumption that does not hold. A query on a late contig must reach that
+    /// contig's entries without walking (or mis-searching) the earlier ones.
+    ///
+    /// Hand-built rather than read from a file, because the file fixture cannot hold more than
+    /// one contig (`test_fixtures::indexed_cram`).
+    #[test]
+    fn the_crai_is_grouped_so_each_contig_sees_only_its_own_entries() {
+        let index = vec![
+            crai_entry(Some(0), 1, 50, 100),
+            crai_entry(Some(0), 51, 50, 200),
+            crai_entry(Some(1), 1, 100, 300),
+            crai_entry(Some(1), 101, 100, 400),
+            crai_entry(Some(2), 1, 300, 500),
+        ];
+        let grouped = group_crai_by_contig(&index, 3);
+
+        for (contig, expected_offsets) in [
+            (0usize, vec![100u64, 200]),
+            (1, vec![300, 400]),
+            (2, vec![500]),
+        ] {
+            let offsets: Vec<u64> = grouped[contig].iter().map(|e| e.offset()).collect();
+            assert_eq!(offsets, expected_offsets, "contig {contig}");
+        }
+    }
+
+    /// **The ordering assumption a binary search would have made, violated by noodles
+    /// itself.** Within a multi-reference slice, `fs::index` sorts by `Option<usize>` — and
+    /// `None < Some(0)` — so the *unplaced* entry is emitted first. A `partition_point` over
+    /// that is unspecified, and a walk would then meet a foreign entry and report
+    /// end-of-input, losing every read of the region with no error at all.
+    ///
+    /// Grouping assumes nothing about order, so an interleaved index is fine.
+    #[test]
+    fn an_unplaced_entry_before_the_placed_ones_does_not_hide_a_contig() {
+        let index = vec![
+            crai_entry(Some(0), 1, 50, 100),
+            crai_entry(None, 1, 0, 150),
+            crai_entry(Some(1), 1, 100, 300),
+        ];
+        let grouped = group_crai_by_contig(&index, 3);
+
+        let offsets: Vec<u64> = grouped[1].iter().map(|e| e.offset()).collect();
+        assert_eq!(
+            offsets,
+            vec![300],
+            "contig 1's entry must be found even though an unplaced entry precedes it — the \
+             case that silently returned nothing before"
+        );
+
+        // And the unplaced entry belongs to no contig at all.
+        for (contig, entries) in grouped.iter().enumerate() {
+            assert!(
+                entries.iter().all(|e| e.reference_sequence_id().is_some()),
+                "an unplaced entry leaked into contig {contig}"
+            );
+        }
+    }
+
+    /// A contig with no entries yields an empty walk rather than someone else's entries.
+    #[test]
+    fn a_contig_absent_from_the_crai_has_an_empty_walk() {
+        let index = vec![
+            crai_entry(Some(0), 1, 50, 100),
+            crai_entry(Some(2), 1, 300, 500),
+        ];
+        let grouped = group_crai_by_contig(&index, 3);
+
+        assert!(grouped[1].is_empty());
     }
 
     // --- the hex decoder's edges ---
@@ -2015,7 +2351,6 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::ng::reference_info::{ReferenceSource, read_reference_info};
-    use crate::pileup::per_sample::cram_files::{ContigSpec, build_fasta};
 
     /// An opened fixture **plus the temp dirs its files live in**.
     ///
@@ -2127,7 +2462,7 @@ mod tests {
     /// is stricter does not have to be taken on trust.
     #[test]
     fn the_superseded_resolves_only_probe_cannot_see_order() {
-        use crate::ng::ref_seq::{InMemoryRefSeq, RefSeq};
+        use crate::ng::ref_seq::RefSeq;
         use crate::ng::types::ContigId;
 
         let (_reference_dir, reference) = fixture_reference(false);
@@ -2135,12 +2470,7 @@ mod tests {
 
         // The superseded check: fetch every contig the file's `@SQ` list can
         // name, and accept if each one resolves. Order is never consulted.
-        let reference_bases = InMemoryRefSeq::from_contigs(
-            FIXTURE_CONTIGS
-                .iter()
-                .map(|(_, length)| vec![b'A'; *length])
-                .collect(),
-        );
+        let reference_bases = fixture_reference_bases();
         let mut probe = Vec::new();
         let every_contig_resolves = (0..permuted.reference_sequences().len()).all(|index| {
             reference_bases

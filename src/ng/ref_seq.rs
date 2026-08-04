@@ -281,9 +281,42 @@ impl<T: ContigTable + ?Sized> ContigTable for std::sync::Arc<T> {
 /// buffered — [`InMemoryRefSeq`], [`ResidentRefSeq`] — implement this as a no-op honestly
 /// rather than by pretending: they hold no window to shrink, so "release what I have
 /// passed" is already true of them.
+///
+/// # Why `&self` and not `&mut self`
+///
+/// A reference reader is **shared**: the walk must own one, and an `Arc` clone is the only
+/// owned handle that does not rebuild the reader underneath. An `Arc` hands out `&self`, so
+/// an `&mut self` here means *the consumers that most need to evict cannot* — which is
+/// exactly what happened. Both locus generators held their reader by `Arc` and never evicted,
+/// and a forward walk of human chromosome 1 would hold about 250 MB of it.
+///
+/// Nothing is stretched to allow this: the window already lives behind a `RefCell`, because
+/// fetching mutates it through `&self` too ([`RefSeq::fetch_into`]). Eviction is the same
+/// kind of operation on the same field.
 pub trait EvictableRefSeq {
     /// Release buffered bases before 1-based `pos` on the currently-resident contig.
-    fn evict_before(&mut self, pos: u64);
+    fn evict_before(&self, pos: u64);
+
+    /// How many bases this reader is holding in memory right now.
+    ///
+    /// **The bound made observable.** "The window is bounded" is otherwise an argument about
+    /// eviction call sites rather than something a test can assert, and a call site quietly
+    /// dropped costs memory without changing a single answer. Zero for an implementation with
+    /// no window, which is honest rather than a stand-in.
+    fn resident_bases(&self) -> usize {
+        0
+    }
+}
+
+/// Eviction through a shared handle — the whole reason [`EvictableRefSeq`] takes `&self`.
+impl<T: EvictableRefSeq + ?Sized> EvictableRefSeq for std::sync::Arc<T> {
+    fn evict_before(&self, pos: u64) {
+        (**self).evict_before(pos);
+    }
+
+    fn resident_bases(&self) -> usize {
+        (**self).resident_bases()
+    }
 }
 
 /// A synthetic, fully in-memory reference: each contig's bytes held directly, indexed by
@@ -383,8 +416,9 @@ impl ContigTable for InMemoryRefSeq {
 }
 
 impl EvictableRefSeq for InMemoryRefSeq {
-    /// Nothing to release: the bytes *are* the reference, not a window onto one.
-    fn evict_before(&mut self, _pos: u64) {}
+    /// Nothing to release: the bytes *are* the reference, not a window onto one. And nothing
+    /// resident in the sense this asks about — the bases are the value, not a cache of it.
+    fn evict_before(&self, _pos: u64) {}
 }
 
 impl RawRefSeq for InMemoryRefSeq {
@@ -496,7 +530,7 @@ impl EvictableRefSeq for ResidentRefSeq {
     /// contig, dropped at a transition by [`Self::clear`]. Shrinking it partway is not a
     /// thing it can do, and saying so with a no-op is honest — the alternative would be
     /// `clear()`, which would evict the very bases the walk is about to read next.
-    fn evict_before(&mut self, _pos: u64) {}
+    fn evict_before(&self, _pos: u64) {}
 }
 
 impl RawRefSeq for ResidentRefSeq {
@@ -606,11 +640,11 @@ impl WindowedRefSeq {
     /// The same accessor, over an index parsed **once** and shared by every accessor
     /// built from it.
     ///
-    /// This is the shape a per-query factory wants: each call still yields its *own*
+    /// This is the shape a per-file factory wants: each call still yields its *own*
     /// reader — its own file cursor and its own window, which is why
-    /// [`SampleReads::reads_in_region`](crate::ng::read::input::SampleReads::reads_in_region)
+    /// [`SampleReads::cursor`](crate::ng::read::input::SampleReads::cursor)
     /// takes a factory rather than one shared accessor — but the index behind them is
-    /// parsed once for the run. Sharing one *accessor* across k streams would collapse
+    /// parsed once for the run. Sharing one *accessor* across k cursors would collapse
     /// them onto one cursor; sharing the *index* costs nothing and collapses nothing.
     ///
     /// **Both** the index and the contig table are shared, because fixing only the
@@ -656,10 +690,18 @@ impl EvictableRefSeq for WindowedRefSeq {
     /// hold, which is *less* than asked and therefore safe — and a >4 Gb coordinate
     /// cannot be fetched by this reader in the first place, so it cannot be buffered
     /// either. Eviction is a hint; a wrong one costs memory, never an answer.
-    fn evict_before(&mut self, pos: u64) {
-        if let Some((_, reader)) = self.current.get_mut() {
+    fn evict_before(&self, pos: u64) {
+        if let Some((_, reader)) = self.current.borrow_mut().as_mut() {
             reader.evict_before(u32::try_from(pos).unwrap_or(u32::MAX));
         }
+    }
+
+    /// The resident window, in bases — see the trait method.
+    fn resident_bases(&self) -> usize {
+        self.current
+            .borrow()
+            .as_ref()
+            .map_or(0, |(_, reader)| reader.resident_bases())
     }
 }
 
@@ -1030,6 +1072,86 @@ mod tests {
         (dir, fasta_path, ContigList { entries })
     }
 
+    /// **A forward walk holds one byte for every base it has passed, unless it releases.**
+    ///
+    /// This is the shape every consumer of a windowed reference has: fetch a window under each
+    /// read, step forward, repeat. The window extends whenever the next request is near the
+    /// last one, and it only ever shrinks on [`EvictableRefSeq::evict_before`] — so a consumer
+    /// that never calls it accumulates the whole walked span. On human chromosome 1 that is
+    /// about 250 MB, against a walk that otherwise peaks near 25 MB.
+    ///
+    /// It stayed invisible for a long time because the project's fixture is
+    /// tandem-repeat-targeted: its coverage is sparse enough that consecutive requests are far
+    /// apart and the reader *jumps* rather than extending, which is the one access pattern that
+    /// cannot grow.
+    ///
+    /// Two hundred kilobases is enough to make the difference three orders of magnitude while
+    /// keeping the test quick.
+    #[test]
+    fn a_forward_walk_holds_the_whole_span_unless_it_releases() {
+        let span = 200_000usize;
+        let bases = vec![b'A'; span];
+        let (_dir, path, contigs) = build_fasta(&[("chrWalk", &bases)]);
+
+        // A read pileup's shape: a 150-base window every 5 bases.
+        let walk = |reader: &WindowedRefSeq, releasing: bool| {
+            let mut at = 1u64;
+            while at + 150 < span as u64 {
+                reader.fetch(ContigId(0), at, 150).expect("in bounds");
+                if releasing {
+                    reader.evict_before(at);
+                }
+                at += 5;
+            }
+        };
+
+        let hoarding = WindowedRefSeq::new(path.clone(), contigs.clone());
+        walk(&hoarding, false);
+        assert!(
+            hoarding.resident_bases() > span - 1_000,
+            "without releasing, the reader ends up holding the whole walked span: {} of \
+             {span} bases",
+            hoarding.resident_bases(),
+        );
+
+        let releasing = WindowedRefSeq::new(path, contigs);
+        walk(&releasing, true);
+        assert!(
+            releasing.resident_bases() <= 200,
+            "releasing behind the walk bounds the window to what is still being read: {} \
+             bases",
+            releasing.resident_bases(),
+        );
+    }
+
+    /// Releasing through a **shared** handle works, which is the whole reason
+    /// [`EvictableRefSeq`] takes `&self`. Both locus generators hold their reader by `Arc`,
+    /// so an `&mut self` signature meant the consumers that most needed to release could not.
+    #[test]
+    fn a_shared_handle_can_release() {
+        let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
+        // `Arc` around a `!Sync` reader is exactly the shape under test: both locus
+        // generators hold their reference this way, and it is why the trait takes `&self`.
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "the shared !Sync handle is the thing being tested"
+        )]
+        let shared = std::sync::Arc::new(WindowedRefSeq::new(path, contigs));
+
+        shared.fetch(ContigId(0), 1, 8).expect("in bounds");
+        assert!(
+            shared.resident_bases() > 0,
+            "something must be resident first"
+        );
+        shared.evict_before(9);
+        assert_eq!(shared.resident_bases(), 0, "released through the Arc");
+        assert_eq!(
+            shared.fetch(ContigId(0), 1, 8).expect("in bounds"),
+            b"ACGTNNNN",
+            "and a released base asked for again is simply read again",
+        );
+    }
+
     fn repository_for(fasta_path: &std::path::Path) -> Repository {
         let indexed = noodles_fasta::io::indexed_reader::Builder::default()
             .build_from_path(fasta_path)
@@ -1314,7 +1436,7 @@ mod tests {
     #[test]
     fn windowed_raw_survives_the_slide_and_eviction() {
         let (_dir, path, contigs) = build_fasta(FASTA_CONTIGS);
-        let mut windowed = WindowedRefSeq::new(path, contigs);
+        let windowed = WindowedRefSeq::new(path, contigs);
 
         // Fresh read, then forward slide (append_forward).
         assert_eq!(raw(&windowed, ContigId(0), 1, 4), b"acgt");
@@ -1396,7 +1518,7 @@ mod tests {
 
     #[test]
     fn windowed_eviction_preserves_correctness() {
-        let (_dir, mut windowed) = windowed();
+        let (_dir, windowed) = windowed();
         let before = windowed.fetch(ContigId(1), 1, 8).unwrap();
         windowed.evict_before(5); // drop resident bytes before position 5
         // Re-fetching an evicted position simply re-reads it; the bytes are unchanged.

@@ -393,13 +393,17 @@ fn split_generic(
 /// # One `.fai`, parsed once
 ///
 /// The generator needs **two** reference accessors — one for the walk's REF fetches and one
-/// per file for the read query's mismatch-fraction filter — and the factory is called at every
-/// region. A fresh `WindowedRefSeq::new` per region parses the whole `.fai` on its first fetch:
-/// measured at **189 µs on a GRCh38-shaped reference against a ~120 µs per-region walk
-/// constant**, so the factory would more than double the cost of a region. `read_index` plus
+/// per file for the mismatch-fraction filter's. A fresh `WindowedRefSeq::new` parses the whole
+/// `.fai` on its first fetch: measured at **189 µs on a GRCh38-shaped reference against a
+/// ~120 µs per-region walk constant**. `read_index` plus
 /// [`WindowedRefSeq::with_shared_index`] takes that to **19 µs**, which is the `open(2)` each
-/// file's own cursor costs and the floor unless handles are pooled. This tool is that fix's
+/// file's own reader costs and the floor unless handles are pooled. This tool is that fix's
 /// first caller.
+///
+/// **Since D1 the factory is called once per file per *chromosome*, not per region** — the
+/// cursor holds its accessor for as long as it holds its file (perf review L2). The sharing
+/// above is kept anyway: it is still 189 µs against 19 µs, now paid per chromosome, and it is
+/// what a per-worker fan-out will multiply.
 fn run_dump<P: ReadPreparer + 'static>(
     fasta: &Path,
     bams: &[PathBuf],

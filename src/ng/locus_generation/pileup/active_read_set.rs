@@ -81,8 +81,12 @@ pub struct ActiveReads {
     /// read *leaves*: both exits ([`expire_passed`](Self::expire_passed)
     /// and [`flush_all`](Self::flush_all)) go through one place each,
     /// and a tally kept outside would have to be told about both.
-    /// Survives [`reset`](Self::reset), like `next_read_id`, because
-    /// the walker reads it into a run-level summary.
+    ///
+    /// **Two resets, and they disagree about this field on purpose.** It survives
+    /// [`reset`](Self::reset), the chromosome-boundary one, like `next_read_id`. It is
+    /// **zeroed** by [`begin_region`](Self::begin_region), because
+    /// `PileupGeneratorCounts::fold_region_walk` sums it region by region and a walker now
+    /// lives long enough to be asked twice.
     silent_exits: u64,
 }
 
@@ -121,6 +125,34 @@ impl ActiveReads {
         // next_read_id keeps advancing — read ids stay unique
         // across the whole run, which makes log messages
         // unambiguous.
+    }
+
+    /// Start a fresh region's walk in this set — **ng's, D1.**
+    ///
+    /// A walker that lives for a chromosome reuses one active set across every region on
+    /// it, where a walker rebuilt per region got a brand-new one. This puts the set back
+    /// into the state that brand-new one had, keeping only the allocated capacity.
+    ///
+    /// **It differs from [`reset`](Self::reset) in the two fields that one deliberately
+    /// preserves, and both differences matter.**
+    ///
+    /// - `silent_exits` is zeroed. It is documented there as a *run* total, which was true
+    ///   while a run and a region were the same thing for this type;
+    ///   `PileupGeneratorCounts::fold_region_walk` sums it **per region**, so a set that
+    ///   carried it across regions would triangular-sum it by the region count.
+    /// - `next_read_id` is zeroed, because a per-region walker restarted it at zero and the
+    ///   ids are region-scoped anyway — `by_read_id` and the mate cross-links never outlive
+    ///   the region that made them, and no id reaches an emitted locus.
+    ///
+    /// **There is no emptiness assertion, unlike `reset`.** A region can be abandoned
+    /// mid-walk — `begin_segment` on a half-drained one — leaving reads in the set that
+    /// never went through `flush_all`. Dropping them uncounted is exactly what dropping the
+    /// per-region walker did, so this reproduces it rather than reporting it.
+    pub fn begin_region(&mut self) {
+        self.reads.clear();
+        self.by_read_id.clear();
+        self.next_read_id = 0;
+        self.silent_exits = 0;
     }
 
     pub fn is_empty(&self) -> bool {

@@ -1,0 +1,552 @@
+# ng — read filtering in stages: two filters and a conversion
+
+**Date:** 2026-08-03, revised 2026-08-04 · **Status:** design settled; **the whole plan is built**
+— A (the renames), B (the contig check), C (the loop moves into the cursor) and D (the two tests
+output identity cannot see). Both questions §9 raised are resolved (owner, 2026-08-03).
+**The present tense below describes the design, and the code now matches it**; where a claim was
+overtaken or found wrong by building it, a ⚠ note says so rather than the sentence being quietly
+rewritten. Three such notes were added at D (2026-08-04): §5's reference claim, and §8's two
+test descriptions.
+**Revises** [`read_filtering.md`](read_filtering.md) §5, which gave step 1 a single type. That
+document says which nine filters run, what their thresholds are, in what order they are
+evaluated, and what each drop is called. All of that is unchanged and stays there. This one is
+only about how the work is divided and where each piece lives.
+**Companions:** [`alignment_cursor.md`](alignment_cursor.md) (the reader below this),
+[`ref_seq.md`](ref_seq.md) (the reference the last filter consults).
+**Code-facing companion:** [`../arch/read_filtering_stages.md`](../arch/read_filtering_stages.md).
+**Build order:** [`../impl_plan/read_filtering_stages.md`](../impl_plan/read_filtering_stages.md).
+
+---
+
+## 1. What this is
+
+Today one type, `ReadFilter`, does three jobs in one loop
+([`filtering.rs:895-951`](../../../../src/ng/read/filtering.rs#L895)): it rejects reads on their
+flag and mapping quality, converts the survivors into ng's own read type, then rejects some of
+*those* on their length, their CIGAR and how well they match the reference. Only two of the
+three are filtering.
+
+**Two words, and the design is about the boundary between them.** After the rename in §6 the
+types carry the distinction themselves:
+
+- a **raw aligned read** (`RawAlignedRead`) is what comes off the file undecoded — a SAM flag
+  and a mapping quality readable without unpacking anything else;
+- an **aligned read** (`AlignedRead`) is the converted one: sequence uppercased, CIGAR in ng's
+  own operations, adaptor boundary worked out
+  ([`aligned_read.rs:67`](../../../../src/ng/read/aligned_read.rs#L67)).
+
+The conversion turns one into the other, and the question this document answers is **which
+filters run on which side of it, and who owns the loop.**
+
+```
+AlignedReadsReader         finds and unpacks raw aligned reads, one reused buffer
+      ↓
+RegionRawAlignedReads      this region's raw aligned reads only
+      ↓
+AlignmentCursor            ┌ filter the raw aligned read   (flag, mapping quality)
+                           ├ convert it                    (raw aligned read → aligned read)
+                           ├ filter the aligned read       (length, CIGAR, mismatch fraction)
+                           └ keep it, and serve it to every region that overlaps it
+```
+
+**Goals.**
+
+- Filtering stops being something a conversion happens inside. The two filters and the
+  conversion each get a name, and each can be tested on its own.
+- `read/filtering.rs` holds **the keep-or-drop rules and the thresholds they use, and nothing
+  else**: it opens no files, converts nothing, and drives no loop over reads.
+- The first filter needs **no reference**: when this was written, nothing could filter on flag
+  and mapping quality without supplying a `RawRefSeq` and paying a probe fetch for every contig
+  in the header. *(Half done: **B1 deleted the per-contig probe**, so building a filter no
+  longer costs ~2,580 fetches. Supplying a `RawRefSeq` is still required, and stops being so at
+  C2.)*
+- **Byte-identical output.** Same reads kept, same drops charged to the same reasons.
+
+**Non-goals.**
+
+- **No filter changes.** Which nine filters run, their thresholds, the order they run in and
+  what each drop is called are `read_filtering.md`'s and stay exactly as they are.
+- **No change to what the cursor keeps** (§3).
+- **Speed is a constraint here, not a goal.** The change is for a simpler shape, and it is
+  worth doing on that alone. A *significant* slowdown would be a reason to reconsider the
+  design; an improvement is welcome and needs no defending. Neither is what this is for.
+  Either way, measure it — §8.
+
+**It does not** introduce a trait, add a type, change the meaning of any error, add a
+configuration knob, or touch `AlignedRead`.
+
+> ⚠ **One qualification, from B1.** "Change the meaning of any error" still holds — no existing
+> error means anything new. But the contig check needed an error of its own, so
+> `AlignmentFileError` gained a **variant**, `CursorAccessorContigTable`. Reusing the open gate's
+> `ContigReconcile` produced a message that is false at that point in the run; §9 Q2 has the
+> reasoning. Adding a variant is not "adding a type" in the sense meant here — no new concept
+> enters the design — but the line is close enough to be worth naming rather than leaving a
+> reader to reconcile it.
+
+## 2. Why the division falls where it does
+
+Step 1 runs nine filters; [`read_filtering.md`](read_filtering.md) §3 is where they are defined.
+**Six of them read two values that are on the raw aligned read already** — the SAM flag and the
+mapping quality. **The other three read fields that only the conversion produces.**
+
+| filter | what it reads | which side of the conversion |
+|---|---|---|
+| #1 duplicate, #3 supplementary, #4 secondary, #5 unmapped, #6 QC-fail | the SAM flag | the raw aligned read |
+| #2 low mapping quality | the SAM mapping quality | the raw aligned read |
+| #7 too short | the sequence length | the aligned read — the conversion uppercases the sequence into a `Vec<u8>` |
+| #9 bad CIGAR | the CIGAR | the aligned read — the conversion turns noodles' CIGAR into ng's `CigarOp` |
+| #8 high mismatch fraction | CIGAR, sequence, base qualities, position, contig, plus a reference fetch | the aligned read, for the same two reasons |
+
+Cited: `verdict_pre_decode` ([`filtering.rs:210-238`](../../../../src/ng/read/filtering.rs#L210)),
+`verdict_post_decode` ([`filtering.rs:269-322`](../../../../src/ng/read/filtering.rs#L269)), and
+the two conversions ([`aligned_read.rs:102`](../../../../src/ng/read/aligned_read.rs#L102),
+[`:107`](../../../../src/ng/read/aligned_read.rs#L107)).
+
+**Converting is not free, and that is what fixes the order.** Building an aligned read copies the
+name, uppercases the sequence, rebuilds the CIGAR as ng's own operations and works out the
+adaptor boundary ([`aligned_read.rs:67-120`](../../../../src/ng/read/aligned_read.rs#L67)). So:
+reject on what the raw aligned read already carries, convert what survives, then reject on what
+the conversion produced. **A read dropped by the first six never pays for a conversion.**
+
+The last three cannot move earlier — they read fields the conversion makes. Taking them off the
+raw read instead would mean writing the mismatch rule and the CIGAR scan a second time against
+noodles' types, and two copies of one rule is the thing this module guards against hardest.
+
+## 3. Why the filters and the conversion sit below what the cursor keeps
+
+Once the three pieces are separable, there are three places the cursor's edge can fall. All
+three produce the same reads. They differ in how much work they spend doing it, and the two we
+did not choose spend it in opposite directions.
+
+**(a) The cursor keeps raw aligned reads and the filters sit above it.** Then a read is converted
+once per region that serves it. Not twice: consecutive regions overlap by about 93 % because the
+caller widens each one by 5,000 bases against regions averaging 390, so a read is returned by
+**about a dozen** consecutive regions
+([`input/cursor.rs:12`](../../../../src/ng/read/input/cursor.rs#L12),
+[`:245`](../../../../src/ng/read/input/cursor.rs#L245)). Twelve conversions per surviving read.
+On CRAM it is worse again — keeping raw reads means keeping a whole decoded container, which
+[`alignment_cursor.md`](alignment_cursor.md) §5 already rules out.
+
+**(b) The cursor converts everything and the filters sit above it.** Then every raw aligned read
+is converted before the flag and mapping-quality filters can speak. On a BAM with 30 % duplicates
+— ordinary for real cohort input after duplicate marking — 30 % of conversions are thrown away,
+and the cursor's kept set holds reads that are about to be discarded, so the memory goes too.
+
+**(c) The filters sit below what the cursor keeps** — today's shape, and this design's. Converted
+**once**, and only for reads that already cleared flag and mapping quality.
+
+**So we choose (c): the two filters and the conversion all sit below the kept set, and the cursor
+owns the loop.** Given what this change is for — a simpler shape, and no significant slowdown
+(§1) — (c) is the one that costs nothing to get. (a) and (b) are not wrong; they would produce
+the same output, and if the goals were different they might be the better trade.
+
+It is written down because separating three things that were fused is exactly when someone
+rearranges them, and moving any of them above the kept set brings back (a) or (b) without
+anything failing.
+
+**A rationale considered and rejected, recorded so nobody re-proposes it.** *"Splitting the
+pieces lets us convert fewer reads."* It does not. The conversion already sits after the cheap
+filters and before the expensive ones
+([`filtering.rs:920`](../../../../src/ng/read/filtering.rs#L920), *"Decode only the pre-decode
+survivors"*), and this design does not move it. Reads dropped by #1–#6 already pay no
+conversion; reads dropped by #7/#8/#9 pay one and always will, because those filters read what
+the conversion produces. Not one conversion is saved. The reasons to do this are §5's.
+
+## 4. What will bite you
+
+**The raw aligned read is one reused buffer, so a filter cannot return one.** The reader fills a
+caller-owned buffer in place and the whole pass allocates exactly one
+([`filtering.rs:366-382`](../../../../src/ng/read/filtering.rs#L366)). A filter shaped
+`fn(RawAlignedRead) -> Option<RawAlignedRead>` would clone a noodles `RecordBuf` per read —
+measured elsewhere in this codebase at ~680 bytes across seven allocations
+([`aligned_reads_reader/container.rs:13-17`](../../../../src/ng/read/input/aligned_reads_reader/container.rs#L13)).
+A filter takes a **borrow** and returns a **verdict**, and the verdict carries the drop reason
+because the tally is keyed on it.
+
+**A drop must be charged to a read group, and the first filter runs before any aligned read
+exists.** Already solved, and easy to undo by accident: the raw aligned read carries its read
+group, stamped by the region narrowing
+([`region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs)), and the
+`read_group` accessor exists for the tally rather than for any filter
+([`filtering.rs:350-357`](../../../../src/ng/read/filtering.rs#L350)).
+
+**The second filter's order is #7 → #9 → #8, not the numbering order.** The cheap checks run
+first so a doomed read never pays the reference fetch, and a read failing both #9 and #8 is
+charged to the root cause rather than the symptom
+([`filtering.rs:240-268`](../../../../src/ng/read/filtering.rs#L240)). Pinned by
+`a_walk_charges_every_drop_reason_by_hand_count` (`input/cursor.rs`), whose fixture's last
+record fails both.
+
+**An unmapped read travels through `RawAlignedRead`.** Filter #5 drops it, so it exists as one
+before being rejected — and an unmapped read is not aligned. `AlignedRead` has no such case: the
+conversion refuses a record with no reference id or no position. The name is still right — SAM
+calls every line an alignment record, unmapped ones included, and this type only ever comes from
+an alignment file — but say so in the type's doc rather than leave it to be discovered and
+"fixed".
+
+**Deleting the source trait takes three fatal-error tests with it if nobody notices** — §6.
+
+## 5. What this buys
+
+**The three-way stop collapses to a boolean.** `FilterState::EndOfInput` exists **only** because
+the filter is a separate type that cannot tell why its source stopped. Its own doc says so
+([`filtering.rs:635-645`](../../../../src/ng/read/filtering.rs#L635)): a long-lived filter reaches
+`EndOfInput` at the end of *every* region, because the region narrowing reports a region boundary
+the only way it can, and repositioning has to undo that. The cursor is the thing that *causes*
+region ends, so once it owns the loop it never has to ask. `FilterState`,
+`restart_after_end_of_input`, `has_failed` and `source_mut` all go, replaced by one `failed` flag.
+
+**No new types — this is a subtraction.** With the tally on the cursor (§7) the first filter
+holds nothing, and is already a plain function today. The second needs the reference bases and
+the buffer they are read into, and the cursor can hold both. So `ReadFilter` goes, the source trait goes, and what
+remains is the two filters, the conversion, and a loop in the type that was already driving all
+three.
+
+**The reference stops being a precondition for filtering at all.** Nothing in ng needs that today
+— it is a capability the current shape forecloses, not a request anyone has made — but a coverage
+histogram, an insert-size pass or a read-group pre-pass would each want flag and mapping-quality
+filtering without a reference, and cannot have it.
+
+> ⚠ **That sentence overclaims, and D1 is where it showed** (2026-08-04). It is true of the
+> **filter**, and of the two layers below it: `verdict_on_raw_read` takes a flag, a mapping quality
+> and the thresholds; `AlignedReadsReader` and `RegionRawAlignedReads` carry no reference bound at
+> all. So a reference-free *pass* — reader, narrowing, first filter, tally — is constructible
+> today, and `read/reference_free_first_filter.rs` is one.
+>
+> It is **not** true of the cursor. `AlignmentCursor<R: RawRefSeq>` and
+> `AlignmentFile::cursor<R: RawRefSeq + ContigTable>` bound `R` unconditionally, because the
+> *second* filter needs the bases. So the three callers named above still cannot reach a **file's**
+> reads without producing a reference: the capability stops at `AlignedReadsReader`, one layer
+> below the entry point ng actually exposes.
+>
+> Closing that gap means a cursor that is generic over whether it filters on the reference at all —
+> a second construction, or a `RawRefSeq` implementation that serves nothing and is refused by the
+> second filter's config being `None`. **Not proposed here**, because nobody has asked for it; the
+> point of this note is that the sentence above should not be read as saying it already exists.
+
+**Two vestiges dissolve rather than needing their own cleanup.** `with_validated_contigs` and
+`ReadFilterBuffers` exist because a filter used to be built per region by a pooled caller. That
+caller is gone; both stop having a reason to exist once the cursor owns the loop.
+
+**`read/filtering.rs` ends up holding only the rules and their thresholds.** It stopped
+reading files on 2026-08-03, when the two whole-file readers it owned were deleted; this takes
+the conversion and the loop out too. What is left is: what counts as a read worth keeping.
+
+## 6. Naming, and where each piece lives
+
+**The rename is part of this design, not a tidy-up.** `RawRecord` names its topic rather than its
+value — a record of *what*? A reference sequence, a read, an observation? Renaming it pairs it
+with the type it converts into, so the relationship the whole design turns on becomes visible in
+the names instead of needing a paragraph of prose.
+
+| now | becomes |
+|---|---|
+| `RawRecord` (trait) | `RawAlignedRead` |
+| `NoodlesRawRecord` | `NoodlesRawAlignedRead` |
+| `RecordReader` (enum) | `AlignedReadsReader` |
+| `BamRecordReader` / `CramRecordReader` / `InMemoryRecordReader` | `BamAlignedReadsReader` / `CramAlignedReadsReader` / `InMemoryAlignedReadsReader` |
+| `record_reader/` (module) | `aligned_reads_reader/` |
+| `RegionRecords` | `RegionRawAlignedReads` |
+| `RecordSource` (trait) | **deleted** — below |
+
+**The readers leave "raw" out of their names** (owner's call, 2026-08-03). They yield undecoded
+reads, so each reader's doc comment has to say so where a caller meets it; the type name does not
+carry it.
+
+**The source trait is deleted, not renamed.** It has exactly one production implementation
+(`RegionRecords`) and, once the cursor owns the loop, no generic consumer at all — it would
+survive only so two test doubles could feed the filter. **The consequence is real and must not be
+missed:** those doubles exist to raise the fatal errors a real file cannot conveniently raise
+(`read_filter_source_read_error_is_fatal`, `read_filter_decode_error_is_fatal`,
+`read_filter_reference_error_mid_stream_is_fatal`). With the trait gone the in-memory reader must
+be able to yield a scripted error — which is the better arrangement anyway, because the error
+path then runs through the real chain instead of through a fake that bypasses two layers.
+
+**Module homes.**
+
+- `read/aligned_read.rs` — `RawAlignedRead`, `NoodlesRawAlignedRead`, `AlignedRead`, and the
+  conversion between them. One thing in two states, and now named so; the conversion already
+  lives here.
+- `read/filtering.rs` — the rules and their thresholds: `ReadFilterConfig`, `DropReason`,
+  `FilterVerdict`, `ReadFilterCounts`, and the two filters themselves.
+- `read/input/aligned_reads_reader/`, `read/input/region_raw_aligned_reads.rs` — unchanged in
+  substance, renamed.
+- `read/input/cursor.rs` — gains the loop.
+
+## 7. The tally
+
+**One tally per read group met, held by the cursor, cumulative until the caller says otherwise.**
+A drop rate is a read group's property: one bad library shows up as an anomalous mapping-quality
+or mismatch rate, and summing across read groups erases exactly that signal.
+
+**`AlignmentCursor::reset_read_group_counts()` lets the caller choose the window.** On the cursor, not on
+`AlignmentFile`, and deliberately: that file held a `Mutex<Vec<ReadGroupCounts>>` until three
+commits ago, fed by each per-region stream on `Drop`, and it went with the rest of that path.
+Putting it back means either a lock on the hottest loop or a fold at cursor drop — which makes
+the number unreadable while the cursor is alive and loses it entirely if the cursor leaks. A
+run-wide total is aggregation, not shared state: read each cursor's counts before dropping it,
+which is what `SampleCursor::read_group_counts` already does across a sample's files.
+
+**Not per region.** Regions overlap by ~93 % and a read is filtered once, when first read off the
+file — never again when replayed. A per-region tally would record *where the reader happened to
+be when it met a bad read*, not how bad the region is; the numbers would not sum to the
+chromosome's total and would not be comparable between regions.
+
+## 8. How we know it works
+
+**The unit suite is necessary and not sufficient.** 45 tests live in `filtering.rs` and most
+drive `ReadFilter` as one thing; each moves to whichever piece keeps its subject.
+
+**The evidence is output identity on real data:**
+
+| anchor | what it proves |
+|---|---|
+| `ng_generic_loci_dump`, `ng_ssr_loci_dump` — HG002 chr21 (BAM) | 251,792 and 4,406 lines, byte-identical |
+| the same two — tomato SL4.0ch01 (CRAM) | 1,718,914 and 11,945 lines, byte-identical |
+| `ng_generic_walk_probe`, chr21 | `loci=236081 observations=251786 reads_admitted=54709` |
+
+`reads_admitted` is the direct one: step 1's keep count for the run.
+
+**And time the walk, because the constraint in §1 needs a number to be checked against.** The
+same probe prints `seconds` and `loci_per_second`; on the development machine chromosome 21 runs
+in **≈1.9 s** (one run, `seconds=1.876`, `loci_per_second=125834`, 2026-08-03 — a single
+measurement on one machine, not a benchmark). Compare before and after on the same machine in
+the same session. A few per cent either way is noise. A large regression is a reason to
+reconsider the design rather than to accept it; a large improvement is a pleasant surprise and
+changes nothing about why the change was made.
+
+**Three tests do not exist yet**, and each covers something no output comparison can see. ✅ **All
+three now exist** — C1 landed the third, D1 and D2 the first two, and both took a different shape
+from the one written here. The corrections are below each.
+
+- **The first filter runs with no reference at all.** Untested, §5's capability quietly stops
+  being true.
+  > ✅ **D1**, as `read/reference_free_first_filter.rs` — but *"drive it with no `RawRefSeq` in
+  > scope"* turned out not to pin anything: three reviewers measured a scope-shaped test's unique
+  > detection power at **zero**, because the property is the signature's and the tree's ordinary
+  > call sites already fail the mutation (one of them in production code, so `cargo build` breaks).
+  > What pins it is a **signature coercion** plus a `ReadFilterConfig` built **field by field** —
+  > the latter because a reference added *to the config*, behind `Default`, breaks the property
+  > with every `default()` caller silent. Measured: with that field added and the tree's other
+  > exhaustive literal repaired, the new file is the sole remaining compile failure.
+- **The conversion is asked for nothing when every read fails the first filter.** A *work*
+  property: hoisting the conversion changes no output.
+  > ✅ **D2** — and **"every read" is wrong**, deliberately. An all-dropped script passes with the
+  > instrument removed and says nothing about *which* reads were converted, so the fixture is
+  > mixed: two survivors among **one record per first-filter reason**. Three reasons was not
+  > enough either — review converted just the `Unmapped` and `LowMapq` drops and the whole suite
+  > stayed green.
+  >
+  > It also needs **two** tests, not one, because the ordering breaks in two directions: the
+  > conversion can rise above the first filter, and one of the second filter's checks can be
+  > hoisted below it. Filter #7 is the live candidate — a raw record carries a sequence, so its
+  > length can be had without converting, and moving it up changes no output at all.
+- **A scripted read error still surfaces as fatal, through the real chain.** Replaces the three
+  test-double tests the deleted trait takes with it (§6).
+  > ✅ **C1**, and it replaced **two** of the three. The third,
+  > `read_filter_decode_error_is_fatal`, has no successor: the chain cannot produce a decode
+  > failure, because the region narrowing guarantees exactly the three things the conversion
+  > refuses. That is also why D2's fixture above could not be built as this document first
+  > imagined it.
+
+**The instrument D2 needed, and why it is not a test double.** A work property has to be measured
+as work, so the conversion became a named step — `AlignmentCursor::convert_buffered_read` — which
+increments `CursorCounts::reads_converted`. **The count lives inside that method rather than beside
+the call**, and the reason is sharper than it looks: an increment written next to the call is left
+behind by a hoist that moves the call, and then reports *the number the test expects*, so the test
+keeps passing while every read is converted. §6's objection to doubles does not reach this: the
+reader, the narrowing and the conversion are all the real ones, nothing is stubbed, and the counter
+ships as an ordinary cursor observable rather than as test scaffolding.
+
+## 9. Resolved decisions & open questions
+
+**Q1 — resolved (owner, 2026-08-03): the cursor holds them, and both filters stay plain
+functions.** The reasoning is below, kept because it is what the answer was chosen against.
+
+**Q1. Where do the reference bases and the buffer they are read into live?**
+
+The **first filter** — the one that looks at the SAM flag and the mapping quality — needs nothing
+but the read in front of it and the thresholds. It is a plain function today, one that stands on
+its own rather than belonging to an object, and it can stay one.
+
+The **second filter** needs two more things: the reference bases, to compare the read against for
+the mismatch check, and a buffer to read those bases into. The buffer is reused from read to read
+so the check costs no allocation. Something has to hold both. Either the second filter becomes a
+small object that holds them, or the cursor holds them and hands them over on each call — which
+is what happens today, one layer up.
+
+*Chosen: the cursor holds them, and both filters stay plain functions.* It is the smaller change,
+and it leaves `read/filtering.rs` holding only rules and thresholds, with nothing to construct and
+no state to get wrong.
+
+**Q2 — resolved, and then corrected by building it.** The check compares two contig tables
+instead of opening 2,580 contigs — *and keeps one of those opens*, for reasons the design did not
+foresee. **Built at B1 (2026-08-03); the corrections are marked ⚠ below.**
+
+**Three different checks are involved, and it helps to keep them apart.**
+
+1. **The reference itself is sound.** `read_reference_info`
+   ([`reference_info.rs:239`](../../../../src/ng/reference_info.rs#L239)) builds the contig
+   table, checks the FASTA against its `.fai`, and rejects duplicate names. Everything that opens
+   a reference goes through it, and this design does not touch that.
+2. **The alignment file agrees with the reference.** `AlignmentFile::open` compares the file's
+   `@SQ` list against that contig table with `ContigList::first_disagreement` — names, lengths
+   and, where both sides carry one, digests
+   ([`open_bam.rs:206-211`](../../../../src/ng/read/input/open_bam.rs#L206)).
+3. **The accessor handed to `cursor()` is over that same reference.** Nothing checks this
+   directly. What stands in for it is a loop that asks the accessor for a zero-length window on
+   every contig in the header ([`filtering.rs:688`](../../../../src/ng/read/filtering.rs#L688)) —
+   which proves each contig *resolves* and nothing about its length.
+
+**Check 3 is the weak one and the expensive one.** It opens every contig in turn and discards
+each — ~2,580 on GRCh38, once per file per chromosome — and never notices an accessor whose
+contigs have the right names at the wrong lengths, or the right names in the wrong order.
+
+> ⚠ **The cost this section first claimed was wrong, and the measurement is ~8× smaller.** It
+> read "roughly 52 µs per open with a shared index" off
+> [`ref_seq.rs:622-655`](../../../../src/ng/ref_seq.rs#L622) and multiplied by 2,580 for
+> **~130 ms per cursor**. That 52 µs is the cost of **constructing a `WindowedRefSeq`** — and
+> the same comment breaks it down: **34 µs of it is cloning the 2,580-entry contig table.** The
+> loop constructed no accessors; it called `fetch_into` on the one it was given, so it never
+> paid the table clone. Multiplying that figure multiplied in a cost the loop did not have.
+>
+> **Measured at B1**, six runs each side on one machine, `ng_generic_walk_probe` on HG002
+> chr21: **1.861 s → 1.834 s, ≈27 ms per cursor (~1.4 %)** — consistent rather than noise, the
+> slowest *after* run beating the fastest *before*. At run scale — one cursor per file per
+> chromosome — a 50-sample cohort over 25 chromosomes mints ~1,250 of them: **~25–34 s per
+> run.** Real, worth having, an order of magnitude below the estimate. Speed was never why this
+> change was made (§1); the correctness argument below is.
+
+**The fix: ask the accessor which table it is over, and compare.** Every accessor already answers
+that — `ContigTable::contigs()`, implemented by all three of them
+([`ref_seq.rs:257`](../../../../src/ng/ref_seq.rs#L257)) — and `ContigList` is comparable, with
+`first_disagreement` for the message. So the cursor's constructor does what the open gate does,
+against the accessor instead of the reference:
+
+> ⚠ **A comparison alone is not enough, and building it is how we found out.** A contig table is
+> a *description*. `InMemoryRefSeq::from_named_contigs` derives its table from the bytes it
+> holds, so for that one equality does imply the bases can be served — but
+> `ResidentRefSeq::new` and `WindowedRefSeq::new` take the `ContigList` as a **constructor
+> argument independent of the bytes on disk**. A `WindowedRefSeq` over a FASTA missing a contig,
+> behind a table that names it, matches the file perfectly and cannot serve one base of it: a
+> stale `.fai`, or one whose FASTA was replaced. Measured at B1 — the deleted loop rejected that
+> accessor, a comparison-only check accepted it, and the fault surfaced mid-walk under a
+> top-level message naming the *BAM*. On a `--regions` run whose reads are all dropped before
+> filter #8, never at all.
+>
+> **So the loop is replaced by two checks, not one, and the second keeps exactly one of its
+> ~2,580 opens** — on the contig this cursor is for, which is the only one it will read.
+
+**As built** (`open_bam.rs`, `AlignmentFile::cursor`), in this order — the argument, then the
+accessor's description, then its ability:
+
+```rust
+pub fn cursor<R: RawRefSeq + ContigTable>(
+    self: &Arc<Self>, contig: ContigId, reference: R,
+) -> Result<AlignmentCursor<R>, AlignmentFileError> {
+    // 1. the contig is one this file declares — and it is what makes (3) safe to index
+    if … { return Err(AlignmentFileError::CursorContigNotInFile { … }); }
+
+    // 2. the accessor's table equals the file's — names, lengths, digests, ORDER
+    self.contigs
+        .first_disagreement(reference.contigs())
+        .map_err(|detail| AlignmentFileError::CursorAccessorContigTable { … })?;
+
+    // 3. …and it can actually serve this cursor's contig
+    let mut probe = Vec::new();
+    reference.fetch_raw_into(contig, 1, 0, &mut probe)
+        .map_err(|source| AlignmentFileError::Reference { … })?;
+    …
+}
+```
+
+> ⚠ **The error is its own variant, not the gate's `ContigReconcile`**, which this section's
+> first sketch reused. By the time `cursor` runs, `open` has already proved the file *does* match
+> the reference — so that variant's message, *"alignment file '…' does not match the reference
+> contig table"*, is **false** here, and it sends an operator to inspect the BAM for a fault in
+> the calling code. The two failures also become discriminable only by substring. §1's "it does
+> not … add a type" was read as forbidding this and does not: adding a variant changes no
+> existing error's meaning. (Arch §4's "No new error type" is about `ReadFilterError`, a
+> different enum, and is still true.)
+
+**Together they are strictly better than the loop on both counts.** One comparison of ~2,580
+entries — integer and string compares in memory — plus **one** `open(2)`, against ~2,580 opens.
+And they prove more: names, lengths **and order** agree, which is what the gate proves for the
+file, so the file, the reference and the accessor are held to one table instead of
+two-and-a-half — *and* the contig about to be read is known servable, which the loop proved for
+all 2,580 and this proves for the one that matters.
+
+**Order is not a detail.** A permuted table resolves on every fetch, so a comparison that ignored
+it would let filter #8 score every read against another chromosome's bases with no error at all.
+That is why this is an equality test and not a resolvability test, and it is pinned by
+`a_cursor_refuses_an_accessor_whose_contig_table_is_a_permutation` — added after an
+order-insensitive rewrite passed all 1,538 tests.
+
+**Why not check it once, in whatever builds the cursors?** Because at that moment the accessor
+does not exist. `AlignmentFile::open` and `SampleReads::open` run before any accessor is made:
+the caller supplies one per file, through a factory, and that is not incidental —
+`WindowedRefSeq` holds an open per-contig reader behind a `RefCell` and is `Send` but not `Sync`,
+so a sample's k files must each have their own or they share one file position and one sliding
+window. Moving the factory into `open` would let the check run once, but it would not fully close
+the hole — validating one accessor a factory returns does not prove the next one is over the same
+FASTA — and it changes `open`'s signature and every caller. With the comparison above costing
+microseconds there is nothing left to save.
+
+**The one thing this does not do** is stop a caller passing an unrelated accessor *that happens
+to carry a matching table and can serve the contig*. Closing that means the file owning its
+reference and handing out accessors itself, which is a larger change — §10.
+
+**A defect the check found on its first run, worth recording.** Applying it turned **23 cursor
+tests red at once**: every fixture built its accessor with `InMemoryRefSeq::from_contigs`, which
+names contigs `contig0`, `contig1`, … , while the fixture files declare `chr1`, `chr2`. All 23
+had been handing `cursor()` an accessor that disagreed on **every contig name**, and nothing had
+noticed for the life of the fixture — because the loop this replaces fetches a window per contig,
+and a window resolves whatever the contig is called. They derive from one
+`test_fixtures::fixture_reference_bases()` now, pinned by
+`the_fixture_accessors_carry_the_same_contig_table_as_the_fixture_files`.
+
+**Impl note:** the added `+ ContigTable` bound is satisfied by every accessor in the tree
+(`InMemoryRefSeq`, `ResidentRefSeq`, `WindowedRefSeq`, and the three test spies) and propagates to
+`SampleReads::cursor` and to both generators. Mechanical, but it does touch their signatures.
+
+## 10. Deferred, with a home
+
+- **Removing `with_validated_contigs` and `ReadFilterBuffers`.** They dissolve as a consequence
+  of this change (§5), so they belong to whichever step lands it — not to a separate cleanup.
+- **A whole-file read path.** Filtering without a reference (§5) is not the same as a way to
+  *read* a whole file, which ng does not have: `AlignmentFile::open` requires an index. If one is
+  wanted it arrives as an `AlignedReadsReader` arm, beside the others.
+- **The file owning its reference, and handing out accessors itself.** Q2 closes the hole that
+  matters — an accessor over a different reference — by comparing contig tables. What remains is
+  a caller passing an unrelated accessor whose table happens to match. Removing the possibility
+  means `AlignmentFile` holding an `OpenReference` for BAM as well as CRAM (today it is `None`
+  for BAM) and building accessors itself, which would also drop the factory from
+  `SampleReads::cursor` and the type parameter from both generators. That is its own change, with
+  its own reasons, and it is not this one's to make.
+- **`read/filtering/` as a folder.** A step with no competing implementations is a file
+  ([`../arch/module_layout.md`](../arch/module_layout.md) principle 1a), and this change makes
+  `filtering.rs` *smaller*. Revisit only if that stops being true.
+
+## 11. Reuse map
+
+No new logic. Every rule exists and is being re-homed or renamed.
+
+| what | existing code | action |
+|---|---|---|
+| the six flag/mapping-quality filters | `verdict_pre_decode` [`filtering.rs:215`](../../../../src/ng/read/filtering.rs#L215) | **keep**, renamed for the vocabulary |
+| the three conversion-dependent filters | `verdict_post_decode` [`filtering.rs:274`](../../../../src/ng/read/filtering.rs#L274) | **keep**, renamed; the #7/#9/#8 order unchanged |
+| the conversion | `RawAlignedRead::decode` [`aligned_read.rs:71`](../../../../src/ng/read/aligned_read.rs#L71) → `decode_record` [`aligned_read.rs:118`](../../../../src/ng/read/aligned_read.rs#L118) | **reuse as-is**, called by the cursor |
+| the loop | `ReadFilter::next` [`filtering.rs:776`](../../../../src/ng/read/filtering.rs#L776) | **move** into `AlignmentCursor::next_read` |
+| the tally | `ReadFilterCounts` / `ReadGroupCounts` [`filtering.rs:127`](../../../../src/ng/read/filtering.rs#L127), [`:564`](../../../../src/ng/read/filtering.rs#L564) | **reuse as-is**, owned by the cursor |
+| the errors | `ReadFilterError` [`filtering.rs:477`](../../../../src/ng/read/filtering.rs#L477) | **reuse as-is** — its three variants already name the three pieces |
+| the raw read and its buffer contract | ✅ **done at A1** — `RawAlignedRead` [`aligned_read.rs:56`](../../../../src/ng/read/aligned_read.rs#L56) | **renamed and moved** to `aligned_read.rs` |
+| the region narrowing | `RegionRecords`, [now `region_raw_aligned_reads.rs`](../../../../src/ng/read/input/region_raw_aligned_reads.rs) | **renamed at A3**; its `RecordSource` impl becomes inherent methods at C3 |
+| the three-way stop | `FilterState` [`filtering.rs:549`](../../../../src/ng/read/filtering.rs#L549) | **delete** — a `failed` flag on the cursor replaces it (§5) |
+| the source trait and its doubles | `RecordSource` [`filtering.rs:338`](../../../../src/ng/read/filtering.rs#L338), `FakeSource`, `ErroringSource` | **delete**; the in-memory reader gains a scripted error (§6) |
+
+*Line citations refreshed at B2 (2026-08-03). They had drifted by up to 120 lines across
+Milestones A and B, and **Milestone C executes against this table** — `RecordSource` alone had
+moved from 366 to 338, and `ReadFilter::next` from 895 to 776.*
+
+**The parity oracle is the four dumps** (§8). There is no second implementation to differ from —
+the oracle is this code before the change.

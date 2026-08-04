@@ -8,6 +8,24 @@ there) and on the shared [`ng_step_interfaces.md`](ng_step_interfaces.md) /
 [`naming.md`](../../../../ai/skills/rust-code-review/code_review/naming.md). Signatures are
 illustrative; the **contract** is the deliverable. See the spec for every "why".*
 
+> ## ⛦ The types were renamed by a later design, 2026-08-03 — read this first
+>
+> This document's `SampleRegionReads`, `MergedRegionReads` and `RegionReads` were deleted at
+> [`alignment_cursor.md`](alignment_cursor.md)'s Milestone F. Their successors live in
+> `src/ng/read/input/sample_cursor.rs` and keep every rule specified here:
+>
+> | here | as built |
+> |---|---|
+> | `SampleReads::reads_in_region(region, make_reference)` | `SampleReads::cursor(contig, make_reference)`, made once per chromosome |
+> | `SampleRegionReads<R>` (enum, `Single` / `Merged`) | `SampleCursor<R>` (enum, `Single` / `Merged`) |
+> | `MergedRegionReads<R>` (§4, the argmin) | `MergedCursors<R>`, argmin unchanged |
+> | `RegionReads<R>` (one file's stream) | `AlignmentCursor<R>` (one file's cursor) |
+> | `SampleReads::counts()` | `SampleCursor::read_group_counts()` |
+> | `IngestError::DuplicateReadAcrossFiles` | `CursorError::DuplicateReadAcrossFiles`, reached through `IngestError::Cursor` |
+>
+> §4's per-read budget — keys beside the heads, never a clone in the merge loop — is the part
+> to read as still binding, and it is.
+
 ## Module home
 
 `src/ng/read/input/`, shared with `alignment_file.md`. This doc owns:
@@ -17,6 +35,12 @@ src/ng/read/input/
 ├── mod.rs    – SampleReads, SampleRegionReads, IngestError
 └── merge.rs  – MergedRegionReads: the argmin k-way merge + the same-file-twice check
 ```
+
+> **⛦ As built:** `merge.rs` no longer exists. Its two jobs live in `sample_cursor.rs`, which
+> holds both `SampleCursor` (the `Single | Merged` enum, still in the entry-point module's
+> spirit but beside the merge rather than in `mod.rs`) and `MergedCursors`. The reason the enum
+> was kept out of `merge.rs` — the single-file arm is the *absence* of a merge — still holds and
+> is why `SampleCursor::Single` costs nothing.
 
 The `Single | Merged` enum lives in `mod.rs` with the entry point, not in `merge.rs`: the single-file
 arm is the *absence* of a merge, not a variant of one (spec §3.4).
