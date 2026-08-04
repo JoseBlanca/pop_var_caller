@@ -1,8 +1,24 @@
 //! A windowed, caller-evictable, **raw** single-contig reference reader.
 //!
-//! ng's copy of `fasta::ManualEvictChromRefFetcher`, with exactly one behavioural
-//! difference: **it does not canonicalise**. The bases land in the buffer verbatim
-//! — soft-mask, IUPAC ambiguity codes and all.
+//! Started as ng's copy of `fasta::ManualEvictChromRefFetcher`. It has since
+//! diverged **twice, on purpose**, and is no longer meant to be read as a copy:
+//!
+//! 1. **It does not canonicalise.** The bases land in the buffer verbatim —
+//!    soft-mask, IUPAC ambiguity codes and all. That is the difference the copy
+//!    was made for, and the next two sections explain it.
+//! 2. **It buffers its file reads** (2026-08-04). Production refills a 64 KiB
+//!    scratch array per call, copies out the handful of bases the caller asked
+//!    for, discards the rest, and rewinds — so a walk asking for one base per
+//!    locus re-reads the same chunk at every locus. Measured on chr21: **289,308
+//!    read calls moving 18.96 GB to deliver 53 MB of bases, a 357× amplification,
+//!    about one read and one `lseek` per emitted locus.** This reader keeps what
+//!    it has already read (a `BufReader`) and tracks the logical file offset so a
+//!    seek to the current position is a no-op: 289,308 reads become **1,452**.
+//!
+//! **Production has the same waste and is deliberately not being fixed** (owner,
+//! 2026-08-04): ng is the caller being bet on, so the fix lands here and the two
+//! files are allowed to part company. Do not read a diff against
+//! `ManualEvictChromRefFetcher` as a list of bugs in this file.
 //!
 //! ## Why a copy, when the difference is one line
 //!
@@ -34,15 +50,16 @@
 //!
 //! ## What is *not* different
 //!
-//! Everything else is production's design, deliberately: the `.fai` validation
-//! (which exists because `--reference` is attacker-influenced and a `line_bases`
-//! of 0 divides by zero), the base→file-offset arithmetic, the bidirectional
-//! extend, and `evict_before`'s drain-keeping-capacity. That arithmetic is fiddly
-//! and well-tested, and this copy stays diffable against it on purpose.
+//! Everything else is still production's design, deliberately: the `.fai`
+//! validation (which exists because `--reference` is attacker-influenced and a
+//! `line_bases` of 0 divides by zero), the base→file-offset arithmetic, the
+//! bidirectional extend, and `evict_before`'s drain-keeping-capacity. That
+//! arithmetic is fiddly and well-tested, and it is worth staying recognisable
+//! even though the two files no longer match line for line.
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use noodles_fasta::fai;
@@ -202,16 +219,21 @@ fn open_contig(
 /// this pushes `b`. Bases arrive **verbatim** — lower-case soft-mask preserved,
 /// IUPAC codes preserved — because the walk's oracle compares locus bytes against
 /// a catalog built from the verbatim FASTA (`typed_regions.md` §6).
+/// The bytes come from the [`BufReader`]'s own buffer rather than a scratch array the
+/// caller then throws away, and `file_pos` tracks the logical file offset of the next
+/// unconsumed byte. That pairing is what removes the read amplification: the old shape
+/// issued a fresh 64 KiB `read(2)` per call and discarded everything past the base it
+/// wanted, so a walk asking for one base per locus re-read the same chunk at every locus.
 fn read_raw_bases(
-    reader: &mut File,
+    reader: &mut BufReader<File>,
+    file_pos: &mut u64,
     dst: &mut Vec<u8>,
     n_bases: usize,
-    read_buf: &mut [u8],
 ) -> io::Result<()> {
     let want_total = dst.len() + n_bases;
     while dst.len() < want_total {
-        let n = reader.read(read_buf)?;
-        if n == 0 {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
@@ -220,16 +242,20 @@ fn read_raw_bases(
                 ),
             ));
         }
-        for &b in &read_buf[..n] {
-            if dst.len() >= want_total {
-                break;
-            }
+        let mut consumed = 0usize;
+        for &b in available {
+            consumed += 1;
             if b == b'\n' || b == b'\r' {
                 continue;
             }
             // Verbatim — NOT `canonicalise(b)`. See the fn docs.
             dst.push(b);
+            if dst.len() >= want_total {
+                break;
+            }
         }
+        reader.consume(consumed);
+        *file_pos += consumed as u64;
     }
     Ok(())
 }
@@ -241,15 +267,20 @@ fn read_raw_bases(
 pub struct RawChromReader {
     chrom_name: String,
     fai: ContigFai,
-    file: File,
+    /// **Buffered**, and the buffer is *retained across fetches* — that is the whole of
+    /// the fix. The unbuffered `File` re-issued a 64 KiB `read(2)` for every base the
+    /// walk asked for and discarded the remainder.
+    file: BufReader<File>,
     /// Newline-stripped bases currently resident, **verbatim** (not uppercased,
     /// not canonicalised) — the difference from production's fetcher.
     buf: Vec<u8>,
     /// 1-based contig coordinate of `buf[0]`. Meaningful only when `!buf.is_empty()`.
     buf_start_base: u32,
-    /// Reusable file-read scratch. Was a `[0u8; FILE_READ_CHUNK]` stack array
-    /// zero-initialised on every `read_raw_bases` call.
-    read_buf: Box<[u8]>,
+    /// File offset of the next byte `file` would yield. Kept so [`Self::seek_to`] can tell
+    /// "already there" (the overwhelmingly common case in a forward walk) from a real
+    /// reposition, and so a small backward step becomes a buffer rewind rather than a
+    /// syscall.
+    file_pos: u64,
 }
 
 impl RawChromReader {
@@ -297,10 +328,10 @@ impl RawChromReader {
         Ok(Self {
             chrom_name: chrom_name.to_string(),
             fai,
-            file,
+            file: BufReader::with_capacity(FILE_READ_CHUNK, file),
             buf: Vec::new(),
             buf_start_base: 1,
-            read_buf: vec![0u8; FILE_READ_CHUNK].into_boxed_slice(),
+            file_pos: 0,
         })
     }
 
@@ -422,9 +453,9 @@ impl RawChromReader {
         let chrom = self.chrom_name.clone();
         read_raw_bases(
             &mut self.file,
+            &mut self.file_pos,
             &mut self.buf,
             target_len,
-            &mut self.read_buf,
         )
         .map_err(|source| ChromRefFetchError::Io {
             chrom_name: chrom,
@@ -441,7 +472,7 @@ impl RawChromReader {
         let take = extra_bases.min(remaining);
         self.buf.reserve(take);
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut self.buf, take, &mut self.read_buf).map_err(|source| {
+        read_raw_bases(&mut self.file, &mut self.file_pos, &mut self.buf, take).map_err(|source| {
             ChromRefFetchError::Io {
                 chrom_name: chrom,
                 source,
@@ -462,7 +493,7 @@ impl RawChromReader {
         self.seek_to(offset)?;
         let mut prefix = Vec::with_capacity(extra_bases);
         let chrom = self.chrom_name.clone();
-        read_raw_bases(&mut self.file, &mut prefix, extra_bases, &mut self.read_buf).map_err(
+        read_raw_bases(&mut self.file, &mut self.file_pos, &mut prefix, extra_bases).map_err(
             |source| ChromRefFetchError::Io {
                 chrom_name: chrom,
                 source,
@@ -474,14 +505,38 @@ impl RawChromReader {
         Ok(())
     }
 
+    /// Position the file at `offset`, **without a syscall when it is already there or
+    /// when the target is still inside the buffer**.
+    ///
+    /// A forward walk asks for the base immediately after the last one it read, so the
+    /// common case is `offset == self.file_pos` and there is nothing to do at all. A short
+    /// backward step (`prepend_backward`) usually lands inside the retained buffer, which
+    /// [`BufReader::seek_relative`] serves by rewinding its own cursor. Only a genuine
+    /// reposition past the buffer reaches `lseek(2)` — and then it discards the buffer, as
+    /// it must.
     fn seek_to(&mut self, offset: u64) -> Result<(), ChromRefFetchError> {
-        self.file
-            .seek(SeekFrom::Start(offset))
-            .map(|_| ())
-            .map_err(|source| ChromRefFetchError::Io {
-                chrom_name: self.chrom_name.clone(),
-                source,
-            })
+        if offset == self.file_pos {
+            return Ok(());
+        }
+        let wrap = |source: io::Error| ChromRefFetchError::Io {
+            chrom_name: self.chrom_name.clone(),
+            source,
+        };
+        // `i128` so the difference cannot wrap; a delta too wide for `i64` (impossible on
+        // any real FASTA, since offsets are file sizes) falls back to an absolute seek
+        // rather than being mis-signed.
+        let delta = i128::from(offset) - i128::from(self.file_pos);
+        let result = match i64::try_from(delta) {
+            Ok(d) => self.file.seek_relative(d),
+            Err(_) => self.file.seek(SeekFrom::Start(offset)).map(|_| ()),
+        };
+        match result {
+            Ok(()) => {
+                self.file_pos = offset;
+                Ok(())
+            }
+            Err(source) => Err(wrap(source)),
+        }
     }
 }
 
