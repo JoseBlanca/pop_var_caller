@@ -2413,10 +2413,33 @@ pub(super) fn process_position(
             let active_read = active_reads
                 .get_by_read_id(contrib.read_id)
                 .expect("contributor's read_id must still be in the active set");
-            let mut window_events =
+            // **The events this read shows inside this record — re-used rather than
+            // re-derived when the record is one base wide and sits under the walker.**
+            //
+            // That is the overwhelmingly common shape: a SNP or REF record is one base,
+            // opened at the position being walked, and closed one step later. For it,
+            // `events_at_pos` — already computed for this read at this position, to decide
+            // which records it touches — *is* the window, provided the read has no deletion
+            // that could reach in from an earlier anchor. `spans_only_its_anchors` states
+            // that condition and proves the equality term by term.
+            //
+            // The two BQ rewrites below are why this is a borrow and not a move: they
+            // mutate, and `events_at_pos` belongs to the contributor. A contributor
+            // carrying either one falls back to the cursor, which is the same work as
+            // before — mate-overlap reconciliation is the case that pays for its own
+            // window.
+            let reuse_events_at_pos = !contrib.bq_zero_in_window
+                && contrib.bq_override_at_walker_pos.is_none()
+                && rec_pos == walker_pos
+                && rec_end == walker_pos.saturating_add(1)
+                && active_read.cursor.spans_only_its_anchors();
+            let mut window_events = if reuse_events_at_pos {
+                super::cigar_cursor::EventsOverlapping::new()
+            } else {
                 active_read
                     .cursor
-                    .events_overlapping(rec_pos, rec_end, &active_read.read);
+                    .events_overlapping(rec_pos, rec_end, &active_read.read)
+            };
             if contrib.bq_zero_in_window {
                 for ev in &mut window_events {
                     zero_event_bq(ev);
@@ -2438,6 +2461,12 @@ pub(super) fn process_position(
                 }
             }
 
+            let window_events: &[ReadEvent] = if reuse_events_at_pos {
+                &contrib.events_at_pos
+            } else {
+                &window_events
+            };
+
             // A contributor only folds into a record if it has
             // events overlapping the record's footprint. (No
             // events overlapping = the read doesn't observe this
@@ -2452,7 +2481,7 @@ pub(super) fn process_position(
                 witnessed_runs_buf,
                 rec_pos,
                 active_read,
-                &window_events,
+                window_events,
                 contrib.bq_baq_at_walker_pos,
             );
         }

@@ -23,6 +23,20 @@
 //! before the window whose deleted run reaches into it overlaps
 //! the window but is not anchored at any position inside.
 //!
+//! **That sentence is also the whole of the difference, and ng says so** — see
+//! [`CigarCursor::spans_only_its_anchors`]. Over a one-base window, a read with no `D`
+//! op returns the same list from both queries, which lets the fold reuse the events it
+//! already asked for instead of asking again for the overwhelmingly common shape: a
+//! one-base record under the walker position.
+//!
+//! # ng's copy has diverged from production's, on purpose
+//!
+//! This file was byte-identical to `crate::pileup::walker::cigar_cursor` and enforced so
+//! by `copy_fidelity.rs`. It was released on 2026-08-05 for the predicate above, which is
+//! worth **−5.8 % of the walk at ~130× coverage and −4.0 % at 30×**. Production has the
+//! same redundant second query and is deliberately not being changed — ng is the caller
+//! being bet on. **Do not read a diff against production's copy as a list of bugs.**
+//!
 //! Two implementation strategies, selected automatically at
 //! construction based on the CIGAR's op count:
 //!
@@ -143,6 +157,15 @@ struct OpOffset {
 pub(super) struct CigarCursor {
     offsets: Vec<OpOffset>,
     mode: CursorMode,
+    /// Whether this read's CIGAR contains a `D` op at all.
+    ///
+    /// The one thing that makes [`events_overlapping`](Self::events_overlapping) over a
+    /// single position differ from [`events_at`](Self::events_at) at that position is a
+    /// deletion **anchored earlier** whose deleted run reaches it: every other event has a
+    /// one-base footprint at its own anchor, so it is in the window exactly when its anchor
+    /// is. A read with no `D` op cannot produce one, which is why the flag is worth its
+    /// byte — see [`spans_only_its_anchors`](Self::spans_only_its_anchors).
+    has_deletion: bool,
 }
 
 impl CigarCursor {
@@ -181,7 +204,37 @@ impl CigarCursor {
             }
         }
         offsets.push(OpOffset { ref_pos, read_pos });
-        Self { offsets, mode }
+        Self {
+            offsets,
+            mode,
+            has_deletion: cigar.iter().any(|op| matches!(op, CigarOp::Deletion(_))),
+        }
+    }
+
+    /// Whether every event this read can produce sits entirely at its own anchor
+    /// position — i.e. the read has no deletion, whose footprint is the only one that
+    /// reaches past its anchor.
+    ///
+    /// **What it licenses.** For a one-base window `[p, p + 1)`, a cursor for which this
+    /// holds returns from [`events_overlapping`](Self::events_overlapping) exactly what
+    /// [`events_at`](Self::events_at) returns at `p`, in the same order — so a caller that
+    /// already has the latter can skip the former. Term by term, and each arm is the same
+    /// code in both functions:
+    ///
+    /// - **Match**: `events_overlapping` emits one event per position of
+    ///   `[max(op_lo, p), min(op_hi, p + 1))`, which is `p` itself when the op covers it;
+    ///   `events_at` emits at `p` under the same test. Same `N` and adaptor skips.
+    /// - **Insertion**: both drop it on the first/last-op and `ref_pos <= 1` rules, and
+    ///   both then require the anchor to be `p` — `anchor >= hi || anchor < lo` with
+    ///   `hi = lo + 1` *is* `anchor != p`.
+    /// - **Deletion**: `events_overlapping` accepts `anchor <= p <= anchor + len`, while
+    ///   `events_at` accepts only `anchor == p`. **This is the whole difference**, and it
+    ///   is what this predicate rules out.
+    ///
+    /// Both scan the ops in order and stop at the same op, so the two lists match element
+    /// for element and not merely as sets.
+    pub(super) fn spans_only_its_anchors(&self) -> bool {
+        !self.has_deletion
     }
 
     /// Events whose **footprint** intersects the half-open
@@ -896,6 +949,79 @@ mod tests {
                     "mode {mode:?}, pattern {name}: cursor and decompose disagree",
                 );
             }
+        }
+    }
+
+    /// **The licence [`spans_only_its_anchors`](CigarCursor::spans_only_its_anchors)
+    /// grants, checked at every position of every shape in the corpus.**
+    ///
+    /// The fold reuses a read's `events_at(p)` as its window over a one-base record at
+    /// `p`, on the strength of that predicate. Here the two queries are compared directly,
+    /// element for element, over the whole corpus under both modes — so a change to either
+    /// function that breaks the equality fails here rather than in a dump diff.
+    #[test]
+    fn a_read_that_spans_only_its_anchors_answers_both_queries_alike() {
+        let mut checked_true = 0usize;
+        for mode in [CursorMode::Linear, CursorMode::BinarySearch] {
+            for (name, read) in pattern_corpus() {
+                let cursor = CigarCursor::with_mode(&read.cigar, read.alignment_start, mode);
+                if !cursor.spans_only_its_anchors() {
+                    continue;
+                }
+                for pos in read.alignment_start..=read.alignment_end {
+                    let overlapping = cursor.events_overlapping(pos, pos + 1, &read);
+                    let at = cursor.events_at(pos, &read);
+                    assert_eq!(
+                        overlapping.as_slice(),
+                        at.as_slice(),
+                        "mode {mode:?}, pattern {name}, pos {pos}: a read with no deletion \
+                         answered the two queries differently over a one-base window",
+                    );
+                    checked_true += 1;
+                }
+            }
+        }
+        assert!(
+            checked_true > 0,
+            "no corpus shape satisfied the predicate, so this test proved nothing",
+        );
+    }
+
+    /// **And the case the predicate exists to exclude really is excluded.** Without this,
+    /// the test above would pass just as well if `spans_only_its_anchors` returned `true`
+    /// for everything and the two queries happened to agree anyway.
+    ///
+    /// A deletion is anchored at 102 and removes 103–104, so at 103 the window `[103, 104)`
+    /// overlaps its footprint while nothing is anchored there.
+    #[test]
+    fn a_read_with_a_deletion_answers_the_two_queries_differently() {
+        let read = make_read(
+            vec![
+                CigarOp::Match(3),
+                CigarOp::Deletion(2),
+                CigarOp::Match(3),
+            ],
+            100,
+            b"ACGTAC",
+            &[30; 6],
+        );
+        for mode in [CursorMode::Linear, CursorMode::BinarySearch] {
+            let cursor = CigarCursor::with_mode(&read.cigar, read.alignment_start, mode);
+            assert!(
+                !cursor.spans_only_its_anchors(),
+                "mode {mode:?}: a CIGAR with a D op claimed to span only its anchors",
+            );
+            let overlapping = cursor.events_overlapping(103, 104, &read);
+            let at = cursor.events_at(103, &read);
+            assert!(
+                at.is_empty(),
+                "mode {mode:?}: nothing is anchored at 103, inside the deleted run",
+            );
+            assert_eq!(
+                overlapping.len(),
+                1,
+                "mode {mode:?}: the deletion anchored at 102 covers 103 and must be returned",
+            );
         }
     }
 

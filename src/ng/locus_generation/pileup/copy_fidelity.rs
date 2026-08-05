@@ -25,6 +25,15 @@
 //! | A0 | `driver.rs` → `genome_walk.rs`, `open_record.rs`, `errors.rs` | the reference is reached through ng's `RefSeq`, not production's `MultiChromRefFetcher` |
 //! | B2 | `tests.rs` | the walk emits ng's `SampleLocusObservations`, so the inherited suite is adapted to it (spec §12) |
 //! | D2 | `active_read_set.rs` | a per-read "ever contributed" flag, so `reads_silent_over_footprint` can be counted — the read spec §13's accounting cannot otherwise place (spec §6) |
+//! | perf 2026-08-05 | `cigar_cursor.rs` | the cursor states when its two queries coincide, so the fold can reuse the events it already has (−5.8 % of the walk at ~130×, −4.0 % at 30×) |
+//!
+//! **The bar for releasing a file is now a measured gain, not a plan step** (owner,
+//! 2026-08-05: *"You can copy the files from production into ng and modify them there.
+//! No problem with ng diverging more and more with production."*). Two other edits to
+//! this same file were measured in the same session and **reverted** rather than
+//! released — a smaller returned-event buffer (−0.21 % at 130×, nothing at 30×) and a
+//! narrower event type (nothing at either) — because a permanent divergence is not worth
+//! a change that cannot be seen.
 //!
 //! Everything still listed in `PAIRS` is byte-for-byte production's, modulo the
 //! sanctioned additions below.
@@ -99,12 +108,7 @@ fn the_remaining_copies_are_still_productions() {
     // **A released file is deleted from this array, not commented out**, so a `git log`
     // on it shows the whole set that was ever guarded and the array itself shows only
     // what is guarded *now*. The release table in this module's header is the record.
-    let pairs: [(&str, &str, &str); 3] = [
-        (
-            "cigar_cursor.rs",
-            include_str!("../../../pileup/walker/cigar_cursor.rs"),
-            include_str!("cigar_cursor.rs"),
-        ),
+    let pairs: [(&str, &str, &str); 2] = [
         (
             "decompose.rs",
             include_str!("../../../pileup/walker/decompose.rs"),
