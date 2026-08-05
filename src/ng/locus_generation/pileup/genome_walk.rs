@@ -1144,25 +1144,6 @@ fn resolve_mate_overlap_at_pos(
     summary: &mut RunSummary,
     scratch: &mut MateOverlapScratch,
 ) {
-    // Fast path: mate overlap requires two contributors at this
-    // walker_pos sharing a chain_id. Solo-read inputs never
-    // hit it; in paired-end inputs the geometry of insert sizes
-    // means most positions also don't. Detecting the no-pair case
-    // up front lets us skip the AHashMap allocation that would
-    // otherwise fire on every walker step (1.5 M allocations on
-    // the `pileup_walker_multi_op/L=5000` fixture, dhat 2026-05-10).
-    // O(n²) early-break duplicate check; at typical n ≤ ~30
-    // contributors per column it beats AHashMap construction +
-    // n probes, and short-circuits as soon as any pair is found.
-    let n = contributors.len();
-    let any_shared = (0..n).any(|i| {
-        let s = contributors[i].chain_id;
-        ((i + 1)..n).any(|j| contributors[j].chain_id == s)
-    });
-    if !any_shared {
-        return;
-    }
-
     // Build a small index: chain_id → list of contributor
     // indices. Anything with a list length >= 2 is a candidate.
     // ahash::AHashMap matches the rest of the module — std HashMap's
@@ -1189,6 +1170,29 @@ fn resolve_mate_overlap_at_pos(
             .map(|(i, c)| (c.chain_id, i)),
     );
     by_chain_id.sort_unstable();
+
+    // **The no-pair exit, read off the sort instead of hunting for it.** Mate overlap
+    // needs two contributors at this position sharing a chain id, and in paired-end
+    // data most columns have none — so this exit is the common case and its cost is
+    // what matters.
+    //
+    // It used to be an all-pairs scan over the unsorted contributors, breaking as soon
+    // as a shared id turned up. That breaks early only when a pair *exists*; the
+    // common case ran the full n(n−1)/2 comparisons, which makes the cheap path the
+    // quadratic one. Its comment priced it at "typical n ≤ ~30 contributors per
+    // column", and at that depth it was the right call. A whole-genome sample at ~130×
+    // puts n near 130, where the scan is ~19× more work per column than at 30 and the
+    // function became the largest single site in the walk (13.8 % of a tomato
+    // `SL4.0ch01` profile, against 4.2 % on a 30× fixture).
+    //
+    // Sorting first and looking for an adjacent equal pair answers the same question in
+    // n log n, and the sort is not new work: every column that *does* have a pair
+    // needed it anyway, three lines below. Equal chain ids are adjacent after a sort on
+    // the `(chain_id, index)` tuple, so "some id repeats" and "some neighbour repeats"
+    // are the same statement.
+    if !by_chain_id.windows(2).any(|w| w[0].0 == w[1].0) {
+        return;
+    }
 
     // Indices to discard outright (indel-overlap losers).
     to_remove.clear();
