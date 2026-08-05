@@ -1273,83 +1273,91 @@ fn column_depth_cap_truncates_snp_only_column_when_over_cap() {
     }
 }
 
+/// **What survives a capped column, pinned — and the rule it pins changed on
+/// 2026-08-05.**
+///
+/// This test was `column_depth_cap_keeps_first_n_of_admission_order`, and it asserted
+/// that the walk keeps the first `cap` contributors in the order the active set holds
+/// them: production's rule, and ng's until now. That rule made the emitted bases depend
+/// on the container's storage order, and where arrival order survived it meant "keep the
+/// leftmost-starting reads" — a subsample tilted towards early alignment starts.
+///
+/// ng now keeps the `cap` reads with the smallest
+/// [`sampling_key`](super::read_sampling::sampling_key), a hash of the query name. So
+/// the expected answer is no longer a fixed pair of names: it is worked out here from the
+/// reads themselves, which is exactly the property being asserted — **the survivors are a
+/// function of the reads and of nothing else.**
+///
+/// Five SNP reads at one position, each with a distinct read base so the survivors are
+/// identifiable from the emitted observations. Cap = 2.
 #[test]
-fn column_depth_cap_keeps_first_n_of_admission_order() {
-    // The cap is a defensive truncation, not a uniform sampler.
-    // Pin the contract so an operator can reason about what
-    // survives: the first `cap` contributors in admission order
-    // (= upstream coordinate-then-arrival order from `alignment_input`)
-    // fold into the record; the rest are dropped. Mi5 in
-    // `ia/reviews/pileup_2026-05-09.md`.
-    //
-    // Five SNP reads at pos 1, each with a distinct read base so
-    // we can identify which contributors survived. Cap = 2 → only
-    // r0 (C) and r1 (G) fold; r2 (T), r3 (A=REF), and r4 (C) are
-    // dropped.
+fn column_depth_cap_keeps_the_smallest_sampling_keys() {
     let fa = MockFasta::new("A");
-    let r0 = snp_read("r0", 1, b"C", &[30]);
-    let r1 = snp_read("r1", 1, b"G", &[30]);
-    let r2 = snp_read("r2", 1, b"T", &[30]);
-    let r3 = snp_read("r3", 1, b"A", &[30]); // matches REF
-    let r4 = snp_read("r4", 1, b"C", &[30]);
+    let reads = vec![
+        snp_read("r0", 1, b"C", &[30]),
+        snp_read("r1", 1, b"G", &[30]),
+        snp_read("r2", 1, b"T", &[30]),
+        snp_read("r3", 1, b"A", &[30]), // matches REF
+        snp_read("r4", 1, b"C", &[30]),
+    ];
     let cfg = WalkerConfig {
         max_snp_column_depth: 2,
         max_indel_column_depth: 99,
         ..WalkerConfig::default()
     };
-    let (records, summary) = drive_walker_with_config(vec![r0, r1, r2, r3, r4], fa, &cfg);
+
+    // The two smallest keys, and therefore the two bases that must be folded — worked
+    // out from the reads before the walk sees them.
+    let mut ranked: Vec<_> = reads
+        .iter()
+        .map(|read| {
+            (
+                super::read_sampling::sampling_key(read),
+                read.qname.to_string(),
+                read.seq.clone(),
+            )
+        })
+        .collect();
+    ranked.sort();
+    let survivors: Vec<&str> = ranked[..2]
+        .iter()
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    let mut expected_bases: Vec<Vec<u8>> =
+        ranked[..2].iter().map(|(_, _, seq)| seq.clone()).collect();
+    expected_bases.sort();
+
+    let (records, summary) = drive_walker_with_config(reads, fa, &cfg);
 
     assert_eq!(records.len(), 1, "single column emitted");
     assert_eq!(summary.column_depth_truncations, 1);
     let rec = &records[0];
-
-    // **Where this test changed, and it is the change spec §12 sanctioned.** Production kept
-    // `alleles[0]` as a REF bucket with zero observations, because it creates that bucket at
-    // record open whatever the evidence; the assertion here used to read
-    // `alleles[0].support.num_obs == 0`. ng derives observations from the reads that folded, and r3 —
-    // the only REF-matching read — was past the cap, so **there is no reference observation at all.**
-    //
-    // The two spellings say different things, and ng's is the stronger: "a bucket exists with
-    // zero support" and "no read matched the reference here" are the same fact, but only the
-    // second is unambiguous about the evidence. The reference bases are still on the locus, as a
-    // field, so nothing is lost by the observation's absence.
     assert_eq!(&*rec.reference_bases, b"A", "the locus's reference base");
-    assert!(
-        rec.observations
-            .iter()
-            .all(|observation| observation.bases.as_ref() != b"A"),
-        "no surviving read matched REF, so ng emits no reference observation: {:?}",
-        rec.observations,
-    );
 
-    // r0's "C" and r1's "G" must be present with one observation each.
-    let c = rec
+    // Every folded read, as bases, one entry per observation counted. ng emits an
+    // observation per allele that a read actually matched — including the reference
+    // allele when a read matched it, and *no* reference observation when none did,
+    // which is the spec §12 divergence from production this file already carried.
+    let mut folded: Vec<Vec<u8>> = rec
         .observations
         .iter()
-        .find(|a| a.bases.as_ref() == b"C")
-        .expect("r0's allele 'C' must survive");
-    assert_eq!(c.num_obs, 1);
-    let g = rec
-        .observations
-        .iter()
-        .find(|a| a.bases.as_ref() == b"G")
-        .expect("r1's allele 'G' must survive");
-    assert_eq!(g.num_obs, 1);
+        .flat_map(|observation| {
+            std::iter::repeat_n(observation.bases.to_vec(), observation.num_obs as usize)
+        })
+        .collect();
+    folded.sort();
 
-    // r2's "T" must be absent — past the cap.
-    assert!(
-        rec.observations.iter().all(|a| a.bases.as_ref() != b"T"),
-        "r2 was past the cap and must not have folded",
-    );
-
-    // **Two observations, not three.** Production counted its empty REF bucket here; ng emits an observation per
-    // read that folded, and the cap let exactly two through. The dropped third "bucket" was
-    // never evidence — see the reference-observation assertion above.
     assert_eq!(
-        rec.observations.len(),
-        2,
-        "the two surviving reads, and nothing for the reference nobody matched"
+        folded, expected_bases,
+        "the cap kept the reads whose bases are {folded:?}; the two smallest sampling \
+         keys belong to {survivors:?}, whose bases are {expected_bases:?}"
     );
+    let total: u32 = rec
+        .observations
+        .iter()
+        .map(|observation| observation.num_obs)
+        .sum();
+    assert_eq!(total, 2, "exactly the cap's worth folded, and no more");
 }
 
 #[test]

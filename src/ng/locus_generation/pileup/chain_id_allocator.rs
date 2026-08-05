@@ -22,6 +22,23 @@
 //! ever exceeds the cap, [`WalkerError::ActiveReadsExhausted`] surfaces.
 //! The cap is independent of, and far smaller than, the `u64`
 //! identifier space.
+//!
+//! # ng's, from the depth-cap change of 2026-08-05 — released from `copy_fidelity.rs`
+//!
+//! This file was byte-for-byte production's until the owner lifted the pin
+//! (*"You might copy any file from production and then change it. ng is destined to
+//! replace production in the near future."*). Two constants moved and one counter
+//! is new; nothing else here is ng's.
+//!
+//! - [`DEFAULT_MAX_ACTIVE_READS`] rose from 4,096 to 32,768. At 4,096 the walk was
+//!   **refusing reads at the door** on ordinary whole-genome data — 19,725 of
+//!   113,629,764 on one tomato chromosome — which left positions covered by fewer
+//!   reads than the BAM had for them. That is the behaviour the owner called wrong.
+//! - [`MAX_PENDING_MATES`] rose from 10,000 to 1,000,000, because at 4,096 held reads
+//!   the old value could not be reached and at 32,768 it can. It is still a defence
+//!   against a malformed BAM, just one sized for the walk that now exists.
+//! - [`ChainIdAllocatorCounters::pending_mates_high_water`] is new, so the headroom
+//!   above is a measured number rather than an assumed one.
 
 use std::sync::Arc;
 
@@ -38,7 +55,7 @@ use super::errors::WalkerError;
 /// never recycled).
 ///
 /// [`WalkerConfig::max_active_reads`]: super::WalkerConfig::max_active_reads
-pub const DEFAULT_MAX_ACTIVE_READS: u32 = 4096;
+pub const DEFAULT_MAX_ACTIVE_READS: u32 = 32_768;
 
 /// Hard cap on the number of entries the `pending_mates` map will
 /// hold at any time. Exceeding it surfaces as
@@ -48,12 +65,22 @@ pub const DEFAULT_MAX_ACTIVE_READS: u32 = 4096;
 /// `(orphans per bp) × mate_lookup_window`. At realistic 30× coverage
 /// with ~5 % orphan rate and a 10 kb window, peak is ~100 entries.
 /// Even on pessimistic 300× coverage with 50 % orphans the peak sits
-/// around 10 k. This cap (10 k) catches truly malformed inputs (e.g.
+/// around 10 k. This cap catches truly malformed inputs (e.g.
 /// a BAM where every paired read carries the FirstOfPair flag and no
 /// second mate ever arrives) without firing on real data. Bumping
 /// the constant if `mate_lookup_window` is configured much higher
 /// for long-insert libraries is a one-line change.
-pub const MAX_PENDING_MATES: usize = 10_000;
+///
+/// **ng raised it from 10,000 to 1,000,000 on 2026-08-05.** While the walk held at
+/// most 4,096 reads the old value was out of reach, and `PileupGeneratorConfig`
+/// recorded that raising the hold ceiling past ~10,000 would put the walk straight
+/// back into a hard `PendingMatesExhausted`. The hold ceiling is now 32,768, so the
+/// old value is reachable and would have converted a deep region from a bad sample
+/// into an aborted run. The real headroom is measured, not assumed:
+/// [`ChainIdAllocatorCounters::pending_mates_high_water`] reports it, and on the
+/// deepest real fixture available (~130× tomato `SL4.0ch01`, 113 M reads) it is
+/// reported in `depth_cap.md`.
+pub const MAX_PENDING_MATES: usize = 1_000_000;
 
 /// Fraction of the active-read cap at which the allocator emits a
 /// one-shot soft warning. Lets the user spot a pathological-coverage
@@ -121,6 +148,11 @@ pub struct ChainIdAllocatorCounters {
     /// Number of first mates whose partner never arrived within
     /// `mate_lookup_window` and were evicted from `pending_mates`.
     pub mate_lookup_evictions: u64,
+    /// **ng's** — the largest the `pending_mates` map ever got, so the headroom under
+    /// [`MAX_PENDING_MATES`] is a number somebody has read rather than a number
+    /// somebody has reasoned about. Updated on insertion only, which is the only
+    /// place the map grows.
+    pub pending_mates_high_water: u32,
 }
 
 impl ChainIdAllocator {
@@ -269,6 +301,12 @@ impl ChainIdAllocator {
                     seen_at: read.alignment_start,
                 },
             );
+            // **ng's.** Read after the insert, so the number reported is a size the map
+            // actually reached rather than the size it was about to reach.
+            let held = self.pending_mates.len() as u32;
+            if held > self.counters.pending_mates_high_water {
+                self.counters.pending_mates_high_water = held;
+            }
         }
 
         Ok((chain_id, None))
@@ -329,19 +367,29 @@ impl ChainIdAllocator {
     }
 
     /// Emit a one-shot soft warning the first time `active_count`
-    /// crosses 75 % of the configured cap. Surfaces a pathological-
-    /// coverage region while the run is still alive, before it
-    /// potentially trips the cap and dies with
-    /// `WalkerError::ActiveReadsExhausted`.
+    /// crosses 75 % of the configured ceiling, naming the region so a
+    /// pathological pile-up is visible while the run is still alive.
+    ///
+    /// **ng rewrote what it says** (depth-cap change, 2026-08-05).
+    /// Production's wording is *"the run will fail with
+    /// ActiveReadsExhausted"*, which was true of production and has
+    /// not been true of ng since the walk started answering a full
+    /// set by giving a read back instead of aborting. Leaving it
+    /// would have told an operator to expect a crash and hidden the
+    /// thing that does happen — reads dropping out of the evidence,
+    /// which is silent unless something says so.
+    ///
+    /// The number to act on is `positions_short_of_cap`, so the
+    /// warning names it rather than restating the ceiling.
     fn maybe_warn_high_water(&mut self, chrom_id: u32, pos: u32) {
         let threshold = high_water_warn_threshold(self.max_active_reads);
         if !self.high_water_warned && self.counters.active_reads_high_water >= threshold {
             self.high_water_warned = true;
             eprintln!(
-                "warning: pileup walker reached {}/{} active reads at \
-                 chrom_id={} pos={}; if usage exceeds {} the run will fail with \
-                 ActiveReadsExhausted (raise WalkerConfig::max_active_reads or \
-                 pre-filter this region)",
+                "warning: pileup walker is holding {}/{} reads at chrom_id={} pos={}; \
+                 past {} it starts dropping reads it is holding, and the positions that \
+                 lose coverage are counted in positions_short_of_cap (raise \
+                 max_active_reads if that number is not zero)",
                 self.counters.active_reads_high_water,
                 self.max_active_reads,
                 chrom_id,

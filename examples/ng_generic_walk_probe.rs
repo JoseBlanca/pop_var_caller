@@ -44,13 +44,18 @@
 //!   costs an hour; a prefix costs a minute and allocation *shape* does not need the
 //!   whole contig.
 //! - `PVC_PROBE_MAX_ACTIVE_READS=n` — override `PileupGeneratorConfig::max_active_reads`,
-//!   the hard cap on reads open at once. **The default, 4,096, is not enough for a real
-//!   whole-genome sample:** a 100×-coverage tomato CRAM fails on `SL4.0ch01` at 33,037,565,
-//!   where 12,792 reads overlap one position against a local typical of 86–133. The cap
-//!   itself lives in `chain_id_allocator.rs`, which is byte-identical to production and
-//!   locked by `copy_fidelity.rs`, so it cannot be raised there without an owner decision —
-//!   this knob raises it per run so the true high-water can be *measured* rather than
-//!   guessed at.
+//!   the ceiling on reads held open at once. **It was written when the default was 4,096,
+//!   which was not enough for a real whole-genome sample:** on a ~130× tomato CRAM,
+//!   `SL4.0ch01` has 12,792 reads over one position at 33,037,565 against a local typical
+//!   of 86–133, and the walk was refusing 19,725 reads across the contig. The default is
+//!   now 32,768 and that no longer happens, so this knob's remaining job is to *measure*
+//!   the ceiling — to sweep it and see what each value costs in resident memory and what
+//!   it costs the evidence (`positions_short_of_cap`).
+//! - `PVC_PROBE_FROM_BP=n` — drop every region ending before reference position `n`, so a
+//!   run can start at a place instead of at the contig's beginning. Written to reach the
+//!   deep spot above, which no `PVC_PROBE_MAX_LOCI` prefix gets near. **The reads in front
+//!   of it are still read**, so a run with this set is not comparable with one without on
+//!   time or on instructions — only on the counters at the place it reaches.
 //! - `PVC_PROBE_MAX_RECORD_SPAN=n` — override `PileupGeneratorConfig::max_record_span`,
 //!   which is also the **halo width**: the read query runs over
 //!   `[region.start, region.end + max_record_span]`. At the default 5,000 against a
@@ -196,7 +201,31 @@ struct ProbeReport {
     /// Printed beside `active_reads_high_water`, which says whether the cap was reached
     /// at all — the pair is what makes a deep region readable from the printout alone.
     reads_shed_at_admission: u64,
+    /// Reads the ceiling gave back after admitting them, to make room for a read with a
+    /// smaller sampling key. Beside `reads_shed_at_admission`, the two are every read the
+    /// ceiling removed from the evidence.
+    reads_evicted_at_ceiling: u64,
+    /// **The number to read first on a deep sample.** Positions that folded fewer reads
+    /// than the per-position cap allows while reads covering them had been given up by
+    /// the ceiling. Zero means the ceiling shaped no position's evidence.
+    positions_short_of_cap: u64,
+    short_of_cap_deficit: u64,
+    /// The deepest column the walk assembled, before the per-position cap. Read beside
+    /// `active_reads_high_water`: the first says how deep the data got, the second how
+    /// much the walk had to hold to see it.
+    column_depth_high_water: u32,
     active_reads_high_water: u32,
+    /// The largest the allocator's first-mates-awaiting-a-partner map got — the headroom
+    /// under `MAX_PENDING_MATES`, which the hold ceiling's default now depends on.
+    pending_mates_high_water: u32,
+    /// **Whether a capped position's evidence is a fair sample.** Reads seen at capped
+    /// positions and reads kept there, each with the sub-count that began left of the
+    /// position. Equal fractions mean the cap sampled; a larger kept fraction means it
+    /// preferred reads reaching the position from the left.
+    capped_column_reads_seen: u64,
+    capped_column_reads_seen_placed_left: u64,
+    capped_column_reads_kept: u64,
+    capped_column_reads_kept_placed_left: u64,
     seconds: f64,
     /// How the run treated the reference: `verified_against_fai` or `trusted_unverified`.
     ///
@@ -272,8 +301,49 @@ impl ProbeReport {
         );
         let _ = writeln!(
             out,
+            "reads_evicted_at_ceiling={}",
+            self.reads_evicted_at_ceiling
+        );
+        let _ = writeln!(
+            out,
+            "positions_short_of_cap={}",
+            self.positions_short_of_cap
+        );
+        let _ = writeln!(out, "short_of_cap_deficit={}", self.short_of_cap_deficit);
+        let _ = writeln!(
+            out,
+            "column_depth_high_water={}",
+            self.column_depth_high_water
+        );
+        let _ = writeln!(
+            out,
             "active_reads_high_water={}",
             self.active_reads_high_water
+        );
+        let _ = writeln!(
+            out,
+            "pending_mates_high_water={}",
+            self.pending_mates_high_water
+        );
+        let _ = writeln!(
+            out,
+            "capped_column_reads_seen={}",
+            self.capped_column_reads_seen
+        );
+        let _ = writeln!(
+            out,
+            "capped_column_reads_seen_placed_left={}",
+            self.capped_column_reads_seen_placed_left
+        );
+        let _ = writeln!(
+            out,
+            "capped_column_reads_kept={}",
+            self.capped_column_reads_kept
+        );
+        let _ = writeln!(
+            out,
+            "capped_column_reads_kept_placed_left={}",
+            self.capped_column_reads_kept_placed_left
         );
         let _ = writeln!(out, "reference_check={}", self.reference_check);
         let _ = writeln!(out, "seconds={:.3}", self.seconds);
@@ -351,6 +421,17 @@ struct ProbeRun {
     max_loci: Option<u64>,
     /// Replace the typed-region stream with one `Generic` region per contig.
     whole_contig: bool,
+    /// Drop every region that ends before this reference position. `None` walks from the
+    /// start of the contig.
+    ///
+    /// **A way to reach a place, not a way to measure one.** The deepest column on the
+    /// ~130× tomato CRAM is 33 Mb into `SL4.0ch01`, and a `PVC_PROBE_MAX_LOCI` prefix
+    /// stops long before it — so measuring what happens there meant walking 17 minutes of
+    /// contig to reach 12 seconds of interest. This skips the regions in front of it.
+    /// **It does not skip the reads**: the source is still asked for the whole contig, so
+    /// a run with this set is not comparable with one without on time or instructions.
+    /// What it *is* comparable on is the walk's counters at the place it reaches.
+    from_bp: Option<u64>,
     /// Whether to prove the reference FASTA still matches its `.fai`. Verifying is a fixed
     /// ~11 s on GRCh38 — longer than this probe's whole chr21 walk — so a measurement loop
     /// turns it off. Reported in `render()`, because a timing taken with it off is not
@@ -371,6 +452,7 @@ fn walk<P: ReadPreparer + 'static>(
         chunk_bp,
         max_loci,
         whole_contig,
+        from_bp,
         reference_check,
     } = run;
     let (info, verify) =
@@ -451,6 +533,10 @@ fn walk<P: ReadPreparer + 'static>(
         let generic_regions = generic_regions.clone();
         typed
             .flat_map(move |item| split_generic(item, chunk_bp))
+            .filter(move |item| match (from_bp, item) {
+                (Some(from), Ok(region)) => region.region.end.get() >= from,
+                _ => true,
+            })
             .inspect(move |item| {
                 if let Ok(region) = item
                     && region.kind == RegionKind::Generic
@@ -519,7 +605,16 @@ fn walk<P: ReadPreparer + 'static>(
         column_depth_truncations,
         mate_overlap_positions,
         reads_shed_at_admission,
+        reads_evicted_at_ceiling,
+        positions_short_of_cap,
+        short_of_cap_deficit,
+        column_depth_high_water,
         active_reads_high_water,
+        pending_mates_high_water,
+        capped_column_reads_seen,
+        capped_column_reads_seen_placed_left,
+        capped_column_reads_kept,
+        capped_column_reads_kept_placed_left,
         ..
     } = *generic;
     report.reads_admitted = reads_admitted;
@@ -532,7 +627,16 @@ fn walk<P: ReadPreparer + 'static>(
     report.column_depth_truncations = column_depth_truncations;
     report.mate_overlap_positions = mate_overlap_positions;
     report.reads_shed_at_admission = reads_shed_at_admission;
+    report.reads_evicted_at_ceiling = reads_evicted_at_ceiling;
+    report.positions_short_of_cap = positions_short_of_cap;
+    report.short_of_cap_deficit = short_of_cap_deficit;
+    report.column_depth_high_water = column_depth_high_water;
     report.active_reads_high_water = active_reads_high_water;
+    report.pending_mates_high_water = pending_mates_high_water;
+    report.capped_column_reads_seen = capped_column_reads_seen;
+    report.capped_column_reads_seen_placed_left = capped_column_reads_seen_placed_left;
+    report.capped_column_reads_kept = capped_column_reads_kept;
+    report.capped_column_reads_kept_placed_left = capped_column_reads_kept_placed_left;
     report.generic_region_bp = generic_bp.get();
     report.generic_regions = generic_regions.get();
 
@@ -636,6 +740,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let from_bp = match parse_env_u64("PVC_PROBE_FROM_BP") {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
     let max_record_span = match parse_env_u64("PVC_PROBE_MAX_RECORD_SPAN") {
         Ok(value) => value,
         Err(message) => {
@@ -718,6 +829,7 @@ fn main() -> ExitCode {
                                 chunk_bp,
                                 max_loci,
                                 whole_contig,
+                                from_bp,
                                 reference_check,
                             },
                             &cache,
@@ -821,6 +933,7 @@ mod tests {
                 chunk_bp,
                 max_loci: None,
                 whole_contig: false,
+                from_bp: None,
                 reference_check: ReferenceCheck::VerifyAgainstIndex,
             },
         )
@@ -832,6 +945,7 @@ mod tests {
             chunk_bp,
             max_loci: None,
             whole_contig: true,
+            from_bp: None,
             reference_check: ReferenceCheck::VerifyAgainstIndex,
         }
     }
@@ -1092,6 +1206,7 @@ mod tests {
                     chunk_bp: None,
                     max_loci: None,
                     whole_contig: false,
+                    from_bp: None,
                     reference_check: ReferenceCheck::VerifyAgainstIndex,
                 },
             ),
@@ -1144,6 +1259,7 @@ mod tests {
                 chunk_bp: None,
                 max_loci: Some(100),
                 whole_contig: true,
+                from_bp: None,
                 reference_check: ReferenceCheck::VerifyAgainstIndex,
             },
         );
@@ -1321,7 +1437,16 @@ mod tests {
                 "column_depth_truncations",
                 "mate_overlap_positions",
                 "reads_shed_at_admission",
+                "reads_evicted_at_ceiling",
+                "positions_short_of_cap",
+                "short_of_cap_deficit",
+                "column_depth_high_water",
                 "active_reads_high_water",
+                "pending_mates_high_water",
+                "capped_column_reads_seen",
+                "capped_column_reads_seen_placed_left",
+                "capped_column_reads_kept",
+                "capped_column_reads_kept_placed_left",
                 "reference_check",
                 "seconds",
                 "loci_per_second",
@@ -1368,6 +1493,15 @@ mod tests {
             mate_overlap_positions: 24,
             reads_shed_at_admission: 22,
             active_reads_high_water: 23,
+            reads_evicted_at_ceiling: 24,
+            positions_short_of_cap: 25,
+            short_of_cap_deficit: 26,
+            column_depth_high_water: 27,
+            pending_mates_high_water: 28,
+            capped_column_reads_seen: 29,
+            capped_column_reads_seen_placed_left: 30,
+            capped_column_reads_kept: 31,
+            capped_column_reads_kept_placed_left: 32,
             seconds: 5.18,
         };
         let rendered = report.render();
@@ -1397,6 +1531,15 @@ mod tests {
             "mate_overlap_positions=24",
             "reads_shed_at_admission=22",
             "active_reads_high_water=23",
+            "reads_evicted_at_ceiling=24",
+            "positions_short_of_cap=25",
+            "short_of_cap_deficit=26",
+            "column_depth_high_water=27",
+            "pending_mates_high_water=28",
+            "capped_column_reads_seen=29",
+            "capped_column_reads_seen_placed_left=30",
+            "capped_column_reads_kept=31",
+            "capped_column_reads_kept_placed_left=32",
             "seconds=5.180",
         ] {
             assert!(

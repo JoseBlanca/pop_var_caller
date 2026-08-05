@@ -9,6 +9,12 @@
 //! `reads_silent_over_footprint` countable (spec §6, plan D2). Everything else
 //! is still the transcription, and the release table in `copy_fidelity.rs`'s
 //! header is the record.
+//!
+//! The depth-cap change of 2026-08-05 added two more:
+//! [`worst_sampling_key`](ActiveReads::worst_sampling_key) and
+//! [`evict_by_read_id`](ActiveReads::evict_by_read_id), which together let the hold
+//! ceiling give up a read chosen by the same rule a capped position uses instead of
+//! refusing whichever read happened to arrive when the set was full.
 
 use std::cell::Cell;
 use std::cmp::Reverse;
@@ -404,6 +410,63 @@ impl ActiveReads {
         if !self.reads[idx].ever_contributed.get() {
             self.silent_exits += 1;
         }
+    }
+
+    /// **ng's, added by the depth-cap change** — the held read the ceiling should give
+    /// up first, as `(sampling key, read_id)`, or `None` on an empty set.
+    ///
+    /// "First" means **largest sampling key**: [`read_sampling`](super::read_sampling)
+    /// keeps the smallest, so the largest is the one furthest from being kept. The
+    /// `read_id` is carried out with it as the eviction handle, and breaks ties in the
+    /// key so two reads that hash alike are still ordered by something deterministic.
+    ///
+    /// **It scans, and it hashes as it goes, on purpose.** Keeping a key on every
+    /// `ActiveRead` — or a heap ordered by key — would make every read in the run pay
+    /// for a decision that concerns almost none of them: the ceiling binds at 17 reads
+    /// in 100,000 even at ~130× coverage, and at the ceiling this module now ships it
+    /// binds on no real fixture at all. So the cost is put where the event is. The scan
+    /// is O(held) and runs only when the set is full, which is the same condition that
+    /// used to make the walk refuse the read outright.
+    pub fn worst_sampling_key(&self) -> Option<(u64, u32)> {
+        self.reads
+            .iter()
+            .map(|active| {
+                (
+                    super::read_sampling::sampling_key(&active.read),
+                    active.read_id,
+                )
+            })
+            .max()
+    }
+
+    /// **ng's, added by the depth-cap change** — remove one held read by id, releasing
+    /// its active-count slot, and say whether it was there.
+    ///
+    /// **This is an early [`expire_passed`](Self::expire_passed), and deliberately not
+    /// more than one.** The state it leaves behind — a read that folded into open
+    /// records and is no longer in the set — is the state every read reaches anyway the
+    /// moment the walker passes its end while a record it folded into is still open, and
+    /// `refold_live_reads` has always handled it by skipping the read. So eviction adds
+    /// no case to the fold; it only makes an ordinary case arrive sooner.
+    ///
+    /// **It does not count towards `silent_exits`.** That tally means "admitted, walked
+    /// over its whole footprint, and never once contributed" — a read whose bases are
+    /// all `N`. A read the ceiling took back was never walked over its footprint, so
+    /// filing it there would say something untrue about the reads. The walk counts it
+    /// under `reads_evicted_at_ceiling` instead.
+    pub fn evict_by_read_id(
+        &mut self,
+        read_id: u32,
+        chain_ids: &mut ChainIdAllocator,
+        walker_pos: u32,
+    ) -> Result<bool, WalkerError> {
+        let Some(idx) = self.by_read_id.get(&read_id).copied() else {
+            return Ok(false);
+        };
+        let chrom_id = self.reads[idx].read.chrom_id;
+        chain_ids.note_read_exit(chrom_id, walker_pos)?;
+        self.swap_remove(idx);
+        Ok(true)
     }
 
     fn swap_remove(&mut self, idx: usize) {

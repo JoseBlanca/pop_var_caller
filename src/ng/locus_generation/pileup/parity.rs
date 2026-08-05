@@ -177,6 +177,42 @@ struct Case {
 }
 
 impl Case {
+    /// **Whether this case's per-position caps are small enough to act** — and therefore
+    /// whether the two walkers are still computing the same thing on it.
+    ///
+    /// # The differential's first stated boundary, and why it is a boundary and not a bug
+    ///
+    /// One case in three is drawn with `max_snp_column_depth` between 1 and 4 so the cap
+    /// actually fires at these depths. Until 2026-08-05 both walkers answered "which reads
+    /// survive the cap" the same way — keep the first `cap` in the order the active set
+    /// holds them — so a capped column was as comparable as any other.
+    ///
+    /// ng no longer answers it that way. It keeps the `cap` reads with the smallest
+    /// [`sampling_key`](super::read_sampling::sampling_key), because the old rule made the
+    /// output depend on the container's storage order and tilted the subsample towards
+    /// early alignment starts (`depth_cap.md`). So on a capped column the two walkers keep
+    /// **different reads**, and every field downstream of that — the bases, `q_sum`, the
+    /// footprint a dropped deletion would have widened, even how many records exist —
+    /// differs for a reason that is neither a transcription slip nor one of the six named
+    /// classes.
+    ///
+    /// **That is not a seventh class.** The six classes describe two walkers that saw the
+    /// same evidence and rendered it differently. Here they did not see the same evidence.
+    /// Filing it as a class would let a real transcription slip hide inside it, since the
+    /// class would have to excuse an arbitrary difference.
+    ///
+    /// So the two whole-output comparisons skip these cases **and count them**, and assert
+    /// the count is non-zero — a generator that silently stopped drawing tiny caps would
+    /// otherwise turn this exclusion into a claim about cases that no longer exist. What
+    /// the exclusion costs is covered instead by
+    /// `genome_walk::tests::the_capped_column_keeps_the_smallest_sampling_keys` and its
+    /// two neighbours, which pin the new rule directly.
+    fn caps_can_fire(&self) -> bool {
+        let default = WalkerConfig::default();
+        self.config.max_snp_column_depth < default.max_snp_column_depth
+            || self.config.max_indel_column_depth < default.max_indel_column_depth
+    }
+
     fn fasta(&self) -> MockFasta {
         MockFasta::with_chromosomes(
             &self
@@ -847,6 +883,30 @@ fn ng_counters(summary: super::RunSummary) -> SummaryCounters {
         reads_silent_over_footprint: _,
         reads_with_holed_witness: _,
         hole_positions: _,
+        // **Five more of ng's alone, dropped by name for the same reason as the four
+        // above** (the depth-cap change, 2026-08-05). `reads_evicted_at_ceiling` is the
+        // other half of `reads_shed_at_admission`: the hold ceiling now gives back a read
+        // it is holding rather than only refusing the arrival, and production, which
+        // aborts the walk at its ceiling, has no counterpart to either.
+        // `positions_short_of_cap` and `short_of_cap_deficit` measure what those two cost
+        // the evidence, a question production cannot be asked because it never gets past
+        // the ceiling to have an answer. `column_depth_high_water` and
+        // `pending_mates_high_water` are peaks ng reports and production does not track.
+        //
+        // As with the four above, on every input this harness runs all five are zero —
+        // the ceiling is never reached — so comparing them would be comparing structural
+        // zeroes.
+        reads_evicted_at_ceiling: _,
+        positions_short_of_cap: _,
+        short_of_cap_deficit: _,
+        column_depth_high_water: _,
+        pending_mates_high_water: _,
+        // The fairness census over capped columns — a measurement of ng's own sampling
+        // rule, which is the thing production does not have.
+        capped_column_reads_seen: _,
+        capped_column_reads_seen_placed_left: _,
+        capped_column_reads_kept: _,
+        capped_column_reads_kept_placed_left: _,
     } = summary;
     SummaryCounters {
         reads_admitted,
@@ -2598,6 +2658,7 @@ fn the_determinism_digest_responds_to_the_evidence() {
 /// the fixture ever gains a partial witness; it is not the thing under test.
 #[test]
 fn ng_agrees_with_production_where_production_fabricated_nothing() {
+    let mut capped = 0usize;
     let mut compared = 0usize;
     let mut anchored = 0usize;
     let mut anchored_multi_base = 0usize;
@@ -2610,6 +2671,13 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
         for index in 0..cases_per_seed() {
             let case = generate_uniform_events(&mut rng);
             let where_ = format!("seed {seed:#x} case {index}");
+
+            // See `Case::caps_can_fire`: on a capped column the two walkers keep
+            // different reads by design, so there is nothing here to compare.
+            if case.caps_can_fire() {
+                capped += 1;
+                continue;
+            }
 
             let theirs = production_walk(&case);
             let ours = ng_walk(&case);
@@ -2690,6 +2758,17 @@ fn ng_agrees_with_production_where_production_fabricated_nothing() {
         }
     }
 
+    // **The excluded cases, asserted to exist.** `caps_can_fire` skips the cases where the
+    // two walkers keep different reads by design; a generator that quietly stopped drawing
+    // tiny caps would turn that skip into an exclusion of nothing, and the boundary this
+    // anchor now states would be a boundary around an empty set. One case in three is
+    // drawn capped, so a tenth is a floor with room to spare.
+    assert!(
+        capped * 10 > total,
+        "only {capped} of {total} cases drew caps small enough to fire — the differential \
+         is no longer excluding the capped columns it says it excludes, so either the \
+         generator changed or `caps_can_fire` no longer recognises them"
+    );
     // The anchor is only worth the ground it covered, and **multi-base loci are the part
     // that matters**: at a one-base locus every contributor is `Complete` whatever the
     // builder does, so an anchor made only of those would stay green against a builder that
@@ -2891,6 +2970,7 @@ fn assert_only_allele_bytes_moved(
 fn every_divergence_from_production_is_one_of_the_six_named_classes() {
     let mut one_group = DivergenceCensus::default();
     let mut two_groups = DivergenceCensus::default();
+    let mut capped = 0usize;
 
     // Both generators: the general one reaches the classes that need partial witnesses, the
     // complete-reads one is where a divergence must be the widen or nothing, so running it
@@ -2905,6 +2985,35 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
                 let case = generator(&mut rng);
                 let where_ = format!("seed {seed:#x} case {index}");
 
+                // See `Case::caps_can_fire`: on a capped column the two walkers keep
+                // different reads by design, and an arbitrary difference cannot be
+                // classified without giving every class an escape hatch.
+                //
+                // **Class 3 is measured here anyway, off ng's walk alone.** It fires on
+                // `reads_discarded_by_cap`, a field only a capped column fills, so
+                // dropping these cases outright would take the class to zero and this
+                // test's own rule — "a class counted zero is a branch nothing takes" —
+                // would fire on an artefact of the exclusion rather than on a real gap.
+                // What is checked is what class 3 has always meant: ng carries a
+                // per-locus counter production has no counterpart to, and it is being
+                // filled. What is *not* checked here is a comparison, because there is
+                // none to make.
+                if case.caps_can_fire() {
+                    capped += 1;
+                    for (groups, census) in [(1, &mut one_group), (2, &mut two_groups)] {
+                        let ours = ng_walk_in_groups(&case, groups);
+                        for item in &ours.records {
+                            if let Ok(locus) = item
+                                && (locus.reads_without_observation > 0
+                                    || locus.reads_discarded_by_cap > 0)
+                            {
+                                census.counters += 1;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let theirs = production_walk(&case);
                 for (groups, census) in [(1, &mut one_group), (2, &mut two_groups)] {
                     // The read group reaches nothing but the observation key — see
@@ -2916,6 +3025,13 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         }
     }
 
+    // The excluded cases, asserted to exist — see the same assertion in
+    // `ng_agrees_with_production_where_production_fabricated_nothing` for why.
+    assert!(
+        capped > 0,
+        "no case drew caps small enough to fire, so this census is excluding an empty set \
+         and `Case::caps_can_fire`'s boundary has stopped describing anything"
+    );
     let census = &one_group;
     let diverged = census.loci - census.exact;
     assert!(
