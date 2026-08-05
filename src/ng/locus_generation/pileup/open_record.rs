@@ -2425,10 +2425,8 @@ pub(super) fn process_position(
             // an entry in the active set in `walker::process_position`
             // (the same step that produces `contributors`), and
             // `process_position` runs before `expire_passed_reads`,
-            // so the read_id is still in the active set here.
-            let active_read = active_reads
-                .get_by_read_id(contrib.read_id)
-                .expect("contributor's read_id must still be in the active set");
+            // so the entry is still at the index the contributor recorded.
+            let active_read = active_reads.at(contrib.active_index);
             // **The events this read shows inside this record — re-used rather than
             // re-derived when the record is one base wide and sits under the walker.**
             //
@@ -2677,9 +2675,24 @@ pub(super) struct ReadContribution {
     // duplicate rather than adding a second way to reach it.
     /// Active-set local id of the contributing read. Keys the
     /// per-record `folded_reads` map (so re-folds subtract the
-    /// prior contribution) and is also how the fold looks the
-    /// read up against the `ActiveReads` to query window events.
+    /// prior contribution).
     pub read_id: u32,
+    /// **Where that read sits in the active set right now** — the position
+    /// [`ActiveReads::at`](super::active_read_set::ActiveReads::at) resolves with a
+    /// subscript instead of a hash.
+    ///
+    /// The fold used to re-find the read by `read_id` through the secondary
+    /// `read_id → index` map, once per (contributor × affected record). The contributor
+    /// is built from that very entry a few steps earlier in the same walker step, and
+    /// nothing between the two touches the active set — reads expire *after*
+    /// `process_position` returns — so the index it was found at is still the index it is
+    /// at.
+    ///
+    /// **This is the invariant the field promotes from benign to load-bearing:** no
+    /// admission and no expiry may run between building a contributor list and folding
+    /// it. Both happen inside `WalkerState::process_position`, and the walk's admit and
+    /// expire calls sit outside it.
+    pub active_index: u32,
     pub chain_id: ChainId,
     /// Events whose anchor *is* this walker_pos (used by step 3
     /// to identify candidate records). At most 2 events anchor at
@@ -3534,7 +3547,8 @@ mod tests {
     fn contributors_at(active: &ActiveReads, pos: u32) -> Vec<ReadContribution> {
         active
             .iter()
-            .filter_map(|entry| {
+            .enumerate()
+            .filter_map(|(active_index, entry)| {
                 let events_at_pos = entry.cursor.events_at(pos, &entry.read);
                 if events_at_pos.is_empty() {
                     return None;
@@ -3548,6 +3562,7 @@ mod tests {
                     .unwrap_or(0);
                 Some(ReadContribution {
                     read_id: entry.read_id,
+                    active_index: active_index as u32,
                     chain_id: entry.chain_id,
                     events_at_pos,
                     bq_baq_at_walker_pos: bq,

@@ -954,7 +954,7 @@ impl WalkerState {
         self.contributors_buf.clear();
         let contributors = &mut self.contributors_buf;
 
-        for active_read in self.active_reads.iter() {
+        for (active_index, active_read) in self.active_reads.iter().enumerate() {
             let events_at_pos = active_read.cursor.events_at(walker_pos, &active_read.read);
 
             if events_at_pos.is_empty() {
@@ -983,6 +983,7 @@ impl WalkerState {
             active_read.ever_contributed.set(true);
             contributors.push(ReadContribution {
                 read_id: active_read.read_id,
+                active_index: active_index as u32,
                 chain_id: active_read.chain_id,
                 events_at_pos,
                 bq_baq_at_walker_pos: bq_at_walker,
@@ -2146,6 +2147,7 @@ mod tests {
     ) -> ReadContribution {
         ReadContribution {
             read_id: 0,
+            active_index: 0,
             chain_id: 0,
             events_at_pos: events,
             bq_baq_at_walker_pos: bq,

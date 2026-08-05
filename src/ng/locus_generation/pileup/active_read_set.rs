@@ -218,6 +218,22 @@ impl ActiveReads {
         self.reads.iter()
     }
 
+    /// The entry at `index` in iteration order — what
+    /// [`ReadContribution::active_index`](super::open_record::ReadContribution::active_index)
+    /// records, so the fold reaches a contributor's read with a subscript rather than a
+    /// hash lookup.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the end of the set. The only producer of such an index is
+    /// `iter()`'s own enumeration inside the same walker step, which is why this is a
+    /// subscript rather than an `Option`: a stale index means an admission or an expiry
+    /// ran where none may, and returning `None` would let the fold quietly drop a read
+    /// instead of saying so.
+    pub fn at(&self, index: u32) -> &ActiveRead {
+        &self.reads[index as usize]
+    }
+
     /// Look up a read by `read_id` via the secondary index. Used
     /// by `open_record::process_position` to query each
     /// contributor's `CigarCursor` for window events at the open
