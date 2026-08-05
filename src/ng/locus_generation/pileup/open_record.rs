@@ -747,8 +747,20 @@ impl OpenPileupRecord {
         record_end_exclusive: u32,
         witness_counts: &mut RecordWitnessCounts,
     ) -> Vec<KeyedObservation> {
-        let mut ids: Vec<u32> = self.folded_reads.keys().copied().collect();
-        ids.sort_unstable();
+        // **The reads, in `read_id` order, taken with their state rather than looked up
+        // again.** This used to collect the keys alone, sort those, and then ask the table
+        // for each one's state — a hash and a probe per folded read, ~130 of them per record
+        // at ~130× coverage, for entries the same walk over the table had just visited.
+        //
+        // Carrying the state along costs a wider sort element (a `u32` and a pointer against
+        // a `u32`) and buys the whole second pass. The order is the one the sort establishes
+        // either way, which is what the paragraph above is about.
+        let mut folded: Vec<(u32, &FoldedReadState)> = self
+            .folded_reads
+            .iter()
+            .map(|(read_id, state)| (*read_id, state))
+            .collect();
+        folded.sort_unstable_by_key(|(read_id, _)| *read_id);
 
         let mut observations: Vec<KeyedObservation> = Vec::new();
         // **Which allele bucket each observation was built from, so grouping reads compares
@@ -772,13 +784,7 @@ impl OpenPileupRecord {
         // distinct allele × witness extent × read group); beyond that it spills and behaves
         // as the `Vec` did.
         let mut observation_alleles: SmallVec<[usize; 4]> = SmallVec::new();
-        for read_id in ids {
-            // PANIC-FREE: the id came from this map's own keys a few lines above, and
-            // nothing between then and here mutates the map.
-            let state = self
-                .folded_reads
-                .get(&read_id)
-                .expect("the id came from this record's own fold state");
+        for (_read_id, state) in folded {
             // The identity is compared **borrowed** and the bases cloned only when an observation is
             // genuinely new. Cloning into the key first and letting `find` compare owned
             // values costs one allocation *per read* where the observations need one *per observation* — the
@@ -2273,6 +2279,16 @@ pub(super) fn find_or_create_allele_index(alleles: &mut Vec<OpenAllele>, seq: Ve
 /// only `clone()` the bytes when a genuinely new allele is added.
 /// L10 in `ia/reviews/perf_pileup_2026-05-10.md`.
 pub(super) fn find_allele_index(alleles: &[OpenAllele], seq: &[u8]) -> Option<usize> {
+    // **One base is the case, not a case.** A record is one reference base wide unless an
+    // indel widened it, and a read folding into it presents one base — so this comparison
+    // is `&[u8]` against `&[u8]`, both of length one, ~113 M times over a whole-genome
+    // contig. Slice equality checks the lengths and then calls the platform's `memcmp`,
+    // and for a single byte the call is the whole cost.
+    if let [single] = seq {
+        return alleles
+            .iter()
+            .position(|a| matches!(a.seq.as_slice(), [candidate] if candidate == single));
+    }
     alleles.iter().position(|a| a.seq.as_slice() == seq)
 }
 
