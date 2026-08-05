@@ -17,7 +17,6 @@
 //! `copy_fidelity.rs` released this file in that commit.
 
 
-use ahash::AHashMap;
 use smallvec::SmallVec;
 
 use crate::ng::ref_seq::RefSeq;
@@ -51,6 +50,137 @@ use crate::ng::locus_generation::{
 /// container (e.g. an arena-pooled map or a perfect hash on
 /// dense `read_id` ranges) can be evaluated.
 const RECORD_FOLDED_READS_INITIAL_CAPACITY: usize = 32;
+
+/// A record's per-read fold state, held as a `Vec` **ordered by `read_id`**.
+///
+/// # Why not a hash map, this time
+///
+/// It was an `AHashMap<u32, FoldedReadState>`, entered once per (read × record) — about
+/// 113 million times over one tomato chromosome — and closing a record collected its
+/// entries into a `Vec` and sorted them, because `q_sum` is an `f64` sum and hash order is
+/// seeded per process. So the walk hashed on the way in and sorted on the way out, to end
+/// up with the order its reads already arrived in.
+///
+/// They arrive in ascending `read_id` since the active set became a queue, so a first fold
+/// is a `push` at the end and closing the record is a walk over the `Vec` in place: no
+/// hash, no collect, no sort.
+///
+/// **The shape was tried before and reverted** (−3.2 % at 30×, **+16.4 % at 300×**), and
+/// the reason it failed then is the reason it works now. Reads used to arrive in the
+/// active set's `swap_remove` permutation, so a fold landing anywhere but the end forced
+/// `Vec::insert` to shift the tail — at 300× that is ~300 entries moved per out-of-order
+/// arrival. In `read_id` order the shift is reached only by a read that was silent at one
+/// position of a record's footprint (in a deletion, or on an `N`) and speaks at a later
+/// one, which is rare and confined to records that stay open across positions.
+///
+/// A first fold is still *checked* against the last key rather than assumed, and an
+/// out-of-order arrival still inserts correctly — the order is a performance property
+/// here, not a correctness one. What **is** load-bearing is that iteration is ascending by
+/// `read_id`: that is the determinism guarantee `keyed_observations_counting` used to buy
+/// with its sort.
+#[derive(Debug, Default, Clone)]
+pub(super) struct FoldedReads {
+    /// Ascending by the `u32` key, which is the invariant every method below preserves.
+    entries: Vec<(u32, FoldedReadState)>,
+}
+
+impl FoldedReads {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Where `read_id` is, or where it would go: exactly `Vec::binary_search`'s answer,
+    /// with the append case — a read arriving in order, which is nearly all of them —
+    /// answered by one comparison against the last key.
+    fn locate(&self, read_id: u32) -> Result<usize, usize> {
+        match self.entries.last() {
+            Some((last_id, _)) if *last_id < read_id => Err(self.entries.len()),
+            None => Err(0),
+            _ => self.entries.binary_search_by_key(&read_id, |(id, _)| *id),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn reserve(&mut self, additional: usize) {
+        self.entries.reserve(additional);
+    }
+
+    fn contains_key(&self, read_id: u32) -> bool {
+        self.locate(read_id).is_ok()
+    }
+
+    fn get(&self, read_id: u32) -> Option<&FoldedReadState> {
+        let index = self.locate(read_id).ok()?;
+        Some(&self.entries[index].1)
+    }
+
+    /// The state at a position [`locate`](Self::locate) returned, without asking again.
+    fn at(&self, index: usize) -> Option<&FoldedReadState> {
+        self.entries.get(index).map(|(_, state)| state)
+    }
+
+    /// Store `state` at a position [`locate`](Self::locate) returned for `read_id`, with
+    /// the table unchanged in between — which is what lets the fold ask once and write
+    /// once.
+    fn store_at(&mut self, slot: Result<usize, usize>, read_id: u32, state: FoldedReadState) {
+        match slot {
+            Ok(index) => self.entries[index].1 = state,
+            // The overwhelmingly common arrival: a read the record has not seen, with an id
+            // above every id it has. No shift.
+            Err(index) if index == self.entries.len() => self.entries.push((read_id, state)),
+            Err(index) => self.entries.insert(index, (read_id, state)),
+        }
+    }
+
+    fn get_mut(&mut self, read_id: u32) -> Option<&mut FoldedReadState> {
+        let index = self.locate(read_id).ok()?;
+        Some(&mut self.entries[index].1)
+    }
+
+    /// Store `state` under `read_id`, keeping the order. The fold itself goes through
+    /// [`locate`](Self::locate) + [`store_at`](Self::store_at) so it pays for one search;
+    /// this is the form fixtures build a table with.
+    #[cfg(test)]
+    fn insert(&mut self, read_id: u32, state: FoldedReadState) {
+        let slot = self.locate(read_id);
+        self.store_at(slot, read_id, state);
+    }
+
+    fn remove(&mut self, read_id: u32) -> Option<FoldedReadState> {
+        let index = self.locate(read_id).ok()?;
+        Some(self.entries.remove(index).1)
+    }
+
+    /// The folded reads, ascending by `read_id`.
+    fn iter(&self) -> impl Iterator<Item = (u32, &FoldedReadState)> {
+        self.entries.iter().map(|(read_id, state)| (*read_id, state))
+    }
+
+    fn keys(&self) -> impl Iterator<Item = u32> {
+        self.entries.iter().map(|(read_id, _)| *read_id)
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut FoldedReadState> {
+        self.entries.iter_mut().map(|(_, state)| state)
+    }
+}
 
 /// The support one allele bucket has accumulated — **ng's own**, and production's
 /// [`AlleleSupportStats`](crate::pileup_record::AlleleSupportStats) **minus
@@ -400,7 +530,7 @@ pub(super) struct OpenPileupRecord {
     /// that footprint, multiplying every five-scalar value by
     /// `ref_span` (B1 in `ia/reviews/pileup_2026-05-06.md`).
     ///
-    folded_reads: AHashMap<u32, FoldedReadState>,
+    folded_reads: FoldedReads,
     /// The reads that covered this record and witnessed **nothing** inside it — every
     /// position of their window masked, `N`, or otherwise silent, so there is no
     /// observation to emit (spec §1 goal 2).
@@ -615,7 +745,7 @@ impl OpenPileupRecord {
             // a truncated column is rare and most runs never see one at all.
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
-            folded_reads: AHashMap::with_capacity(fold_capacity),
+            folded_reads: FoldedReads::with_capacity(fold_capacity),
         }
     }
 
@@ -713,19 +843,21 @@ impl OpenPileupRecord {
     /// key. That is what "free at one read group" means, and it is what keeps the stage-1
     /// differential green across B1.
     ///
-    /// # Reads are taken in `read_id` order, and **that line is the determinism guarantee**
+    /// # Reads are taken in `read_id` order, and **that is the determinism guarantee**
     ///
-    /// `folded_reads` is an `AHashMap` whose iteration order is seeded per process, and
-    /// `q_sum` is an `f64` sum, so accumulating in hash order would make the last bits of
-    /// every quality total depend on the seed — the same input emitting different bytes run
-    /// to run, which spec §7 forbids. The bucket totals this replaces had the property for
-    /// free, from being accumulated in walk order; re-deriving is what puts it at risk, and
-    /// `ids.sort_unstable()` below is what restores it.
+    /// `q_sum` is an `f64` sum, so which read is added first decides the last bits of every
+    /// quality total. Taking them in a *fixed* order is what makes the same input emit the
+    /// same bytes, which spec §7 requires.
+    ///
+    /// The order used to be re-established here: `folded_reads` was an `AHashMap` whose
+    /// iteration order is seeded per process, so this function collected its entries and
+    /// sorted them, once per covered base. It is now a [`FoldedReads`], which **is** in
+    /// `read_id` order, so this walks it in place — the sort, the collect and its
+    /// allocation are gone, and the guarantee moved upstream to the container.
     ///
     /// Pinned by `parity::ng_emits_the_same_bytes_in_a_second_process`, which walks the same
-    /// input in two processes: delete that sort and it fails; delete `finalise`'s *observation* sort
-    /// and it stays green. No test inside one process can see any of this, because `ahash`
-    /// seeds once per process.
+    /// input in two processes. Delete `finalise`'s *observation* sort and it stays green;
+    /// that one buys a canonical presentation order, not determinism.
     #[cfg(test)]
     fn keyed_observations(&self, record_end_exclusive: u32) -> Vec<KeyedObservation> {
         let mut counts = RecordWitnessCounts {
@@ -747,21 +879,6 @@ impl OpenPileupRecord {
         record_end_exclusive: u32,
         witness_counts: &mut RecordWitnessCounts,
     ) -> Vec<KeyedObservation> {
-        // **The reads, in `read_id` order, taken with their state rather than looked up
-        // again.** This used to collect the keys alone, sort those, and then ask the table
-        // for each one's state — a hash and a probe per folded read, ~130 of them per record
-        // at ~130× coverage, for entries the same walk over the table had just visited.
-        //
-        // Carrying the state along costs a wider sort element (a `u32` and a pointer against
-        // a `u32`) and buys the whole second pass. The order is the one the sort establishes
-        // either way, which is what the paragraph above is about.
-        let mut folded: Vec<(u32, &FoldedReadState)> = self
-            .folded_reads
-            .iter()
-            .map(|(read_id, state)| (*read_id, state))
-            .collect();
-        folded.sort_unstable_by_key(|(read_id, _)| *read_id);
-
         let mut observations: Vec<KeyedObservation> = Vec::new();
         // **Which allele bucket each observation was built from, so grouping reads compares
         // an index instead of bases.** A read's `bases` below are literally
@@ -784,7 +901,9 @@ impl OpenPileupRecord {
         // distinct allele × witness extent × read group); beyond that it spills and behaves
         // as the `Vec` did.
         let mut observation_alleles: SmallVec<[usize; 4]> = SmallVec::new();
-        for (_read_id, state) in folded {
+        // **In place, ascending by `read_id`** — see the note above on why that order is
+        // the determinism guarantee and why it no longer costs a sort.
+        for (_read_id, state) in self.folded_reads.iter() {
             // The identity is compared **borrowed** and the bases cloned only when an observation is
             // genuinely new. Cloning into the key first and letting `find` compare owned
             // values costs one allocation *per read* where the observations need one *per observation* — the
@@ -920,7 +1039,7 @@ impl OpenPileupRecord {
                 .reads_discarded_by_cap
                 .iter()
                 .filter(|read_id| {
-                    !self.folded_reads.contains_key(read_id)
+                    !self.folded_reads.contains_key(**read_id)
                         && !self.reads_without_observation.contains(read_id)
                 })
                 .count() as u32,
@@ -1066,7 +1185,7 @@ pub(super) struct RecordStorage {
     /// The fold table, **not** cleared here — [`OpenPileupRecordTable::recycle`] decides
     /// whether to keep it or let it go, because a table that grew for a deep region is a
     /// liability in a shallow one.
-    folded_reads: AHashMap<u32, FoldedReadState>,
+    folded_reads: FoldedReads,
 }
 
 /// EXPERIMENT (data_layout perf review 2026-08-04): a key-sorted `Vec` standing in for
@@ -1284,7 +1403,7 @@ impl OpenPileupRecordTable {
             return;
         }
         if storage.folded_reads.capacity() > 4 * self.fold_capacity {
-            storage.folded_reads = AHashMap::with_capacity(self.fold_capacity);
+            storage.folded_reads = FoldedReads::with_capacity(self.fold_capacity);
         } else {
             storage.folded_reads.clear();
         }
@@ -1892,7 +2011,7 @@ fn event_kind_rank(ev: &ReadEvent) -> u8 {
 /// defect, spelled in the type.
 struct RecordFoldState<'a> {
     alleles: &'a mut Vec<OpenAllele>,
-    folded_reads: &'a mut AHashMap<u32, FoldedReadState>,
+    folded_reads: &'a mut FoldedReads,
     reads_without_observation: &'a mut Vec<u32>,
     reads_discarded_by_cap: &'a mut Vec<u32>,
 }
@@ -1962,7 +2081,7 @@ fn fold_read_into_record(
         // folding contiguously and then splitting when the window widened — is gone, and what
         // remains is a defence for a state no input reaches, which is worth its four lines
         // because the failure is a wrong number rather than a crash (spec §4).
-        if let Some(prev) = folded_reads.remove(&active.read_id) {
+        if let Some(prev) = folded_reads.remove(active.read_id) {
             subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
         }
         return;
@@ -1995,18 +2114,22 @@ fn fold_read_into_record(
     // **One lookup, not two.** This read either is already folded into this record — a
     // re-fold at a later position of the same footprint, whose old contribution has to come
     // off its bucket first — or it is arriving for the first time. Both cases end by storing
-    // its state under the same key, so asking the table once for the slot and keeping the
-    // slot answers both questions: the previous `remove` followed by `insert` hashed the read
-    // id twice and probed twice, on a table that is entered once per (read × record) and so
-    // ~113 M times over one whole-genome contig.
+    // its state under the same key, so locating the slot once answers both questions, on a
+    // table that is entered once per (read × record) and so ~113 M times over one
+    // whole-genome contig.
     //
     // The removal *shape* is still available where it is genuinely a removal — the
     // no-observation path above — and only the common path changed.
-    let slot = folded_reads.entry(active.read_id);
-    if let std::collections::hash_map::Entry::Occupied(occupied) = &slot {
-        let prev = occupied.get();
+    let slot = folded_reads.locate(active.read_id);
+    if let Ok(index) = slot {
+        // PANIC-FREE: `locate` returned `Ok`, and nothing between there and here touches
+        // the table.
+        let prev = folded_reads
+            .at(index)
+            .expect("locate returned an occupied slot");
         let prev_index = prev.allele_index;
-        subtract_contribution(&mut alleles[prev_index].support, &prev.contribution);
+        let prev_contribution = prev.contribution;
+        subtract_contribution(&mut alleles[prev_index].support, &prev_contribution);
     }
     // Borrowed lookup; only `clone()` the bytes when adding a genuinely new allele. In
     // SNP/REF steady state every contributor lands in the same existing bucket, so the
@@ -2026,14 +2149,7 @@ fn fold_read_into_record(
         read_group: active.read.read_group,
         witnessed,
     };
-    match slot {
-        std::collections::hash_map::Entry::Occupied(mut occupied) => {
-            occupied.insert(state);
-        }
-        std::collections::hash_map::Entry::Vacant(vacant) => {
-            vacant.insert(state);
-        }
-    }
+    folded_reads.store_at(slot, active.read_id, state);
 }
 
 /// Re-place every **live** read already folded into this record against the window it now
@@ -2082,9 +2198,11 @@ fn refold_live_reads(
     active_reads: &ActiveReads,
     contributors: &[ReadContribution],
 ) {
+    // Already ascending: `folded_reads` is ordered by `read_id`, so the sort this used to
+    // run is gone. The ids are still copied out rather than iterated in place, because the
+    // loop below removes from the table it is walking.
     ids.clear();
-    ids.extend(rec.folded_reads.keys().copied());
-    ids.sort_unstable();
+    ids.extend(rec.folded_reads.keys());
 
     let rec_pos = rec.pos;
     let rec_end = rec.footprint_end_exclusive();
@@ -2117,7 +2235,7 @@ fn refold_live_reads(
             read_group: _,
             witnessed: _,
         } = folded_reads
-            .get(&read_id)
+            .get(read_id)
             .expect("the id came from this record's own fold state");
         let window = active
             .cursor
@@ -2138,7 +2256,7 @@ fn refold_live_reads(
         // and no second copy of "did this read witness anything" to keep in step with the
         // buffer (Milestone C review, F1).
         let refilled = folded_reads
-            .get_mut(&read_id)
+            .get_mut(read_id)
             .expect("the id came from this record's own fold state")
             .witnessed
             .refill_from(witnessed_runs_buf);
@@ -2153,7 +2271,7 @@ fn refold_live_reads(
             // failure they prevent is a live contribution stranded in a bucket, which is a
             // wrong number rather than a crash (see `fold_read_into_record`).
             note_no_observation(reads_without_observation, read_id);
-            folded_reads.remove(&read_id);
+            folded_reads.remove(read_id);
             subtract_contribution(
                 &mut alleles[previous_allele_index].support,
                 &previous_contribution,
@@ -2188,7 +2306,7 @@ fn refold_live_reads(
         // question at both sites; before C1 this was a whole-struct assignment, which
         // asked it the same way.
         let state = folded_reads
-            .get_mut(&read_id)
+            .get_mut(read_id)
             .expect("the id came from this record's own fold state");
         let FoldedReadState {
             // The one the re-place still has to decide; the witness was refilled above.
@@ -2224,7 +2342,7 @@ fn refold_live_reads(
 /// buckets simply retained.
 fn evict_unsupported_alleles(
     alleles: &mut Vec<OpenAllele>,
-    folded_reads: &mut AHashMap<u32, FoldedReadState>,
+    folded_reads: &mut FoldedReads,
 ) {
     if alleles.len() < 2 || alleles[1..].iter().all(|a| a.support.num_obs > 0) {
         return;
@@ -3686,7 +3804,7 @@ mod tests {
         );
         let opener = record
             .folded_reads
-            .get(&read_id_of(&active, "opener"))
+            .get(read_id_of(&active, "opener"))
             .expect("the opener folded into this record at position 5");
         assert_eq!(
             opener.witnessed,
@@ -3721,7 +3839,7 @@ mod tests {
             let record = open.records.get_mut(&5).expect("the record at 5");
             let state = record
                 .folded_reads
-                .get_mut(&opener_id)
+                .get_mut(opener_id)
                 .expect("the opener folded");
             let was = state.contribution.q_sum;
             record.alleles[state.allele_index].support.q_sum += RECONCILED - was;
@@ -3739,7 +3857,7 @@ mod tests {
         );
         let opener = record
             .folded_reads
-            .get(&opener_id)
+            .get(opener_id)
             .expect("the opener is still folded");
         assert_eq!(
             opener.contribution.q_sum, RECONCILED,
@@ -3785,7 +3903,7 @@ mod tests {
         let bucket_of = |qname: &str| -> &OpenAllele {
             let state = record
                 .folded_reads
-                .get(&read_id_of(&active, qname))
+                .get(read_id_of(&active, qname))
                 .unwrap_or_else(|| panic!("{qname} folded into this record"));
             &record.alleles[state.allele_index]
         };
@@ -4054,7 +4172,7 @@ mod tests {
             );
             let state = record
                 .folded_reads
-                .get(&shortie_id)
+                .get(shortie_id)
                 .expect("the shortie folded at 5");
             assert_eq!(
                 witness_of(
@@ -4080,7 +4198,7 @@ mod tests {
         );
         let state = record
             .folded_reads
-            .get(&shortie_id)
+            .get(shortie_id)
             .expect("the shortie is still folded");
         assert_eq!(
             state.witnessed, narrow,
@@ -4707,7 +4825,7 @@ mod tests {
         assert!(
             record
                 .folded_reads
-                .contains_key(&read_id_of(&active, "capped")),
+                .contains_key(read_id_of(&active, "capped")),
             "`capped` must have folded at 6, or this fixture is the other test"
         );
         let (locus, witness) = record.finalise();
@@ -4851,7 +4969,7 @@ mod tests {
                 .get(&5)
                 .expect("the record at 5")
                 .folded_reads
-                .contains_key(&holed_id),
+                .contains_key(holed_id),
             "before the widen `holed` witnessed 5..=7 as one run and has a observation"
         );
 
@@ -4877,7 +4995,7 @@ mod tests {
         );
         let holed_state = record
             .folded_reads
-            .get(&holed_id)
+            .get(holed_id)
             .expect("`holed` is still folded, with a witness in two runs");
         assert_eq!(
             holed_state.witnessed.runs().len(),

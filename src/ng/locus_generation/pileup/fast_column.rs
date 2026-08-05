@@ -254,6 +254,13 @@ pub(super) fn try_ordinary_column(
 
     // **The determinism guarantee**, and the only ordering in this function that is not
     // free to change: see the module note.
+    //
+    // **Kept even though the ordered active set makes it redundant.** With `ActiveReads` a
+    // queue in ascending `read_id`, this buffer arrives sorted and the sort is a scan.
+    // Deleting it was measured — −0.44 % at 130×, −0.18 % at 30×, −0.08 % at 300× — and
+    // declined: it would make this module's `q_sum` summation order, and so the emitted
+    // bytes, depend on a container choice in `active_read_set.rs`. Half a percent is not
+    // worth that coupling. See `composed_full.md` §7.
     scratch.reads.sort_unstable_by_key(|r| r.read_id);
 
     scratch.ref_base.clear();

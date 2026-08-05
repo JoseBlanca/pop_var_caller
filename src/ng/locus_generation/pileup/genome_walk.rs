@@ -1762,12 +1762,19 @@ fn resolve_mate_overlap_at_pos(
         }
     }
 
-    // Drop indel-overlap losers from the contributor list.
-    // Sort descending so swap_remove keeps earlier indices valid.
+    // Drop indel-overlap losers from the contributor list, **in place**: the list arrives
+    // in ascending `read_id` from the active set, and everything downstream of here — the
+    // fold order, and with it the fold table's shape — is built on it still being so.
+    // `swap_remove` would put the last contributor in the loser's place and undo that for
+    // the whole column. The shift costs a memmove of the tail, and only on a column that
+    // has a mate overlap *with an indel on one side*; `swap_remove` charged nothing there
+    // and charged the ordering everywhere.
+    //
+    // Removal is applied back to front so earlier indices stay valid either way.
     to_remove.sort_unstable();
     to_remove.dedup();
     for idx in to_remove.drain(..).rev() {
-        contributors.swap_remove(idx);
+        contributors.remove(idx);
     }
 }
 
