@@ -11,6 +11,8 @@
 //! header is the record.
 
 use std::cell::Cell;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use ahash::AHashMap;
 
@@ -88,6 +90,15 @@ pub struct ActiveReads {
     /// `PileupGeneratorCounts::fold_region_walk` sums it region by region and a walker now
     /// lives long enough to be asked twice.
     silent_exits: u64,
+    /// **ng's** — the last reference position at which each *pair* the set holds still has
+    /// both of its alignments on the reference, smallest first.
+    ///
+    /// One entry is pushed when a second mate is admitted while its first mate is still
+    /// here, and it is dropped once the walker passes it. So the heap is non-empty exactly
+    /// while some pair's two alignments could both reach the walker's column, which is the
+    /// only way a column can have two contributors sharing a chain id — see
+    /// [`may_have_mate_overlap_at`](Self::may_have_mate_overlap_at).
+    pair_overlap_ends: BinaryHeap<Reverse<u32>>,
 }
 
 impl ActiveReads {
@@ -97,7 +108,44 @@ impl ActiveReads {
             by_read_id: AHashMap::new(),
             next_read_id: 0,
             silent_exits: 0,
+            pair_overlap_ends: BinaryHeap::new(),
         }
+    }
+
+    /// Could this column have two contributors that share a chain id?
+    ///
+    /// **The answer the walk actually wants is "no", and it wants it in O(1).**
+    /// `resolve_mate_overlap_at_pos` runs at every covered reference base and its first act
+    /// is to build one `(chain_id, index)` tuple per contributor and sort them, only to
+    /// discover — at more than eight columns in ten, at both 30× and 130× — that no two
+    /// share an id. That sort is depth-sized, so at 130× it orders ~130 entries 86 million
+    /// times per contig to answer a question admission already settled.
+    ///
+    /// **Two contributors share a chain id only if they are the two mates of one pair.**
+    /// Chain ids are allocated once per fragment and *never recycled*
+    /// (`chain_id_allocator.rs`), a second mate takes its first mate's id, and read ids are
+    /// unique within a region — so the only way two reads in this set carry one id is that
+    /// one was admitted as the other's mate. That happens at exactly one place
+    /// ([`admit`](Self::admit)), where both alignments' start and end are in hand, and the
+    /// interval on which the two can both reach the walker is their intersection.
+    ///
+    /// So [`admit`](Self::admit) records the end of that intersection and this prunes the
+    /// ones the walker has passed. A `true` here is an over-approximation — the pair may be
+    /// silent at this particular base, or the column may not be deep enough to include both
+    /// — and costs one ordinary sorted column. A `false` is exact: no pair of this set's
+    /// reads has both alignments still on the reference at `walker_pos`, so no two
+    /// contributors can share an id.
+    ///
+    /// Takes `&mut self` because pruning is how the heap stays O(1) to consult.
+    pub fn may_have_mate_overlap_at(&mut self, walker_pos: u32) -> bool {
+        while let Some(&Reverse(overlap_end)) = self.pair_overlap_ends.peek() {
+            if overlap_end < walker_pos {
+                self.pair_overlap_ends.pop();
+            } else {
+                return true;
+            }
+        }
+        false
     }
 
     /// Reads that left having never contributed anywhere — the run total, current at
@@ -122,6 +170,10 @@ impl ActiveReads {
         );
         self.reads.clear();
         self.by_read_id.clear();
+        // Positions restart at 1 on the next chromosome, so an end recorded on this one
+        // would read as a live overlap there. Nothing is lost by dropping them: the reads
+        // they describe are gone.
+        self.pair_overlap_ends.clear();
         // next_read_id keeps advancing — read ids stay unique
         // across the whole run, which makes log messages
         // unambiguous.
@@ -153,6 +205,9 @@ impl ActiveReads {
         self.by_read_id.clear();
         self.next_read_id = 0;
         self.silent_exits = 0;
+        // Same reason as in `reset`: `walker_pos` restarts at 1, so an end left here would
+        // claim a live pair overlap over the new region's opening megabase.
+        self.pair_overlap_ends.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -218,6 +273,11 @@ impl ActiveReads {
 
         let cursor = CigarCursor::new(&read.cigar, read.alignment_start);
 
+        // Read off before the read moves into the set — the pair-overlap interval below
+        // needs both, and after the push they are behind an index.
+        let alignment_start = read.alignment_start;
+        let alignment_end = read.alignment_end;
+
         let active = ActiveRead {
             read_id,
             read,
@@ -238,6 +298,22 @@ impl ActiveReads {
             && let Some(partner_idx) = self.by_read_id.get(&partner).copied()
         {
             self.reads[partner_idx].mate_read_id = Some(read_id);
+
+            // **The one moment a pair is knowable, so the one moment to price it.**
+            // Reads arrive in coordinate order, so this read starts at or after its
+            // partner and the two alignments intersect on
+            // `[alignment_start, min(both ends)]`. Recording that end is what lets
+            // every column outside it skip the per-column search for a shared chain id
+            // ([`may_have_mate_overlap_at`](Self::may_have_mate_overlap_at)).
+            //
+            // The interval's *start* needs no recording: admission happens only once the
+            // walker has reached this read's `alignment_start`, so the pair is already
+            // inside its overlap when the entry is pushed, and a read contributes to no
+            // column before it is admitted.
+            let overlap_end = alignment_end.min(self.reads[partner_idx].read.alignment_end);
+            if overlap_end >= alignment_start {
+                self.pair_overlap_ends.push(Reverse(overlap_end));
+            }
         }
 
         Ok(read_id)
@@ -442,6 +518,64 @@ mod tests {
         // Both mates should now reference each other.
         assert_eq!(s.get_by_read_id(m1).unwrap().mate_read_id, Some(m2));
         assert_eq!(s.get_by_read_id(m2).unwrap().mate_read_id, Some(m1));
+    }
+
+    /// The predicate the per-column mate-overlap skip reads. It must answer `true`
+    /// **everywhere the two alignments both cover**, one position at a time — a `false`
+    /// inside that span is a lost reconciliation.
+    #[test]
+    fn a_pair_is_visible_at_every_position_its_two_alignments_share() {
+        let mut s = ActiveReads::new();
+        let mut a = ChainIdAllocator::new();
+        // 100..149 and 130..179 — they share 130..149.
+        s.admit(paired_read("p", true, 100, 50), &mut a).unwrap();
+        s.admit(paired_read("p", false, 130, 50), &mut a).unwrap();
+        for pos in 100..=149 {
+            assert!(
+                s.may_have_mate_overlap_at(pos),
+                "the pair is still on the reference at {pos}",
+            );
+        }
+        assert!(
+            !s.may_have_mate_overlap_at(150),
+            "the first mate's alignment ended at 149, so nothing can share a chain id now",
+        );
+    }
+
+    /// The case the skip exists for: mates that do not reach each other. Nothing is
+    /// recorded at all, so every column of the walk takes the cheap exit.
+    #[test]
+    fn mates_whose_alignments_do_not_meet_are_never_visible() {
+        let mut s = ActiveReads::new();
+        let mut a = ChainIdAllocator::new();
+        // 100..149 and 200..249 — disjoint.
+        s.admit(paired_read("p", true, 100, 50), &mut a).unwrap();
+        s.admit(paired_read("p", false, 200, 50), &mut a).unwrap();
+        for pos in [100u32, 149, 150, 200, 249, 250] {
+            assert!(
+                !s.may_have_mate_overlap_at(pos),
+                "the mates never share a position, so none can be claimed at {pos}",
+            );
+        }
+    }
+
+    /// Positions restart at 1 in a new region, so an overlap recorded in the old one would
+    /// read as live over the new region's opening bases — the skip would simply stop
+    /// firing there, which costs time rather than correctness, but the state is wrong.
+    #[test]
+    fn a_region_boundary_forgets_the_previous_region_s_pair_overlaps() {
+        let mut s = ActiveReads::new();
+        let mut a = ChainIdAllocator::new();
+        s.admit(paired_read("p", true, 1_000_000, 50), &mut a)
+            .unwrap();
+        s.admit(paired_read("p", false, 1_000_000, 50), &mut a)
+            .unwrap();
+        assert!(s.may_have_mate_overlap_at(1_000_000));
+        s.begin_region();
+        assert!(
+            !s.may_have_mate_overlap_at(1),
+            "the new region's first column inherited the old region's overlap",
+        );
     }
 
     #[test]

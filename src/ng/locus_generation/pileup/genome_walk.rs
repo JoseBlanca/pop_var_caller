@@ -853,6 +853,12 @@ impl WalkerState {
         // silent (deletion interior or N-skip), so they are not
         // added as contributors at all.
         let walker_pos = self.walker_pos;
+        // Asked before the contributor list is built, because the active set is borrowed
+        // immutably for the whole of that loop. See
+        // [`ActiveReads::may_have_mate_overlap_at`]: `false` means no pair of this set's
+        // reads has both alignments still on the reference here, so step 2 below cannot
+        // find anything and is skipped whole.
+        let may_have_mate_overlap = self.active_reads.may_have_mate_overlap_at(walker_pos);
         // Hoisted buffer; cleared per step. L6.
         self.contributors_buf.clear();
         let contributors = &mut self.contributors_buf;
@@ -903,7 +909,26 @@ impl WalkerState {
         // observation, contributing ln(1)=0 log-likelihood mass)
         // and is flagged so any window event the fold pulls from
         // its cursor also gets BQ-zeroed.
-        resolve_mate_overlap_at_pos(contributors, &mut self.summary, &mut self.mate_overlap_buf);
+        //
+        // **Skipped outright wherever no pair is present, which is most columns at the
+        // depths this walk is for.** Reconciled columns are 1,664 in 10,000 on a 130×
+        // tomato whole-genome sample and 1,911 in 10,000 on a 30× human one; the step's own
+        // no-pair exit still costs a depth-sized tuple build and sort at every one of the
+        // other eight in ten. The active set can rule the column out in O(1) instead,
+        // because a shared chain id is a mate pair and a mate pair is known at admission
+        // (`ActiveReads::may_have_mate_overlap_at`). At 300× a pair is present at most
+        // columns and the skip simply stops firing.
+        if may_have_mate_overlap {
+            resolve_mate_overlap_at_pos(contributors, &mut self.summary, &mut self.mate_overlap_buf);
+        } else {
+            debug_assert!(
+                !column_shares_a_chain_id(contributors),
+                "the mate-overlap skip fired at {}:{} on a column where two contributors \
+                 share a chain id — the reconciliation was silently lost",
+                self.chrom_id,
+                walker_pos,
+            );
+        }
 
         // Step 2b: per-column depth cap. Adopted from samtools'
         // mpileup (see `WalkerConfig` doc-comment). Apply *after*
@@ -1116,6 +1141,25 @@ struct MateOverlapScratch {
     by_chain_id: Vec<(ChainId, usize)>,
     to_remove: Vec<usize>,
     bq_updates: Vec<(usize, u8, bool)>,
+}
+
+/// Does any pair of contributors at this column share a chain id?
+///
+/// **The pin on the O(1) skip, and it only exists in debug builds.** The skip's claim is
+/// that a column the active set rules out cannot contain two contributors with one chain
+/// id; a wrong skip loses a mate reconciliation, changes the emitted bytes, and shows up
+/// nowhere else — `mate_overlap_positions` would simply be smaller. This is the all-pairs
+/// scan the skip replaces, asserted every time the skip fires under `cargo test` and under
+/// any debug-built dump, at the cost the old code paid on every column of every build.
+///
+/// Not `#[cfg(debug_assertions)]`: `debug_assert!` expands to a `cfg!`-guarded `assert!`,
+/// so the call is type-checked in every build and elided from the release one.
+fn column_shares_a_chain_id(contributors: &[ReadContribution]) -> bool {
+    contributors.iter().enumerate().any(|(i, a)| {
+        contributors[i + 1..]
+            .iter()
+            .any(|b| a.chain_id == b.chain_id)
+    })
 }
 
 /// Resolve mate-overlap at the current walker position.

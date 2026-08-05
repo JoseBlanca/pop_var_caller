@@ -188,6 +188,10 @@ struct ProbeReport {
     record_widen_events: u64,
     records_outside_region: u64,
     column_depth_truncations: u64,
+    /// Columns where two mates of one pair were both present and were reconciled. Printed
+    /// because it is the direct check on the mate-overlap fast path: a change that skips
+    /// the per-column pair search must leave this number bit-for-bit unchanged.
+    mate_overlap_positions: u64,
     /// Reads refused at admission because the walk already held `max_active_reads` open.
     /// Printed beside `active_reads_high_water`, which says whether the cap was reached
     /// at all — the pair is what makes a deep region readable from the printout alone.
@@ -255,6 +259,11 @@ impl ProbeReport {
             out,
             "column_depth_truncations={}",
             self.column_depth_truncations
+        );
+        let _ = writeln!(
+            out,
+            "mate_overlap_positions={}",
+            self.mate_overlap_positions
         );
         let _ = writeln!(
             out,
@@ -508,6 +517,7 @@ fn walk<P: ReadPreparer + 'static>(
         record_widen_events,
         records_outside_region,
         column_depth_truncations,
+        mate_overlap_positions,
         reads_shed_at_admission,
         active_reads_high_water,
         ..
@@ -520,6 +530,7 @@ fn walk<P: ReadPreparer + 'static>(
     report.record_widen_events = record_widen_events;
     report.records_outside_region = records_outside_region;
     report.column_depth_truncations = column_depth_truncations;
+    report.mate_overlap_positions = mate_overlap_positions;
     report.reads_shed_at_admission = reads_shed_at_admission;
     report.active_reads_high_water = active_reads_high_water;
     report.generic_region_bp = generic_bp.get();
@@ -1294,6 +1305,7 @@ mod tests {
                 "record_widen_events",
                 "records_outside_region",
                 "column_depth_truncations",
+                "mate_overlap_positions",
                 "reads_shed_at_admission",
                 "active_reads_high_water",
                 "reference_check",
@@ -1339,6 +1351,7 @@ mod tests {
             record_widen_events: 19,
             records_outside_region: 20,
             column_depth_truncations: 21,
+            mate_overlap_positions: 24,
             reads_shed_at_admission: 22,
             active_reads_high_water: 23,
             seconds: 5.18,
@@ -1367,6 +1380,7 @@ mod tests {
             "record_widen_events=19",
             "records_outside_region=20",
             "column_depth_truncations=21",
+            "mate_overlap_positions=24",
             "reads_shed_at_admission=22",
             "active_reads_high_water=23",
             "seconds=5.180",

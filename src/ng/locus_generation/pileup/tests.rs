@@ -654,6 +654,50 @@ fn paired_mates_with_overlapping_positions_share_chain_id() {
     );
 }
 
+/// **The pin on the per-column mate-overlap skip.**
+///
+/// `process_position` asks the active set, in O(1), whether any pair it holds still has
+/// both alignments on the reference at this column, and skips the whole mate-overlap step
+/// when the answer is no. A skip that fired on a column where a pair *is* present would
+/// lose that reconciliation silently: the emitted record would keep both mates' BQ instead
+/// of zeroing the lower one, and the only counter that would notice is this one.
+///
+/// So this walks a pair whose mates overlap on three bases and one solo read that overlaps
+/// neither, and asserts the exact number of reconciled columns. Three, not "more than
+/// zero": a skip that fired on one column of the overlap would still leave two.
+#[test]
+fn every_column_a_mate_pair_spans_is_reconciled_not_skipped() {
+    let fa = MockFasta::new("AAAAAAAAAA");
+    // Mates at 1..3 and 3..5 — one shared column, position 3.
+    let (m1, mut m2) = paired_snp_reads("pair_edge", 1, 3, b"AAA", &[30; 3]);
+    m2.bq_baq = vec![10; 3];
+    // Mates at 6..8 and 6..8 — three shared columns, 6, 7 and 8.
+    let (m3, mut m4) = paired_snp_reads("pair_full", 6, 6, b"AAA", &[30; 3]);
+    m4.bq_baq = vec![10; 3];
+    // A solo read over the same span as the second pair: depth without a partner, so the
+    // skip has columns where it must *not* fire and columns where nothing shares an id.
+    let solo = snp_read("solo", 6, b"AAA", &[30; 3]);
+    let (_records, summary) = drive_walker_with_summary(vec![m1, m2, m3, solo, m4], fa);
+    assert_eq!(
+        summary.mate_overlap_positions, 4,
+        "one shared column for the staggered pair plus three for the stacked one",
+    );
+}
+
+/// The other half of the same claim: a column with no pair present must not be *charged*
+/// for one. A pair whose mates never overlap — the ordinary paired-end case, and the
+/// reason the skip is worth having — reconciles nothing anywhere.
+#[test]
+fn mates_that_never_overlap_reconcile_nothing() {
+    let fa = MockFasta::new("AAAAAAAAAA");
+    let (m1, m2) = paired_snp_reads("pair", 1, 5, b"AAA", &[30; 3]);
+    let (_records, summary) = drive_walker_with_summary(vec![m1, m2], fa);
+    assert_eq!(
+        summary.mate_overlap_positions, 0,
+        "the mates span 1..3 and 5..7, so no column holds both",
+    );
+}
+
 #[test]
 fn paired_mates_within_lookup_window_share_chain_id_across_active_set_exit() {
     // The first mate exits the active set well before the second
