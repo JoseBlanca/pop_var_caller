@@ -546,7 +546,28 @@ impl OpenPileupRecord {
     /// zero observations) so the `alleles[0] == REF` invariant
     /// holds from the very start. The REF bytes are moved into the
     /// REF bucket — there is no separate copy on the record.
+    ///
+    /// **Tests only.** The walk opens records through
+    /// [`with_fold_capacity`](Self::with_fold_capacity) so the fold table starts at the
+    /// sample's observed coverage; a test that folds three reads has nothing to learn from
+    /// coverage, and reading `new(chrom, pos, seq)` at a test site is worth keeping.
+    #[cfg(test)]
     fn new(chrom_id: u32, pos: u32, ref_seq: Vec<u8>) -> Self {
+        Self::with_fold_capacity(chrom_id, pos, ref_seq, RECORD_FOLDED_READS_INITIAL_CAPACITY)
+    }
+
+    /// As [`new`](Self::new), with room reserved for `fold_capacity` folded reads.
+    ///
+    /// The walk uses this so a record's fold table starts at the sample's observed
+    /// coverage instead of a fixed guess; see
+    /// [`OpenPileupRecordTable::observe_column_depth`]. `new` remains the form tests build
+    /// records with, since a test that folds three reads has nothing to learn from.
+    fn with_fold_capacity(
+        chrom_id: u32,
+        pos: u32,
+        ref_seq: Vec<u8>,
+        fold_capacity: usize,
+    ) -> Self {
         Self {
             chrom_id,
             pos,
@@ -556,7 +577,7 @@ impl OpenPileupRecord {
             // a truncated column is rare and most runs never see one at all.
             reads_without_observation: Vec::new(),
             reads_discarded_by_cap: Vec::new(),
-            folded_reads: AHashMap::with_capacity(RECORD_FOLDED_READS_INITIAL_CAPACITY),
+            folded_reads: AHashMap::with_capacity(fold_capacity),
         }
     }
 
@@ -619,6 +640,23 @@ impl OpenPileupRecord {
         if first >= past_last {
             return false;
         }
+        // **The REF bucket answers this without looking at a byte, and it is the common
+        // case.** A read in bucket 0 has the record's own reference bytes as its allele, so
+        // the comparison below is `reference == reference[first..past_last]` — the same
+        // memory against a slice of itself. Two slices of equal length starting from the
+        // same buffer, one of them the whole of it, are equal exactly when the other is the
+        // whole of it too; and since `past_last <= reference.len()`, that is
+        // `first == 0 && past_last == reference.len()`. So the length test *is* the answer,
+        // and the byte compare after it can only confirm what the lengths already said.
+        //
+        // Worth writing out because it is most of the calls: nearly every read agrees with
+        // the reference, so nearly every read is in bucket 0, and `finalise` asks this once
+        // per folded read — ~113 M times over one whole-genome contig, each one a `memcmp`
+        // call for what is usually a single base (2.3 % of the walk at ~130×, profile
+        // 2026-08-04).
+        if state.allele_index == 0 {
+            return first == 0 && past_last == reference.len();
+        }
         self.alleles[state.allele_index].seq == reference[first..past_last]
     }
 
@@ -675,6 +713,27 @@ impl OpenPileupRecord {
         ids.sort_unstable();
 
         let mut observations: Vec<KeyedObservation> = Vec::new();
+        // **Which allele bucket each observation was built from, so grouping reads compares
+        // an index instead of bases.** A read's `bases` below are literally
+        // `self.alleles[state.allele_index].seq`, and `find_allele_index` only ever opens a
+        // new bucket when no existing one matched — so the buckets hold pairwise distinct
+        // sequences and "same bases" and "same bucket" are the same statement.
+        //
+        // The byte compare it replaces ran once per (read × observation seen so far), which
+        // at ~130× is ~130 `memcmp` calls per record for what is usually a single base, and
+        // is most of what `finalise` spent in byte comparison (2.3 % of the walk together
+        // with the reference-agreement compare, profile 2026-08-04). Kept beside
+        // `observations` rather than inside `KeyedObservation` because it is scaffolding for
+        // building the list, not part of an observation's identity — nothing downstream has
+        // a bucket index to compare against.
+        //
+        // **Inline, because a `Vec` here measured +0.13 % at 30×.** It is one more heap
+        // allocation per record on top of `observations`' own, and at 30× the byte compares
+        // it saves are too few to pay for it — a record with 17 reads and one observation
+        // does 17 one-byte compares. Four slots cover a record's observation count (one per
+        // distinct allele × witness extent × read group); beyond that it spills and behaves
+        // as the `Vec` did.
+        let mut observation_alleles: SmallVec<[usize; 4]> = SmallVec::new();
         for read_id in ids {
             // PANIC-FREE: the id came from this map's own keys a few lines above, and
             // nothing between then and here mutates the map.
@@ -704,11 +763,14 @@ impl OpenPileupRecord {
             }
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
-            let existing = observations.iter().position(|observation| {
-                observation.key.bases == bases
-                    && observation.key.read_witness == read_witness
-                    && observation.key.read_group == read_group
-            });
+            let existing = observations
+                .iter()
+                .zip(&observation_alleles)
+                .position(|(observation, &observation_allele)| {
+                    observation_allele == state.allele_index
+                        && observation.key.read_witness == read_witness
+                        && observation.key.read_group == read_group
+                });
             let observation = match existing {
                 Some(index) => &mut observations[index],
                 None => {
@@ -721,6 +783,9 @@ impl OpenPileupRecord {
                         support: AlleleSupportStats::default(),
                         chain_ids: Vec::new(),
                     });
+                    // Pushed in the same step as the observation it describes, so the two
+                    // stay index-for-index.
+                    observation_alleles.push(state.allele_index);
                     // PANIC-FREE: pushed on the line above.
                     observations.last_mut().expect("just pushed")
                 }
@@ -1050,6 +1115,28 @@ pub(super) struct OpenPileupRecordTable {
     /// per-process seed, so folding in its iteration order would make bucket *creation*
     /// order — and therefore the emitted allele order — differ run to run.
     refold_ids_buf: Vec<u32>,
+    /// How many reads to make room for in a **new** record's fold table: **how many the
+    /// last record to close actually held**, floored at
+    /// [`RECORD_FOLDED_READS_INITIAL_CAPACITY`].
+    ///
+    /// The size used to be that constant alone, sized "for typical WGS coverage": right at
+    /// 30×, and four times too small at the ~130× of a real whole-genome sample, where
+    /// every record grew and rehashed twice before being thrown away
+    /// (`hashbrown reserve_rehash`, 3.5 % of the walk, profile 2026-08-04).
+    ///
+    /// **Two other estimators were measured and are worse**, both because they predict a
+    /// number bigger than the one that matters:
+    ///
+    /// - the deepest column seen so far: **+0.45 %** at 30×. One pathological column near
+    ///   a repeat sets a size every later record then pays for.
+    /// - the current column's depth: **+0.25 %** at 30×. Not every read covering a column
+    ///   folds into the record opened there, so this over-asks by roughly a factor of two
+    ///   and buys a doubled table for records that never fill it.
+    ///
+    /// What a closing record held is the same quantity being predicted, measured on the
+    /// nearest neighbour that has it — and coverage is local, so the neighbour is a good
+    /// predictor. It cannot run away either: it is bounded by what a record genuinely held.
+    fold_capacity: usize,
     /// Per-instance cap on per-record reference span, mirrors
     /// `WalkerConfig::max_record_span`. M11 in
     /// `ia/reviews/pileup_2026-05-11.md`.
@@ -1079,8 +1166,18 @@ impl OpenPileupRecordTable {
             closing_keys_buf: Vec::new(),
             widen_bases_buf: Vec::new(),
             refold_ids_buf: Vec::new(),
+            fold_capacity: RECORD_FOLDED_READS_INITIAL_CAPACITY,
             max_record_span,
         }
+    }
+
+    /// Note how many reads a record that is closing turned out to hold, so the next one
+    /// opened starts with a table that size. See [`fold_capacity`](Self::fold_capacity).
+    fn learn_fold_size_from(&mut self, closing: &OpenPileupRecord) {
+        self.fold_capacity = closing
+            .folded_reads
+            .len()
+            .max(RECORD_FOLDED_READS_INITIAL_CAPACITY);
     }
 
     /// Reset chromosome-scoped state in place. Used at chromosome
@@ -1139,11 +1236,17 @@ impl OpenPileupRecordTable {
             }
         }
         out.reserve(self.closing_keys_buf.len());
-        for pos in self.closing_keys_buf.drain(..) {
+        // The key buffer is lifted out and put back rather than drained in place: the loop
+        // body needs `&mut self` to learn from each closing record, and the buffer's whole
+        // reason for existing is that its allocation survives the call.
+        let mut closing_keys = std::mem::take(&mut self.closing_keys_buf);
+        for pos in closing_keys.drain(..) {
             if let Some(rec) = self.records.remove(&pos) {
+                self.learn_fold_size_from(&rec);
                 out.push(rec);
             }
         }
+        self.closing_keys_buf = closing_keys;
     }
 
     /// Drain everything unconditionally (chromosome boundary or
@@ -1354,7 +1457,7 @@ impl OpenPileupRecordTable {
                 start_plus_len: pos + span,
                 source,
             })?;
-        let rec = OpenPileupRecord::new(chrom_id, pos, ref_seq);
+        let rec = OpenPileupRecord::with_fold_capacity(chrom_id, pos, ref_seq, self.fold_capacity);
         self.records.insert(pos, rec);
         // PANIC-FREE: the entry was just inserted on the previous
         // line; no concurrent mutation is possible because `&mut self`.
@@ -1762,8 +1865,21 @@ fn fold_read_into_record(
         mapq_sum_sq: (mapq as u64) * (mapq as u64),
     };
 
-    if let Some(prev) = folded_reads.remove(&active.read_id) {
-        subtract_contribution(&mut alleles[prev.allele_index].support, &prev.contribution);
+    // **One lookup, not two.** This read either is already folded into this record — a
+    // re-fold at a later position of the same footprint, whose old contribution has to come
+    // off its bucket first — or it is arriving for the first time. Both cases end by storing
+    // its state under the same key, so asking the table once for the slot and keeping the
+    // slot answers both questions: the previous `remove` followed by `insert` hashed the read
+    // id twice and probed twice, on a table that is entered once per (read × record) and so
+    // ~113 M times over one whole-genome contig.
+    //
+    // The removal *shape* is still available where it is genuinely a removal — the
+    // no-observation path above — and only the common path changed.
+    let slot = folded_reads.entry(active.read_id);
+    if let std::collections::hash_map::Entry::Occupied(occupied) = &slot {
+        let prev = occupied.get();
+        let prev_index = prev.allele_index;
+        subtract_contribution(&mut alleles[prev_index].support, &prev.contribution);
     }
     // Borrowed lookup; only `clone()` the bytes when adding a genuinely new allele. In
     // SNP/REF steady state every contributor lands in the same existing bucket, so the
@@ -1776,16 +1892,21 @@ fn fold_read_into_record(
         }
     };
     add_contribution(&mut alleles[new_index].support, &new_contribution);
-    folded_reads.insert(
-        active.read_id,
-        FoldedReadState {
-            allele_index: new_index,
-            contribution: new_contribution,
-            chain_id: active.chain_id,
-            read_group: active.read.read_group,
-            witnessed,
-        },
-    );
+    let state = FoldedReadState {
+        allele_index: new_index,
+        contribution: new_contribution,
+        chain_id: active.chain_id,
+        read_group: active.read.read_group,
+        witnessed,
+    };
+    match slot {
+        std::collections::hash_map::Entry::Occupied(mut occupied) => {
+            occupied.insert(state);
+        }
+        std::collections::hash_map::Entry::Vacant(vacant) => {
+            vacant.insert(state);
+        }
+    }
 }
 
 /// Re-place every **live** read already folded into this record against the window it now
@@ -2122,6 +2243,7 @@ pub(super) fn process_position(
         closing_keys_buf: _,
         widen_bases_buf: _,
         refold_ids_buf: _,
+        fold_capacity: _,
         max_record_span: _,
     } = open;
     for key in affected {
@@ -2465,6 +2587,72 @@ mod tests {
             )
             .expect("a run covering at least one position"),
         }
+    }
+
+    /// **A record opens with room for as many reads as the last one to close held.**
+    ///
+    /// This is the only check on that sizing, and it exists because the sizing's failure
+    /// mode is invisible: it changes no emitted byte — that is what let it be adopted at
+    /// all — so deleting the call in `drain_aged_into` would leave every dump identical
+    /// and every other test green, and only show up as a slower walk on a deep sample.
+    ///
+    /// It asserts a **lower bound on capacity**, not a capacity: hashbrown rounds a
+    /// request up to a power-of-two bucket count with load-factor headroom, and pinning
+    /// the number it lands on would pin hashbrown's internals rather than this file's
+    /// intent.
+    #[test]
+    fn a_record_opens_sized_for_what_the_last_one_to_close_held() {
+        let reference = fa(&"ACGT".repeat(40));
+        let mut table = OpenPileupRecordTable::new();
+
+        let held = RECORD_FOLDED_READS_INITIAL_CAPACITY + 40;
+        let first = table.open_new(0, 1, 1, &reference).expect("record at 1");
+        for read_id in 0..held as u32 {
+            first.folded_reads.insert(
+                read_id,
+                FoldedReadState {
+                    allele_index: 0,
+                    contribution: AlleleSupportStats::default(),
+                    chain_id: 1,
+                    read_group: ReadGroupId(0),
+                    witnessed: WitnessedRefPositions::from_half_open_runs([(1, 2)])
+                        .expect("one run of one position"),
+                },
+            );
+        }
+
+        // The record at 1 spans one base, so it has aged out by position 2.
+        let mut closed = Vec::new();
+        table.drain_aged_into(2, &mut closed);
+        assert_eq!(closed.len(), 1, "the record at 1 should have closed");
+
+        let next = table.open_new(0, 10, 1, &reference).expect("record at 10");
+        assert!(
+            next.folded_reads.capacity() >= held,
+            "a record opened after one holding {held} reads has room for only {}",
+            next.folded_reads.capacity(),
+        );
+    }
+
+    /// The floor still applies when the neighbour held almost nothing — a run of shallow
+    /// records must not shrink the next one below the fixed starting size, or a return to
+    /// depth pays a grow per record.
+    #[test]
+    fn a_shallow_neighbour_does_not_shrink_the_next_record_below_the_floor() {
+        let reference = fa(&"ACGT".repeat(40));
+        let mut table = OpenPileupRecordTable::new();
+
+        table.open_new(0, 1, 1, &reference).expect("record at 1");
+        let mut closed = Vec::new();
+        table.drain_aged_into(2, &mut closed);
+        assert_eq!(closed.len(), 1, "the record at 1 should have closed");
+
+        let next = table.open_new(0, 10, 1, &reference).expect("record at 10");
+        assert!(
+            next.folded_reads.capacity() >= RECORD_FOLDED_READS_INITIAL_CAPACITY,
+            "an empty neighbour dropped the next record to {}",
+            next.folded_reads.capacity(),
+        );
     }
 
     #[test]
