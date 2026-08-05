@@ -170,7 +170,9 @@ impl FoldedReads {
 
     /// The folded reads, ascending by `read_id`.
     fn iter(&self) -> impl Iterator<Item = (u32, &FoldedReadState)> {
-        self.entries.iter().map(|(read_id, state)| (*read_id, state))
+        self.entries
+            .iter()
+            .map(|(read_id, state)| (*read_id, state))
     }
 
     fn keys(&self) -> impl Iterator<Item = u32> {
@@ -2340,10 +2342,7 @@ fn refold_live_reads(
 /// counter-pressure spec §7 names is paid right here — a positional `allele_index` on
 /// `FoldedReadState` has to be remapped, which is why a mapping is built rather than the
 /// buckets simply retained.
-fn evict_unsupported_alleles(
-    alleles: &mut Vec<OpenAllele>,
-    folded_reads: &mut FoldedReads,
-) {
+fn evict_unsupported_alleles(alleles: &mut Vec<OpenAllele>, folded_reads: &mut FoldedReads) {
     if alleles.len() < 2 || alleles[1..].iter().all(|a| a.support.num_obs > 0) {
         return;
     }

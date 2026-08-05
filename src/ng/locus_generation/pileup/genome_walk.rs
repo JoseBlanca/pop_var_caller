@@ -40,8 +40,8 @@ use crate::ng::types::GenomeRegion;
 use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
 use super::decompose::ReadEvent;
-use super::fast_column::FastColumnScratch;
 use super::errors::WalkerError;
+use super::fast_column::FastColumnScratch;
 use super::open_record::{
     OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
 };
@@ -331,8 +331,7 @@ where
             (None, Some(open)) => Some(open),
             (None, None) => None,
         };
-        self.state.walker_pos > stop
-            && first_outstanding_anchor.is_none_or(|anchor| anchor > stop)
+        self.state.walker_pos > stop && first_outstanding_anchor.is_none_or(|anchor| anchor > stop)
     }
 
     /// Cumulative counters for the run so far. Safe to call
@@ -1157,7 +1156,11 @@ impl WalkerState {
         // (`ActiveReads::may_have_mate_overlap_at`). At 300× a pair is present at most
         // columns and the skip simply stops firing.
         if may_have_mate_overlap {
-            resolve_mate_overlap_at_pos(contributors, &mut self.summary, &mut self.mate_overlap_buf);
+            resolve_mate_overlap_at_pos(
+                contributors,
+                &mut self.summary,
+                &mut self.mate_overlap_buf,
+            );
         } else {
             debug_assert!(
                 !column_shares_a_chain_id(contributors),

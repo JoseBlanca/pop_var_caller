@@ -181,11 +181,7 @@ pub(super) fn try_ordinary_column(
         // — which is what makes a second path through the walk's hottest code defensible.
         debug_assert_eq!(
             active.cursor.match_at(walker_pos, &active.read),
-            match active
-                .cursor
-                .events_at(walker_pos, &active.read)
-                .first()
-            {
+            match active.cursor.events_at(walker_pos, &active.read).first() {
                 Some(super::decompose::ReadEvent::Match { base, bq_baq, .. }) => {
                     Some((*base, *bq_baq))
                 }
@@ -242,8 +238,7 @@ pub(super) fn try_ordinary_column(
         // one, change the emitted bytes, and show up nowhere else.
         debug_assert!(
             {
-                let mut chains: Vec<ChainId> =
-                    scratch.reads.iter().map(|r| r.chain_id).collect();
+                let mut chains: Vec<ChainId> = scratch.reads.iter().map(|r| r.chain_id).collect();
                 chains.sort_unstable();
                 chains.windows(2).all(|w| w[0] != w[1])
             },
