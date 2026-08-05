@@ -157,6 +157,14 @@ struct OpOffset {
 pub(super) struct CigarCursor {
     offsets: Vec<OpOffset>,
     mode: CursorMode,
+    /// Whether this read's CIGAR contains an `I` or a `D` op at all.
+    ///
+    /// The **cheap** side of "can this read do anything but match the reference here?".
+    /// [`has_deletion`](Self::has_deletion) rules out an event reaching in from an earlier
+    /// anchor; this one additionally rules out an indel *anchored* at the position being
+    /// asked about, without looking at the position. A read for which it is `false` answers
+    /// [`events_at`](Self::events_at) with at most one `Match`, at every position.
+    has_indel: bool,
     /// Whether this read's CIGAR contains a `D` op at all.
     ///
     /// The one thing that makes [`events_overlapping`](Self::events_overlapping) over a
@@ -207,8 +215,17 @@ impl CigarCursor {
         Self {
             offsets,
             mode,
+            has_indel: cigar
+                .iter()
+                .any(|op| matches!(op, CigarOp::Deletion(_) | CigarOp::Insertion(_))),
             has_deletion: cigar.iter().any(|op| matches!(op, CigarOp::Deletion(_))),
         }
+    }
+
+    /// Whether this read can produce anything but a `Match` — see
+    /// [`has_indel`](Self::has_indel).
+    pub(super) fn matches_only(&self) -> bool {
+        !self.has_indel
     }
 
     /// Whether every event this read can produce sits entirely at its own anchor
@@ -514,6 +531,73 @@ impl CigarCursor {
             | CigarOp::HardClip(_)
             | CigarOp::Padding(_) => {}
         }
+    }
+
+    /// The base and BAQ-capped quality this read shows at `walker_pos`, for a read that can
+    /// only ever match ([`matches_only`](Self::matches_only)).
+    ///
+    /// **The same answer [`events_at`](Self::events_at) gives, in scalars.** For a CIGAR
+    /// with no `I` and no `D` op, `events_at` can push at most one `ReadEvent::Match` — the
+    /// other two arms are unreachable — so the whole of its result is this pair, or nothing.
+    /// The `N`-base and adaptor rules are applied here in the same order and with the same
+    /// tests, because they decide whether there is an event at all.
+    ///
+    /// It exists because the caller that wants it wants it 8 columns in 10 and does not want
+    /// a `SmallVec` of 40-byte enums to hold one byte of sequence: see
+    /// [`fast_column`](super::fast_column).
+    pub(super) fn match_at(&self, walker_pos: u32, read: &PreparedRead) -> Option<(u8, u8)> {
+        debug_assert!(
+            self.matches_only(),
+            "match_at is only equivalent to events_at for a CIGAR with no indel op",
+        );
+        let n_ops = read.cigar.len();
+        // The op containing `walker_pos`, found the way this cursor's mode finds anything:
+        // a scan with an early break, or a partition point. Only a Match op can contain a
+        // position and produce an event, so the search is for the last op starting at or
+        // before `walker_pos`.
+        let candidate = match self.mode {
+            CursorMode::BinarySearch => {
+                let i_after = self.offsets.partition_point(|o| o.ref_pos <= walker_pos);
+                if i_after == 0 {
+                    return None;
+                }
+                let i_lo = i_after - 1;
+                if i_lo >= n_ops {
+                    return None;
+                }
+                Some(i_lo)
+            }
+            CursorMode::Linear => {
+                let mut found = None;
+                for i in 0..n_ops {
+                    if self.offsets[i].ref_pos > walker_pos {
+                        break;
+                    }
+                    found = Some(i);
+                }
+                found
+            }
+        };
+        let i = candidate?;
+        let (CigarOp::Match(len) | CigarOp::SeqMatch(len) | CigarOp::SeqMismatch(len)) =
+            read.cigar[i]
+        else {
+            return None;
+        };
+        let off = self.offsets[i];
+        let op_lo = off.ref_pos;
+        let op_hi = op_lo + len;
+        if walker_pos < op_lo || walker_pos >= op_hi {
+            return None;
+        }
+        let read_off = (off.read_pos + (walker_pos - op_lo)) as usize;
+        let base = read.seq[read_off];
+        // Read-N: skip per `pileup_walker.md` §"N-base handling".
+        // G1 — drop bases past the adaptor boundary.
+        if base == b'N' || base_in_adaptor(walker_pos, read) {
+            return None;
+        }
+        Some((base, read.bq_baq[read_off]))
     }
 
     /// Events whose **anchor** is exactly `walker_pos`. The

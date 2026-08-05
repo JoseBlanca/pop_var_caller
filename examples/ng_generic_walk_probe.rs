@@ -745,6 +745,20 @@ fn main() -> ExitCode {
                  walk, and every number above it would be meaningless"
             );
             print!("{}", report.render());
+            // Measurement scaffolding, printed to stderr so the stdout key set the
+            // probe's own tests pin stays exactly as it was.
+            eprintln!(
+                "fast_columns={}",
+                pop_var_caller::ng::locus_generation::pileup::column_census::FAST_COLUMNS
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            if pop_var_caller::ng::locus_generation::pileup::column_census::enabled() {
+                for (name, value) in
+                    pop_var_caller::ng::locus_generation::pileup::column_census::snapshot()
+                {
+                    eprintln!("census_{}={}", name.to_lowercase(), value);
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {

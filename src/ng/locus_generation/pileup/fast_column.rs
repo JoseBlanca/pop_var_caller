@@ -1,0 +1,357 @@
+//! The **ordinary column** — one covered reference base where every read that covers it
+//! simply matches, and there is nothing to reconcile.
+//!
+//! # What "ordinary" means, and why it gets its own path
+//!
+//! The walk runs one fully general machine at every covered base: each read's CIGAR is
+//! re-walked into a list of [`ReadEvent`](super::decompose::ReadEvent)s, the events open or
+//! widen a record, the record's reference bytes are re-derived per read into an allele
+//! string, the positions the read witnessed are accumulated as runs and canonicalised, the
+//! read's state goes into a hash table keyed by its id, and at close the table is collected,
+//! sorted, and re-read to produce the observations. Every one of those steps exists for a
+//! case that is rare: an indel, a record widened by one, a hole in a witness, a mate-overlap
+//! replay, a read folded twice.
+//!
+//! **Measured, on the two review fixtures**, the column where none of that applies is
+//! 7,898 in 10,000 (tomato ~130×) and 7,789 in 10,000 (HG002 chr1 30×). For it the answer
+//! is a handful of scalars per read: a base, a quality, a strand bit, two mapping-quality
+//! moments, a `q_sum` term, and a witness that is by construction complete.
+//!
+//! # The predicate is decided **before** any per-read work
+//!
+//! Three tests, all cheap, and each one is a reason the general path would have had
+//! something to do:
+//!
+//! 1. **No record is already open over this base.** Then the record this column opens is
+//!    one base wide, anchored at the walker, and can never be found again — the next
+//!    position's events start at `pos + 1` and half-open intervals that touch do not
+//!    overlap. So no widen, no re-fold, and no read folded into it twice.
+//! 2. **Every active read's CIGAR is free of `I` and `D` ops**
+//!    ([`matches_only`](super::cigar_cursor::CigarCursor::matches_only)). Then every read
+//!    answers with at most one `Match` at any position, so no event can open a wider record
+//!    or reach in from an earlier anchor.
+//! 3. **No two contributors share a chain id**, i.e. no mate-overlap reconciliation fires
+//!    here. **The active set answers this one before the pass, in O(1)**: a shared chain id
+//!    is a mate pair, and
+//!    [`may_have_mate_overlap_at`](super::active_read_set::ActiveReads::may_have_mate_overlap_at)
+//!    says whether any pair the set holds still has both alignments on the reference at this
+//!    column. Its `false` is exact. Only when it says a pair *could* be here — 1,664 columns
+//!    in 10,000 at 130× — is the depth-sized sort over the contributors' chain ids run, and
+//!    a column that fails it is handed back with nothing lost but the pass itself.
+//!
+//! A fourth, the per-column depth cap, is checked against the active-set size, which bounds
+//! the contributor count from above.
+//!
+//! **Handing back is always safe.** The pass writes only into scratch buffers this module
+//! owns and sets [`ever_contributed`](super::active_read_set::ActiveRead::ever_contributed),
+//! which the general path sets for exactly the same reads a moment later. Nothing else is
+//! touched, so a fallback re-runs the general path against untouched state.
+//!
+//! # Byte-identity, and the one place the risk lives
+//!
+//! `q_sum` is an `f64` sum, so it is not the value that has to match but the **order the
+//! terms are added in**. The general path adds one term per read per observation in
+//! ascending `read_id`, established by
+//! [`keyed_observations_counting`](super::open_record::OpenPileupRecord)'s sort; this path
+//! sorts its own compact per-read buffer by `read_id` and accumulates in that order, which
+//! is the same sequence of additions. Everything else the locus carries is integer or
+//! byte-valued.
+//!
+//! The observations themselves come out sorted by `(bases, read_witness, read_group)` as
+//! `finalise` sorts them. Here every witness is `Complete` and every `bases` is one byte, so
+//! that reduces to `(base, read_group)`.
+
+use crate::ng::locus_generation::{
+    LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+};
+use crate::ng::ref_seq::RefSeq;
+use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+use crate::pileup_record::ChainId;
+
+use super::active_read_set::ActiveReads;
+use super::errors::WalkerError;
+use super::open_record::{OpenPileupRecordTable, phred_to_ln_perr};
+
+/// What one read contributes to an ordinary column: everything the locus needs from it,
+/// with no reference to the read left behind.
+///
+/// 40 bytes, so a 130-deep column's whole buffer is ~5 kB and stays in L1 across the sort
+/// and the grouping pass that follow.
+#[derive(Clone, Copy, Debug)]
+struct PlainContribution {
+    /// Sorted on — see the module note on `q_sum`.
+    read_id: u32,
+    chain_id: ChainId,
+    read_group: ReadGroupId,
+    /// The read's base at this position. Its allele, and the whole of it.
+    base: u8,
+    /// `ln(P_err)` for this read at this position: the BAQ-capped base quality, floored by
+    /// the read's mapping-quality log-error exactly as the general fold's
+    /// `ln_bq_for_read(..).max(mq_log_err)` does.
+    ln_q: f64,
+    /// Forward strand.
+    fwd: bool,
+    /// The read started strictly left of this position.
+    placed_left: bool,
+    mapq: u8,
+}
+
+/// One accumulating observation — an allele × read group, which at a one-base record with
+/// every witness complete is the whole of an observation's identity.
+#[derive(Debug)]
+struct PlainObservation {
+    base: u8,
+    read_group: ReadGroupId,
+    num_obs: u32,
+    q_sum: f64,
+    fwd: u32,
+    placed_left: u32,
+    mapq_sum: u32,
+    mapq_sum_sq: u64,
+    /// Filled only for reads that disagreed with the reference — the same rule
+    /// `read_agreed_with_reference` states, which for a one-base complete witness is
+    /// exactly `base != reference base`.
+    chain_ids: Vec<ChainId>,
+}
+
+/// The buffers the fast lane reuses column to column, so an ordinary column allocates only
+/// what it emits.
+#[derive(Debug, Default)]
+pub(super) struct FastColumnScratch {
+    reads: Vec<PlainContribution>,
+    /// `(chain_id, ())` sorted to find a mate overlap — the same shape
+    /// `resolve_mate_overlap_at_pos` uses, and the same cost.
+    chains: Vec<ChainId>,
+    observations: Vec<PlainObservation>,
+    ref_base: Vec<u8>,
+}
+
+/// What [`try_ordinary_column`] decided.
+#[derive(Debug)]
+pub(super) enum FastColumn {
+    /// The column was ordinary and this is its locus, ready to be emitted at the position
+    /// the general path would have emitted it — see `WalkerState::close_aged_records_into`.
+    Emitted(SampleLocusObservations),
+    /// Not ordinary. Nothing was changed; run the general path.
+    Fallback,
+}
+
+/// Try to answer this column with scalars. See the module note for the predicate and for
+/// why handing back is free.
+///
+/// **Eight arguments, and each is a distinct fact the walker already holds** — where it is,
+/// what is live, where the reference is, where to put the scratch, and the two limits the
+/// column is judged against. Grouping them into a context struct would name the caller's own
+/// fields a second time without hiding anything; the alternative that would genuinely shorten
+/// the list is moving the predicate out to `genome_walk.rs`, which is the one thing this
+/// module exists to keep in one place.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_ordinary_column(
+    walker_pos: u32,
+    chrom_id: u32,
+    active_reads: &ActiveReads,
+    open_records: &OpenPileupRecordTable,
+    reference: &dyn RefSeq,
+    scratch: &mut FastColumnScratch,
+    max_snp_column_depth: usize,
+    may_have_mate_overlap: bool,
+) -> Result<FastColumn, WalkerError> {
+    // The contributor count is at most the active-read count, so this bounds the column
+    // cap from above without knowing which reads contribute.
+    if active_reads.len() > max_snp_column_depth || active_reads.is_empty() {
+        return Ok(FastColumn::Fallback);
+    }
+    // A record already covering this base is a widen, a re-fold, or a footprint wider than
+    // one — all three of which the scalars below cannot express.
+    if open_records
+        .find_overlapping(walker_pos, walker_pos.saturating_add(1))
+        .is_some()
+    {
+        return Ok(FastColumn::Fallback);
+    }
+
+    scratch.reads.clear();
+    for active in active_reads.iter() {
+        if !active.cursor.matches_only() {
+            return Ok(FastColumn::Fallback);
+        }
+        // **The two paths cross-checked where they genuinely duplicate a computation**, and
+        // only there: everything after this loop is a sum over what it produced. Armed in
+        // every debug walk in the suite — the parity census alone runs it over ~257,000 loci
+        // — which is what makes a second path through the walk's hottest code defensible.
+        debug_assert_eq!(
+            active.cursor.match_at(walker_pos, &active.read),
+            match active
+                .cursor
+                .events_at(walker_pos, &active.read)
+                .first()
+            {
+                Some(super::decompose::ReadEvent::Match { base, bq_baq, .. }) => {
+                    Some((*base, *bq_baq))
+                }
+                Some(_) => None,
+                None => None,
+            },
+            "match_at and events_at disagree at {walker_pos} for read {}",
+            active.read_id,
+        );
+        let Some((base, bq)) = active.cursor.match_at(walker_pos, &active.read) else {
+            continue;
+        };
+        // Set here rather than in the loop below, and for the same reason the general path
+        // sets it before the mate collapse and the depth cap: it exists to find the read
+        // that reaches *no* contributor list anywhere. A read counted here and then handed
+        // to the general path is counted there too, idempotently.
+        active.ever_contributed.set(true);
+        let mapq = active.read.mapq;
+        scratch.reads.push(PlainContribution {
+            read_id: active.read_id,
+            chain_id: active.chain_id,
+            read_group: active.read.read_group,
+            base,
+            ln_q: phred_to_ln_perr(bq).max(active.read.mq_log_err),
+            fwd: !active.read.is_reverse_strand,
+            placed_left: active.read.alignment_start < walker_pos,
+            mapq,
+        });
+    }
+    if scratch.reads.is_empty() {
+        return Ok(FastColumn::Fallback);
+    }
+
+    // Mate overlap: two contributors from one pair. The general path reconciles their
+    // qualities against each other, which is a rewrite this path has no term for.
+    //
+    // **The sort only runs where a pair could be.** `may_have_mate_overlap` is the active
+    // set's O(1) answer to exactly the question this sort asks; a `false` is exact, so the
+    // set of columns this function accepts is the same either way — `fast_columns` is
+    // unchanged by the shortcut. A `true` is an over-approximation (the pair may be silent
+    // here, or one mate may be `N`-masked), so it still has to be settled by the sort.
+    if may_have_mate_overlap {
+        scratch.chains.clear();
+        scratch
+            .chains
+            .extend(scratch.reads.iter().map(|r| r.chain_id));
+        scratch.chains.sort_unstable();
+        if scratch.chains.windows(2).any(|w| w[0] == w[1]) {
+            return Ok(FastColumn::Fallback);
+        }
+    } else {
+        // The pin, in debug builds only: the sort the shortcut skipped, run in full. A
+        // wrong shortcut here would keep both mates' quality instead of zeroing the lower
+        // one, change the emitted bytes, and show up nowhere else.
+        debug_assert!(
+            {
+                let mut chains: Vec<ChainId> =
+                    scratch.reads.iter().map(|r| r.chain_id).collect();
+                chains.sort_unstable();
+                chains.windows(2).all(|w| w[0] != w[1])
+            },
+            "the ordinary-column path skipped its chain-id sort at {walker_pos} on a column \
+             where two contributors share a chain id — the mate reconciliation was lost",
+        );
+    }
+
+    // **The determinism guarantee**, and the only ordering in this function that is not
+    // free to change: see the module note.
+    scratch.reads.sort_unstable_by_key(|r| r.read_id);
+
+    scratch.ref_base.clear();
+    reference
+        .fetch_into(
+            ContigId(chrom_id),
+            u64::from(walker_pos),
+            1,
+            &mut scratch.ref_base,
+        )
+        .map_err(|source| WalkerError::Fasta {
+            chrom_id,
+            start: walker_pos,
+            start_plus_len: walker_pos.saturating_add(1),
+            source,
+        })?;
+    // PANIC-FREE: `fetch_into` was asked for one base and returned `Ok`.
+    let ref_base = *scratch
+        .ref_base
+        .first()
+        .expect("one base was fetched and the fetch succeeded");
+
+    scratch.observations.clear();
+    for read in &scratch.reads {
+        let at = match scratch
+            .observations
+            .iter()
+            .position(|o| o.base == read.base && o.read_group == read.read_group)
+        {
+            Some(at) => at,
+            None => {
+                scratch.observations.push(PlainObservation {
+                    base: read.base,
+                    read_group: read.read_group,
+                    num_obs: 0,
+                    q_sum: 0.0,
+                    fwd: 0,
+                    placed_left: 0,
+                    mapq_sum: 0,
+                    mapq_sum_sq: 0,
+                    chain_ids: Vec::new(),
+                });
+                scratch.observations.len() - 1
+            }
+        };
+        let observation = &mut scratch.observations[at];
+        let mapq = u32::from(read.mapq);
+        observation.num_obs += 1;
+        observation.q_sum += read.ln_q;
+        observation.fwd += u32::from(read.fwd);
+        observation.placed_left += u32::from(read.placed_left);
+        observation.mapq_sum += mapq;
+        observation.mapq_sum_sq += u64::from(mapq) * u64::from(mapq);
+        if read.base != ref_base {
+            observation.chain_ids.push(read.chain_id);
+        }
+    }
+
+    // `finalise` sorts on `(bases, read_witness, read_group)`; one byte of bases and one
+    // witness class collapse that to this.
+    scratch
+        .observations
+        .sort_unstable_by_key(|o| (o.base, o.read_group.0));
+
+    let observations = scratch
+        .observations
+        .iter_mut()
+        .map(|o| {
+            o.chain_ids.sort_unstable();
+            o.chain_ids.dedup();
+            SequenceObservation {
+                bases: vec![o.base].into_boxed_slice(),
+                read_witness: ReadWitness::Complete,
+                read_group: o.read_group,
+                num_obs: o.num_obs,
+                num_fwd: o.fwd,
+                q_sum: o.q_sum,
+                mapq_sum: o.mapq_sum,
+                mapq_sum_sq: o.mapq_sum_sq,
+                placed_left: o.placed_left,
+                chain_ids: std::mem::take(&mut o.chain_ids),
+            }
+        })
+        .collect();
+
+    super::column_census::FAST_COLUMNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok(FastColumn::Emitted(SampleLocusObservations {
+        region: GenomeRegion {
+            contig: ContigId(chrom_id),
+            start: Position(u64::from(walker_pos)),
+            end: Position(u64::from(walker_pos)),
+        },
+        reference_bases: vec![ref_base].into_boxed_slice(),
+        observations,
+        // A read that produced no observation did not reach this path — every entry in
+        // `reads` carries a `Match` — and the depth cap is gated out above.
+        reads_without_observation: 0,
+        reads_discarded_by_cap: 0,
+        kind: LocusKind::Generic,
+    }))
+}

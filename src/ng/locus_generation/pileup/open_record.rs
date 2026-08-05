@@ -2650,7 +2650,7 @@ fn ln_bq_for_read(window_events: &[ReadEvent], fallback_bq: u8) -> f64 {
 /// H3 in `ia/reviews/perf_pileup_2026-05-12.md`. Replaces the
 /// per-call FP multiply that round-2 perf attributed at 2.94 %
 /// of walker self-time on `pileup_walker_multi_op/5000`.
-fn phred_to_ln_perr(q: u8) -> f64 {
+pub(super) fn phred_to_ln_perr(q: u8) -> f64 {
     static LN_PERR_TABLE: [f64; 256] = {
         let mut t = [0.0_f64; 256];
         let mut q = 1usize;

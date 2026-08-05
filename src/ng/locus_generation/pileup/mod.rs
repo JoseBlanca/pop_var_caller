@@ -105,6 +105,7 @@ mod chain_id_allocator;
 mod cigar_cursor;
 mod decompose;
 mod errors;
+mod fast_column;
 mod generator;
 mod genome_walk;
 mod open_record;
@@ -184,6 +185,60 @@ pub use generator::{
     MAX_RECORD_SPAN_CEILING, PileupGenerator, PileupGeneratorConfig, PileupGeneratorConfigError,
     PileupGeneratorCounts,
 };
+
+/// **Measurement scaffolding, not part of the walk.** Process-global tallies of how many
+/// columns the walk saw and how many of them were the *ordinary* column — one covered base,
+/// every contributor showing a plain reference-anchored match, nothing to reconcile. Read by
+/// `ng_generic_walk_probe`; incremented from
+/// [`genome_walk`](crate::ng::locus_generation::pileup) only when `PVC_COLUMN_CENSUS=1`.
+pub mod column_census {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    macro_rules! counters {
+        ($($name:ident),* $(,)?) => {
+            $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
+            /// Every counter's current value, in declaration order, with its name.
+            pub fn snapshot() -> Vec<(&'static str, u64)> {
+                vec![$((stringify!($name), $name.load(Ordering::Relaxed))),*]
+            }
+        };
+    }
+
+    /// **Always counted, unlike everything below** — how many columns the ordinary-column
+    /// path answered. A fast lane that never fires and one that works look identical in a
+    /// timing, so this one is not behind the env gate. One relaxed increment per ordinary
+    /// column, against the ~90 reads that column would otherwise fold.
+    pub static FAST_COLUMNS: AtomicU64 = AtomicU64::new(0);
+
+    counters! {
+        COLUMNS,
+        COLUMNS_ORDINARY,
+        CONTRIBUTORS,
+        CONTRIBUTORS_ORDINARY,
+        REJECT_RECORD_ALREADY_OPEN,
+        REJECT_INDEL_EVENT,
+        REJECT_READ_HAS_DELETION,
+        REJECT_MATE_OVERLAP,
+        REJECT_DEPTH_CAP,
+        REJECT_MULTI_READ_GROUP,
+        REJECT_READ_HAS_INDEL,
+        COLUMNS_SIMPLE,
+        CONTRIBUTORS_SIMPLE,
+        COLUMNS_SIMPLE_WITH_MATE,
+        CONTRIBUTORS_SIMPLE_WITH_MATE,
+    }
+
+    /// Whether the census is armed for this process. Read once; the walk pays a relaxed
+    /// atomic load per column when it is off.
+    pub fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("PVC_COLUMN_CENSUS").is_some_and(|v| v == "1"))
+    }
+
+    pub(super) fn add(counter: &AtomicU64, n: u64) {
+        counter.fetch_add(n, Ordering::Relaxed);
+    }
+}
 
 // **Not `pub`: no consumer outside this module, and it is production's name.** Kept in
 // scope rather than deleted because `generator.rs` reaches it as

@@ -39,6 +39,7 @@ use crate::ng::types::GenomeRegion;
 use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
 use super::decompose::ReadEvent;
+use super::fast_column::FastColumnScratch;
 use super::errors::WalkerError;
 use super::open_record::{
     OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
@@ -316,12 +317,20 @@ where
         let Some(stop) = self.stop_after else {
             return false;
         };
+        // **A held ordinary-column locus counts as an open record here**, and must: it
+        // stands where a record the general path would still be holding stands, and a stop
+        // rule blind to it cuts the region one position short — see `WalkerState::sealed`.
+        let first_outstanding_anchor = match (
+            self.state.sealed.as_ref().map(|l| l.region.start.0 as u32),
+            self.state.open_records.first_open_anchor(),
+        ) {
+            (Some(held), Some(open)) => Some(held.min(open)),
+            (Some(held), None) => Some(held),
+            (None, Some(open)) => Some(open),
+            (None, None) => None,
+        };
         self.state.walker_pos > stop
-            && self
-                .state
-                .open_records
-                .first_open_anchor()
-                .is_none_or(|anchor| anchor > stop)
+            && first_outstanding_anchor.is_none_or(|anchor| anchor > stop)
     }
 
     /// Cumulative counters for the run so far. Safe to call
@@ -420,7 +429,8 @@ where
             // ordering also keeps the active-read count accurate
             // when an emitted record's footprint coincides with a
             // read's `alignment_end`.
-            self.state.process_position(&self.reference)?;
+            self.state
+                .process_position(&self.reference, &mut self.pending)?;
             self.state.expire_passed_reads()?;
             self.state.close_aged_records_into(&mut self.pending);
 
@@ -648,6 +658,35 @@ struct WalkerState {
     /// `drain_aged` paid in round-1. H2 in
     /// `ia/reviews/perf_pileup_2026-05-12.md`.
     drained_buf: Vec<OpenPileupRecord>,
+    /// Reusable buffers for the ordinary-column path — see [`fast_column`](super::fast_column).
+    fast_column_buf: FastColumnScratch,
+    /// **Measurement knob only.** `PVC_FAST_COLUMN=0` sends every column down the general
+    /// path, so the two can be A/B-ed inside one binary rather than across two builds — the
+    /// only way to alternate runs on a host several other measurements are sharing. Read
+    /// once, here, so the per-column cost of carrying it is one predictable branch.
+    fast_column_enabled: bool,
+    /// **The record the ordinary-column path did not have to open** — the locus it built,
+    /// held for exactly as long as the general path would have held the record.
+    ///
+    /// The fast lane finishes a column's locus at the position it walks; the general path
+    /// leaves a one-base record open and drains it one step later. **That one step is
+    /// observable and had to be reproduced**, in two ways a fully-consumed walk cannot show
+    /// and two tests do:
+    ///
+    /// - A walk that **aborts** — a reference fetch past the contig end — loses whatever is
+    ///   still open. Emitting a step early hands the consumer one locus more before the
+    ///   error (`parity::both_walkers_report_the_same_error_on_the_same_malformed_input`).
+    /// - A walk that is **abandoned** part-way stops where its consumer stopped pulling, and
+    ///   a locus offered a step early moves that point back by one position — so fewer reads
+    ///   are admitted and fewer chain ids allocated
+    ///   (`generator::tests::an_abandoned_walk_does_not_leak_its_active_reads_into_the_next_region`).
+    ///
+    /// **One slot is always enough.** The fast lane fires only when no record covers the
+    /// base it is on, which means every record still open ends at or before it — so by the
+    /// time the next position is reached the table is empty, and a locus held here is the
+    /// only thing outstanding. That is also why emitting it first is always coordinate
+    /// order.
+    sealed: Option<SampleLocusObservations>,
 }
 
 impl WalkerState {
@@ -681,6 +720,10 @@ impl WalkerState {
             truncated_read_ids_buf: Vec::new(),
             mate_overlap_buf: MateOverlapScratch::default(),
             drained_buf: Vec::new(),
+            fast_column_buf: FastColumnScratch::default(),
+            fast_column_enabled: std::env::var_os("PVC_FAST_COLUMN")
+                .is_none_or(|value| value != "0"),
+            sealed: None,
         }
     }
 
@@ -749,7 +792,15 @@ impl WalkerState {
             truncated_read_ids_buf: _,
             mate_overlap_buf: _,
             drained_buf: _,
+            fast_column_buf: _,
+            // A knob the walker was built with, like `config`.
+            fast_column_enabled: _,
+            // Region-scoped, and **dropped rather than emitted** — for the reason the open
+            // records a few lines below are dropped: it belongs to the region being left,
+            // whose output nobody collects.
+            sealed,
         } = self;
+        *sealed = None;
 
         // What `new` starts with. `enter_chrom` overwrites the first three as soon as the
         // new region's first read is peeked; they are set here so a region with no reads at
@@ -847,18 +898,58 @@ impl WalkerState {
         Ok(())
     }
 
-    fn process_position<F: RefSeq>(&mut self, reference: &F) -> Result<(), WalkerError> {
+    fn process_position<F: RefSeq>(
+        &mut self,
+        reference: &F,
+        out: &mut VecDeque<SampleLocusObservations>,
+    ) -> Result<(), WalkerError> {
+        let walker_pos = self.walker_pos;
+        // **Asked once per column, and read by both paths below.** See
+        // [`ActiveReads::may_have_mate_overlap_at`]: `false` means no pair of this set's
+        // reads has both alignments still on the reference here, so no two contributors can
+        // share a chain id. The general path skips its whole mate-overlap step on that
+        // answer; the ordinary-column path skips the sort it would otherwise run to reach
+        // the same conclusion. It is hoisted above both because it needs the active set
+        // mutably — pruning is how the heap stays O(1) to consult — and both paths below
+        // borrow it immutably.
+        let may_have_mate_overlap = self.active_reads.may_have_mate_overlap_at(walker_pos);
+        // **The ordinary column, answered in scalars.** Roughly eight columns in ten are one
+        // covered base at which every read simply matches; for those the general machine
+        // below is asked to express a handful of numbers. The predicate is decided before any
+        // per-read work and handing back costs nothing — see `fast_column`.
+        let attempt = if self.fast_column_enabled {
+            super::fast_column::try_ordinary_column(
+                walker_pos,
+                self.chrom_id,
+                &self.active_reads,
+                &self.open_records,
+                reference,
+                &mut self.fast_column_buf,
+                self.config.max_snp_column_depth as usize,
+                may_have_mate_overlap,
+            )?
+        } else {
+            super::fast_column::FastColumn::Fallback
+        };
+        match attempt {
+            super::fast_column::FastColumn::Emitted(locus) => {
+                // **The previous position's locus goes out here, and only after this one was
+                // built without error.** It is one step old, which is where the general path
+                // would have drained its record, and the fetch that could still fail has
+                // already succeeded — so an aborting walk loses exactly what it lost before.
+                // The table is empty whenever anything is held (see `sealed`), so there is
+                // nothing this could be pushed ahead of.
+                self.emit_held_locus_into(out);
+                self.sealed = Some(locus);
+                return Ok(());
+            }
+            super::fast_column::FastColumn::Fallback => {}
+        }
+
         // Step 1: query each active read's cursor for events
         // anchored at walker_pos. Reads with no event here are
         // silent (deletion interior or N-skip), so they are not
         // added as contributors at all.
-        let walker_pos = self.walker_pos;
-        // Asked before the contributor list is built, because the active set is borrowed
-        // immutably for the whole of that loop. See
-        // [`ActiveReads::may_have_mate_overlap_at`]: `false` means no pair of this set's
-        // reads has both alignments still on the reference here, so step 2 below cannot
-        // find anything and is skipped whole.
-        let may_have_mate_overlap = self.active_reads.may_have_mate_overlap_at(walker_pos);
         // Hoisted buffer; cleared per step. L6.
         self.contributors_buf.clear();
         let contributors = &mut self.contributors_buf;
@@ -956,6 +1047,95 @@ impl WalkerState {
             self.summary.column_depth_truncations += 1;
         }
 
+        // **Measurement only** — how often the column the walk is about to fold is the
+        // ordinary one. Off unless `PVC_COLUMN_CENSUS=1`; see `column_census`.
+        if super::column_census::enabled() && !contributors.is_empty() {
+            use super::column_census as census;
+            census::add(&census::COLUMNS, 1);
+            census::add(&census::CONTRIBUTORS, contributors.len() as u64);
+
+            let record_already_open = self
+                .open_records
+                .find_overlapping(walker_pos, walker_pos.saturating_add(1))
+                .is_some();
+            let indel_event = contributors.iter().any(|c| {
+                c.events_at_pos
+                    .iter()
+                    .any(|e| !matches!(e, ReadEvent::Match { .. }))
+                    || c.events_at_pos.len() != 1
+            });
+            let read_has_deletion = contributors.iter().any(|c| {
+                self.active_reads
+                    .get_by_read_id(c.read_id)
+                    .is_some_and(|a| !a.cursor.spans_only_its_anchors())
+            });
+            let read_has_indel = contributors.iter().any(|c| {
+                self.active_reads
+                    .get_by_read_id(c.read_id)
+                    .is_some_and(|a| !a.cursor.matches_only())
+            });
+            let mate_overlap = contributors
+                .iter()
+                .any(|c| c.bq_zero_in_window || c.bq_override_at_walker_pos.is_some());
+            let depth_cap = !self.truncated_read_ids_buf.is_empty();
+            let first_group = self
+                .active_reads
+                .get_by_read_id(contributors[0].read_id)
+                .map(|a| a.read.read_group);
+            let multi_read_group = contributors.iter().any(|c| {
+                self.active_reads
+                    .get_by_read_id(c.read_id)
+                    .map(|a| a.read.read_group)
+                    != first_group
+            });
+
+            if record_already_open {
+                census::add(&census::REJECT_RECORD_ALREADY_OPEN, 1);
+            }
+            if indel_event {
+                census::add(&census::REJECT_INDEL_EVENT, 1);
+            }
+            if read_has_deletion {
+                census::add(&census::REJECT_READ_HAS_DELETION, 1);
+            }
+            if mate_overlap {
+                census::add(&census::REJECT_MATE_OVERLAP, 1);
+            }
+            if depth_cap {
+                census::add(&census::REJECT_DEPTH_CAP, 1);
+            }
+            if multi_read_group {
+                census::add(&census::REJECT_MULTI_READ_GROUP, 1);
+            }
+            if read_has_indel {
+                census::add(&census::REJECT_READ_HAS_INDEL, 1);
+            }
+            if !(record_already_open
+                || indel_event
+                || read_has_deletion
+                || mate_overlap
+                || depth_cap
+                || multi_read_group)
+            {
+                census::add(&census::COLUMNS_ORDINARY, 1);
+                census::add(&census::CONTRIBUTORS_ORDINARY, contributors.len() as u64);
+            }
+            // The predicate a cheap per-read probe can actually decide: no contributor's
+            // read carries an indel op anywhere, so `events_at` can only be one `Match`.
+            let simple = !(record_already_open || read_has_indel || depth_cap || multi_read_group);
+            if simple && !mate_overlap {
+                census::add(&census::COLUMNS_SIMPLE, 1);
+                census::add(&census::CONTRIBUTORS_SIMPLE, contributors.len() as u64);
+            }
+            if simple {
+                census::add(&census::COLUMNS_SIMPLE_WITH_MATE, 1);
+                census::add(
+                    &census::CONTRIBUTORS_SIMPLE_WITH_MATE,
+                    contributors.len() as u64,
+                );
+            }
+        }
+
         // Step 3–6: fold contributors into the records affected
         // at this walker_pos. The fold queries each contributor's
         // cursor through `&self.active`; the returned outcome
@@ -981,6 +1161,9 @@ impl WalkerState {
     /// Returns without touching `out` if there are no aged records
     /// to drain.
     fn close_aged_records_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
+        // The ordinary column's locus, if one is a step old. First, because the table is
+        // empty whenever one is held — see `sealed`.
+        self.emit_held_locus_into(out);
         self.open_records
             .drain_aged_into(self.walker_pos, &mut self.drained_buf);
         if self.drained_buf.is_empty() {
@@ -1002,6 +1185,20 @@ impl WalkerState {
             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
             self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);
+            self.summary.records_emitted += 1;
+        }
+    }
+
+    /// Hand over an ordinary column's locus once the walker has passed it — the moment the
+    /// general path drains the one-base record it would have left open. See `sealed`.
+    fn emit_held_locus_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
+        if self
+            .sealed
+            .as_ref()
+            .is_some_and(|locus| locus.region.end.0 < u64::from(self.walker_pos))
+        {
+            // PANIC-FREE: the predicate above only holds on `Some`.
+            out.push_back(self.sealed.take().expect("just tested as Some"));
             self.summary.records_emitted += 1;
         }
     }
@@ -1058,6 +1255,13 @@ impl WalkerState {
         &mut self,
         out: &mut VecDeque<SampleLocusObservations>,
     ) -> Result<(), WalkerError> {
+        // The held ordinary-column locus goes with the records it stood among, and first:
+        // its anchor is the smallest of them. Unconditional here, as `drain_all` is — a
+        // chromosome flush closes everything still in flight regardless of the walker.
+        if let Some(locus) = self.sealed.take() {
+            out.push_back(locus);
+            self.summary.records_emitted += 1;
+        }
         // Drain remaining open records (anything that was still
         // open at end-of-chromosome is by definition ready to
         // close — there are no future reads on this chromosome).
