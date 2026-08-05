@@ -972,7 +972,8 @@ impl WalkerState {
             // (`reads_without_observation`, `reads_discarded_by_cap`) and the complete/partial
             // split is read only by tests; the **holed** pair is kept, because nothing else in
             // a non-test build can state how often a read was blind in the middle of a record.
-            let (record, witness) = open.finalise();
+            let (record, witness, storage) = open.finalise_recycling();
+            self.open_records.recycle(storage);
             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
             self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);
@@ -1036,8 +1037,11 @@ impl WalkerState {
         // open at end-of-chromosome is by definition ready to
         // close — there are no future reads on this chromosome).
         for open in self.open_records.drain_all() {
-            // Same as `close_aged_records_into` — see the note there.
-            let (record, witness) = open.finalise();
+            // Same as `close_aged_records_into` — see the note there. The storage is
+            // dropped rather than handed back: this runs once per chromosome, against
+            // 86 million times for the loop that does hand it back, so the pool is
+            // better left holding whatever the walk was using mid-chromosome.
+            let (record, witness, _storage) = open.finalise_recycling();
             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
             self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);

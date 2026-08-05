@@ -562,6 +562,44 @@ impl OpenPileupRecord {
     /// coverage instead of a fixed guess; see
     /// [`OpenPileupRecordTable::observe_column_depth`]. `new` remains the form tests build
     /// records with, since a test that folds three reads has nothing to learn from.
+    /// As [`with_fold_capacity`](Self::with_fold_capacity), built on the containers a
+    /// previously closed record handed back rather than on fresh ones.
+    ///
+    /// The fold table arrives already emptied and already sized by
+    /// [`OpenPileupRecordTable::recycle`], which is the only producer of a
+    /// [`RecordStorage`]; this only tops it up if the sample has got deeper since.
+    fn on_storage(
+        chrom_id: u32,
+        pos: u32,
+        ref_seq: Vec<u8>,
+        storage: RecordStorage,
+        fold_capacity: usize,
+    ) -> Self {
+        let RecordStorage {
+            mut alleles,
+            mut folded_reads,
+        } = storage;
+        debug_assert!(
+            alleles.is_empty() && folded_reads.is_empty(),
+            "recycled storage must arrive empty: {} buckets, {} folded reads",
+            alleles.len(),
+            folded_reads.len(),
+        );
+        alleles.push(OpenAllele::new(ref_seq));
+        let already = folded_reads.capacity();
+        if already < fold_capacity {
+            folded_reads.reserve(fold_capacity - already);
+        }
+        Self {
+            chrom_id,
+            pos,
+            alleles,
+            reads_without_observation: Vec::new(),
+            reads_discarded_by_cap: Vec::new(),
+            folded_reads,
+        }
+    }
+
     fn with_fold_capacity(
         chrom_id: u32,
         pos: u32,
@@ -821,7 +859,27 @@ impl OpenPileupRecord {
     /// `PileupRecord` boundary did, and this step removed that boundary. Nothing consumes
     /// it, and it is a pure function of the read's start against the anchor, so a later
     /// consumer re-derives it without changing the fold (spec §6).
+    /// As [`finalise_recycling`](Self::finalise_recycling), dropping the storage it hands
+    /// back. The form tests use, where one record is built and closed and there is no next
+    /// one to give it to.
+    #[cfg(test)]
     pub fn finalise(self) -> (SampleLocusObservations, RecordWitnessCounts) {
+        let (locus, witness, _storage) = self.finalise_recycling();
+        (locus, witness)
+    }
+
+    /// Close the record, and hand back the two containers it was built on so the next
+    /// record can be built on them instead of allocating its own.
+    ///
+    /// **Why the walk cares.** At most two records are open at any moment (measured, both
+    /// fixtures) while 86 million pass through the table on one tomato chromosome, so the
+    /// bucket list and the fold table are allocated and freed 86 million times to hold at
+    /// most two of each alive. The reference bytes are *not* handed back: they leave with
+    /// the emitted locus, which is the one part of a record that genuinely has to be new
+    /// each time.
+    pub fn finalise_recycling(
+        self,
+    ) -> (SampleLocusObservations, RecordWitnessCounts, RecordStorage) {
         let record_pos = self.pos;
         let record_end_exclusive = self.footprint_end_exclusive();
         let chrom_id = self.chrom_id;
@@ -953,13 +1011,23 @@ impl OpenPileupRecord {
 
         // `alleles[0]` is the REF bucket and its bytes are the record's reference sequence
         // — there is no separate copy, which is why this moves rather than clones.
-        let reference_bases = self
-            .alleles
-            .into_iter()
-            .next()
-            .expect("alleles[0] is created with the record and never evicted")
-            .seq
-            .into_boxed_slice();
+        //
+        // Taken *out of* the bucket rather than by consuming the `Vec` that holds the
+        // buckets, so that `Vec` survives to be handed back below. The bytes themselves
+        // cannot be: they leave with the emitted locus.
+        let mut alleles = self.alleles;
+        let reference_bases = std::mem::take(
+            &mut alleles
+                .first_mut()
+                .expect("alleles[0] is created with the record and never evicted")
+                .seq,
+        )
+        .into_boxed_slice();
+        alleles.clear();
+        let storage = RecordStorage {
+            alleles,
+            folded_reads: self.folded_reads,
+        };
 
         let locus = SampleLocusObservations {
             // `GenomeRegion` is 1-based **inclusive**, so the end is the last covered
@@ -975,8 +1043,24 @@ impl OpenPileupRecord {
             reads_discarded_by_cap: witness_counts.reads_discarded_by_cap,
             kind: LocusKind::Generic,
         };
-        (locus, witness_counts)
+        (locus, witness_counts, storage)
     }
+}
+
+/// The two containers a closed record hands back, emptied but with their allocations
+/// intact, so the next record opened can be built on them.
+///
+/// Not `Clone` and with no constructor: the only way to obtain one is to close a record,
+/// which is what makes "this storage was genuinely finished with" true by construction.
+#[derive(Debug)]
+pub(super) struct RecordStorage {
+    /// The bucket list, cleared. Its `Vec` survives; the REF bucket's bytes do not — they
+    /// leave with the emitted locus.
+    alleles: Vec<OpenAllele>,
+    /// The fold table, **not** cleared here — [`OpenPileupRecordTable::recycle`] decides
+    /// whether to keep it or let it go, because a table that grew for a deep region is a
+    /// liability in a shallow one.
+    folded_reads: AHashMap<u32, FoldedReadState>,
 }
 
 /// EXPERIMENT (data_layout perf review 2026-08-04): a key-sorted `Vec` standing in for
@@ -1137,6 +1221,12 @@ pub(super) struct OpenPileupRecordTable {
     /// nearest neighbour that has it — and coverage is local, so the neighbour is a good
     /// predictor. It cannot run away either: it is bounded by what a record genuinely held.
     fold_capacity: usize,
+    /// Storage handed back by closed records, waiting for the next record to be opened on.
+    ///
+    /// Two slots because two records are open at once at most, so at most two can be
+    /// waiting; a third would mean the walk changed shape and is dropped rather than
+    /// silently growing a pool.
+    spare: Vec<RecordStorage>,
     /// Per-instance cap on per-record reference span, mirrors
     /// `WalkerConfig::max_record_span`. M11 in
     /// `ia/reviews/pileup_2026-05-11.md`.
@@ -1167,8 +1257,32 @@ impl OpenPileupRecordTable {
             widen_bases_buf: Vec::new(),
             refold_ids_buf: Vec::new(),
             fold_capacity: RECORD_FOLDED_READS_INITIAL_CAPACITY,
+            spare: Vec::new(),
             max_record_span,
         }
+    }
+
+    /// Take back the storage of a record that has just been closed, for the next one to be
+    /// opened on. Call it once per closed record; keeping it is optional and dropping it
+    /// only costs the next record an allocation.
+    ///
+    /// **The fold table is kept only while it still fits the sample.** A table that grew
+    /// for a deep region is not a free win in a shallow one: `finalise` scans every slot of
+    /// it to read the keys out, so an oversized table is paid for at every record until it
+    /// is replaced. Four times what records are currently holding
+    /// ([`fold_capacity`](Self::fold_capacity)) is the point past which it is cheaper to let
+    /// it go — the same "predict from the neighbour, not from the maximum" rule the sizing
+    /// itself follows.
+    pub fn recycle(&mut self, mut storage: RecordStorage) {
+        if self.spare.len() >= 2 {
+            return;
+        }
+        if storage.folded_reads.capacity() > 4 * self.fold_capacity {
+            storage.folded_reads = AHashMap::with_capacity(self.fold_capacity);
+        } else {
+            storage.folded_reads.clear();
+        }
+        self.spare.push(storage);
     }
 
     /// Note how many reads a record that is closing turned out to hold, so the next one
@@ -1457,7 +1571,14 @@ impl OpenPileupRecordTable {
                 start_plus_len: pos + span,
                 source,
             })?;
-        let rec = OpenPileupRecord::with_fold_capacity(chrom_id, pos, ref_seq, self.fold_capacity);
+        let rec = match self.spare.pop() {
+            Some(storage) => {
+                OpenPileupRecord::on_storage(chrom_id, pos, ref_seq, storage, self.fold_capacity)
+            }
+            None => {
+                OpenPileupRecord::with_fold_capacity(chrom_id, pos, ref_seq, self.fold_capacity)
+            }
+        };
         self.records.insert(pos, rec);
         // PANIC-FREE: the entry was just inserted on the previous
         // line; no concurrent mutation is possible because `&mut self`.
@@ -2244,6 +2365,7 @@ pub(super) fn process_position(
         widen_bases_buf: _,
         refold_ids_buf: _,
         fold_capacity: _,
+        spare: _,
         max_record_span: _,
     } = open;
     for key in affected {
@@ -2631,6 +2753,51 @@ mod tests {
             next.folded_reads.capacity() >= held,
             "a record opened after one holding {held} reads has room for only {}",
             next.folded_reads.capacity(),
+        );
+    }
+
+    /// **A closed record's containers are handed to the next one, not thrown away.**
+    ///
+    /// Like the sizing test above, this guards something that changes no emitted byte, so
+    /// nothing else would notice it break. The bucket list is the observable part — a
+    /// record that grew three buckets hands back a `Vec` with room for three, and a
+    /// freshly-allocated one has room only for the one bucket it was given.
+    ///
+    /// **What it does not cover, stated rather than implied:** it drives `recycle`
+    /// directly, so it pins the mechanism and not the wiring. Deleting the single
+    /// `recycle` call in `genome_walk::close_aged_records_into` leaves this green —
+    /// checked, not assumed. Covering that needs a walk-level test with a way to see the
+    /// table afterwards, and the failure it would catch is 86 million allocation/free
+    /// pairs per chromosome rather than a wrong byte.
+    #[test]
+    fn a_closed_records_containers_are_reused_by_the_next_record() {
+        let reference = fa(&"ACGT".repeat(40));
+        let mut table = OpenPileupRecordTable::new();
+
+        let first = table.open_new(0, 1, 1, &reference).expect("record at 1");
+        for bases in [b"C".to_vec(), b"G".to_vec()] {
+            let mut bucket = OpenAllele::new(bases);
+            // Supported, or `finalise`'s "no bucket survives that no read is folded into"
+            // assertion fires before this test can ask its own question.
+            bucket.support.num_obs = 1;
+            first.alleles.push(bucket);
+        }
+        let grown_to = first.alleles.capacity();
+        assert!(grown_to >= 3, "the fixture must grow the bucket list");
+
+        let mut closed = Vec::new();
+        table.drain_aged_into(2, &mut closed);
+        let (_locus, _witness, storage) = closed
+            .pop()
+            .expect("the record at 1 should have closed")
+            .finalise_recycling();
+        table.recycle(storage);
+
+        let next = table.open_new(0, 10, 1, &reference).expect("record at 10");
+        assert_eq!(
+            next.alleles.capacity(),
+            grown_to,
+            "a record opened after a three-bucket one allocated its own bucket list",
         );
     }
 
