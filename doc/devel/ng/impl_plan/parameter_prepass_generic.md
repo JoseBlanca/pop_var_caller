@@ -162,7 +162,7 @@ adjacent rungs a ratio of `10^0.025` apart. No `Phred` newtype — a second log-
 probability type beside `LogProb` would make a base mix-up a plausible wrong number instead of
 a compile error. *Depends:* A2. *Source:* arch §2.1.
 
-**A4. `DepthBin` and `DepthBinEdges` — the ladder itself.**  ☐ **Own commit, do not bundle.**
+**A4. `DepthBin` and `DepthBinEdges` — the ladder itself.**  ✅ **Own commit, do not bundle.**
 Exact integers to 8, then eleven geometrically widening bins to a cap of 124 — twenty bins,
 583 cells. `bin_for`, `row_start`, `depth_range` (a `RangeInclusive`, so an off-by-one cannot
 silently mis-size a row), `cell_count`, `bin_count`, `max_depth`. **The silent failure this

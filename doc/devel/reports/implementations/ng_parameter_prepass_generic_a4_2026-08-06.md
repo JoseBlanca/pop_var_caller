@@ -100,10 +100,48 @@ as worse.** Each was applied as a one-constant mutation and the suite re-run:
 | mutation | what the note measured for it | tests failing |
 |---|---|---|
 | `DEPTH_BIN_COUNT = 16` | 0.55 rungs, 1.8% | 2 |
-| `MAX_BINNED_DEPTH = 300` | 1.04 rungs, 8.0% (at 16 bins) | 3 |
-| `EXACT_DEPTH_LIMIT = 4` | 0.15–0.21 rungs even at 3 reads | 3 |
+| `MAX_BINNED_DEPTH = 300` | 0.190 rungs, 0.88% (at 20 bins) | 2 |
+| `EXACT_DEPTH_LIMIT = 4` | 0.15–0.21 rungs even at 3 reads | 2 |
 
-All three restored, 7 passed.
+**Corrected after review, twice over.** This table first read 2 / 3 / 3; those came from
+a `grep -c FAILED` that also matched the `test result: FAILED.` summary line. Two
+reviewers independently re-ran all three and measured **2 each, and the same two every
+time** — `the_widening_bins_top_out_at_the_measured_depths` and
+`the_ladder_holds_583_cells`. The `MAX_BINNED_DEPTH = 300` row also quoted the
+sixteen-bin cost against a twenty-bin ladder.
+
+**The correction changes what the table means, which matters more than the number.**
+The other five tests are written *in terms of* the three shape constants, so their
+expectations move with a mutation and they cannot detect a constant edit at all. They
+check that whatever ladder is configured is internally consistent — a different
+question from whether it is the ladder that was measured. **The oracle against a moved
+parameter is two tests**, the two carrying hard literals. That is now said in the doc
+comment of the first of them, where the next reader meets it, and a third test gained a
+literal `max_depth()` assertion so it joins them.
+
+The commit message of `54378b9` carries the original 2/3/3 figures and cannot be
+corrected without rewriting history.
+
+## 5a. Review outcome
+
+Three agents, seven categories, each in its own worktree: 0 Blocker, **3 Major**, 10
+Minor, 4 Nit; 16 applied, 1 deferred, 0 disputed. See the
+[review](../reviews/ng_parameter_prepass_generic_a4_2026-08-06.md) and the
+[fixes applied](../reviews/fixes_applied_2026-08-06_v2.md).
+
+**Two of the three Majors were real defects in this file, and only mutation found
+them.** The guard against a degenerate ladder fired zero times at the adopted constants
+— deleting it left all seven tests green — and its two clamps were ordered so that when
+it *did* fire it produced the empty bins it claimed to prevent. And `row_start` answered
+`583` for a bin index one past the end, where `depth_range` panicked on the same input;
+583 is `cell_count()`, a number shaped exactly like a row offset.
+
+Both are fixed, and the fix's own first attempt reproduced the defect it was fixing:
+reordering the clamps makes strict increase provable by construction, so the assertion
+proposed alongside it was itself unreachable. The tests caught that.
+
+After fixes the module holds 20 tests (was 7) and the suite is 2,920 passed / 1 failed
+(pre-existing) / 5 ignored.
 
 ## 6. Tradeoffs and follow-ups
 
