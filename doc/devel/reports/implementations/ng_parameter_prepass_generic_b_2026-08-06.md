@@ -170,10 +170,11 @@ prose was the first round of this plan with no wrong number in it.
 - **✅ Settled by the owner (2026-08-06): `whole_sample_histogram` is renamed
   `fold_windows_of_one_ploidy`.** The restriction cannot live in the signature, because
   selecting a ploidy's windows is C3's job, so it lives in the name.
-- **Two owner items carried from Milestone A remain open**: the arch module table and the
-  plan's A1 still name four files under `generic/` where five exist, and
-  `spec` §6.5 / `arch` §5.3 still say "29% covered by runs" where the research note's
-  realised `F` is 0.2629.
+- **✅ Both Milestone-A owner items are closed (2026-08-06).** The architecture's module
+  table lists `depth_bins.rs`, with a paragraph on why the binning rule is its own file,
+  and the plan's scope list and A1 follow. The "29% covered by runs" item was **stale
+  since the branch point** — `5d13beff` corrected both design docs as well as the code —
+  and had been carried forward as open through two checkpoints.
 - **`cargo test --all-targets` is red on this branch and it is not step 4's.**
   `benches/psp_writer_perf.rs:386` panics with `index out of bounds: the len is 3300000
   but the index is 3300000`, in its own `flush_block_one` priming loop, which walks

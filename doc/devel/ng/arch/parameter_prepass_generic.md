@@ -31,9 +31,18 @@ src/ng/parameter_estimation/
 └── generic/
     ├── mod.rs                – the two accumulators and what each fits (§3, §5)
     ├── depth_and_alt_reads.rs – data shaping: one locus → one cell key (§2.3)
-    ├── histogram.rs          – the cell table (§2.2)
+    ├── depth_bins.rs         – the binning rule: which depths share a bin (§2.2)
+    ├── histogram.rs          – the cell table, and the fold over it (§2.2)
     └── runs.rs               – the inbreeding coefficient: a two-state HMM over windows (§5.3)
 ```
+
+**Why the binning rule is its own file** (added 2026-08-06, when Milestone A4 built it; an
+earlier draft of this table put it in `histogram.rs`). It fits neither side of `generic/`'s
+data-shaping-versus-mathematics split: it is a fixed rule, not a shaping of this sample's data
+and not a fit. §2.2 names three consumers for it inside `generic/` — the cell table, the
+subsampling cap of §2.3, and the memory arithmetic of spec §9 — and it has no consumer outside
+step 4. Keeping it separate is also what lets `DepthBinEdges` refuse `PartialEq` and `Clone`
+without those refusals reading as arbitrary restrictions on the table (§2.2).
 
 `fitting/` is a folder rather than a file because it is the one place with a genuine swappable
 seam — one trait, one implementation here and a second on the STR path (spec

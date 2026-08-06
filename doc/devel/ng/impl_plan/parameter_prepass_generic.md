@@ -51,7 +51,7 @@ Every milestone below is proven against them or against an identity, never again
 ## Scope
 
 **In:** `src/ng/parameter_estimation/` — `mod.rs`, `fitting/{mod.rs, mixture_weights.rs}`,
-`generic/{mod.rs, depth_and_alt_reads.rs, histogram.rs, runs.rs}`; the four constrained
+`generic/{mod.rs, depth_and_alt_reads.rs, depth_bins.rs, histogram.rs, runs.rs}`; the four constrained
 newtypes step 4 adds to `types.rs`; `DepthBinEdges` and the cell table; the read-group and
 windowed accumulators with their merge; `fit_mixture_weights`, the `NoiseModel` seam and the
 profile scan; the coupled error-rate/frequency loop; the runs model; the fallback ladder and
@@ -143,8 +143,10 @@ profile scan; the coupled error-rate/frequency loop; the runs model; the fallbac
 `mod.rs`, `fitting/{mod.rs, mixture_weights.rs}`, `generic/{mod.rs, depth_and_alt_reads.rs,
 histogram.rs, runs.rs}`, each with its `#[cfg(test)]` block; wire `pub mod
 parameter_estimation;` into `ng/mod.rs`. The folder split is the project rule that the shaping
-of data and the mathematics on it never share a file. *Source:* arch §Module home,
-[module layout](../arch/module_layout.md).
+of data and the mathematics on it never share a file. A fifth file under `generic/`,
+`depth_bins.rs`, arrived with A4 and is now in the architecture's module table — the binning
+rule fits neither side of that split, and all three A4 reviewers judged its own file right.
+*Source:* arch §Module home, [module layout](../arch/module_layout.md).
 
 **A2. Extend `types.rs` with the four constrained newtypes.**  ✅
 `ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` — each with a private field, a

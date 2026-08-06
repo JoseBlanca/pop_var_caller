@@ -142,6 +142,9 @@ one by writing the type bare.
   already absorbed the cells the fold reached. Nothing recovers from those panics today;
   it is documented so that a later `catch_unwind` is not written on the assumption that
   it could.
-- **Two Milestone-A owner items are still open** — the arch module table naming four
-  files under `generic/` where five exist, and the "29% covered by runs" figure in
-  `spec` §6.5 and `arch` §5.3 against the research note's realised 0.2629.
+- **Both Milestone-A owner items are closed** (2026-08-06). The architecture's module
+  table now lists `depth_bins.rs`, with a paragraph on why the binning rule is its own
+  file. The "29% covered by runs" item turned out to have been **stale since the branch
+  point**: `5d13beff` corrected both design docs as well as the code, and the entry
+  survived in `PROJECT_STATUS.md` through two checkpoints — worth noting because a
+  wrongly-open item costs a reader the same trust as a wrongly-closed one.
