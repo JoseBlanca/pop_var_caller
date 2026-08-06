@@ -137,7 +137,11 @@ pub struct AccumulationCounts {
     /// Loci that began before the previous locus on their contig ended. **Must be
     /// zero** — see [`GenericAccumulators::add_locus`].
     pub loci_overlapping_previous: u64,
-    /// Pairs of shard spans that overlap on a contig. **Must be zero**, and while it is,
+    /// Shard spans that overlap the span before them on a contig. **Must be zero**, and
+    /// **a lower bound rather than a count** when it is not: the check walks the sorted
+    /// spans in pairs, so three shards all covering one stretch report 1 rather than 3.
+    /// Zero-detection is exact, which is the property that matters — and while it is
+    /// zero,
     /// `loci_overlapping_previous` is the exact count a single unsharded walk would have
     /// produced: no locus of one shard can overlap a locus of another if the shards'
     /// spans are disjoint.
@@ -339,9 +343,14 @@ impl GenericAccumulators {
     ///
     /// # Panics
     ///
-    /// If the two were built with different edges objects, different inbreeding modes or
-    /// different library counts — each would make their cells mean different things, and
-    /// only the first is checkable by pointer identity.
+    /// **If the two shards were built with anything different that changes what their
+    /// cells mean — all four of `new`'s arguments.** Different edges objects or ploidy
+    /// maps, checked by pointer identity; different library counts or inbreeding modes,
+    /// checked by value. Every one of those mismatches is silent if it merges: two
+    /// shards handed different ploidy maps produce cells scored against different sets
+    /// of genotype classes and nothing downstream can tell, which is this module's
+    /// declared failure mode on the argument that was, until this check, the one left
+    /// unguarded.
     pub fn merge(&mut self, other: Self) {
         assert!(
             Arc::ptr_eq(&self.edges, &other.edges),
@@ -357,6 +366,13 @@ impl GenericAccumulators {
             self.inbreeding, other.inbreeding,
             "these two shards disagree about whether F is fitted, so one keyed its \
              sites by window and the other did not"
+        );
+        assert!(
+            Arc::ptr_eq(&self.ploidy, &other.ploidy),
+            "these two shards were handed different ploidy maps, so their cells were \
+             scored against different sets of genotype classes — a haploid region has \
+             two and a diploid three, and pooling them scores a site against the wrong \
+             set"
         );
 
         for (key, table) in other.by_group {
@@ -376,11 +392,23 @@ impl GenericAccumulators {
             }
         }
 
+        // Destructured exhaustively on purpose: a counter added later stops this
+        // compiling rather than being silently left out of every merge. All four of
+        // these sums could be deleted with the suite green until
+        // `merge_carries_every_counter_and_both_tables` existed.
+        let AccumulationCounts {
+            loci_with_upstream_subsample,
+            reads_without_observation,
+            sites_subsampled_to_cap,
+            loci_overlapping_previous,
+            // Never stored — `adjustments` derives it from the spans, which merge below.
+            shard_spans_overlapping: _,
+        } = other.counts;
         let counts = &mut self.counts;
-        counts.loci_with_upstream_subsample += other.counts.loci_with_upstream_subsample;
-        counts.reads_without_observation += other.counts.reads_without_observation;
-        counts.sites_subsampled_to_cap += other.counts.sites_subsampled_to_cap;
-        counts.loci_overlapping_previous += other.counts.loci_overlapping_previous;
+        counts.loci_with_upstream_subsample += loci_with_upstream_subsample;
+        counts.reads_without_observation += reads_without_observation;
+        counts.sites_subsampled_to_cap += sites_subsampled_to_cap;
+        counts.loci_overlapping_previous += loci_overlapping_previous;
         self.covered_spans.extend(other.covered_spans);
     }
 
@@ -501,11 +529,26 @@ mod tests {
         }
     }
 
+    /// The run's one ploidy map, shared by every shard exactly as a real run shares it.
+    ///
+    /// **A `thread_local` rather than a fresh `Arc` per shard**, because `merge` proves
+    /// two shards were handed the same map by pointer identity: minting one per shard
+    /// here would have made the merge tests exercise a configuration no run can produce,
+    /// and they failed the moment that check was added — which is the check working.
+    fn shared_ploidy() -> Arc<dyn PloidyMap> {
+        thread_local! {
+            static PLOIDY: Arc<dyn PloidyMap> = Arc::new(ConstantPloidy(
+                Ploidy::try_new(2).expect("a positive copy number"),
+            ));
+        }
+        PLOIDY.with(Arc::clone)
+    }
+
     fn accumulators(edges: &Arc<DepthBinEdges>, groups: &[ReadGroupId]) -> GenericAccumulators {
         GenericAccumulators::new(
             Arc::clone(edges),
             groups,
-            Arc::new(ConstantPloidy(diploid())),
+            shared_ploidy(),
             InbreedingMode::Fitted,
         )
     }
@@ -652,6 +695,148 @@ mod tests {
         }
     }
 
+    /// **Every counter and both tables survive a merge**, which nothing checked: the
+    /// sharding test above compares five zeros against five zeros, because its walk is
+    /// twelve clean loci, and the two tests that do exercise counters never merge. All
+    /// four counter sums could be deleted, and the whole read-group table dropped, with
+    /// the suite green — the second of those means a region-sharded walk producing an
+    /// **empty** read-group table, which is every error rate this step exists to fit.
+    #[test]
+    fn merge_carries_every_counter_and_both_tables() {
+        let edges = ladder();
+
+        let shard_of = |contig: u32, start: u64| {
+            let mut shard = accumulators(&edges, &[group(0)]);
+            let mut with_upstream_cap = site(contig, start, vec![observation(b"A", group(0), 20)]);
+            with_upstream_cap.reads_discarded_by_cap = 7;
+            with_upstream_cap.reads_without_observation = 3;
+            shard.add_locus(&with_upstream_cap);
+            // Deeper than the cap, so this step subsamples it.
+            shard.add_locus(&site(
+                contig,
+                start + 10,
+                vec![
+                    observation(b"A", group(0), 400),
+                    observation(b"T", group(0), 100),
+                ],
+            ));
+            // Overlaps the one before it.
+            let mut overlapping = site(contig, start + 10, vec![observation(b"A", group(0), 9)]);
+            overlapping.region.end = Position(start + 12);
+            shard.add_locus(&overlapping);
+            shard
+        };
+
+        let mut merged = shard_of(0, 1_000);
+        merged.merge(shard_of(1, 1_000));
+
+        let counts = merged.adjustments();
+        assert_eq!(counts.loci_with_upstream_subsample, 2, "one per shard");
+        assert_eq!(counts.reads_without_observation, 6);
+        assert_eq!(counts.sites_subsampled_to_cap, 2);
+        assert_eq!(counts.loci_overlapping_previous, 2);
+        assert_eq!(counts.shard_spans_overlapping, 0, "different contigs");
+
+        let by_group = merged.read_group_histograms();
+        assert_eq!(by_group.len(), 1, "one library, one ploidy");
+        assert_eq!(
+            by_group[&(group(0), diploid())].total_loci(),
+            6,
+            "three loci from each shard reached the read-group table"
+        );
+        assert_eq!(merged.whole_sample_histogram(diploid()).total_loci(), 6);
+    }
+
+    /// **Both boundaries of the overlap comparison.** A locus starting exactly where the
+    /// previous one ended overlaps by one position and is counted; one starting the
+    /// position after does not. And a locus wholly *contained* in its predecessor is
+    /// counted too, and does not shorten the reach the next locus is checked against —
+    /// which a naive `previous = end` would have done.
+    #[test]
+    fn touching_and_contained_loci_are_both_counted() {
+        let edges = ladder();
+
+        let stretch = |start: u64, end: u64| {
+            let mut locus = site(0, start, vec![observation(b"A", group(0), 8)]);
+            locus.region.end = Position(end);
+            locus
+        };
+
+        let mut touching = accumulators(&edges, &[group(0)]);
+        touching.add_locus(&stretch(100, 200));
+        touching.add_locus(&stretch(200, 300));
+        assert_eq!(
+            touching.adjustments().loci_overlapping_previous,
+            1,
+            "position 200 is in both"
+        );
+
+        let mut abutting = accumulators(&edges, &[group(0)]);
+        abutting.add_locus(&stretch(100, 200));
+        abutting.add_locus(&stretch(201, 300));
+        assert_eq!(
+            abutting.adjustments().loci_overlapping_previous,
+            0,
+            "abutting is not overlapping"
+        );
+
+        let mut contained = accumulators(&edges, &[group(0)]);
+        contained.add_locus(&stretch(100, 300));
+        contained.add_locus(&stretch(150, 200));
+        contained.add_locus(&stretch(250, 400));
+        assert_eq!(
+            contained.adjustments().loci_overlapping_previous,
+            2,
+            "the contained locus, and the one still inside the first's reach"
+        );
+    }
+
+    /// `merge`'s four guards each refuse a shard that would make the merged cells mean
+    /// something other than what they say. The ploidy map is the one that was unguarded
+    /// until this review: two shards handed different maps merged silently, and every
+    /// cell one of them filled was scored against the wrong set of genotype classes.
+    #[test]
+    #[should_panic(expected = "different ploidy maps")]
+    fn merging_shards_handed_different_ploidy_maps_is_refused() {
+        let edges = ladder();
+        let mut mine = accumulators(&edges, &[group(0)]);
+        mine.merge(GenericAccumulators::new(
+            Arc::clone(&edges),
+            &[group(0)],
+            Arc::new(ConstantPloidy(diploid())),
+            InbreedingMode::Fitted,
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "different ladder objects")]
+    fn merging_shards_binned_by_different_ladders_is_refused() {
+        let edges = ladder();
+        let mut mine = accumulators(&edges, &[group(0)]);
+        mine.merge(accumulators(&ladder(), &[group(0)]));
+    }
+
+    #[test]
+    #[should_panic(expected = "whether the sample has more than one library")]
+    fn merging_shards_that_disagree_about_the_library_count_is_refused() {
+        let edges = ladder();
+        let mut mine = accumulators(&edges, &[group(0)]);
+        mine.merge(accumulators(&edges, &[group(0), group(1)]));
+    }
+
+    #[test]
+    #[should_panic(expected = "whether F is fitted")]
+    fn merging_shards_that_disagree_about_inbreeding_is_refused() {
+        let edges = ladder();
+        let mut mine = accumulators(&edges, &[group(0)]);
+        mine.merge(GenericAccumulators::new(
+            Arc::clone(&edges),
+            &[group(0)],
+            shared_ploidy(),
+            InbreedingMode::Supplied(InbreedingF::try_new(0.1).expect("a coefficient")),
+        ));
+    }
+
     /// **Shards whose spans overlap are reported**, because while that counter is
     /// non-zero the locus counter is not the count an unsharded walk would have given —
     /// a locus of one shard may overlap a locus of another and neither shard could see
@@ -712,7 +897,7 @@ mod tests {
         let mut with_supplied_f = GenericAccumulators::new(
             Arc::clone(&edges),
             &[group(0)],
-            Arc::new(ConstantPloidy(diploid())),
+            shared_ploidy(),
             InbreedingMode::Supplied(supplied),
         );
         for locus in a_walk() {

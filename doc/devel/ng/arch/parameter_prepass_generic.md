@@ -274,10 +274,13 @@ heterozygosity at three reads, on two libraries with the *same* error rate.
 /// and the difference lands on the `k = 0, 1, 2` cells that carry every bit of the
 /// error-rate evidence:
 ///
-/// - *Rescaling and rounding to nearest* is not a subsample at all. A 500-read site with
+/// - *Rescaling and rounding to nearest* is not a subsample at all. A 200-read site with
 ///   one alternative read becomes `(124, 1)` — an alternative fraction of 1/124 against a
-///   true 1/500 — and the bias reverses sign at the depth where a lone alternative read
-///   stops surviving the round.
+///   true 1/200, nearly double — while the same lone read at 500 reads becomes `(124, 0)`
+///   and vanishes. **The bias reverses sign at depth 248** (corrected 2026-08-06: an
+///   earlier draft gave the 500-read site as `(124, 1)`, which is the wrong side of that
+///   reversal — `round(1 × 124/500) = 0`), so the rule inflates rare alleles below 248
+///   reads and erases them above.
 /// - *Rescaling with a stochastic round* — take the floor, add one with probability equal
 ///   to the fraction — fixes the **mean** and breaks the **spread**. Thinning `k` by a
 ///   factor `r` this way gives a variance of about `r²·Var[k]`, where a real subsample of

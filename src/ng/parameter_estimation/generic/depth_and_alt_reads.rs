@@ -117,9 +117,7 @@ pub fn count_by_read_group(
     edges: &DepthBinEdges,
     out: &mut Vec<(ReadGroupId, CountedSite)>,
 ) {
-    // Inline for two groups, which is every sample that has more than one library at
-    // all: 1,550 of the 1,707 in the tomato archive survey have exactly one.
-    let mut running: SmallVec<[(ReadGroupId, u32, u32); 2]> = SmallVec::new();
+    let mut running = ReadGroupTotals::new();
     accumulate_by_read_group(locus, &mut running);
 
     let cap = edges.max_depth();
@@ -158,7 +156,7 @@ pub fn count_whole_site_by_library(
     edges: &DepthBinEdges,
     alt_by_group: &mut Vec<(ReadGroupId, u32)>,
 ) -> CountedSite {
-    let mut running: SmallVec<[(ReadGroupId, u32, u32); 2]> = SmallVec::new();
+    let mut running = ReadGroupTotals::new();
     accumulate_by_read_group(locus, &mut running);
 
     let depth = running.iter().fold(0u32, |total, &(_, group_depth, _)| {
@@ -203,13 +201,23 @@ pub fn count_whole_site_by_library(
     }
 }
 
+/// One site's `(read group, depth, alternative reads)` totals, in read-group order.
+///
+/// **Eight inline, not two, and the figure is measured.** The tomato archive survey has
+/// 133 samples carrying two libraries, 20 carrying three, and four carrying 7, 16, 16
+/// and 42 (`spec/read_groups.md`) — so "two is every sample with more than one library"
+/// is false. At two inline, `add_locus` allocated twice per locus from three groups
+/// upward (200 allocations per 100 steady-state loci, measured) and cost about 47 ns a
+/// locus more, breaking the architecture's contract that it never allocates after a
+/// key's first locus — on exactly the multi-library samples the machinery exists for.
+/// Eight takes 1,703 of the 1,707 surveyed samples to zero; the four above it spill once
+/// per locus rather than always.
+type ReadGroupTotals = SmallVec<[(ReadGroupId, u32, u32); 8]>;
+
 /// Total each read group's complete witnesses into `(group, depth, alternative reads)`,
 /// in read-group order. Shared so that the two grains cannot come to disagree about what
 /// they are counting.
-fn accumulate_by_read_group(
-    locus: &SampleLocusObservations,
-    running: &mut SmallVec<[(ReadGroupId, u32, u32); 2]>,
-) {
+fn accumulate_by_read_group(locus: &SampleLocusObservations, running: &mut ReadGroupTotals) {
     running.clear();
     for observation in locus.complete_observations() {
         let group = observation.read_group;
@@ -240,10 +248,12 @@ fn accumulate_by_read_group(
 /// thing, and the difference lands on the `k = 0, 1, 2` cells that carry every bit of
 /// the error-rate evidence:
 ///
-/// - *Rescaling and rounding to nearest* is not a subsample at all. A 500-read site with
+/// - *Rescaling and rounding to nearest* is not a subsample at all. A 200-read site with
 ///   one alternative read becomes `(124, 1)` — an alternative fraction of 1/124 against
-///   a true 1/500 — and the bias reverses sign at the depth where a lone alternative
-///   read stops surviving the round.
+///   a true 1/200, nearly double — while the same lone read at 500 reads becomes
+///   `(124, 0)` and vanishes. **The bias reverses sign at depth 248**, where
+///   `1 × 124/depth` stops rounding up to one, so the rule inflates rare alleles below
+///   that depth and erases them above it.
 /// - *Rescaling with a stochastic round* — take the floor, add one with probability
 ///   equal to the fraction — fixes the **mean** and breaks the **spread**. Thinning `k`
 ///   that way gives a variance of about `r²·Var[k]` where a real subsample of the same
@@ -866,6 +876,47 @@ mod tests {
             (variance - expected_variance).abs() < 1.6,
             "variance {variance} against {expected_variance}"
         );
+    }
+
+    /// **`SelectionWalk`'s one contract, over the whole domain rather than at a
+    /// fixture.** Walking the successes in pieces must give exactly what walking them at
+    /// once gives — that is what `count_whole_site_by_library` rests on when it splits a
+    /// site's alternative reads between libraries, and the two fast paths are where a
+    /// resumed walk's state can be left wrong without any *single* call looking odd.
+    ///
+    /// It is here because the fixtures could not reach it: deleting the population
+    /// decrement in the all-kept arm — leaving every later group drawing against a
+    /// population one too high — left the whole suite green. That arm fires exactly
+    /// where the design says the damage lands, at the deep allele-rich sites where the
+    /// cap bites, and nothing would have panicked: the entry's attribution still sums to
+    /// its own total, so `add_attributed_site`'s cross-check passes.
+    #[test]
+    fn a_resumed_walk_sums_to_a_single_call_over_every_split() {
+        for population in [1u32, 2, 3, 5, 8, 124, 125, 200, 500] {
+            for draws in [0u32, 1, 2, 3, population / 2, population - 1, population] {
+                if draws > population {
+                    continue;
+                }
+                for successes in 0..=population.min(40) {
+                    for seed in [1u64, 7, 0xdead_beef, u64::MAX] {
+                        let whole =
+                            SelectionWalk::new(seed, population, draws).keep_from(successes);
+                        assert!(whole <= draws.min(successes));
+                        for cut in 0..=successes {
+                            let mut walk = SelectionWalk::new(seed, population, draws);
+                            let first = walk.keep_from(cut);
+                            let rest = walk.keep_from(successes - cut);
+                            assert_eq!(
+                                first + rest,
+                                whole,
+                                "population {population}, draws {draws}, \
+                                 successes {successes}, cut after {cut}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The two degenerate ends are exact rather than drawn: a site with no alternative
