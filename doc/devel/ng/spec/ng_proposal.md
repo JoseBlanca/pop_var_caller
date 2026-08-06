@@ -1,6 +1,28 @@
 # NG proposal — a step-decomposed, benchmark-driven algorithm lab
 
-*Status: proposal / discussion draft (2026-07-10). Prompted by the GIAB HG002
+> ## Historical document — read for the intent, not for the design
+>
+> **This is the original proposal, kept as a record of what we set out to do and why.** It is not
+> maintained, and parts of it have been overtaken. Where it disagrees with a later spec, the later
+> spec is the design.
+>
+> **The largest single reversal is in §4, the parameter pre-pass.** This document assumes a **rough
+> first-pass caller** whose confident genotypes teach the parameters — "two callers, a rough one to
+> learn the parameters and the real one that uses them" (below). **ng does not build a rough caller
+> anywhere.** The parameters are estimated by summing over the genotype rather than choosing one, so
+> there is nothing to bootstrap from and no confident-genotype gate. Two smaller consequences of the
+> same error: §4's list of "rough passes" includes GATK's DRAGstr calibration and HipSTR's stutter
+> pre-pass, and **neither calls a genotype** — DRAGstr grid-searches a marginal likelihood, HipSTR
+> runs EM over soft posteriors.
+>
+> The replacement is [`parameter_prepass.md`](parameter_prepass.md) and its four companion
+> documents, which supersede §4 entirely.
+>
+> **What is still worth reading here** is §1's step catalogue — the decomposition of freebayes,
+> GATK HaplotypeCaller, GangSTR, HipSTR and our own caller into comparable steps — and the framing
+> that produced it. That survey is the reason the rest of ng exists and nothing has replaced it.
+
+*Status: **historical**; originally a proposal / discussion draft (2026-07-10). Prompted by the GIAB HG002
 single-sample STR experiment (`benchmarks/ssr_hg002/`), where **freebayes — a
 general caller with no STR model at all — matched or beat both HipSTR and our
 caller on single-sample detection**, and where we could only understand *why* by

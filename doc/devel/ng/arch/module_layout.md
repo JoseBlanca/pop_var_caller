@@ -56,13 +56,23 @@ src/ng/
 ├── locus_generation/ – the locus generators: turn one typed region into a sample's loci.
 │                       LocusGenerator<S> trait + one impl per segment kind, side by side —
 │                       a step folder, because alternatives per kind are expected.
-│                        · mod.rs   – SampleLocusObservations, ObservedSequence, LocusGenerator,
+│                        · mod.rs   – SampleLocusObservations, SequenceObservation, LocusGenerator,
 │                          the dispatch match, NoLoci (the count-only generator)
 │                        · ssr.rs   – the STR generator (../spec/locus_generation_ssr.md)
 │                        · pileup/  – the generic generator: walks a non-STR stretch, splits
 │                          it into loci from the data. Reuse target: production pileup/walker/.
 │                       Spec ../spec/locus_generation.md. See *The locus stream*.
-├── pre_pass/         – step 4  Caller, SampleSummarizer, CohortEstimator + impls
+├── parameter_estimation/ – step 4  the parameters the caller runs on — noise rates and
+│                       rates of variation — estimated from the data before calling, and
+│                       emitted as ModelParams. Named for what it owns, not for when it
+│                       runs: "pre-pass" says only that something else comes after, and
+│                       "prior" would both collide with genotype_prior/ below and overstate
+│                       the output, half of which is noise-model terms rather than priors.
+│                       SampleSummarizer + CohortEstimator. Specs ../spec/parameter_prepass*.md;
+│                       arch parameter_prepass_generic.md (which owns the shared fitting/
+│                       machinery) and parameter_prepass_ssr.md. Sub-units: fitting/,
+│                       generic/, ssr/ — STR-ness is a property of an implementation
+│                       (principle 2), not a top-level split
 ├── allele_candidates/ – step 6  CandidateGenerator + impls (rung_ladder [STR], assembly [generic])
 ├── likelihood/       – step 7  ReadLikelihood + impls (stutter models, pair-HMM)
 ├── genotype_prior/   – step 8  GenotypePrior + impls (flat, dirichlet, sfs, marginalized)

@@ -55,6 +55,28 @@ by document kind:
   - [`locus_generation_ssr.md`](spec/locus_generation_ssr.md) — the first generator (STR): one
     tract segment → one locus, adapting production `src/ssr/pileup/` and carrying partial (censored)
     observations the old path dropped.
+  - **Step 4, the parameter pre-pass, in five documents** — the noise rates and rates of variation
+    a caller runs on, estimated **without first calling genotypes**:
+    [`parameter_prepass.md`](spec/parameter_prepass.md) (read first: what the step produces, why
+    production's numbers are biased, the estimator both paths share);
+    [`parameter_prepass_generic.md`](spec/parameter_prepass_generic.md) (the SNP/indel path: two
+    histograms, the per-base error rate, the sample's rates, the inbreeding coefficient);
+    [`parameter_prepass_ssr.md`](spec/parameter_prepass_ssr.md) (the STR path: what stutter
+    actually looks like, and the per-locus table its four numbers are fitted from);
+    [`parameter_prepass_census_sites.md`](spec/parameter_prepass_census_sites.md) (the two
+    censuses — the same loci in every sample, so answers can be compared); and
+    [`parameter_prepass_cohort.md`](spec/parameter_prepass_cohort.md) (the gather: diversity, the
+    frequency spectrum, contamination, relatedness).
+  - [`synthetic_validation.md`](spec/synthetic_validation.md) — the generated data the calling
+    steps are graded against.
+- **`research/`** — measurements, kept apart from the designs they settled so a spec can point at
+  a number rather than repeat it.
+  - [`parameter_estimator_experiments_2026-08-06.md`](research/parameter_estimator_experiments_2026-08-06.md)
+    — what step 4's estimators actually do, from three harnesses in `examples/`. Bias computed
+    **exactly** rather than simulated, so "unbiased" is decided rather than estimated. It carries
+    the numbers behind the multi-library cell key, the inbreeding coefficient, depth binning, the
+    heterozygote `½`, and the STR stutter accumulator — and a list of the findings it overturned,
+    including several of its own.
 - **`arch/`** — architecture (the shared types and the interfaces implementations
   plug into).
   - [`ng_step_interfaces.md`](arch/ng_step_interfaces.md) — the common domain
@@ -99,6 +121,14 @@ by document kind:
   - [`locus_generation_ssr.md`](arch/locus_generation_ssr.md) — the STR generator's types &
     interfaces (`SsrLocus`, `SsrGenerator`, the reservoir cap and its traps); companion to
     `spec/locus_generation_ssr.md`.
+  - [`parameter_prepass_generic.md`](arch/parameter_prepass_generic.md) — step 4's SNP/indel
+    types: the depth ladder and cell table, the two keyed accumulators, and **the fitting
+    machinery both paths share** (`NoiseModel`, the concave climb over genotype frequencies, the
+    profile scan). Specified here because this path is its first consumer.
+  - [`parameter_prepass_ssr.md`](arch/parameter_prepass_ssr.md) — step 4's STR types: the
+    per-locus offset table, the slippage model as the second `NoiseModel`, and the summary that
+    keeps several hundred fits readable. Consumes the machinery above and names the two changes it
+    needs there.
 - **`impl_plan/`** — step-by-step implementation plans (build order, not new design).
   - [`foundations.md`](impl_plan/foundations.md) — the first ng code: skeleton,
     `types.rs` seed, and the `RefSeq` accessor (three impls).
@@ -135,6 +165,14 @@ by document kind:
     prerequisite `flank_bp`→`bundle_threshold` rename, `SsrLocus` + margin fetch, the ported
     reservoir cap, the fetch→align→tally transform, and byte parity vs production. Gated on the
     ng STR aligner.
+  - [`parameter_prepass_generic.md`](impl_plan/parameter_prepass_generic.md) — step 4's
+    SNP/indel half: the `parameter_estimation/` module, the depth ladder and cell table, the
+    two keyed accumulators, the fitting machinery both paths share, and the four numbers a
+    sample emits. **Its oracle is not production** — nothing downstream can check these
+    parameters and the production code nearest to them is what the step replaces — so every
+    milestone is proven against the research harnesses in `examples/` or against an
+    identity. **The STR half's spec and architecture are both settled**, so its plan is writable;
+    the two censuses and the cohort gather still need an architecture document.
 
 This mirrors the repo-wide `doc/devel/{specs,architecture,implementation_plans}`
 convention but scoped to ng, so the growing set of ng docs stays together.
