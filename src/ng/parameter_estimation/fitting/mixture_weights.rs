@@ -10,9 +10,10 @@
 //!
 //! Shared by two of the four fits — the error-rate scan, which climbs to the best
 //! frequencies at every rung of its ladder, and the sample's own rates, climbed once
-//! on the whole-sample table. The surface is concave, so the climb cannot get stuck
-//! on a false summit and a failure to converge is a bug rather than a data condition
-//! (`spec/parameter_prepass.md` §3.1).
+//! on the whole-sample table. The surface is concave, so the climb cannot get **stuck**
+//! (`spec/parameter_prepass.md` §3.1); what concavity does not promise is that it
+//! arrives quickly, and [`MAX_CLIMB_PASSES`] carries the measurement of how slow it
+//! actually gets.
 //!
 //! **Not the runs model.** Its two states share one inbreeding coefficient, which is a
 //! two-dimensional surface inside the simplex rather than a free point on it; a
@@ -26,25 +27,132 @@ use smallvec::SmallVec;
 
 use crate::ng::types::LogProb;
 
-/// How many passes the climb is allowed before it gives up.
+/// How many passes the climb is allowed before it stops without having settled.
 ///
-/// **Generous rather than tight, because exhausting it is not treated as an error.**
-/// Expectation-maximization converges linearly at a rate set by how much the mixture
-/// components overlap (Redner & Walker, 1984), and they overlap most at low coverage,
-/// where a heterozygous site and a homozygous-reference one look alike — which is the
-/// regime this estimator was built for. A cap that fired on a slow-but-correct climb
-/// would turn shallow data into a crash; the tests assert convergence on tables whose
-/// answer is known instead (`spec/parameter_prepass.md` §3.1).
-const MAX_CLIMB_PASSES: u32 = 1_000;
+/// **Concavity rules out a false summit, not a slow one.** `spec/parameter_prepass.md`
+/// §3.1 proves the surface has no local maximum that is not also global, so a climb
+/// cannot get stuck; the same section says the *rate* of approach is only linear and is
+/// set by how much the mixture components overlap (Redner & Walker, 1984) — worst at low
+/// coverage, where a heterozygous site and a homozygous-reference one look alike, which
+/// is this estimator's own regime. So a climb that exhausts this cap has not found a
+/// second summit. It has run out of time on the only one, and that is a data condition
+/// rather than a bug.
+///
+/// **Measured, not guessed, and the first value was too small.** On the four-cell
+/// fixture in this file's tests, reaching [`CLIMB_STILLNESS`] takes 257 passes at a truth
+/// of `[0.60, 0.35, 0.05]`, 449 at `[0.90, 0.07, 0.03]` and **1,234** at
+/// `[0.80, 0.02, 0.18]`. D1 shipped this at 1,000, which cut the third one off: it
+/// returned `converged = false` 3.6 × 10⁻¹⁰ from its answer and the test that read it
+/// could not tell, because it went through [`fit_mixture_weights`], which discards the
+/// flag. Ten thousand is eight times the slowest measured. The harness this file's
+/// arithmetic follows caps at 400 and breaks out silently
+/// (`examples/ng_multilib_key_harness.rs`, `climb_frequencies`).
+pub const MAX_CLIMB_PASSES: u32 = 10_000;
 
-/// How still the weights have to be before the climb is called finished: the largest
-/// move any one weight made in a pass.
+/// How still the weights have to be before the climb is called settled: the largest move
+/// **any one** genotype's weight made in a pass.
+///
+/// The largest over every genotype and not the last one's: a genotype that no cell can
+/// have produced reaches weight zero on the first pass and never moves again, so a
+/// measure watching only that coordinate calls the climb finished on pass two with the
+/// others still far out — 0.7698 against a truth of 0.95 on the table
+/// `a_genotype_impossible_everywhere_does_not_end_the_climb_early` builds.
 ///
 /// Absolute rather than relative, and it has to be read against what the weights are.
 /// The two that matter here — heterozygosity and the homozygous-non-reference rate —
 /// sit near 0.001, so this is a relative stillness of about one part in 10¹⁰, against
-/// the 1% the recovery tests of Milestone F assert.
-const CLIMB_STILLNESS: f64 = 1e-13;
+/// the 1% the recovery tests of Milestone F assert. Taken from the same harness
+/// (`examples/ng_multilib_key_harness.rs`, `climb_frequencies`).
+pub const CLIMB_STILLNESS: f64 = 1e-13;
+
+/// How likely each genotype makes each cell — the table the climb is fitted to, and the
+/// only thing about the data the climb sees.
+///
+/// **One buffer, row-major, with the row width named once.** The entries are laid out
+/// one cell after another, each cell contributing `genotypes()` entries in genotype
+/// order. Borrowed rather than owned, so the caller keeps the buffer and refills it: the
+/// error-rate scan rebuilds this table at every one of its 161 rungs, and a shape made
+/// of one slice per cell would force it to rebuild an index of row pointers each time as
+/// well — a `Vec<&[f64]>` of a few hundred entries per rung, which the borrow checker
+/// will not let it hoist out of the loop because refilling the buffer invalidates it.
+///
+/// **Natural logarithms**, which is why the constructor says so in its name, and a
+/// caller handing this linear probabilities would otherwise get a plausible wrong
+/// answer. The corners of a deep table are what force it: a site at the depth cap of 124
+/// whose every read showed the alternative allele is `124 · ln ε` under the
+/// homozygous-reference genotype, which is `−857` at an error rate of 0.001 and `−1428`
+/// at the ladder's floor — both zero in linear space, where the ordinary cell beside them
+/// (no alternative read at all) is 0.883. At the ladder's floor a depth of 65 already
+/// underflows. `−∞` is a legal entry and means this genotype cannot have produced this
+/// cell; it is the only non-finite value accepted.
+#[derive(Copy, Clone, Debug)]
+pub struct GenotypeLikelihoodTable<'a> {
+    ln_likelihood_row_major: &'a [f64],
+    genotypes: usize,
+}
+
+impl<'a> GenotypeLikelihoodTable<'a> {
+    /// Borrow a row-major buffer of **natural-log** likelihoods as a table `genotypes`
+    /// wide.
+    ///
+    /// The width is the only number this takes, and the cell count is derived from it,
+    /// so there is no pair of `usize`s here to hand over transposed. A width that does
+    /// not divide the buffer is what a raggedly-built table becomes: it cannot be
+    /// represented, only refused.
+    ///
+    /// # Panics
+    ///
+    /// If `genotypes` is zero, if the buffer is empty, if its length is not a multiple
+    /// of `genotypes`, or if any entry is `NaN` or `+∞` — each of those would otherwise
+    /// leave a `NaN` to travel through the fit as a plausible number.
+    #[must_use]
+    pub fn from_natural_logs(ln_likelihood_row_major: &'a [f64], genotypes: usize) -> Self {
+        assert!(
+            genotypes > 0,
+            "a mixture cannot be fitted over an empty genotype set"
+        );
+        assert!(
+            !ln_likelihood_row_major.is_empty(),
+            "a mixture cannot be fitted from an empty table"
+        );
+        assert_eq!(
+            ln_likelihood_row_major.len() % genotypes,
+            0,
+            "a table {genotypes} genotypes wide cannot hold {} entries",
+            ln_likelihood_row_major.len()
+        );
+        for (entry, &ln_likelihood) in ln_likelihood_row_major.iter().enumerate() {
+            assert!(
+                ln_likelihood.is_finite() || ln_likelihood == f64::NEG_INFINITY,
+                "cell {}, genotype {}: {ln_likelihood} is not a log-likelihood",
+                entry / genotypes,
+                entry % genotypes
+            );
+        }
+        Self {
+            ln_likelihood_row_major,
+            genotypes,
+        }
+    }
+
+    /// How many genotypes each cell is scored against — the width of a row, and so the
+    /// length of the answer: three for a diploid, five for a tetraploid.
+    #[must_use]
+    pub fn genotypes(&self) -> usize {
+        self.genotypes
+    }
+
+    /// How many cells the table holds.
+    #[must_use]
+    pub fn cells(&self) -> usize {
+        self.ln_likelihood_row_major.len() / self.genotypes
+    }
+
+    /// One row per cell, each `genotypes()` long.
+    fn rows(&self) -> std::slice::ChunksExact<'a, f64> {
+        self.ln_likelihood_row_major.chunks_exact(self.genotypes)
+    }
+}
 
 /// What one climb over the genotype frequencies returned.
 ///
@@ -58,15 +166,21 @@ const CLIMB_STILLNESS: f64 = 1e-13;
 /// design claims instead of trusting it.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct MixtureWeightsFit {
-    /// One weight per genotype, non-negative and summing to one.
-    pub weights: SmallVec<[f64; 3]>,
-    /// The weighted log-likelihood **at `weights`** — `Σ_cells w · ln Σ_genotypes π·L`.
+    /// One weight per genotype, non-negative and summing to one. Named for the genotypes
+    /// rather than bare `weights`, because the climb also carries a *cell* weight per
+    /// row of the table and the two are never interchangeable.
+    pub genotype_weights: SmallVec<[f64; 3]>,
+    /// The weighted log-likelihood **at `genotype_weights`** —
+    /// `Σ_cells w · ln Σ_genotypes π·L`.
     /// Computed in a final pass after the climb stopped, so it belongs to the weights
     /// returned beside it rather than to the pass before them.
     pub log_likelihood: LogProb,
     /// How many passes ran. One pass is one expectation step and one maximization step.
     pub passes: u32,
-    /// Whether the weights stopped moving, as against running out of passes.
+    /// Whether the weights stopped moving, as against running out of passes. The
+    /// implication runs one way only: `false` means `passes == MAX_CLIMB_PASSES`, while
+    /// `true` says nothing about the count, since a climb may settle exactly on its last
+    /// allowed pass.
     pub converged: bool,
 }
 
@@ -77,40 +191,64 @@ pub(crate) struct MixtureWeightsFit {
 /// calls this at every rung of its ladder, and the sample's own rates, climbed once on
 /// the whole-sample table (`arch/parameter_prepass_generic.md` §5.1, §5.2).
 ///
-/// `ln_likelihood_by_cell_and_genotype` is **one row per cell, one entry per genotype
-/// within a row** — natural logarithms, because a cell at depth 124 has a likelihood no
-/// `f64` can hold in linear space. Every row must be the same width, and that width is
-/// the number of genotypes, so it is the length of the answer: three for a diploid,
-/// five for a tetraploid. `−∞` is a legal entry and means this genotype cannot have
-/// produced this cell; it is the only non-finite value accepted.
+/// `ln_likelihood_by_cell_and_genotype` says how likely each genotype makes each cell;
+/// its width is the number of genotypes, so it is also the length of the answer.
 ///
 /// `cell_weights` is how much each cell counts for — its site count, or its site count
-/// times a posterior. One entry per row above.
+/// times a posterior. One entry per cell of the table.
 ///
 /// The climb starts from the uniform point. Where it starts does not matter: with the
 /// component likelihoods fixed the surface is concave over the simplex, so there is no
 /// local summit that is not also the global one (`spec/parameter_prepass.md` §3.1).
 ///
+/// It runs until no genotype's weight moves by more than [`CLIMB_STILLNESS`] in a pass,
+/// or for [`MAX_CLIMB_PASSES`] passes, **whichever comes first** — and a climb that
+/// stopped on the second returns its weights with nothing to say so. That is deliberate
+/// and the reasoning is on [`MAX_CLIMB_PASSES`]: exhausting the cap means the climb ran
+/// out of time on the one summit, not that it found a wrong one.
+///
+/// # Examples
+///
+/// Two cells and three genotypes, with the cells' likelihoods laid out one cell after
+/// another. The second cell is three times as common as the first, and the third
+/// genotype explains it best, so that is where the weight goes:
+///
+/// ```
+/// use pop_var_caller::ng::parameter_estimation::fitting::mixture_weights::{
+///     fit_mixture_weights, GenotypeLikelihoodTable,
+/// };
+///
+/// let ln_likelihood: Vec<f64> = [
+///     0.8_f64, 0.5, 0.1, // cell 0, under each of the three genotypes
+///     0.1, 0.4, 0.9, //     cell 1, likewise
+/// ]
+/// .iter()
+/// .map(|p| p.ln())
+/// .collect();
+///
+/// let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 3);
+/// let fitted = fit_mixture_weights(table, &[250.0, 750.0]);
+///
+/// assert_eq!(fitted.len(), 3);
+/// assert!((fitted.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+/// assert!(fitted[2] > fitted[0], "{fitted:?}");
+/// ```
+///
 /// # Panics
 ///
-/// If the two arguments disagree in length, if the table is empty or ragged, if a
-/// likelihood is `NaN` or `+∞`, if a weight is negative or not finite, if every weight
-/// is zero, or if a cell that carries weight is one no genotype could have produced.
-/// Each of those is a caller error that would otherwise leave a `NaN` to propagate
-/// through the fit as a plausible number.
+/// If the table and `cell_weights` disagree in length, if a weight is negative or not
+/// finite, if every weight is zero, or if a cell that carries weight is one no genotype
+/// could have produced. Each of those is a caller error that would otherwise leave a
+/// `NaN` to propagate through the fit as a plausible number.
 #[must_use]
 pub fn fit_mixture_weights(
-    ln_likelihood_by_cell_and_genotype: &[&[f64]],
+    ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
 ) -> SmallVec<[f64; 3]> {
-    // The width is read off the table and the checking is left to the climb, so that
-    // an empty or ragged table is reported by the one function that knows what is
-    // wrong with it rather than twice, differently.
-    let genotypes = ln_likelihood_by_cell_and_genotype
-        .first()
-        .map_or(0, |row| row.len());
+    let genotypes = ln_likelihood_by_cell_and_genotype.genotypes();
     let uniform = vec![1.0 / genotypes as f64; genotypes];
-    climb_mixture_weights(ln_likelihood_by_cell_and_genotype, cell_weights, &uniform).weights
+    climb_mixture_weights(ln_likelihood_by_cell_and_genotype, cell_weights, &uniform)
+        .genotype_weights
 }
 
 /// [`fit_mixture_weights`], with the start named and the termination reported.
@@ -127,42 +265,69 @@ pub fn fit_mixture_weights(
 ///
 /// As [`fit_mixture_weights`], and additionally if `start` is not an interior point of
 /// the simplex of the right width.
-pub(crate) fn climb_mixture_weights(
-    ln_likelihood_by_cell_and_genotype: &[&[f64]],
+#[must_use]
+pub(super) fn climb_mixture_weights(
+    ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
     start: &[f64],
 ) -> MixtureWeightsFit {
-    let genotypes = check_table(ln_likelihood_by_cell_and_genotype, cell_weights);
+    climb_with_cap(
+        ln_likelihood_by_cell_and_genotype,
+        cell_weights,
+        start,
+        MAX_CLIMB_PASSES,
+    )
+}
+
+/// [`climb_mixture_weights`] with the pass cap named rather than taken from the
+/// constant.
+///
+/// **The cap is a parameter here for one reason: so that what it costs is a test rather
+/// than a recompile.** Two questions can then be asked of a real table — does the answer
+/// move when the cap is raised, and what does a climb that ran out of passes report —
+/// and both are asked of the fixtures below. Every caller outside the tests goes through
+/// [`climb_mixture_weights`] and gets [`MAX_CLIMB_PASSES`].
+#[must_use]
+fn climb_with_cap(
+    ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
+    cell_weights: &[f64],
+    start: &[f64],
+    max_passes: u32,
+) -> MixtureWeightsFit {
+    check_cell_weights(ln_likelihood_by_cell_and_genotype, cell_weights);
+    let genotypes = ln_likelihood_by_cell_and_genotype.genotypes();
     check_start(start, genotypes);
 
-    let total_weight: f64 = cell_weights.iter().sum();
+    let total_cell_weight: f64 = cell_weights.iter().sum();
 
-    let mut weights: SmallVec<[f64; 3]> = SmallVec::from_slice(start);
-    let mut next: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
-    // Scratch, loaded and cleared once per cell rather than allocated per cell: the
-    // inner loop runs over every cell of the table, 161 times per fit.
+    let mut genotype_weights: SmallVec<[f64; 3]> = SmallVec::from_slice(start);
+    let mut next_genotype_weights: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
+    // Scratch, loaded and cleared once per cell rather than allocated per cell. The
+    // loop below walks every cell of the table — 583 of them on the generic path
+    // (`arch/parameter_prepass_generic.md` §4.1) — once per pass, and the profile scan
+    // runs one whole climb at each of its 161 rungs.
     let mut ln_joint: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
 
     let mut passes = 0;
     let mut converged = false;
     let mut previous_score = f64::NEG_INFINITY;
 
-    while passes < MAX_CLIMB_PASSES {
-        next.fill(0.0);
+    while passes < max_passes {
+        next_genotype_weights.fill(0.0);
         let mut score = 0.0;
 
-        for (cell, (&row, &cell_weight)) in ln_likelihood_by_cell_and_genotype
-            .iter()
+        for (cell, (row, &cell_weight)) in ln_likelihood_by_cell_and_genotype
+            .rows()
             .zip(cell_weights)
             .enumerate()
         {
             if cell_weight == 0.0 {
                 continue;
             }
-            for (slot, (&weight, &ln_likelihood)) in
-                ln_joint.iter_mut().zip(weights.iter().zip(row))
+            for (slot, (&genotype_weight, &ln_likelihood)) in
+                ln_joint.iter_mut().zip(genotype_weights.iter().zip(row))
             {
-                *slot = weight.ln() + ln_likelihood;
+                *slot = genotype_weight.ln() + ln_likelihood;
             }
             let ln_total = ln_sum_exp(&ln_joint);
             assert!(
@@ -173,30 +338,36 @@ pub(crate) fn climb_mixture_weights(
             score += cell_weight * ln_total;
             // The expectation step's responsibilities, accumulated straight into the
             // maximization step's numerator rather than materialised per cell.
-            for (slot, &ln_j) in next.iter_mut().zip(ln_joint.iter()) {
+            for (slot, &ln_j) in next_genotype_weights.iter_mut().zip(ln_joint.iter()) {
                 *slot += cell_weight * (ln_j - ln_total).exp();
             }
         }
 
         // Monotone ascent is the one thing expectation-maximization is actually proved
         // to give (Dempster, Laird & Rubin 1977), so a pass that lost ground is a bug
-        // in the two steps above rather than a hard table. Slack for the summation's
-        // own rounding, which is a sum over hundreds of cells.
+        // in the two steps above rather than a hard table. Skipped on the first pass,
+        // where there is nothing to compare against — stated rather than left to
+        // `-∞ - ∞ = -∞` to make the check vacuous by arithmetic. The slack is relative
+        // because the score scales with the total cell weight: −1,001 over a thousand
+        // sites and −1,001,017 over a million.
         debug_assert!(
-            score >= previous_score - 1e-9 * previous_score.abs(),
+            passes == 0 || score >= previous_score - 1e-9 * previous_score.abs(),
             "a pass lost ground: {previous_score} → {score}"
         );
         previous_score = score;
 
-        let mut moved: f64 = 0.0;
-        for (slot, &weight) in next.iter_mut().zip(weights.iter()) {
-            *slot /= total_weight;
-            moved = moved.max((*slot - weight).abs());
+        let mut largest_move: f64 = 0.0;
+        for (slot, &genotype_weight) in next_genotype_weights
+            .iter_mut()
+            .zip(genotype_weights.iter())
+        {
+            *slot /= total_cell_weight;
+            largest_move = largest_move.max((*slot - genotype_weight).abs());
         }
-        weights.copy_from_slice(&next);
+        genotype_weights.copy_from_slice(&next_genotype_weights);
         passes += 1;
 
-        if moved < CLIMB_STILLNESS {
+        if largest_move < CLIMB_STILLNESS {
             converged = true;
             break;
         }
@@ -205,12 +376,12 @@ pub(crate) fn climb_mixture_weights(
     let log_likelihood = weighted_log_likelihood(
         ln_likelihood_by_cell_and_genotype,
         cell_weights,
-        &weights,
+        &genotype_weights,
         &mut ln_joint,
     );
 
     MixtureWeightsFit {
-        weights,
+        genotype_weights,
         log_likelihood: LogProb(log_likelihood),
         passes,
         converged,
@@ -223,18 +394,26 @@ pub(crate) fn climb_mixture_weights(
 /// weights it started the pass with, and what a caller compares rungs on is the score
 /// at the weights it is handed.
 fn weighted_log_likelihood(
-    ln_likelihood_by_cell_and_genotype: &[&[f64]],
+    ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
-    weights: &[f64],
+    genotype_weights: &[f64],
     ln_joint: &mut [f64],
 ) -> f64 {
     let mut score = 0.0;
-    for (&row, &cell_weight) in ln_likelihood_by_cell_and_genotype.iter().zip(cell_weights) {
+    for (row, &cell_weight) in ln_likelihood_by_cell_and_genotype.rows().zip(cell_weights) {
+        // Not an optimisation. A cell that carries no weight may legally be one no
+        // genotype could have produced, and `0 · −∞` is `NaN` — which does not lose
+        // loudly, it simply never wins, so the profile scan would return whichever rung
+        // happened to be scored on a table with no empty cells. A posterior-weighted
+        // call, which is what `cell_weights` documents, produces zero-weight cells as a
+        // matter of course.
         if cell_weight == 0.0 {
             continue;
         }
-        for (slot, (&weight, &ln_likelihood)) in ln_joint.iter_mut().zip(weights.iter().zip(row)) {
-            *slot = weight.ln() + ln_likelihood;
+        for (slot, (&genotype_weight, &ln_likelihood)) in
+            ln_joint.iter_mut().zip(genotype_weights.iter().zip(row))
+        {
+            *slot = genotype_weight.ln() + ln_likelihood;
         }
         score += cell_weight * ln_sum_exp(ln_joint);
     }
@@ -247,65 +426,43 @@ fn weighted_log_likelihood(
 /// `−∞` terms contribute nothing and an all-`−∞` slice returns `−∞`, which is the
 /// caller's signal that no genotype could have produced the cell.
 fn ln_sum_exp(terms: &[f64]) -> f64 {
-    let largest = terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    if largest == f64::NEG_INFINITY {
+    let largest_term = terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if largest_term == f64::NEG_INFINITY {
         return f64::NEG_INFINITY;
     }
-    let sum: f64 = terms.iter().map(|&term| (term - largest).exp()).sum();
-    largest + sum.ln()
+    let sum: f64 = terms.iter().map(|&term| (term - largest_term).exp()).sum();
+    largest_term + sum.ln()
 }
 
-/// Check the table and return the number of genotypes — the width every row shares.
+/// Check there is one usable weight per cell of the table.
 ///
-/// **The width is derived from the table rather than taken as an argument**, which is
-/// what stops a cell count and a genotype count, two `usize`s in the same call, from
-/// being swapped without a compiler or a test noticing.
-fn check_table(ln_likelihood_by_cell_and_genotype: &[&[f64]], cell_weights: &[f64]) -> usize {
+/// The table's own shape was settled when it was borrowed
+/// ([`GenotypeLikelihoodTable::from_natural_logs`]); what is left is whether the weights
+/// beside it line up with it and are counts of sites.
+fn check_cell_weights(
+    ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
+    cell_weights: &[f64],
+) {
     assert_eq!(
-        ln_likelihood_by_cell_and_genotype.len(),
+        ln_likelihood_by_cell_and_genotype.cells(),
         cell_weights.len(),
         "one weight per cell: {} cells against {} weights",
-        ln_likelihood_by_cell_and_genotype.len(),
+        ln_likelihood_by_cell_and_genotype.cells(),
         cell_weights.len()
     );
-    let first = ln_likelihood_by_cell_and_genotype
-        .first()
-        .expect("a mixture cannot be fitted from an empty table");
-    let genotypes = first.len();
-    assert!(
-        genotypes > 0,
-        "a mixture cannot be fitted over an empty genotype set"
-    );
 
-    for (cell, &row) in ln_likelihood_by_cell_and_genotype.iter().enumerate() {
-        assert_eq!(
-            row.len(),
-            genotypes,
-            "cell {cell} lists {} genotypes where cell 0 lists {genotypes}",
-            row.len()
-        );
-        for (genotype, &ln_likelihood) in row.iter().enumerate() {
-            assert!(
-                ln_likelihood.is_finite() || ln_likelihood == f64::NEG_INFINITY,
-                "cell {cell}, genotype {genotype}: {ln_likelihood} is not a log-likelihood"
-            );
-        }
-    }
-
-    let mut total_weight = 0.0;
+    let mut total_cell_weight = 0.0;
     for (cell, &cell_weight) in cell_weights.iter().enumerate() {
         assert!(
             cell_weight.is_finite() && cell_weight >= 0.0,
             "cell {cell} carries weight {cell_weight}, which is not a count of sites"
         );
-        total_weight += cell_weight;
+        total_cell_weight += cell_weight;
     }
     assert!(
-        total_weight > 0.0,
+        total_cell_weight > 0.0,
         "every cell carries zero weight, so there is nothing to fit"
     );
-
-    genotypes
 }
 
 /// Check a start is an interior point of the simplex of the right width.
@@ -341,11 +498,14 @@ mod tests {
     /// `w_cell = Σ_j π_j · L(cell | j)`, makes that truth the maximiser exactly — this
     /// is the infinite-genome table, with no sampling noise in it to argue about. It is
     /// the same device the research harnesses use
-    /// (`doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md` §2).
+    /// (`doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md` §1, applied
+    /// throughout §2).
     ///
-    /// **Four cells and three genotypes, deliberately unequal.** The two dimensions of
-    /// this table are the pair a transposed index would swap, and at 4 × 3 a
-    /// transposition is a length mismatch rather than a wrong number.
+    /// **Four cells and three genotypes, deliberately unequal**, so that a fixture built
+    /// with the two dimensions swapped is a buffer the width does not divide rather than
+    /// a wrong number. The cell weights it produces run 0.6376 down to 0.0555 — an
+    /// 11.5-to-1 spread, which is what makes a climb that ignored them fail rather than
+    /// merely drift.
     const CELL_GIVEN_GENOTYPE: [[f64; 3]; 4] = [
         // homozygous reference, heterozygous, homozygous non-reference
         [0.70, 0.10, 0.02],
@@ -354,17 +514,23 @@ mod tests {
         [0.03, 0.15, 0.60],
     ];
 
-    /// The rows of [`CELL_GIVEN_GENOTYPE`] in logs, as the climb takes them.
-    fn ln_table() -> Vec<[f64; 3]> {
-        CELL_GIVEN_GENOTYPE
+    /// [`CELL_GIVEN_GENOTYPE`] in logs, row-major, as the climb takes it.
+    fn ln_table() -> Vec<f64> {
+        natural_logs_of(&CELL_GIVEN_GENOTYPE)
+    }
+
+    /// A table of fixed-width rows of linear probabilities, flattened into the row-major
+    /// buffer of natural logs [`GenotypeLikelihoodTable`] borrows.
+    fn natural_logs_of<const GENOTYPES: usize>(table: &[[f64; GENOTYPES]]) -> Vec<f64> {
+        table
             .iter()
-            .map(|row| [row[0].ln(), row[1].ln(), row[2].ln()])
+            .flat_map(|row| row.iter().map(|likelihood| likelihood.ln()))
             .collect()
     }
 
-    /// Borrow a table of fixed-width rows as the `&[&[f64]]` the climb takes.
-    fn rows<const GENOTYPES: usize>(table: &[[f64; GENOTYPES]]) -> Vec<&[f64]> {
-        table.iter().map(|row| row.as_slice()).collect()
+    /// The diploid fixture, borrowed as the three-genotype table it is.
+    fn diploid_table(ln_likelihood_row_major: &[f64]) -> GenotypeLikelihoodTable<'_> {
+        GenotypeLikelihoodTable::from_natural_logs(ln_likelihood_row_major, 3)
     }
 
     /// The exact cell weights an infinite genome at `truth` would produce, times a
@@ -392,8 +558,11 @@ mod tests {
     /// table, and it finds them exactly, because the table is the infinite-genome one.
     #[test]
     fn the_climb_recovers_the_frequencies_that_generated_the_table() {
-        let table = ln_table();
-        let fitted = fit_mixture_weights(&rows(&table), &weights_under(&TRUTH, 1_000_000.0));
+        let ln_likelihood = ln_table();
+        let fitted = fit_mixture_weights(
+            diploid_table(&ln_likelihood),
+            &weights_under(&TRUTH, 1_000_000.0),
+        );
 
         assert_eq!(fitted.len(), 3);
         for (genotype, (&got, &want)) in fitted.iter().zip(&TRUTH).enumerate() {
@@ -405,28 +574,31 @@ mod tests {
     }
 
     /// Concavity is the property that makes the start irrelevant, and it is asserted
-    /// rather than assumed: three starts spanning the simplex — one at each corner's
-    /// neighbourhood and one uniform — reach the same point.
+    /// rather than assumed: five starts — one in each of the three corners'
+    /// neighbourhoods, the uniform point, and one ordinary interior point — reach the
+    /// same answer. The heterozygous corner is in the list because it is the coordinate
+    /// the estimator exists to measure.
     #[test]
     fn every_interior_start_reaches_the_same_summit() {
-        let table = ln_table();
-        let borrowed = rows(&table);
+        let ln_likelihood = ln_table();
+        let table = diploid_table(&ln_likelihood);
         let cell_weights = weights_under(&TRUTH, 1_000_000.0);
 
         let starts = [
             [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
             [0.98, 0.01, 0.01],
+            [0.01, 0.98, 0.01],
             [0.01, 0.01, 0.98],
             [0.20, 0.30, 0.50],
         ];
         for start in starts {
-            let fit = climb_mixture_weights(&borrowed, &cell_weights, &start);
+            let fit = climb_mixture_weights(table, &cell_weights, &start);
             assert!(fit.converged, "start {start:?} ran out of passes");
             assert!(
                 fit.passes < MAX_CLIMB_PASSES,
                 "start {start:?} used every pass"
             );
-            for (genotype, (&got, &want)) in fit.weights.iter().zip(&TRUTH).enumerate() {
+            for (genotype, (&got, &want)) in fit.genotype_weights.iter().zip(&TRUTH).enumerate() {
                 assert!(
                     (got - want).abs() < 1e-9,
                     "start {start:?}, genotype {genotype}: fitted {got}, truth {want}"
@@ -441,36 +613,154 @@ mod tests {
     /// tell them apart.
     #[test]
     fn two_truths_over_one_likelihood_table_give_two_answers() {
-        let table = ln_table();
-        let borrowed = rows(&table);
+        let ln_likelihood = ln_table();
+        let table = diploid_table(&ln_likelihood);
 
         let inbred = [0.80, 0.02, 0.18];
         let outcrossing = [0.60, 0.35, 0.05];
 
-        let first = fit_mixture_weights(&borrowed, &weights_under(&inbred, 500_000.0));
-        let second = fit_mixture_weights(&borrowed, &weights_under(&outcrossing, 500_000.0));
+        // Through the reporting entry point rather than the public one, so that a climb
+        // that ran out of passes fails here rather than passing on the margin. It is
+        // this fixture that measured the cap: at `MAX_CLIMB_PASSES = 1_000` the inbred
+        // truth stopped 3.6 × 10⁻¹⁰ short with `converged = false`, inside the 10⁻⁹ the
+        // loops below assert.
+        let uniform = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+        let first = climb_mixture_weights(table, &weights_under(&inbred, 500_000.0), &uniform);
+        let second =
+            climb_mixture_weights(table, &weights_under(&outcrossing, 500_000.0), &uniform);
 
-        for (genotype, (&got, &want)) in first.iter().zip(&inbred).enumerate() {
+        assert!(
+            first.converged,
+            "the inbred truth ran out of passes at {}",
+            first.passes
+        );
+        assert!(
+            second.converged,
+            "the outcrossing truth ran out of passes at {}",
+            second.passes
+        );
+        for (genotype, (&got, &want)) in first.genotype_weights.iter().zip(&inbred).enumerate() {
             assert!((got - want).abs() < 1e-9, "genotype {genotype}: {got}");
         }
-        for (genotype, (&got, &want)) in second.iter().zip(&outcrossing).enumerate() {
+        for (genotype, (&got, &want)) in
+            second.genotype_weights.iter().zip(&outcrossing).enumerate()
+        {
             assert!((got - want).abs() < 1e-9, "genotype {genotype}: {got}");
         }
     }
 
-    /// The answer really is the summit, checked against the objective rather than
-    /// against the construction that produced the fixture: every step away from it
-    /// along an edge of the simplex scores lower. This is the assertion that survives a
-    /// change of fixture.
+    /// **What a climb that ran out of passes reports, which nothing else reaches.** Two
+    /// claims live here and both were unheld: that `converged` is ever `false`, and that
+    /// `log_likelihood` is the score at the weights returned beside it rather than at the
+    /// weights the last pass started from. On a settled climb those two scores agree to
+    /// thirteen digits, so only a stopped-early climb can tell them apart — here the gap
+    /// is large enough that the longhand check below has teeth.
     #[test]
-    fn no_move_away_from_the_fitted_weights_scores_higher() {
-        let table = ln_table();
-        let borrowed = rows(&table);
+    fn a_climb_stopped_early_says_so_and_scores_the_weights_it_returns() {
+        let ln_likelihood = ln_table();
+        let table = diploid_table(&ln_likelihood);
         let cell_weights = weights_under(&TRUTH, 1_000_000.0);
 
-        let fit =
-            climb_mixture_weights(&borrowed, &cell_weights, &[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
-        let mut scratch = vec![0.0; 3];
+        let stopped = climb_with_cap(table, &cell_weights, &[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0], 5);
+
+        assert!(!stopped.converged, "five passes was expected to be too few");
+        assert_eq!(stopped.passes, 5);
+
+        let mut longhand = 0.0;
+        for (row, &cell_weight) in CELL_GIVEN_GENOTYPE.iter().zip(&cell_weights) {
+            let mixed: f64 = row
+                .iter()
+                .zip(&stopped.genotype_weights)
+                .map(|(&likelihood, &genotype_weight)| genotype_weight * likelihood)
+                .sum();
+            longhand += cell_weight * mixed.ln();
+        }
+        assert!(
+            (stopped.log_likelihood.get() - longhand).abs() < 1e-6,
+            "reported {}, score at the weights returned {longhand}",
+            stopped.log_likelihood.get()
+        );
+    }
+
+    /// The cap is a stopping rule, not a shaping one: raise it tenfold and the answer is
+    /// the same bits. This is the experiment the pass-cap decision rests on, and it is a
+    /// test rather than a recompile because `climb_with_cap` takes the cap.
+    #[test]
+    fn raising_the_pass_cap_does_not_move_the_answer() {
+        let ln_likelihood = ln_table();
+        let table = diploid_table(&ln_likelihood);
+        let inbred = [0.80, 0.02, 0.18];
+        let cell_weights = weights_under(&inbred, 500_000.0);
+        let uniform = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0];
+
+        let standard = climb_with_cap(table, &cell_weights, &uniform, MAX_CLIMB_PASSES);
+        let generous = climb_with_cap(table, &cell_weights, &uniform, 10 * MAX_CLIMB_PASSES);
+
+        assert!(standard.converged && generous.converged);
+        assert_eq!(standard.genotype_weights, generous.genotype_weights);
+        assert_eq!(standard.passes, generous.passes);
+    }
+
+    /// **The stillness test has to watch every genotype, not the last one.** A genotype
+    /// no cell can have produced reaches weight zero on the first pass and never moves
+    /// again; a measure that looked only at it would call this climb finished on pass
+    /// two, with the first weight at 0.7698 against a truth of 0.95. It is also the only
+    /// table here where a weight reaches exactly zero *during* the climb, which is the
+    /// state `genotype_weight.ln()` has to survive.
+    #[test]
+    fn a_genotype_impossible_everywhere_does_not_end_the_climb_early() {
+        let cell_given_genotype: [[f64; 3]; 3] =
+            [[0.70, 0.10, 0.0], [0.20, 0.40, 0.0], [0.10, 0.50, 0.0]];
+        let truth = [0.95, 0.05, 0.0];
+
+        let ln_likelihood = natural_logs_of(&cell_given_genotype);
+        let table = diploid_table(&ln_likelihood);
+        let cell_weights: Vec<f64> = cell_given_genotype
+            .iter()
+            .map(|row| {
+                1_000_000.0
+                    * row
+                        .iter()
+                        .zip(&truth)
+                        .map(|(&likelihood, &frequency)| frequency * likelihood)
+                        .sum::<f64>()
+            })
+            .collect();
+
+        let fit = climb_mixture_weights(table, &cell_weights, &[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
+
+        assert!(fit.converged);
+        assert!(
+            fit.passes > 100,
+            "the climb finished in {} passes, which is too few to have crawled there",
+            fit.passes
+        );
+        for (genotype, (&got, &want)) in fit.genotype_weights.iter().zip(&truth).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "genotype {genotype}: fitted {got}, truth {want}"
+            );
+        }
+    }
+
+    /// The answer really is the summit, checked against the objective rather than
+    /// against the construction that produced the fixture: each of the eighteen steps
+    /// away from it along an edge of the simplex scores lower. It survives a change of
+    /// fixture, which the recovery tests do not.
+    ///
+    /// **What it does not check is the scorer.** Both points are scored by the same
+    /// function, so a `weighted_log_likelihood` that was wrong in a way common to every
+    /// point passes this untouched. That half is held by
+    /// `the_reported_score_belongs_to_the_weights_returned_with_it`, which recomputes the
+    /// score longhand in linear space.
+    #[test]
+    fn no_move_away_from_the_fitted_weights_scores_higher() {
+        let ln_likelihood = ln_table();
+        let table = diploid_table(&ln_likelihood);
+        let cell_weights = weights_under(&TRUTH, 1_000_000.0);
+
+        let fit = climb_mixture_weights(table, &cell_weights, &[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
+        let mut ln_joint = vec![0.0; 3];
 
         for from in 0..3 {
             for to in 0..3 {
@@ -478,14 +768,14 @@ mod tests {
                     continue;
                 }
                 for step in [1e-4, 1e-3, 1e-2] {
-                    let mut moved: Vec<f64> = fit.weights.to_vec();
-                    if moved[from] <= step {
+                    let mut nudged: Vec<f64> = fit.genotype_weights.to_vec();
+                    if nudged[from] <= step {
                         continue;
                     }
-                    moved[from] -= step;
-                    moved[to] += step;
+                    nudged[from] -= step;
+                    nudged[to] += step;
                     let score =
-                        weighted_log_likelihood(&borrowed, &cell_weights, &moved, &mut scratch);
+                        weighted_log_likelihood(table, &cell_weights, &nudged, &mut ln_joint);
                     assert!(
                         score <= fit.log_likelihood.get(),
                         "moving {step} from genotype {from} to {to} scored \
@@ -502,19 +792,18 @@ mod tests {
     /// out longhand, not against the climb's own running total.
     #[test]
     fn the_reported_score_belongs_to_the_weights_returned_with_it() {
-        let table = ln_table();
-        let borrowed = rows(&table);
+        let ln_likelihood = ln_table();
+        let table = diploid_table(&ln_likelihood);
         let cell_weights = weights_under(&TRUTH, 1_000.0);
 
-        let fit =
-            climb_mixture_weights(&borrowed, &cell_weights, &[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
+        let fit = climb_mixture_weights(table, &cell_weights, &[1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]);
 
         let mut longhand = 0.0;
         for (row, &cell_weight) in CELL_GIVEN_GENOTYPE.iter().zip(&cell_weights) {
             let mixed: f64 = row
                 .iter()
-                .zip(&fit.weights)
-                .map(|(&likelihood, &weight)| weight * likelihood)
+                .zip(&fit.genotype_weights)
+                .map(|(&likelihood, &genotype_weight)| genotype_weight * likelihood)
                 .sum();
             longhand += cell_weight * mixed.ln();
         }
@@ -531,9 +820,9 @@ mod tests {
     /// total weight would return counts here and nothing else in the fit would notice.
     #[test]
     fn the_fitted_weights_are_a_point_on_the_simplex() {
-        let table = ln_table();
+        let ln_likelihood = ln_table();
         let cell_weights = weights_under(&TRUTH, 7.0);
-        let fitted = fit_mixture_weights(&rows(&table), &cell_weights);
+        let fitted = fit_mixture_weights(diploid_table(&ln_likelihood), &cell_weights);
 
         let total: f64 = fitted.iter().sum();
         assert!((total - 1.0).abs() < 1e-12, "the weights sum to {total}");
@@ -559,17 +848,8 @@ mod tests {
         ];
         let truth = [0.70, 0.15, 0.08, 0.05, 0.02];
 
-        let table: Vec<[f64; 5]> = cell_given_dosage
-            .iter()
-            .map(|row| {
-                let mut logs = [0.0; 5];
-                for (slot, &likelihood) in logs.iter_mut().zip(row) {
-                    *slot = likelihood.ln();
-                }
-                logs
-            })
-            .collect();
-        let borrowed: Vec<&[f64]> = table.iter().map(|row| row.as_slice()).collect();
+        let ln_likelihood = natural_logs_of(&cell_given_dosage);
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 5);
         let cell_weights: Vec<f64> = cell_given_dosage
             .iter()
             .map(|row| {
@@ -583,11 +863,16 @@ mod tests {
             .collect();
 
         let uniform = vec![0.2; 5];
-        let fit = climb_mixture_weights(&borrowed, &cell_weights, &uniform);
+        let fit = climb_mixture_weights(table, &cell_weights, &uniform);
         assert!(fit.converged, "the climb ran out of passes");
-        let fitted = fit.weights;
+        let fitted = fit.genotype_weights;
 
         assert_eq!(fitted.len(), 5);
+        assert_eq!(
+            table.cells(),
+            6,
+            "six cells, five genotypes, not the reverse"
+        );
         for (dosage, (&got, &want)) in fitted.iter().zip(&truth).enumerate() {
             assert!(
                 (got - want).abs() < 1e-8,
@@ -601,12 +886,8 @@ mod tests {
     /// says about a cell where every read showed something else at a zero error rate.
     #[test]
     fn a_genotype_that_cannot_have_produced_a_cell_is_allowed_to_say_so() {
-        let table = [
-            [0.0_f64.ln(), 0.5_f64.ln(), 0.9_f64.ln()],
-            [1.0_f64.ln(), 0.5_f64.ln(), 0.1_f64.ln()],
-        ];
-        let borrowed = rows(&table);
-        let fitted = fit_mixture_weights(&borrowed, &[100.0, 900.0]);
+        let ln_likelihood = natural_logs_of(&[[0.0, 0.5, 0.9], [1.0, 0.5, 0.1]]);
+        let fitted = fit_mixture_weights(diploid_table(&ln_likelihood), &[100.0, 900.0]);
 
         assert!(fitted.iter().all(|weight| weight.is_finite()));
         let total: f64 = fitted.iter().sum();
@@ -619,77 +900,122 @@ mod tests {
     #[test]
     #[should_panic(expected = "cell 1 carries weight 900 and no genotype can have produced it")]
     fn a_cell_no_genotype_can_produce_is_refused_rather_than_scored() {
-        let table = [
-            [0.5_f64.ln(), 0.5_f64.ln()],
-            [f64::NEG_INFINITY, f64::NEG_INFINITY],
+        let ln_likelihood = [
+            0.5_f64.ln(),
+            0.5_f64.ln(),
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
         ];
-        let _ = fit_mixture_weights(&rows(&table), &[100.0, 900.0]);
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
+        let _ = fit_mixture_weights(table, &[100.0, 900.0]);
     }
 
     /// A cell that carries no weight is skipped, so it may say anything at all —
     /// including that no genotype produced it.
+    ///
+    /// **And the score has to come back finite**, which is the half a fit that returns
+    /// only the weights cannot see. `0 · −∞` is `NaN`, and a `NaN` score does not lose
+    /// loudly in the profile scan — it simply never wins. That is why this goes through
+    /// the reporting entry point.
     #[test]
     fn a_cell_carrying_no_weight_is_skipped_whatever_it_says() {
-        let table = [
-            [0.5_f64.ln(), 0.5_f64.ln()],
-            [f64::NEG_INFINITY, f64::NEG_INFINITY],
+        let ln_likelihood = [
+            0.5_f64.ln(),
+            0.5_f64.ln(),
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
         ];
-        let fitted = fit_mixture_weights(&rows(&table), &[100.0, 0.0]);
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
+        let fit = climb_mixture_weights(table, &[100.0, 0.0], &[0.5, 0.5]);
 
-        let total: f64 = fitted.iter().sum();
+        assert!(
+            fit.log_likelihood.get().is_finite(),
+            "the score came back {}",
+            fit.log_likelihood.get()
+        );
+        let total: f64 = fit.genotype_weights.iter().sum();
         assert!((total - 1.0).abs() < 1e-12, "the weights sum to {total}");
+    }
+
+    /// Two cells and two genotypes as a flat buffer, for the refusals below.
+    fn two_by_two() -> [f64; 4] {
+        [0.5_f64.ln(), 0.5_f64.ln(), 0.5_f64.ln(), 0.5_f64.ln()]
     }
 
     #[test]
     #[should_panic(expected = "one weight per cell: 2 cells against 3 weights")]
     fn a_weight_without_a_cell_is_refused() {
-        let table = [[0.5_f64.ln(), 0.5_f64.ln()], [0.5_f64.ln(), 0.5_f64.ln()]];
-        let _ = fit_mixture_weights(&rows(&table), &[1.0, 1.0, 1.0]);
+        let ln_likelihood = two_by_two();
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
+        let _ = fit_mixture_weights(table, &[1.0, 1.0, 1.0]);
+    }
+
+    /// What a raggedly-built table becomes once the rows live in one buffer: a length
+    /// the width does not divide. It cannot reach the climb at all.
+    #[test]
+    #[should_panic(expected = "a table 2 genotypes wide cannot hold 5 entries")]
+    fn a_buffer_the_genotype_count_does_not_divide_is_refused() {
+        let ln_likelihood = [0.5_f64.ln(); 5];
+        let _ = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
     }
 
     #[test]
-    #[should_panic(expected = "cell 1 lists 3 genotypes where cell 0 lists 2")]
-    fn a_ragged_table_is_refused() {
-        let first = [0.5_f64.ln(), 0.5_f64.ln()];
-        let second = [0.3_f64.ln(), 0.3_f64.ln(), 0.4_f64.ln()];
-        let borrowed: Vec<&[f64]> = vec![first.as_slice(), second.as_slice()];
-        let _ = fit_mixture_weights(&borrowed, &[1.0, 1.0]);
-    }
-
-    #[test]
-    #[should_panic(expected = "is not a log-likelihood")]
+    #[should_panic(expected = "cell 1, genotype 0: NaN is not a log-likelihood")]
     fn a_nan_likelihood_is_refused() {
-        let table = [[f64::NAN, 0.5_f64.ln()], [0.5_f64.ln(), 0.5_f64.ln()]];
-        let _ = fit_mixture_weights(&rows(&table), &[1.0, 1.0]);
+        let ln_likelihood = [0.5_f64.ln(), 0.5_f64.ln(), f64::NAN, 0.5_f64.ln()];
+        let _ = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
     }
 
     /// `+∞` is not a log-likelihood either, and it is the one that would survive
     /// `ln_sum_exp` as a `NaN` rather than as an obvious wrong answer.
     #[test]
-    #[should_panic(expected = "is not a log-likelihood")]
+    #[should_panic(expected = "cell 0, genotype 1: inf is not a log-likelihood")]
     fn a_positive_infinity_likelihood_is_refused() {
-        let table = [[f64::INFINITY, 0.5_f64.ln()], [0.5_f64.ln(), 0.5_f64.ln()]];
-        let _ = fit_mixture_weights(&rows(&table), &[1.0, 1.0]);
+        let ln_likelihood = [0.5_f64.ln(), f64::INFINITY, 0.5_f64.ln(), 0.5_f64.ln()];
+        let _ = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
     }
 
     #[test]
     #[should_panic(expected = "cell 0 carries weight -1, which is not a count of sites")]
     fn a_negative_cell_weight_is_refused() {
-        let table = [[0.5_f64.ln(), 0.5_f64.ln()], [0.5_f64.ln(), 0.5_f64.ln()]];
-        let _ = fit_mixture_weights(&rows(&table), &[-1.0, 2.0]);
+        let ln_likelihood = two_by_two();
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
+        let _ = fit_mixture_weights(table, &[-1.0, 2.0]);
+    }
+
+    /// The companion to the negative weight above, and the one that pins the
+    /// `is_finite()` half of the check: `+∞ >= 0.0` is true, so a lower bound alone
+    /// would let an infinite site count through and the total weight the maximization
+    /// step divides by would be `∞`.
+    #[test]
+    #[should_panic(expected = "cell 1 carries weight inf, which is not a count of sites")]
+    fn an_infinite_cell_weight_is_refused() {
+        let ln_likelihood = two_by_two();
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
+        let _ = fit_mixture_weights(table, &[1.0, f64::INFINITY]);
     }
 
     #[test]
     #[should_panic(expected = "every cell carries zero weight")]
     fn a_table_of_empty_cells_is_refused() {
-        let table = [[0.5_f64.ln(), 0.5_f64.ln()], [0.5_f64.ln(), 0.5_f64.ln()]];
-        let _ = fit_mixture_weights(&rows(&table), &[0.0, 0.0]);
+        let ln_likelihood = two_by_two();
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 2);
+        let _ = fit_mixture_weights(table, &[0.0, 0.0]);
     }
 
     #[test]
     #[should_panic(expected = "empty table")]
     fn an_empty_table_is_refused() {
-        let _ = fit_mixture_weights(&[], &[]);
+        let _ = GenotypeLikelihoodTable::from_natural_logs(&[], 3);
+    }
+
+    /// The panic the committed version documented and no test reached: a table whose
+    /// cells are scored against no genotypes at all. It used to be a zero-length uniform
+    /// start reaching the climb; now the table cannot be borrowed.
+    #[test]
+    #[should_panic(expected = "empty genotype set")]
+    fn a_table_over_no_genotypes_at_all_is_refused() {
+        let _ = GenotypeLikelihoodTable::from_natural_logs(&[0.5_f64.ln()], 0);
     }
 
     /// A start on a face of the simplex pins that genotype at zero for the whole
@@ -698,17 +1024,83 @@ mod tests {
     #[test]
     #[should_panic(expected = "genotype 1 starts at 0, which is not inside the simplex")]
     fn a_start_on_a_face_of_the_simplex_is_refused() {
-        let table = ln_table();
+        let ln_likelihood = ln_table();
         let cell_weights = weights_under(&TRUTH, 1_000.0);
-        let _ = climb_mixture_weights(&rows(&table), &cell_weights, &[0.5, 0.0, 0.5]);
+        let _ = climb_mixture_weights(
+            diploid_table(&ln_likelihood),
+            &cell_weights,
+            &[0.5, 0.0, 0.5],
+        );
     }
 
     #[test]
     #[should_panic(expected = "the start sums to 1.5 rather than one")]
     fn a_start_that_is_not_a_distribution_is_refused() {
-        let table = ln_table();
+        let ln_likelihood = ln_table();
         let cell_weights = weights_under(&TRUTH, 1_000.0);
-        let _ = climb_mixture_weights(&rows(&table), &cell_weights, &[0.5, 0.5, 0.5]);
+        let _ = climb_mixture_weights(
+            diploid_table(&ln_likelihood),
+            &cell_weights,
+            &[0.5, 0.5, 0.5],
+        );
+    }
+
+    /// A start of the wrong width is a caller who thinks the table is a different shape
+    /// than it is. Refused where the mismatch is legible, rather than left to the
+    /// `zip`s in the climb, which would silently fit over the shorter of the two.
+    #[test]
+    #[should_panic(expected = "the start lists 2 weights where the table has 3 genotypes")]
+    fn a_start_of_the_wrong_width_is_refused() {
+        let ln_likelihood = ln_table();
+        let cell_weights = weights_under(&TRUTH, 1_000.0);
+        let _ = climb_mixture_weights(diploid_table(&ln_likelihood), &cell_weights, &[0.5, 0.5]);
+    }
+
+    /// `+∞` in the start is the mirror of `+∞` in the cell weights: it clears the
+    /// `> 0.0` bound and would make the sum check pass or fail by accident.
+    #[test]
+    #[should_panic(expected = "genotype 0 starts at inf, which is not inside the simplex")]
+    fn an_infinite_start_weight_is_refused() {
+        let ln_likelihood = ln_table();
+        let cell_weights = weights_under(&TRUTH, 1_000.0);
+        let _ = climb_mixture_weights(
+            diploid_table(&ln_likelihood),
+            &cell_weights,
+            &[f64::INFINITY, 0.5, 0.5],
+        );
+    }
+
+    /// **The shape the profile scan will use, compiled.** One buffer, allocated before
+    /// the ladder and refilled at every rung; the table borrows it inside the loop and
+    /// gives it back at the end of the iteration, so no row index is built and nothing
+    /// is allocated per rung. The committed `&[&[f64]]` cannot do this — a
+    /// `Vec<&[f64]>` collected before the loop makes the refill a borrow error
+    /// (E0502), so it has to be rebuilt inside it, once per rung.
+    #[test]
+    fn a_rung_loop_refills_one_buffer_and_allocates_nothing_per_rung() {
+        let cell_weights = weights_under(&TRUTH, 1_000.0);
+        let mut ln_likelihood = vec![0.0; CELL_GIVEN_GENOTYPE.len() * TRUTH.len()];
+
+        let mut fitted_per_rung = Vec::new();
+        for rung in [1.0, 0.5, 0.25] {
+            for (slot, &likelihood) in ln_likelihood
+                .iter_mut()
+                .zip(CELL_GIVEN_GENOTYPE.as_flattened())
+            {
+                *slot = (likelihood * rung).ln();
+            }
+            let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 3);
+            fitted_per_rung.push(fit_mixture_weights(table, &cell_weights));
+        }
+
+        // Scaling every likelihood by the same factor cannot move the maximiser, so all
+        // three rungs land on the truth — which is also what says the refill took.
+        assert_eq!(fitted_per_rung.len(), 3);
+        for fitted in &fitted_per_rung {
+            for (genotype, (&got, &want)) in fitted.iter().zip(&TRUTH).enumerate() {
+                assert!((got - want).abs() < 1e-9, "genotype {genotype}: {got}");
+            }
+        }
     }
 
     /// `ln_sum_exp` is the one place the table's dynamic range is handled, and a table

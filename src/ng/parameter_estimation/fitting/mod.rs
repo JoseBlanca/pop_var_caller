@@ -53,10 +53,14 @@ pub struct ScanResult<P> {
 /// How an alternating fit ended.
 ///
 /// **Emitted rather than discarded**, because a fit that ran out of iterations is still
-/// a number a caller would otherwise consume as though it had settled. The inner climb
-/// over the genotype frequencies is provably concave and needs no cap; the outer
-/// alternation between two tables has no such proof, so it is capped, the best-scoring
-/// iterate is kept, and this says which happened.
+/// a number a caller would otherwise consume as though it had settled. This is the
+/// **outer** alternation between the two tables, which has no convergence proof at all;
+/// the inner climb over the genotype frequencies is provably concave, so it cannot get
+/// stuck — but it is capped too, because concavity says nothing about how *fast* it
+/// arrives and one of `mixture_weights`' own fixtures takes 1,234 passes. The inner cap
+/// is not reported to a consumer and this one is: the outer loop can end either way at
+/// any iteration count and keeps its best-scoring iterate, so which happened is not
+/// derivable from the count.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct FitTermination {
     pub iterations: u32,
