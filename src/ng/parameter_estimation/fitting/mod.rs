@@ -21,7 +21,48 @@ pub mod mixture_weights;
 
 use smallvec::SmallVec;
 
-use crate::ng::types::LogProb;
+use crate::ng::types::{LogProb, Ploidy};
+
+/// What a path assumes can go wrong with a read.
+///
+/// **The one seam between the two paths of step 4**: the same procedure over two models.
+/// A base miscalled here, a repeat unit gained or lost there
+/// (`spec/parameter_prepass.md` §3.2). The SNP/indel path implements it in
+/// `parameter_estimation::generic::noise_model`; the STR path is the second implementor.
+///
+/// **Static dispatch, deliberately** — the scan is written `<M: NoiseModel>` and not
+/// `&dyn NoiseModel`, so the compiler emits one specialised copy per model with
+/// `M::Cell` substituted. Sharing the procedure across the two paths then costs nothing
+/// at run time in a loop that runs about 75,000 times per fit
+/// (`arch/parameter_prepass_generic.md` §4.2).
+pub trait NoiseModel {
+    /// The cell type this model's histogram is keyed on — a depth and an alternative
+    /// count on the SNP/indel path, a table of repeat-length offsets on the STR path.
+    type Cell;
+    /// The noise parameters being scanned — error rates on the SNP/indel path, three
+    /// slippage parameters on the STR path.
+    type NoiseParams;
+
+    /// How likely each genotype makes this cell, at these noise parameters, as natural
+    /// logarithms.
+    ///
+    /// **Appends `ploidy + 1` entries and clears nothing**, one per number of
+    /// alternative copies, ascending from zero. The name says so because the contract is
+    /// what the profile scan is built on: the scan clears one flat buffer per rung and
+    /// calls this once per cell, so what comes out is the row-major table
+    /// [`mixture_weights::GenotypeLikelihoodTable`] borrows, with no per-cell row and no
+    /// copy. A model that cleared instead would silently leave the scan holding one
+    /// cell's row.
+    ///
+    /// `−∞` is a legal entry and says this genotype cannot have produced this cell.
+    fn append_genotype_likelihoods(
+        &self,
+        cell: &Self::Cell,
+        noise: &Self::NoiseParams,
+        ploidy: Ploidy,
+        out: &mut Vec<f64>,
+    );
+}
 
 /// What one scan over a ladder of noise parameters returned.
 ///

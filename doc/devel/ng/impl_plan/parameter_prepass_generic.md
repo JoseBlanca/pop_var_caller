@@ -296,7 +296,7 @@ Not used by the runs model, whose two states are a constrained parameterisation 
 free point on the simplex. Unit test: recovers known frequencies from a hand-built table from
 any interior start. *Depends:* A5. *Source:* arch §4.1, spec parameter_prepass §3.1.
 
-**D2. The generic `NoiseModel` — §5.1's closed form.**  ☐ **Own commit, do not bundle.**
+**D2. The generic `NoiseModel` — §5.1's closed form.**  ✅ **Own commit, do not bundle.**
 `ln L(cell | θ)` summing over the split the key forgot rather than inventing a per-library
 depth: one multinomial over `G + 1` categories, one "alternative from library g" per library
 and one pooled "showed the reference". **The silent failure this isolates:** the plug-in an

@@ -18,6 +18,7 @@ pub mod accumulators;
 pub mod depth_and_alt_reads;
 pub mod depth_bins;
 pub mod histogram;
+pub mod noise_model;
 pub mod runs;
 
 use std::collections::BTreeMap;
