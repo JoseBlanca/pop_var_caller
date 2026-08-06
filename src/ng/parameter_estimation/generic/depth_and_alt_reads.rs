@@ -117,13 +117,100 @@ pub fn count_by_read_group(
     edges: &DepthBinEdges,
     out: &mut Vec<(ReadGroupId, CountedSite)>,
 ) {
-    // Depth and alternative count are accumulated as a bare pair and only made a
-    // `DepthAndAltReads` at the end, because that type's constructor checks
-    // `alt_reads <= depth` and a half-accumulated group has not earned the check yet.
     // Inline for two groups, which is every sample that has more than one library at
     // all: 1,550 of the 1,707 in the tomato archive survey have exactly one.
     let mut running: SmallVec<[(ReadGroupId, u32, u32); 2]> = SmallVec::new();
+    accumulate_by_read_group(locus, &mut running);
 
+    let cap = edges.max_depth();
+    let seed = seed_at(locus.region);
+    out.clear();
+    out.extend(running.into_iter().map(|(group, depth, alt_reads)| {
+        (group, CountedSite::capped(depth, alt_reads, cap, seed))
+    }));
+}
+
+/// The whole-site count **with the kept alternative reads split between the libraries
+/// they came from** — what a multi-library sample's windowed entry is keyed on.
+///
+/// **This exists because the split has to be of the *same* subsample.** The windowed
+/// table enters a site once, at its total depth, with the attribution of its alternative
+/// reads; that attribution must sum to exactly the alternative count of the entry it
+/// belongs to, and [`add_attributed_site`](super::histogram::DepthAltHistogram::add_attributed_site)
+/// refuses it otherwise. Above
+/// the cap the per-group counts of [`count_by_read_group`] cannot serve: each of those is
+/// its own subsample of its own group's reads, drawn against its own depth, so their
+/// alternative counts sum to something else entirely. The two tables ask different
+/// questions of the same site — one about the chemistry of each library, one about the
+/// genotype of the individual — and above the cap they are answered by two different
+/// draws, which is right. It is only their *internal* consistency that matters, and this
+/// is what gives the windowed entry its own.
+///
+/// `alt_by_group` is scratch: cleared, then filled in read-group order, and it holds only
+/// groups that kept at least one alternative read. Below the cap it is the exact per-group
+/// alternative counts, with no draw at all.
+///
+/// # Panics
+///
+/// If the locus's supports sum past `u32`, which no pileup cap allows.
+pub fn count_whole_site_by_library(
+    locus: &SampleLocusObservations,
+    edges: &DepthBinEdges,
+    alt_by_group: &mut Vec<(ReadGroupId, u32)>,
+) -> CountedSite {
+    let mut running: SmallVec<[(ReadGroupId, u32, u32); 2]> = SmallVec::new();
+    accumulate_by_read_group(locus, &mut running);
+
+    let depth = running.iter().fold(0u32, |total, &(_, group_depth, _)| {
+        add_support(total, group_depth, "depth")
+    });
+    let alt_reads = running.iter().fold(0u32, |total, &(_, _, group_alt)| {
+        add_support(total, group_alt, "alternative reads")
+    });
+
+    alt_by_group.clear();
+    let cap = edges.max_depth();
+    if depth <= cap {
+        alt_by_group.extend(
+            running
+                .iter()
+                .filter(|&&(_, _, group_alt)| group_alt > 0)
+                .map(|&(group, _, group_alt)| (group, group_alt)),
+        );
+        return CountedSite {
+            counts: DepthAndAltReads::new(depth, alt_reads),
+            subsampled_from: None,
+        };
+    }
+
+    // One walk over the site's alternative reads, group by group, sharing a single
+    // selection state — so the totals it yields are the *same* draw
+    // `CountedSite::capped` would have made, split. That is what keeps the entry's
+    // attribution summing to its own alternative count.
+    let mut walk = SelectionWalk::new(seed_at(locus.region), depth, cap);
+    let mut kept_total = 0u32;
+    for &(group, _, group_alt) in &running {
+        let kept = walk.keep_from(group_alt);
+        kept_total += kept;
+        if kept > 0 {
+            alt_by_group.push((group, kept));
+        }
+    }
+
+    CountedSite {
+        counts: DepthAndAltReads::new(cap, kept_total),
+        subsampled_from: Some(depth),
+    }
+}
+
+/// Total each read group's complete witnesses into `(group, depth, alternative reads)`,
+/// in read-group order. Shared so that the two grains cannot come to disagree about what
+/// they are counting.
+fn accumulate_by_read_group(
+    locus: &SampleLocusObservations,
+    running: &mut SmallVec<[(ReadGroupId, u32, u32); 2]>,
+) {
+    running.clear();
     for observation in locus.complete_observations() {
         let group = observation.read_group;
         let at = match running.iter().position(|&(seen, _, _)| seen == group) {
@@ -139,14 +226,7 @@ pub fn count_by_read_group(
             entry.2 = add_support(entry.2, observation.num_obs, "alternative reads");
         }
     }
-
     running.sort_unstable_by_key(|&(group, _, _)| group);
-    let cap = edges.max_depth();
-    let seed = seed_at(locus.region);
-    out.clear();
-    out.extend(running.into_iter().map(|(group, depth, alt_reads)| {
-        (group, CountedSite::capped(depth, alt_reads, cap, seed))
-    }));
 }
 
 /// One site counted, and whether the ladder's cap had to be applied to it.
@@ -275,34 +355,64 @@ fn splitmix64(mut state: u64) -> u64 {
 /// draws; that correlates their entries at that one site and leaves each one's marginal
 /// exactly hypergeometric, which is all any fit here reads.
 fn hypergeometric_draw(seed: u64, population: u32, successes: u32, draws: u32) -> u32 {
-    let mut remaining_population = u64::from(population);
-    let mut remaining_draws = u64::from(draws);
-    let mut kept = 0u32;
-    let mut state = seed;
+    SelectionWalk::new(seed, population, draws).keep_from(successes)
+}
 
-    for done in 0..successes {
-        if remaining_draws == 0 {
-            break;
+/// A partly-walked selection sample: how much of the population is still to be passed
+/// over, and how many places in the kept set are still open.
+///
+/// **Resumable, which is the point.** One site's alternative reads are walked group by
+/// group through a single walk, so the per-group kept counts sum to exactly what one
+/// call over all of them would have returned — that is what
+/// [`count_whole_site_by_library`] rests on, and it holds by construction rather than by
+/// two implementations agreeing.
+struct SelectionWalk {
+    state: u64,
+    remaining_population: u64,
+    remaining_draws: u64,
+}
+
+impl SelectionWalk {
+    fn new(seed: u64, population: u32, draws: u32) -> Self {
+        Self {
+            state: seed,
+            remaining_population: u64::from(population),
+            remaining_draws: u64::from(draws),
         }
-        if remaining_draws == remaining_population {
-            // Every read still in the running is kept, so every success still to be
-            // walked is kept. **The count is the remaining successes, not the remaining
-            // draws** — those are equal only when every read left is an alternative one,
-            // and taking the draws would have inflated the alternative count at exactly
-            // the deep, allele-rich sites where the cap fires.
-            return kept + (successes - done);
-        }
-        state = splitmix64(state);
-        // The modulo's bias is `2^64 mod remaining_population` out of `2^64` — at most
-        // one part in 10^15 for any depth a pileup can produce, which is far below the
-        // sampling noise the draw is made of.
-        if state % remaining_population < remaining_draws {
-            kept += 1;
-            remaining_draws -= 1;
-        }
-        remaining_population -= 1;
     }
-    kept
+
+    /// Walk the next `successes` items of the population and return how many were kept.
+    fn keep_from(&mut self, successes: u32) -> u32 {
+        let mut kept = 0u32;
+        for done in 0..successes {
+            if self.remaining_draws == 0 {
+                // The kept set is full; the rest of the population is passed over.
+                self.remaining_population -= u64::from(successes - done);
+                return kept;
+            }
+            if self.remaining_draws == self.remaining_population {
+                // Every item still in the running is kept, so every success still to be
+                // walked is kept. **The count is the remaining successes, not the
+                // remaining draws** — those are equal only when every item left is a
+                // success, and taking the draws would have inflated the alternative
+                // count at exactly the deep, allele-rich sites where the cap fires.
+                let left = successes - done;
+                self.remaining_draws -= u64::from(left);
+                self.remaining_population -= u64::from(left);
+                return kept + left;
+            }
+            self.state = splitmix64(self.state);
+            // The modulo's bias is `2^64 mod remaining_population` out of `2^64` — at
+            // most one part in 10^15 for any depth a pileup can produce, which is far
+            // below the sampling noise the draw is made of.
+            if self.state % self.remaining_population < self.remaining_draws {
+                kept += 1;
+                self.remaining_draws -= 1;
+            }
+            self.remaining_population -= 1;
+        }
+        kept
+    }
 }
 
 /// Add one observation's support, refusing to wrap.
@@ -790,6 +900,70 @@ mod tests {
         assert_eq!(split.len(), 1);
         assert_eq!(split[0].1, whole_site, "one site, one draw");
         assert_eq!(whole_site.subsampled_from(), Some(500));
+    }
+
+    /// **The windowed entry's attribution sums to its own alternative count — at every
+    /// depth, capped or not.** This is the property `add_attributed_site` asserts, and
+    /// the reason the split cannot be taken from `count_by_read_group`: above the cap
+    /// those are each a subsample of their own group's reads against their own depth, so
+    /// their alternative counts sum to something else. Checked here across the cap, at
+    /// 40, 124, 125 and 500 reads.
+    #[test]
+    fn the_windowed_entrys_attribution_sums_to_its_own_alternative_count() {
+        let mut alt_by_group = Vec::new();
+        for depth in [40u32, 124, 125, 500] {
+            let from_first = depth / 2;
+            let site = locus(
+                b"A",
+                vec![
+                    observation(b"A", ReadWitness::Complete, group(0), from_first - 3),
+                    observation(b"T", ReadWitness::Complete, group(0), 3),
+                    observation(
+                        b"A",
+                        ReadWitness::Complete,
+                        group(5),
+                        depth - from_first - 7,
+                    ),
+                    observation(b"T", ReadWitness::Complete, group(5), 7),
+                ],
+            );
+
+            let entry = count_whole_site_by_library(&site, &ladder(), &mut alt_by_group);
+            let attributed: u32 = alt_by_group.iter().map(|&(_, kept)| kept).sum();
+            assert_eq!(
+                attributed,
+                entry.counts().alt_reads(),
+                "at depth {depth}: {alt_by_group:?}"
+            );
+            assert!(alt_by_group.iter().all(|&(_, kept)| kept > 0));
+            assert!(
+                alt_by_group.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "read-group order"
+            );
+        }
+    }
+
+    /// And the whole-site pair it reports is the very pair [`count_whole_site`] reports,
+    /// so the two ways in cannot key one site to two cells.
+    #[test]
+    fn splitting_the_attribution_does_not_move_the_whole_site_pair() {
+        let mut alt_by_group = Vec::new();
+        for depth in [40u32, 500] {
+            let site = locus(
+                b"A",
+                vec![
+                    observation(b"A", ReadWitness::Complete, group(0), depth - 30),
+                    observation(b"T", ReadWitness::Complete, group(0), 20),
+                    observation(b"T", ReadWitness::Complete, group(5), 10),
+                ],
+            );
+
+            assert_eq!(
+                count_whole_site_by_library(&site, &ladder(), &mut alt_by_group),
+                count_whole_site(&site, &ladder()),
+                "at depth {depth}"
+            );
+        }
     }
 
     /// **The reference bases arrive canonical, and this is what would break if they did
