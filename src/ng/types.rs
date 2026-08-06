@@ -258,21 +258,151 @@ impl MismatchFraction {
     }
 }
 
+// ---------------------------------------------------------------------
+// The parameters a caller runs on — the four constrained scalars step 4
+// fits and steps 7 and 8 consume. Four types and not one shared
+// `Probability`: three of them are fractions in `[0, 1]`, so a single type
+// would let an inbreeding coefficient be handed to something expecting an
+// error rate and compile (`arch/parameter_prepass_generic.md` §2.1).
+//
+// Each follows `MismatchFraction`'s shape: private field, checked
+// `try_new`, `.get()`. `try_new` is the **boundary** constructor — it
+// rejects rather than coerces, for values arriving from outside the
+// program. The fits construct through the same door and `.expect()`,
+// because a frequency off the simplex means our own arithmetic is broken
+// and there is nothing a caller could do about it.
+// ---------------------------------------------------------------------
+
+/// A per-base sequencing error rate: how often a read shows a base other than the
+/// one on the template it was read from. A probability in `[0, 1]`.
+///
+/// Estimated **per read group**, because the chemistry belongs to the library
+/// preparation and the sequencing run, not to the individual whose DNA they read
+/// (`spec/parameter_prepass_generic.md` §2).
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct ErrorRate(f64);
+
+impl ErrorRate {
+    /// The only constructor. A rate that is not a finite probability in `[0, 1]` is
+    /// rejected rather than coerced.
+    pub fn try_new(rate: f64) -> Result<Self, DomainError> {
+        if !rate.is_finite() || !(0.0..=1.0).contains(&rate) {
+            return Err(DomainError::ErrorRate(rate));
+        }
+        Ok(Self(rate))
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// How common one genotype is in a sample's genome — the share of sites carrying
+/// it. A probability in `[0, 1]`; a set of them over the genotypes at one ploidy
+/// sums to one.
+///
+/// On the diploid path the three are the homozygous-reference rate, the
+/// heterozygosity, and the homozygous-non-reference rate.
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct GenotypeFrequency(f64);
+
+impl GenotypeFrequency {
+    /// The only constructor. A frequency that is not a finite probability in
+    /// `[0, 1]` is rejected rather than coerced.
+    pub fn try_new(frequency: f64) -> Result<Self, DomainError> {
+        if !frequency.is_finite() || !(0.0..=1.0).contains(&frequency) {
+            return Err(DomainError::GenotypeFrequency(frequency));
+        }
+        Ok(Self(frequency))
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// The inbreeding coefficient: the fraction of an individual's analysable genome
+/// lying in runs of homozygosity, where the two copies descend from one recent
+/// ancestor. `0` for an outcrosser, approaching `1` for a long-selfed line.
+///
+/// A user may supply one on the command line, which is why the constructor
+/// rejects rather than coerces (`spec/parameter_prepass_generic.md` §6.4).
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub struct InbreedingF(f64);
+
+impl InbreedingF {
+    /// The only constructor. A coefficient that is not a finite fraction in
+    /// `[0, 1]` is rejected rather than coerced.
+    pub fn try_new(coefficient: f64) -> Result<Self, DomainError> {
+        if !coefficient.is_finite() || !(0.0..=1.0).contains(&coefficient) {
+            return Err(DomainError::InbreedingF(coefficient));
+        }
+        Ok(Self(coefficient))
+    }
+
+    #[inline]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// How many copies of the genome an individual carries at a region — two on a
+/// diploid autosome, one on a haploid sex chromosome.
+///
+/// An input to every fit rather than a global constant: it varies by region
+/// within one genome (`spec/parameter_prepass.md` §3).
+///
+/// **Constrained, unlike the unchecked newtypes above**: the likelihood divides
+/// by the number of copies, so a zero is a division by zero rather than an odd
+/// answer. `Ord` because it keys the histogram and output maps, where the derived
+/// order is the natural one — fewest copies first.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Ploidy(u8);
+
+impl Ploidy {
+    /// The only constructor. Zero copies is rejected: it is not a genome.
+    pub fn try_new(copies: u8) -> Result<Self, DomainError> {
+        if copies == 0 {
+            return Err(DomainError::Ploidy(copies));
+        }
+        Ok(Self(copies))
+    }
+
+    #[inline]
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
 /// A domain-invariant violation — the ng-wide error raised when an untrusted
-/// value falls outside a constrained newtype's range. Introduced here with its
-/// first variant; later constrained types (`AlleleFreq`, `InbreedingF`,
-/// `Theta`, …) add their own variants as they arrive. `#[non_exhaustive]` so
-/// matchers accept those future variants without breaking.
+/// value falls outside a constrained newtype's range. Introduced with its
+/// first variant; later constrained types (`AlleleFreq`, `Theta`, …) add their
+/// own variants as they arrive. `#[non_exhaustive]` so matchers accept those
+/// future variants without breaking.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum DomainError {
     /// A [`MismatchFraction`] was constructed from a value outside `[0, 1]`.
     #[error("mismatch fraction {0} is outside [0, 1]")]
     MismatchFraction(f32),
-    /// A flat emission model was built from a per-base error rate that is not a finite
-    /// probability in `[0, 1]`.
+    /// A flat emission model or an [`ErrorRate`] was built from a per-base error
+    /// rate that is not a finite probability in `[0, 1]`.
     #[error("per-base error rate {0} is not a finite probability in [0, 1]")]
     ErrorRate(f64),
+    /// A [`GenotypeFrequency`] was built from a value that is not a finite
+    /// probability in `[0, 1]`.
+    #[error("genotype frequency {0} is not a finite probability in [0, 1]")]
+    GenotypeFrequency(f64),
+    /// An [`InbreedingF`] was built from a value that is not a finite fraction in
+    /// `[0, 1]`.
+    #[error("inbreeding coefficient {0} is not a finite fraction in [0, 1]")]
+    InbreedingF(f64),
+    /// A [`Ploidy`] was built from zero genome copies, which the likelihood
+    /// divides by.
+    #[error("ploidy {0} is not a positive number of genome copies")]
+    Ploidy(u8),
     /// A read's bases and its qualities were paired but differ in length.
     #[error("read has {bases} bases but {qualities} qualities")]
     ReadQualityLengthMismatch { bases: usize, qualities: usize },
@@ -475,6 +605,83 @@ mod tests {
     fn log_prob_carries_positive_infinity_out_of_domain() {
         assert_eq!(LogProb(f64::INFINITY).get(), f64::INFINITY);
         assert!(LogProb(f64::INFINITY) > LogProb(1e300));
+    }
+
+    /// The three `[0, 1]` rates accept both endpoints — a genotype frequency of
+    /// exactly zero and an inbreeding coefficient of exactly one are both real
+    /// answers, so a half-open check would reject valid data.
+    #[test]
+    fn the_constrained_rates_accept_both_endpoints() {
+        assert_eq!(ErrorRate::try_new(0.0).unwrap().get(), 0.0);
+        assert_eq!(ErrorRate::try_new(1.0).unwrap().get(), 1.0);
+        assert_eq!(ErrorRate::try_new(0.001).unwrap().get(), 0.001);
+
+        assert_eq!(GenotypeFrequency::try_new(0.0).unwrap().get(), 0.0);
+        assert_eq!(GenotypeFrequency::try_new(1.0).unwrap().get(), 1.0);
+
+        assert_eq!(InbreedingF::try_new(0.0).unwrap().get(), 0.0);
+        assert_eq!(InbreedingF::try_new(1.0).unwrap().get(), 1.0);
+    }
+
+    /// Each rate reports its **own** `DomainError` variant. That is the whole
+    /// reason there are four types and not one shared `Probability`: a message
+    /// naming the wrong quantity would send a reader to the wrong fit.
+    #[test]
+    fn each_constrained_rate_rejects_out_of_range_with_its_own_variant() {
+        assert_eq!(
+            ErrorRate::try_new(-0.01),
+            Err(DomainError::ErrorRate(-0.01))
+        );
+        assert_eq!(ErrorRate::try_new(1.01), Err(DomainError::ErrorRate(1.01)));
+        assert_eq!(
+            GenotypeFrequency::try_new(1.5),
+            Err(DomainError::GenotypeFrequency(1.5))
+        );
+        assert_eq!(
+            InbreedingF::try_new(-0.5),
+            Err(DomainError::InbreedingF(-0.5))
+        );
+    }
+
+    /// `NaN` and the infinities are not probabilities. The range check alone
+    /// rejects `NaN` and `+∞`; `is_finite` is what rejects them all uniformly,
+    /// so a rate arriving from a division by zero cannot enter a likelihood.
+    #[test]
+    fn the_constrained_rates_reject_nan_and_the_infinities() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(ErrorRate::try_new(bad).is_err(), "error rate {bad}");
+            assert!(
+                GenotypeFrequency::try_new(bad).is_err(),
+                "genotype frequency {bad}"
+            );
+            assert!(InbreedingF::try_new(bad).is_err(), "inbreeding {bad}");
+        }
+    }
+
+    /// Ploidy zero is the one value the type exists to make unrepresentable: the
+    /// likelihood divides by the number of copies.
+    #[test]
+    fn ploidy_rejects_zero_and_accepts_every_real_copy_number() {
+        assert_eq!(Ploidy::try_new(0), Err(DomainError::Ploidy(0)));
+        assert_eq!(Ploidy::try_new(1).unwrap().get(), 1);
+        assert_eq!(Ploidy::try_new(2).unwrap().get(), 2);
+        assert_eq!(Ploidy::try_new(4).unwrap().get(), 4);
+    }
+
+    /// `Ploidy` keys the histogram and the emitted rate maps, so its order has to
+    /// be the natural one — a haploid region's cells sort before a diploid's.
+    #[test]
+    fn ploidy_orders_by_copy_number() {
+        let mut ploidies = [
+            Ploidy::try_new(4).unwrap(),
+            Ploidy::try_new(1).unwrap(),
+            Ploidy::try_new(2).unwrap(),
+        ];
+        ploidies.sort();
+        assert_eq!(
+            ploidies.iter().map(|p| p.get()).collect::<Vec<_>>(),
+            vec![1, 2, 4]
+        );
     }
 
     fn genome_position(contig: u32, position: u64) -> GenomePosition {
