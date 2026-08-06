@@ -429,21 +429,17 @@ mod sealed {
 /// reader will not see it unless it is said here.
 #[derive(Debug)]
 pub struct DepthAltHistogram<C: CellCounter = u32> {
-    /// The pooled arm: one counter per cell, rows located through
+    /// The pooled arm: one tally per cell, rows located through
     /// [`DepthBinEdges::row_start`].
-    counts: Vec<C>,
-    /// The pooled arm's depth sums: for each cell, the sum of the **exact** depths of
-    /// the sites that landed in it. One entry per cell of `counts`, at the same index,
-    /// and [`DepthAltHistogram::mean_depth_in_cell`] is why it exists.
-    depth_sums: Vec<C>,
+    pooled_cells: Vec<CellTally<C>>,
     /// The attributed arm: the sites whose alternative reads kept the library each
-    /// came from, each with its site count and its depth sum — the same pair the two
-    /// vectors above hold, since an attributed cell carries a depth bin too and so
-    /// needs a depth to be scored at. Sparse, and **empty for a single-library sample
-    /// provided the accumulator entered it through [`DepthAltHistogram::add_site`]**
-    /// (Milestone C) — this type will populate the map for a lone read group if it is
-    /// asked to, because a key cannot see how many libraries a sample has.
-    attributed_cells: BTreeMap<SiteKey, (C, C)>,
+    /// came from, tallied exactly as the pooled ones are — an attributed cell carries
+    /// a depth bin too, so it needs a depth to be scored at. Sparse, and **empty for a
+    /// single-library sample provided the accumulator entered it through
+    /// [`DepthAltHistogram::add_site`]** (Milestone C) — this type will populate the
+    /// map for a lone read group if it is asked to, because a key cannot see how many
+    /// libraries a sample has.
+    attributed_cells: BTreeMap<SiteKey, CellTally<C>>,
     edges: Arc<DepthBinEdges>,
     /// How many reference positions the loci entered here covered.
     ///
@@ -467,8 +463,7 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     pub fn new(edges: Arc<DepthBinEdges>) -> Self {
         let cells = edges.cell_count();
         Self {
-            counts: vec![C::from(0); cells],
-            depth_sums: vec![C::from(0); cells],
+            pooled_cells: vec![CellTally::empty(); cells],
             attributed_cells: BTreeMap::new(),
             edges,
             covered_positions: 0,
@@ -548,12 +543,10 @@ impl<C: CellCounter> DepthAltHistogram<C> {
 
         match key.attribution() {
             Attribution::ByReadGroup(_) => {
-                let cell = self
-                    .attributed_cells
+                self.attributed_cells
                     .entry(key)
-                    .or_insert((C::from(0), C::from(0)));
-                Self::count_one_more(&mut cell.0, depth_bin, site.alt_reads());
-                Self::add_depth(&mut cell.1, site.depth(), depth_bin, site.alt_reads());
+                    .or_insert_with(CellTally::empty)
+                    .add(site, depth_bin);
             }
             Attribution::Pooled => self.add_pooled(depth_bin, site),
         }
@@ -580,38 +573,23 @@ impl<C: CellCounter> DepthAltHistogram<C> {
         // Both arms' upper bound: at most one cell per ladder cell, plus the sparse
         // map. Over-reserving a few tens of kilobytes once beats the nine reallocations
         // a full table costs otherwise, on a vector the profile scan re-walks 161 times.
-        let mut cells = Vec::with_capacity(self.counts.len() + self.attributed_cells.len());
+        let mut cells = Vec::with_capacity(self.pooled_cells.len() + self.attributed_cells.len());
 
         for depth_bin in self.edges.bins() {
             let row = self.edges.row_start(depth_bin);
             let width = *self.edges.depth_range(depth_bin).end() as usize + 1;
-            let depths = &self.depth_sums[row..row + width];
-            for (alt_reads, count) in self.counts[row..row + width].iter().enumerate() {
-                let sites: u64 = (*count).into();
-                if sites > 0 {
-                    let depth_sum: u64 = depths[alt_reads].into();
-                    cells.push(Cell {
-                        key: SiteKey::pooled(depth_bin, alt_reads as u32),
-                        ploidy,
-                        sites,
-                        mean_depth: depth_sum as f64 / sites as f64,
-                    });
+            for (alt_reads, tally) in self.pooled_cells[row..row + width].iter().enumerate() {
+                if !tally.is_empty() {
+                    cells.push(
+                        tally.reported_as(SiteKey::pooled(depth_bin, alt_reads as u32), ploidy),
+                    );
                 }
             }
         }
         cells.extend(
             self.attributed_cells
                 .iter()
-                .map(|(key, &(count, depth_sum))| {
-                    let sites: u64 = count.into();
-                    let depth_sum: u64 = depth_sum.into();
-                    Cell {
-                        key: key.clone(),
-                        ploidy,
-                        sites,
-                        mean_depth: depth_sum as f64 / sites as f64,
-                    }
-                }),
+                .map(|(key, tally)| tally.reported_as(key.clone(), ploidy)),
         );
         cells
     }
@@ -631,12 +609,11 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     #[must_use]
     pub fn total_loci(&self) -> u64 {
         let cells = self
-            .counts
+            .pooled_cells
             .iter()
-            .copied()
-            .chain(self.attributed_cells.values().map(|&(count, _)| count));
-        cells.fold(0u64, |total, count| {
-            let in_cell: u64 = count.into();
+            .chain(self.attributed_cells.values());
+        cells.fold(0u64, |total, tally| {
+            let in_cell: u64 = tally.sites.into();
             total.checked_add(in_cell).unwrap_or_else(|| {
                 panic!(
                     "this table's locus count passed u64 at {total}, with a cell holding \
@@ -662,48 +639,47 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     /// **What the bin mean actually costs is worse to live with than "it diverges".**
     /// The objective does not become unbounded and the fit does not rail: the 0.3% of
     /// sites whose term grows as `ε` falls are outweighed by the sites showing one or
-    /// two alternative reads, whose terms fall faster. The fit lands **5.2 rungs below
-    /// the true error rate** — 0.74 times the true rate, where the ladder's floor is 80
-    /// rungs below — **and 29% below the true homozygous-non-reference rate**, and
-    /// reports nothing (research note §4.5). A railed fit announces itself;
-    /// `ScanResult::argmax_at_ladder_end` exists for that. A rate a quarter low
-    /// announces nothing, so the rail flag is not the protection here. This is.
+    /// two alternative reads, whose terms fall faster. Across the worlds the research
+    /// note fits, the error rate comes out **0.5 to 5.2 rungs low** and the
+    /// homozygous-non-reference rate **10% to 29% low**, with nothing reported (§4.5).
+    /// At the worst of those the fitted rate is 0.74 times the truth, where the
+    /// ladder's floor is 80 rungs below — so a railed fit it is not, and a railed fit is
+    /// the only kind that announces itself: `ScanResult::argmax_at_ladder_end` exists
+    /// for that. A rate a quarter low announces nothing, so the rail flag is not the
+    /// protection here. This is.
     ///
     /// **Defined for the attributed arm by the same rule.** Those cells carry a depth
     /// bin too, so they need a depth to be scored at. The divergence above cannot reach
-    /// them — an attributed cell has at most four alternative reads and a depth above
-    /// the pooling threshold — but a cell scored at a made-up depth is wrong whether or
-    /// not it diverges.
+    /// them — an attributed cell shows at most [`MAX_ATTRIBUTED_ALT_READS`] alternative
+    /// reads, so its own count is four at the most and no bin's mean falls below that
+    /// — but a cell scored at a made-up depth is wrong whether or not it diverges.
     ///
     /// # Panics
     ///
-    /// If no site landed in this cell: there is no mean of nothing, and every caller
-    /// gets its cells from [`DepthAltHistogram::cells`], which returns only occupied
-    /// ones. Answering `0.0` would break the very identity this method exists to hold,
-    /// and `NaN` would poison a score silently. Also if the key names an alternative
-    /// count outside its own bin's row.
+    /// If no site landed in this cell: there is no mean of nothing. A caller that took
+    /// its cells from [`DepthAltHistogram::cells`] cannot reach it, since that returns
+    /// only occupied ones — but [`SiteKey`]'s constructors are public and Milestone B4
+    /// folds several tables, so a key from one table looked up in another is a call
+    /// somebody will write. Answering `0.0` would break the very identity this method
+    /// exists to hold, and `NaN` would poison a score with nothing to show for it.
+    ///
+    /// Also if the key names an alternative count outside its own bin's row.
     #[must_use]
     pub fn mean_depth_in_cell(&self, cell: &SiteKey) -> f64 {
-        let (sites, depth_sum) = match cell.attribution() {
-            Attribution::ByReadGroup(_) => {
-                let &(sites, depth_sum) = self.attributed_cells.get(cell).unwrap_or_else(|| {
-                    panic!("no site landed in the cell {cell:?}, so it has no mean depth")
-                });
-                (sites.into(), depth_sum.into())
-            }
+        let tally = match cell.attribution() {
+            Attribution::ByReadGroup(_) => self.attributed_cells.get(cell).copied(),
             Attribution::Pooled => {
                 let index = self.pooled_cell_index(cell.depth_bin(), cell.alt_reads());
-                let sites: u64 = self.counts[index].into();
-                (sites, self.depth_sums[index].into())
+                Some(self.pooled_cells[index])
             }
         };
-        assert!(
-            sites > 0,
-            "no site landed in the cell {cell:?}, so it has no mean depth"
-        );
+        let tally = tally.filter(|tally| !tally.is_empty());
 
-        let (depth_sum, sites): (u64, u64) = (depth_sum, sites);
-        depth_sum as f64 / sites as f64
+        tally
+            .unwrap_or_else(|| {
+                panic!("no site landed in the cell {cell:?}, so it has no mean depth")
+            })
+            .mean_depth()
     }
 
     /// How many reference **positions** those loci covered — `Σ region.len()`.
@@ -766,43 +742,11 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     }
 
     /// Count one more site into the dense table, and add its exact depth to the same
-    /// cell's running sum. The two entry points share it so that the bound check, the
-    /// count and the depth cannot come apart — a cell whose count and depth sum were
-    /// written at different indices would be scored at another cell's depth.
+    /// cell's running sum. The two entry points share it so that the bound check and the
+    /// tally cannot come apart.
     fn add_pooled(&mut self, depth_bin: DepthBin, site: DepthAndAltReads) {
         let index = self.pooled_cell_index(depth_bin, site.alt_reads());
-        Self::count_one_more(&mut self.counts[index], depth_bin, site.alt_reads());
-        Self::add_depth(
-            &mut self.depth_sums[index],
-            site.depth(),
-            depth_bin,
-            site.alt_reads(),
-        );
-    }
-
-    fn count_one_more(counter: &mut C, depth_bin: DepthBin, alt_reads: u32) {
-        *counter = counter.checked_add(C::from(1)).unwrap_or_else(|| {
-            panic!(
-                "the cell for depth bin {} at {alt_reads} alternative reads holds more \
-                 sites than a {}-bit counter can, so this table needs the whole-sample \
-                 fold's width",
-                depth_bin.get(),
-                std::mem::size_of::<C>() * 8
-            )
-        });
-    }
-
-    fn add_depth(sum: &mut C, depth: u32, depth_bin: DepthBin, alt_reads: u32) {
-        *sum = sum.checked_add(C::from(depth)).unwrap_or_else(|| {
-            panic!(
-                "the depths in the cell for depth bin {} at {alt_reads} alternative \
-                 reads sum past what a {}-bit counter holds, so this table needs the \
-                 whole-sample fold's width — and a wrapped sum is a cell scored at the \
-                 wrong depth, which is the one thing this counter exists to prevent",
-                depth_bin.get(),
-                std::mem::size_of::<C>() * 8
-            )
-        });
+        self.pooled_cells[index].add(site, depth_bin);
     }
 
     fn add_covered_positions(&mut self, covered: Bp) {
@@ -814,6 +758,104 @@ impl<C: CellCounter> DepthAltHistogram<C> {
                 covered.get()
             )
         });
+    }
+}
+
+/// What one cell holds: how many sites landed in it, and what their **exact** depths
+/// sum to.
+///
+/// **One struct rather than two counters side by side, and that is a defect fix rather
+/// than tidiness.** The two members are the same type, so a pair read positionally
+/// transposes silently: with the pair swapped at the one place `cells()` unpacks it, a
+/// cell of three sites at depths 18, 19 and 20 came back holding 57 sites at a mean
+/// depth of 0.05 — one alternative read scored at a twentieth of a read — and the whole
+/// module stayed green. Named fields make that transposition stop compiling. Keeping
+/// the dense arm in one vector of these rather than two parallel vectors closes the same
+/// hole for the pooled cells, where the two halves could otherwise be written at
+/// different indices.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct CellTally<C: CellCounter> {
+    sites: C,
+    /// The sum of the exact depths, never of the binned ones —
+    /// [`DepthAltHistogram::mean_depth_in_cell`] is why this is kept per cell.
+    depth_sum: C,
+}
+
+impl<C: CellCounter> CellTally<C> {
+    fn empty() -> Self {
+        Self {
+            sites: C::from(0),
+            depth_sum: C::from(0),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        Into::<u64>::into(self.sites) == 0
+    }
+
+    /// Count one more site here, at its exact depth. `depth_bin` and the site's
+    /// alternative count are carried only so that an overflow can name the cell it
+    /// happened in.
+    ///
+    /// # Panics
+    ///
+    /// If either half runs past its counter's width. A wrapped site count scores a
+    /// crowded cell as a rare one; a wrapped depth sum scores it at the wrong depth,
+    /// which is the very failure this per-cell sum exists to prevent, arriving through
+    /// the counter instead of through the binning. The release profile leaves
+    /// `overflow-checks` off, so neither would announce itself.
+    fn add(&mut self, site: DepthAndAltReads, depth_bin: DepthBin) {
+        let alt_reads = site.alt_reads();
+        self.sites = self.sites.checked_add(C::from(1)).unwrap_or_else(|| {
+            panic!(
+                "the cell for depth bin {} at {alt_reads} alternative reads holds more \
+                 sites than a {}-bit counter can, so this table needs the whole-sample \
+                 fold's width",
+                depth_bin.get(),
+                std::mem::size_of::<C>() * 8
+            )
+        });
+        self.depth_sum = self
+            .depth_sum
+            .checked_add(C::from(site.depth()))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the depths in the cell for depth bin {} at {alt_reads} alternative \
+                     reads sum past what a {}-bit counter holds, so this table needs the \
+                     whole-sample fold's width — and a wrapped sum is a cell scored at \
+                     the wrong depth",
+                    depth_bin.get(),
+                    std::mem::size_of::<C>() * 8
+                )
+            });
+    }
+
+    /// The depth these sites are scored at. **The only division in this file**, so the
+    /// method on the table and the field on a reported cell cannot answer differently.
+    ///
+    /// # Panics
+    ///
+    /// If no site landed here — a caller checks [`CellTally::is_empty`] first, and both
+    /// do.
+    fn mean_depth(&self) -> f64 {
+        let sites: u64 = self.sites.into();
+        let depth_sum: u64 = self.depth_sum.into();
+        assert!(sites > 0, "an empty cell has no mean depth");
+
+        // PANIC-FREE, and exact: the largest depth sum a fold can reach is 3.1 × 10¹¹
+        // against `f64`'s 9.0 × 10¹⁵ exactly-representable integers, so neither cast
+        // loses a bit.
+        depth_sum as f64 / sites as f64
+    }
+
+    /// This cell as a fit reads it.
+    fn reported_as(&self, key: SiteKey, ploidy: Ploidy) -> Cell {
+        Cell {
+            key,
+            ploidy,
+            sites: self.sites.into(),
+            mean_depth: self.mean_depth(),
+        }
     }
 }
 
@@ -840,12 +882,12 @@ pub struct Cell {
     /// is never below this cell's own alternative count.
     ///
     /// Carried on the cell rather than looked up per rung, because
-    /// [`DepthAltHistogram::mean_depth_in_cell`] costs a map lookup on the attributed
-    /// arm and the profile scan re-walks these 161 times. That method is the definition;
-    /// this is the same number, computed once. What must never be substituted for either
-    /// is the **bin's** mean, which lands the fit 5.2 rungs below the true error rate
-    /// and 29% below the true homozygous-non-reference rate, silently — the method's doc
-    /// has the measurement.
+    /// [`DepthAltHistogram::mean_depth_in_cell`] costs a map probe on the attributed arm
+    /// and the profile scan re-walks these 161 times. Both come from the one division in
+    /// `CellTally::mean_depth`, so the field and the method cannot drift apart. What
+    /// must never be substituted for either is the **bin's** mean, which lands the fit
+    /// 5.2 rungs below the true error rate and 29% below the true
+    /// homozygous-non-reference rate, silently — the method's doc has the measurement.
     pub mean_depth: f64,
 }
 
@@ -1261,8 +1303,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "holds more sites than a 32-bit counter can")]
     fn a_cell_at_its_counters_ceiling_names_itself_rather_than_wrapping() {
-        let mut counter = u32::MAX;
-        DepthAltHistogram::<u32>::count_one_more(&mut counter, DepthBin(3), 2);
+        let mut tally = CellTally::<u32> {
+            sites: u32::MAX,
+            depth_sum: 0,
+        };
+        tally.add(DepthAndAltReads::new(12, 2), DepthBin(3));
     }
 
     /// The width the whole-sample fold produces counts and reports exactly as the
@@ -1496,7 +1541,11 @@ mod tests {
         let table = a_table_of_deep_sites();
         let cells = table.cells(diploid());
 
-        assert!(cells.len() > 100, "the sweep filled the top bin's row");
+        // Every depth 100 to 124 is in bin 19, so the sweep fills that one row and
+        // nothing else: 125 cells, one per alternative count 0 to 124, holding 2,825
+        // sites between them.
+        assert_eq!(cells.len(), 125, "the top bin's row, filled end to end");
+        assert_eq!(table.total_loci(), 2_825);
         for cell in &cells {
             let alt_reads = f64::from(cell.key.alt_reads());
             let mean_depth = table.mean_depth_in_cell(&cell.key);
@@ -1509,6 +1558,56 @@ mod tests {
             assert!(
                 (cell.mean_depth - mean_depth).abs() < 1e-12,
                 "the cell carries the same depth the method answers"
+            );
+        }
+    }
+
+    /// **The whole ladder, cell by cell, against depths computed outside the code under
+    /// test.** The oracle above is written on depths 100–124, which is one bin of
+    /// twenty — so recording a depth of zero for every site below depth 18 passed all
+    /// 2,983 tests, and depths 0–17 are the whole exact-per-depth region, where 97 sites
+    /// in 100 of a three-read tomato sample sit.
+    ///
+    /// This sweeps every legal `(depth, alternative count)` pair the ladder admits —
+    /// 7,875 sites over 583 cells — and checks each cell against a tally the test keeps
+    /// itself: the right site count, the mean of exactly the depths that landed there,
+    /// and the identity. It is the test that says the depth recorded is the site's own.
+    #[test]
+    fn every_cell_is_scored_at_the_mean_of_exactly_the_depths_that_landed_in_it() {
+        let edges = ladder();
+        let mut table = DepthAltHistogram::<u32>::new(edges.clone());
+        let mut expected: BTreeMap<(u16, u32), (u64, u64)> = BTreeMap::new();
+
+        for depth in 0..=edges.max_depth() {
+            for alt_reads in 0..=depth {
+                table.add_site(DepthAndAltReads::new(depth, alt_reads), ONE_POSITION);
+                let tally = expected
+                    .entry((edges.bin_for(depth).get(), alt_reads))
+                    .or_insert((0, 0));
+                tally.0 += 1;
+                tally.1 += u64::from(depth);
+            }
+        }
+
+        assert_eq!(table.total_loci(), 7_875, "every pair, once");
+        let cells = table.cells(diploid());
+        assert_eq!(cells.len(), 583, "the ladder's own cell count");
+        assert_eq!(cells.len(), expected.len());
+
+        for cell in &cells {
+            let (sites, depth_sum) = expected[&(cell.key.depth_bin().get(), cell.key.alt_reads())];
+            let mean = depth_sum as f64 / sites as f64;
+            assert_eq!(cell.sites, sites, "cell {:?}", cell.key);
+            assert!(
+                (cell.mean_depth - mean).abs() < 1e-12,
+                "cell {:?} is scored at {} where its own sites average {mean}",
+                cell.key,
+                cell.mean_depth
+            );
+            assert!(
+                f64::from(cell.key.alt_reads()) <= cell.mean_depth,
+                "cell {:?} is scored below its own alternative count",
+                cell.key
             );
         }
     }
@@ -1528,7 +1627,14 @@ mod tests {
         let cells = table.cells(diploid());
 
         // The bin's mean over every site in it, which is the quantity the per-cell sums
-        // replace. Every site here is in the top bin, so one mean covers them all.
+        // replace. One mean covers them all only because every cell is in the top bin,
+        // so that is asserted rather than assumed.
+        let top_bin = DepthBin(ladder().bin_count() as u16 - 1);
+        assert!(
+            cells.iter().all(|cell| cell.key.depth_bin() == top_bin),
+            "depths 100 to 124 all sit in one bin, which is what makes a single bin \
+             mean the right comparison"
+        );
         let sites: f64 = cells.iter().map(|cell| cell.sites as f64).sum();
         let depths: f64 = cells
             .iter()
@@ -1586,6 +1692,46 @@ mod tests {
         assert!(scored_at >= f64::from(key.alt_reads()));
     }
 
+    /// **`cells()` is where a fit meets an attributed cell, and nothing pinned what it
+    /// reports for one.** The deep-table fixture above is built entirely through
+    /// `add_site`, so it holds no attributed cells at all, and the attributed depth test
+    /// goes through `mean_depth_in_cell` rather than through `cells()`. With the count
+    /// and the depth sum transposed at the one place that unpacked them, this cell came
+    /// back holding 57 sites at a mean depth of 0.05 — one alternative read scored at a
+    /// twentieth of a read — and every test stayed green. `CellTally`'s named fields are
+    /// what stop that compiling now; this is what would notice if they were reordered.
+    #[test]
+    fn an_attributed_cell_reports_its_own_site_count_and_mean_depth() {
+        let mut table = DepthAltHistogram::<u32>::new(ladder());
+        let from_one_group = [(group(0), 1u32)];
+        for depth in [18u32, 19, 20] {
+            table.add_attributed_site(
+                DepthAndAltReads::new(depth, 1),
+                &from_one_group,
+                ONE_POSITION,
+            );
+        }
+
+        let cells = table.cells(diploid());
+        assert_eq!(cells.len(), 1, "three sites of one shape are one cell");
+        let cell = &cells[0];
+
+        assert_eq!(cell.sites, 3);
+        assert!(
+            (cell.mean_depth - 19.0).abs() < 1e-12,
+            "{}",
+            cell.mean_depth
+        );
+        assert!(
+            f64::from(cell.key.alt_reads()) <= cell.mean_depth,
+            "the identity holds on the attributed arm too"
+        );
+        assert!(
+            (cell.mean_depth - table.mean_depth_in_cell(&cell.key)).abs() < 1e-12,
+            "the cell carries the depth the method answers"
+        );
+    }
+
     /// A cell nothing landed in has no mean depth, and says so rather than answering
     /// zero — which would break the identity above — or `NaN`, which would poison a
     /// score with nothing to show for it.
@@ -1611,8 +1757,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "sum past what a 32-bit counter holds")]
     fn a_depth_sum_past_its_counter_is_reported_rather_than_wrapped() {
-        let mut sum = u32::MAX;
-        DepthAltHistogram::<u32>::add_depth(&mut sum, 12, DepthBin(10), 1);
+        let mut tally = CellTally::<u32> {
+            sites: 1,
+            depth_sum: u32::MAX,
+        };
+        tally.add(DepthAndAltReads::new(12, 1), DepthBin(10));
     }
 
     /// **Three groups, in every order, because two cannot tell a sort from a swap.**
