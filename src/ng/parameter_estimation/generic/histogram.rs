@@ -716,6 +716,92 @@ impl<C: CellCounter> DepthAltHistogram<C> {
         );
     }
 
+    /// Add another table's tallies into this one, cell for cell.
+    ///
+    /// **Associative and exact**, because both arms are integer addition: the pooled
+    /// cells add element-wise and the attributed ones key-wise, so two tables built from
+    /// disjoint region shards merge to the table of their union whatever order the
+    /// shards finish in (`arch/parameter_prepass_generic.md` §2.2).
+    ///
+    /// # Panics
+    ///
+    /// **Unless both tables hold the same edges object**, which is checked by pointer
+    /// identity and not by comparing lengths. Two ladders built separately from the same
+    /// constants are equal in every observable way and still not interchangeable as a
+    /// promise: what `merge` needs to know is that one binning rule was shared, and only
+    /// the pointer says that. It is why [`DepthBinEdges`] deliberately has no
+    /// `PartialEq` — a derived `==` would answer `true` for any two ladders that exist
+    /// at all, a check that cannot fail sitting one keystroke from the check that must
+    /// not be skipped.
+    ///
+    /// Also if any cell's counters, or the covered-position total, run past their width.
+    /// That is the fold's business rather than this method's — see
+    /// [`whole_sample_histogram`], which is where the widening happens.
+    pub fn merge(&mut self, other: &Self) {
+        self.absorb(other, |counter| counter);
+    }
+
+    /// The one body behind [`DepthAltHistogram::merge`] and [`whole_sample_histogram`],
+    /// so a same-width merge and a widening fold cannot come to disagree about what
+    /// "add these two tables" means. `widen` is the identity for the first and
+    /// `u32 -> u64` for the second.
+    fn absorb<N: CellCounter>(
+        &mut self,
+        other: &DepthAltHistogram<N>,
+        widen: impl Fn(N) -> C + Copy,
+    ) {
+        // Destructured exhaustively on purpose: a field added to the struct later stops
+        // this compiling, rather than being silently left out of every merge.
+        let DepthAltHistogram {
+            pooled_cells,
+            attributed_cells,
+            edges,
+            covered_positions,
+        } = other;
+
+        assert!(
+            Arc::ptr_eq(&self.edges, edges),
+            "these two tables were binned by different ladder objects, so their cells \
+             are not the same cells — every table in a run has to be handed the one \
+             shared `DepthBinEdges`"
+        );
+
+        for (index, tally) in pooled_cells.iter().enumerate() {
+            self.pooled_cells[index] = self.pooled_cells[index]
+                .absorbed(tally.widened_by(widen))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "merging overran a {}-bit counter at cell {index} of {} — the \
+                         whole-sample fold is what widens to u64",
+                        std::mem::size_of::<C>() * 8,
+                        self.pooled_cells.len()
+                    )
+                });
+        }
+
+        for (key, tally) in attributed_cells {
+            let into = self
+                .attributed_cells
+                .entry(key.clone())
+                .or_insert_with(CellTally::empty);
+            *into = into.absorbed(tally.widened_by(widen)).unwrap_or_else(|| {
+                panic!(
+                    "merging overran a {}-bit counter at the cell {key:?} — the \
+                     whole-sample fold is what widens to u64",
+                    std::mem::size_of::<C>() * 8
+                )
+            });
+        }
+
+        let so_far = self.covered_positions;
+        self.covered_positions = so_far.checked_add(*covered_positions).unwrap_or_else(|| {
+            panic!(
+                "merging took this table's covered positions past u64, from {so_far} \
+                 with {covered_positions} more"
+            )
+        });
+    }
+
     /// Where a pooled cell sits in the flat vector.
     ///
     /// **The bound check is the one that matters in this file.** A bin's row is only as
@@ -759,6 +845,40 @@ impl<C: CellCounter> DepthAltHistogram<C> {
             )
         });
     }
+}
+
+/// Fold a sample's per-window tables into one, **widening both counters to `u64` here
+/// and only here**.
+///
+/// Free and exact: a site enters exactly one window, so summing the windows gives the
+/// table a single whole-sample walk would have produced. That is why no third
+/// accumulator is built (`spec/parameter_prepass_generic.md` §1).
+///
+/// **What forces the widening is the depth sum, not the site count.** Folded over a
+/// human genome the site count reaches 3.1 × 10⁹ against a `u32` ceiling of
+/// 4.29 × 10⁹ — close, but inside — while the per-cell depth sums reach 3.1 × 10¹¹,
+/// **seventy-two times over**. A fold that widened the counts and left the depth sums
+/// alone would wrap the one quantity [`DepthAltHistogram::mean_depth_in_cell`] exists
+/// to hold, which is B3's failure arriving by another route; the architecture records
+/// an earlier draft doing exactly that.
+///
+/// `edges` is passed separately because a sample with no windows still yields a table,
+/// and an empty table still has to be binned.
+///
+/// # Panics
+///
+/// Unless every window holds the same edges object as `edges` — see
+/// [`DepthAltHistogram::merge`] for why that is checked by pointer identity.
+#[must_use]
+pub fn whole_sample_histogram<'a, C: CellCounter + 'a>(
+    edges: &Arc<DepthBinEdges>,
+    windows: impl IntoIterator<Item = &'a DepthAltHistogram<C>>,
+) -> DepthAltHistogram<u64> {
+    let mut folded = DepthAltHistogram::<u64>::new(Arc::clone(edges));
+    for window in windows {
+        folded.absorb(window, Into::<u64>::into);
+    }
+    folded
 }
 
 /// What one cell holds: how many sites landed in it, and what their **exact** depths
@@ -846,6 +966,26 @@ impl<C: CellCounter> CellTally<C> {
         // against `f64`'s 9.0 × 10¹⁵ exactly-representable integers, so neither cast
         // loses a bit.
         depth_sum as f64 / sites as f64
+    }
+
+    /// The same tally at another counter width — the widening the whole-sample fold
+    /// performs, applied to both halves together so neither can be widened without the
+    /// other.
+    fn widened_by<W: CellCounter>(&self, widen: impl Fn(C) -> W) -> CellTally<W> {
+        CellTally {
+            sites: widen(self.sites),
+            depth_sum: widen(self.depth_sum),
+        }
+    }
+
+    /// This tally plus another, or `None` if either half would not fit. The caller
+    /// supplies the message, because what a reader needs is which cell overflowed.
+    #[must_use]
+    fn absorbed(&self, other: Self) -> Option<Self> {
+        Some(Self {
+            sites: self.sites.checked_add(other.sites)?,
+            depth_sum: self.depth_sum.checked_add(other.depth_sum)?,
+        })
     }
 
     /// This cell as a fit reads it.
@@ -1762,6 +1902,196 @@ mod tests {
             depth_sum: u32::MAX,
         };
         tally.add(DepthAndAltReads::new(12, 1), DepthBin(10));
+    }
+
+    /// One site as the merge fixtures state it: what its reads showed, which libraries
+    /// its alternative reads came from (empty for the pooled arm), and how many
+    /// reference positions its locus spanned.
+    type SiteToEnter = (DepthAndAltReads, &'static [(ReadGroupId, u32)], Bp);
+
+    /// A spread of sites covering both arms, several bins and a widened locus — the
+    /// fixture the merge tests split up and put back together.
+    fn a_shard_of_sites() -> Vec<SiteToEnter> {
+        const FROM_ZERO: &[(ReadGroupId, u32)] = &[(ReadGroupId(0), 1)];
+        const FROM_BOTH: &[(ReadGroupId, u32)] = &[(ReadGroupId(0), 1), (ReadGroupId(1), 1)];
+        vec![
+            (DepthAndAltReads::new(3, 0), &[], Bp(1)),
+            (DepthAndAltReads::new(3, 1), &[], Bp(1)),
+            (DepthAndAltReads::new(12, 1), FROM_ZERO, Bp(4)),
+            (DepthAndAltReads::new(20, 2), FROM_BOTH, Bp(1)),
+            (DepthAndAltReads::new(20, 2), FROM_BOTH, Bp(1)),
+            (DepthAndAltReads::new(124, 60), &[], Bp(1)),
+            (DepthAndAltReads::new(0, 0), &[], Bp(7)),
+            (DepthAndAltReads::new(12, 1), FROM_ZERO, Bp(1)),
+        ]
+    }
+
+    fn fill_from(table: &mut DepthAltHistogram<u32>, sites: &[SiteToEnter]) {
+        for &(site, by_group, covered) in sites {
+            if by_group.is_empty() {
+                table.add_site(site, covered);
+            } else {
+                table.add_attributed_site(site, by_group, covered);
+            }
+        }
+    }
+
+    /// Everything a merge has to preserve, in one comparable value.
+    fn reported(table: &DepthAltHistogram<u32>) -> (Vec<Cell>, u64, u64) {
+        (
+            table.cells(diploid()),
+            table.total_loci(),
+            table.total_covered_positions(),
+        )
+    }
+
+    /// **A table split in two and merged is the table that was never split, cell for
+    /// cell — in either order.** That is what makes a region-sharded walk exact: the
+    /// shards are added as integers, so the order they finish in cannot move a fitted
+    /// rate.
+    #[test]
+    fn a_table_split_in_two_and_merged_is_the_table_that_was_never_split() {
+        let edges = ladder();
+        let sites = a_shard_of_sites();
+
+        let mut whole = DepthAltHistogram::<u32>::new(edges.clone());
+        fill_from(&mut whole, &sites);
+
+        for split in 0..=sites.len() {
+            let (left_sites, right_sites) = sites.split_at(split);
+            let mut left = DepthAltHistogram::<u32>::new(edges.clone());
+            let mut right = DepthAltHistogram::<u32>::new(edges.clone());
+            fill_from(&mut left, left_sites);
+            fill_from(&mut right, right_sites);
+
+            let mut left_first = DepthAltHistogram::<u32>::new(edges.clone());
+            left_first.merge(&left);
+            left_first.merge(&right);
+
+            let mut right_first = DepthAltHistogram::<u32>::new(edges.clone());
+            right_first.merge(&right);
+            right_first.merge(&left);
+
+            assert_eq!(reported(&left_first), reported(&whole), "split at {split}");
+            assert_eq!(reported(&right_first), reported(&whole), "split at {split}");
+        }
+    }
+
+    /// **Two ladders built separately are not one shared ladder, and `merge` says so.**
+    /// They are equal in every observable way — same bins, same rows, same cap — which
+    /// is exactly why the check is pointer identity: what a merge needs to know is that
+    /// one binning rule was shared, and a value comparison of two ladders derived from
+    /// the same compile-time constants answers `true` for any two that exist at all.
+    /// `DepthBinEdges` derives `Clone`, so the wrong path is one keystroke from the
+    /// right one.
+    #[test]
+    #[should_panic(expected = "binned by different ladder objects")]
+    fn merging_tables_binned_by_separate_ladders_is_refused() {
+        let mut mine = DepthAltHistogram::<u32>::new(ladder());
+        let theirs = DepthAltHistogram::<u32>::new(Arc::new(DepthBinEdges::new()));
+        mine.merge(&theirs);
+    }
+
+    /// The same refusal for a ladder *cloned* from the shared one, which is the way it
+    /// would actually happen.
+    #[test]
+    #[should_panic(expected = "binned by different ladder objects")]
+    fn merging_a_table_binned_by_a_cloned_ladder_is_refused() {
+        let shared = ladder();
+        let mut mine = DepthAltHistogram::<u32>::new(shared.clone());
+        let cloned = Arc::new((*shared).clone());
+        mine.merge(&DepthAltHistogram::<u32>::new(cloned));
+    }
+
+    /// **The fold over a sample's windows is the same table a single walk would have
+    /// built, at twice the counter width.** Free and exact, which is why no third
+    /// accumulator is accumulated.
+    #[test]
+    fn folding_a_samples_windows_gives_the_table_a_single_walk_would_have_built() {
+        let edges = ladder();
+        let sites = a_shard_of_sites();
+
+        let mut single_walk = DepthAltHistogram::<u32>::new(edges.clone());
+        fill_from(&mut single_walk, &sites);
+
+        let windows: Vec<DepthAltHistogram<u32>> = sites
+            .chunks(3)
+            .map(|chunk| {
+                let mut window = DepthAltHistogram::<u32>::new(edges.clone());
+                fill_from(&mut window, chunk);
+                window
+            })
+            .collect();
+        assert_eq!(
+            windows.len(),
+            3,
+            "the sites really were spread over windows"
+        );
+
+        let folded = whole_sample_histogram(&edges, windows.iter());
+
+        assert_eq!(folded.total_loci(), single_walk.total_loci());
+        assert_eq!(
+            folded.total_covered_positions(),
+            single_walk.total_covered_positions()
+        );
+        let (wide, narrow) = (folded.cells(diploid()), single_walk.cells(diploid()));
+        assert_eq!(wide, narrow, "cell for cell, including every mean depth");
+        for cell in &wide {
+            assert_eq!(cell.mean_depth, folded.mean_depth_in_cell(&cell.key));
+        }
+    }
+
+    /// A sample with no windows still yields a table, and it is binned — which is why
+    /// the fold takes the edges rather than reading them off its first window.
+    #[test]
+    fn folding_no_windows_gives_an_empty_table_that_is_still_binned() {
+        let edges = ladder();
+        let folded = whole_sample_histogram(&edges, std::iter::empty::<&DepthAltHistogram<u32>>());
+
+        assert_eq!(folded.total_loci(), 0);
+        assert_eq!(folded.total_covered_positions(), 0);
+        assert!(folded.cells(diploid()).is_empty());
+        assert_eq!(folded.pooled_cells.len(), 583, "still the adopted ladder");
+    }
+
+    /// **The widening is what the fold is for, and this is the arithmetic that forces
+    /// it.** Two window tallies whose site counts and depth sums each fit a `u32` can
+    /// sum past it; at `u64` the same pair is nowhere near. Exercised on the tally
+    /// directly, because filling a `u32` cell to its ceiling through `add_site` would
+    /// take 4.29 × 10⁹ calls.
+    #[test]
+    fn a_pair_of_tallies_that_overflows_at_the_window_width_is_comfortable_at_the_folds() {
+        let narrow = CellTally::<u32> {
+            sites: 3_000_000_000,
+            depth_sum: 3_000_000_000,
+        };
+        assert_eq!(narrow.absorbed(narrow), None, "6 × 10⁹ is past a u32");
+
+        let wide = narrow.widened_by(Into::<u64>::into);
+        let summed = wide.absorbed(wide).expect("a u64 holds 6 × 10⁹ easily");
+        assert_eq!(summed.sites, 6_000_000_000);
+        assert_eq!(summed.depth_sum, 6_000_000_000);
+
+        // And what actually forces the widening is the depth sum: over a human genome
+        // the site count reaches 3.1 × 10⁹ — inside a u32's 4.29 × 10⁹ — while the
+        // depth sums reach 3.1 × 10¹¹, seventy-two times over.
+        assert!(3_100_000_000u64 < u64::from(u32::MAX));
+        assert!(310_000_000_000u64 > 72 * u64::from(u32::MAX));
+    }
+
+    /// A merge that overruns a window's counter says which cell, rather than wrapping to
+    /// a small number and scoring a crowded cell as a rare one.
+    #[test]
+    #[should_panic(expected = "merging overran a 32-bit counter at cell")]
+    fn a_merge_that_overruns_a_window_counter_names_the_cell() {
+        let edges = ladder();
+        let mut mine = DepthAltHistogram::<u32>::new(edges.clone());
+        let mut theirs = DepthAltHistogram::<u32>::new(edges.clone());
+        mine.pooled_cells[7].sites = u32::MAX;
+        theirs.pooled_cells[7].sites = 1;
+
+        mine.merge(&theirs);
     }
 
     /// **Three groups, in every order, because two cannot tell a sort from a swap.**

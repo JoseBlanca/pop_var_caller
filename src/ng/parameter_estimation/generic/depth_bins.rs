@@ -127,6 +127,12 @@ impl DepthBin {
 /// for any two ladders that exist at all — a check that cannot fail, sitting one
 /// keystroke away from the check that must not be skipped.
 ///
+/// **So `Arc::new((*edges).clone())` is the wrong way to hand a ladder to a second
+/// worker**, even though it compiles and produces a ladder identical in every
+/// observable way: it mints a second object, and every later `merge` against a table
+/// binned by the original will panic. Clone the **handle** — `Arc::clone(&edges)` — and
+/// the `Clone` here is for the rare caller that genuinely wants a separate rule.
+///
 /// Named for depths and not made generic over "any binned quantity" on purpose: a
 /// repeat count and a depth are both `u32`, and edges that accepted either would let
 /// the two be transposed silently.
