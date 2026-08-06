@@ -121,22 +121,23 @@ impl DepthBin {
 /// rather than copying it, which is what lets `merge` prove two tables are binned the
 /// same way by pointer identity instead of comparing lengths and hoping.
 ///
-/// **Deliberately not `PartialEq`.** Two ladders are "the same rule" only when they are
-/// the same `Arc`, which is what `merge` checks. A derived `==` would compare two
-/// vectors both derived from the same compile-time constants, so it would answer `true`
-/// for any two ladders that exist at all — a check that cannot fail, sitting one
-/// keystroke away from the check that must not be skipped.
-///
-/// **So `Arc::new((*edges).clone())` is the wrong way to hand a ladder to a second
-/// worker**, even though it compiles and produces a ladder identical in every
-/// observable way: it mints a second object, and every later `merge` against a table
-/// binned by the original will panic. Clone the **handle** — `Arc::clone(&edges)` — and
-/// the `Clone` here is for the rare caller that genuinely wants a separate rule.
+/// **Deliberately neither `PartialEq` nor `Clone`, and both for the same reason.** Two
+/// ladders are "the same rule" only when they are the same `Arc`, which is what
+/// [`DepthAltHistogram::merge`](super::histogram::DepthAltHistogram::merge) checks. A
+/// derived `==` would compare two vectors both derived from the same compile-time
+/// constants, so it would answer `true` for any two ladders that exist at all — a check
+/// that cannot fail, sitting one keystroke away from the check that must not be skipped.
+/// And a `Clone` would let `Arc::new((*edges).clone())` hand a second worker a ladder
+/// identical in every observable way and yet not the shared one, so that every later
+/// merge against it panics at run time. Without the derive that line does not compile,
+/// which is the earlier failure. **Clone the handle instead — `Arc::clone(&edges)`.**
+/// There is nothing a separate ladder could be: [`DepthBinEdges::new`] takes no
+/// arguments, so every ladder a run can build is byte-identical to every other.
 ///
 /// Named for depths and not made generic over "any binned quantity" on purpose: a
 /// repeat count and a depth are both `u32`, and edges that accepted either would let
 /// the two be transposed silently.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DepthBinEdges {
     /// The deepest depth in each bin, ascending and strictly increasing. `bin_tops[b]`
     /// is the top of bin `b`, so the ladder is stated once and everything else is
