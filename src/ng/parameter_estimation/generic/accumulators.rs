@@ -620,6 +620,41 @@ mod tests {
         assert_eq!(folded.total_loci(), 12);
     }
 
+    /// **§12.6 above the cap, which is where it was never checked.** The shipped test
+    /// for "the read-group table equals the windowed one folded, on a single-library
+    /// sample" tops out at depth 20 — below the cap, where neither grain draws. Above
+    /// it both draw, and they agree only because the draw is a pure function of
+    /// `(seed, population, successes, draws)` and a lone read group presents the same
+    /// four. That is an argument; this is the test.
+    #[test]
+    fn the_two_tables_agree_cell_for_cell_above_the_cap_too() {
+        let edges = ladder();
+        let mut accumulators = accumulators(&edges, &[group(0)]);
+
+        for at in 0..40u32 {
+            let depth = 300 + at * 17;
+            accumulators.add_locus(&site(
+                0,
+                1 + u64::from(at) * 5_000,
+                vec![
+                    observation(b"A", group(0), depth - depth / 3),
+                    observation(b"T", group(0), depth / 3),
+                ],
+            ));
+        }
+
+        let counts = accumulators.adjustments();
+        assert_eq!(counts.sites_subsampled_to_cap, 40, "every site was capped");
+
+        let read_group_table = &accumulators.read_group_histograms()[&(group(0), diploid())];
+        let folded = accumulators.whole_sample_histogram(diploid());
+        assert_eq!(read_group_table.cells(diploid()), folded.cells(diploid()));
+        assert_eq!(
+            read_group_table.total_covered_positions(),
+            folded.total_covered_positions()
+        );
+    }
+
     /// **Two loci that overlap are counted, not repaired.** Overlap would enter a site
     /// into the windowed table twice, breaking "a site enters once, whole" — and a
     /// de-duplication rule would hide the upstream bug behind a plausible number.

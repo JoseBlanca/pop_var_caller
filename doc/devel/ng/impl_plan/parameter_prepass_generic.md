@@ -245,7 +245,7 @@ unsplit one, cell for cell, in either merge order. *Depends:* B3. *Source:* arch
 
 ### Milestone C — one locus → one cell (data shaping)
 
-**C1. `count_whole_site` and `count_by_read_group`.**  ☐
+**C1. `count_whole_site` and `count_by_read_group`.**  ✅
 The only place that decides what counts as an alternative read — which is why it is its own
 file and not a method on the locus type. **Complete witnesses only**
 ([`locus_generation/mod.rs:134`](../../../../src/ng/locus_generation/mod.rs)): a read that
@@ -255,7 +255,7 @@ counting them would assert they showed the reference. Unit tests over hand-built
 `SampleLocusObservations`: a one-base locus, a locus with a partial witness, a locus where
 every read is a non-witness. *Depends:* B1. *Source:* arch §2.3.
 
-**C2. The depth cap — subsample, do not rescale.**  ☐ **Own commit, do not bundle.**
+**C2. The depth cap — subsample, do not rescale.**  ✅ **Own commit, do not bundle.**
 A site deeper than `max_site_depth(edges)` keeps 124 of its reads and counts the alternative
 ones among them, seeded from the locus position so a region-sharded walk and a single-threaded
 one keep the same reads. Fires in `count_*`, before the pair is built, so the depth recorded
@@ -268,7 +268,7 @@ many seeds the kept alternative count is hypergeometric — mean and variance ma
 form — and the same locus position gives the same draw on every run. *Depends:* C1, A4.
 *Source:* arch §2.2 (`max_site_depth`), §2.3.
 
-**C3. `GenericAccumulators`, `add_locus`, `AccumulationCounts`.**  ☐
+**C3. `GenericAccumulators`, `add_locus`, `AccumulationCounts`.**  ✅
 The two keyed collections (`BTreeMap` and not `HashMap`: the runs model reads windows in
 genome order, and every fit is a floating-point sum over cells, which is not associative);
 `InbreedingMode`, which drops the window key when `F` is supplied and collapses the object

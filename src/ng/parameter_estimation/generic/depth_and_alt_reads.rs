@@ -996,6 +996,49 @@ mod tests {
 
     /// And the whole-site pair it reports is the very pair [`count_whole_site`] reports,
     /// so the two ways in cannot key one site to two cells.
+    ///
+    /// **Over many positions and depths, because at one seed it passed by luck.** Seeding
+    /// the walk per read group instead of once per site survived the two-locus version —
+    /// and measured directly that mutation keeps 77 + 49 = 126 alternative reads against
+    /// a cap of 124, an alternative count larger than the depth it belongs to.
+    #[test]
+    fn the_two_doors_agree_at_every_depth_and_position() {
+        let mut alt_by_group = Vec::new();
+        for at in 0..60u64 {
+            for depth in [40u32, 124, 125, 300, 500, 963] {
+                let mut site = locus(
+                    b"A",
+                    vec![
+                        observation(b"A", ReadWitness::Complete, group(0), depth / 2),
+                        observation(b"T", ReadWitness::Complete, group(0), depth / 4),
+                        observation(
+                            b"T",
+                            ReadWitness::Complete,
+                            group(2),
+                            depth - depth / 2 - depth / 4,
+                        ),
+                    ],
+                );
+                site.region.start = Position(1 + at * 977);
+                site.region.end = site.region.start;
+
+                let split = count_whole_site_by_library(&site, &ladder(), &mut alt_by_group);
+                assert_eq!(
+                    split,
+                    count_whole_site(&site, &ladder()),
+                    "at {at}, {depth}"
+                );
+
+                let attributed: u32 = alt_by_group.iter().map(|&(_, kept)| kept).sum();
+                assert_eq!(attributed, split.counts().alt_reads(), "at {at}, {depth}");
+                assert!(
+                    split.counts().alt_reads() <= split.counts().depth(),
+                    "an alternative count larger than its own depth at {at}, {depth}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn splitting_the_attribution_does_not_move_the_whole_site_pair() {
         let mut alt_by_group = Vec::new();
