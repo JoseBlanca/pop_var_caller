@@ -135,6 +135,14 @@ by document kind:
     prerequisite `flank_bp`→`bundle_threshold` rename, `SsrLocus` + margin fetch, the ported
     reservoir cap, the fetch→align→tally transform, and byte parity vs production. Gated on the
     ng STR aligner.
+  - [`parameter_prepass_generic.md`](impl_plan/parameter_prepass_generic.md) — step 4's
+    SNP/indel half: the `parameter_estimation/` module, the depth ladder and cell table, the
+    two keyed accumulators, the fitting machinery both paths share, and the four numbers a
+    sample emits. **Its oracle is not production** — nothing downstream can check these
+    parameters and the production code nearest to them is what the step replaces — so every
+    milestone is proven against the two research harnesses in `examples/` or against an
+    identity. The STR half's plan follows its architecture doc settling; the two censuses and
+    the cohort gather still need one.
 
 This mirrors the repo-wide `doc/devel/{specs,architecture,implementation_plans}`
 convention but scoped to ng, so the growing set of ng docs stays together.
