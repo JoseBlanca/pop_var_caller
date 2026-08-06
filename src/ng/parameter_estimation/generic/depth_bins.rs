@@ -294,6 +294,18 @@ impl DepthBinEdges {
         self.bin_tops.len()
     }
 
+    /// Every bin, in order.
+    ///
+    /// It exists so that a caller walking the ladder does not write `DepthBin(bin as
+    /// u16)` by hand: the cast is safe only because the const assertion at the top of
+    /// this file pins `DEPTH_BIN_COUNT - 1` inside a `u16`, and that guarantee lives
+    /// here rather than at the call sites.
+    pub fn bins(&self) -> impl Iterator<Item = DepthBin> + '_ {
+        // PANIC-FREE: the const assertion above pins the ladder's last index inside a
+        // `u16`, and `new` is the only constructor.
+        (0..self.bin_count()).map(|bin| DepthBin(bin as u16))
+    }
+
     /// The deepest depth the ladder has a bin for. A site above it is subsampled down
     /// to it before it is entered.
     ///
@@ -450,6 +462,24 @@ mod tests {
             assert_eq!(next_start, expected, "row width wrong at bin {bin:?}");
         }
         assert_eq!(edges.row_start(DepthBin(0)), 0);
+    }
+
+    /// `bins()` yields every bin once, in order, and nothing else — it exists so that a
+    /// caller walking the ladder does not spell the `u16` cast by hand, and a walk that
+    /// skipped or repeated a bin would leave a histogram row unreported with nothing to
+    /// say so.
+    #[test]
+    fn bins_yields_every_bin_once_in_order() {
+        let edges = DepthBinEdges::new();
+        let walked: Vec<DepthBin> = edges.bins().collect();
+
+        assert_eq!(walked.len(), edges.bin_count());
+        assert!(walked.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(walked.first().copied(), Some(DepthBin(0)));
+        assert_eq!(
+            walked.last().copied(),
+            Some(DepthBin(edges.bin_count() as u16 - 1))
+        );
     }
 
     /// A depth above the cap answers the last bin rather than panicking. The cap is
