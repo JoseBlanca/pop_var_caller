@@ -42,12 +42,73 @@
 #                       question**: at ng's defaults region typing emits nothing below
 #                       [6,4,4,3,3,3], so every curve would start exactly where the floor is meant
 #                       to be decided and the measurement would be censored at the wrong place.
+#   JOBS=8              files walked at once. **The knob that decides whether this finishes.** One
+#                       file over 90 Mb takes ~10 minutes, so 2,475 of them sequentially is 17 days
+#                       and at 32-way is half a day. Each walk is independent — that is what the
+#                       per-file design buys — so set this to about the core count, backing off if
+#                       the archive's disks are the bottleneck rather than the CPU.
+#   REGIONS=            a BED to walk instead of whole contigs. **The other way to make a large
+#                       survey finish**: these curves need thousands of loci per stratum, not the
+#                       ~200k that a whole chromosome gives, so a 10 Mb slice is ~9x faster and
+#                       still ample. Overrides CONTIGS.
 #   PASSES=3            how many times to come back for files that were not ready.
 #   WAIT=900            seconds between passes. Long enough that a file being written has plausibly
 #                       finished; the survey is hours long, so this costs nothing.
 #   WORK=OUT.work       where per-file results accumulate. Delete it to force a full re-run.
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# The per-file worker, re-entered through `--one`
+# ---------------------------------------------------------------------------
+#
+# Walking one file is its own invocation so the parent can drive many at once with `xargs -P`. The
+# worker reports back through `$WORK/<key>.status` rather than stdout, because several of them are
+# writing at the same time and interleaved lines would be unreadable and unparseable.
+if [[ "${1:-}" == "--one" ]]; then
+    cram=$2
+    key=$(basename "$cram" | tr -c 'A-Za-z0-9._-' '_')
+    result="$SURVEY_WORK/$key.tsv"
+    status="$SURVEY_WORK/$key.status"
+    stamp_of() { stat -c '%s %Y' "$1" 2>/dev/null || stat -f '%z %m' "$1" 2>/dev/null || echo gone; }
+    index_of() {
+        local candidate
+        for candidate in "$cram.crai" "$cram.bai" "${cram%.*}.crai" "${cram%.*}.bai"; do
+            [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
+        done
+        return 1
+    }
+    [[ -s "$result" ]] && exit 0
+    if [[ ! -f "$cram" ]]; then echo "missing" > "$status"; exit 0; fi
+    if ! index=$(index_of); then echo "no index yet" > "$status"; exit 0; fi
+    if [[ "$cram" -nt "$index" ]]; then
+        echo "index older than the file — still growing, or not re-indexed" > "$status"
+        exit 0
+    fi
+    if [[ "$SURVEY_QUICKCHECK" == "1" ]] && ! samtools quickcheck "$cram" 2>/dev/null; then
+        echo "no EOF block — still being written" > "$status"
+        exit 0
+    fi
+    before=$(stamp_of "$cram")
+    read -r -a survey_args <<< "$SURVEY_ARGS"
+    if ! "$SURVEY_BIN" "${survey_args[@]}" "$SURVEY_REF" "$cram" \
+            > "$result.partial" 2> "$SURVEY_WORK/$key.err"; then
+        rm -f "$result.partial"
+        echo "walk failed: $(tail -n 1 "$SURVEY_WORK/$key.err" 2>/dev/null | tr '\t' ' ')" > "$status"
+        exit 0
+    fi
+    # **The check that catches the silent case.** A file appended to during its own walk yields a
+    # result that looks like a thin library rather than an error, so the stamp — not the exit code —
+    # decides whether the result is trustworthy.
+    if [[ "$before" != "$(stamp_of "$cram")" ]]; then
+        rm -f "$result.partial"
+        echo "changed during its own walk — result discarded" > "$status"
+        exit 0
+    fi
+    mv "$result.partial" "$result"
+    rm -f "$status"
+    exit 0
+fi
 
 OUT=${1:?"usage: $0 OUT.tsv REF CRAM [CRAM ...]"}
 REF=${2:?"usage: $0 OUT.tsv REF CRAM [CRAM ...]"}
@@ -57,10 +118,12 @@ shift 2
 # `${CONTIGS-...}` without the colon, so an explicitly empty CONTIGS means "the whole genome"
 # rather than falling back to the default — which is what the usage above promises.
 CONTIGS=${CONTIGS-SL4.0ch01}
+REGIONS=${REGIONS:-}
 MIN_COPIES=${MIN_COPIES:-2}
 PASSES=${PASSES:-3}
 WAIT=${WAIT:-900}
 WORK=${WORK:-$OUT.work}
+JOBS=${JOBS:-8}
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN="$REPO_ROOT/target/release/examples/ng_str_stutter_by_library"
@@ -73,47 +136,28 @@ BIN="$REPO_ROOT/target/release/examples/ng_str_stutter_by_library"
 [[ -f "$REF" ]] || { echo "reference not found: $REF" >&2; exit 1; }
 
 mkdir -p "$WORK"
-contig_args=()
-[[ -n "$CONTIGS" ]] && contig_args=(--contigs "$CONTIGS")
+walk_args=()
+if [[ -n "$REGIONS" ]]; then
+    [[ -f "$REGIONS" ]] || { echo "regions BED not found: $REGIONS" >&2; exit 1; }
+    walk_args=(--regions "$REGIONS")
+elif [[ -n "$CONTIGS" ]]; then
+    walk_args=(--contigs "$CONTIGS")
+fi
+walk_args+=(--min-copies "$MIN_COPIES")
 
 command -v samtools >/dev/null && HAVE_QUICKCHECK=1 || HAVE_QUICKCHECK=0
 ((HAVE_QUICKCHECK)) || echo "warning: samtools not on PATH — no EOF check, only indexes and stamps" >&2
 
-# `stat` differs between GNU and BSD and this script is written on one and run on the other.
-stamp_of() {
-    stat -c '%s %Y' "$1" 2>/dev/null || stat -f '%z %m' "$1" 2>/dev/null || echo "gone"
-}
-
-index_of() {
-    local cram=$1 candidate
-    for candidate in "$cram.crai" "$cram.bai" "${cram%.*}.crai" "${cram%.*}.bai"; do
-        [[ -f "$candidate" ]] && { echo "$candidate"; return 0; }
-    done
-    return 1
-}
-
-# Is this file ready to be walked *right now*? Two states an in-progress file can be in, and each
-# needs its own test: still being written (no EOF block, which `samtools quickcheck` detects), or
-# written but not yet indexed — or indexed and then appended to, which `quickcheck` passes.
-ready_reason() {
-    local cram=$1 index
-    [[ -f "$cram" ]] || { echo "missing"; return 1; }
-    index=$(index_of "$cram") || { echo "no index yet"; return 1; }
-    [[ "$cram" -nt "$index" ]] && { echo "index older than the file — still growing, or not re-indexed"; return 1; }
-    if ((HAVE_QUICKCHECK)) && ! samtools quickcheck "$cram" 2>/dev/null; then
-        echo "no EOF block — still being written"
-        return 1
-    fi
-    return 0
-}
-
-# A stable key per file, so a resumed run recognises what it already has and the merge can attribute
-# rows without depending on the numeric read-group id, which is minted per invocation.
 key_of() { basename "$1" | tr -c 'A-Za-z0-9._-' '_'; }
+
+export SURVEY_WORK="$WORK" SURVEY_REF="$REF" SURVEY_BIN="$BIN"
+export SURVEY_QUICKCHECK="$HAVE_QUICKCHECK"
+export SURVEY_ARGS="${walk_args[*]}"
+SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 
 declare -a pending=("$@")
 total=${#pending[@]}
-echo "surveying $total file(s) over ${CONTIGS:-the whole genome}, from $MIN_COPIES copies" >&2
+echo "surveying $total file(s) over ${REGIONS:-${CONTIGS:-the whole genome}}, from $MIN_COPIES copies, $JOBS at a time" >&2
 echo "  work directory: $WORK (delete it to force a full re-run)" >&2
 
 declare -a deferred_files=() deferred_reasons=()
@@ -124,51 +168,32 @@ for ((pass = 1; pass <= PASSES; pass++)); do
         echo "pass $pass: waiting ${WAIT}s for ${#pending[@]} unfinished file(s) to settle" >&2
         sleep "$WAIT"
     }
+    # Clear last pass's verdicts so a file that has since become readable is not still carrying one.
+    for cram in "${pending[@]}"; do rm -f "$WORK/$(key_of "$cram").status"; done
+
+    echo "pass $pass: ${#pending[@]} file(s) to walk" >&2
+    # **`xargs -P` rather than a hand-rolled job pool**, because it is the portable way to keep N
+    # slots full: a `wait`-on-every-N loop stalls the whole group on its slowest member, and these
+    # files differ several-fold in size.
+    printf '%s\0' "${pending[@]}" \
+        | xargs -0 -n 1 -P "$JOBS" -I {} "$SELF" --one {} \
+        || echo "  (some workers reported failures; their reasons are in the work directory)" >&2
+
     declare -a still_pending=()
     deferred_files=()
     deferred_reasons=()
-    index=0
+    done_count=0
     for cram in "${pending[@]}"; do
-        index=$((index + 1))
         key=$(key_of "$cram")
-        result="$WORK/$key.tsv"
-        # Resume: anything already walked cleanly is left alone, which is what makes re-running the
-        # same command add libraries rather than redo them.
-        [[ -s "$result" ]] && continue
-
-        if ! reason=$(ready_reason "$cram"); then
-            still_pending+=("$cram")
-            deferred_files+=("$cram")
-            deferred_reasons+=("$reason")
-            echo "  [$index/${#pending[@]}] deferring $(basename "$cram") — $reason" >&2
+        if [[ -s "$WORK/$key.tsv" ]]; then
+            done_count=$((done_count + 1))
             continue
         fi
-
-        before=$(stamp_of "$cram")
-        echo "  [$index/${#pending[@]}] walking $(basename "$cram")" >&2
-        if ! "$BIN" "${contig_args[@]}" --min-copies "$MIN_COPIES" "$REF" "$cram" \
-                > "$result.partial" 2> "$WORK/$key.err"; then
-            rm -f "$result.partial"
-            still_pending+=("$cram")
-            deferred_files+=("$cram")
-            deferred_reasons+=("walk failed: $(tail -n 1 "$WORK/$key.err" 2>/dev/null | tr '\t' ' ')")
-            echo "    failed — will retry in a later pass" >&2
-            continue
-        fi
-        # **The check that catches the silent case.** A file appended to during its own walk yields
-        # a result that looks like a thin library rather than an error, so the stamp decides whether
-        # the result is trustworthy — not whether the command succeeded.
-        after=$(stamp_of "$cram")
-        if [[ "$before" != "$after" ]]; then
-            rm -f "$result.partial"
-            still_pending+=("$cram")
-            deferred_files+=("$cram")
-            deferred_reasons+=("changed during its own walk — result discarded")
-            echo "    changed while being walked; discarding and retrying later" >&2
-            continue
-        fi
-        mv "$result.partial" "$result"
+        still_pending+=("$cram")
+        deferred_files+=("$cram")
+        deferred_reasons+=("$(cat "$WORK/$key.status" 2>/dev/null || echo 'no result and no reason recorded')")
     done
+    echo "  pass $pass done: $done_count walked, ${#still_pending[@]} outstanding" >&2
     pending=("${still_pending[@]:-}")
     # `${arr[@]:-}` yields one empty element on an empty array under `set -u`; drop it.
     ((${#pending[@]} == 1)) && [[ -z "${pending[0]}" ]] && pending=()
