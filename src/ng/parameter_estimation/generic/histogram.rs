@@ -432,23 +432,29 @@ pub struct DepthAltHistogram<C: CellCounter = u32> {
     /// The pooled arm: one counter per cell, rows located through
     /// [`DepthBinEdges::row_start`].
     counts: Vec<C>,
+    /// The pooled arm's depth sums: for each cell, the sum of the **exact** depths of
+    /// the sites that landed in it. One entry per cell of `counts`, at the same index,
+    /// and [`DepthAltHistogram::mean_depth_in_cell`] is why it exists.
+    depth_sums: Vec<C>,
     /// The attributed arm: the sites whose alternative reads kept the library each
-    /// came from. Sparse, and **empty for a single-library sample provided the
-    /// accumulator entered it through [`DepthAltHistogram::add_site`]** (Milestone C) —
-    /// this type will populate the map for a lone read group if it is asked to, because
-    /// a key cannot see how many libraries a sample has.
-    attributed_cells: BTreeMap<SiteKey, C>,
+    /// came from, each with its site count and its depth sum — the same pair the two
+    /// vectors above hold, since an attributed cell carries a depth bin too and so
+    /// needs a depth to be scored at. Sparse, and **empty for a single-library sample
+    /// provided the accumulator entered it through [`DepthAltHistogram::add_site`]**
+    /// (Milestone C) — this type will populate the map for a lone read group if it is
+    /// asked to, because a key cannot see how many libraries a sample has.
+    attributed_cells: BTreeMap<SiteKey, (C, C)>,
     edges: Arc<DepthBinEdges>,
     /// How many reference positions the loci entered here covered.
     ///
     /// **`u64` rather than `C`, unlike the cells.** The memory argument that forces a
-    /// width choice on the cell vectors — four bytes for a site count and, once
-    /// Milestone B3 adds the depth sums, four more: eight bytes a cell, ~4.7 kB a
-    /// window, ~37 MB a tomato sample (`spec/parameter_prepass_generic.md` §9) — does
-    /// not reach one scalar per table, where the whole difference is eight bytes
-    /// against four. And the quantity is uncomfortably placed for 32 bits: a read-group
-    /// table accumulates over the whole genome without a windowed fold to widen it, and
-    /// a human genome's 3.1 × 10⁹ analysable positions sit at 72% of the `u32` ceiling.
+    /// width choice on the cell vectors — four bytes for a site count and four for its
+    /// depth sum, so eight bytes a cell, ~4.7 kB a window, ~37 MB a tomato sample
+    /// (`spec/parameter_prepass_generic.md` §9) — does not reach one scalar per table,
+    /// where the whole difference is eight bytes against four. And the quantity is
+    /// uncomfortably placed for 32 bits: a read-group table accumulates over the whole
+    /// genome without a windowed fold to widen it, and a human genome's 3.1 × 10⁹
+    /// analysable positions sit at 72% of the `u32` ceiling.
     covered_positions: u64,
 }
 
@@ -459,9 +465,10 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     /// cells mean different things and folding them together is meaningless.
     #[must_use]
     pub fn new(edges: Arc<DepthBinEdges>) -> Self {
-        let counts = vec![C::from(0); edges.cell_count()];
+        let cells = edges.cell_count();
         Self {
-            counts,
+            counts: vec![C::from(0); cells],
+            depth_sums: vec![C::from(0); cells],
             attributed_cells: BTreeMap::new(),
             edges,
             covered_positions: 0,
@@ -491,7 +498,7 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     pub fn add_site(&mut self, site: DepthAndAltReads, covered: Bp) {
         self.check_within_the_cap(site.depth());
         let depth_bin = self.edges.bin_for(site.depth());
-        self.add_pooled(depth_bin, site.alt_reads());
+        self.add_pooled(depth_bin, site);
         self.add_covered_positions(covered);
     }
 
@@ -541,10 +548,14 @@ impl<C: CellCounter> DepthAltHistogram<C> {
 
         match key.attribution() {
             Attribution::ByReadGroup(_) => {
-                let counter = self.attributed_cells.entry(key).or_insert(C::from(0));
-                Self::count_one_more(counter, depth_bin, site.alt_reads());
+                let cell = self
+                    .attributed_cells
+                    .entry(key)
+                    .or_insert((C::from(0), C::from(0)));
+                Self::count_one_more(&mut cell.0, depth_bin, site.alt_reads());
+                Self::add_depth(&mut cell.1, site.depth(), depth_bin, site.alt_reads());
             }
-            Attribution::Pooled => self.add_pooled(depth_bin, site.alt_reads()),
+            Attribution::Pooled => self.add_pooled(depth_bin, site),
         }
         self.add_covered_positions(covered);
     }
@@ -574,22 +585,34 @@ impl<C: CellCounter> DepthAltHistogram<C> {
         for depth_bin in self.edges.bins() {
             let row = self.edges.row_start(depth_bin);
             let width = *self.edges.depth_range(depth_bin).end() as usize + 1;
+            let depths = &self.depth_sums[row..row + width];
             for (alt_reads, count) in self.counts[row..row + width].iter().enumerate() {
                 let sites: u64 = (*count).into();
                 if sites > 0 {
+                    let depth_sum: u64 = depths[alt_reads].into();
                     cells.push(Cell {
                         key: SiteKey::pooled(depth_bin, alt_reads as u32),
                         ploidy,
                         sites,
+                        mean_depth: depth_sum as f64 / sites as f64,
                     });
                 }
             }
         }
-        cells.extend(self.attributed_cells.iter().map(|(key, count)| Cell {
-            key: key.clone(),
-            ploidy,
-            sites: (*count).into(),
-        }));
+        cells.extend(
+            self.attributed_cells
+                .iter()
+                .map(|(key, &(count, depth_sum))| {
+                    let sites: u64 = count.into();
+                    let depth_sum: u64 = depth_sum.into();
+                    Cell {
+                        key: key.clone(),
+                        ploidy,
+                        sites,
+                        mean_depth: depth_sum as f64 / sites as f64,
+                    }
+                }),
+        );
         cells
     }
 
@@ -607,8 +630,12 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     /// against a later fold, not against a reachable input.
     #[must_use]
     pub fn total_loci(&self) -> u64 {
-        let cells = self.counts.iter().chain(self.attributed_cells.values());
-        cells.fold(0u64, |total, &count| {
+        let cells = self
+            .counts
+            .iter()
+            .copied()
+            .chain(self.attributed_cells.values().map(|&(count, _)| count));
+        cells.fold(0u64, |total, count| {
             let in_cell: u64 = count.into();
             total.checked_add(in_cell).unwrap_or_else(|| {
                 panic!(
@@ -617,6 +644,66 @@ impl<C: CellCounter> DepthAltHistogram<C> {
                 )
             })
         })
+    }
+
+    /// **The depth a cell's sites are scored at: the mean of the exact depths that
+    /// landed in *that cell*.** A property of this sample's data rather than of the
+    /// binning rule, which is why it lives on the table and not on the ladder.
+    ///
+    /// **Per cell, not per bin, and that is a correctness requirement rather than a
+    /// refinement.** Binning the depth while keeping the alternative count exact means
+    /// the top bin covers depths 98–124 and holds cells up to 124 alternative reads.
+    /// Scored at the *bin's* mean — necessarily below its top — a homozygous
+    /// non-reference site at depth 124 is charged `n − k = −12` reference reads, and its
+    /// term `(ε/3)^(n−k)` then grows without limit as `ε` falls. Per cell the problem
+    /// cannot arise: every site in cell `(bin, k)` has at least `k` reads, so the cell's
+    /// mean does too.
+    ///
+    /// **What the bin mean actually costs is worse to live with than "it diverges".**
+    /// The objective does not become unbounded and the fit does not rail: the 0.3% of
+    /// sites whose term grows as `ε` falls are outweighed by the sites showing one or
+    /// two alternative reads, whose terms fall faster. The fit lands **5.2 rungs below
+    /// the true error rate** — 0.74 times the true rate, where the ladder's floor is 80
+    /// rungs below — **and 29% below the true homozygous-non-reference rate**, and
+    /// reports nothing (research note §4.5). A railed fit announces itself;
+    /// `ScanResult::argmax_at_ladder_end` exists for that. A rate a quarter low
+    /// announces nothing, so the rail flag is not the protection here. This is.
+    ///
+    /// **Defined for the attributed arm by the same rule.** Those cells carry a depth
+    /// bin too, so they need a depth to be scored at. The divergence above cannot reach
+    /// them — an attributed cell has at most four alternative reads and a depth above
+    /// the pooling threshold — but a cell scored at a made-up depth is wrong whether or
+    /// not it diverges.
+    ///
+    /// # Panics
+    ///
+    /// If no site landed in this cell: there is no mean of nothing, and every caller
+    /// gets its cells from [`DepthAltHistogram::cells`], which returns only occupied
+    /// ones. Answering `0.0` would break the very identity this method exists to hold,
+    /// and `NaN` would poison a score silently. Also if the key names an alternative
+    /// count outside its own bin's row.
+    #[must_use]
+    pub fn mean_depth_in_cell(&self, cell: &SiteKey) -> f64 {
+        let (sites, depth_sum) = match cell.attribution() {
+            Attribution::ByReadGroup(_) => {
+                let &(sites, depth_sum) = self.attributed_cells.get(cell).unwrap_or_else(|| {
+                    panic!("no site landed in the cell {cell:?}, so it has no mean depth")
+                });
+                (sites.into(), depth_sum.into())
+            }
+            Attribution::Pooled => {
+                let index = self.pooled_cell_index(cell.depth_bin(), cell.alt_reads());
+                let sites: u64 = self.counts[index].into();
+                (sites, self.depth_sums[index].into())
+            }
+        };
+        assert!(
+            sites > 0,
+            "no site landed in the cell {cell:?}, so it has no mean depth"
+        );
+
+        let (depth_sum, sites): (u64, u64) = (depth_sum, sites);
+        depth_sum as f64 / sites as f64
     }
 
     /// How many reference **positions** those loci covered — `Σ region.len()`.
@@ -678,12 +765,19 @@ impl<C: CellCounter> DepthAltHistogram<C> {
         self.edges.row_start(depth_bin) + alt_reads as usize
     }
 
-    /// Count one more site into the dense table. The two entry points share it so that
-    /// the bound check and the increment cannot come apart, and so that Milestone B4's
-    /// fold has one place to add through.
-    fn add_pooled(&mut self, depth_bin: DepthBin, alt_reads: u32) {
-        let index = self.pooled_cell_index(depth_bin, alt_reads);
-        Self::count_one_more(&mut self.counts[index], depth_bin, alt_reads);
+    /// Count one more site into the dense table, and add its exact depth to the same
+    /// cell's running sum. The two entry points share it so that the bound check, the
+    /// count and the depth cannot come apart — a cell whose count and depth sum were
+    /// written at different indices would be scored at another cell's depth.
+    fn add_pooled(&mut self, depth_bin: DepthBin, site: DepthAndAltReads) {
+        let index = self.pooled_cell_index(depth_bin, site.alt_reads());
+        Self::count_one_more(&mut self.counts[index], depth_bin, site.alt_reads());
+        Self::add_depth(
+            &mut self.depth_sums[index],
+            site.depth(),
+            depth_bin,
+            site.alt_reads(),
+        );
     }
 
     fn count_one_more(counter: &mut C, depth_bin: DepthBin, alt_reads: u32) {
@@ -692,6 +786,19 @@ impl<C: CellCounter> DepthAltHistogram<C> {
                 "the cell for depth bin {} at {alt_reads} alternative reads holds more \
                  sites than a {}-bit counter can, so this table needs the whole-sample \
                  fold's width",
+                depth_bin.get(),
+                std::mem::size_of::<C>() * 8
+            )
+        });
+    }
+
+    fn add_depth(sum: &mut C, depth: u32, depth_bin: DepthBin, alt_reads: u32) {
+        *sum = sum.checked_add(C::from(depth)).unwrap_or_else(|| {
+            panic!(
+                "the depths in the cell for depth bin {} at {alt_reads} alternative \
+                 reads sum past what a {}-bit counter holds, so this table needs the \
+                 whole-sample fold's width — and a wrapped sum is a cell scored at the \
+                 wrong depth, which is the one thing this counter exists to prevent",
                 depth_bin.get(),
                 std::mem::size_of::<C>() * 8
             )
@@ -719,7 +826,7 @@ impl<C: CellCounter> DepthAltHistogram<C> {
 /// mathematics split exists to keep clean — and the profile scan walks it 161 times per
 /// fit, in code that would otherwise be written in `.2`. Introduced now because
 /// retro-fitting it once the fits exist would touch every one of them.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Cell {
     /// What the sites in this cell looked like.
     pub key: SiteKey,
@@ -729,6 +836,17 @@ pub struct Cell {
     pub ploidy: Ploidy,
     /// How many sites landed here.
     pub sites: u64,
+    /// The depth these sites are scored at — the mean of their **exact** depths, which
+    /// is never below this cell's own alternative count.
+    ///
+    /// Carried on the cell rather than looked up per rung, because
+    /// [`DepthAltHistogram::mean_depth_in_cell`] costs a map lookup on the attributed
+    /// arm and the profile scan re-walks these 161 times. That method is the definition;
+    /// this is the same number, computed once. What must never be substituted for either
+    /// is the **bin's** mean, which lands the fit 5.2 rungs below the true error rate
+    /// and 29% below the true homozygous-non-reference rate, silently — the method's doc
+    /// has the measurement.
+    pub mean_depth: f64,
 }
 
 #[cfg(test)]
@@ -1352,6 +1470,149 @@ mod tests {
     #[should_panic(expected = "pushed a site's alternative count past u32")]
     fn a_listing_summing_past_u32_names_the_group_that_pushed_it_over() {
         let _ = SiteKey::attributing(DepthBin(12), &[(group(0), u32::MAX), (group(1), 1)]);
+    }
+
+    /// The deep table B3's oracle is written on: every legal `(depth, alternative
+    /// count)` pair with the depth between 100 and 124, which all fall in the top bin
+    /// (98–124). It is the exact case a per-bin mean fails — the bin's mean depth is
+    /// necessarily below its top, while the cells reach an alternative count of 124.
+    fn a_table_of_deep_sites() -> DepthAltHistogram<u32> {
+        let mut table = DepthAltHistogram::<u32>::new(ladder());
+        for depth in 100..=124u32 {
+            for alt_reads in 0..=depth {
+                table.add_site(DepthAndAltReads::new(depth, alt_reads), ONE_POSITION);
+            }
+        }
+        table
+    }
+
+    /// **The identity, at every cell: a cell is never scored below its own alternative
+    /// count.** Every site in cell `(bin, k)` has at least `k` reads, so the mean of
+    /// their exact depths does too — and that is what keeps a homozygous non-reference
+    /// site from being charged a negative number of reference reads, whose term
+    /// `(ε/3)^(n−k)` would then grow without limit as `ε` falls.
+    #[test]
+    fn no_cell_is_scored_below_its_own_alternative_count() {
+        let table = a_table_of_deep_sites();
+        let cells = table.cells(diploid());
+
+        assert!(cells.len() > 100, "the sweep filled the top bin's row");
+        for cell in &cells {
+            let alt_reads = f64::from(cell.key.alt_reads());
+            let mean_depth = table.mean_depth_in_cell(&cell.key);
+            assert!(
+                alt_reads <= mean_depth,
+                "cell {:?} shows {alt_reads} alternative reads and is scored at depth \
+                 {mean_depth}",
+                cell.key
+            );
+            assert!(
+                (cell.mean_depth - mean_depth).abs() < 1e-12,
+                "the cell carries the same depth the method answers"
+            );
+        }
+    }
+
+    /// **And the same table proves the assertion bites**, by computing what the *bin*
+    /// mean would be and showing it violating the identity the per-cell mean holds.
+    /// Without this, "no cell is scored below its own alternative count" could be a
+    /// property of the fixture rather than of the code.
+    ///
+    /// The cost of getting it wrong is not a crash: the objective stays bounded, the
+    /// fit lands 5.2 rungs below the true error rate and 29% below the true
+    /// homozygous-non-reference rate, and nothing outside reports it (research note
+    /// §4.5).
+    #[test]
+    fn the_bin_mean_would_violate_that_identity_on_the_same_table() {
+        let table = a_table_of_deep_sites();
+        let cells = table.cells(diploid());
+
+        // The bin's mean over every site in it, which is the quantity the per-cell sums
+        // replace. Every site here is in the top bin, so one mean covers them all.
+        let sites: f64 = cells.iter().map(|cell| cell.sites as f64).sum();
+        let depths: f64 = cells
+            .iter()
+            .map(|cell| cell.mean_depth * cell.sites as f64)
+            .sum();
+        let bin_mean = depths / sites;
+
+        let underscored: Vec<u32> = cells
+            .iter()
+            .map(|cell| cell.key.alt_reads())
+            .filter(|&alt_reads| f64::from(alt_reads) > bin_mean)
+            .collect();
+
+        assert!(
+            (112.4..112.5).contains(&bin_mean),
+            "depths 100 to 124, each weighted by the {{depth}} + 1 cells it fills: \
+             {bin_mean}"
+        );
+        assert_eq!(
+            underscored,
+            (113..=124).collect::<Vec<u32>>(),
+            "these twelve alternative counts sit above the bin's mean depth of \
+             {bin_mean}, so scoring the bin would charge each of them a negative \
+             number of reference reads — where the per-cell mean charges none of them"
+        );
+    }
+
+    /// An attributed cell is scored by the same rule — those cells carry a depth bin
+    /// too, so they need a depth, and a cell scored at a made-up depth is wrong whether
+    /// or not it can diverge.
+    ///
+    /// **The three depths are 18, 19 and 20 rather than anything symmetric**, so that
+    /// their mean of 19 differs from bin 12's own midpoint of 20 (the bin holds 18 to
+    /// 22). An implementation answering the bin's middle, or the bin's mean, gives 20
+    /// and fails here; one answering the cell's own sites gives 19.
+    #[test]
+    fn an_attributed_cell_is_scored_at_the_mean_of_its_own_sites_depths() {
+        let mut table = DepthAltHistogram::<u32>::new(ladder());
+        let from_one_group = [(group(0), 1u32)];
+
+        for depth in [18u32, 19, 20] {
+            table.add_attributed_site(
+                DepthAndAltReads::new(depth, 1),
+                &from_one_group,
+                ONE_POSITION,
+            );
+        }
+
+        let key = SiteKey::attributing(DepthBin(12), &from_one_group);
+        let scored_at = table.mean_depth_in_cell(&key);
+        assert!(
+            (scored_at - 19.0).abs() < 1e-12,
+            "the mean of 18, 19 and 20 — bin 12's midpoint is 20: {scored_at}"
+        );
+        assert!(scored_at >= f64::from(key.alt_reads()));
+    }
+
+    /// A cell nothing landed in has no mean depth, and says so rather than answering
+    /// zero — which would break the identity above — or `NaN`, which would poison a
+    /// score with nothing to show for it.
+    #[test]
+    #[should_panic(expected = "has no mean depth")]
+    fn an_empty_cell_has_no_mean_depth() {
+        let table = DepthAltHistogram::<u32>::new(ladder());
+        let _ = table.mean_depth_in_cell(&SiteKey::pooled(DepthBin(4), 2));
+    }
+
+    /// The same for the attributed arm, whose empty cells are not in the map at all.
+    #[test]
+    #[should_panic(expected = "has no mean depth")]
+    fn an_empty_attributed_cell_has_no_mean_depth() {
+        let table = DepthAltHistogram::<u32>::new(ladder());
+        let _ = table.mean_depth_in_cell(&SiteKey::attributing(DepthBin(12), &[(group(0), 1)]));
+    }
+
+    /// A depth sum past its counter's width is reported rather than wrapped — and a
+    /// wrapped sum is a cell scored at a small depth, which is the exact failure the
+    /// per-cell sum exists to prevent, arriving through the counter instead of through
+    /// the binning.
+    #[test]
+    #[should_panic(expected = "sum past what a 32-bit counter holds")]
+    fn a_depth_sum_past_its_counter_is_reported_rather_than_wrapped() {
+        let mut sum = u32::MAX;
+        DepthAltHistogram::<u32>::add_depth(&mut sum, 12, DepthBin(10), 1);
     }
 
     /// **Three groups, in every order, because two cannot tell a sort from a swap.**
