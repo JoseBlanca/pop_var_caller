@@ -162,15 +162,28 @@ pub enum ParameterEstimationError {
     )]
     InbreedingStatesNotSeparated { sample: String, starts: usize },
 
-    /// A constrained scalar rejected its value on the way — a rate outside `[0, 1]`, a
-    /// ploidy of zero.
+    /// A constrained scalar rejected its value while a named fit was running — a rate
+    /// outside `[0, 1]`, a ploidy of zero.
     ///
-    /// **Transparent, so the newtype's own message is what the reader sees**: it already
-    /// names the quantity and the offending value, and re-wording it here would lose the
-    /// quantity. What it does not name is the sample or the operation, which is a real
-    /// gap on a cohort run — see the module's tracked follow-up.
-    #[error(transparent)]
-    Domain(#[from] DomainError),
+    /// **Not transparent, and not `#[from]`, and both for the same reason.** The inner
+    /// [`DomainError`] names the quantity and the offending value, which is half of what a
+    /// reader needs; what it cannot know is *whose* data and *which* fit produced it, and
+    /// on a cohort run of hundreds of samples that is the half that locates the fault. A
+    /// transparent variant forwards the inner message unchanged and drops both. A `#[from]`
+    /// conversion is worse than the missing context alone: it makes `?` silently mint this
+    /// variant at every one of the five constructors that can raise a `DomainError`, so the
+    /// sample and the fit would have to be *remembered* to be attached, and the compiler
+    /// would never ask. Constructing it by hand is what forces each site to say where it
+    /// was.
+    #[error("sample {sample}: {fit} rejected a value — {source}")]
+    Domain {
+        sample: String,
+        /// Which fit was running, in the words the emitted summary uses — "the error-rate
+        /// scan", "the runs model". A reader who has the sample and the fit can find the
+        /// site; one who has only the quantity cannot.
+        fit: &'static str,
+        source: DomainError,
+    },
 }
 
 #[cfg(test)]
@@ -265,18 +278,26 @@ mod tests {
         );
     }
 
-    /// A domain violation reaching a fit is reported transparently rather than being
-    /// re-worded, so the newtype's own message — which names the quantity and the value
-    /// — is what the reader sees.
+    /// A domain violation carries **three** things a reader needs, and the inner error has
+    /// only one of them. The quantity and the offending value come from the newtype; the
+    /// sample and the fit have to be attached here, because on a cohort run of hundreds of
+    /// samples those are what say where to look.
     #[test]
-    fn a_domain_violation_passes_through_with_its_own_message() {
-        let rejected = ParameterEstimationError::from(DomainError::InbreedingF(1.5));
+    fn a_domain_violation_names_the_sample_and_the_fit_as_well_as_the_quantity() {
+        let rejected = ParameterEstimationError::Domain {
+            sample: "SL_landrace_07".to_string(),
+            fit: "the runs model",
+            source: DomainError::InbreedingF(1.5),
+        };
+        let message = rejected.to_string();
 
-        assert_eq!(
-            rejected.to_string(),
-            DomainError::InbreedingF(1.5).to_string()
+        assert!(message.contains("SL_landrace_07"), "the sample: {message}");
+        assert!(message.contains("the runs model"), "the fit: {message}");
+        assert!(message.contains("1.5"), "the offending value: {message}");
+        assert!(
+            message.contains("inbreeding coefficient"),
+            "the quantity, in the newtype's own words: {message}"
         );
-        assert!(rejected.to_string().contains("1.5"));
     }
 
     /// The four provenances are distinct values, not a scale — `Borrowed` is not

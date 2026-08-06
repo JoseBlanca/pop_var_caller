@@ -1125,7 +1125,7 @@ pub fn fit_inbreeding(
 /// The starting points the fit climbs from. **They must disagree about the state
 /// separation, not only about `F`** — that is the whole content of this type, and spec §6.5
 /// carries the measurement: starts sharing one separation guess return `F` = 0.0000 on a
-/// genome 29% covered by runs, converged and silent.
+/// genome 26% covered by runs, converged and silent.
 pub struct RunsModelStarts {
     /// The inside state's heterozygote rate as a fraction of the outside one. Default
     /// `[0.05, 1.0/3.0, 0.75]`.

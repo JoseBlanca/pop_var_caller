@@ -782,11 +782,12 @@ number, and it is worth being exact about how.
 
 Baum–Welch climbs to a stationary point. A start that guesses the inside state's heterozygote rate
 far below the truth fits every window to the outside state on its first pass, empties the inside
-state, and drives the rate of entering a run to zero. **On a genome with 29% of its length in runs
+state, and drives the rate of entering a run to zero. **On a genome with 26% of its length in runs
 and a floor of spurious heterozygotes three times the real rate, that returns `F` = 0.0000, reports
 convergence, and gives no other signal** — because every start made the same wrong guess, so keeping
 the best-scoring one had nothing better to pick. Starts spanning the separation return 0.2634 on the
-same data (research note §3.4). **At minimum: the inside heterozygote rate started at 1/20, 1/3 and
+same data, against a realised 0.2629 — which is where the 26% above comes from, so the two can be
+checked against each other (research note §3.4). **At minimum: the inside heterozygote rate started at 1/20, 1/3 and
 3/4 of the outside one, crossed with a few implied `F`.** Nine such starts cost seconds on 8,000
 windows and are the difference between an answer and a plausible zero.
 

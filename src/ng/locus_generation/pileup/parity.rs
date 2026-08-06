@@ -1786,6 +1786,11 @@ struct DivergenceCensus {
     unsupported_bucket: usize,
     observation_order: usize,
     stale_widen: usize,
+    /// **Walks that reached the same footprints in a different number of widen calls** —
+    /// the seventh class, and the only one that is about a run counter rather than a locus.
+    /// See [`counters_agree_apart_from_the_widen_path`] for why it is counted instead of
+    /// asserted, and why counting it cannot hide a record divergence.
+    widen_path: usize,
     /// Loci where one allele really is carried by two read groups and so becomes two observations —
     /// class 2's *visible* consequence, and the check spec §13 asks for by name. Counted
     /// apart from the class flag because the flag fires on any non-projected group, which is
@@ -2919,14 +2924,116 @@ fn assert_only_allele_bytes_moved(
     }
 
     if ours.panic_message.is_none() {
-        assert_eq!(
-            ours.summary.as_ref(),
-            theirs.summary.as_ref(),
-            "{where_}: the RunSummary counters diverged — every one of them is driven by \
-             the events, which A2 does not touch",
-        );
+        match (ours.summary.as_ref(), theirs.summary.as_ref()) {
+            (Some(ours), Some(theirs)) => {
+                if !counters_agree_apart_from_the_widen_path(where_, ours, theirs) {
+                    census.widen_path += 1;
+                }
+            }
+            (ours, theirs) => assert_eq!(
+                ours, theirs,
+                "{where_}: one walker produced a summary and the other did not",
+            ),
+        }
     }
     census.float_only += float_only_divergences(&ours.records, &theirs.records);
+}
+
+/// Compare the seven counters that do not depend on the order contributors arrive in, and
+/// report whether the eighth — `record_widen_events` — differed.
+///
+/// # Why one counter is a census and the other seven are equalities
+///
+/// `record_widen_events` counts records that grew *after* being opened. A record opened by
+/// the first event that lands in it and then widened by a later, wider one, and the same
+/// record opened at full width because the wider event came first, **finish identical** —
+/// same span, same reference bases, same observations. The first counts a widen; the second
+/// does not. Which happens is decided by the order step 3 iterates contributors, and the two
+/// walkers no longer share one: production's active set is permuted by `swap_remove`, ng's
+/// is held in read order since `f952581f`. Neither order is more correct, and nothing
+/// outside a run header reads the counter.
+///
+/// Measured on `seed 0x5eed0001 case 18`, which is where this first showed: production opens
+/// the record at position 18 two bases wide; ng opens it one wide and widens it to two. Both
+/// then widen it to 23, and all 76 emitted records are equal.
+///
+/// **What makes counting this honest rather than an excuse is the order of the checks.**
+/// Every emitted record has already been compared above and classified under the six named
+/// classes. So a divergence here with the loci equal is a different path to the same answer;
+/// a divergence here with the loci *unequal* would have failed as one of the six first, and
+/// this function is never reached with an unexplained record difference behind it. The count
+/// is floored at the end of each census for the same reason every class is: a class counted
+/// zero is a branch nothing takes.
+///
+/// The seven are destructured exhaustively, twice, so a ninth counter cannot join
+/// `SummaryCounters` without a decision being made about which side of this split it is on.
+fn counters_agree_apart_from_the_widen_path(
+    where_: &str,
+    ours: &SummaryCounters,
+    theirs: &SummaryCounters,
+) -> bool {
+    let SummaryCounters {
+        reads_admitted: our_reads_admitted,
+        records_emitted: our_records_emitted,
+        record_widen_events: our_widens,
+        mate_overlap_positions: our_mate_overlap_positions,
+        chain_allocations: our_chain_allocations,
+        active_reads_high_water: our_active_reads_high_water,
+        mate_lookup_evictions: our_mate_lookup_evictions,
+        column_depth_truncations: our_column_depth_truncations,
+    } = ours;
+    let SummaryCounters {
+        reads_admitted: their_reads_admitted,
+        records_emitted: their_records_emitted,
+        record_widen_events: their_widens,
+        mate_overlap_positions: their_mate_overlap_positions,
+        chain_allocations: their_chain_allocations,
+        active_reads_high_water: their_active_reads_high_water,
+        mate_lookup_evictions: their_mate_lookup_evictions,
+        column_depth_truncations: their_column_depth_truncations,
+    } = theirs;
+
+    for (counter, ours, theirs) in [
+        ("reads_admitted", our_reads_admitted, their_reads_admitted),
+        (
+            "records_emitted",
+            our_records_emitted,
+            their_records_emitted,
+        ),
+        (
+            "mate_overlap_positions",
+            our_mate_overlap_positions,
+            their_mate_overlap_positions,
+        ),
+        (
+            "chain_allocations",
+            our_chain_allocations,
+            their_chain_allocations,
+        ),
+        (
+            "active_reads_high_water",
+            our_active_reads_high_water,
+            their_active_reads_high_water,
+        ),
+        (
+            "mate_lookup_evictions",
+            our_mate_lookup_evictions,
+            their_mate_lookup_evictions,
+        ),
+        (
+            "column_depth_truncations",
+            our_column_depth_truncations,
+            their_column_depth_truncations,
+        ),
+    ] {
+        assert_eq!(
+            ours, theirs,
+            "{where_}: `{counter}` diverged — ng {ours}, production {theirs}. This counter \
+             is driven by the events, which A2 does not touch, and it does not depend on \
+             the order contributors arrive in the way `record_widen_events` does",
+        );
+    }
+    our_widens == their_widens
 }
 
 /// **Every divergence is one of the six, each is counted, and here is how big the first one
@@ -3031,6 +3138,18 @@ fn every_divergence_from_production_is_one_of_the_six_named_classes() {
         capped > 0,
         "no case drew caps small enough to fire, so this census is excluding an empty set \
          and `Case::caps_can_fire`'s boundary has stopped describing anything"
+    );
+
+    // The seventh class, floored like the other six: a class counted zero is a branch
+    // nothing takes, and this one would then be excusing a difference the corpus no longer
+    // produces. It is measured across both censuses because it is a property of the walk,
+    // not of how many read groups the observations were keyed by.
+    assert!(
+        one_group.widen_path + two_groups.widen_path > 0,
+        "no walk reached the same footprints by a different number of widen calls, so the \
+         `record_widen_events` census is describing nothing — either the corpus stopped \
+         drawing a record whose events arrive out of width order, or the two walkers have \
+         come back into step and the counter can be asserted equal again"
     );
     let census = &one_group;
     let diverged = census.loci - census.exact;
