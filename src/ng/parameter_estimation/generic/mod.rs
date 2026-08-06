@@ -14,6 +14,7 @@
 //! companion. The accumulators and the fits land across Milestones B, C, E and F;
 //! the vocabulary below is Milestone A.
 
+pub mod accumulators;
 pub mod depth_and_alt_reads;
 pub mod depth_bins;
 pub mod histogram;
