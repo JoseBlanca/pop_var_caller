@@ -412,7 +412,7 @@ fn run(
         let counts = groups.get(&id).cloned().unwrap_or_default();
         writeln!(
             out,
-            "#rg\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}",
+            "#rg\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}",
             id.get(),
             group.id,
             group.sample,
@@ -428,12 +428,17 @@ fn run(
             } else {
                 0.0
             },
+            group.file.display(),
         )?;
     }
+    // **`file` is last and it is what makes two runs joinable.** The numeric `read_group` is minted
+    // per run and means nothing across them; `(file, rg_id)` is the stable identity, because the SAM
+    // specification makes `@RG ID` unique within its file. A survey run in batches merges on that
+    // pair — which `scripts/ng_str_library_survey.sh` does.
     writeln!(
         out,
         "#rg_columns\tread_group\trg_id\tsample\tlibrary\tlibrary_origin\texperiment\t\
-         experiment_origin\tplatform\tloci\treads\tmean_tract_bases_per_read"
+         experiment_origin\tplatform\tloci\treads\tmean_tract_bases_per_read\tfile"
     )?;
 
     // The per-read-group floors, which are the answer this survey exists for.
