@@ -287,7 +287,7 @@ every order give the same counters. *Depends:* C2, B4. *Source:* arch §3.
 
 ### Milestone D — the fitting machinery (the mathematics, no loci)
 
-**D1. `fit_mixture_weights` — the concave climb.**  ☐
+**D1. `fit_mixture_weights` — the concave climb.**  ✅
 Given each cell's per-genotype likelihood and a weight per cell, the genotype frequencies that
 best explain the table. Expectation-maximization is a reasonable default and nothing depends
 on it being EM. **Convergence failure is a bug, not a data condition** — the surface is

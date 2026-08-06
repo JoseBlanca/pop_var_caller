@@ -13,8 +13,9 @@
 //! is the second, and whether the seam was cut in the right place is a question its
 //! plan answers, not this one.
 //!
-//! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §4. The scan and the climb
-//! land in Milestone D; the two result types below are Milestone A.
+//! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §4. The climb over the
+//! genotype frequencies is [`mixture_weights`]; the scan over the noise parameters
+//! joins it in Milestone D. The two result types below are Milestone A.
 
 pub mod mixture_weights;
 
