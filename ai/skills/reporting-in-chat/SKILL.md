@@ -200,6 +200,34 @@ genuinely theirs (three findings), an item needing no action, and a fact about m
 own tooling. All four were formatted identically, so the real question was invisible.
 **Rule added:** triage D/K/W, and never format them alike.
 
+### 2026-08-06 — an architecture recommendation delivered in experiment labels
+
+Four experiments settled how a pipeline should pass data between its stages. They were
+reported over several replies as *"sketch 1"* through *"sketch 4"*, their variants as
+*"arm A"* through *"arm E"*, and their results as five-column tables of instruction
+counts. The owner did not argue with any of it; they asked to be told the recommended
+architecture, and pointed at this skill instead of answering.
+
+> ❌ "**Arm E is the finding.** It is record-shaped — the same head scan as arm A — and
+> simply reads the keep column, materialising 28,718 loci instead of 2.83 M."
+>
+> ✅ "When the merge reads a sample's file it should first scan one small number per
+> locus, and build the full locus only where some sample might have a variant — about
+> one position in a hundred."
+
+Three failures, and the first two are already rules:
+
+1. **`arm E` and `sketch 4` are internal labels**, exactly as `H1` and `H3` were on
+   2026-08-04. They were used for a whole day.
+2. **A table of experiment states is working, not an answer.** The reader had asked what
+   to build; five states of a measurement harness are how the answer was found, not what
+   it is.
+3. **New, and the reason this entry exists:** an experiment's *arms* feel like shared
+   vocabulary in a way finding codes do not, because each one was described when it was
+   introduced. It does not survive the reply it was introduced in. **A name defined
+   earlier in the conversation is not defined for the reply the reader is reading now** —
+   if a recommendation cannot be stated without it, the recommendation is not finished.
+
 ### 2026-08-04 — the rules existed and were never loaded
 
 `CLAUDE.md` already contained a section named *"Writing for the reader — including in
