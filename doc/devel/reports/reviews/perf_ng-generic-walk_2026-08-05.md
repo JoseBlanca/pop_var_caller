@@ -159,8 +159,9 @@ is a **chr21** floor. Three agents measured 0.349 G independently. Using the wro
 30× result by about 1.4 % of itself.
 
 **The correctness gate for every experiment.** All four dumps compared with `cmp`, not line
-counts — 251,792 / 4,406 / 1,718,914 / 11,945 lines, md5s in
-`tmp/perf_review_2026-08-04_ng-generic-walk/` — plus probe counters exact
+counts — 251,792 / 4,406 / 1,718,914 / 11,945 lines. **The stored copies lived in a scratch
+directory and are gone; regenerate them** by running the four dump commands above on the commit
+you are measuring against, which is what they were. Plus probe counters exact
 (`loci=236081 observations=251786 reads_admitted=54709`), and now two more that say each change
 is still firing rather than silently disabled: `fast_columns=262498` and
 `mate_overlap_positions=39312`.
