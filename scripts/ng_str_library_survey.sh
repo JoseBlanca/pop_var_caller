@@ -175,8 +175,14 @@ for ((pass = 1; pass <= PASSES; pass++)); do
     # **`xargs -P` rather than a hand-rolled job pool**, because it is the portable way to keep N
     # slots full: a `wait`-on-every-N loop stalls the whole group on its slowest member, and these
     # files differ several-fold in size.
+    #
+    # **The file is appended as the last argument rather than substituted with `-I`.** `-I` implies
+    # one argument per run, so passing `-n 1` beside it made GNU xargs warn that the two are
+    # mutually exclusive — harmless, since `-I` won and one file per worker is what was wanted, but
+    # `-I` also has a history of interacting badly with `-P` across implementations. Appending needs
+    # neither flag and the worker's signature (`--one <cram>`) already puts the file last.
     printf '%s\0' "${pending[@]}" \
-        | xargs -0 -n 1 -P "$JOBS" -I {} "$SELF" --one {} \
+        | xargs -0 -n 1 -P "$JOBS" "$SELF" --one \
         || echo "  (some workers reported failures; their reasons are in the work directory)" >&2
 
     declare -a still_pending=()
