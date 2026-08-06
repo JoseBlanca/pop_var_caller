@@ -195,7 +195,7 @@ produces a confident wrong number. *Depends:* A2. *Source:* arch §5.4.
 
 ### Milestone B — the cell table (storage, no loci)
 
-**B1. `SiteKey`, `DepthAndAltReads` and `CellCounter`.**  ☐
+**B1. `SiteKey`, `DepthAndAltReads` and `CellCounter`.**  ✅
 Two arms and no third: `Attributed { depth_bin, alt_by_group }` for at most
 `MAX_ATTRIBUTED_ALT_READS = 4` alternative reads, `Pooled { depth_bin, alt_reads }` above it.
 `alt_by_group` in read-group order so the key is canonical. `CellCounter` implemented for
@@ -203,7 +203,7 @@ Two arms and no third: `Attributed { depth_bin, alt_by_group }` for at most
 Unit test: two sites differing only in the order their read groups are listed produce the same
 key. *Depends:* A4. *Source:* arch §2.2.
 
-**B2. `DepthAltHistogram<C>` — storage, `add_site`, `cells`, the two counters.**  ☐
+**B2. `DepthAltHistogram<C>` — storage, `add_site`, `cells`, the two counters.**  ✅
 The flat ragged `counts` and `depth_sums` located through `edges.row_start`, the sparse `fine`
 map for the attributed arm, the `Arc<DepthBinEdges>` handle. `add_site` derives the bin from
 the exact depth it is handed and adds that depth to the cell's running sum. `cells(ploidy)`
@@ -213,7 +213,7 @@ two differ because a generic locus can be widened to an indel's reference span. 
 a hand-built table's rows are the right widths; `cells()` is stable in order across runs.
 *Depends:* B1. *Source:* arch §2.2.
 
-**B3. `mean_depth_in_cell`.**  ☐ **Own commit, do not bundle.**
+**B3. `mean_depth_in_cell`.**  ✅ **Own commit, do not bundle.**
 The mean of the exact depths that landed in **this cell**, from its own depth sum. **The
 silent failure this isolates:** taking the mean over the whole *bin* instead charges 0.3% of
 sites a negative number of reference reads, and the fit then lands 5.2 rungs below the true
@@ -225,7 +225,7 @@ exact case the per-bin mean fails — plus a per-bin-mean unit test showing that
 violating it, so the assertion is proven to bite. *Depends:* B2. *Source:* arch §2.2, spec
 §12.10, research note §4.5.
 
-**B4. `merge` and `whole_sample_histogram`.**  ☐
+**B4. `merge` and `whole_sample_histogram`.**  ✅
 Element-wise integer addition on the pooled table and a key-wise sum on the attributed map,
 panicking unless the two histograms hold the same edges object (`Arc::ptr_eq` — a proof, not a
 length comparison). `whole_sample_histogram` folds the windows for one ploidy and **widens
