@@ -225,11 +225,13 @@ exact case the per-bin mean fails — plus a per-bin-mean unit test showing that
 violating it, so the assertion is proven to bite. *Depends:* B2. *Source:* arch §2.2, spec
 §12.10, research note §4.5.
 
-**B4. `merge` and `whole_sample_histogram`.**  ✅
+**B4. `merge` and `fold_windows_of_one_ploidy`.**  ✅
 Element-wise integer addition on the pooled table and a key-wise sum on the attributed map,
 panicking unless the two histograms hold the same edges object (`Arc::ptr_eq` — a proof, not a
-length comparison). `whole_sample_histogram` folds the windows for one ploidy and **widens
-both counters to `u64` here and only here**. The depth sum is the one that forces it: folded
+length comparison). `fold_windows_of_one_ploidy` — named `whole_sample_histogram` when this
+plan was written, renamed on the owner's call (2026-08-06) because the ploidy restriction
+cannot live in the signature and "whole sample" reads as *all* of it — folds the windows for
+one ploidy and **widens both counters to `u64` here and only here**. The depth sum is the one that forces it: folded
 over a human genome the site count reaches 3.1 × 10⁹ against a `u32` ceiling of 4.29 × 10⁹ —
 close, but inside — while the depth sum reaches 3.1 × 10¹¹, **seventy-two times over**. A fold
 that widened the site counts and left the depth sums alone would wrap the very quantity

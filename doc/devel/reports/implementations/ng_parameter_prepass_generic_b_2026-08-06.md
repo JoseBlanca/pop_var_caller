@@ -22,7 +22,7 @@ become a few hundred counters.
 | `367a1450` | — | the B1+B2 review applied |
 | `375159b4` | B3 | the per-cell depth sums and `mean_depth_in_cell` — **own commit, do not bundle** |
 | `498a9f53` | — | the B3 review applied |
-| `b01b0212` | B4 | `merge`, `absorb`, `whole_sample_histogram` |
+| `b01b0212` | B4 | `merge`, `absorb`, the windows fold |
 | `698302f1` | — | the B4 review applied |
 
 `src/ng/parameter_estimation/generic/depth_bins.rs` gained `DepthBinEdges::bins()` and a
@@ -57,12 +57,13 @@ are not. Five signatures were deviated from; every measurement was reproduced.
   exist would touch every fit.
 
 Two internal types have no counterpart in the architecture: `CellTally { sites, depth_sum }`
-(see §4) and the private `absorb`. `whole_sample_histogram` is a free function taking the
+(see §4) and the private `absorb`. `fold_windows_of_one_ploidy` is a free function taking the
 already-selected windows, where arch §3 has it as a method on `GenericAccumulators`
-taking a `Ploidy`; C3 writes that method and it calls this. The restriction the parameter
-carried is stated on the free function as an obligation, because nothing in it can check
-one. And `DepthBinEdges` lost its `Clone` derive, so that cloning a ladder rather than
-its handle is a compile error rather than a merge that panics hours later.
+named `whole_sample_histogram` and taking a `Ploidy`; C3 writes that method and it calls
+this one, whose **name** carries the restriction the parameter carried (owner,
+2026-08-06) — nothing in the free function can check it. And `DepthBinEdges` lost its
+`Clone` derive, so that cloning a ladder rather than its handle is a compile error rather
+than a merge that panics hours later.
 
 ## 3. Deviation from the plan: where `depth_sums` lands
 
@@ -79,8 +80,8 @@ thing that reads it in another; keeping it whole is what the isolation is for.
 
 ## 4. What the reviews found
 
-Three loops, eleven agents, ~60 mutations. **Two Blockers, both of them missing tests
-rather than wrong code**, and one real bug.
+Three loops, eleven agents, ~80 mutations. **Five Blockers, four of them missing tests
+rather than wrong code**, and four findings that were wrong code.
 
 - **B1+B2 — a guard that fired in one of three regimes.** `SiteKey::attributing`
   documented an unconditional panic on a duplicate read group, but the check sat after
@@ -110,8 +111,8 @@ rather than wrong code**, and one real bug.
   four billion sites came back as three at a mean depth of 1.0, the truncation happening
   before `checked_add` ever saw the value. Replaced by `N: CellCounter + Into<C>`, which
   makes the narrowing `error[E0277]`.
-- **B4 — the read-group table has no fold to widen it.** `whole_sample_histogram` folds
-  *windows*; the read-group histogram is genome-wide and is not keyed by them, so at
+- **B4 — the read-group table has no fold to widen it.** The fold is over *windows*;
+  the read-group histogram is genome-wide and is not keyed by them, so at
   `u32` its busiest cell's depth sum passes 4.29 × 10⁹ about a third of the way through a
   human sample. The module had already made this argument once, for `covered_positions`,
   and the cell counters did not inherit it. Recorded in the type's doc and in both
@@ -158,10 +159,17 @@ prose was the first round of this plan with no wrong number in it.
 
 ## 6. Open items for the owner
 
-- **The read-group histogram's counter width is C3's to set, and it must be `u64`.**
-  Arch §3 sketches `BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram>` — the `u32`
-  default — which overflows its depth sums on a human sample with no fold to widen it.
-  The type doc and both overflow messages now say so; the declaration is C3's.
+- **✅ Settled by the owner (2026-08-06): the read-group histogram is
+  `DepthAltHistogram<u64>`, and the type has no default width any more.** Arch §3
+  sketches `BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram>` — the `u32` default —
+  which overflows its depth sums on a human sample with no fold to widen it. Recording
+  the decision was the weaker fix; removing `= u32` is the stronger one, because a
+  default fires in exactly one place — a field or signature written bare — and that is
+  where the choice is least visible. Every declaration now states its width. Nothing
+  else changed: every use site in the module was already explicit.
+- **✅ Settled by the owner (2026-08-06): `whole_sample_histogram` is renamed
+  `fold_windows_of_one_ploidy`.** The restriction cannot live in the signature, because
+  selecting a ploidy's windows is C3's job, so it lives in the name.
 - **Two owner items carried from Milestone A remain open**: the arch module table and the
   plan's A1 still name four files under `generic/` where five exist, and
   `spec` §6.5 / `arch` §5.3 still say "29% covered by runs" where the research note's

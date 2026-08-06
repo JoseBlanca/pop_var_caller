@@ -75,12 +75,13 @@ failure is a silent no-op.
   `impl Fn(N) -> C`; `|counter| counter as u32` compiled and four billion sites came back
   as three at a mean depth of 1.0, the truncation happening before `checked_add` saw the
   value. `N: CellCounter + Into<C>` makes it `error[E0277]`.
-- **The read-group table has no fold to widen it** (round 3). `whole_sample_histogram`
-  folds *windows*; the read-group histogram is genome-wide and is not keyed by them, so
-  at `u32` its busiest cell's depth sum passes 4.29 × 10⁹ about a third of the way
-  through a human sample — this module's own widening argument, applied to the table the
-  fold cannot reach. The width choice is C3's; the docs and both overflow messages now
-  say which width that table needs.
+- **The read-group table has no fold to widen it** (round 3). The fold is over *windows*;
+  the read-group histogram is genome-wide and is not keyed by them, so at `u32` its
+  busiest cell's depth sum passes 4.29 × 10⁹ about a third of the way through a human
+  sample — this module's own widening argument, applied to the table the fold cannot
+  reach. **Settled by the owner (2026-08-06): that table is `DepthAltHistogram<u64>`, and
+  the type's `= u32` default is gone**, so every declaration states its width rather than
+  inheriting one where the choice is least visible.
 - **The fold dropped the architecture's "for one ploidy"** (round 3), from its signature
   and its prose alike. A table carries no ploidy — `cells()` stamps one on read — so a
   mixed-ploidy fold produces cells all scored against one genotype set, and haploid
@@ -118,21 +119,25 @@ test's reach**, not the ones taken from the research note.
   implementation report.
 - **`DepthAndAltReads` as a shape name** (round 1, filed as a Nit by its own reporter).
   The architecture's name.
-- **Renaming `whole_sample_histogram` to `fold_windows_of_one_ploidy`** (round 3). The
-  reviewer's point stands — the name reads as "all of it" and invites the mixed-ploidy
-  fold — but it is the name the plan's B4 and the architecture both use, and C3's method
-  of the same name will pass the selected windows. The obligation went into the doc
-  instead.
+- **Renaming `whole_sample_histogram` to `fold_windows_of_one_ploidy`** was declined at
+  first — it is the name the plan's B4 and the architecture both use — and then **taken
+  on the owner's call (2026-08-06)**: the restriction cannot be a parameter, so the name
+  is the only place left for it, and "whole sample" reads as *all* of it. The
+  architecture's method keeps its name; the free function beneath it does not.
 
-One finding was accepted in a stronger form than proposed: the reviewer asked for a doc
-warning about `Arc::new((*edges).clone())`, then observed that `DepthBinEdges: Clone` has
-no user and cannot have one — `new()` takes no arguments, so every ladder a run can build
-is byte-identical. Dropping the derive turns a documented footgun into a compile error.
+**Two findings were accepted in a stronger form than proposed.** The reviewer asked for a
+doc warning about `Arc::new((*edges).clone())`, then observed that `DepthBinEdges: Clone`
+has no user and cannot have one — `new()` takes no arguments, so every ladder a run can
+build is byte-identical. Dropping the derive turns a documented footgun into a compile
+error. And the read-group width was to be recorded for C3 to honour; removing the `= u32`
+default instead makes every declaration state its width, so C3 cannot inherit the wrong
+one by writing the type bare.
 
 ## 4. What the reviews are owed next
 
-- **C3 must declare the read-group histogram as `DepthAltHistogram<u64>`.** This is the
-  one finding that outlives Milestone B.
+- **C3 declares the read-group histogram as `DepthAltHistogram<u64>` and the windows as
+  `<u32>`.** With the default gone it cannot omit either, which is as far as this
+  milestone can carry the finding.
 - **`merge` is not atomic**, which round 3 verified: a table whose merge panicked has
   already absorbed the cells the fold reached. Nothing recovers from those panics today;
   it is documented so that a later `catch_unwind` is not written on the assumption that

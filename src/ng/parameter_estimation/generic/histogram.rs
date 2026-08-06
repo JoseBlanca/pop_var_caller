@@ -410,39 +410,36 @@ mod sealed {
 /// are binned the same way by pointer identity rather than by comparing lengths and
 /// hoping (`arch/parameter_prepass_generic.md` §2.2).
 ///
-/// **Generic over its counter width, and the two widths are not interchangeable.** A
-/// window accumulates in `u32`; the fold over a sample's windows produces `u64`. The
-/// site count alone would not force that: folded over a human genome it reaches
-/// 3.1 × 10⁹ against a `u32` ceiling of 4.29 × 10⁹ — close, but inside. **The per-cell
-/// depth sum is what forces it**, and it is not close: 3.1 × 10¹¹, seventy-two times
-/// the ceiling. A fold that widened the counts and left the depth sums alone would wrap
-/// the one quantity `mean_depth_in_cell` exists to hold, which the design records as a
-/// mistake that has already shipped once. Those sums arrive with Milestone B3 and the
-/// widening with B4; the trait is here now so that neither can be added at the wrong
-/// width.
+/// **Generic over its counter width, and the two widths are not interchangeable.** The
+/// site count alone would not force a second width: folded over a human genome it
+/// reaches 3.1 × 10⁹ against a `u32` ceiling of 4.29 × 10⁹ — close, but inside. **The
+/// per-cell depth sum is what forces it**, and it is not close: 3.1 × 10¹¹,
+/// seventy-two times the ceiling. A fold that widened the counts and left the depth
+/// sums alone would wrap the one quantity [`DepthAltHistogram::mean_depth_in_cell`]
+/// exists to hold, which the design records as a mistake that has already shipped once.
 ///
-/// **The width defaults to `u32`, the window's — and only a window's.** A field or
-/// signature written `DepthAltHistogram` with no parameter is a *window* table, whose
-/// 100 kb of sites can reach neither ceiling: at most 100,000 sites and a depth sum
-/// under 1.2 × 10⁷.
+/// **There is no default width, deliberately: every declaration says which table it
+/// is.** A default would fire in exactly one place — a field or signature that writes
+/// the type bare — and that is where the choice is least visible and most easily wrong.
+/// Inference does not reach it either: `DepthAltHistogram::new` with neither a turbofish
+/// nor an annotation does not compile. Two tables exist and they take different widths:
 ///
-/// **The read-group histogram is not a window table and has to be spelled
-/// `DepthAltHistogram<u64>`.** It accumulates over the whole sample and there is no
-/// fold that widens it — [`whole_sample_histogram`] folds *windows*, which the
-/// read-group table is not keyed by. On a human sample the depth sum in its busiest
-/// cell passes 4.29 × 10⁹ about a third of the way through the run, while the site
-/// count survives: this type's own argument for widening, applied to the table the
-/// fold cannot reach. It is the same argument `covered_positions` below is `u64` for.
-/// The cost is 9.3 kB against 4.7 kB for that table (`spec/parameter_prepass_generic.md`
-/// §9), against the windowed object's 37 MB. Tomato hides the failure — 800 Mb at three
-/// reads is 2.4 × 10⁹ of depth in total, inside a `u32` before it is even spread over
-/// cells — so it arrives on the first human sample.
-///
-/// Inference will not pick the default up — `DepthAltHistogram::new` with neither a
-/// turbofish nor an annotation does not compile — so the default is only ever reached
-/// by naming the type, which is where a reader will not see it unless it is said here.
+/// - **A window table is `DepthAltHistogram<u32>`.** Its 100 kb of sites can reach
+///   neither ceiling — at most 100,000 sites and a depth sum under 1.2 × 10⁷ — and a
+///   sample holds about 8,000 of them, which is where the width buys something: 37 MB
+///   rather than 74 MB (`spec/parameter_prepass_generic.md` §9).
+/// - **The read-group table is `DepthAltHistogram<u64>`** (settled, owner, 2026-08-06).
+///   It accumulates over the whole sample and no fold widens it —
+///   [`fold_windows_of_one_ploidy`] folds *windows*, which the read-group table is not
+///   keyed by. On a human sample the depth sum in its busiest cell passes 4.29 × 10⁹
+///   about a third of the way through the run while the site count survives: this
+///   type's own argument for widening, applied to the table the fold cannot reach, and
+///   the same argument `covered_positions` below is `u64` for. It costs that table
+///   9.3 kB against 4.7 kB, beside the windowed object's 37 MB. Tomato hides the
+///   failure — 800 Mb at three reads is 2.4 × 10⁹ of depth in total, inside a `u32`
+///   before it is even spread over cells — so it would arrive on the first human sample.
 #[derive(Debug)]
-pub struct DepthAltHistogram<C: CellCounter = u32> {
+pub struct DepthAltHistogram<C: CellCounter> {
     /// The pooled arm: one tally per cell, rows located through
     /// [`DepthBinEdges::row_start`].
     pooled_cells: Vec<CellTally<C>>,
@@ -766,7 +763,7 @@ impl<C: CellCounter> DepthAltHistogram<C> {
         self.absorb(other);
     }
 
-    /// The one body behind [`DepthAltHistogram::merge`] and [`whole_sample_histogram`],
+    /// The one body behind [`DepthAltHistogram::merge`] and [`fold_windows_of_one_ploidy`],
     /// so a same-width merge and a widening fold cannot come to disagree about what
     /// "add these two tables" means.
     ///
@@ -876,24 +873,24 @@ impl<C: CellCounter> DepthAltHistogram<C> {
     }
 }
 
-/// Fold a sample's per-window tables into one, **widening both counters to `u64` here
-/// and only here**.
+/// Fold **one ploidy's** windows into a single whole-sample table, widening both
+/// counters to `u64` here and only here.
 ///
 /// Free and exact: a site enters exactly one window, so summing the windows gives the
 /// table a single whole-sample walk would have produced. That is why no third
 /// accumulator is built (`spec/parameter_prepass_generic.md` §1).
 ///
-/// **Every window handed in must be one ploidy's, and nothing here can check it.** The
-/// architecture states the restriction on its own signature — "sum the windows into one
-/// whole-sample table, *for one ploidy*" — where the ploidy is a parameter; this takes
-/// the windows already selected, because selecting them is the accumulator's job
-/// (Milestone C3), whose windows are keyed by `(contig, window, ploidy)`. A table
-/// carries no ploidy of its own — [`DepthAltHistogram::cells`] stamps one on read — so
-/// folding a haploid window into a diploid sample's table produces cells that are then
-/// all scored against one genotype set, and haploid sites, which can never be
-/// heterozygous, enter the heterozygosity fit as diploid ones. That is a wrong fitted
-/// rate with nothing to show for it, and this signature offers no resistance to it, so
-/// the obligation is stated here rather than left in the architecture.
+/// **The ploidy is in the name because it cannot be in the signature.** The
+/// architecture's version is a method taking a `Ploidy` — "sum the windows into one
+/// whole-sample table, *for one ploidy*"; this takes the windows already selected,
+/// because selecting them is the accumulator's job (Milestone C3), whose windows are
+/// keyed by `(contig, window, ploidy)`. A table carries no ploidy of its own —
+/// [`DepthAltHistogram::cells`] stamps one on read — so nothing here can check the
+/// obligation, and a fold given a haploid window and a diploid one produces cells all
+/// scored against a single genotype set: haploid sites, which can never be
+/// heterozygous, entering the heterozygosity fit as diploid ones. A wrong fitted rate
+/// with nothing to show for it. An earlier draft called this `whole_sample_histogram`,
+/// which reads as "all of it" and invites exactly that.
 ///
 /// **What forces the widening is the depth sum, not the site count.** Folded over a
 /// human genome the site count reaches 3.1 × 10⁹ against a `u32` ceiling of
@@ -911,7 +908,7 @@ impl<C: CellCounter> DepthAltHistogram<C> {
 /// Unless every window holds the same edges object as `edges` — see
 /// [`DepthAltHistogram::merge`] for why that is checked by pointer identity.
 #[must_use]
-pub fn whole_sample_histogram<'a, C: CellCounter + 'a>(
+pub fn fold_windows_of_one_ploidy<'a, C: CellCounter + 'a>(
     edges: &Arc<DepthBinEdges>,
     windows: impl IntoIterator<Item = &'a DepthAltHistogram<C>>,
 ) -> DepthAltHistogram<u64> {
@@ -2123,7 +2120,7 @@ mod tests {
             "the sites really were spread over windows"
         );
 
-        let folded = whole_sample_histogram(&edges, windows.iter());
+        let folded = fold_windows_of_one_ploidy(&edges, windows.iter());
 
         assert_eq!(folded.total_loci(), single_walk.total_loci());
         assert_eq!(
@@ -2146,7 +2143,8 @@ mod tests {
     #[test]
     fn folding_no_windows_gives_an_empty_table_binned_by_the_ladder_it_was_handed() {
         let edges = ladder();
-        let folded = whole_sample_histogram(&edges, std::iter::empty::<&DepthAltHistogram<u32>>());
+        let folded =
+            fold_windows_of_one_ploidy(&edges, std::iter::empty::<&DepthAltHistogram<u32>>());
 
         assert_eq!(folded.total_loci(), 0);
         assert_eq!(folded.total_covered_positions(), 0);
@@ -2240,7 +2238,7 @@ mod tests {
     #[should_panic(expected = "binned by different ladder objects")]
     fn folding_windows_binned_by_another_ladder_is_refused() {
         let windows = [DepthAltHistogram::<u32>::new(ladder())];
-        let _ = whole_sample_histogram(&ladder(), windows.iter());
+        let _ = fold_windows_of_one_ploidy(&ladder(), windows.iter());
     }
 
     /// **Three groups, in every order, because two cannot tell a sort from a swap.**
