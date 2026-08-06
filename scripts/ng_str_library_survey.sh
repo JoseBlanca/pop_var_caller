@@ -136,6 +136,42 @@ BIN="$REPO_ROOT/target/release/examples/ng_str_stutter_by_library"
 [[ -f "$REF" ]] || { echo "reference not found: $REF" >&2; exit 1; }
 
 mkdir -p "$WORK"
+
+# ---------------------------------------------------------------------------
+# The work directory belongs to one set of walk parameters
+# ---------------------------------------------------------------------------
+#
+# **Resuming with a different walk would silently mix incomparable results.** The per-file results
+# are keyed by filename alone, so a run over `SL4.0ch01` and a later one over a 10 Mb BED would land
+# side by side in the same directory and merge into one table whose libraries were measured over
+# different loci — a survey that looks whole and compares nothing. Since narrowing the walk is the
+# obvious thing to reach for when a run is taking too long, this is a mistake worth making
+# impossible rather than documenting.
+PARAMS="contigs=${CONTIGS:-} regions=${REGIONS:-} min_copies=$MIN_COPIES"
+STAMP="$WORK/.survey-params"
+existing=$(find "$WORK" -maxdepth 1 -name '*.tsv' -size +0 2>/dev/null | wc -l | tr -d ' ')
+if [[ -f "$STAMP" ]]; then
+    recorded=$(cat "$STAMP")
+    if [[ "$recorded" != "$PARAMS" ]]; then
+        echo "this work directory was built with different walk parameters:" >&2
+        echo "  it holds: $recorded" >&2
+        echo "  you asked: $PARAMS" >&2
+        echo "Results from two different walks are not comparable. Use a different OUT path, or" >&2
+        echo "delete $WORK to start over." >&2
+        exit 1
+    fi
+elif ((existing > 0)); then
+    # Written by a version of this script that did not stamp, so the parameters are unknown.
+    echo "$WORK holds $existing result(s) but no record of how they were walked." >&2
+    echo "If they came from the same walk you are asking for now, re-run with" >&2
+    echo "  SURVEY_ADOPT_EXISTING=1" >&2
+    echo "Otherwise delete $WORK. Mixing two walks makes a table that compares nothing." >&2
+    [[ "${SURVEY_ADOPT_EXISTING:-0}" == "1" ]] || exit 1
+    echo "$PARAMS" > "$STAMP"
+else
+    echo "$PARAMS" > "$STAMP"
+fi
+
 walk_args=()
 if [[ -n "$REGIONS" ]]; then
     [[ -f "$REGIONS" ]] || { echo "regions BED not found: $REGIONS" >&2; exit 1; }
