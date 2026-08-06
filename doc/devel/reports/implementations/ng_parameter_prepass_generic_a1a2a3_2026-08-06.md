@@ -31,18 +31,26 @@ Three choices the plan and architecture left open. None changes a design decisio
 each is recorded because a later reader would otherwise have to re-derive it.
 
 1. **Where the step-local scalars live.** Arch §2.1 says they "stay in
-   `parameter_estimation/`" without naming a file. They are in `mod.rs`, the module's
-   own surface, because `WindowIndex` is read by `generic/` and the ladder by
-   `fitting/`, and a scalar read from both sub-units belongs above both.
-2. **`error_rate_ladder()` builds rather than tabulates.** The three Phred constants
-   are the single statement of the ladder's shape, so a stored table would be a second
-   one that could disagree with them.
-3. **The three `[0, 1]` rates reject non-finite values explicitly**, not only through
-   the range check. The range check alone already rejects `NaN` and `+∞`; `is_finite`
-   is what makes `-∞` reject by the same rule as the rest, so a rate arriving from a
-   division by zero cannot enter a likelihood. This copies `FlatEmission::try_new`
-   ([emission.rs:287](../../../../src/ng/alignment/emission.rs#L287)) rather than
-   `MismatchFraction::try_new`, which relies on the range check alone.
+   `parameter_estimation/`" without naming a file. ~~They are in `mod.rs`~~ —
+   **corrected after review**: they are in `generic/mod.rs`. The original reasoning
+   said the ladder was read by `fitting/`, which the design contradicts —
+   `fit_by_profile_scan` takes a ladder as a *parameter* and knows nothing about
+   markers. Both scalars are the SNP/indel path's, and `parameter_estimation/mod.rs`
+   is the level the STR sub-unit will share.
+2. **`error_rate_ladder()` builds rather than tabulates.** The Phred constants are the
+   single statement of the ladder's shape, so a stored table would be a second one
+   that could disagree with them. **Amended after review:** the *rung count* is now a
+   stated constant rather than a rounded division, because the division's `as u32`
+   cast saturated — swapping the two edge constants gave a silent one-rung ladder.
+3. ~~**The three `[0, 1]` rates reject non-finite values explicitly.**~~
+   **Withdrawn — the assumption was false.** It claimed the range check misses `-∞`
+   and that `is_finite` is what catches it. `(0.0..=1.0).contains(&x)` is
+   `0.0 <= x && x <= 1.0`, which rejects `NaN`, `+∞` **and** `-∞` on its own; four
+   review agents independently deleted the guard and watched every test stay green.
+   What landed instead is one predicate in one place — a private
+   `checked_probability(x, reject)` taking each type's `DomainError` variant as a
+   `fn(f64) -> DomainError` — so no constructor can state the range differently from
+   another.
 
 ## 3. Changes made
 
@@ -114,7 +122,8 @@ All in the container (`./scripts/dev.sh`).
 | `cargo clippy --all-targets --all-features -- -D warnings` | clean |
 | `cargo test --lib ng::types::` | 26 passed, 0 failed |
 | `cargo test --lib ng::parameter_estimation` | 3 passed, 0 failed |
-| `cargo test --all-targets --all-features` | 2,904 passed, **1 failed — pre-existing** |
+| `cargo test --all-targets --all-features` | 2,901 passed, **1 failed — pre-existing**, 5 ignored |
+| `cargo doc --no-deps --lib` | 15 unresolved links — **12 pre-existing, 3 introduced here and fixed after review** |
 
 **The one failure is not this step's**, and it was proved so rather than assumed:
 `ng::locus_generation::pileup::parity::every_divergence_from_production_is_one_of_the_six_named_classes`
@@ -128,9 +137,18 @@ this one carries only the plan's code.
 
 ## 6. Tradeoffs and follow-ups
 
-- **Nothing computes yet.** Milestone A is types by design; the first thing that reads a
-  number is Milestone D. The ladder is the exception and is tested against its own
-  arithmetic.
+- **Nothing computes yet.** Milestone A is types by design. The first arithmetic is
+  Milestone B's depth means — `add_site` derives a bin and sums depths, and B3's
+  `mean_depth_in_cell` is a mean isolated in its own commit because getting it wrong
+  lands the fit 5.2 rungs off — and the first fit is Milestone D. The ladder is this
+  milestone's exception and is tested against its own arithmetic.
+- **Review outcome.** Six categories, each in its own worktree: 0 Blocker, 4 Major,
+  16 Minor, 10 Nit; 28 applied, 4 deferred, 0 disputed. See the
+  [review](../reviews/ng_parameter_prepass_generic_a1a2a3_2026-08-06.md) and the
+  [fixes applied](../reviews/fixes_applied_2026-08-06.md). The validation figures
+  above are the pre-fix ones; after fixes the suite is 2,906 passed / 1 failed
+  (pre-existing) / 5 ignored, and no file in this step contributes a `cargo doc`
+  error.
 - **`Phred` is not a type**, and will not become one. `types.rs` already has `LogProb`
   for the logarithm of a probability; a second log-scaled type in a different base would
   make a base mix-up a plausible wrong number instead of a compile error.
