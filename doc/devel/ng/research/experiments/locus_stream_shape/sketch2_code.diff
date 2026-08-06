@@ -1,0 +1,1712 @@
+diff --git a/examples/sketch2_merge_shape.rs b/examples/sketch2_merge_shape.rs
+new file mode 100644
+index 0000000..79aad21
+--- /dev/null
++++ b/examples/sketch2_merge_shape.rs
+@@ -0,0 +1,943 @@
++//! **Sketch 2 — the k-way cohort merge: records vs. fold-first.**
++//!
++//! Throwaway experiment for `doc/devel/ng/impl_plan/locus_stream_shape_experiments.md`
++//! §4 "Sketch 2". Deleted after the decision; commits no interface.
++//!
++//! ## The question
++//!
++//! Does the merge want columns, and what does a per-sample cursor cost when it
++//! cannot borrow?
++//!
++//! ## The three arms
++//!
++//! All three walk the same cohort of `.psp` files with the same shipped block
++//! decoder, cover byte-identically the same genomic span, and hand the same
++//! merged evidence to the same consumer. Only the shape the merge sees differs.
++//!
++//! - **`merger`** — production's own
++//!   [`PerPositionMerger`](pop_var_caller::var_calling::per_position_merger::PerPositionMerger)
++//!   over the shipped `OwnedRecordsIter`. The literal default architecture, warts
++//!   included (it builds a fresh `Vec<Option<PileupRecord>>` per output position).
++//!
++//! - **`records`** — the same shape written fresh: one owned `PileupRecord` of
++//!   lookahead per sample in a reused array, an O(N) scan over the heads at each
++//!   output position, no per-position allocation. This separates *the record
++//!   shape* from *production's implementation of it*.
++//!
++//! - **`fold`** — fold first, materialise late. One
++//!   [`BlockColumnReader`](pop_var_caller::psp::BlockColumnReader) per sample.
++//!   Each round loads a block per sample, derives the light columns (position,
++//!   summed non-REF observations), folds them across samples over the watermark
++//!   window to find the variable positions, and materialises **only those** —
++//!   never building a `PileupRecord` at all.
++//!
++//! ## The borrow constraint, which is the point
++//!
++//! `BlockColumnReader::columns()` hands out a `BlockColumns<'_>` borrowing the
++//! reader's own decode buffers, so a view cannot survive the next
++//! `load_current()` / `advance()`. That is production's self-referential cursor,
++//! restated. This sketch's answer is a **round structure**: a mutable phase loads
++//! one block per sample, a shared phase borrows every sample's view at once and
++//! folds + materialises everything up to the cohort watermark, the views are
++//! dropped, and a mutable phase advances the drained samples. No reference
++//! counting and no per-sample owned copy of the block — the views are re-taken
++//! each round, which is free (`columns()` only assembles a struct of slices).
++//!
++//! ## Usage
++//!
++//! ```text
++//! sketch2_merge_shape <merger|records|fold> <full|digest> <count|nocount> \
++//!                     <max_blocks|all> <a.psp> ...
++//! ```
++//!
++//! `max_blocks` derives a genomic stop key from the **first** sample's block
++//! index, so every arm covers exactly the same span.
++
++#[cfg(feature = "dhat-heap")]
++#[global_allocator]
++static ALLOC: dhat::Alloc = dhat::Alloc;
++
++use std::fs::File;
++use std::io::BufReader;
++use std::path::PathBuf;
++
++use pop_var_caller::pileup_record::{AlleleObservation, PileupRecord};
++use pop_var_caller::psp::writer::SnpKind;
++use pop_var_caller::psp::{BlockColumnReader, BlockColumns, OwnedRecordsIter, PspReader};
++use pop_var_caller::var_calling::per_position_merger::{PerPositionMerger, check_chromosome_agreement};
++
++/// Cohort keep threshold — production's `--min-alt-obs-per-sample` default.
++const MIN_ALT_OBS: u32 = 2;
++/// Alleles the calling proxy carries per position (freebayes-ish cap).
++const MAX_ALLELES: usize = 4;
++/// EM iterations the calling proxy runs per variable position.
++const EM_ITERS: usize = 5;
++/// Upper bound on the dense fold window, so a chromosome change (the key jumps
++/// by 2^32) or a long uncovered gap cannot ask for an astronomical array.
++const MAX_WINDOW: u64 = 1 << 20;
++/// Fixed-width bytes one merged allele evidence carries (obs, q_sum, fwd,
++/// placed_left, placed_start, mapq_sum, mapq_sum_sq).
++const EVIDENCE_FIXED_BYTES: u64 = 4 + 8 + 4 + 4 + 4 + 4 + 8;
++
++type Src = BufReader<File>;
++
++// =====================================================================
++// The merged evidence — what every arm must produce, byte for byte
++// =====================================================================
++
++#[derive(Default)]
++struct AlleleEvidence {
++    seq: Vec<u8>,
++    chain_ids: Vec<u64>,
++    obs: u32,
++    q_sum: f64,
++    fwd: u32,
++    placed_left: u32,
++    placed_start: u32,
++    mapq_sum: u32,
++    mapq_sum_sq: u64,
++}
++
++#[derive(Default)]
++struct SampleEvidence {
++    sample: u32,
++    alleles: Vec<AlleleEvidence>,
++    n_alleles: usize,
++}
++
++/// One merged position. `samples[..n]` are the contributing samples in cohort
++/// order; everything past `n` is pooled storage from earlier positions.
++#[derive(Default)]
++struct MergedPosition {
++    key: u64,
++    samples: Vec<SampleEvidence>,
++    n: usize,
++}
++
++impl MergedPosition {
++    fn begin(&mut self, key: u64) {
++        self.key = key;
++        self.n = 0;
++    }
++
++    fn open_sample(&mut self, sample: u32) -> &mut SampleEvidence {
++        if self.n == self.samples.len() {
++            self.samples.push(SampleEvidence::default());
++        }
++        let se = &mut self.samples[self.n];
++        self.n += 1;
++        se.sample = sample;
++        se.n_alleles = 0;
++        se
++    }
++}
++
++impl SampleEvidence {
++    fn open_allele(&mut self) -> &mut AlleleEvidence {
++        if self.n_alleles == self.alleles.len() {
++            self.alleles.push(AlleleEvidence::default());
++        }
++        let a = &mut self.alleles[self.n_alleles];
++        self.n_alleles += 1;
++        a
++    }
++}
++
++impl AlleleEvidence {
++    /// Copy one allele out of a materialised record.
++    fn take_from_record(&mut self, a: &AlleleObservation) -> u64 {
++        self.seq.clear();
++        self.seq.extend_from_slice(&a.seq);
++        self.chain_ids.clear();
++        self.chain_ids.extend_from_slice(&a.chain_ids);
++        self.obs = a.support.num_obs;
++        self.q_sum = a.support.q_sum;
++        self.fwd = a.support.fwd;
++        self.placed_left = a.support.placed_left;
++        self.placed_start = a.support.placed_start;
++        self.mapq_sum = a.support.mapq_sum;
++        self.mapq_sum_sq = a.support.mapq_sum_sq;
++        self.seq.len() as u64 + (self.chain_ids.len() as u64) * 8 + EVIDENCE_FIXED_BYTES
++    }
++
++    /// Copy one allele straight out of a decoded block's columns.
++    fn take_from_columns(&mut self, bc: &BlockColumns<'_>, a: usize) -> u64 {
++        let sb = bc.allele_seq_offsets[a] as usize;
++        let se = bc.allele_seq_offsets[a + 1] as usize;
++        self.seq.clear();
++        self.seq.extend_from_slice(&bc.allele_seq_data[sb..se]);
++        let cb = bc.allele_chain_ids_offsets[a] as usize;
++        let ce = bc.allele_chain_ids_offsets[a + 1] as usize;
++        self.chain_ids.clear();
++        self.chain_ids
++            .extend_from_slice(&bc.allele_chain_ids_data[cb..ce]);
++        self.obs = bc.allele_obs_count[a];
++        self.q_sum = bc.allele_q_sum_log[a];
++        self.fwd = bc.allele_fwd_count[a];
++        self.placed_left = bc.allele_placed_left_count[a];
++        self.placed_start = bc.allele_placed_start_count[a];
++        self.mapq_sum = bc.allele_mapq_sum[a];
++        self.mapq_sum_sq = bc.allele_mapq_sum_sq[a];
++        self.seq.len() as u64 + (self.chain_ids.len() as u64) * 8 + EVIDENCE_FIXED_BYTES
++    }
++}
++
++// =====================================================================
++// Counters — first-class results, not diagnostics
++// =====================================================================
++
++#[derive(Default, Debug)]
++struct Counters {
++    /// Positions any sample covered (the merge's input scale).
++    positions_seen: u64,
++    /// Positions that passed the cohort keep rule.
++    positions_kept: u64,
++    /// Per-locus objects the producer built: arm `merger`/`records`, one owned
++    /// `PileupRecord` per covered base per sample; arm `fold`, none.
++    producer_records: u64,
++    /// Bytes the producer copied into those objects (heap payload only).
++    producer_bytes: u64,
++    /// Per-(sample, position) evidence objects the merge materialised.
++    merge_objects: u64,
++    /// Bytes copied at the merge handoff (producer storage → merged evidence).
++    merge_bytes: u64,
++}
++
++/// Heap bytes one `PileupRecord` owns: the allele vector plus, per allele, the
++/// sequence bytes and the chain-id list.
++fn record_owned_bytes(rec: &PileupRecord) -> u64 {
++    let per_allele = std::mem::size_of::<AlleleObservation>() as u64;
++    let mut b = rec.alleles.len() as u64 * per_allele;
++    for a in &rec.alleles {
++        b += a.seq.len() as u64 + (a.chain_ids.len() as u64) * 8;
++    }
++    b
++}
++
++#[inline]
++fn nonref_obs_of(rec: &PileupRecord) -> u32 {
++    rec.alleles[1..]
++        .iter()
++        .map(|a| a.support.num_obs)
++        .fold(0u32, u32::saturating_add)
++}
++
++// =====================================================================
++// The sink: correctness digest + the calling proxy
++// =====================================================================
++
++#[derive(Clone, Copy, PartialEq)]
++enum Consumer {
++    /// Digest only — the merge's own cost, with just enough work that nothing
++    /// can be optimised away.
++    Digest,
++    /// Digest plus a per-position genotype-likelihood + allele-frequency EM: the
++    /// real arithmetic the merged evidence exists to feed.
++    Full,
++}
++
++struct Sink {
++    consumer: Consumer,
++    digest: u64,
++    table: Vec<Vec<u8>>,
++    table_len: usize,
++    counts: Vec<u32>,
++    errs: Vec<f64>,
++    gl: Vec<f64>,
++    post: Vec<f64>,
++    freqs: Vec<f64>,
++    loglik_acc: f64,
++}
++
++#[inline]
++fn fnv(h: &mut u64, bytes: &[u8]) {
++    for &b in bytes {
++        *h ^= u64::from(b);
++        *h = h.wrapping_mul(0x100_0000_01b3);
++    }
++}
++
++impl Sink {
++    fn new(consumer: Consumer) -> Self {
++        Self {
++            consumer,
++            digest: 0xcbf2_9ce4_8422_2325,
++            table: Vec::new(),
++            table_len: 0,
++            counts: Vec::new(),
++            errs: Vec::new(),
++            gl: Vec::new(),
++            post: Vec::new(),
++            freqs: Vec::new(),
++            loglik_acc: 0.0,
++        }
++    }
++
++    /// Fold one merged position into the digest — the correctness oracle. Every
++    /// byte the arms must agree on goes through here, in a fixed order, on raw
++    /// bit patterns, so agreement is exact and needs no tolerance.
++    fn accept(&mut self, mp: &MergedPosition) {
++        let mut h = self.digest;
++        fnv(&mut h, &mp.key.to_le_bytes());
++        fnv(&mut h, &(mp.n as u32).to_le_bytes());
++        for se in &mp.samples[..mp.n] {
++            fnv(&mut h, &se.sample.to_le_bytes());
++            fnv(&mut h, &(se.n_alleles as u32).to_le_bytes());
++            for a in &se.alleles[..se.n_alleles] {
++                fnv(&mut h, &a.seq);
++                fnv(&mut h, &a.obs.to_le_bytes());
++                fnv(&mut h, &a.q_sum.to_bits().to_le_bytes());
++                fnv(&mut h, &a.fwd.to_le_bytes());
++                fnv(&mut h, &a.placed_left.to_le_bytes());
++                fnv(&mut h, &a.placed_start.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum_sq.to_le_bytes());
++                for &c in &a.chain_ids {
++                    fnv(&mut h, &c.to_le_bytes());
++                }
++            }
++        }
++        self.digest = h;
++        if self.consumer == Consumer::Full {
++            let ll = self.call(mp);
++            self.loglik_acc += ll;
++            let mut h = self.digest;
++            fnv(&mut h, &ll.to_bits().to_le_bytes());
++            self.digest = h;
++        }
++    }
++
++    /// The calling proxy: build the cohort allele table, derive per-sample
++    /// diploid genotype likelihoods from (obs, q_sum), then run a fixed number
++    /// of EM iterations on the allele frequencies. Identical arithmetic over
++    /// identical inputs in identical order in every arm, so it is bit-exact.
++    fn call(&mut self, mp: &MergedPosition) -> f64 {
++        self.table_len = 0;
++        for se in &mp.samples[..mp.n] {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let known = self.table[..self.table_len]
++                    .iter()
++                    .any(|t| t.as_slice() == a.seq.as_slice());
++                if !known && self.table_len < MAX_ALLELES {
++                    if self.table_len == self.table.len() {
++                        self.table.push(Vec::new());
++                    }
++                    let slot = &mut self.table[self.table_len];
++                    slot.clear();
++                    slot.extend_from_slice(&a.seq);
++                    self.table_len += 1;
++                }
++            }
++        }
++        let k = self.table_len.max(1);
++        let n_gt = k * (k + 1) / 2;
++        let s_n = mp.n;
++
++        self.counts.clear();
++        self.counts.resize(s_n * k, 0);
++        self.errs.clear();
++        self.errs.resize(s_n * k, 0.0);
++        for (si, se) in mp.samples[..s_n].iter().enumerate() {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let Some(idx) = self.table[..self.table_len]
++                    .iter()
++                    .position(|t| t.as_slice() == a.seq.as_slice())
++                else {
++                    continue;
++                };
++                self.counts[si * k + idx] += a.obs;
++                self.errs[si * k + idx] = (a.q_sum / f64::from(a.obs)).exp().clamp(1e-9, 0.5);
++            }
++        }
++
++        // Per-sample diploid genotype likelihoods.
++        self.gl.clear();
++        self.gl.resize(s_n * n_gt, 0.0);
++        for si in 0..s_n {
++            let mut g = 0usize;
++            for i in 0..k {
++                for j in i..k {
++                    let mut ll = 0.0f64;
++                    for a in 0..k {
++                        let n = self.counts[si * k + a];
++                        if n == 0 {
++                            continue;
++                        }
++                        let e = self.errs[si * k + a];
++                        let dose = f64::from(u8::from(a == i)) + f64::from(u8::from(a == j));
++                        let p = (dose / 2.0) * (1.0 - e) + (1.0 - dose / 2.0) * (e / 3.0);
++                        ll += f64::from(n) * p.max(1e-300).ln();
++                    }
++                    self.gl[si * n_gt + g] = ll;
++                    g += 1;
++                }
++            }
++        }
++
++        // Allele-frequency EM.
++        self.freqs.clear();
++        self.freqs.resize(k, 1.0 / k as f64);
++        self.post.clear();
++        self.post.resize(n_gt, 0.0);
++        let mut loglik = 0.0f64;
++        for _ in 0..EM_ITERS {
++            let mut new_f = [0.0f64; MAX_ALLELES];
++            loglik = 0.0;
++            for si in 0..s_n {
++                let mut norm = 0.0f64;
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let prior = if i == j {
++                            self.freqs[i] * self.freqs[i]
++                        } else {
++                            2.0 * self.freqs[i] * self.freqs[j]
++                        };
++                        let w = prior * self.gl[si * n_gt + g].exp();
++                        self.post[g] = w;
++                        norm += w;
++                        g += 1;
++                    }
++                }
++                if norm <= 0.0 {
++                    continue;
++                }
++                loglik += norm.ln();
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let p = self.post[g] / norm;
++                        new_f[i] += p;
++                        new_f[j] += p;
++                        g += 1;
++                    }
++                }
++            }
++            let tot: f64 = new_f[..k].iter().sum();
++            if tot > 0.0 {
++                for i in 0..k {
++                    self.freqs[i] = new_f[i] / tot;
++                }
++            }
++        }
++        loglik
++    }
++}
++
++#[inline]
++fn key_of(chrom_id: u32, pos: u32) -> u64 {
++    (u64::from(chrom_id) << 32) | u64::from(pos)
++}
++
++// =====================================================================
++// Arm 1 — production's own PerPositionMerger
++// =====================================================================
++
++fn run_production_merger(
++    paths: &[PathBuf],
++    stop_key: u64,
++    sink: &mut Sink,
++    c: &mut Counters,
++    count: bool,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let mut readers = Vec::with_capacity(paths.len());
++    for p in paths {
++        readers.push(PspReader::new(BufReader::with_capacity(
++            64 * 1024,
++            File::open(p)?,
++        ))?);
++    }
++    let chroms = check_chromosome_agreement(&readers)?;
++    let names: Vec<String> = readers.iter().map(|r| r.header().sample.clone()).collect();
++    let iters: Vec<OwnedRecordsIter<Src, SnpKind>> = readers
++        .into_iter()
++        .map(PspReader::into_records_of::<SnpKind>)
++        .collect();
++    let merger = PerPositionMerger::new(iters, names, chroms)?;
++
++    let mut mp = MergedPosition::default();
++    for item in merger {
++        let pp = item?;
++        let key = key_of(pp.chrom_id, pp.pos);
++        if key >= stop_key {
++            break;
++        }
++        c.positions_seen += 1;
++        if count {
++            for slot in pp.per_sample.iter().flatten() {
++                c.producer_records += 1;
++                c.producer_bytes += record_owned_bytes(slot);
++            }
++        }
++        let max_nonref = pp
++            .per_sample
++            .iter()
++            .flatten()
++            .map(nonref_obs_of)
++            .max()
++            .unwrap_or(0);
++        if max_nonref < MIN_ALT_OBS {
++            continue;
++        }
++        c.positions_kept += 1;
++        mp.begin(key);
++        for (si, slot) in pp.per_sample.iter().enumerate() {
++            let Some(rec) = slot else { continue };
++            let se = mp.open_sample(si as u32);
++            for a in &rec.alleles {
++                let b = se.open_allele().take_from_record(a);
++                if count {
++                    c.merge_bytes += b;
++                }
++            }
++            if count {
++                c.merge_objects += 1;
++            }
++        }
++        sink.accept(&mp);
++    }
++    Ok(())
++}
++
++// =====================================================================
++// Arm 2 — the record shape, written fresh (no per-position allocation)
++// =====================================================================
++
++struct RecordCursor {
++    it: OwnedRecordsIter<Src, SnpKind>,
++    head: Option<PileupRecord>,
++}
++
++impl RecordCursor {
++    fn pull(&mut self, c: &mut Counters, count: bool) -> Result<(), Box<dyn std::error::Error>> {
++        self.head = match self.it.next() {
++            Some(r) => {
++                let rec = r?;
++                if count {
++                    c.producer_records += 1;
++                    c.producer_bytes += record_owned_bytes(&rec);
++                }
++                Some(rec)
++            }
++            None => None,
++        };
++        Ok(())
++    }
++
++    #[inline]
++    fn key(&self) -> u64 {
++        match &self.head {
++            Some(r) => key_of(r.chrom_id, r.pos),
++            None => u64::MAX,
++        }
++    }
++}
++
++fn run_records(
++    paths: &[PathBuf],
++    stop_key: u64,
++    sink: &mut Sink,
++    c: &mut Counters,
++    count: bool,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let mut cur: Vec<RecordCursor> = Vec::with_capacity(paths.len());
++    for p in paths {
++        let r = PspReader::new(BufReader::with_capacity(64 * 1024, File::open(p)?))?;
++        cur.push(RecordCursor {
++            it: r.into_records_of::<SnpKind>(),
++            head: None,
++        });
++    }
++    for cursor in &mut cur {
++        cursor.pull(c, count)?;
++    }
++
++    let mut mp = MergedPosition::default();
++    loop {
++        // Pass 1 — O(N) scan for the minimum head key.
++        let mut min_key = u64::MAX;
++        for cursor in &cur {
++            let k = cursor.key();
++            if k < min_key {
++                min_key = k;
++            }
++        }
++        if min_key == u64::MAX || min_key >= stop_key {
++            break;
++        }
++        c.positions_seen += 1;
++
++        // Pass 2 — O(N) scan applying the cohort keep rule to the heads on
++        // `min_key`. Touches only the cheap non-REF observation sums.
++        let mut max_nonref = 0u32;
++        for cursor in &cur {
++            if cursor.key() == min_key {
++                let s = nonref_obs_of(cursor.head.as_ref().unwrap());
++                if s > max_nonref {
++                    max_nonref = s;
++                }
++            }
++        }
++        let kept = max_nonref >= MIN_ALT_OBS;
++        if kept {
++            c.positions_kept += 1;
++            mp.begin(min_key);
++        }
++
++        // Pass 3 — O(N) scan copying the kept position's evidence out of the
++        // heads, then advancing every head that sat on `min_key`.
++        for si in 0..cur.len() {
++            if cur[si].key() != min_key {
++                continue;
++            }
++            if kept {
++                let rec = cur[si].head.as_ref().unwrap();
++                let se = mp.open_sample(si as u32);
++                let mut bytes = 0u64;
++                for a in &rec.alleles {
++                    bytes += se.open_allele().take_from_record(a);
++                }
++                if count {
++                    c.merge_bytes += bytes;
++                    c.merge_objects += 1;
++                }
++            }
++            cur[si].pull(c, count)?;
++        }
++        if kept {
++            sink.accept(&mp);
++        }
++    }
++    Ok(())
++}
++
++// =====================================================================
++// Arm 3 — fold first, materialise late
++// =====================================================================
++
++/// The light columns arm `fold` derives once per loaded block, plus the offset
++/// arithmetic the ragged columns need. This is what the record shape hands the
++/// consumer for free and the column shape has to rebuild.
++#[derive(Default)]
++struct BlockLight {
++    /// Absolute 1-based position per record (`delta_pos` prefix-summed).
++    pos: Vec<u32>,
++    /// Summed non-REF observations per record — the cheap fold column.
++    nonref: Vec<u32>,
++    /// Cumulative allele index per record (`n_alleles` prefix-summed).
++    allele_start: Vec<u32>,
++    chrom_id: u32,
++    /// Records before this index are already merged.
++    cursor: usize,
++}
++
++impl BlockLight {
++    fn fill(&mut self, bc: &BlockColumns<'_>) {
++        let n = bc.n_records as usize;
++        self.chrom_id = bc.chrom_id;
++        self.cursor = 0;
++        self.pos.clear();
++        self.pos.reserve(n);
++        self.nonref.clear();
++        self.nonref.reserve(n);
++        self.allele_start.clear();
++        self.allele_start.reserve(n);
++
++        let mut p = bc.first_pos;
++        let mut off = 0u32;
++        for i in 0..n {
++            p = p.wrapping_add(bc.delta_pos[i] as u32);
++            self.pos.push(p);
++            self.allele_start.push(off);
++            let na = bc.n_alleles[i] as u32;
++            let lo = off as usize + 1;
++            let hi = off as usize + na as usize;
++            let mut s = 0u32;
++            for a in lo..hi {
++                s = s.saturating_add(bc.allele_obs_count[a]);
++            }
++            self.nonref.push(s);
++            off += na;
++        }
++    }
++
++    #[inline]
++    fn key_at(&self, i: usize) -> u64 {
++        key_of(self.chrom_id, self.pos[i])
++    }
++
++    fn last_key(&self) -> Option<u64> {
++        self.pos.last().map(|&p| key_of(self.chrom_id, p))
++    }
++}
++
++#[allow(clippy::too_many_lines)]
++fn run_fold(
++    paths: &[PathBuf],
++    stop_key: u64,
++    sink: &mut Sink,
++    c: &mut Counters,
++    count: bool,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = paths.len();
++    let mut readers: Vec<BlockColumnReader<Src>> = Vec::with_capacity(n);
++    for p in paths {
++        let r = PspReader::new(BufReader::with_capacity(64 * 1024, File::open(p)?))?;
++        readers.push(r.into_column_blocks());
++    }
++    let mut light: Vec<BlockLight> = (0..n).map(|_| BlockLight::default()).collect();
++    let mut loaded = vec![false; n];
++    let mut done = vec![false; n];
++    let mut mat_cursor = vec![0usize; n];
++
++    // Dense fold window: one slot per reference base of the current watermark
++    // window. Loci are one per covered base, so a dense array is enough — the
++    // sorted k-way merge production folds over its sparser `.psp` row set is
++    // not needed here.
++    let mut window_nonref: Vec<u32> = Vec::new();
++    let mut window_seen: Vec<bool> = Vec::new();
++    let mut kept_offsets: Vec<u32> = Vec::new();
++    let mut mp = MergedPosition::default();
++
++    let mut next_key = 0u64;
++
++    loop {
++        // ---- mutable phase: give every live sample a loaded block ----------
++        for s in 0..n {
++            if done[s] || loaded[s] {
++                continue;
++            }
++            loop {
++                let Some(e) = readers[s].peek_block().copied() else {
++                    done[s] = true;
++                    break;
++                };
++                if key_of(e.chrom_id, e.first_pos) >= stop_key {
++                    done[s] = true;
++                    break;
++                }
++                if key_of(e.chrom_id, e.last_pos) < next_key {
++                    readers[s].advance();
++                    continue;
++                }
++                readers[s].load_current()?;
++                let bc = readers[s].columns().expect("block just loaded");
++                light[s].fill(&bc);
++                // Skip records already merged in an earlier round.
++                let l = &mut light[s];
++                while l.cursor < l.pos.len() && l.key_at(l.cursor) < next_key {
++                    l.cursor += 1;
++                }
++                loaded[s] = true;
++                break;
++            }
++        }
++
++        // ---- watermark: the lowest block end among live samples ------------
++        let mut watermark = u64::MAX;
++        let mut win_lo = u64::MAX;
++        let mut any_live = false;
++        for s in 0..n {
++            if !loaded[s] {
++                continue;
++            }
++            any_live = true;
++            if let Some(lk) = light[s].last_key() {
++                watermark = watermark.min(lk);
++            }
++            let l = &light[s];
++            if l.cursor < l.pos.len() {
++                win_lo = win_lo.min(l.key_at(l.cursor));
++            }
++        }
++        if !any_live {
++            break;
++        }
++        watermark = watermark.min(stop_key.saturating_sub(1));
++        let win_lo = win_lo.max(next_key).min(watermark);
++        // Cap the dense window so a chromosome change or a long uncovered gap
++        // cannot ask for an astronomical array.
++        watermark = watermark.min(win_lo + MAX_WINDOW - 1);
++
++        if watermark >= win_lo {
++            let win_len = (watermark - win_lo + 1) as usize;
++            window_nonref.clear();
++            window_nonref.resize(win_len, 0);
++            if count {
++                window_seen.clear();
++                window_seen.resize(win_len, false);
++            }
++
++            // ---- shared phase: every sample's columns borrowed at once -----
++            {
++                let views: Vec<Option<BlockColumns<'_>>> = (0..n)
++                    .map(|s| if loaded[s] { readers[s].columns() } else { None })
++                    .collect();
++
++                // Fold: max non-REF observations across samples, per position.
++                for s in 0..n {
++                    if views[s].is_none() {
++                        continue;
++                    }
++                    let l = &light[s];
++                    let mut i = l.cursor;
++                    while i < l.pos.len() {
++                        let k = l.key_at(i);
++                        if k > watermark {
++                            break;
++                        }
++                        let off = (k - win_lo) as usize;
++                        if l.nonref[i] > window_nonref[off] {
++                            window_nonref[off] = l.nonref[i];
++                        }
++                        if count {
++                            window_seen[off] = true;
++                        }
++                        i += 1;
++                    }
++                }
++
++                kept_offsets.clear();
++                for (off, &v) in window_nonref.iter().enumerate() {
++                    if v >= MIN_ALT_OBS {
++                        kept_offsets.push(off as u32);
++                    }
++                }
++                c.positions_kept += kept_offsets.len() as u64;
++                if count {
++                    c.positions_seen += window_seen.iter().filter(|&&b| b).count() as u64;
++                }
++
++                // Materialise only the kept positions, straight out of the
++                // columns, with one monotone cursor per sample.
++                for s in 0..n {
++                    mat_cursor[s] = light[s].cursor;
++                }
++                for &off in &kept_offsets {
++                    let key = win_lo + u64::from(off);
++                    mp.begin(key);
++                    for s in 0..n {
++                        let Some(bc) = views[s].as_ref() else { continue };
++                        let l = &light[s];
++                        let mut i = mat_cursor[s];
++                        while i < l.pos.len() && l.key_at(i) < key {
++                            i += 1;
++                        }
++                        mat_cursor[s] = i;
++                        if i >= l.pos.len() || l.key_at(i) != key {
++                            continue;
++                        }
++                        let a0 = l.allele_start[i] as usize;
++                        let na = bc.n_alleles[i] as usize;
++                        let se = mp.open_sample(s as u32);
++                        let mut bytes = 0u64;
++                        for a in a0..a0 + na {
++                            bytes += se.open_allele().take_from_columns(bc, a);
++                        }
++                        if count {
++                            c.merge_bytes += bytes;
++                            c.merge_objects += 1;
++                        }
++                    }
++                    sink.accept(&mp);
++                }
++            } // views dropped — the borrow ends before any `advance()`
++
++            // Move each sample's cursor past the window.
++            for s in 0..n {
++                if !loaded[s] {
++                    continue;
++                }
++                let l = &mut light[s];
++                while l.cursor < l.pos.len() && l.key_at(l.cursor) <= watermark {
++                    l.cursor += 1;
++                }
++            }
++        }
++
++        // ---- mutable phase: advance the drained samples --------------------
++        for s in 0..n {
++            if loaded[s] && light[s].cursor >= light[s].pos.len() {
++                readers[s].advance();
++                loaded[s] = false;
++            }
++        }
++        next_key = watermark.saturating_add(1);
++        if next_key >= stop_key {
++            break;
++        }
++    }
++    Ok(())
++}
++
++// =====================================================================
++// Driver
++// =====================================================================
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    #[cfg(feature = "dhat-heap")]
++    let _profiler = dhat::Profiler::new_heap();
++
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    if args.len() < 5 {
++        eprintln!(
++            "usage: sketch2_merge_shape <merger|records|fold> <full|digest> <count|nocount> <max_blocks|all> <a.psp> ..."
++        );
++        std::process::exit(2);
++    }
++    let arm = args[0].clone();
++    let consumer = match args[1].as_str() {
++        "full" => Consumer::Full,
++        "digest" => Consumer::Digest,
++        other => panic!("unknown consumer {other}"),
++    };
++    let count = args[2] == "count";
++    let paths: Vec<PathBuf> = args[4..].iter().map(PathBuf::from).collect();
++
++    // The stop key comes from the first sample's block index, so every arm and
++    // every cohort size covers exactly the same genomic span.
++    let stop_key = {
++        let r = PspReader::new(BufReader::new(File::open(&paths[0])?))?;
++        let idx = r.block_index();
++        if args[3] == "all" {
++            u64::MAX
++        } else if args[3] == "floor" {
++            // Floor run: open every file and parse every block index, then stop
++            // before merging anything. Identical work in every arm, so
++            // subtracting it leaves the merge.
++            0
++        } else {
++            let b: usize = args[3].parse()?;
++            let e = idx[b.min(idx.len()) - 1];
++            key_of(e.chrom_id, e.last_pos) + 1
++        }
++    };
++
++    let mut sink = Sink::new(consumer);
++    let mut c = Counters::default();
++    match arm.as_str() {
++        "merger" => run_production_merger(&paths, stop_key, &mut sink, &mut c, count)?,
++        "records" => run_records(&paths, stop_key, &mut sink, &mut c, count)?,
++        "fold" => run_fold(&paths, stop_key, &mut sink, &mut c, count)?,
++        other => panic!("unknown arm {other}"),
++    }
++
++    println!("arm={arm} consumer={} count={count}", args[1]);
++    println!("samples={}", paths.len());
++    println!("stop_key={stop_key}");
++    println!("digest=0x{:016x}", sink.digest);
++    println!("loglik_acc={:.6}", sink.loglik_acc);
++    println!("positions_kept={}", c.positions_kept);
++    println!("positions_seen={}", c.positions_seen);
++    println!("producer_records={}", c.producer_records);
++    println!("producer_bytes={}", c.producer_bytes);
++    println!("merge_objects={}", c.merge_objects);
++    println!("merge_bytes={}", c.merge_bytes);
++    Ok(())
++}
+diff --git a/examples/sketch2_ng_merge.rs b/examples/sketch2_ng_merge.rs
+new file mode 100644
+index 0000000..1662082
+--- /dev/null
++++ b/examples/sketch2_ng_merge.rs
+@@ -0,0 +1,757 @@
++//! **Sketch 2, second configuration — the k-way merge fed by ng's generator.**
++//!
++//! Throwaway experiment for `doc/devel/ng/impl_plan/locus_stream_shape_experiments.md`
++//! §4 "Sketch 2". Deleted after the decision; commits no interface.
++//!
++//! The `.psp`-fed configuration (`sketch2_merge_shape`) answers "does the merge
++//! want columns **when the producer is a columnar file**". This one answers the
++//! question the plan actually asks: does it still want them **when the producer
++//! is ng's generic locus generator and persistence is skipped**.
++//!
++//! ## Three modes
++//!
++//! - **`walk`** — every sample's generator is driven to exhaustion and each
++//!   locus is dropped. No merge at all. This is the producer floor: the share of
++//!   the whole path that no merge shape can change.
++//! - **`records`** — one owned `SampleLocusObservations` of lookahead per
++//!   sample, an O(N) scan over the heads at each output position.
++//! - **`fold`** — each sample's loci are pulled into a per-sample **owned**
++//!   buffer, a light column (position + summed non-reference observations) is
++//!   derived from them, folded across samples over the watermark window, and
++//!   only the variable positions are materialised.
++//!
++//! ## Why `fold` looks different here
++//!
++//! In the `.psp` configuration the fold reads a decoded block it can borrow
++//! from. Here there is no block: `PileupGenerator::next_locus` returns one fully
++//! owned record and there is **no API that yields any per-locus summary without
++//! building it** — the generator's only emitter is the whole record. So the
++//! buffer arm B holds is not a view over someone else's storage, it is a queue
++//! of records arm B owns. That is the honest shape of "a per-sample owned buffer
++//! the view borrows from" when the producer emits records.
++//!
++//! ## Usage
++//!
++//! ```text
++//! sketch2_ng_merge <walk|records|fold> <full|digest> <ref.fa> <regions.bed> \
++//!                  <n_regions> <a.cram> ...
++//! ```
++
++#[cfg(feature = "dhat-heap")]
++#[global_allocator]
++static ALLOC: dhat::Alloc = dhat::Alloc;
++
++use std::fs::File;
++use std::io::{BufRead, BufReader};
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use pop_var_caller::ng::locus_generation::SampleLocusObservations;
++use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
++use pop_var_caller::ng::read::ReadFilterConfig;
++use pop_var_caller::ng::read::input::SampleReads;
++use pop_var_caller::ng::read::input::reference::OpenReference;
++use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
++use pop_var_caller::ng::ref_seq::WindowedRefSeq;
++use pop_var_caller::ng::reference_info::{
++    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
++};
++use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
++
++const MIN_ALT_OBS: u32 = 2;
++const MAX_ALLELES: usize = 4;
++const EM_ITERS: usize = 5;
++/// Loci arm `fold` pulls into each sample's owned buffer per round.
++const FOLD_BATCH: usize = 4096;
++
++type Gen = PileupGenerator<WindowedRefSeq, LeftAlignPreparer<WindowedRefSeq>>;
++
++// =====================================================================
++// Merged evidence (same shape as the `.psp` configuration)
++// =====================================================================
++
++#[derive(Default)]
++struct AlleleEvidence {
++    seq: Vec<u8>,
++    chain_ids: Vec<u64>,
++    obs: u32,
++    q_sum: f64,
++    fwd: u32,
++    placed_left: u32,
++    mapq_sum: u32,
++    mapq_sum_sq: u64,
++}
++
++#[derive(Default)]
++struct SampleEvidence {
++    sample: u32,
++    alleles: Vec<AlleleEvidence>,
++    n_alleles: usize,
++}
++
++#[derive(Default)]
++struct MergedPosition {
++    key: u64,
++    samples: Vec<SampleEvidence>,
++    n: usize,
++}
++
++impl MergedPosition {
++    fn begin(&mut self, key: u64) {
++        self.key = key;
++        self.n = 0;
++    }
++    fn open_sample(&mut self, sample: u32) -> &mut SampleEvidence {
++        if self.n == self.samples.len() {
++            self.samples.push(SampleEvidence::default());
++        }
++        let se = &mut self.samples[self.n];
++        self.n += 1;
++        se.sample = sample;
++        se.n_alleles = 0;
++        se
++    }
++}
++
++impl SampleEvidence {
++    fn open_allele(&mut self) -> &mut AlleleEvidence {
++        if self.n_alleles == self.alleles.len() {
++            self.alleles.push(AlleleEvidence::default());
++        }
++        let a = &mut self.alleles[self.n_alleles];
++        self.n_alleles += 1;
++        a
++    }
++}
++
++/// Copy one locus's observations into the merged evidence. Returns bytes copied.
++fn copy_locus(mp: &mut MergedPosition, sample: u32, locus: &SampleLocusObservations) -> u64 {
++    let se = mp.open_sample(sample);
++    let mut bytes = 0u64;
++    for o in &locus.observations {
++        let dst = se.open_allele();
++        dst.seq.clear();
++        dst.seq.extend_from_slice(&o.bases);
++        dst.chain_ids.clear();
++        dst.chain_ids.extend_from_slice(&o.chain_ids);
++        dst.obs = o.num_obs;
++        dst.q_sum = o.q_sum;
++        dst.fwd = o.num_fwd;
++        dst.placed_left = o.placed_left;
++        dst.mapq_sum = o.mapq_sum;
++        dst.mapq_sum_sq = o.mapq_sum_sq;
++        bytes += dst.seq.len() as u64 + (dst.chain_ids.len() as u64) * 8 + 32;
++    }
++    bytes
++}
++
++/// The light column ng does not provide: summed observations whose bases differ
++/// from the locus's reference bases. Costs a byte comparison per observation —
++/// the record shape's price for not carrying a REF-first allele order.
++#[inline]
++fn nonref_obs_of(locus: &SampleLocusObservations) -> u32 {
++    let mut s = 0u32;
++    for o in &locus.observations {
++        if o.bases.as_ref() != locus.reference_bases.as_ref() {
++            s = s.saturating_add(o.num_obs);
++        }
++    }
++    s
++}
++
++#[inline]
++fn key_of(locus: &SampleLocusObservations) -> u64 {
++    (u64::from(locus.region.contig.0) << 32) | locus.region.start.0
++}
++
++// =====================================================================
++// Counters + sink
++// =====================================================================
++
++#[derive(Default, Debug)]
++struct Counters {
++    loci_produced: u64,
++    positions_seen: u64,
++    positions_kept: u64,
++    merge_objects: u64,
++    merge_bytes: u64,
++    /// Bytes the producer owns in the records it built (heap payload only).
++    producer_bytes: u64,
++}
++
++fn locus_owned_bytes(l: &SampleLocusObservations) -> u64 {
++    let mut b = l.reference_bases.len() as u64;
++    b += l.observations.len() as u64 * 96;
++    for o in &l.observations {
++        b += o.bases.len() as u64 + (o.chain_ids.len() as u64) * 8;
++    }
++    b
++}
++
++#[derive(Clone, Copy, PartialEq)]
++enum Consumer {
++    Digest,
++    Full,
++}
++
++struct Sink {
++    consumer: Consumer,
++    digest: u64,
++    table: Vec<Vec<u8>>,
++    table_len: usize,
++    counts: Vec<u32>,
++    errs: Vec<f64>,
++    gl: Vec<f64>,
++    post: Vec<f64>,
++    freqs: Vec<f64>,
++    loglik_acc: f64,
++}
++
++#[inline]
++fn fnv(h: &mut u64, bytes: &[u8]) {
++    for &b in bytes {
++        *h ^= u64::from(b);
++        *h = h.wrapping_mul(0x100_0000_01b3);
++    }
++}
++
++impl Sink {
++    fn new(consumer: Consumer) -> Self {
++        Self {
++            consumer,
++            digest: 0xcbf2_9ce4_8422_2325,
++            table: Vec::new(),
++            table_len: 0,
++            counts: Vec::new(),
++            errs: Vec::new(),
++            gl: Vec::new(),
++            post: Vec::new(),
++            freqs: Vec::new(),
++            loglik_acc: 0.0,
++        }
++    }
++
++    fn accept(&mut self, mp: &MergedPosition) {
++        let mut h = self.digest;
++        fnv(&mut h, &mp.key.to_le_bytes());
++        fnv(&mut h, &(mp.n as u32).to_le_bytes());
++        for se in &mp.samples[..mp.n] {
++            fnv(&mut h, &se.sample.to_le_bytes());
++            fnv(&mut h, &(se.n_alleles as u32).to_le_bytes());
++            for a in &se.alleles[..se.n_alleles] {
++                fnv(&mut h, &a.seq);
++                fnv(&mut h, &a.obs.to_le_bytes());
++                fnv(&mut h, &a.q_sum.to_bits().to_le_bytes());
++                fnv(&mut h, &a.fwd.to_le_bytes());
++                fnv(&mut h, &a.placed_left.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum_sq.to_le_bytes());
++                for &c in &a.chain_ids {
++                    fnv(&mut h, &c.to_le_bytes());
++                }
++            }
++        }
++        self.digest = h;
++        if self.consumer == Consumer::Full {
++            let ll = self.call(mp);
++            self.loglik_acc += ll;
++            let mut h = self.digest;
++            fnv(&mut h, &ll.to_bits().to_le_bytes());
++            self.digest = h;
++        }
++    }
++
++    fn call(&mut self, mp: &MergedPosition) -> f64 {
++        self.table_len = 0;
++        for se in &mp.samples[..mp.n] {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let known = self.table[..self.table_len]
++                    .iter()
++                    .any(|t| t.as_slice() == a.seq.as_slice());
++                if !known && self.table_len < MAX_ALLELES {
++                    if self.table_len == self.table.len() {
++                        self.table.push(Vec::new());
++                    }
++                    let slot = &mut self.table[self.table_len];
++                    slot.clear();
++                    slot.extend_from_slice(&a.seq);
++                    self.table_len += 1;
++                }
++            }
++        }
++        let k = self.table_len.max(1);
++        let n_gt = k * (k + 1) / 2;
++        let s_n = mp.n;
++
++        self.counts.clear();
++        self.counts.resize(s_n * k, 0);
++        self.errs.clear();
++        self.errs.resize(s_n * k, 0.0);
++        for (si, se) in mp.samples[..s_n].iter().enumerate() {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let Some(idx) = self.table[..self.table_len]
++                    .iter()
++                    .position(|t| t.as_slice() == a.seq.as_slice())
++                else {
++                    continue;
++                };
++                self.counts[si * k + idx] += a.obs;
++                self.errs[si * k + idx] = (a.q_sum / f64::from(a.obs)).exp().clamp(1e-9, 0.5);
++            }
++        }
++
++        self.gl.clear();
++        self.gl.resize(s_n * n_gt, 0.0);
++        for si in 0..s_n {
++            let mut g = 0usize;
++            for i in 0..k {
++                for j in i..k {
++                    let mut ll = 0.0f64;
++                    for a in 0..k {
++                        let n = self.counts[si * k + a];
++                        if n == 0 {
++                            continue;
++                        }
++                        let e = self.errs[si * k + a];
++                        let dose = f64::from(u8::from(a == i)) + f64::from(u8::from(a == j));
++                        let p = (dose / 2.0) * (1.0 - e) + (1.0 - dose / 2.0) * (e / 3.0);
++                        ll += f64::from(n) * p.max(1e-300).ln();
++                    }
++                    self.gl[si * n_gt + g] = ll;
++                    g += 1;
++                }
++            }
++        }
++
++        self.freqs.clear();
++        self.freqs.resize(k, 1.0 / k as f64);
++        self.post.clear();
++        self.post.resize(n_gt, 0.0);
++        let mut loglik = 0.0f64;
++        for _ in 0..EM_ITERS {
++            let mut new_f = [0.0f64; MAX_ALLELES];
++            loglik = 0.0;
++            for si in 0..s_n {
++                let mut norm = 0.0f64;
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let prior = if i == j {
++                            self.freqs[i] * self.freqs[i]
++                        } else {
++                            2.0 * self.freqs[i] * self.freqs[j]
++                        };
++                        let w = prior * self.gl[si * n_gt + g].exp();
++                        self.post[g] = w;
++                        norm += w;
++                        g += 1;
++                    }
++                }
++                if norm <= 0.0 {
++                    continue;
++                }
++                loglik += norm.ln();
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let p = self.post[g] / norm;
++                        new_f[i] += p;
++                        new_f[j] += p;
++                        g += 1;
++                    }
++                }
++            }
++            let tot: f64 = new_f[..k].iter().sum();
++            if tot > 0.0 {
++                for i in 0..k {
++                    self.freqs[i] = new_f[i] / tot;
++                }
++            }
++        }
++        loglik
++    }
++}
++
++// =====================================================================
++// Per-sample generator
++// =====================================================================
++
++struct NgSample {
++    generator: Gen,
++    reads: SampleReads,
++    head: Option<SampleLocusObservations>,
++}
++
++impl NgSample {
++    fn pull(&mut self, c: &mut Counters) -> Result<(), Box<dyn std::error::Error>> {
++        self.head = self.generator.next_locus(&self.reads)?;
++        if let Some(l) = &self.head {
++            c.loci_produced += 1;
++            c.producer_bytes += locus_owned_bytes(l);
++        }
++        Ok(())
++    }
++
++    #[inline]
++    fn key(&self) -> u64 {
++        self.head.as_ref().map_or(u64::MAX, key_of)
++    }
++}
++
++// =====================================================================
++// Modes
++// =====================================================================
++
++fn mode_walk(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            while let Some(l) = s.generator.next_locus(&s.reads)? {
++                c.loci_produced += 1;
++                c.producer_bytes += locus_owned_bytes(&l);
++                drop(l);
++            }
++        }
++    }
++    Ok(())
++}
++
++fn mode_records(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut mp = MergedPosition::default();
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            s.head = None;
++        }
++        for si in 0..n {
++            samples[si].pull(c)?;
++        }
++        loop {
++            // Pass 1 — O(N) scan for the minimum head key.
++            let mut min_key = u64::MAX;
++            for s in samples.iter() {
++                min_key = min_key.min(s.key());
++            }
++            if min_key == u64::MAX {
++                break;
++            }
++            c.positions_seen += 1;
++
++            // Pass 2 — O(N) scan applying the cohort keep rule.
++            let mut max_nonref = 0u32;
++            for s in samples.iter() {
++                if s.key() == min_key {
++                    max_nonref = max_nonref.max(nonref_obs_of(s.head.as_ref().unwrap()));
++                }
++            }
++            let kept = max_nonref >= MIN_ALT_OBS;
++            if kept {
++                c.positions_kept += 1;
++                mp.begin(min_key);
++            }
++
++            // Pass 3 — copy the kept evidence, then advance the tied heads.
++            for si in 0..n {
++                if samples[si].key() != min_key {
++                    continue;
++                }
++                if kept {
++                    let locus = samples[si].head.as_ref().unwrap();
++                    c.merge_bytes += copy_locus(&mut mp, si as u32, locus);
++                    c.merge_objects += 1;
++                }
++                samples[si].pull(c)?;
++            }
++            if kept {
++                sink.accept(&mp);
++            }
++        }
++    }
++    Ok(())
++}
++
++fn mode_fold(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    // Per-sample owned buffers — the only shape available when the producer
++    // hands over owned records and nothing can be borrowed from it.
++    let mut buf: Vec<Vec<SampleLocusObservations>> = (0..n).map(|_| Vec::new()).collect();
++    let mut light_key: Vec<Vec<u64>> = (0..n).map(|_| Vec::new()).collect();
++    let mut light_nonref: Vec<Vec<u32>> = (0..n).map(|_| Vec::new()).collect();
++    let mut cursor = vec![0usize; n];
++    let mut exhausted = vec![false; n];
++    let mut mat_cursor = vec![0usize; n];
++    let mut window_key: Vec<u64> = Vec::new();
++    let mut window_nonref: Vec<u32> = Vec::new();
++    let mut mp = MergedPosition::default();
++
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++        }
++        for s in 0..n {
++            buf[s].clear();
++            light_key[s].clear();
++            light_nonref[s].clear();
++            cursor[s] = 0;
++            exhausted[s] = false;
++        }
++        loop {
++            // Refill each sample's buffer to the batch size, deriving the light
++            // column as the records arrive.
++            for s in 0..n {
++                while !exhausted[s] && buf[s].len() - cursor[s] < FOLD_BATCH {
++                    match samples[s].generator.next_locus(&samples[s].reads)? {
++                        Some(l) => {
++                            c.loci_produced += 1;
++                            c.producer_bytes += locus_owned_bytes(&l);
++                            light_key[s].push(key_of(&l));
++                            light_nonref[s].push(nonref_obs_of(&l));
++                            buf[s].push(l);
++                        }
++                        None => exhausted[s] = true,
++                    }
++                }
++            }
++
++            // Watermark: the lowest buffered end among unexhausted samples.
++            let mut watermark = u64::MAX;
++            let mut any = false;
++            for s in 0..n {
++                if cursor[s] < buf[s].len() {
++                    any = true;
++                }
++                if !exhausted[s] {
++                    if let Some(&k) = light_key[s].last() {
++                        watermark = watermark.min(k);
++                    } else {
++                        watermark = 0;
++                    }
++                }
++            }
++            if !any {
++                break;
++            }
++            if watermark == u64::MAX {
++                watermark = light_key
++                    .iter()
++                    .filter_map(|v| v.last().copied())
++                    .max()
++                    .unwrap_or(0);
++            }
++
++            // Fold the light columns of every sample over the window. Loci are
++            // one per covered reference base, so a dense array indexed by
++            // (key - win_lo) is enough — the same shape the `.psp` arm uses, and
++            // cheaper than the sorted k-way merge production folds over its
++            // sparser row set.
++            let win_lo = (0..n)
++                .filter(|&s| cursor[s] < light_key[s].len())
++                .map(|s| light_key[s][cursor[s]])
++                .min()
++                .unwrap_or(watermark);
++            let win_len = (watermark.saturating_sub(win_lo) + 1) as usize;
++            window_nonref.clear();
++            window_nonref.resize(win_len, u32::MAX); // MAX = "no sample here"
++            for s in 0..n {
++                let mut i = cursor[s];
++                while i < light_key[s].len() && light_key[s][i] <= watermark {
++                    let off = (light_key[s][i] - win_lo) as usize;
++                    let v = light_nonref[s][i];
++                    let slot = &mut window_nonref[off];
++                    *slot = if *slot == u32::MAX { v } else { (*slot).max(v) };
++                    i += 1;
++                }
++            }
++            window_key.clear();
++            for (off, &v) in window_nonref.iter().enumerate() {
++                if v != u32::MAX {
++                    window_key.push(win_lo + off as u64);
++                }
++            }
++            c.positions_seen += window_key.len() as u64;
++
++            // Materialise only the variable positions.
++            for s in 0..n {
++                mat_cursor[s] = cursor[s];
++            }
++            for &key in &window_key {
++                if window_nonref[(key - win_lo) as usize] < MIN_ALT_OBS {
++                    continue;
++                }
++                c.positions_kept += 1;
++                mp.begin(key);
++                for s in 0..n {
++                    let mut i = mat_cursor[s];
++                    while i < light_key[s].len() && light_key[s][i] < key {
++                        i += 1;
++                    }
++                    mat_cursor[s] = i;
++                    if i >= light_key[s].len() || light_key[s][i] != key {
++                        continue;
++                    }
++                    c.merge_bytes += copy_locus(&mut mp, s as u32, &buf[s][i]);
++                    c.merge_objects += 1;
++                }
++                sink.accept(&mp);
++            }
++
++            // Retire the consumed prefix of every buffer.
++            for s in 0..n {
++                let mut i = cursor[s];
++                while i < light_key[s].len() && light_key[s][i] <= watermark {
++                    i += 1;
++                }
++                buf[s].drain(..i);
++                light_key[s].drain(..i);
++                light_nonref[s].drain(..i);
++                cursor[s] = 0;
++            }
++        }
++    }
++    Ok(())
++}
++
++// =====================================================================
++// Driver
++// =====================================================================
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    #[cfg(feature = "dhat-heap")]
++    let _profiler = dhat::Profiler::new_heap();
++
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    if args.len() < 6 {
++        eprintln!(
++            "usage: sketch2_ng_merge <walk|records|fold> <full|digest> <ref.fa> <regions.bed> <n_regions> <a.cram> ..."
++        );
++        std::process::exit(2);
++    }
++    let mode = args[0].clone();
++    let consumer = match args[1].as_str() {
++        "full" => Consumer::Full,
++        "digest" => Consumer::Digest,
++        other => panic!("unknown consumer {other}"),
++    };
++    let fasta = PathBuf::from(&args[2]);
++    let bed = PathBuf::from(&args[3]);
++    let n_regions: usize = args[4].parse()?;
++    let crams: Vec<PathBuf> = args[5..].iter().map(PathBuf::from).collect();
++
++    let cache = Arc::new(ReferenceInfoCache::new());
++    let (info, verify) = read_reference_verifying_or_creating_fai(
++        &cache,
++        fasta.clone(),
++        ReferenceCheck::TrustIndexWithoutChecking,
++    )?;
++    let contigs = Arc::new(info.contig_list());
++    let index = WindowedRefSeq::read_index(&fasta)?;
++    if let Some(v) = verify {
++        v.join().expect("reference verification thread");
++    }
++
++    // Regions: the BED that defines where these benchmark CRAMs carry reads.
++    // BED is 0-based half-open; `GenomeRegion` is 1-based inclusive.
++    let mut regions: Vec<GenomeRegion> = Vec::new();
++    for line in BufReader::new(File::open(&bed)?).lines() {
++        let line = line?;
++        let mut f = line.split('\t');
++        let (Some(name), Some(s), Some(e)) = (f.next(), f.next(), f.next()) else {
++            continue;
++        };
++        let Some(cid) = contigs.entries.iter().position(|c| c.name == name) else {
++            continue;
++        };
++        regions.push(GenomeRegion {
++            contig: ContigId(cid as u32),
++            start: Position(s.parse::<u64>()? + 1),
++            end: Position(e.parse::<u64>()?),
++        });
++        if regions.len() >= n_regions {
++            break;
++        }
++    }
++
++    let reference = OpenReference::new(info);
++    let mut samples: Vec<NgSample> = Vec::with_capacity(crams.len());
++    for cram in &crams {
++        let reads = SampleReads::open_only_sample(
++            std::slice::from_ref(cram),
++            &reference,
++            ReadFilterConfig::default(),
++            true,
++        )?;
++        let preparer = LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::with_shared_index(
++            fasta.clone(),
++            contigs.clone(),
++            index.clone(),
++        ));
++        #[allow(
++            clippy::arc_with_non_send_sync,
++            reason = "the file-backed accessor is single-threaded here, as in benches/ng_generic_pileup_perf.rs"
++        )]
++        let refseq = Arc::new(WindowedRefSeq::with_shared_index(
++            fasta.clone(),
++            contigs.clone(),
++            index.clone(),
++        ));
++        let make_reference = {
++            let fasta = fasta.clone();
++            let contigs = contigs.clone();
++            let index = index.clone();
++            move || WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
++        };
++        let generator = PileupGenerator::new(
++            refseq,
++            make_reference,
++            preparer,
++            PileupGeneratorConfig::default(),
++        )?;
++        samples.push(NgSample {
++            generator,
++            reads,
++            head: None,
++        });
++    }
++
++    let mut sink = Sink::new(consumer);
++    let mut c = Counters::default();
++    match mode.as_str() {
++        "walk" => mode_walk(&mut samples, &regions, &mut c)?,
++        "records" => mode_records(&mut samples, &regions, &mut sink, &mut c)?,
++        "fold" => mode_fold(&mut samples, &regions, &mut sink, &mut c)?,
++        other => panic!("unknown mode {other}"),
++    }
++
++    println!("mode={mode} consumer={}", args[1]);
++    println!("samples={} regions={}", crams.len(), regions.len());
++    println!("digest=0x{:016x}", sink.digest);
++    println!("loglik_acc={:.6}", sink.loglik_acc);
++    println!("loci_produced={}", c.loci_produced);
++    println!("positions_seen={}", c.positions_seen);
++    println!("positions_kept={}", c.positions_kept);
++    println!("producer_bytes={}", c.producer_bytes);
++    println!("merge_objects={}", c.merge_objects);
++    println!("merge_bytes={}", c.merge_bytes);
++    Ok(())
++}

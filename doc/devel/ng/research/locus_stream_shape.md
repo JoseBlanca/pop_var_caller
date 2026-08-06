@@ -303,7 +303,11 @@ costs more than receiving objects that were never taken apart.
 
 ## 9. Where the detail lives
 
-The four experiment reports, with full tables, the code as diffs, and every raw measurement, are
-in the gitignored working directory `tmp/locus_stream_experiments_2026-08-06/`. The plan they
-were run under, and a condensed results section, is
+The four experiment reports, with full tables and the code as diffs, are in
+[experiments/locus_stream_shape/](experiments/locus_stream_shape/); its
+[README](experiments/README.md) says what each one measured. The plan they were run under, and
+a condensed results section, is
 [locus_stream_shape_experiments.md](../impl_plan/locus_stream_shape_experiments.md).
+
+Raw profiles and heap dumps were not kept. They were hundreds of megabytes and are reproducible
+from the commands each report records.

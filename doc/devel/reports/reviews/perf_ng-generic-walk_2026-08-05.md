@@ -31,10 +31,11 @@ high-performance cores and 12 low-energy cores, 128 kB L1 data cache per perform
 `[profile.profiling]` build, 3 M loci of the ~130× tomato CRAM), plus, new this round: a
 counted census of what one read-at-one-position costs; a resolution of the profile's largest
 unattributed line; four changes built, gated and measured with `instructions retired`; and a
-composition of all four measured across four depths. Audit trail in gitignored
-`tmp/perf_review_2026-08-05_ng-generic-structure/` — `census.md`, `common_column.md`,
-`mate_overlap_sort.md`, `ordered_active_set.md`, `composed.md`, `composed_full.md`, with every
-diff, every raw measurement file and the rejected variants beside them.
+composition of all four measured across four depths. Audit trail in
+[../../ng/research/experiments/generic_walk_performance/](../../ng/research/experiments/generic_walk_performance/) — `census.md`, `common_column.md`,
+`mate_overlap_sort.md`, `ordered_active_set.md`, `composed.md`, `composed_full.md`, including the reports that
+refuted a change. Raw profiles and heap dumps were not kept; they are reproducible from the
+commands each report records.
 
 **Deliberately out of scope.** Designing the parallel fan-out; the SSR/STR generator except
 where it shares the cursor; `src/pileup/` and `src/var_calling/` (frozen production).
@@ -480,12 +481,13 @@ position keeps by a deterministic function of the read rather than a prefix of t
 order. **Part 2 dissolves the finding that
 prompted this decision**: once the kept subset is independent of how the active set stores reads,
 H2's reordering changes no output at any depth, and the last blocker on the second half of the
-stack disappears. Measured in `tmp/perf_review_2026-08-05_ng-generic-structure/depth_cap.md`.
+stack disappears. Measured in
+[../../ng/research/experiments/generic_walk_performance/depth_cap.md](../../ng/research/experiments/generic_walk_performance/depth_cap.md).
 
 ### The assembled state, and a correction to H2's own evidence
 
 All five changes are in one tree, measured against a pristine build of `6fbbd09`, uncommitted —
-`tmp/perf_review_2026-08-05_ng-generic-structure/landing.md`, with `landing.diff` and a suggested
+[../../ng/research/experiments/generic_walk_performance/landing.md](../../ng/research/experiments/generic_walk_performance/landing.md), with a suggested
 five-commit sequence.
 
 | depth | four performance changes | **all five, with the cap fix** |

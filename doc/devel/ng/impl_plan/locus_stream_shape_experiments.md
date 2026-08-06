@@ -44,7 +44,7 @@ saying where each locus's part of each array begins.
 
 ## 3. What is already measured — do not re-derive any of it
 
-**ng's generator, as shipped at `1e5ffa8`** (measured 2026-08-05, `tmp/perf_2026-08-05_shipped_reprice/price.md`):
+**ng's generator, as shipped at `1e5ffa8`** (measured 2026-08-05, [../research/experiments/generic_walk_performance/price.md](../research/experiments/generic_walk_performance/price.md)):
 
 | | |
 |---|---:|
@@ -234,8 +234,8 @@ twice, and a whole second mechanism for blocks that did not cut where consumers 
 
 ## 10. Results — all three sketches, 2026-08-06
 
-Full reports, raw measurements and sketch code in gitignored
-`tmp/locus_stream_experiments_2026-08-06/`. Every number below was measured on real
+Full reports and sketch code in
+[../research/experiments/locus_stream_shape/](../research/experiments/locus_stream_shape/). Every number below was measured on real
 alignments; no wall clock was recorded and no sampling profile was quoted, because a further
 agent was loading the host — every attribution is an instruction-count ablation or a static
 allocation tally, both per-process.
