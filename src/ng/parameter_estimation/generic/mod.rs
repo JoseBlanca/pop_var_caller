@@ -15,6 +15,7 @@
 //! the vocabulary below is Milestone A.
 
 pub mod depth_and_alt_reads;
+pub mod depth_bins;
 pub mod histogram;
 pub mod runs;
 
