@@ -139,14 +139,14 @@ profile scan; the coupled error-rate/frequency loop; the runs model; the fallbac
 
 ### Milestone A — vocabulary and the local types (types, no logic)
 
-**A1. Scaffold the `parameter_estimation/` module tree.**  ☐
+**A1. Scaffold the `parameter_estimation/` module tree.**  ✅
 `mod.rs`, `fitting/{mod.rs, mixture_weights.rs}`, `generic/{mod.rs, depth_and_alt_reads.rs,
 histogram.rs, runs.rs}`, each with its `#[cfg(test)]` block; wire `pub mod
 parameter_estimation;` into `ng/mod.rs`. The folder split is the project rule that the shaping
 of data and the mathematics on it never share a file. *Source:* arch §Module home,
 [module layout](../arch/module_layout.md).
 
-**A2. Extend `types.rs` with the four constrained newtypes.**  ☐
+**A2. Extend `types.rs` with the four constrained newtypes.**  ✅
 `ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` — each with a private field, a
 `try_new` returning `DomainError`, and `.get()`, copying `MismatchFraction`'s shape
 ([`types.rs:243`](../../../../src/ng/types.rs)). Four types and not one shared `Probability`:
@@ -155,7 +155,7 @@ to something expecting an error rate and compile. `Ploidy` rejects zero, because
 likelihood divides by it. Unit tests: boundary values accepted, out-of-range rejected, `Ploidy
 = 0` rejected. *Source:* arch §2.1.
 
-**A3. The step-4-local scalars and the error-rate ladder.**  ☐
+**A3. The step-4-local scalars and the error-rate ladder.**  ✅
 `WindowIndex`, `INBREEDING_WINDOW_BP = Bp(100_000)`, the three `ERROR_RATE_LADDER_*_PHRED`
 constants and `error_rate_ladder()`. Unit test: 161 rungs, ascending, spanning Phred 10 to 50,
 adjacent rungs a ratio of `10^0.025` apart. No `Phred` newtype — a second log-scaled
