@@ -23,9 +23,9 @@ use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
-use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::fitting::FitTermination;
 use crate::ng::parameter_estimation::generic::runs::RunsModelFit;
+use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError};
 use crate::ng::types::{Bp, ErrorRate, GenotypeFrequency, InbreedingF, Ploidy, ReadGroupId};
 
 /// Which fixed-width window of the reference a locus falls in — its start position
@@ -171,34 +171,33 @@ pub fn error_rate_ladder() -> Vec<ErrorRate> {
 
 /// Fewest sites a fit will accept before it borrows or fails.
 ///
-/// **Soft**, and a floor against noise rather than a precision target: six million read
-/// observations pin an error rate to one part in eighty, so a fit is precise long
-/// before this. It is here to stop a rate being fitted from a handful of sites and
-/// emitted as though it were measured.
+/// **Soft** — a guard against fitting a rate from a handful of sites and emitting it as
+/// though it were measured, not a precision target. The spec's own precision figure is
+/// about a different regime and does not bear on this number: six million read
+/// observations pin an error rate near 0.001 to about one part in eighty, and at three
+/// reads a site that is two million sites, 200 times this floor
+/// (`spec/parameter_prepass.md` §4.1). What a fit at 10,000 sites is worth was not
+/// measured.
 pub const MIN_SITES_TO_FIT: u64 = 10_000;
-
-/// Fewest windows the runs model will accept.
-///
-/// **Not the same kind of floor as [`MIN_SITES_TO_FIT`].** Below a few thousand windows
-/// the estimator's own noise swamps the signal: a genome generated with **no runs at
-/// all** returned `F` averaging 0.23 at 1,200 windows, and 0.84 on one seed of eight. A
-/// tomato genome is 8,004 windows and a human 31,000, so no real run is near this — but
-/// a development fixture or a region-restricted run is, and the number it would produce
-/// looks like any other. Fail rather than emit.
-pub const MIN_WINDOWS_TO_FIT_INBREEDING: usize = 3_000;
 
 /// The per-base error rate used when none can be fitted and none was supplied.
 ///
 /// **Soft, and the only defaulted parameter on this path.** Chemistry varies far less
 /// between runs than biology does between samples, so a stated constant is defensible
-/// here in a way it is not for heterozygosity or for inbreeding.
+/// here in a way it is not for heterozygosity or for inbreeding — which is why those
+/// two fail instead (`arch/parameter_prepass_generic.md` §5.4).
 pub const DEFAULT_ERROR_RATE: f64 = 0.001;
 
 /// The cap on the alternation between the error rates and the genotype frequencies.
 ///
-/// Generous on purpose: a single-library sample converges in one iteration, because the
-/// two tables the alternation reads are then the same table, and only the 157 of 1,707
-/// multi-library samples in the archive survey iterate at all.
+/// **Soft, and generous against what the loop needs.** The alternation converges
+/// linearly and was measured reaching the truth in all 25 worlds tried from a start at
+/// three times the true rates and half the true frequencies
+/// (`spec/parameter_prepass_generic.md` §5.1); a single-library sample takes **one**
+/// iteration, because the two tables it reads are then the same table. The cap exists
+/// because the outer alternation — unlike the concave inner climb — has no convergence
+/// proof, so it is capped, the best-scoring iterate is kept, and the termination is
+/// reported rather than a stalled fit arriving silently.
 pub const MAX_COUPLED_FIT_ITERATIONS: u32 = 20;
 
 // ---------------------------------------------------------------------
@@ -212,20 +211,67 @@ pub const MAX_COUPLED_FIT_ITERATIONS: u32 = 20;
 /// the intermediate dosages have no diploid name. The two a diploid caller reads are
 /// the accessors below.
 ///
-/// **The invariant — `by_alt_copies.len() == ploidy + 1`, and the entries sum to one —
-/// is documented rather than enforced.** These are the output of a fit that constructs
-/// each entry through [`GenotypeFrequency::try_new`], so an entry outside `[0, 1]` is
-/// already unrepresentable; what is not checked here is the length and the sum. The fit
-/// that produces them is Milestone E, and it is where the check belongs.
+/// **The fields are private and the constructor is checked, because the accessors read
+/// by dosage.** `homozygous_non_reference_rate()` returns the *last* entry, so a
+/// ploidy-2 set holding one entry would hand back the homozygous-**reference** rate —
+/// near 1.0 — under the homozygous-**non-reference** name, where the truth is near
+/// 0.001. That is a wrong number with no symptom, in the module whose whole difficulty
+/// is that wrong numbers here have none. Guarding the accessors instead was the other
+/// option and it is worse: it answers `None` for a malformed set, which no caller can
+/// act on and which the doc below defines as meaning something else entirely.
 #[derive(Clone, PartialEq, Debug)]
 pub struct SampleRates {
-    pub ploidy: Ploidy,
-    /// Indexed by how many of the individual's copies are non-reference: entry 0 is the
-    /// homozygous-reference rate, the last entry the homozygous-non-reference one.
-    pub by_alt_copies: SmallVec<[GenotypeFrequency; 3]>,
+    ploidy: Ploidy,
+    by_alt_copies: SmallVec<[GenotypeFrequency; 5]>,
 }
 
 impl SampleRates {
+    /// The only constructor. `by_alt_copies` must hold one frequency per dosage
+    /// `0..=ploidy`, summing to one.
+    ///
+    /// **Fallible, though the caller is our own fit.** A set off the simplex means the
+    /// climb that produced it is broken and there is nothing a caller could do — so the
+    /// fits construct through this door and `.expect()`, the same shape the four
+    /// constrained scalars use. What makes it worth a check rather than a comment is
+    /// that the failure is silent: see the type's doc.
+    ///
+    /// The sum is compared with a tolerance, because the frequencies arrive from a
+    /// floating-point climb over the simplex and an exact `== 1.0` would reject a
+    /// correct fit.
+    pub fn try_new(
+        ploidy: Ploidy,
+        by_alt_copies: SmallVec<[GenotypeFrequency; 5]>,
+    ) -> Result<Self, ParameterEstimationError> {
+        let total: f64 = by_alt_copies.iter().map(|f| f.get()).sum();
+        let one_per_dosage = by_alt_copies.len() == usize::from(ploidy.get()) + 1;
+
+        if !one_per_dosage || (total - 1.0).abs() > SIMPLEX_TOLERANCE {
+            return Err(ParameterEstimationError::GenotypeFrequenciesOffSimplex {
+                ploidy,
+                entries: by_alt_copies.len(),
+                total,
+            });
+        }
+        Ok(Self {
+            ploidy,
+            by_alt_copies,
+        })
+    }
+
+    /// How many copies of the genome this set describes.
+    #[must_use]
+    pub fn ploidy(&self) -> Ploidy {
+        self.ploidy
+    }
+
+    /// Every frequency, indexed by how many of the individual's copies are
+    /// non-reference: entry 0 is the homozygous-reference rate, the last entry the
+    /// homozygous-non-reference one.
+    #[must_use]
+    pub fn by_alt_copies(&self) -> &[GenotypeFrequency] {
+        &self.by_alt_copies
+    }
+
     /// How often the individual's two copies of a site differ — `Hobs` in the
     /// population genetics.
     ///
@@ -234,29 +280,36 @@ impl SampleRates {
     /// away; the replacement is gene diversity — the chance that two copies drawn at
     /// random from the individual differ — which reduces to this at `P = 2` and is
     /// deferred. `None` says "this genome does not have one of these", not "it was not
-    /// measured".
+    /// measured", and the checked constructor is what keeps that the only reading.
     #[must_use]
     pub fn observed_heterozygosity(&self) -> Option<GenotypeFrequency> {
-        (self.ploidy.get() == 2)
-            .then(|| self.by_alt_copies.get(1).copied())
-            .flatten()
+        (self.ploidy.get() == 2).then(|| self.by_alt_copies[1])
     }
 
     /// How often **every** copy is non-reference: the last entry, at any ploidy.
     ///
     /// **Not a leftover of heterozygosity — it measures something else.** How often an
-    /// individual carries a non-reference allele at all belongs to the *pair*
-    /// (individual, reference): swap in a different accession as the reference and it
-    /// changes, while heterozygosity and inbreeding do not. The two come apart in the
-    /// direction that matters here — a selfing landrace far from the reference is
-    /// mostly homozygous and mostly non-reference at once, so a caller whose prior
-    /// assumes "non-reference implies rare" is wrong on exactly that sample, and
-    /// tomato's reference is one cultivated accession.
+    /// individual carries a non-reference allele at all is *heterozygosity plus this
+    /// rate*, and it is that **sum** that belongs to the pair (individual, reference):
+    /// swap in a different accession as the reference and it changes, while
+    /// heterozygosity and inbreeding do not. The two terms also come apart in the
+    /// direction that matters here — a selfing landrace far from the reference is mostly
+    /// homozygous and mostly non-reference at once, so a caller whose prior assumes
+    /// "non-reference implies rare" is wrong on exactly that sample, and tomato's
+    /// reference is one cultivated accession.
     #[must_use]
-    pub fn homozygous_non_reference_rate(&self) -> Option<GenotypeFrequency> {
-        self.by_alt_copies.last().copied()
+    pub fn homozygous_non_reference_rate(&self) -> GenotypeFrequency {
+        // PANIC-FREE: `try_new` is the only constructor and it rejects a set with fewer
+        // than `ploidy + 1` entries, so there is always a last one.
+        self.by_alt_copies[self.by_alt_copies.len() - 1]
     }
 }
+
+/// How far the sum of a genotype-frequency set may sit from one. The frequencies arrive
+/// from a floating-point climb over the simplex, so an exact comparison would reject a
+/// correct fit; this is loose enough for accumulated rounding over five entries and far
+/// too tight to admit a set that is genuinely off.
+const SIMPLEX_TOLERANCE: f64 = 1e-9;
 
 /// Everything the generic path estimates for one sample.
 ///
@@ -304,13 +357,15 @@ mod tests {
     }
 
     fn rates(copies: u8, by_alt_copies: &[f64]) -> SampleRates {
-        SampleRates {
-            ploidy: ploidy(copies),
-            by_alt_copies: by_alt_copies
-                .iter()
-                .map(|&f| GenotypeFrequency::try_new(f).expect("a frequency in [0, 1]"))
-                .collect(),
-        }
+        SampleRates::try_new(ploidy(copies), frequencies(by_alt_copies))
+            .expect("a well-formed set for this ploidy")
+    }
+
+    fn frequencies(values: &[f64]) -> SmallVec<[GenotypeFrequency; 5]> {
+        values
+            .iter()
+            .map(|&f| GenotypeFrequency::try_new(f).expect("a frequency in [0, 1]"))
+            .collect()
     }
 
     /// A diploid sample reads its heterozygosity off the middle entry, and the three
@@ -319,7 +374,7 @@ mod tests {
     fn a_diploid_sample_reads_its_two_rates_off_three_frequencies_summing_to_one() {
         let diploid = rates(2, &[0.9885, 0.0105, 0.0010]);
 
-        let total: f64 = diploid.by_alt_copies.iter().map(|f| f.get()).sum();
+        let total: f64 = diploid.by_alt_copies().iter().map(|f| f.get()).sum();
         assert!(
             (total - 1.0).abs() < 1e-12,
             "the frequencies sum to one: {total}"
@@ -329,10 +384,7 @@ mod tests {
             diploid.observed_heterozygosity().map(|h| h.get()),
             Some(0.0105)
         );
-        assert_eq!(
-            diploid.homozygous_non_reference_rate().map(|a| a.get()),
-            Some(0.0010)
-        );
+        assert_eq!(diploid.homozygous_non_reference_rate().get(), 0.0010);
     }
 
     /// **Above two copies there is no heterozygosity to read**, and the accessor says so
@@ -345,42 +397,79 @@ mod tests {
     fn heterozygosity_is_absent_above_diploidy_where_the_homozygous_rate_is_not() {
         let tetraploid = rates(4, &[0.970, 0.018, 0.007, 0.003, 0.002]);
 
-        let total: f64 = tetraploid.by_alt_copies.iter().map(|f| f.get()).sum();
+        let total: f64 = tetraploid.by_alt_copies().iter().map(|f| f.get()).sum();
         assert!(
             (total - 1.0).abs() < 1e-12,
             "the frequencies sum to one: {total}"
         );
 
-        assert_eq!(tetraploid.by_alt_copies.len(), 5, "one entry per 0..=P");
+        assert_eq!(tetraploid.by_alt_copies().len(), 5, "one entry per 0..=P");
         assert_eq!(tetraploid.observed_heterozygosity(), None);
-        assert_eq!(
-            tetraploid.homozygous_non_reference_rate().map(|a| a.get()),
-            Some(0.002)
-        );
+        assert_eq!(tetraploid.homozygous_non_reference_rate().get(), 0.002);
     }
 
     /// A haploid region has two genotype classes, not three, and it is not diploid — so
-    /// it has no heterozygosity either. The boundary is tested on both sides because
-    /// the accessor's condition is an equality, and a `>=` slipped in later would let a
-    /// haploid answer.
+    /// it has no heterozygosity either.
+    ///
+    /// **The boundary is tested on both sides because the accessor's condition is an
+    /// equality**, and the two ways to loosen it fail in opposite directions: `>= 2`
+    /// lets a *tetraploid* answer, which the tetraploid test above catches, and `<= 2`
+    /// lets a haploid answer, which only this one does.
     #[test]
     fn a_haploid_region_has_two_classes_and_no_heterozygosity() {
         let haploid = rates(1, &[0.9985, 0.0015]);
 
-        assert_eq!(haploid.by_alt_copies.len(), 2);
+        assert_eq!(haploid.by_alt_copies().len(), 2);
         assert_eq!(haploid.observed_heterozygosity(), None);
-        assert_eq!(
-            haploid.homozygous_non_reference_rate().map(|a| a.get()),
-            Some(0.0015)
-        );
+        assert_eq!(haploid.homozygous_non_reference_rate().get(), 0.0015);
+    }
+
+    /// **A set with the wrong number of entries for its ploidy is rejected, and this is
+    /// the test that matters most in this file.** The accessors read *by dosage*: before
+    /// the constructor was checked, a ploidy-2 set holding only entry 0 answered
+    /// `homozygous_non_reference_rate()` with that entry — the homozygous-*reference*
+    /// rate, near 1.0, under the homozygous-*non-reference* name, where the truth is
+    /// near 0.001.
+    #[test]
+    fn a_set_with_the_wrong_number_of_entries_for_its_ploidy_is_rejected() {
+        for (copies, values) in [
+            (2u8, &[1.0][..]),                  // the inversion above
+            (2, &[0.5, 0.3, 0.1, 0.1][..]),     // one entry too many
+            (4, &[0.5, 0.5][..]),               // a tetraploid keyed as a haploid
+            (1, &[0.9885, 0.0105, 0.0010][..]), // a haploid keyed as a diploid
+        ] {
+            let rejected = SampleRates::try_new(ploidy(copies), frequencies(values));
+            assert!(
+                matches!(
+                    rejected,
+                    Err(ParameterEstimationError::GenotypeFrequenciesOffSimplex { .. })
+                ),
+                "ploidy {copies} with {} entries should not construct",
+                values.len()
+            );
+        }
+    }
+
+    /// A set of the right length whose entries do not sum to one is rejected too: that
+    /// is not a distribution, and every fit that reads one assumes it is. The tolerance
+    /// admits a floating-point climb's accumulated rounding and nothing wider.
+    #[test]
+    fn a_set_that_does_not_sum_to_one_is_rejected_within_a_rounding_tolerance() {
+        assert!(SampleRates::try_new(ploidy(2), frequencies(&[0.5, 0.3, 0.1])).is_err());
+        assert!(SampleRates::try_new(ploidy(2), frequencies(&[0.5, 0.4, 0.4])).is_err());
+
+        // A third of the genome in each class: the entries sum to one only after
+        // rounding, and a fit is entitled to produce this.
+        let third = 1.0 / 3.0;
+        assert!(SampleRates::try_new(ploidy(2), frequencies(&[third, third, third])).is_ok());
     }
 
     /// The floors are stated as tests because each is a number a later reader will want
-    /// to change, and each has a measurement behind it rather than an argument.
+    /// to change, and each has a measurement or a stated decision behind it rather than
+    /// an argument.
     #[test]
     fn the_fit_floors_are_the_measured_ones() {
         assert_eq!(MIN_SITES_TO_FIT, 10_000);
-        assert_eq!(MIN_WINDOWS_TO_FIT_INBREEDING, 3_000);
         assert_eq!(DEFAULT_ERROR_RATE, 0.001);
         assert_eq!(MAX_COUPLED_FIT_ITERATIONS, 20);
     }

@@ -738,6 +738,21 @@ mod tests {
 
     /// `Ploidy` keys the histogram and the emitted rate maps, so its order has to
     /// be the natural one — a haploid region's cells sort before a diploid's.
+    /// `Ploidy` renders as the bare copy number, because the messages that name one
+    /// supply their own word for it ("at ploidy {ploidy}"). Tested because nothing else
+    /// reads the impl: the error message that uses it asserts the sample and the site
+    /// count, so replacing this body with a constant would leave the suite green.
+    #[test]
+    fn ploidy_displays_as_the_bare_copy_number() {
+        assert_eq!(Ploidy::try_new(2).unwrap().to_string(), "2");
+        assert_eq!(Ploidy::try_new(1).unwrap().to_string(), "1");
+        assert_eq!(Ploidy::try_new(u8::MAX).unwrap().to_string(), "255");
+        assert_eq!(
+            format!("at ploidy {}", Ploidy::try_new(4).unwrap()),
+            "at ploidy 4"
+        );
+    }
+
     #[test]
     fn ploidy_orders_by_copy_number() {
         let mut ploidies = [

@@ -173,14 +173,14 @@ cap biases the error rate by 0.55 rungs and the homozygous-non-reference rate by
 the exact region, that `cell_count()` is 583, and that `bin_for` is monotone and total over
 `0..=124`. *Depends:* A1. *Source:* arch §2.2, spec §4, research note §4.3.
 
-**A5. The output types.**  ☐
+**A5. The output types.**  ✅
 `Provenance`, `Estimate<T>`, `SampleRates` with its two diploid accessors,
 `GenericSampleParameters`, `FitTermination`, `ScanResult<P>`, `CoupledFit`, `RunsModelStarts`
 (defaults `separations = [0.05, 1/3, 0.75]`, `implied_f = [0.05, 0.5, 0.75]`), `RunsModelFit`,
 `StartOutcome`. Types only. Unit test: `SampleRates::observed_heterozygosity()` is `None`
 above ploidy 2 and the frequencies sum to one. *Depends:* A2. *Source:* arch §2.4, §5.2, §5.3.
 
-**A6. `ParameterEstimationError` and the fit floors.**  ☐
+**A6. `ParameterEstimationError` and the fit floors.**  ✅
 The four variants — `GenotypeFrequenciesNotFittable`, `InbreedingNotFittable`,
 `InbreedingStatesNotSeparated`, `Domain` — with `MIN_SITES_TO_FIT = 10_000`,
 `MIN_WINDOWS_TO_FIT_INBREEDING = 3_000`, `DEFAULT_ERROR_RATE = 0.001` and

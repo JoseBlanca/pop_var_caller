@@ -43,13 +43,15 @@ decision about what the estimator does.
 3. **`Ploidy` gained a `Display` impl** in `types.rs`. `GenotypeFrequenciesNotFittable`
    names a ploidy in its message, so the type has to render; it renders the bare number,
    because the message supplies the word.
-4. **`SampleRates`' simplex invariant is documented, not enforced.** Its entries are
-   already `GenotypeFrequency`, so none can sit outside `[0, 1]`; what is unchecked is
-   that there are `ploidy + 1` of them and that they sum to one. A checked constructor
-   would need an error variant for a condition only our own arithmetic can produce, and
-   the fit that produces these is Milestone E — which is where the check belongs. The
-   tests assert the invariant on the values they build, so it is stated somewhere
-   executable.
+4. ~~**`SampleRates`' simplex invariant is documented, not enforced.**~~ **Withdrawn
+   after review, and it was half wrong on the half that mattered.** Deferring the *sum*
+   check was defensible — no accessor reads the sum, so an unchecked sum could not
+   produce a wrong number until Milestone E. Deferring the *length* check was not:
+   `homozygous_non_reference_rate()` returns the **last** entry, so a ploidy-2 set
+   holding one entry handed back the homozygous-*reference* rate — near 1.0 — under the
+   homozygous-*non-reference* name, where the truth is near 0.001. What landed instead is
+   a checked `try_new` with private fields, and the error-variant objection is answered by
+   the `.expect()` pattern the four constrained scalars already use.
 
 ## 3. Changes made
 
@@ -85,8 +87,10 @@ Fourteen, across four files. The ones with teeth:
 - `heterozygosity_is_absent_above_diploidy_where_the_homozygous_rate_is_not` — the
   plan's stated A5 oracle, plus the frequencies summing to one.
 - `a_haploid_region_has_two_classes_and_no_heterozygosity` — the *other* side of the
-  boundary. `observed_heterozygosity()` tests `ploidy == 2`; a `>=` slipped in later
-  would let a haploid answer, and only this test would notice.
+  boundary. **Corrected after review:** this first said a `>=` would let a haploid
+  answer. It would not — `1 >= 2` is false. Measured, `>= 2` lets a *tetraploid* answer
+  and the tetraploid test catches it; `<= 2` lets a haploid answer, and only this test
+  does. The test is right; the reason given for it was not.
 - `the_default_starts_disagree_about_the_state_separation_not_only_about_f` — the
   property `RunsModelStarts` exists for. Starts differing only in the assumed inside
   fraction are not a spread: they miss a genome whose states sit close together in the
@@ -109,6 +113,25 @@ All in the container.
 | `cargo test --all-targets --all-features` | 2,934 passed, 1 failed (pre-existing), 5 ignored |
 
 The one failure remains `ng::locus_generation::pileup::parity::every_divergence_from_production_is_one_of_the_six_named_classes`, confirmed pre-existing at `HEAD`.
+
+## 5a. Review outcome
+
+Three agents, eight categories, each in its own worktree: 0 Blocker, **6 Major**, 10
+Minor, 4 Nit; 18 applied, 4 deferred, 0 disputed. See the
+[review](../reviews/ng_parameter_prepass_generic_a5a6_2026-08-06.md) and the
+[fixes applied](../reviews/fixes_applied_2026-08-06_v3.md).
+
+**Three of the six Majors are wrong numbers rather than wrong code**, which is where the
+defects live on a milestone whose deliverable is declarations. One is the `SampleRates`
+inversion above; one is "29% covered by runs" against a realised 0.2629 — copied from
+`spec` §6.5 and `arch` §5.3, **which carry the same slip and are not corrected here**;
+and one is in this report, above.
+
+Eleven other numeric claims in these files were checked against the research note, both
+specs and the architecture, and all eleven held exactly.
+
+After fixes the module holds 40 tests (was 34) and the suite is 2,941 passed / 1 failed
+(pre-existing) / 5 ignored.
 
 ## 6. Tradeoffs and follow-ups
 

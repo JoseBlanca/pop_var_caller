@@ -20,6 +20,8 @@ pub mod mixture_weights;
 
 use smallvec::SmallVec;
 
+use crate::ng::types::LogProb;
+
 /// What one scan over a ladder of noise parameters returned.
 ///
 /// Generic over the noise parameters, because the two paths scan different things: one
@@ -33,8 +35,11 @@ pub struct ScanResult<P> {
     /// discarded — while the sample's own rates come from a scan run for these.
     pub frequencies: SmallVec<[f64; 3]>,
     /// What makes "the best-scoring iterate" a defined comparison in an alternating
-    /// fit.
-    pub log_likelihood: f64,
+    /// fit. A [`LogProb`] rather than a bare `f64` because comparing is the only thing
+    /// it is for, and `LogProb` carries `ln(0)` as `-∞` — the score of a rung nothing
+    /// could have produced — where a linear probability would reach `0` and be
+    /// indistinguishable from a value that merely got too small to represent.
+    pub log_likelihood: LogProb,
     /// **Whether the answer sat on the ladder's edge, and it is not decoration.** A
     /// read group whose true rate lies outside the ladder — a bad run, heavy
     /// contamination, or any of the arithmetic failures a scan can suffer — has its
@@ -68,7 +73,7 @@ mod tests {
         let railed = ScanResult {
             noise: 0.1_f64,
             frequencies: SmallVec::from_slice(&[0.98, 0.015, 0.005]),
-            log_likelihood: -1.2e9,
+            log_likelihood: LogProb(-1.2e9),
             argmax_at_ladder_end: true,
         };
 

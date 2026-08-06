@@ -35,7 +35,6 @@
 pub mod fitting;
 pub mod generic;
 
-use crate::ng::parameter_estimation::generic::{MIN_SITES_TO_FIT, MIN_WINDOWS_TO_FIT_INBREEDING};
 use crate::ng::types::{DomainError, Ploidy};
 
 /// Where a parameter came from.
@@ -95,14 +94,21 @@ pub enum ParameterEstimationError {
     ///
     /// **Not recoverable here.** There is no sibling to borrow from — a sample has one
     /// heterozygosity — and no constant worth inventing, because this is the biology.
+    ///
+    /// `floor` travels on the variant rather than being read from a constant, so that
+    /// the message quotes the floor the *caller* applied. This error is
+    /// `#[non_exhaustive]` and shared with the STR path, whose floors are its own; a
+    /// message hard-wired to the SNP/indel constant would quote the wrong number at the
+    /// wrong grain the first time the STR path raises it.
     #[error(
         "sample {sample}: {sites} sites at ploidy {ploidy} is too few to fit genotype \
-         frequencies (need {MIN_SITES_TO_FIT}); supply them or drop the sample"
+         frequencies (need {floor}); supply them or drop the sample"
     )]
     GenotypeFrequenciesNotFittable {
         sample: String,
         ploidy: Ploidy,
         sites: u64,
+        floor: u64,
     },
 
     /// `F` was to be fitted and the runs model had too few windows to run on.
@@ -113,9 +119,32 @@ pub enum ParameterEstimationError {
     /// amplified rather than absorbed.
     #[error(
         "sample {sample}: {windows} usable windows is too few to fit the inbreeding \
-         coefficient (need {MIN_WINDOWS_TO_FIT_INBREEDING}); supply one instead"
+         coefficient (need {floor}); supply one instead"
     )]
-    InbreedingNotFittable { sample: String, windows: usize },
+    InbreedingNotFittable {
+        sample: String,
+        windows: usize,
+        floor: usize,
+    },
+
+    /// A sample's genotype frequencies were built with the wrong number of entries for
+    /// their ploidy, or with entries that do not sum to one.
+    ///
+    /// **This is our own arithmetic being broken, not a data condition** — which is why
+    /// the fits construct through the checked door and `.expect()`. It is here rather
+    /// than in [`DomainError`] because the invariant is about a *set* of frequencies
+    /// against a ploidy, which no single constrained scalar can express: entry `k` of
+    /// the set is the rate for `k` non-reference copies, so a set one entry short hands
+    /// back the wrong dosage's rate under the right name.
+    #[error(
+        "a ploidy-{ploidy} sample needs one genotype frequency per dosage 0..={ploidy}, \
+         got {entries} summing to {total}"
+    )]
+    GenotypeFrequenciesOffSimplex {
+        ploidy: Ploidy,
+        entries: usize,
+        total: f64,
+    },
 
     /// Every starting point emptied one of the runs model's two states, so no
     /// separation between them was found.
@@ -133,8 +162,13 @@ pub enum ParameterEstimationError {
     )]
     InbreedingStatesNotSeparated { sample: String, starts: usize },
 
-    /// A domain invariant was violated on the way — a rate outside `[0, 1]`, a ploidy
-    /// of zero.
+    /// A constrained scalar rejected its value on the way — a rate outside `[0, 1]`, a
+    /// ploidy of zero.
+    ///
+    /// **Transparent, so the newtype's own message is what the reader sees**: it already
+    /// names the quantity and the offending value, and re-wording it here would lose the
+    /// quantity. What it does not name is the sample or the operation, which is a real
+    /// gap on a cohort run — see the module's tracked follow-up.
     #[error(transparent)]
     Domain(#[from] DomainError),
 }
@@ -142,6 +176,8 @@ pub enum ParameterEstimationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::parameter_estimation::generic::MIN_SITES_TO_FIT;
+    use crate::ng::parameter_estimation::generic::runs::MIN_WINDOWS_TO_FIT_INBREEDING;
 
     fn ploidy(copies: u8) -> Ploidy {
         Ploidy::try_new(copies).expect("a positive copy number")
@@ -157,26 +193,53 @@ mod tests {
             sample: "SL_landrace_07".to_string(),
             ploidy: ploidy(2),
             sites: 812,
+            floor: MIN_SITES_TO_FIT,
         };
         let message = frequencies.to_string();
         assert!(message.contains("SL_landrace_07"), "{message}");
         assert!(message.contains("812"), "{message}");
         assert!(
-            message.contains("10000"),
+            message.contains("ploidy 2"),
+            "the ploidy renders: {message}"
+        );
+        // Against the constant's own rendering rather than a literal: `contains("10000")`
+        // is also true of a floor of 100,000, so a floor raised tenfold would have left
+        // this assertion green.
+        assert!(
+            message.contains(&MIN_SITES_TO_FIT.to_string()),
             "the floor it fell short of: {message}"
         );
 
         let inbreeding = ParameterEstimationError::InbreedingNotFittable {
             sample: "HG002_chr20".to_string(),
             windows: 1_200,
+            floor: MIN_WINDOWS_TO_FIT_INBREEDING,
         };
         let message = inbreeding.to_string();
         assert!(message.contains("HG002_chr20"), "{message}");
         assert!(message.contains("1200"), "{message}");
         assert!(
-            message.contains("3000"),
+            message.contains(&MIN_WINDOWS_TO_FIT_INBREEDING.to_string()),
             "the floor it fell short of: {message}"
         );
+    }
+
+    /// A set of genotype frequencies can be wrong for its ploidy in two ways, and the
+    /// message has to say which. Entry `k` is the rate for `k` non-reference copies, so
+    /// a set one entry short is not merely incomplete — it hands back the wrong dosage's
+    /// rate under the right name.
+    #[test]
+    fn the_off_simplex_message_names_the_ploidy_the_entry_count_and_the_total() {
+        let malformed = ParameterEstimationError::GenotypeFrequenciesOffSimplex {
+            ploidy: ploidy(2),
+            entries: 1,
+            total: 1.0,
+        };
+        let message = malformed.to_string();
+
+        assert!(message.contains("ploidy-2"), "{message}");
+        assert!(message.contains("0..=2"), "the dosages expected: {message}");
+        assert!(message.contains("got 1"), "{message}");
     }
 
     /// The one message that has to say what it is **not**. An outcrosser and a failed
