@@ -400,6 +400,15 @@ impl Ploidy {
     }
 }
 
+/// Just the copy number — `2`, not `Ploidy(2)`. An error message that names a ploidy
+/// supplies its own word for it ("at ploidy {ploidy}"), so the type renders the number
+/// and nothing else.
+impl fmt::Display for Ploidy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A domain-invariant violation — the ng-wide error raised when an untrusted
 /// value falls outside a constrained newtype's range. Introduced with its
 /// first variant; later constrained types (`AlleleFreq`, `Theta`, …) add their
