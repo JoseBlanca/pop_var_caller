@@ -164,6 +164,9 @@ fn p_alt(j: usize, eps: f64) -> f64 {
 
 #[derive(Clone)]
 struct Scenario {
+    /// What the world is, for a reader of the source. Not printed — the runs are
+    /// labelled by their parameters — so the compiler sees it as unread.
+    #[expect(dead_code, reason = "documents the scenario in the source")]
     name: String,
     contigs: usize,
     windows_per_contig: usize,
@@ -262,6 +265,9 @@ struct DepthLadder {
     label: String,
     bin_of: Vec<u32>,
     cap: u32,
+    /// How many bins the ladder has — carried so a reader can see a ladder's shape
+    /// where it is built, though the code reads it back off `bin_of`.
+    #[expect(dead_code, reason = "documents the ladder where it is built")]
     bins: usize,
 }
 
@@ -516,7 +522,11 @@ fn simulate(scenario: &Scenario, space: &CellSpace, seed: u64) -> Sample {
 struct RunsFit {
     /// `(hom-ref, het, hom-alt)` for each state, after the ordering constraint.
     freqs: [[f64; GENOTYPES]; STATES],
+    /// The two fitted per-window transition rates. Reported through `f_stationary`
+    /// rather than directly, so the compiler sees them as unread.
+    #[expect(dead_code, reason = "reported through f_stationary")]
     enter_run: f64,
+    #[expect(dead_code, reason = "reported through f_stationary")]
     leave_run: f64,
     /// The coverage-weighted posterior occupancy — the `F` the architecture emits.
     f_posterior: f64,

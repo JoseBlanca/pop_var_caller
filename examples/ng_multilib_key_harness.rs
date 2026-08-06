@@ -86,6 +86,13 @@
 //! cargo run --release --example ng_multilib_key_harness -- --only=balance
 //! ```
 
+// `j` here is a **genotype** — how many of the individual's copies are non-reference —
+// and the arrays it steps through are indexed by it. Rewriting those loops as
+// `iter_mut().enumerate()` would hide the quantity behind an iterator position, on the
+// one file whose arithmetic is the oracle every later change to the scoring rule is
+// checked against.
+#![allow(clippy::needless_range_loop)]
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -834,6 +841,10 @@ impl CellSpace {
         }
     }
 
+    #[expect(
+        dead_code,
+        reason = "kept for ad-hoc runs that check the cell space sums to one"
+    )]
     fn total_mass(&self) -> f64 {
         self.mass.iter().sum()
     }

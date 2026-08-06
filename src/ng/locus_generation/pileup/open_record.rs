@@ -16,7 +16,6 @@
 //! buffer this table owns instead of allocating a `Vec<u8>` per call.
 //! `copy_fidelity.rs` released this file in that commit.
 
-
 use smallvec::SmallVec;
 
 use crate::ng::ref_seq::RefSeq;
@@ -732,12 +731,7 @@ impl OpenPileupRecord {
         }
     }
 
-    fn with_fold_capacity(
-        chrom_id: u32,
-        pos: u32,
-        ref_seq: Vec<u8>,
-        fold_capacity: usize,
-    ) -> Self {
+    fn with_fold_capacity(chrom_id: u32, pos: u32, ref_seq: Vec<u8>, fold_capacity: usize) -> Self {
         Self {
             chrom_id,
             pos,
@@ -928,14 +922,13 @@ impl OpenPileupRecord {
             }
             let read_group = state.read_group;
             let agreed_with_reference = self.read_agreed_with_reference(state);
-            let existing = observations
-                .iter()
-                .zip(&observation_alleles)
-                .position(|(observation, &observation_allele)| {
+            let existing = observations.iter().zip(&observation_alleles).position(
+                |(observation, &observation_allele)| {
                     observation_allele == state.allele_index
                         && observation.key.read_witness == read_witness
                         && observation.key.read_group == read_group
-                });
+                },
+            );
             let observation = match existing {
                 Some(index) => &mut observations[index],
                 None => {
@@ -1224,7 +1217,6 @@ impl SortedRecords {
         self.entries.first().map(|(pos, _)| *pos)
     }
 
-
     /// Entries with key strictly below `hi`, ascending — `range(..hi)`.
     fn range_below(&self, hi: u32) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
         let end = self.entries.partition_point(|(pos, _)| *pos < hi);
@@ -1232,7 +1224,11 @@ impl SortedRecords {
     }
 
     /// Entries with `lo <= key <= hi`, descending — `range(lo..=hi).rev()`.
-    fn range_inclusive_rev(&self, lo: u32, hi: u32) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
+    fn range_inclusive_rev(
+        &self,
+        lo: u32,
+        hi: u32,
+    ) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
         let start = self.entries.partition_point(|(pos, _)| *pos < lo);
         let end = self.entries.partition_point(|(pos, _)| *pos <= hi);
         self.entries[start..end]

@@ -1080,11 +1080,7 @@ mod tests {
     #[test]
     fn a_read_with_a_deletion_answers_the_two_queries_differently() {
         let read = make_read(
-            vec![
-                CigarOp::Match(3),
-                CigarOp::Deletion(2),
-                CigarOp::Match(3),
-            ],
+            vec![CigarOp::Match(3), CigarOp::Deletion(2), CigarOp::Match(3)],
             100,
             b"ACGTAC",
             &[30; 6],

@@ -283,6 +283,7 @@ impl World {
 
     /// The share of loci the depth truncation drops — printed so the truncation is never
     /// silent.
+    #[expect(dead_code, reason = "kept for ad-hoc runs that report the truncation")]
     fn depth_mass_lost(&self, max_depth: u32) -> f64 {
         let lambda = self.mean_depth;
         let kept: f64 = (1..=max_depth)
@@ -309,9 +310,9 @@ fn read_bucket_probs(slip: &Slip, allele_offset: i32, keying: &Keying) -> Vec<f6
         EdgeScoring::PlugAtEdge | EdgeScoring::PlugAtEdgeRenormalised => {
             // Every bucket is scored at one offset — its own — so the mass the end buckets
             // absorb is simply not counted.
-            for bucket in 0..keying.buckets() {
+            for (bucket, p) in out.iter_mut().enumerate() {
                 let offset = bucket as i32 - keying.half_range;
-                out[bucket] = slip.p(offset - allele_offset);
+                *p = slip.p(offset - allele_offset);
             }
             if keying.edges == EdgeScoring::PlugAtEdgeRenormalised {
                 let total: f64 = out.iter().sum();
@@ -632,8 +633,7 @@ fn maximise_slip(score: impl Fn(&Slip) -> f64, start: Slip) -> (Slip, f64) {
 
     for _sweep in 0..8 {
         let mut moved: f64 = 0.0;
-        for axis in 0..3 {
-            let (mut lo, mut hi) = axes[axis];
+        for (axis, &(mut lo, mut hi)) in axes.iter().enumerate() {
             let mut c = hi - inverse_phi * (hi - lo);
             let mut d = lo + inverse_phi * (hi - lo);
             let evaluate = |x: f64, base: &Slip| {
@@ -1072,7 +1072,7 @@ fn question_identification(report: &mut String) {
 
             let mut answers: Vec<(Slip, f64)> = starting_points(&truth)
                 .into_iter()
-                .map(|start| maximise_slip(&score, start))
+                .map(|start| maximise_slip(score, start))
                 .collect();
             let lowest = answers
                 .iter()
