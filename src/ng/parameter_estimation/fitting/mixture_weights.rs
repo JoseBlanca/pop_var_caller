@@ -166,14 +166,20 @@ impl<'a> GenotypeLikelihoodTable<'a> {
 /// design claims instead of trusting it.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct MixtureWeightsFit {
-    /// One weight per genotype, non-negative and summing to one. Named for the genotypes
-    /// rather than bare `weights`, because the climb also carries a *cell* weight per
-    /// row of the table and the two are never interchangeable.
-    pub genotype_weights: SmallVec<[f64; 3]>,
-    /// The weighted log-likelihood **at `genotype_weights`** —
+    /// What fraction of the sample's sites each genotype accounts for: one entry per
+    /// genotype, non-negative and summing to one.
+    ///
+    /// **Named for what the numbers are and not for the role they play in the
+    /// arithmetic.** They are the mixture's weights, which is what this file's procedure
+    /// is named for, but to a reader of the fit they are genotype frequencies — and the
+    /// climb carries a *cell* weight per row of the table as well, which is never the
+    /// same quantity. `ScanResult::genotype_frequencies` is this vector filed by ploidy,
+    /// under the same name.
+    pub genotype_frequencies: SmallVec<[f64; 3]>,
+    /// The weighted log-likelihood **at `genotype_frequencies`** —
     /// `Σ_cells w · ln Σ_genotypes π·L`.
-    /// Computed in a final pass after the climb stopped, so it belongs to the weights
-    /// returned beside it rather than to the pass before them.
+    /// Computed in a final pass after the climb stopped, so it belongs to the
+    /// frequencies returned beside it rather than to the pass before them.
     pub log_likelihood: LogProb,
     /// How many passes ran. One pass is one expectation step and one maximization step.
     pub passes: u32,
@@ -248,7 +254,7 @@ pub fn fit_mixture_weights(
     let genotypes = ln_likelihood_by_cell_and_genotype.genotypes();
     let uniform = vec![1.0 / genotypes as f64; genotypes];
     climb_mixture_weights(ln_likelihood_by_cell_and_genotype, cell_weights, &uniform)
-        .genotype_weights
+        .genotype_frequencies
 }
 
 /// [`fit_mixture_weights`], with the start named and the termination reported.
@@ -300,10 +306,11 @@ fn climb_with_cap(
 
     let total_cell_weight: f64 = cell_weights.iter().sum();
 
-    let mut genotype_weights: SmallVec<[f64; 3]> = SmallVec::from_slice(start);
-    let mut next_genotype_weights: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
+    let mut genotype_frequencies: SmallVec<[f64; 3]> = SmallVec::from_slice(start);
+    let mut next_genotype_frequencies: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
     // Scratch, loaded and cleared once per cell rather than allocated per cell. The
-    // loop below walks every cell of the table — 583 of them on the generic path
+    // loop below walks every cell of the table — up to 583 on the generic path, which is
+    // the cell ladder's capacity rather than a count
     // (`arch/parameter_prepass_generic.md` §4.1) — once per pass, and the profile scan
     // runs one whole climb at each of its 161 rungs.
     let mut ln_joint: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
@@ -313,7 +320,7 @@ fn climb_with_cap(
     let mut previous_score = f64::NEG_INFINITY;
 
     while passes < max_passes {
-        next_genotype_weights.fill(0.0);
+        next_genotype_frequencies.fill(0.0);
         let mut score = 0.0;
 
         for (cell, (row, &cell_weight)) in ln_likelihood_by_cell_and_genotype
@@ -324,10 +331,11 @@ fn climb_with_cap(
             if cell_weight == 0.0 {
                 continue;
             }
-            for (slot, (&genotype_weight, &ln_likelihood)) in
-                ln_joint.iter_mut().zip(genotype_weights.iter().zip(row))
+            for (slot, (&genotype_frequency, &ln_likelihood)) in ln_joint
+                .iter_mut()
+                .zip(genotype_frequencies.iter().zip(row))
             {
-                *slot = genotype_weight.ln() + ln_likelihood;
+                *slot = genotype_frequency.ln() + ln_likelihood;
             }
             let ln_total = ln_sum_exp(&ln_joint);
             assert!(
@@ -338,7 +346,7 @@ fn climb_with_cap(
             score += cell_weight * ln_total;
             // The expectation step's responsibilities, accumulated straight into the
             // maximization step's numerator rather than materialised per cell.
-            for (slot, &ln_j) in next_genotype_weights.iter_mut().zip(ln_joint.iter()) {
+            for (slot, &ln_j) in next_genotype_frequencies.iter_mut().zip(ln_joint.iter()) {
                 *slot += cell_weight * (ln_j - ln_total).exp();
             }
         }
@@ -357,14 +365,14 @@ fn climb_with_cap(
         previous_score = score;
 
         let mut largest_move: f64 = 0.0;
-        for (slot, &genotype_weight) in next_genotype_weights
+        for (slot, &genotype_frequency) in next_genotype_frequencies
             .iter_mut()
-            .zip(genotype_weights.iter())
+            .zip(genotype_frequencies.iter())
         {
             *slot /= total_cell_weight;
-            largest_move = largest_move.max((*slot - genotype_weight).abs());
+            largest_move = largest_move.max((*slot - genotype_frequency).abs());
         }
-        genotype_weights.copy_from_slice(&next_genotype_weights);
+        genotype_frequencies.copy_from_slice(&next_genotype_frequencies);
         passes += 1;
 
         if largest_move < CLIMB_STILLNESS {
@@ -376,12 +384,12 @@ fn climb_with_cap(
     let log_likelihood = weighted_log_likelihood(
         ln_likelihood_by_cell_and_genotype,
         cell_weights,
-        &genotype_weights,
+        &genotype_frequencies,
         &mut ln_joint,
     );
 
     MixtureWeightsFit {
-        genotype_weights,
+        genotype_frequencies,
         log_likelihood: LogProb(log_likelihood),
         passes,
         converged,
@@ -396,7 +404,7 @@ fn climb_with_cap(
 fn weighted_log_likelihood(
     ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
-    genotype_weights: &[f64],
+    genotype_frequencies: &[f64],
     ln_joint: &mut [f64],
 ) -> f64 {
     let mut score = 0.0;
@@ -410,10 +418,11 @@ fn weighted_log_likelihood(
         if cell_weight == 0.0 {
             continue;
         }
-        for (slot, (&genotype_weight, &ln_likelihood)) in
-            ln_joint.iter_mut().zip(genotype_weights.iter().zip(row))
+        for (slot, (&genotype_frequency, &ln_likelihood)) in ln_joint
+            .iter_mut()
+            .zip(genotype_frequencies.iter().zip(row))
         {
-            *slot = genotype_weight.ln() + ln_likelihood;
+            *slot = genotype_frequency.ln() + ln_likelihood;
         }
         score += cell_weight * ln_sum_exp(ln_joint);
     }
@@ -598,7 +607,8 @@ mod tests {
                 fit.passes < MAX_CLIMB_PASSES,
                 "start {start:?} used every pass"
             );
-            for (genotype, (&got, &want)) in fit.genotype_weights.iter().zip(&TRUTH).enumerate() {
+            for (genotype, (&got, &want)) in fit.genotype_frequencies.iter().zip(&TRUTH).enumerate()
+            {
                 assert!(
                     (got - want).abs() < 1e-9,
                     "start {start:?}, genotype {genotype}: fitted {got}, truth {want}"
@@ -639,11 +649,15 @@ mod tests {
             "the outcrossing truth ran out of passes at {}",
             second.passes
         );
-        for (genotype, (&got, &want)) in first.genotype_weights.iter().zip(&inbred).enumerate() {
+        for (genotype, (&got, &want)) in first.genotype_frequencies.iter().zip(&inbred).enumerate()
+        {
             assert!((got - want).abs() < 1e-9, "genotype {genotype}: {got}");
         }
-        for (genotype, (&got, &want)) in
-            second.genotype_weights.iter().zip(&outcrossing).enumerate()
+        for (genotype, (&got, &want)) in second
+            .genotype_frequencies
+            .iter()
+            .zip(&outcrossing)
+            .enumerate()
         {
             assert!((got - want).abs() < 1e-9, "genotype {genotype}: {got}");
         }
@@ -670,8 +684,8 @@ mod tests {
         for (row, &cell_weight) in CELL_GIVEN_GENOTYPE.iter().zip(&cell_weights) {
             let mixed: f64 = row
                 .iter()
-                .zip(&stopped.genotype_weights)
-                .map(|(&likelihood, &genotype_weight)| genotype_weight * likelihood)
+                .zip(&stopped.genotype_frequencies)
+                .map(|(&likelihood, &genotype_frequency)| genotype_frequency * likelihood)
                 .sum();
             longhand += cell_weight * mixed.ln();
         }
@@ -697,7 +711,7 @@ mod tests {
         let generous = climb_with_cap(table, &cell_weights, &uniform, 10 * MAX_CLIMB_PASSES);
 
         assert!(standard.converged && generous.converged);
-        assert_eq!(standard.genotype_weights, generous.genotype_weights);
+        assert_eq!(standard.genotype_frequencies, generous.genotype_frequencies);
         assert_eq!(standard.passes, generous.passes);
     }
 
@@ -706,7 +720,7 @@ mod tests {
     /// again; a measure that looked only at it would call this climb finished on pass
     /// two, with the first weight at 0.7698 against a truth of 0.95. It is also the only
     /// table here where a weight reaches exactly zero *during* the climb, which is the
-    /// state `genotype_weight.ln()` has to survive.
+    /// state `genotype_frequency.ln()` has to survive.
     #[test]
     fn a_genotype_impossible_everywhere_does_not_end_the_climb_early() {
         let cell_given_genotype: [[f64; 3]; 3] =
@@ -735,7 +749,7 @@ mod tests {
             "the climb finished in {} passes, which is too few to have crawled there",
             fit.passes
         );
-        for (genotype, (&got, &want)) in fit.genotype_weights.iter().zip(&truth).enumerate() {
+        for (genotype, (&got, &want)) in fit.genotype_frequencies.iter().zip(&truth).enumerate() {
             assert!(
                 (got - want).abs() < 1e-9,
                 "genotype {genotype}: fitted {got}, truth {want}"
@@ -768,7 +782,7 @@ mod tests {
                     continue;
                 }
                 for step in [1e-4, 1e-3, 1e-2] {
-                    let mut nudged: Vec<f64> = fit.genotype_weights.to_vec();
+                    let mut nudged: Vec<f64> = fit.genotype_frequencies.to_vec();
                     if nudged[from] <= step {
                         continue;
                     }
@@ -802,8 +816,8 @@ mod tests {
         for (row, &cell_weight) in CELL_GIVEN_GENOTYPE.iter().zip(&cell_weights) {
             let mixed: f64 = row
                 .iter()
-                .zip(&fit.genotype_weights)
-                .map(|(&likelihood, &genotype_weight)| genotype_weight * likelihood)
+                .zip(&fit.genotype_frequencies)
+                .map(|(&likelihood, &genotype_frequency)| genotype_frequency * likelihood)
                 .sum();
             longhand += cell_weight * mixed.ln();
         }
@@ -865,7 +879,7 @@ mod tests {
         let uniform = vec![0.2; 5];
         let fit = climb_mixture_weights(table, &cell_weights, &uniform);
         assert!(fit.converged, "the climb ran out of passes");
-        let fitted = fit.genotype_weights;
+        let fitted = fit.genotype_frequencies;
 
         assert_eq!(fitted.len(), 5);
         assert_eq!(
@@ -933,7 +947,7 @@ mod tests {
             "the score came back {}",
             fit.log_likelihood.get()
         );
-        let total: f64 = fit.genotype_weights.iter().sum();
+        let total: f64 = fit.genotype_frequencies.iter().sum();
         assert!((total - 1.0).abs() < 1e-12, "the weights sum to {total}");
     }
 

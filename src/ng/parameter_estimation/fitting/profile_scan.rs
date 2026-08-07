@@ -22,8 +22,47 @@ use smallvec::SmallVec;
 use crate::ng::parameter_estimation::fitting::mixture_weights::{
     GenotypeLikelihoodTable, climb_mixture_weights,
 };
-use crate::ng::parameter_estimation::fitting::{NoiseModel, ScanResult, WeightedCell};
+use crate::ng::parameter_estimation::fitting::{NoiseModel, WeightedCell};
 use crate::ng::types::{LogProb, Ploidy};
+
+/// What one scan over a ladder of noise parameters returned.
+///
+/// Generic over the noise parameters, because the two paths scan different things: one
+/// error rate here, three stutter parameters on the STR path.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ScanResult<P> {
+    /// The winning rung.
+    pub noise: P,
+    /// The genotype frequencies climbed to at that rung, **one set per ploidy the cells
+    /// covered**. On the error-rate scan these are a means rather than an output — the
+    /// scan is run for `noise` and they are discarded — while the sample's own rates
+    /// come from a scan run for these.
+    ///
+    /// **Keyed by ploidy rather than the single vector the architecture sketches**
+    /// (§5.2). A haploid region has two genotype classes and a diploid three,
+    /// so they cannot share a weight vector and the scan climbs once per ploidy (§4.2);
+    /// a single vector would mean picking one of them to report and dropping the rest,
+    /// silently, in the module whose whole difficulty is that its wrong numbers have no
+    /// symptom.
+    ///
+    /// The same quantity `MixtureWeightsFit::genotype_frequencies` carries and under the
+    /// same name, because it is the same numbers: the climb returns them and the scan
+    /// files them by ploidy.
+    pub genotype_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    /// What makes "the best-scoring iterate" a defined comparison in an alternating
+    /// fit. A [`LogProb`] rather than a bare `f64` because comparing is the only thing
+    /// it is for, and `LogProb` carries `ln(0)` as `-∞` — the score of a rung nothing
+    /// could have produced — where a linear probability would reach `0` and be
+    /// indistinguishable from a value that merely got too small to represent.
+    pub log_likelihood: LogProb,
+    /// **Whether the answer sat on the ladder's edge, and it is not decoration.** A
+    /// read group whose true rate lies outside the ladder — a bad run, heavy
+    /// contamination, or any of the arithmetic failures a scan can suffer — has its
+    /// answer silently clamped to an endpoint and emitted as though it were fitted,
+    /// with a large observation count behind it. This one bit is what stands between a
+    /// railed fit and a plausible-looking number.
+    pub argmax_at_ladder_end: bool,
+}
 
 /// Step through `ladder`; at each rung climb to the genotype frequencies that best
 /// explain `cells`, and return the best-scoring rung with the frequencies found there.
@@ -59,9 +98,12 @@ use crate::ng::types::{LogProb, Ploidy};
 ///
 /// # Panics
 ///
-/// If `cells` or `ladder` is empty, if any ploidy present carries no sites at all, or if
-/// the model appends a number of entries other than the [`NoiseModel::genotypes`] it
-/// declares.
+/// If `cells` or `ladder` is empty, if any ploidy present carries no sites at all, if the
+/// model declares no genotypes at a ploidy present, if it appends a number of entries
+/// other than the [`NoiseModel::genotypes`] it declares, or if what it wrote is not a
+/// log-likelihood — a `NaN`, a `+∞`, or a whole row of `−∞` on a cell that carries sites.
+/// **The last three name the rung**, which is the part no later frame can recover: by the
+/// time the climb refuses the table, the noise parameters are gone.
 #[must_use]
 pub fn fit_by_profile_scan<M>(
     model: &M,
@@ -70,7 +112,6 @@ pub fn fit_by_profile_scan<M>(
 ) -> ScanResult<M::NoiseParams>
 where
     M: NoiseModel,
-    M::Cell: WeightedCell,
     M::NoiseParams: Clone,
 {
     assert!(!cells.is_empty(), "a scan needs at least one cell to score");
@@ -89,7 +130,7 @@ where
             .push(position);
     }
 
-    let mut plan: Vec<PloidyPlan> = Vec::with_capacity(cells_of_ploidy.len());
+    let mut plans: Vec<PloidyPlan> = Vec::with_capacity(cells_of_ploidy.len());
     for (ploidy, positions) in cells_of_ploidy {
         let genotypes = model.genotypes(ploidy);
         assert!(
@@ -105,7 +146,7 @@ where
             total_sites > 0.0,
             "every cell of ploidy {ploidy} holds zero sites, so there is nothing to fit"
         );
-        plan.push(PloidyPlan {
+        plans.push(PloidyPlan {
             ploidy,
             genotypes,
             positions,
@@ -115,67 +156,118 @@ where
     }
 
     // Scratch, cleared and refilled once per (rung, ploidy) rather than allocated there:
-    // the generic path walks 583 cells at each of 161 rungs, and the model appends
+    // the generic path's cell table has room for 583 cells and walks whatever it holds at
+    // each of 161 rungs — the ladder's capacity is the bound, not the count, since only
+    // non-empty cells are materialised and the attributed arm adds one entry per listing.
+    // The model appends
     // straight into this, so what comes out is the row-major table the climb borrows —
     // no per-cell row and no copy.
-    let mut ln_likelihood: Vec<f64> = Vec::new();
+    let mut ln_likelihood_row_major: Vec<f64> = Vec::new();
 
-    let mut best: Option<Winner<M::NoiseParams>> = None;
+    let mut best: Option<ScanResult<M::NoiseParams>> = None;
 
     for (rung, noise) in ladder.iter().enumerate() {
-        let mut log_likelihood = 0.0;
-        let mut frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = BTreeMap::new();
+        let mut rung_log_likelihood = 0.0;
+        let mut genotype_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = BTreeMap::new();
 
-        for group in &plan {
-            ln_likelihood.clear();
-            for &position in &group.positions {
-                let before = ln_likelihood.len();
+        for plan in &plans {
+            ln_likelihood_row_major.clear();
+            for &position in &plan.positions {
+                let before = ln_likelihood_row_major.len();
                 model.append_genotype_likelihoods(
                     &cells[position],
                     noise,
-                    group.ploidy,
-                    &mut ln_likelihood,
+                    plan.ploidy,
+                    &mut ln_likelihood_row_major,
                 );
                 assert_eq!(
-                    ln_likelihood.len() - before,
-                    group.genotypes,
+                    ln_likelihood_row_major.len() - before,
+                    plan.genotypes,
                     "the model declares {} genotypes at ploidy {} and appended {} for \
                      cell {position}",
-                    group.genotypes,
-                    group.ploidy,
-                    ln_likelihood.len() - before
+                    plan.genotypes,
+                    plan.ploidy,
+                    ln_likelihood_row_major.len() - before
                 );
             }
 
-            let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, group.genotypes);
-            let climbed = climb_mixture_weights(table, &group.cell_weights, &group.uniform_start);
-            log_likelihood += climbed.log_likelihood.get();
-            frequencies.insert(group.ploidy, climbed.genotype_weights);
+            // **What the model wrote is checked here, where the rung is still in
+            // scope.** The same faults are refused two frames down, by
+            // `GenotypeLikelihoodTable::from_natural_logs` and by the climb — but
+            // those messages name a row of a buffer and nothing else, and the rung is
+            // the one part no later frame can recover, because the noise parameters
+            // are gone by then. A model that goes wrong at one rung of 161 is exactly
+            // the case worth localising.
+            for ((row, &position), &cell_weight) in ln_likelihood_row_major
+                .chunks_exact(plan.genotypes)
+                .zip(&plan.positions)
+                .zip(&plan.cell_weights)
+            {
+                for (genotype, &entry) in row.iter().enumerate() {
+                    assert!(
+                        entry.is_finite() || entry == f64::NEG_INFINITY,
+                        "rung {rung}, ploidy {}: cell {position} scored {entry} under \
+                         genotype {genotype}, which is not a log-likelihood",
+                        plan.ploidy
+                    );
+                }
+                // A cell that carries no sites may legally say no genotype produced
+                // it — the climb never looks at it — so the weight is what makes this
+                // a fault rather than a shape.
+                assert!(
+                    cell_weight == 0.0 || row.iter().any(|&entry| entry > f64::NEG_INFINITY),
+                    "rung {rung}, ploidy {}: no genotype can have produced cell \
+                     {position}, which holds {cell_weight} sites",
+                    plan.ploidy
+                );
+            }
+
+            let table = GenotypeLikelihoodTable::from_natural_logs(
+                &ln_likelihood_row_major,
+                plan.genotypes,
+            );
+            let climbed = climb_mixture_weights(table, &plan.cell_weights, &plan.uniform_start);
+            // **A rung whose climb ran out of passes is scored below its own summit**,
+            // so the rung beside it can win on that alone and the argmax stops being
+            // the argmax. There is no channel to report it — `FitTermination` covers
+            // the outer alternation of Milestone E and not this — and `MAX_CLIMB_PASSES`
+            // is measured on four-cell fixtures where the slowest truth took 1,234
+            // passes, against a real table of 583 cells climbed 161 times. Debug only,
+            // because a slow climb is a data condition rather than a bug
+            // (`spec/parameter_prepass.md` §3.1) and the release path must not abort on
+            // one.
+            debug_assert!(
+                climbed.converged,
+                "rung {rung}, ploidy {}: the climb used all {} passes, so this rung is \
+                 scored short of its summit and the rung beside it may win on that alone",
+                plan.ploidy, climbed.passes
+            );
+            rung_log_likelihood += climbed.log_likelihood.get();
+            genotype_frequencies.insert(plan.ploidy, climbed.genotype_frequencies);
         }
+
+        // The rung's answer is built here rather than at the end from a stored index,
+        // so that the rail flag is decided where `rung` is in scope and there is no
+        // second, private copy of `ScanResult` to keep in step with this one.
+        let scanned = ScanResult {
+            noise: noise.clone(),
+            genotype_frequencies,
+            log_likelihood: LogProb(rung_log_likelihood),
+            argmax_at_ladder_end: rung == 0 || rung == ladder.len() - 1,
+        };
 
         // `>=` and not `>`: a tie keeps the **later** rung. See the tie rule above — it
         // is what makes the generic ladder, which descends in error rate, resolve a tie
         // to the lower rate.
-        let better = best
+        let scores_at_least_as_well = best
             .as_ref()
-            .is_none_or(|winner| log_likelihood >= winner.log_likelihood);
-        if better {
-            best = Some(Winner {
-                rung,
-                noise: noise.clone(),
-                frequencies,
-                log_likelihood,
-            });
+            .is_none_or(|winner| scanned.log_likelihood >= winner.log_likelihood);
+        if scores_at_least_as_well {
+            best = Some(scanned);
         }
     }
 
-    let winner = best.expect("the ladder is not empty, so some rung won");
-    ScanResult {
-        noise: winner.noise,
-        frequencies: winner.frequencies,
-        log_likelihood: LogProb(winner.log_likelihood),
-        argmax_at_ladder_end: winner.rung == 0 || winner.rung == ladder.len() - 1,
-    }
+    best.expect("the ladder is not empty, so some rung won")
 }
 
 /// Everything about one ploidy's cells that does not change along the ladder.
@@ -190,19 +282,18 @@ struct PloidyPlan {
     /// Where this ploidy's cells sit in the caller's slice.
     positions: Vec<usize>,
     /// One site count per entry of `positions`, in the same order.
+    ///
+    /// **Parallel to `positions` rather than zipped into it**, because
+    /// [`climb_mixture_weights`] takes the weights as one contiguous `&[f64]`; a
+    /// `Vec<(usize, f64)>` would have to be unzipped into a fresh buffer at every one of
+    /// the ladder's 161 rungs. Nothing can be transposed between the two — one is a
+    /// `usize` index and the other an `f64` weight — so what has to hold is only that
+    /// they stay the same length and the same order, and both are built in one pass
+    /// below.
     cell_weights: Vec<f64>,
     /// The interior point the climb starts from. Where it starts does not matter — the
     /// surface is concave — so it is built once rather than at every rung.
     uniform_start: Vec<f64>,
-}
-
-/// The best rung seen so far. A struct rather than a tuple because three of its four
-/// members would otherwise be an unlabelled `usize`, `f64` and map.
-struct Winner<P> {
-    rung: usize,
-    noise: P,
-    frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
-    log_likelihood: f64,
 }
 
 #[cfg(test)]
@@ -232,6 +323,25 @@ mod tests {
 
     fn ploidy(copies: u8) -> Ploidy {
         Ploidy::try_new(copies).expect("a positive copy number")
+    }
+
+    /// The rail flag is the field with teeth, so it is stated rather than left to a
+    /// reader to notice: a scan that railed reports the same shape as one that did not.
+    #[test]
+    fn a_scan_result_reports_whether_its_answer_sat_on_the_ladders_edge() {
+        let diploid = ploidy(2);
+        let railed = ScanResult {
+            noise: 0.1_f64,
+            genotype_frequencies: BTreeMap::from([(
+                diploid,
+                SmallVec::from_slice(&[0.98, 0.015, 0.005]),
+            )]),
+            log_likelihood: LogProb(-1.2e9),
+            argmax_at_ladder_end: true,
+        };
+
+        assert!(railed.argmax_at_ladder_end);
+        assert_eq!(railed.genotype_frequencies[&diploid].len(), 3);
     }
 
     /// A model whose likelihoods come from a table indexed by rung and cell, so a test
@@ -297,11 +407,14 @@ mod tests {
         ]
     }
 
-    /// The exact cell weights an infinite genome at `truth` would produce under `rung`'s
-    /// columns — the same device the research harnesses use, so the answer is what the
+    /// The exact cell weights an infinite genome at `truth` would produce under a set of
+    /// `columns` — the same device the research harnesses use, so the answer is what the
     /// estimator converges to with no sampling noise in it.
-    fn weights_under(table: &[Vec<Vec<f64>>], rung: usize, truth: &[f64], sites: f64) -> Vec<u64> {
-        table[rung]
+    ///
+    /// Takes the columns rather than a table and a rung index, so that the rail test can
+    /// ask it for the weights under a truth that is on **no** rung of its ladder.
+    fn weights_under(columns: &[Vec<f64>], truth: &[f64], sites: f64) -> Vec<u64> {
+        columns
             .iter()
             .map(|row| {
                 let probability: f64 = row
@@ -338,7 +451,7 @@ mod tests {
             genotypes: 3,
             asked: RefCell::new(Vec::new()),
         };
-        let cells = diploid_cells(&weights_under(&table, 1, &[0.90, 0.07, 0.03], 1_000_000.0));
+        let cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000_000.0));
 
         let scan = fit_by_profile_scan(&model, &cells, &[0, 1, 2]);
 
@@ -347,7 +460,7 @@ mod tests {
             !scan.argmax_at_ladder_end,
             "the winner is interior, so nothing railed"
         );
-        let frequencies = &scan.frequencies[&ploidy(2)];
+        let frequencies = &scan.genotype_frequencies[&ploidy(2)];
         assert_eq!(frequencies.len(), 3);
         for (genotype, (&got, &want)) in frequencies.iter().zip(&[0.90, 0.07, 0.03]).enumerate() {
             assert!(
@@ -369,7 +482,7 @@ mod tests {
             genotypes: 3,
             asked: RefCell::new(Vec::new()),
         };
-        let cells = diploid_cells(&weights_under(&table, 1, &[0.90, 0.07, 0.03], 1_000.0));
+        let cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0));
 
         let _ = fit_by_profile_scan(&model, &cells, &[0, 1, 2]);
 
@@ -410,7 +523,7 @@ mod tests {
             genotypes: 3,
             asked: RefCell::new(Vec::new()),
         };
-        let cells = diploid_cells(&weights_under(&table, 3, &[0.90, 0.07, 0.03], 1_000_000.0));
+        let cells = diploid_cells(&weights_under(&table[3], &[0.90, 0.07, 0.03], 1_000_000.0));
 
         // First prove the local summit is really there: over the first two rungs alone,
         // rung 0 wins. Without this the test below could pass on a table with one hump.
@@ -431,12 +544,17 @@ mod tests {
     /// `reversed` marches the other way, so the closest rung is the first.
     fn ladder_marching_towards(truth: &[Vec<f64>], reversed: bool) -> Vec<Vec<Vec<f64>>> {
         const RUNGS: usize = 5;
-        let flat = 1.0 / 3.0;
+        // **One over the number of *cells*, not the number of genotypes.** A column is one
+        // genotype's distribution over the cells, so the flat column that sums to one is
+        // `1/cells`. At `1/genotypes` the blend below stops preserving the sum and the
+        // renormalisation is doing work it should not have to.
+        let flat = 1.0 / truth.len() as f64;
         (0..RUNGS)
             .map(|rung| {
                 let step = if reversed { RUNGS - 1 - rung } else { rung };
-                // Rung `RUNGS - 1` sits four fifths of the way from flat to the truth,
-                // so no rung is the truth and the best is at the end.
+                // The last rung sits four fifths of the way from flat to the truth, so no
+                // rung *is* the truth and the closest one is at the end — which is what
+                // makes this a railed fit rather than a recovered one.
                 let towards = 0.8 * step as f64 / (RUNGS - 1) as f64;
                 let mut blended: Vec<Vec<f64>> = truth
                     .iter()
@@ -446,12 +564,18 @@ mod tests {
                             .collect()
                     })
                     .collect();
-                // **Every column is renormalised to sum to one**, and without that this
-                // fixture measures the wrong thing: a genotype's column is its
-                // distribution over the cells, and a rung whose columns summed to more
-                // would score higher on total mass rather than on fit. Blending a
-                // distribution with a flat vector does not preserve the sum, so the
-                // unnormalised version handed the win to the flattest rung.
+                // Both `flat` and every column of `truth` sum to one, so a convex
+                // combination of them does too and this loop is a no-op — kept because it
+                // is what makes that a checked property of the fixture rather than an
+                // assumption about `flat`.
+                //
+                // **The first version of this fixture used `1/genotypes` and skipped
+                // it, and what went wrong is worth recording, because it is not what a
+                // reader would guess.** Unnormalised columns did *not* hand the win to the
+                // flattest rung: measured, that rung scored **worst of the five**, about
+                // 160,000 nats below the winner. What the extra mass did was move the
+                // argmax **one rung inward**, from 4 to 3 — a symptom far easier to read
+                // as rounding than as a broken fixture.
                 let genotypes = blended[0].len();
                 for genotype in 0..genotypes {
                     let column: f64 = blended.iter().map(|row| row[genotype]).sum();
@@ -491,17 +615,7 @@ mod tests {
                 asked: RefCell::new(Vec::new()),
             };
             // The weights come from the truth's own columns, which are on no rung.
-            let sites: Vec<u64> = truth_columns
-                .iter()
-                .map(|row| {
-                    let probability: f64 = row
-                        .iter()
-                        .zip(&truth)
-                        .map(|(&likelihood, &frequency)| frequency * likelihood)
-                        .sum();
-                    (1_000_000.0 * probability).round() as u64
-                })
-                .collect();
+            let sites = weights_under(&truth_columns, &truth, 1_000_000.0);
 
             let scan = fit_by_profile_scan(&model, &diploid_cells(&sites), &[0, 1, 2, 3, 4]);
 
@@ -525,7 +639,7 @@ mod tests {
             genotypes: 3,
             asked: RefCell::new(Vec::new()),
         };
-        let cells = diploid_cells(&weights_under(&table, 1, &[0.90, 0.07, 0.03], 1_000.0));
+        let cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0));
         assert!(fit_by_profile_scan(&model, &cells, &[0]).argmax_at_ladder_end);
     }
 
@@ -581,17 +695,21 @@ mod tests {
         let scan = fit_by_profile_scan(&DosageModel, &cells, &[0.01, 0.001, 0.0001]);
 
         assert_eq!(
-            scan.frequencies.len(),
+            scan.genotype_frequencies.len(),
             2,
             "one set of frequencies per ploidy"
         );
         assert_eq!(
-            scan.frequencies[&ploidy(1)].len(),
+            scan.genotype_frequencies[&ploidy(1)].len(),
             2,
             "a haploid has two genotype classes"
         );
-        assert_eq!(scan.frequencies[&ploidy(2)].len(), 3, "a diploid has three");
-        for (ploidy, weights) in &scan.frequencies {
+        assert_eq!(
+            scan.genotype_frequencies[&ploidy(2)].len(),
+            3,
+            "a diploid has three"
+        );
+        for (ploidy, weights) in &scan.genotype_frequencies {
             let total: f64 = weights.iter().sum();
             assert!(
                 (total - 1.0).abs() < 1e-9,
@@ -630,7 +748,7 @@ mod tests {
             genotypes: 3,
             asked: RefCell::new(Vec::new()),
         };
-        let cells = diploid_cells(&weights_under(&table, 0, &[0.90, 0.07, 0.03], 1_000.0));
+        let cells = diploid_cells(&weights_under(&table[0], &[0.90, 0.07, 0.03], 1_000.0));
 
         let scan = fit_by_profile_scan(&model, &cells, &[0, 1, 2]);
         assert_eq!(scan.noise, 2, "a tie keeps the last of the tied rungs");
@@ -646,7 +764,7 @@ mod tests {
             genotypes: 3,
             asked: RefCell::new(Vec::new()),
         };
-        let sites = weights_under(&table, 1, &[0.90, 0.07, 0.03], 1_000.0);
+        let sites = weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0);
 
         let diploid_only = fit_by_profile_scan(&model, &diploid_cells(&sites), &[0, 1, 2]);
 
@@ -696,6 +814,287 @@ mod tests {
         }
 
         let _ = fit_by_profile_scan(&Liar, &diploid_cells(&[10, 20]), &[0]);
+    }
+
+    /// **The zero-sites guard is per ploidy, and this is what makes its scope
+    /// testable.** With one ploidy in the scan, "this ploidy's cells" and "every cell in
+    /// the slice" are the same set, so a guard summing the whole slice would pass every
+    /// single-ploidy test. A read group covering a haploid contig that contributed no
+    /// sites is the ordinary case — one error rate is fitted across every ploidy the
+    /// group covered — and the guard is the only thing that names *which* ploidy was
+    /// empty. Two frames down the message is "every cell carries zero weight", which
+    /// names neither.
+    #[test]
+    #[should_panic(expected = "every cell of ploidy 1 holds zero sites")]
+    fn a_ploidy_holding_no_sites_beside_one_that_does_names_that_ploidy() {
+        let table = three_rung_table();
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let mut cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0));
+        cells.extend((0..4).map(|row| ToyCell {
+            ploidy: ploidy(1),
+            sites: 0,
+            row,
+        }));
+        let _ = fit_by_profile_scan(&model, &cells, &[0, 1, 2]);
+    }
+
+    /// A model that scores a cell as `NaN` at one rung of three names **that rung**, not
+    /// a row of a buffer nobody outside the loop can see. The rung is what no later frame
+    /// can recover: by the time the climb refuses the table, the noise parameters are
+    /// gone.
+    #[test]
+    #[should_panic(
+        expected = "rung 2, ploidy 2: cell 3 scored NaN under genotype 0, which is not a"
+    )]
+    fn a_model_that_scores_a_cell_as_nan_names_the_rung_and_the_cell() {
+        struct NanAtTheLastRung;
+        impl NoiseModel for NanAtTheLastRung {
+            type Cell = ToyCell;
+            type NoiseParams = usize;
+
+            fn genotypes(&self, _ploidy: Ploidy) -> usize {
+                3
+            }
+
+            fn append_genotype_likelihoods(
+                &self,
+                cell: &ToyCell,
+                noise: &usize,
+                _ploidy: Ploidy,
+                out: &mut Vec<f64>,
+            ) {
+                if *noise == 2 && cell.row == 3 {
+                    out.extend([f64::NAN, 0.5_f64.ln(), 0.5_f64.ln()]);
+                } else {
+                    out.extend([0.5_f64.ln(), 0.3_f64.ln(), 0.2_f64.ln()]);
+                }
+            }
+        }
+
+        let _ = fit_by_profile_scan(
+            &NanAtTheLastRung,
+            &diploid_cells(&[10, 20, 30, 40]),
+            &[0, 1, 2],
+        );
+    }
+
+    /// A rung at which some weighted cell becomes impossible under every genotype is a
+    /// fault in the model, and it is the rung that has to be named — the same cell is
+    /// perfectly scorable at the other 160.
+    #[test]
+    #[should_panic(
+        expected = "rung 2, ploidy 2: no genotype can have produced cell 3, which holds 40 sites"
+    )]
+    fn a_rung_at_which_a_weighted_cell_is_impossible_names_that_rung() {
+        struct ImpossibleAtTheLastRung;
+        impl NoiseModel for ImpossibleAtTheLastRung {
+            type Cell = ToyCell;
+            type NoiseParams = usize;
+
+            fn genotypes(&self, _ploidy: Ploidy) -> usize {
+                3
+            }
+
+            fn append_genotype_likelihoods(
+                &self,
+                cell: &ToyCell,
+                noise: &usize,
+                _ploidy: Ploidy,
+                out: &mut Vec<f64>,
+            ) {
+                if *noise == 2 && cell.row == 3 {
+                    out.extend([f64::NEG_INFINITY; 3]);
+                } else {
+                    out.extend([0.5_f64.ln(), 0.3_f64.ln(), 0.2_f64.ln()]);
+                }
+            }
+        }
+
+        let _ = fit_by_profile_scan(
+            &ImpossibleAtTheLastRung,
+            &diploid_cells(&[10, 20, 30, 40]),
+            &[0, 1, 2],
+        );
+    }
+
+    /// The companion to the two above, and what keeps the impossible-cell check from
+    /// being tightened into one that refuses a legal table: a cell carrying **no** sites
+    /// may say no genotype produced it, because the climb never looks at it.
+    #[test]
+    fn a_cell_holding_no_sites_may_say_no_genotype_produced_it() {
+        struct ImpossibleWhereEmpty;
+        impl NoiseModel for ImpossibleWhereEmpty {
+            type Cell = ToyCell;
+            type NoiseParams = usize;
+
+            fn genotypes(&self, _ploidy: Ploidy) -> usize {
+                3
+            }
+
+            fn append_genotype_likelihoods(
+                &self,
+                cell: &ToyCell,
+                _noise: &usize,
+                _ploidy: Ploidy,
+                out: &mut Vec<f64>,
+            ) {
+                if cell.sites == 0 {
+                    out.extend([f64::NEG_INFINITY; 3]);
+                } else {
+                    out.extend([0.5_f64.ln(), 0.3_f64.ln(), 0.2_f64.ln()]);
+                }
+            }
+        }
+
+        let cells = diploid_cells(&[10, 0, 30, 40]);
+        let scan = fit_by_profile_scan(&ImpossibleWhereEmpty, &cells, &[0, 1, 2]);
+        assert!(scan.log_likelihood.get().is_finite());
+    }
+
+    /// A cell holding no sites is legal on its own — only the ploidy's total is
+    /// checked — and it must not move the answer, because a cell nothing landed in is no
+    /// evidence.
+    #[test]
+    fn a_cell_holding_no_sites_reaches_the_climb_without_moving_the_fit() {
+        let table = three_rung_table();
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let sites = weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000_000.0);
+
+        let without = fit_by_profile_scan(&model, &diploid_cells(&sites), &[0, 1, 2]);
+
+        let mut with_empty = diploid_cells(&sites);
+        with_empty.push(ToyCell {
+            ploidy: ploidy(2),
+            sites: 0,
+            row: 0,
+        });
+        let with = fit_by_profile_scan(&model, &with_empty, &[0, 1, 2]);
+
+        assert_eq!(with.noise, without.noise);
+        assert_eq!(
+            with.log_likelihood.get().to_bits(),
+            without.log_likelihood.get().to_bits(),
+            "an empty cell moved the score"
+        );
+    }
+
+    /// A model that scores some ploidy against no genotypes at all is named where the
+    /// ploidy is still in scope. Two frames down the message knows only that some table
+    /// was empty.
+    #[test]
+    #[should_panic(expected = "scores a cell of ploidy 2 against no genotypes at all")]
+    fn a_model_that_scores_a_ploidy_against_no_genotypes_at_all_is_refused() {
+        struct NoGenotypes;
+        impl NoiseModel for NoGenotypes {
+            type Cell = ToyCell;
+            type NoiseParams = usize;
+
+            fn genotypes(&self, _ploidy: Ploidy) -> usize {
+                0
+            }
+
+            fn append_genotype_likelihoods(
+                &self,
+                _cell: &ToyCell,
+                _noise: &usize,
+                _ploidy: Ploidy,
+                _out: &mut Vec<f64>,
+            ) {
+            }
+        }
+
+        let _ = fit_by_profile_scan(&NoGenotypes, &diploid_cells(&[10, 20]), &[0]);
+    }
+
+    /// **The per-ploidy scores are added in a fixed order whatever order the cells
+    /// arrive in**, which is what the `BTreeMap` is for: floating-point addition is not
+    /// associative, so two runs that summed the ploidies in different orders would return
+    /// different bits. Asserted on the bits and not against a tolerance, because a
+    /// tolerance is exactly what this cannot afford — the scan compares rungs on this
+    /// number and adjacent rungs can be close.
+    ///
+    /// **Six ploidies, and their site counts spread over four orders of magnitude.** Both
+    /// are what make the test able to fail. At two groups a `HashMap` happens to iterate
+    /// them in the same order often enough to pass; at six the chance is one in 720. And
+    /// with equal group scores the sum is order-independent whatever the container does,
+    /// so the counts are scaled ×1 to ×10⁵ to force the partial sums apart in the last
+    /// bits.
+    #[test]
+    fn the_per_ploidy_scores_are_summed_in_a_fixed_order_whatever_the_slice_order() {
+        let table = three_rung_table();
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let base = weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0);
+
+        let groups: Vec<Vec<ToyCell>> = (1..=6_u8)
+            .map(|copies| {
+                let scale = 10_u64.pow(u32::from(copies) - 1);
+                base.iter()
+                    .enumerate()
+                    .map(|(row, &sites)| ToyCell {
+                        ploidy: ploidy(copies),
+                        sites: sites * scale + 1,
+                        row,
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let grouped: Vec<ToyCell> = groups.iter().flatten().cloned().collect();
+        // The same cells, one from each ploidy in turn, so a container that iterated in
+        // insertion order would add the six partial sums the other way round.
+        let mut interleaved: Vec<ToyCell> = Vec::with_capacity(grouped.len());
+        for row in 0..base.len() {
+            for group in groups.iter().rev() {
+                interleaved.push(group[row].clone());
+            }
+        }
+
+        let first = fit_by_profile_scan(&model, &grouped, &[0, 1, 2]);
+        let second = fit_by_profile_scan(&model, &interleaved, &[0, 1, 2]);
+
+        assert_eq!(first.genotype_frequencies.len(), 6);
+        assert_eq!(
+            first.log_likelihood.get().to_bits(),
+            second.log_likelihood.get().to_bits(),
+            "the ploidies were summed in a different order: {} against {}",
+            first.log_likelihood.get(),
+            second.log_likelihood.get()
+        );
+    }
+
+    /// A ladder carrying the same rung twice is the other way a tie arises, and the one
+    /// an alternating fit re-scanning a narrowed ladder would produce. The rule is the
+    /// same: the later of the two wins.
+    #[test]
+    fn a_ladder_with_a_repeated_rung_returns_the_later_of_the_two() {
+        let table = three_rung_table();
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0));
+
+        // Rung 1 is the truth and appears at positions 1 and 2 of the ladder.
+        let scan = fit_by_profile_scan(&model, &cells, &[0, 1, 1]);
+
+        assert_eq!(scan.noise, 1);
+        assert!(
+            scan.argmax_at_ladder_end,
+            "the later of the two tied rungs is the ladder's last"
+        );
     }
 
     #[test]

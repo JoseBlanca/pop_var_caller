@@ -14,17 +14,19 @@
 //! plan answers, not this one.
 //!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §4. The climb over the
-//! genotype frequencies is [`mixture_weights`]; the scan over the noise parameters
-//! joins it in Milestone D. The two result types below are Milestone A.
+//! genotype frequencies is [`mixture_weights`]; the scan over the noise parameters is
+//! [`profile_scan`], which joined it in Milestone D.
+//!
+//! **What this file holds is the seam and nothing else**: the two traits a path
+//! implements to be fitted — [`NoiseModel`] and [`WeightedCell`] — and
+//! [`FitTermination`], which belongs to the alternating fit of Milestone E rather than
+//! to either half. Each fit's result type sits with the function that builds it:
+//! [`profile_scan::ScanResult`] is the scan's.
 
 pub mod mixture_weights;
 pub mod profile_scan;
 
-use std::collections::BTreeMap;
-
-use smallvec::SmallVec;
-
-use crate::ng::types::{LogProb, Ploidy};
+use crate::ng::types::Ploidy;
 
 /// What the scan needs to know about a cell **besides how to score it**: which genotype
 /// set it belongs to, and how much of the table it accounts for.
@@ -54,12 +56,20 @@ pub trait WeightedCell {
 /// **Static dispatch, deliberately** — the scan is written `<M: NoiseModel>` and not
 /// `&dyn NoiseModel`, so the compiler emits one specialised copy per model with
 /// `M::Cell` substituted. Sharing the procedure across the two paths then costs nothing
-/// at run time in a loop that runs about 75,000 times per fit
-/// (`arch/parameter_prepass_generic.md` §4.2).
+/// at run time in a loop that runs tens of thousands of times per fit — the generic
+/// path's ladder is 161 rungs and its cell table holds up to 583 cells, so at most
+/// 93,863 evaluations (`arch/parameter_prepass_generic.md` §4.2, which rounds it to
+/// "~75,000" against a table that is rarely full).
 pub trait NoiseModel {
     /// The cell type this model's histogram is keyed on — a depth and an alternative
     /// count on the SNP/indel path, a table of repeat-length offsets on the STR path.
-    type Cell;
+    ///
+    /// **It must also be a [`WeightedCell`]**, which completes the seam in one place: a
+    /// path plugs into `fitting/` by supplying a model *and* a cell that knows its ploidy
+    /// and its site count. Stated here rather than as a bound on
+    /// [`profile_scan::fit_by_profile_scan`], where a model whose cell knew neither would
+    /// compile and fail only at the one call site that scans it.
+    type Cell: WeightedCell;
     /// The noise parameters being scanned — error rates on the SNP/indel path, three
     /// slippage parameters on the STR path.
     type NoiseParams;
@@ -99,41 +109,6 @@ pub trait NoiseModel {
     );
 }
 
-/// What one scan over a ladder of noise parameters returned.
-///
-/// Generic over the noise parameters, because the two paths scan different things: one
-/// error rate here, three stutter parameters on the STR path.
-#[derive(Clone, PartialEq, Debug)]
-pub struct ScanResult<P> {
-    /// The winning rung.
-    pub noise: P,
-    /// The genotype frequencies climbed to at that rung, **one set per ploidy the cells
-    /// covered**. On the error-rate scan these are a means rather than an output — the
-    /// scan is run for `noise` and they are discarded — while the sample's own rates
-    /// come from a scan run for these.
-    ///
-    /// **Keyed by ploidy rather than a single vector**, which is what the architecture
-    /// sketches (§5.2). A haploid region has two genotype classes and a diploid three,
-    /// so they cannot share a weight vector and the scan climbs once per ploidy (§4.2);
-    /// a single vector would mean picking one of them to report and dropping the rest,
-    /// silently, in the module whose whole difficulty is that its wrong numbers have no
-    /// symptom.
-    pub frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
-    /// What makes "the best-scoring iterate" a defined comparison in an alternating
-    /// fit. A [`LogProb`] rather than a bare `f64` because comparing is the only thing
-    /// it is for, and `LogProb` carries `ln(0)` as `-∞` — the score of a rung nothing
-    /// could have produced — where a linear probability would reach `0` and be
-    /// indistinguishable from a value that merely got too small to represent.
-    pub log_likelihood: LogProb,
-    /// **Whether the answer sat on the ladder's edge, and it is not decoration.** A
-    /// read group whose true rate lies outside the ladder — a bad run, heavy
-    /// contamination, or any of the arithmetic failures a scan can suffer — has its
-    /// answer silently clamped to an endpoint and emitted as though it were fitted,
-    /// with a large observation count behind it. This one bit is what stands between a
-    /// railed fit and a plausible-looking number.
-    pub argmax_at_ladder_end: bool,
-}
-
 /// How an alternating fit ended.
 ///
 /// **Emitted rather than discarded**, because a fit that ran out of iterations is still
@@ -154,22 +129,6 @@ pub struct FitTermination {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The rail flag is the field with teeth, so it is stated rather than left to a
-    /// reader to notice: a scan that railed reports the same shape as one that did not.
-    #[test]
-    fn a_scan_result_reports_whether_its_answer_sat_on_the_ladders_edge() {
-        let diploid = Ploidy::try_new(2).expect("a positive copy number");
-        let railed = ScanResult {
-            noise: 0.1_f64,
-            frequencies: BTreeMap::from([(diploid, SmallVec::from_slice(&[0.98, 0.015, 0.005]))]),
-            log_likelihood: LogProb(-1.2e9),
-            argmax_at_ladder_end: true,
-        };
-
-        assert!(railed.argmax_at_ladder_end);
-        assert_eq!(railed.frequencies[&diploid].len(), 3);
-    }
 
     /// A single-library sample settles after one pass, because the two tables the
     /// alternation reads are then the same table. That is 1,550 of the 1,707 samples in
