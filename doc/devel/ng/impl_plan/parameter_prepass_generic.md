@@ -329,7 +329,7 @@ a known rate recovers that rung; a table generated outside Phred 10–50 sets th
 
 ### Milestone E — the four fits
 
-**E1. The per-read-group error rate.**  ☐
+**E1. The per-read-group error rate.**  ✅
 `fit_by_profile_scan` over `ReadGroupHistograms`, once per read group, keeping only `ε` — the
 frequencies it climbs to at each rung are a means, not an output. *Depends:* D3, C3.
 *Source:* arch §5.1, spec §3.

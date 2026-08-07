@@ -411,12 +411,43 @@ fn climb_with_cap(
 ///
 /// `ln_joint` is scratch, one entry per genotype; what it holds on return is the last
 /// scored cell's per-genotype terms and means nothing to a caller.
+///
+/// # Panics
+///
+/// If the three lengths beside the table disagree with it. **Checked here rather than
+/// left to the caller now that there is more than one caller**: the body zips the row
+/// against `genotype_frequencies` and `ln_joint`, and `zip` stops at the shortest — so a
+/// frequency set one entry short silently scores a mixture over a prefix of the genotypes,
+/// and a `ln_joint` one entry long feeds a stale slot to the log-sum-exp. Both are
+/// plausible wrong numbers rather than crashes. Three comparisons once per call, against a
+/// walk of every cell in the table.
 pub(super) fn weighted_log_likelihood(
     ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
     genotype_frequencies: &[f64],
     ln_joint: &mut [f64],
 ) -> f64 {
+    let genotypes = ln_likelihood_by_cell_and_genotype.genotypes();
+    assert_eq!(
+        cell_weights.len(),
+        ln_likelihood_by_cell_and_genotype.cells(),
+        "one weight per cell: {} weights against {} cells",
+        cell_weights.len(),
+        ln_likelihood_by_cell_and_genotype.cells()
+    );
+    assert_eq!(
+        genotype_frequencies.len(),
+        genotypes,
+        "{} genotype frequencies against a table {genotypes} genotypes wide",
+        genotype_frequencies.len()
+    );
+    assert_eq!(
+        ln_joint.len(),
+        genotypes,
+        "{} scratch slots against a table {genotypes} genotypes wide",
+        ln_joint.len()
+    );
+
     let mut score = 0.0;
     for (row, &cell_weight) in ln_likelihood_by_cell_and_genotype.rows().zip(cell_weights) {
         // Not an optimisation. A cell that carries no weight may legally be one no

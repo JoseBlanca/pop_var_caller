@@ -16,7 +16,13 @@
 //! fitted and the rate being tried are tied together in one value rather than travelling
 //! as a pair.
 //!
-//! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §5.1, spec §3.
+//! Design: `doc/devel/ng/spec/parameter_prepass_generic.md` §3 for what this table holds
+//! and why only `ε` comes out of it, and §5.1 for the alternation. **Not §3's second
+//! paragraph**, which describes the procedure this half replaced — "step through the error
+//! rate, and at each step climb to the genotype frequencies that fit best" is
+//! `fit_by_profile_scan`, and the owner's decision of 2026-08-07 is that the `ε` step holds
+//! the frequencies fixed instead. `arch/parameter_prepass_generic.md` §5.1 and §5.2 carry
+//! the same stale reading; that is recorded for the owner rather than edited here.
 
 use std::collections::BTreeMap;
 
@@ -37,7 +43,7 @@ use crate::ng::types::{ErrorRate, LogProb, Ploidy, ReadGroupId};
 /// the default is Milestone E4's, and it is what attaches a
 /// [`Provenance`](crate::ng::parameter_estimation::Provenance).
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct ReadGroupErrorRate {
+pub struct ReadGroupErrorRateFit {
     /// The winning rung's error rate.
     pub error_rate: ErrorRate,
     /// Where that rung sat on the ladder, counting from zero.
@@ -61,6 +67,12 @@ pub struct ReadGroupErrorRate {
     /// Carried because [`MIN_SITES_TO_FIT`](super::MIN_SITES_TO_FIT) is checked against it
     /// in Milestone E4, and the alternative is for that step to re-walk the tables to
     /// recover a number this one already summed.
+    ///
+    /// **Sites, and `arch/parameter_prepass_generic.md` §2.4 says an error rate's
+    /// `Estimate::observations` is *reads*.** The two differ by the mean depth, so
+    /// whichever E4 puts on the estimate has to be the one the field's doc claims.
+    /// Recorded here rather than converted, because a per-read count is a division this
+    /// step has no reason to do and E4 has the histograms it would need.
     pub sites: u64,
 }
 
@@ -94,15 +106,19 @@ pub struct ReadGroupErrorRate {
 ///
 /// If `ladder` is empty, if `genotype_frequencies` has no entry for a ploidy some group
 /// covered, if an entry is not as wide as that ploidy's genotype set, or if an entry is not
-/// a probability vector. Also if a cell of a group's table lists a read group other than
-/// that group's own, which would mean the read-group table and these parameters were built
-/// from two different samples.
+/// a probability vector.
+///
+/// And, two frames down in [`SampleLibraryNoise`], if a cell lists a read group other than
+/// the one being fitted. **That reaches only the attributed arm**, and the read-group table
+/// is built entirely of pooled keys, so on any table the accumulator produces it cannot
+/// fire — which is exactly why the read group inside the noise parameters is inert here and
+/// why the ladder is built inside the loop below rather than once outside it.
 #[must_use]
 pub fn fit_read_group_error_rates(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
     ladder: &[ErrorRate],
-) -> BTreeMap<ReadGroupId, ReadGroupErrorRate> {
+) -> BTreeMap<ReadGroupId, ReadGroupErrorRateFit> {
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
 
     // The map is keyed `(group, ploidy)` and `BTreeMap` orders by the pair, so a group's
@@ -129,6 +145,15 @@ pub fn fit_read_group_error_rates(
         // and the group it belongs to from being two collections indexed by position —
         // the fault `spec/parameter_prepass_generic.md` §1's scoring rule has no identity
         // against, since a rule with two libraries' rates swapped is still a probability.
+        //
+        // **And that construction is the whole of the guarantee, because the label is
+        // inert on this path.** Every cell of the read-group table carries a pooled key,
+        // and the pooled branch of the scoring rule reads a library's share and its rate
+        // and never its read group — so a ladder hoisted out of this loop and built from
+        // the first group's id fits every group to the right answer, and the two checks
+        // below are what catch it. They compare against the same `read_group` the ladder
+        // was built from, which is the point: they hold by construction while the
+        // construction stays here, and stop holding the moment it moves.
         let noise_ladder: Vec<SampleLibraryNoise> = ladder
             .iter()
             .map(|&error_rate| SampleLibraryNoise::single(read_group, error_rate))
@@ -156,7 +181,7 @@ pub fn fit_read_group_error_rates(
 
         fitted.insert(
             read_group,
-            ReadGroupErrorRate {
+            ReadGroupErrorRateFit {
                 error_rate: libraries[0].error_rate,
                 rung: scanned.rung,
                 log_likelihood: scanned.log_likelihood,
@@ -202,6 +227,16 @@ mod tests {
     /// and a fit that recovers its own rung is a claim about the **scan** rather than
     /// about the expression. Whether the expression itself is right is D2's four
     /// identities, not this file's.
+    ///
+    /// **What that division of labour rests on, stated because it is easy to over-read.**
+    /// On a table of expected counts the score is `N · Σ_c p_c(θ₀) · ln p_c(θ)`, which
+    /// Gibbs' inequality maximises at `θ = θ₀` for *any* rule whose cell probabilities sum
+    /// to one over the cell space. So recovery of the generating rung cannot catch an
+    /// expression that is wrong self-consistently — that is exactly what D2's identities
+    /// are for — and it is not vacuous either: it fails the moment the scan mislabels,
+    /// misgathers, misreports or misranks, which is what the tests below turn into
+    /// assertions. The sum-to-one it leans on holds here only because every site sits at
+    /// one exact depth, which is why [`table_generated_at`] takes a single `depth`.
     fn alternative_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64) -> f64 {
         let carried = f64::from(alt_copies) / f64::from(ploidy.get());
         carried * (1.0 - error_rate / 3.0) + (1.0 - carried) * error_rate
@@ -214,8 +249,15 @@ mod tests {
     /// The same device the research harnesses use — replace the observed count with its
     /// probability under a known truth and the answer has no sampling noise in it, so a
     /// departure from the generating rung is bias rather than luck (research note §1).
-    /// One depth, so the cell's mean depth is that depth exactly and the binning rule
-    /// contributes nothing to the answer.
+    /// One depth, so the cell's mean depth is that depth exactly, the binning rule
+    /// contributes nothing to the answer, and the cell probabilities sum to one — which is
+    /// what [`alternative_read_probability`]'s note says the recovery claim needs.
+    ///
+    /// Each cell is rounded on its own, so the table holds a site or two either side of
+    /// `sites` (199,998 to 200,000 at the depths used here). Nothing asserts the total
+    /// against `sites`; what is compared against is
+    /// [`DepthAltHistogram::total_loci`](super::histogram::DepthAltHistogram::total_loci)
+    /// of the same table.
     fn table_generated_at(
         edges: &Arc<DepthBinEdges>,
         depth: u32,
@@ -254,7 +296,9 @@ mod tests {
     /// **The claim E1 exists for, and the one that cannot be made from a single group:
     /// two libraries of one sample, four Phred apart, each recover their own rate.** A
     /// fit that answered either group from the other's table lands sixteen rungs out, and
-    /// a fit that pooled the two tables lands between them — neither is a near miss.
+    /// a fit that pooled the two tables lands between them — neither is a near miss. The
+    /// pooled arm is asserted rather than argued, because "between them" is a claim about
+    /// this fixture and not a general fact.
     #[test]
     fn two_read_groups_at_different_rates_each_recover_their_own() {
         let edges = Arc::new(DepthBinEdges::new());
@@ -283,6 +327,36 @@ mod tests {
             );
             assert_eq!(fit.error_rate, ladder[fit.rung]);
         }
+
+        // What a fit that pooled the two tables would return: one group's worth of sites
+        // from each rate, entered under a single read group. Rung 70 is between 64 and 80
+        // and is no library's rate — the failure has no symptom other than this number.
+        let mut pooled = table_generated_at(
+            &edges,
+            DEPTH,
+            ladder[RUNG_AT_PHRED_30].get(),
+            diploid,
+            &TRUTH,
+            SITES,
+        );
+        pooled.merge(&table_generated_at(
+            &edges,
+            DEPTH,
+            ladder[RUNG_AT_PHRED_26].get(),
+            diploid,
+            &TRUTH,
+            SITES,
+        ));
+        let pooled = fit_read_group_error_rates(
+            &BTreeMap::from([((ReadGroupId(1), diploid), pooled)]),
+            &frequencies(&[(2, &TRUTH)]),
+            &ladder,
+        );
+        assert_eq!(
+            pooled[&ReadGroupId(1)].rung,
+            70,
+            "pooling the two libraries lands between their rungs, at neither one's rate"
+        );
     }
 
     /// **The frequencies are held fixed, and holding them somewhere else moves the
@@ -294,18 +368,25 @@ mod tests {
     /// A scan that ignored the frequencies, or that climbed its own at every rung, would
     /// return the same rung twice.
     ///
-    /// **Three reads a site, not twenty, and the depth is what makes this test able to
-    /// fail at all.** The coupling between the two parameters is a low-coverage
-    /// phenomenon: at twenty reads a heterozygote shows about ten alternative reads and a
-    /// homozygous-reference site about one in fifty, so no plausible heterozygosity
-    /// competes for the one-alternative-read cell and the same fixture returns rung 80
-    /// under both frequency sets — measured, before this test was moved down to three
-    /// reads. At three, a heterozygote shows one alternative read of three three times in
-    /// eight, which is where the two explanations of that cell overlap and where the
-    /// research note fits its coupled worlds.
+    /// **Six reads a site, not twenty, and the depth is what makes this test able to fail
+    /// at all.** The coupling between the two parameters is a low-coverage phenomenon: at
+    /// twenty reads a heterozygote shows about ten alternative reads (10.007) and a
+    /// homozygous-reference site about one in fifty (one in 50.5), so no plausible
+    /// heterozygosity competes for the one-alternative-read cell. Measured on this exact
+    /// fixture, both frequency sets return rung 80 at twenty reads **and at ten**; the
+    /// answer only moves below that.
+    ///
+    /// **Six and not three, and that is the second thing this fixture had to get
+    /// right.** At three reads the second arm lands on rung **160**, the top of the
+    /// ladder — a railed answer, which satisfies "higher than rung 80" without being an
+    /// argmax of anything, so the assertion would also pass a defect that railed high for
+    /// any frequency set but the fixture's own. At six the move is 80 → 84 and interior,
+    /// which is why both halves are asserted below.
     #[test]
     fn the_frequencies_handed_in_move_the_fitted_rate() {
-        const SHALLOW: u32 = 3;
+        const SHALLOW: u32 = 6;
+        /// Where the second arm lands: four rungs, one Phred, below the true rate.
+        const RUNG_TOLD_TEN_TIMES_AS_VARIABLE: usize = 84;
         let edges = Arc::new(DepthBinEdges::new());
         let ladder = error_rate_ladder();
         let diploid = ploidy(2);
@@ -334,10 +415,15 @@ mod tests {
             RUNG_AT_PHRED_30,
             "at the truth's own frequencies the generating rung comes back"
         );
+        let moved = &told_it_is_variable[&ReadGroupId(1)];
+        assert_eq!(
+            moved.rung, RUNG_TOLD_TEN_TIMES_AS_VARIABLE,
+            "at ten times the true heterozygosity the fit landed on rung {}",
+            moved.rung
+        );
         assert!(
-            told_it_is_variable[&ReadGroupId(1)].rung > RUNG_AT_PHRED_30,
-            "at ten times the true heterozygosity the fit stayed at rung {}",
-            told_it_is_variable[&ReadGroupId(1)].rung
+            !moved.argmax_at_ladder_end,
+            "the moved answer must be an argmax and not the ladder's end"
         );
     }
 
@@ -391,9 +477,10 @@ mod tests {
     }
 
     /// **The rail flag, which is the only thing between a railed fit and a
-    /// plausible-looking number.** A library ten times noisier than the ladder's worst
-    /// rung has its answer clamped to that rung and reported with the group's whole site
-    /// count behind it. The contrast that gives this teeth is the interior winner of
+    /// plausible-looking number.** A library at Phred 5 — an error rate of 0.316, **3.2
+    /// times** the 0.1 of the ladder's worst rung and five Phred past its end — has its
+    /// answer clamped to that rung and reported with the group's whole site count behind
+    /// it. The contrast that gives this teeth is the interior winner of
     /// `two_read_groups_at_different_rates_each_recover_their_own`.
     #[test]
     fn a_group_noisier_than_the_ladder_reaches_sets_the_rail_flag() {
@@ -442,6 +529,169 @@ mod tests {
         let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
 
         assert_eq!(fitted.keys().copied().collect::<Vec<_>>(), [ReadGroupId(1)]);
+    }
+
+    /// **A group too thin to be worth fitting is still fitted here.**
+    /// [`MIN_SITES_TO_FIT`](super::MIN_SITES_TO_FIT) is Milestone E4's gate, and E4 needs
+    /// both the fit and the site count to decide against them — a group dropped at this
+    /// step is one E4 cannot tell from a group that never had a table, and the two get
+    /// different rungs of the fallback ladder.
+    ///
+    /// **Five hundred sites, against a floor of ten thousand**, because every other
+    /// fixture in this file holds 40,000 or 200,000: a gate run a milestone early would be
+    /// invisible to all of them.
+    #[test]
+    fn a_group_far_below_the_fitting_floor_is_still_returned_with_its_site_count() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let thin = 500.0;
+        assert!(
+            thin < super::super::MIN_SITES_TO_FIT as f64,
+            "the fixture has to sit below the floor for this test to say anything"
+        );
+        let histograms = BTreeMap::from([(
+            (ReadGroupId(1), diploid),
+            table_generated_at(
+                &edges,
+                DEPTH,
+                ladder[RUNG_AT_PHRED_30].get(),
+                diploid,
+                &TRUTH,
+                thin,
+            ),
+        )]);
+
+        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+
+        let fit = fitted
+            .get(&ReadGroupId(1))
+            .expect("a thin group is fitted here and gated in E4");
+        assert_eq!(
+            fit.sites,
+            histograms[&(ReadGroupId(1), diploid)].total_loci()
+        );
+    }
+
+    /// **A cell is scored against the genotypes of the ploidy its table is keyed by.** A
+    /// haploid-only group is handed haploid frequencies and nothing else, so a fit that
+    /// labelled its cells with any other ploidy has no frequencies to look up and panics
+    /// rather than answering.
+    ///
+    /// The two-ploidy test above cannot say this: it hands over both sets, so a fit that
+    /// labelled every cell diploid finds a set waiting for it.
+    #[test]
+    fn a_haploid_group_is_scored_against_haploid_genotypes() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let haploid = ploidy(1);
+        let histograms = BTreeMap::from([(
+            (ReadGroupId(1), haploid),
+            table_generated_at(
+                &edges,
+                DEPTH,
+                ladder[RUNG_AT_PHRED_30].get(),
+                haploid,
+                &[0.999, 0.001],
+                SITES,
+            ),
+        )]);
+
+        let fitted =
+            fit_read_group_error_rates(&histograms, &frequencies(&[(1, &[0.999, 0.001])]), &ladder);
+
+        assert_eq!(fitted[&ReadGroupId(1)].rung, RUNG_AT_PHRED_30);
+    }
+
+    /// **The rate a group is scored against must be labelled with that group**, and this
+    /// is the only test that can say so — with a caveat worth stating rather than hiding.
+    ///
+    /// The read-group table's cells are all **pooled**, and the pooled branch of the
+    /// scoring rule reads a library's share and its rate and never its label. So on every
+    /// table `add_locus` can build, the read group inside
+    /// [`SampleLibraryNoise`] is **inert**: a ladder hoisted out of the per-group loop and
+    /// built from the first group's id fits every group correctly. The two `assert_eq!`s
+    /// in the fit are what catch that, and they can only catch it because the construction
+    /// sits inside the loop.
+    ///
+    /// The **attributed** branch does read the label, and refuses a cell naming a library
+    /// it does not have. So this test puts one attributed site in each group's table to
+    /// give the pairing an observable consequence. `add_locus` never produces such a cell
+    /// in the read-group table — that arm belongs to the windowed one — so what is pinned
+    /// here is the function's contract rather than a reachable input.
+    #[test]
+    fn each_group_is_scored_against_noise_that_names_it() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+
+        let mut histograms = BTreeMap::new();
+        for (group, rung) in [(1u32, RUNG_AT_PHRED_30), (2, RUNG_AT_PHRED_26)] {
+            let mut table =
+                table_generated_at(&edges, DEPTH, ladder[rung].get(), diploid, &TRUTH, SITES);
+            table.add_attributed_site(
+                DepthAndAltReads::new(DEPTH, 1),
+                &[(ReadGroupId(group), 1)],
+                Bp(1),
+            );
+            histograms.insert((ReadGroupId(group), diploid), table);
+        }
+
+        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+
+        assert_eq!(fitted[&ReadGroupId(1)].rung, RUNG_AT_PHRED_30);
+        assert_eq!(fitted[&ReadGroupId(2)].rung, RUNG_AT_PHRED_26);
+    }
+
+    /// **The score reported is the winning rung's own score**, which is the field the
+    /// coupled fit of E2 picks its best-scoring iterate by — so a constant there would be
+    /// read as "no iterate improved on the first".
+    ///
+    /// Two one-rung ladders make it checkable from outside: the rung the table was
+    /// generated at must score above a rung sixteen away, and the full scan must report
+    /// exactly the number its winning rung scored on its own.
+    #[test]
+    fn the_reported_score_is_the_winning_rungs_score() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let histograms = BTreeMap::from([(
+            (ReadGroupId(1), diploid),
+            table_generated_at(
+                &edges,
+                DEPTH,
+                ladder[RUNG_AT_PHRED_30].get(),
+                diploid,
+                &TRUTH,
+                SITES,
+            ),
+        )]);
+        let frequencies = frequencies(&[(2, &TRUTH)]);
+        let score_at = |rung: usize| {
+            fit_read_group_error_rates(&histograms, &frequencies, &ladder[rung..=rung])
+                [&ReadGroupId(1)]
+                .log_likelihood
+                .get()
+        };
+
+        let at_the_truth = score_at(RUNG_AT_PHRED_30);
+        assert!(
+            at_the_truth < 0.0 && at_the_truth.is_finite(),
+            "a weighted log-likelihood over {SITES} sites is a negative finite number, \
+             not {at_the_truth}"
+        );
+        assert!(
+            at_the_truth > score_at(RUNG_AT_PHRED_26),
+            "the generating rung scored {at_the_truth} and a rung sixteen away scored {}",
+            score_at(RUNG_AT_PHRED_26)
+        );
+
+        let whole_ladder = fit_read_group_error_rates(&histograms, &frequencies, &ladder);
+        assert_eq!(
+            whole_ladder[&ReadGroupId(1)].log_likelihood.get(),
+            at_the_truth,
+            "the scan reported a score its own winning rung does not have"
+        );
     }
 
     #[test]
