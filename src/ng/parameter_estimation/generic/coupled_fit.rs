@@ -57,11 +57,14 @@ use crate::ng::parameter_estimation::fitting::mixture_weights::{
 };
 use crate::ng::parameter_estimation::fitting::{FitTermination, NoiseModel};
 use crate::ng::parameter_estimation::generic::accumulators::GenericAccumulators;
+use crate::ng::parameter_estimation::generic::fallback::resolve_error_rates;
 use crate::ng::parameter_estimation::generic::histogram::{Cell, DepthAltHistogram};
 use crate::ng::parameter_estimation::generic::noise_model::{
     LibraryNoise, SampleLibraryNoise, SubstitutionNoiseModel,
 };
-use crate::ng::parameter_estimation::generic::read_group_error_rate::fit_read_group_error_rates;
+use crate::ng::parameter_estimation::generic::read_group_error_rate::{
+    ReadGroupErrorRateFit, fit_read_group_error_rates,
+};
 use crate::ng::parameter_estimation::generic::{
     CoupledFit, DEFAULT_ERROR_RATE, MAX_COUPLED_FIT_ITERATIONS, MIN_SITES_TO_FIT, SampleRates,
 };
@@ -94,6 +97,7 @@ pub fn fit_coupled(
     sample: &str,
     accumulators: &GenericAccumulators,
     ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
 ) -> Result<CoupledFit, ParameterEstimationError> {
     let ploidies: BTreeSet<Ploidy> = accumulators
         .windowed_histograms()
@@ -110,6 +114,7 @@ pub fn fit_coupled(
         accumulators.read_group_histograms(),
         &whole_sample,
         ladder,
+        supplied,
     )
 }
 
@@ -136,6 +141,7 @@ pub(crate) fn fit_coupled_from_tables(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
 ) -> Result<CoupledFit, ParameterEstimationError> {
     let start = nearest_rung(ladder, DEFAULT_ERROR_RATE);
     let shares = library_shares(read_group_histograms);
@@ -146,6 +152,7 @@ pub(crate) fn fit_coupled_from_tables(
         read_group_histograms,
         whole_sample,
         ladder,
+        supplied,
         &start,
         MAX_COUPLED_FIT_ITERATIONS,
     )
@@ -168,6 +175,7 @@ fn fit_by_alternation(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
     start: &BTreeMap<ReadGroupId, usize>,
     max_iterations: u32,
 ) -> Result<(CoupledFit, Vec<ScoredIterate>), ParameterEstimationError> {
@@ -203,6 +211,10 @@ fn fit_by_alternation(
 
     let mut rungs = start.clone();
     let mut trace: Vec<ScoredIterate> = Vec::new();
+    // The last round's per-group fits, kept for their **site counts**: how much evidence
+    // stood behind a group is what Milestone E4's fallback ladder gates on, and it does
+    // not move between rounds.
+    let mut fitted_sites: BTreeMap<ReadGroupId, ReadGroupErrorRateFit> = BTreeMap::new();
     let mut best: Option<ScoredIterate> = None;
     let mut iterations = 0;
     let mut converged = false;
@@ -221,6 +233,7 @@ fn fit_by_alternation(
             .iter()
             .map(|(&group, fit)| (group, fit.rung))
             .collect();
+        fitted_sites = fitted;
 
         // The iterate is the pair (rates, frequencies) this round arrived at, and its score
         // is the whole-sample table's likelihood **at that pair** — one objective on one
@@ -265,6 +278,8 @@ fn fit_by_alternation(
             read_group_histograms,
             whole_sample,
             ladder,
+            supplied,
+            &fitted_sites,
             &best,
             termination,
         )?,
@@ -288,6 +303,8 @@ fn into_coupled_fit(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
+    fitted_sites: &BTreeMap<ReadGroupId, ReadGroupErrorRateFit>,
     best: &ScoredIterate,
     termination: FitTermination,
 ) -> Result<CoupledFit, ParameterEstimationError> {
@@ -298,20 +315,31 @@ fn into_coupled_fit(
         *reads_of_group.entry(group).or_default() += table.total_reads();
     }
 
-    let error_rate = best
-        .rungs
+    // **The winning iterate's rungs, not the last round's fits**, which is why this rebuilds
+    // the per-group answer rather than passing the loop's own `fitted` straight on: the
+    // rate a group gets is the one the best-scoring iterate chose, and only its site count
+    // comes from the fit.
+    let at_the_winning_rungs: BTreeMap<ReadGroupId, ReadGroupErrorRateFit> = fitted_sites
         .iter()
-        .map(|(&group, &rung)| {
-            (
-                group,
-                Estimate {
-                    value: ladder[rung],
-                    provenance: Provenance::FittedHere,
-                    observations: reads_of_group.get(&group).copied().unwrap_or_default(),
-                },
-            )
+        .filter_map(|(&group, fit)| {
+            best.rungs.get(&group).map(|&rung| {
+                (
+                    group,
+                    ReadGroupErrorRateFit {
+                        error_rate: ladder[rung],
+                        rung,
+                        ..*fit
+                    },
+                )
+            })
         })
         .collect();
+    let error_rate = resolve_error_rates(
+        &at_the_winning_rungs,
+        &reads_of_group,
+        supplied,
+        MIN_SITES_TO_FIT,
+    );
 
     let mut rates = BTreeMap::new();
     for (&ploidy, frequencies) in &best.genotype_frequencies {
@@ -625,6 +653,7 @@ mod tests {
                 &self.read_group_histograms,
                 &self.whole_sample,
                 &self.ladder,
+                &BTreeMap::new(),
                 start,
                 max_iterations,
             )
@@ -777,6 +806,7 @@ mod tests {
             &read_group_histograms,
             &whole_sample,
             &ladder,
+            &BTreeMap::new(),
         )
         .expect("enough sites");
 
@@ -1025,6 +1055,7 @@ mod tests {
                 table_generated_at(&edges, PER_LIBRARY_DEPTH, rate, diploid, &TRUTH, thin),
             )]),
             &ladder,
+            &BTreeMap::new(),
         )
         .expect_err("a thousand sites is below the floor");
 
@@ -1128,6 +1159,85 @@ mod tests {
         );
     }
 
+    /// **The fallback ladder reaches the fit a caller reads.** A second library with 500
+    /// sites — a twentieth of [`MIN_SITES_TO_FIT`] — is fitted like any other inside the
+    /// loop, and comes out of it marked `Borrowed`, carrying the deep library's rate and
+    /// the deep library's reads as its warrant.
+    ///
+    /// Without this the ladder is a function nothing calls: `CoupledFit` would report a
+    /// rate fitted from 500 sites as `FittedHere`, which is the provenance record saying
+    /// the opposite of what happened.
+    #[test]
+    fn a_thin_library_comes_out_of_the_coupled_fit_marked_borrowed() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let thin = 500.0;
+        assert!(thin < MIN_SITES_TO_FIT as f64);
+
+        let read_group_histograms = BTreeMap::from([
+            (
+                (ReadGroupId(1), diploid),
+                table_generated_at(
+                    &edges,
+                    PER_LIBRARY_DEPTH,
+                    ladder[RUNG_AT_PHRED_30].get(),
+                    diploid,
+                    &TRUTH,
+                    SITES,
+                ),
+            ),
+            (
+                (ReadGroupId(2), diploid),
+                table_generated_at(
+                    &edges,
+                    PER_LIBRARY_DEPTH,
+                    ladder[RUNG_AT_PHRED_26].get(),
+                    diploid,
+                    &TRUTH,
+                    thin,
+                ),
+            ),
+        ]);
+        let whole_sample = BTreeMap::from([(
+            diploid,
+            table_generated_at(
+                &edges,
+                PER_LIBRARY_DEPTH,
+                ladder[RUNG_AT_PHRED_30].get(),
+                diploid,
+                &TRUTH,
+                SITES,
+            ),
+        )]);
+
+        let fit = fit_coupled_from_tables(
+            "one-thin",
+            &read_group_histograms,
+            &whole_sample,
+            &ladder,
+            &BTreeMap::new(),
+        )
+        .expect("the whole-sample table holds enough sites");
+
+        assert_eq!(
+            fit.error_rate[&ReadGroupId(1)].provenance,
+            Provenance::FittedHere
+        );
+        let thin_group = &fit.error_rate[&ReadGroupId(2)];
+        assert_eq!(thin_group.provenance, Provenance::Borrowed);
+        assert_eq!(
+            thin_group.value,
+            fit.error_rate[&ReadGroupId(1)].value,
+            "with one lender the borrowed rate is that lender's"
+        );
+        assert_eq!(
+            thin_group.observations,
+            read_group_histograms[&(ReadGroupId(1), diploid)].total_reads(),
+            "the warrant is the lender's reads, not the 500 sites that were too few"
+        );
+    }
+
     /// **A library that contributed no reads is left out rather than given a share of
     /// zero**, which [`SampleLibraryNoise::new`] refuses — a library with no reads has no
     /// rate to fit and contributes no term to the mixture.
@@ -1227,13 +1337,14 @@ mod tests {
         }
 
         let ladder = error_rate_ladder();
-        let through_the_door = fit_coupled("walked", &accumulators, &ladder)
+        let through_the_door = fit_coupled("walked", &accumulators, &ladder, &BTreeMap::new())
             .expect("the accumulator holds enough sites");
         let from_the_tables = fit_coupled_from_tables(
             "walked",
             accumulators.read_group_histograms(),
             &BTreeMap::from([(diploid, accumulators.whole_sample_histogram(diploid))]),
             &ladder,
+            &BTreeMap::new(),
         )
         .expect("the same tables");
 
@@ -1345,6 +1456,7 @@ mod tests {
                 &self.read_group_histograms,
                 &self.whole_sample,
                 &self.ladder,
+                &BTreeMap::new(),
                 start,
                 max_iterations,
             )
@@ -1487,6 +1599,7 @@ mod tests {
                 &BTreeMap::from([((ReadGroupId(1), diploid), generate())]),
                 &BTreeMap::from([(diploid, generate())]),
                 &ladder,
+                &BTreeMap::new(),
             )
             .expect("enough sites")
         };
@@ -1554,6 +1667,7 @@ mod tests {
             &read_group_histograms,
             &whole_sample,
             &ladder,
+            &BTreeMap::new(),
         )
         .expect("enough sites at both ploidies");
 

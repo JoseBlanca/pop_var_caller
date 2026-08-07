@@ -375,7 +375,7 @@ surface inside the simplex rather than a free point on it, and the concavity tha
 safe does not transfer to a curve. *Depends:* E1, C3, B3. *Source:* arch §5.3, §4.1, spec
 §6.1, §6.5.
 
-**E4. The fallback ladder and the floors.**  ☐
+**E4. The fallback ladder and the floors.**  ✅
 Fitted here → borrowed from the sample's other groups → supplied → defaulted, each carrying
 its `Provenance`. `MIN_SITES_TO_FIT` gates the first; below
 `MIN_WINDOWS_TO_FIT_INBREEDING` the runs model **fails rather than emits**, because inbreeding

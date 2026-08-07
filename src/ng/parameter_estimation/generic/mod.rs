@@ -20,6 +20,7 @@ pub mod depth_and_alt_reads;
 pub mod depth_bins;
 #[cfg(test)]
 mod expected_counts;
+pub mod fallback;
 pub mod histogram;
 pub mod noise_model;
 pub mod read_group_error_rate;
