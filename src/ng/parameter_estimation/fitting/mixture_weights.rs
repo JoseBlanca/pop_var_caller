@@ -396,12 +396,22 @@ fn climb_with_cap(
     }
 }
 
-/// `Σ_cells w · ln Σ_genotypes π·L`, the quantity the climb maximises.
+/// `Σ_cells w · ln Σ_genotypes π·L`, the quantity the climb maximises — evaluated at
+/// genotype frequencies handed in rather than searched for.
 ///
 /// Kept separate from the climb because the climb's own running score belongs to the
 /// weights it started the pass with, and what a caller compares rungs on is the score
 /// at the weights it is handed.
-fn weighted_log_likelihood(
+///
+/// **Two callers, and the second is why this is visible outside the file.** The climb
+/// finishes on it; and `ladder_scan::fit_by_fixed_frequency_scan` is nothing but this,
+/// once per rung — a scan that holds the frequencies where the coupled alternation left
+/// them scores exactly the quantity a climb would have started from
+/// (`arch/parameter_prepass_generic.md` §5.2).
+///
+/// `ln_joint` is scratch, one entry per genotype; what it holds on return is the last
+/// scored cell's per-genotype terms and means nothing to a caller.
+pub(super) fn weighted_log_likelihood(
     ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
     genotype_frequencies: &[f64],

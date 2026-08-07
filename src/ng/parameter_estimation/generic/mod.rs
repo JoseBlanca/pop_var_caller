@@ -19,6 +19,7 @@ pub mod depth_and_alt_reads;
 pub mod depth_bins;
 pub mod histogram;
 pub mod noise_model;
+pub mod read_group_error_rate;
 pub mod runs;
 
 use std::collections::BTreeMap;

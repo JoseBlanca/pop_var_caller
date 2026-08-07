@@ -15,16 +15,17 @@
 //!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §4. The climb over the
 //! genotype frequencies is [`mixture_weights`]; the scan over the noise parameters is
-//! [`profile_scan`], which joined it in Milestone D.
+//! [`ladder_scan`], which joined it in Milestone D.
 //!
 //! **What this file holds is the seam and nothing else**: the two traits a path
 //! implements to be fitted — [`NoiseModel`] and [`WeightedCell`] — and
 //! [`FitTermination`], which belongs to the alternating fit of Milestone E rather than
 //! to either half. Each fit's result type sits with the function that builds it:
-//! [`profile_scan::ScanResult`] is the scan's.
+//! [`ladder_scan::ScanResult`] and [`ladder_scan::FixedFrequencyScanResult`] are the two
+//! scans'.
 
+pub mod ladder_scan;
 pub mod mixture_weights;
-pub mod profile_scan;
 
 use crate::ng::types::Ploidy;
 
@@ -67,7 +68,7 @@ pub trait NoiseModel {
     /// **It must also be a [`WeightedCell`]**, which completes the seam in one place: a
     /// path plugs into `fitting/` by supplying a model *and* a cell that knows its ploidy
     /// and its site count. Stated here rather than as a bound on
-    /// [`profile_scan::fit_by_profile_scan`], where a model whose cell knew neither would
+    /// [`ladder_scan::fit_by_profile_scan`], where a model whose cell knew neither would
     /// compile and fail only at the one call site that scans it.
     type Cell: WeightedCell;
     /// The noise parameters being scanned — error rates on the SNP/indel path, three

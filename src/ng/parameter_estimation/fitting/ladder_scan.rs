@@ -1,17 +1,32 @@
-//! The scan: step through a ladder of noise parameters, climb to the best genotype
-//! frequencies at each rung, and keep the rung that scores highest.
-//!
-//! In the standard vocabulary this is a **profile likelihood** over the noise
-//! parameters — the frequencies are maximised out at every value of the parameter being
-//! scanned, leaving a curve in that parameter alone. Splitting the search this way puts
-//! the effort where the difficulty is: the frequencies are provably concave and never
-//! needed searching, while about the noise parameters there is no proof either way
-//! (`spec/parameter_prepass.md` §3.1).
+//! The scan: step through a ladder of noise parameters, score the cells at every rung,
+//! and keep the rung that scores highest.
 //!
 //! **Every rung is scored and no early exit is taken**, because nobody has shown the
 //! curve has a single hump. That is the whole reason for a scan rather than a
 //! one-dimensional optimiser, and it is why the cost is stated rather than avoided: the
 //! generic ladder is 161 rungs, once per read group.
+//!
+//! **Two scans, differing only in what a rung's score means.**
+//!
+//! - [`fit_by_profile_scan`] climbs to the best genotype frequencies at every rung and
+//!   scores the rung there. In the standard vocabulary that is a **profile likelihood**
+//!   over the noise parameters — the frequencies are maximised out at every value of the
+//!   parameter being scanned, leaving a curve in that parameter alone. Splitting the
+//!   search this way puts the effort where the difficulty is: the frequencies are
+//!   provably concave and never needed searching, while about the noise parameters there
+//!   is no proof either way (`spec/parameter_prepass.md` §3.1).
+//! - [`fit_by_fixed_frequency_scan`] scores every rung at genotype frequencies the caller
+//!   hands it and climbs nothing. That is **not** a profile likelihood, which is why it is
+//!   a sibling rather than a mode of the first (owner's call, 2026-08-07): a function
+//!   whose name says *profile* and which sometimes is not one is a name that has stopped
+//!   being true. It is the `ε` half of Milestone E's coupled alternation — the half the
+//!   research harness measured, whose error-rate step holds the frequencies where the
+//!   previous iteration left them (`spec/parameter_prepass_generic.md` §5.1,
+//!   `examples/ng_multilib_key_harness.rs`, `fit_eps_on_read_group`).
+//!
+//! Everything else about a rung is the same in both, and shared in one place
+//! ([`scan_ladder`]): the per-ploidy plan, the check that the model appended the width it
+//! declared, the value checks that name the rung, the tie rule, and the rail flag.
 //!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §4.2.
 
@@ -20,10 +35,18 @@ use std::collections::BTreeMap;
 use smallvec::SmallVec;
 
 use crate::ng::parameter_estimation::fitting::mixture_weights::{
-    GenotypeLikelihoodTable, climb_mixture_weights,
+    GenotypeLikelihoodTable, climb_mixture_weights, weighted_log_likelihood,
 };
 use crate::ng::parameter_estimation::fitting::{NoiseModel, WeightedCell};
 use crate::ng::types::{LogProb, Ploidy};
+
+/// How far the genotype frequencies handed to [`fit_by_fixed_frequency_scan`] may miss
+/// summing to one before they are refused.
+///
+/// They arrive from a climb over the simplex, which normalises by a division, so exact
+/// equality is not available; this is loose enough for that and tight enough that a set
+/// built from the wrong denominator — or one genotype short — cannot pass.
+const FREQUENCY_SUM_TOLERANCE: f64 = 1e-9;
 
 /// What one scan over a ladder of noise parameters returned.
 ///
@@ -114,6 +137,210 @@ where
     M: NoiseModel,
     M::NoiseParams: Clone,
 {
+    let winner = scan_ladder(
+        model,
+        cells,
+        ladder,
+        |rung, plan, table, climbed_by_ploidy: &mut BTreeMap<Ploidy, SmallVec<[f64; 3]>>| {
+            let climbed = climb_mixture_weights(table, &plan.cell_weights, &plan.uniform_start);
+            // **A rung whose climb ran out of passes is scored below its own summit**,
+            // so the rung beside it can win on that alone and the argmax stops being
+            // the argmax. There is no channel to report it — `FitTermination` covers
+            // the outer alternation of Milestone E and not this — and `MAX_CLIMB_PASSES`
+            // is measured on four-cell fixtures where the slowest truth took 1,234
+            // passes, against a real table of 583 cells climbed 161 times. Debug only,
+            // because a slow climb is a data condition rather than a bug
+            // (`spec/parameter_prepass.md` §3.1) and the release path must not abort on
+            // one.
+            debug_assert!(
+                climbed.converged,
+                "rung {rung}, ploidy {}: the climb used all {} passes, so this rung is \
+                 scored short of its summit and the rung beside it may win on that alone",
+                plan.ploidy, climbed.passes
+            );
+            climbed_by_ploidy.insert(plan.ploidy, climbed.genotype_frequencies);
+            climbed.log_likelihood.get()
+        },
+    );
+
+    ScanResult {
+        noise: winner.noise,
+        genotype_frequencies: winner.kept,
+        log_likelihood: winner.log_likelihood,
+        argmax_at_ladder_end: winner.argmax_at_ladder_end,
+    }
+}
+
+/// What [`fit_by_fixed_frequency_scan`] returned: the winning rung and nothing that was
+/// merely handed in.
+///
+/// **No genotype frequencies, deliberately.** The sibling [`ScanResult`] carries the ones
+/// its climb arrived at, which are a fitted quantity. This scan climbs nothing, so the
+/// only frequencies it could report are the caller's own argument echoed back — and an
+/// echo filed under the same name as a fitted value is how a held-fixed number gets read
+/// as a result (owner's call, 2026-08-07).
+///
+/// Generic over the noise parameters for the same reason [`ScanResult`] is: the two paths
+/// scan different things.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FixedFrequencyScanResult<P> {
+    /// Where the winner sat on the ladder, counting from zero.
+    ///
+    /// **Carried because the coupled fit's stopping rule is stated in rungs** — it stops
+    /// when every read group's winning rung is the one it had last iteration
+    /// (`arch/parameter_prepass_generic.md` §5.2). Comparing the noise parameters instead
+    /// would work only as long as they carry an exact equality, and would say "the same
+    /// rung" in a vocabulary the design does not use.
+    pub rung: usize,
+    /// The winning rung's noise parameters.
+    pub noise: P,
+    /// The weighted log-likelihood of the cells at that rung, **at the frequencies the
+    /// caller handed in**. Comparable across rungs of one scan; comparable across two
+    /// scans only if they were handed the same frequencies.
+    pub log_likelihood: LogProb,
+    /// Whether the answer sat on the ladder's edge — the same bit [`ScanResult`] carries
+    /// and for the same reason: a read group whose true rate lies outside the ladder has
+    /// its answer clamped to an endpoint and emitted as though it were fitted.
+    pub argmax_at_ladder_end: bool,
+}
+
+/// Step through `ladder` scoring `cells` at the genotype frequencies handed in, and
+/// return the best-scoring rung. **Nothing is climbed.**
+///
+/// **The `ε` half of the coupled alternation** (`spec/parameter_prepass_generic.md` §5.1):
+/// each read group's error rate is fitted from its own table with the sample's genotype
+/// frequencies held where the previous iteration left them. That is the procedure the
+/// research harness measured — `fit_eps_on_read_group(space, freqs)` in
+/// `examples/ng_multilib_key_harness.rs` scores each candidate rate at the frequencies it
+/// is handed and never re-climbs them — and from a start at three times the true rates and
+/// half the true frequencies its fixed point is the truth in all 25 worlds tried, to 0.000
+/// rungs and 0.000% (research note §2.6).
+///
+/// `genotype_frequencies` carries **one set per ploidy the cells cover**, each as many
+/// entries as [`NoiseModel::genotypes`] declares at that ploidy, in the model's own
+/// genotype order. One shared set across read groups, not one per group: the frequencies
+/// are a property of the individual and the error rates are a property of the chemistry.
+///
+/// Everything else — every rung scored, the tie rule, the rail flag, the value checks that
+/// name the rung — is [`fit_by_profile_scan`]'s, shared rather than restated.
+///
+/// # Panics
+///
+/// Everything [`fit_by_profile_scan`] panics on, and additionally if
+/// `genotype_frequencies` has no entry for a ploidy the cells cover, if an entry is not as
+/// wide as the model declares that ploidy's genotype set, or if an entry is not a
+/// probability vector — a negative or non-finite weight, or a set that does not sum to
+/// one. Each of those is a caller that built the frequencies from a different table from
+/// the cells, and each would otherwise score every rung against a mixture that is not one.
+#[must_use]
+pub fn fit_by_fixed_frequency_scan<M>(
+    model: &M,
+    cells: &[M::Cell],
+    ladder: &[M::NoiseParams],
+    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+) -> FixedFrequencyScanResult<M::NoiseParams>
+where
+    M: NoiseModel,
+    M::NoiseParams: Clone,
+{
+    for (&ploidy, frequencies) in genotype_frequencies {
+        check_genotype_frequencies(ploidy, frequencies);
+    }
+
+    // Scratch for the one log-sum-exp per cell, resized when the ploidy changes rather
+    // than allocated per cell: the scan walks every cell at each of 161 rungs.
+    let mut ln_joint: Vec<f64> = Vec::new();
+
+    let winner = scan_ladder(
+        model,
+        cells,
+        ladder,
+        |_rung, plan, table, _kept: &mut ()| {
+            let frequencies = genotype_frequencies
+                .get(&plan.ploidy)
+                .unwrap_or_else(|| panic!("no genotype frequencies for ploidy {}", plan.ploidy));
+            assert_eq!(
+                frequencies.len(),
+                plan.genotypes,
+                "ploidy {} was handed {} genotype frequencies where the model scores it \
+             against {} genotypes",
+                plan.ploidy,
+                frequencies.len(),
+                plan.genotypes
+            );
+            ln_joint.clear();
+            ln_joint.resize(plan.genotypes, 0.0);
+            weighted_log_likelihood(table, &plan.cell_weights, frequencies, &mut ln_joint)
+        },
+    );
+
+    FixedFrequencyScanResult {
+        rung: winner.rung,
+        noise: winner.noise,
+        log_likelihood: winner.log_likelihood,
+        argmax_at_ladder_end: winner.argmax_at_ladder_end,
+    }
+}
+
+/// Refuse a set of genotype frequencies that is not a probability vector.
+///
+/// A zero weight is legal — a genotype the climb drove out of the mixture — so this is
+/// weaker than [`mixture_weights`]' interior-point check on a climb's start.
+///
+/// [`mixture_weights`]: super::mixture_weights
+fn check_genotype_frequencies(ploidy: Ploidy, frequencies: &[f64]) {
+    let mut total = 0.0;
+    for (genotype, &frequency) in frequencies.iter().enumerate() {
+        assert!(
+            frequency >= 0.0 && frequency.is_finite(),
+            "ploidy {ploidy}, genotype {genotype}: {frequency} is not a share of the \
+             sample's sites"
+        );
+        total += frequency;
+    }
+    assert!(
+        (total - 1.0).abs() < FREQUENCY_SUM_TOLERANCE,
+        "ploidy {ploidy}: the genotype frequencies sum to {total} rather than one"
+    );
+}
+
+/// The rung both scans keep, with whatever the scoring step wanted to keep beside it.
+///
+/// Private, and one type rather than each scan's own: the tie rule and the rail flag are
+/// decided here, so a second copy of this shape is a second place they could be decided
+/// differently.
+struct WinningRung<P, K> {
+    rung: usize,
+    noise: P,
+    /// Whatever the scoring closure filed at this rung — the frequencies it climbed to,
+    /// per ploidy, or `()` when it climbed nothing.
+    kept: K,
+    log_likelihood: LogProb,
+    argmax_at_ladder_end: bool,
+}
+
+/// The rung loop both scans run, with the scoring step left to the caller.
+///
+/// `score_one_ploidy` is handed the rung's index, that ploidy's plan and its
+/// row-major likelihood table, and a slot to file anything it wants kept; it returns that
+/// ploidy's contribution to the rung's score. A rung's score is the sum over ploidies, and
+/// `kept` is discarded for every rung but the winner.
+///
+/// # Panics
+///
+/// As [`fit_by_profile_scan`] — the checks are all here.
+fn scan_ladder<M, K, F>(
+    model: &M,
+    cells: &[M::Cell],
+    ladder: &[M::NoiseParams],
+    mut score_one_ploidy: F,
+) -> WinningRung<M::NoiseParams, K>
+where
+    M: NoiseModel,
+    M::NoiseParams: Clone,
+    K: Default,
+    F: FnMut(usize, &PloidyPlan, GenotypeLikelihoodTable<'_>, &mut K) -> f64,
+{
     assert!(!cells.is_empty(), "a scan needs at least one cell to score");
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
 
@@ -164,11 +391,11 @@ where
     // no per-cell row and no copy.
     let mut ln_likelihood_row_major: Vec<f64> = Vec::new();
 
-    let mut best: Option<ScanResult<M::NoiseParams>> = None;
+    let mut best: Option<WinningRung<M::NoiseParams, K>> = None;
 
     for (rung, noise) in ladder.iter().enumerate() {
         let mut rung_log_likelihood = 0.0;
-        let mut genotype_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = BTreeMap::new();
+        let mut kept = K::default();
 
         for plan in &plans {
             ln_likelihood_row_major.clear();
@@ -226,32 +453,16 @@ where
                 &ln_likelihood_row_major,
                 plan.genotypes,
             );
-            let climbed = climb_mixture_weights(table, &plan.cell_weights, &plan.uniform_start);
-            // **A rung whose climb ran out of passes is scored below its own summit**,
-            // so the rung beside it can win on that alone and the argmax stops being
-            // the argmax. There is no channel to report it — `FitTermination` covers
-            // the outer alternation of Milestone E and not this — and `MAX_CLIMB_PASSES`
-            // is measured on four-cell fixtures where the slowest truth took 1,234
-            // passes, against a real table of 583 cells climbed 161 times. Debug only,
-            // because a slow climb is a data condition rather than a bug
-            // (`spec/parameter_prepass.md` §3.1) and the release path must not abort on
-            // one.
-            debug_assert!(
-                climbed.converged,
-                "rung {rung}, ploidy {}: the climb used all {} passes, so this rung is \
-                 scored short of its summit and the rung beside it may win on that alone",
-                plan.ploidy, climbed.passes
-            );
-            rung_log_likelihood += climbed.log_likelihood.get();
-            genotype_frequencies.insert(plan.ploidy, climbed.genotype_frequencies);
+            rung_log_likelihood += score_one_ploidy(rung, plan, table, &mut kept);
         }
 
         // The rung's answer is built here rather than at the end from a stored index,
         // so that the rail flag is decided where `rung` is in scope and there is no
-        // second, private copy of `ScanResult` to keep in step with this one.
-        let scanned = ScanResult {
+        // second, private copy of this shape to keep in step with it.
+        let scanned = WinningRung {
+            rung,
             noise: noise.clone(),
-            genotype_frequencies,
+            kept,
             log_likelihood: LogProb(rung_log_likelihood),
             argmax_at_ladder_end: rung == 0 || rung == ladder.len() - 1,
         };
@@ -1128,5 +1339,429 @@ mod tests {
             asked: RefCell::new(Vec::new()),
         };
         let _ = fit_by_profile_scan(&model, &diploid_cells(&[0, 0]), &[0, 1, 2]);
+    }
+
+    // -----------------------------------------------------------------
+    // The sibling: a scan at frequencies handed in, climbing nothing.
+    // -----------------------------------------------------------------
+
+    /// The frequency map the sibling takes, for one ploidy.
+    fn frequencies_at(copies: u8, frequencies: &[f64]) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
+        BTreeMap::from([(ploidy(copies), SmallVec::from_slice(frequencies))])
+    }
+
+    /// **The claim E1 exists for: a table generated at a known rung recovers that rung
+    /// when the scan is handed the frequencies it was generated at.** Same fixture as
+    /// `a_table_generated_at_a_known_rung_recovers_it`, so the two answers can be read
+    /// against each other: the profile scan finds this rung by climbing to those
+    /// frequencies, and this one finds it by being told them.
+    #[test]
+    fn a_table_generated_at_a_known_rung_recovers_it_from_its_own_frequencies() {
+        let table = three_rung_table();
+        let truth = [0.90, 0.07, 0.03];
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&weights_under(&table[1], &truth, 1_000_000.0));
+
+        let scan =
+            fit_by_fixed_frequency_scan(&model, &cells, &[0, 1, 2], &frequencies_at(2, &truth));
+
+        assert_eq!(scan.noise, 1, "the middle rung is the truth");
+        assert_eq!(scan.rung, 1, "and it is the middle rung of the ladder");
+        assert!(
+            !scan.argmax_at_ladder_end,
+            "the winner is interior, so nothing railed"
+        );
+    }
+
+    /// **The frequencies handed in decide the answer, and this is the test that says
+    /// so.** Two genotypes, two cells, three rungs: genotype 0 is explained best by rung
+    /// 0 and genotype 1 by rung 2, so the winner is whichever genotype the caller says
+    /// the sample is made of.
+    ///
+    /// Three mutants die here and nowhere else. A scan that **ignored** its frequency
+    /// argument returns one rung for both halves. A scan that **climbed** returns rung 2
+    /// for both, because the two rungs' best-over-π scores tie at `ln 0.9` and the tie
+    /// rule keeps the later — which is also why the ladder has a middle rung the answer
+    /// never lands on: without it a mutant picking "the last rung" would be right half
+    /// the time by construction. And a scan that read the wrong ploidy's set finds
+    /// nothing filed under ploidy 2 and panics.
+    #[test]
+    fn the_frequencies_handed_in_decide_which_rung_wins() {
+        let leaning = |towards_second: f64| {
+            vec![
+                vec![1.0 - towards_second, towards_second],
+                vec![1.0 - towards_second, towards_second],
+            ]
+        };
+        let table = vec![leaning(0.1), leaning(0.5), leaning(0.9)];
+        let model = TableModel {
+            likelihood: table,
+            genotypes: 2,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&[600, 400]);
+
+        let all_first = fit_by_fixed_frequency_scan(
+            &model,
+            &cells,
+            &[0, 1, 2],
+            &frequencies_at(2, &[1.0, 0.0]),
+        );
+        let all_second = fit_by_fixed_frequency_scan(
+            &model,
+            &cells,
+            &[0, 1, 2],
+            &frequencies_at(2, &[0.0, 1.0]),
+        );
+
+        assert_eq!(
+            all_first.rung, 0,
+            "a sample made of genotype 0 is explained best by the rung that makes \
+             genotype 0 likely"
+        );
+        assert_eq!(
+            all_second.rung, 2,
+            "and one made of genotype 1 by the rung at the other end"
+        );
+    }
+
+    /// **Nothing is climbed**, asserted as a score rather than inferred from the absence
+    /// of a frequency field. One rung, so both scans score the same table; the profile
+    /// scan climbs to the frequencies that maximise it and this one is handed a set far
+    /// from them, so its score must be **strictly lower**. A sibling that quietly climbed
+    /// would report the same number to the last bit.
+    #[test]
+    fn a_scan_at_fixed_frequencies_scores_below_the_climb_it_declines_to_do() {
+        let table = three_rung_table();
+        let truth = [0.90, 0.07, 0.03];
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&weights_under(&table[1], &truth, 1_000.0));
+
+        let climbed = fit_by_profile_scan(&model, &cells, &[1]);
+        let told = fit_by_fixed_frequency_scan(
+            &model,
+            &cells,
+            &[1],
+            &frequencies_at(2, &[0.20, 0.30, 0.50]),
+        );
+
+        assert!(
+            told.log_likelihood.get() < climbed.log_likelihood.get() - 1.0,
+            "handed {} against the climb's {}",
+            told.log_likelihood.get(),
+            climbed.log_likelihood.get()
+        );
+
+        // And handed the frequencies the climb arrived at, the two agree — which is what
+        // makes the inequality above a statement about the climb and not about this
+        // fixture being hard to score.
+        let at_the_summit = fit_by_fixed_frequency_scan(
+            &model,
+            &cells,
+            &[1],
+            &BTreeMap::from([(ploidy(2), climbed.genotype_frequencies[&ploidy(2)].clone())]),
+        );
+        assert!(
+            (at_the_summit.log_likelihood.get() - climbed.log_likelihood.get()).abs() < 1e-9,
+            "at the climb's own answer this scan scored {} against {}",
+            at_the_summit.log_likelihood.get(),
+            climbed.log_likelihood.get()
+        );
+    }
+
+    /// **Every rung is scored — no early exit**, the same contract the profile scan
+    /// carries and checked the same way, by asking the model which rungs it was shown.
+    /// Nobody has shown this curve has a single hump either; holding the frequencies
+    /// fixed changes what a rung scores, not whether the score is unimodal in the rung.
+    #[test]
+    fn every_rung_is_scored_at_fixed_frequencies_too() {
+        let table = three_rung_table();
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.07, 0.03], 1_000.0));
+
+        let _ = fit_by_fixed_frequency_scan(
+            &model,
+            &cells,
+            &[0, 1, 2],
+            &frequencies_at(2, &[0.90, 0.07, 0.03]),
+        );
+
+        let mut asked = model.asked.borrow().clone();
+        asked.sort_unstable();
+        asked.dedup();
+        assert_eq!(asked, vec![0, 1, 2], "every rung was scored");
+    }
+
+    /// **The rail flag, on the sibling.** Its own test rather than a note that the loop
+    /// is shared: the flag is the one bit between a railed fit and a plausible-looking
+    /// number, and E1 emits it per read group.
+    ///
+    /// Both ends, for the reason the profile scan's version gives — a flag watching one
+    /// end passes a test written at the other — and the interior winner of
+    /// `a_table_generated_at_a_known_rung_recovers_it_from_its_own_frequencies` is what
+    /// stops a flag hard-coded to `true` from passing.
+    #[test]
+    fn a_fixed_frequency_scan_whose_truth_lies_past_the_ladder_sets_the_rail_flag() {
+        let truth_columns = vec![
+            vec![0.70, 0.10, 0.02],
+            vec![0.20, 0.40, 0.08],
+            vec![0.07, 0.35, 0.30],
+            vec![0.03, 0.15, 0.60],
+        ];
+        let truth = [0.90, 0.07, 0.03];
+
+        for reversed in [false, true] {
+            let table = ladder_marching_towards(&truth_columns, reversed);
+            let model = TableModel {
+                likelihood: table,
+                genotypes: 3,
+                asked: RefCell::new(Vec::new()),
+            };
+            let sites = weights_under(&truth_columns, &truth, 1_000_000.0);
+
+            let scan = fit_by_fixed_frequency_scan(
+                &model,
+                &diploid_cells(&sites),
+                &[0, 1, 2, 3, 4],
+                &frequencies_at(2, &truth),
+            );
+
+            let expected_end = if reversed { 0 } else { 4 };
+            assert_eq!(scan.rung, expected_end, "reversed = {reversed}");
+            assert!(scan.argmax_at_ladder_end, "reversed = {reversed}");
+        }
+    }
+
+    /// A tie keeps the later rung here too, which on the generic ladder is the lower
+    /// error rate. Stated on the sibling as well as on the profile scan because E1 and
+    /// E2 read this one, and a rule that held in only one of the two would be a silent
+    /// disagreement between the alternation's two halves.
+    #[test]
+    fn a_tie_in_a_fixed_frequency_scan_keeps_the_later_rung() {
+        let flat = vec![
+            vec![0.70, 0.10, 0.02],
+            vec![0.20, 0.40, 0.08],
+            vec![0.07, 0.35, 0.30],
+            vec![0.03, 0.15, 0.60],
+        ];
+        let table = vec![flat.clone(), flat.clone(), flat];
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let truth = [0.90, 0.07, 0.03];
+        let cells = diploid_cells(&weights_under(&table[0], &truth, 1_000.0));
+
+        let scan =
+            fit_by_fixed_frequency_scan(&model, &cells, &[0, 1, 2], &frequencies_at(2, &truth));
+
+        assert_eq!(scan.rung, 2, "a tie keeps the last of the tied rungs");
+        assert_eq!(scan.noise, 2, "and `noise` is that rung's parameters");
+    }
+
+    /// **One set of frequencies per ploidy, each against its own genotype set.** The two
+    /// ploidies here have two and three genotypes, so the sets cannot be interchanged
+    /// without a width fault — and changing only the haploid set moves the answer, which
+    /// is what says the haploid cells were scored against the haploid frequencies rather
+    /// than against whichever set the map happened to yield first.
+    #[test]
+    fn each_ploidy_is_scored_against_its_own_frequency_set() {
+        struct DosageModel;
+        impl NoiseModel for DosageModel {
+            type Cell = ToyCell;
+            type NoiseParams = f64;
+
+            fn genotypes(&self, ploidy: Ploidy) -> usize {
+                usize::from(ploidy.get()) + 1
+            }
+
+            /// A cell's row index is how many alternative reads it showed out of two, and
+            /// `noise` is the per-read error rate: the ordinary binomial, with the
+            /// heterozygote at a half.
+            fn append_genotype_likelihoods(
+                &self,
+                cell: &ToyCell,
+                noise: &f64,
+                ploidy: Ploidy,
+                out: &mut Vec<f64>,
+            ) {
+                let alt_reads = cell.row as u32;
+                for alt_copies in 0..=ploidy.get() {
+                    let p = f64::from(alt_copies) / f64::from(ploidy.get());
+                    let p = p * (1.0 - noise) + (1.0 - p) * noise;
+                    let reads = 2;
+                    let ways: f64 = if alt_reads == 1 { 2.0 } else { 1.0 };
+                    out.push(
+                        ways.ln()
+                            + f64::from(alt_reads) * p.ln()
+                            + f64::from(reads - alt_reads) * (1.0 - p).ln(),
+                    );
+                }
+            }
+        }
+
+        // Three cells per ploidy — zero, one and two alternative reads. **The diploid arm
+        // is a hundredth the size of the haploid one on purpose**: only the haploid
+        // frequencies differ between the two scans below, so the diploid cells' score is
+        // the same at every rung in both and would otherwise decide the argmax on its own
+        // curvature — which is how the first version of this test passed a scan that read
+        // one set for both ploidies.
+        let cells: Vec<ToyCell> = [(1u8, [900u64, 60, 40]), (2, [5, 3, 2])]
+            .into_iter()
+            .flat_map(|(copies, sites)| {
+                sites
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(row, sites)| ToyCell {
+                        ploidy: ploidy(copies),
+                        sites,
+                        row,
+                    })
+            })
+            .collect();
+        let ladder = [0.02_f64, 0.05, 0.10, 0.20];
+        let diploid = SmallVec::from_slice(&[0.50, 0.30, 0.20]);
+
+        let mostly_reference = BTreeMap::from([
+            (ploidy(1), SmallVec::from_slice(&[0.99, 0.01])),
+            (ploidy(2), diploid.clone()),
+        ]);
+        let evenly_split = BTreeMap::from([
+            (ploidy(1), SmallVec::from_slice(&[0.50, 0.50])),
+            (ploidy(2), diploid),
+        ]);
+
+        let strict = fit_by_fixed_frequency_scan(&DosageModel, &cells, &ladder, &mostly_reference);
+        let loose = fit_by_fixed_frequency_scan(&DosageModel, &cells, &ladder, &evenly_split);
+
+        assert!(
+            strict.rung > loose.rung,
+            "a haploid sample said to be almost all reference must explain its \
+             alternative reads as error and take a higher rate: {} against {}",
+            strict.noise,
+            loose.noise
+        );
+    }
+
+    /// The rung reported indexes the ladder handed in — the identity the coupled fit's
+    /// stopping rule rests on, since it compares rungs rather than rates.
+    #[test]
+    fn the_rung_reported_indexes_the_ladder() {
+        let table = three_rung_table();
+        let truth = [0.90, 0.07, 0.03];
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&weights_under(&table[1], &truth, 1_000.0));
+        let ladder = [0, 1, 2];
+
+        let scan = fit_by_fixed_frequency_scan(&model, &cells, &ladder, &frequencies_at(2, &truth));
+
+        assert_eq!(ladder[scan.rung], scan.noise);
+    }
+
+    #[test]
+    #[should_panic(expected = "no genotype frequencies for ploidy 2")]
+    fn a_ploidy_the_caller_gave_no_frequencies_for_is_named() {
+        let model = TableModel {
+            likelihood: three_rung_table(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let _ = fit_by_fixed_frequency_scan(
+            &model,
+            &diploid_cells(&[10, 20]),
+            &[0, 1, 2],
+            &frequencies_at(4, &[0.90, 0.07, 0.03]),
+        );
+    }
+
+    /// A frequency set one genotype short would be scored against the first two of three
+    /// genotypes and leave the third unweighted, which is a plausible wrong answer rather
+    /// than a crash — so it is named at the ploidy.
+    #[test]
+    #[should_panic(expected = "ploidy 2 was handed 2 genotype frequencies")]
+    fn a_frequency_set_that_is_not_as_wide_as_the_genotype_set_is_refused() {
+        let model = TableModel {
+            likelihood: three_rung_table(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let _ = fit_by_fixed_frequency_scan(
+            &model,
+            &diploid_cells(&[10, 20]),
+            &[0, 1, 2],
+            &frequencies_at(2, &[0.93, 0.07]),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the genotype frequencies sum to 0.8 rather than one")]
+    fn frequencies_that_are_not_a_probability_vector_are_refused() {
+        let model = TableModel {
+            likelihood: three_rung_table(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let _ = fit_by_fixed_frequency_scan(
+            &model,
+            &diploid_cells(&[10, 20]),
+            &[0, 1, 2],
+            &frequencies_at(2, &[0.70, 0.07, 0.03]),
+        );
+    }
+
+    /// A genotype the climb drove out of the mixture arrives here as a zero, and that is
+    /// legal — it is the interior-point rule of a climb's *start* that this must not
+    /// inherit, since nothing here starts anywhere.
+    #[test]
+    fn a_genotype_at_zero_frequency_is_accepted() {
+        let table = three_rung_table();
+        let model = TableModel {
+            likelihood: table.clone(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let cells = diploid_cells(&weights_under(&table[1], &[0.90, 0.10, 0.0], 1_000.0));
+
+        let scan = fit_by_fixed_frequency_scan(
+            &model,
+            &cells,
+            &[0, 1, 2],
+            &frequencies_at(2, &[0.90, 0.10, 0.0]),
+        );
+
+        assert!(scan.log_likelihood.get().is_finite());
+    }
+
+    #[test]
+    #[should_panic(expected = "genotype 1: -0.1 is not a share of the sample's sites")]
+    fn a_negative_frequency_is_refused() {
+        let model = TableModel {
+            likelihood: three_rung_table(),
+            genotypes: 3,
+            asked: RefCell::new(Vec::new()),
+        };
+        let _ = fit_by_fixed_frequency_scan(
+            &model,
+            &diploid_cells(&[10, 20]),
+            &[0, 1, 2],
+            &frequencies_at(2, &[1.05, -0.1, 0.05]),
+        );
     }
 }
