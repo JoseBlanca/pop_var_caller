@@ -1714,6 +1714,7 @@ pub enum TypedRegionError {
 mod tests {
     use super::*;
     use crate::ng::ref_seq::{InMemoryRefSeq, RefSeq};
+    use segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
 
     /// `Default` is the **short-read** settings now (spec §2.3), not the catalog's —
     /// which is what the golden oracles pin explicitly (see [`catalog_config`]).
@@ -3019,18 +3020,29 @@ mod tests {
     /// **A microsatellite too close to a satellite is swallowed by it, from either
     /// side** (spec §2.4a — the owner's rule, 2026-07-16).
     ///
-    /// The situation is physical and symmetric: a `(CAG)*8` tract 20 bp from a 1.3 kb
+    /// The situation is physical and symmetric: a `(CAG)*8` tract close to a 1.3 kb
     /// array cannot be genotyped, because the flank on that side *is* array. So the
     /// answer must not depend on which side it sits — and before this rule it did, in
     /// two different wrong ways (`resolve_features`' docs).
     ///
-    /// The 200 bp arm is the **control**, and it is what makes the 20 bp arm mean
-    /// something: at 200 bp the same two features, built by the same code, give a clean
-    /// `Generic / locus / Generic / Satellite` — so absorption at 20 bp is the *rule*
-    /// firing, not classification quietly rejecting a tract that was never viable.
+    /// The far arm is the **control**, and it is what makes the near arm mean
+    /// something: 200 bp away the same two features, built by the same code, give a
+    /// clean `Generic / locus / Generic / Satellite` — so absorption up close is the
+    /// *rule* firing, not classification quietly rejecting a tract that was never
+    /// viable.
+    ///
+    /// **Both gaps are derived from [`DEFAULT_BUNDLE_THRESHOLD`] rather than written as
+    /// numbers.** They used to be a literal 20 bp against a radius of 30; when the
+    /// radius moved to 20 the near arm landed exactly on the boundary — where the rule
+    /// is strict and so does *not* absorb — and the test failed for a reason that had
+    /// nothing to do with what it checks. A fixture that pins a constant it does not
+    /// own tests the constant.
     #[test]
     fn a_microsatellite_beside_a_satellite_is_absorbed_into_it() {
         let config = TypedRegionConfig::default();
+        // Comfortably inside the radius, and comfortably outside it.
+        let near = (DEFAULT_BUNDLE_THRESHOLD / 2) as usize;
+        let far = (DEFAULT_BUNDLE_THRESHOLD * 10) as usize;
         let kinds = |regions: &[TypedRegion]| -> Vec<&'static str> {
             regions
                 .iter()
@@ -3046,14 +3058,14 @@ mod tests {
         for micro_left in [true, false] {
             let side = if micro_left { "left" } else { "right" };
 
-            // --- absorbed: 20 bp of gap, less than the 50 bp flank ---
-            let bases = micro_near_satellite(micro_left, 20);
+            // --- absorbed: a gap inside the bundle radius ---
+            let bases = micro_near_satellite(micro_left, near);
             let regions = partition_resident("chr1", ContigId(0), &bases, &config);
             assert_partitions(
                 &regions,
                 ContigId(0),
                 bases.len() as u64,
-                &format!("micro {side} of a satellite, 20 bp"),
+                &format!("micro {side} of a satellite, {near} bp"),
             );
             assert_eq!(
                 kinds(&regions),
@@ -3070,28 +3082,66 @@ mod tests {
                 .find(|r| matches!(r.kind, RegionKind::Satellite))
                 .expect("one satellite");
             assert!(
-                satellite.region.len() >= 1300 + 20 + 24,
+                satellite.region.len() as usize >= 1300 + near + 24,
                 "micro {side}: the satellite must EXPAND over the gap and the tract — \
-                 array (1300) + gap (20) + tract (24); got {}",
+                 array (1300) + gap ({near}) + tract (24); got {}",
                 satellite.region.len()
             );
 
-            // --- the control: 200 bp of gap, and the flank is clean ---
-            let bases = micro_near_satellite(micro_left, 200);
+            // --- the control: far outside the radius, and the flank is clean ---
+            let bases = micro_near_satellite(micro_left, far);
             let regions = partition_resident("chr1", ContigId(0), &bases, &config);
             assert_partitions(
                 &regions,
                 ContigId(0),
                 bases.len() as u64,
-                &format!("micro {side} of a satellite, 200 bp"),
+                &format!("micro {side} of a satellite, {far} bp"),
             );
             assert!(
                 kinds(&regions).contains(&"locus"),
-                "micro {side}: 200 bp away the SAME tract is a locus — so the absorption \
+                "micro {side}: {far} bp away the SAME tract is a locus — so the absorption \
                  above is the rule, not a tract that was never admissible"
             );
             assert!(kinds(&regions).contains(&"satellite"));
         }
+    }
+
+    /// **Where absorption stops, and that it moves with the radius.** A `(CAG)*8` tract
+    /// separated from a 1.3 kb array by `bundle_threshold` bases is still absorbed; one
+    /// base further out it survives as a locus.
+    ///
+    /// Pinned because nothing pinned it, and the gap cost a confusing failure: the
+    /// absorption test above used a literal 20 bp gap, which was comfortably inside a
+    /// radius of 30 and sat right at the transition once the radius became 20. The
+    /// behaviour was correct both times; only the fixture was wrong. A boundary nobody
+    /// asserts is one the next reader rediscovers from a broken test.
+    ///
+    /// **What this pins is the transition's position relative to the radius, not the
+    /// inequality that produces it.** The gap this fixture lays down and the gap the
+    /// rule measures need not be the same number to the base: classification trims a
+    /// tract's edges, so a tract's admitted extent can differ from the bases written
+    /// into the fixture. Asserting "absorbed at the radius, a locus one further" is
+    /// therefore a claim about behaviour that is checkable; deriving it from
+    /// [`absorb_into`]'s comparison would be a claim about the code restating itself.
+    #[test]
+    fn absorption_tracks_the_bundle_radius() {
+        let config = TypedRegionConfig::default();
+        let radius = DEFAULT_BUNDLE_THRESHOLD as usize;
+        let has_locus = |gap: usize| {
+            let bases = micro_near_satellite(true, gap);
+            partition_resident("chr1", ContigId(0), &bases, &config)
+                .iter()
+                .any(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
+        };
+        assert!(
+            !has_locus(radius),
+            "at {radius} bp of gap the flank is not clean enough and the tract is absorbed"
+        );
+        assert!(
+            has_locus(radius + 1),
+            "one base further out the same tract survives as a locus — so the absorption \
+             above is the radius firing and not the tract being inadmissible"
+        );
     }
 
     /// Absorption must not depend on the window either: the windowed walk agrees with
@@ -3100,7 +3150,7 @@ mod tests {
     #[test]
     fn absorption_is_window_invariant() {
         for micro_left in [true, false] {
-            for gap in [20usize, 200] {
+            for gap in [(DEFAULT_BUNDLE_THRESHOLD / 2) as usize, 200] {
                 let bases = micro_near_satellite(micro_left, gap);
                 let resident =
                     partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
@@ -3438,13 +3488,16 @@ mod tests {
             &config,
         )
         .expect_err("a margin narrower than bundle_threshold is refused");
+        // Compared field by field rather than pattern-matched: a bare constant in a
+        // `matches!` pattern is a fresh binding, so it would match anything and the
+        // assertion could not fail.
         assert!(
             matches!(
                 err,
                 TypedRegionError::MarginNarrowerThanFlank {
                     max_str_len: 10,
-                    bundle_threshold: 30
-                }
+                    bundle_threshold,
+                } if bundle_threshold == DEFAULT_BUNDLE_THRESHOLD
             ),
             "and it names both numbers, so the message says which flag to move: {err}"
         );

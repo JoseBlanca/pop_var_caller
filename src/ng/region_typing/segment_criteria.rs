@@ -245,11 +245,43 @@ pub const DEFAULT_MIN_PURITY: f32 = 0.8;
 pub const DEFAULT_MIN_SCORE: i32 = 0;
 
 /// Bundle radius (bp) — the clean sequence a tract needs either side to be a
-/// locus rather than a bundle member. The short-read default (spec §2.3): 30 bp
-/// is more than enough unique sequence to anchor a short read to a locus, where
-/// the catalog's inherited 50 was unmeasured. Lowering it also loosens what
-/// counts as a bundle (spec §2.4). Soft, and swept (spec §10).
-pub const DEFAULT_BUNDLE_THRESHOLD: u64 = 30;
+/// locus rather than a bundle member. Lowering it also loosens what counts as a
+/// bundle (spec §2.4), and it sets the aligner's anchor too:
+/// [`SsrGeneratorConfig::flank_bp`](crate::ng::locus_generation::ssr::SsrGeneratorConfig)
+/// defaults to this and may not exceed it. Soft, and swept (spec §10).
+///
+/// **20 bp since 2026-08-07, down from 30.** The radius is what decides how many
+/// tracts can be named as loci at all: a tract with any other repeat inside it has
+/// no clean flank and becomes a bundle member instead. Narrowing it recovers loci,
+/// measured over a 2 Mb slice of tomato SL4.0ch01 at ng's copy floors — **6,237
+/// loci at 30 bp, 6,709 at 25, 7,245 at 20, 7,820 at 15**, with the bases locked up
+/// in bundles falling from 74,289 to 47,623 over the same range. The gain is larger
+/// at a lowered copy floor, which is the regime the copy-floor survey walks in
+/// ([`parameter_prepass_ssr.md`](../../../../doc/devel/ng/spec/parameter_prepass_ssr.md)
+/// §5.1): 9,242 loci at 30 bp against 13,086 at 20.
+///
+/// **The anchor was checked against injected truth before this moved, because the
+/// real-data check could not settle it.** Narrowing the radius shortens every read's
+/// anchor, and a mis-anchored read placed a whole repeat off would land in an offset
+/// bucket and read as *slippage* — invisible to any measurement that has no truth to
+/// compare against. So the answer comes from
+/// [`ng_ssr_synthetic_bakeoff.rs`](../../../../examples/ng_ssr_synthetic_bakeoff.rs),
+/// which builds each read from a chosen allele and scores the recovered length against
+/// it. For the shipped delimiter (`SsrUnitRobustAligner`) across 136 scenarios:
+///
+/// | flank | exact length on clean reads | exact on noisy reads | composite |
+/// |---:|---:|---:|---:|
+/// | 25 bp | 1.000 | 0.999 | 0.9994 |
+/// | **20 bp** | **1.000** | **0.999** | **0.9993** |
+/// | 15 bp | 1.000 | 0.999 | 0.9993 |
+///
+/// Flat. The older delimiters do lose ground by 15 bp — `unit_slip` drops from 0.952 to
+/// 0.690 at recognising an allele longer than the read — so the headroom is the shipped
+/// aligner's, not the family's, and 20 leaves a margin 15 would not.
+///
+/// 30 bp was itself unmeasured — chosen as "more than enough unique sequence to
+/// anchor a short read", against the catalog's inherited 50.
+pub const DEFAULT_BUNDLE_THRESHOLD: u64 = 20;
 
 /// The narrowest period classified by default: **1**, so a qualifying
 /// homopolymer is a period-1 STR locus (spec §2.3). Mononucleotides stutter

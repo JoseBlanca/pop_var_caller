@@ -70,16 +70,34 @@
 //! from 2,678 loci to 225 — 92% gone at a period whose own floor never changed. Two settings
 //! therefore measure two different populations of loci rather than two ends of one curve.
 //!
-//! **What this survey can still say** is where each period crosses *within* the loci ng's defaults
-//! admit, and how far that crossing moves between libraries — which is the axis nothing has varied.
-//! Extending a curve below its floor needs the two roles separated: a bundling floor held at ng's
-//! defaults and a classification floor that moves. That is a change to `SsrSegmentCriteria`, not to
-//! this program. See `doc/devel/ng/spec/parameter_prepass_ssr.md` §5.1.
+//! ## One step down is usable, and the criterion that places the floors survives it
+//!
+//! **`--min-copies 5,3,3,3,3,3` is what the archive survey runs**, and it is a step rather than a
+//! plunge for the reason above. One step still costs loci — about half of every stratum shared with
+//! a default walk — but the two criteria are not equally affected, and the sharper one is the one
+//! that holds:
+//!
+//! - **The guard share is essentially unmoved.** Dinucleotides at 4 repeats read 0.345 in a
+//!   default walk and 0.344 in a swept one; at 20 bp of flank, 0.431 against 0.408. So the
+//!   criterion that decides periods 2 to 6 can be read off a swept walk directly.
+//! - **The off-reference share is not**, coming back ~30% low, because the tracts that survive are
+//!   the isolated ones and isolated tracts sit in cleaner context. That is the only criterion
+//!   **mononucleotides** have, so the period-1 floor rests on softer evidence than the rest — and
+//!   the bias understates stutter, which pushes a floor *up*, the direction that fails silently.
+//!
+//! **And the answer the survey exists for is robust to all of it.** Dinucleotides at 3 repeats read
+//! a guard share of 63% against a one-in-ten threshold, unchanged across every flank width and both
+//! copy-floor settings tried, on thousands of loci. Six-fold over is not a marginal call, so no
+//! correction reaches it. See `doc/devel/ng/spec/parameter_prepass_ssr.md` §5.1.
 //!
 //! ```text
-//! ng_str_stutter_by_library [--contigs a,b] [--regions r.bed] [--min-copies 6,4,4,3,3,3] \
-//!     <reference.fa> <sample.cram> [more...]
+//! ng_str_stutter_by_library [--contigs a,b] [--regions r.bed] [--min-copies 5,3,3,3,3,3] \
+//!     [--bundle-threshold 20] <reference.fa> <sample.cram> [more...]
 //! ```
+//!
+//! `--bundle-threshold` is the clean sequence a tract needs either side to be nameable as a locus,
+//! and it is also the aligner's anchor. **ng's default is 20 bp and this survey does not need to
+//! set it**; the flag exists so the knob can be swept, which is how 20 was chosen.
 //!
 //! **Restrict the walk.** The cost is one region-typing pass plus a read fetch per sample, so it
 //! scales with samples; a few hundred thousand loci settle these curves, which is one tomato
@@ -405,6 +423,7 @@ fn run(
     contig_filter: &[String],
     regions_bed: Option<&Path>,
     min_copies: Option<MinCopies>,
+    bundle_threshold_override: Option<u64>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(
@@ -454,6 +473,15 @@ fn run(
                 .join(",")
         );
     }
+    // **The other lever on the same problem** (§5.1). A tract needs this many clean bases either
+    // side before it can be named a locus, so it is the radius in which a neighbouring repeat
+    // spoils a tract. Narrowing it keeps more tracts nameable at a lowered copy floor, which is the
+    // selection that biases a swept walk. It is not free: `flank_bp` is held at or below this, so
+    // it is also the anchor the STR aligner places a read against.
+    if let Some(bases) = bundle_threshold_override {
+        walk_config.criteria.bundle_threshold = bases;
+        eprintln!("  a tract needs {bases} clean bases either side, against ng's default of 30");
+    }
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
     #[expect(
         clippy::arc_with_non_send_sync,
@@ -471,7 +499,17 @@ fn run(
                     let reference = Arc::clone(&shared_reference);
                     move || Arc::clone(&reference)
                 },
-                SsrGeneratorConfig::default(),
+                {
+                    // **The anchor moves with the radius, because the two are one number in
+                    // practice.** `flank_bp` is the sequence the STR aligner places a read
+                    // against, and it must not reach past the repeat-free radius region typing
+                    // guarantees — so narrowing the radius to keep more tracts nameable also
+                    // shortens every read's anchor. That is the cost of this lever.
+                    SsrGeneratorConfig {
+                        flank_bp: bundle_threshold,
+                        ..SsrGeneratorConfig::default()
+                    }
+                },
                 bundle_threshold,
             )
         })
@@ -560,10 +598,7 @@ fn run(
     // (`scripts/ng_str_library_survey.sh`). Refuse before anything is written, and name the cause
     // from the tally rather than leaving the reader to guess.
     if strata.is_empty() {
-        return Err(Box::new(EmptySurvey {
-            min_copies,
-            typing,
-        }));
+        return Err(Box::new(EmptySurvey { min_copies, typing }));
     }
 
     let stdout = std::io::stdout();
@@ -683,6 +718,7 @@ fn main() -> ExitCode {
     let mut contig_filter: Vec<String> = Vec::new();
     let mut regions_bed: Option<PathBuf> = None;
     let mut min_copies: Option<MinCopies> = None;
+    let mut bundle_threshold: Option<u64> = None;
     let mut rest = std::env::args().skip(1);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -699,6 +735,16 @@ fn main() -> ExitCode {
                 }
                 None => {
                     eprintln!("error: --contigs needs a comma-separated list");
+                    return ExitCode::from(2);
+                }
+            },
+            "--bundle-threshold" => match rest.next().and_then(|v| v.parse::<u64>().ok()) {
+                Some(bases) if bases >= 1 => bundle_threshold = Some(bases),
+                _ => {
+                    eprintln!(
+                        "error: --bundle-threshold needs a whole number of bases, at least 1 \
+                         (ng's default is 30)"
+                    );
                     return ExitCode::from(2);
                 }
             },
@@ -737,6 +783,7 @@ fn main() -> ExitCode {
         &contig_filter,
         regions_bed.as_deref(),
         min_copies,
+        bundle_threshold,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

@@ -831,27 +831,72 @@ never changed, and with the off-reference share moving with it (0.0263 to 0.0210
 So two settings do not give two ends of one curve. They give two different populations of loci, and
 the second is a selected subset: the tracts that happened not to acquire a neighbour.
 
-**What follows for §5.1's table.** The survey can still say where each period crosses **within the
-loci ng's defaults admit**, and how far that crossing moves between libraries — which is the axis
-nothing has varied and the reason the survey exists. What it cannot do is extend a period's curve
-below its own floor, so the half of this section that asks whether a floor could be **lowered**
-stays unanswered by it. **What would answer it is separating the two roles**: a bundling floor held
-at ng's defaults, so that what counts as a neighbouring repeat never moves, and a classification
-floor that the sweep lowers. That is a change to `SsrSegmentCriteria` in region typing (step 3),
-not to this step or to the survey, and it is not made here.
+**What follows for §5.1's table: one step down is usable, and the criterion this section places the
+floors on survives it.** A sweep of `[5, 3, 3, 3, 3, 3]` — one step under ng's defaults at the three
+periods that can move — still costs about half the loci of every stratum it shares with a default
+walk. But the two criteria are not equally damaged, and the sharper one holds:
 
-**The direction of §5.1's decision survives this intact**, which is worth saying because the
-measurement is a setback and not a reversal. A floor set too low announces itself through the
-guard-share audit; a floor set too high is silent. So the default still comes from the most
-stuttering library available, and what the survey can deliver — the crossing per period per library,
-within the admitted loci — is what places it. **Only the "could it be lower?" half is blocked.**
+- **The guard share is essentially unmoved.** The same stratum, dinucleotides at 4 repeats, reads
+  0.345 in a default walk against 0.344 in a swept one; at a 20 bp radius, 0.431 against 0.408. So
+  the criterion that decides periods 2 to 6 can be read off a swept walk directly.
+- **The off-reference share is not**, coming back about 30% low, because the surviving tracts are
+  the isolated ones and isolated tracts sit in cleaner context. That is the only criterion
+  **mononucleotides** have (their guard share being zero by arithmetic, §2), so the period-1 floor
+  rests on softer evidence than the rest. The bias understates stutter, which pushes a floor *up* —
+  the direction this section's decision rule calls silent.
+
+**And the answer the section turns on is robust to all of it.** Dinucleotides at 3 repeats read a
+guard share of **63%** against the one-in-ten threshold, on 2,031 to 3,259 loci, unchanged across
+every bundle radius and both copy-floor settings tried. Trinucleotides at 3 repeats read 51%, and
+dinucleotides one repeat higher read **0%**. There is a clean step between 3 repeats and 4, and it
+is six-fold clear of the threshold, so no correction of the size measured above can reach it.
+**Periods 2 and 3 keep their floor of 4.**
+
+**What the 2 Mb slice cannot settle is periods 4, 5 and 6**, which hold 67, 20 and 7 loci at 3
+repeats. Those are locus-starved rather than biased, and the archive walk is what fixes them.
+
+**The separation of the two roles is therefore not needed** — a bundling floor held at ng's defaults
+while a classification floor moves. It remains the clean way to extend a curve below its floor if a
+period ever comes back near the threshold rather than far from it.
+
+**The direction of this section's decision survives intact.** A floor set too low announces itself
+through the guard-share audit; a floor set too high is silent. So the default still comes from the
+most stuttering library available, and the crossing per period per library — which the archive
+survey delivers — is what places it.
 
 **And the mononucleotide floor of 6 carries a reason that survives this framing rather than being
 overridden by it.** It was chosen deliberately over ~9 — "the Illumina read-artifact onset, not the
-higher ~9-unit germline-slippage threshold" (`:362-367`). Under the definition above that is right:
-the stutter model is a **noise** model, so a tract that stutters because of the instrument needs the
-STR route exactly as much as one that stutters in the germline. Raising that floor means overturning
-a considered choice, not filling a gap.
+higher ~9-unit germline-slippage threshold"
+([`segment_criteria.rs`](../../../../src/ng/region_typing/segment_criteria.rs)). Under the
+definition above that is right: the stutter model is a **noise** model, so a tract that stutters
+because of the instrument needs the STR route exactly as much as one that stutters in the germline.
+Raising that floor means overturning a considered choice, not filling a gap. What the survey adds is
+the other direction: mononucleotides at 5 repeats read 1.34% off-reference against the survey's 1%
+criterion, and the swept walk's bias understates that, so 5 is worth testing on the archive.
+
+### 5.2 The bundle radius, and why it moved to 20 bp
+
+**A tract is only nameable as a locus if it has clean sequence either side**, and how much is the
+bundle radius (`DEFAULT_BUNDLE_THRESHOLD`). It is a second lever on the same problem as the copy
+floors: narrowing it means fewer neighbours spoil a tract, so more tracts survive as loci. Measured
+on the same 2 Mb slice at ng's copy floors — **6,237 loci at 30 bp, 6,709 at 25, 7,245 at 20, 7,820
+at 15** — with the bases locked up in clusters falling from 74,289 to 47,623 across that range. The
+gain is larger in the swept regime the survey walks: 9,242 loci at 30 bp against 13,086 at 20.
+
+**Decision: 20 bp, changed 2026-08-07 from 30.** The 30 was itself unmeasured, chosen as "more than
+enough unique sequence to anchor a short read".
+
+**What had to be checked first, because the survey structurally cannot check it.** The radius caps
+`flank_bp`, the anchor the STR aligner places a read against, so narrowing it shortens every read's
+anchor. A mis-anchored read placed a whole repeat off lands in an offset bucket and reads as
+**slippage** — the very parameter this step fits — so no measurement without a truth set can tell the
+two apart. The answer comes from the synthetic bake-off
+([`ng_ssr_synthetic_bakeoff.rs`](../../../../examples/ng_ssr_synthetic_bakeoff.rs)), which builds
+each read from a chosen allele and scores the recovered length against it. For the shipped
+delimiter across 136 scenarios, exact-length recovery on clean reads is **1.000 at 25, 20 and 15 bp**
+and the composite moves from 0.9994 to 0.9993. Flat. The older delimiters do lose ground by 15 bp —
+`unit_slip` falls from 0.952 to 0.690 at recognising an allele longer than the read — so the headroom
+belongs to the shipped aligner rather than the family, and 20 keeps a margin that 15 would not.
 
 ---
 
@@ -1017,18 +1062,22 @@ genotype long alleles" is a claim with no number attached to it.
    width of the entry's counters, which is an implementation choice
    ([`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1) rather than a
    question about the design.
-9. **Where do the per-period copy floors go?** — OPEN, and **blocked on region typing rather than on
-   a measurement** (§5.1). They cannot be swept downward by lowering `MinCopies` and re-typing:
-   that one value decides both what is admitted as a locus and what counts as a neighbouring
-   repeat, so lowering it makes tracts bundle and the locus count *falls* — 6,237 loci at ng's
-   defaults, 848 at a uniform floor of 3, zero at 2, over a 2 Mb tomato slice. Lowering one period
-   alone is no safer: it takes period-1 tracts at six copies from 2,678 loci to 225, at a period
-   whose own floor never moved. **Settled by:** separating the two roles in `SsrSegmentCriteria` — a
-   bundling floor pinned at ng's defaults and a classification floor the sweep moves — which is a
-   step-3 change. Until then the archive survey can place a floor from above (where each period
-   crosses within the loci the defaults admit, per library) and cannot say whether one could be
-   lower. *This is the question §5.1 exists for, and it is the only one on this list that blocks
-   nothing downstream: the floors are a default a user can already override.*
+9. **Where do the per-period copy floors go?** — OPEN, and **waiting on the archive survey rather
+   than on a design decision** (§5.1). Two things were settled getting here. They cannot be swept
+   downward far: `MinCopies` decides both what is admitted as a locus and what counts as a
+   neighbouring repeat, so lowering it makes tracts cluster and the locus count *falls* — 6,237 loci
+   at ng's defaults, 848 at a uniform floor of 3, zero at 2, over a 2 Mb tomato slice. But **one
+   step down works**, because the guard share — the criterion that places the floors for periods 2
+   to 6 — is essentially unmoved by it (0.345 default against 0.344 swept, at dinucleotides/4
+   repeats). **Periods 2 and 3 are already answered on that slice**: 3-repeat tracts read a guard
+   share of 63% and 51% against a one-in-ten threshold, so their floor of 4 stands. **What is left
+   is periods 4, 5 and 6**, which hold 67, 20 and 7 loci at 3 repeats there — locus-starved, not
+   biased — plus the library axis nothing has varied. **Settled by:** the archive survey at
+   `[5, 3, 3, 3, 3, 3]` (`scripts/ng_str_library_survey.sh`). Separating `MinCopies`' two roles in
+   `SsrSegmentCriteria` remains the clean way to reach further below a floor, and is not needed
+   unless a period comes back near the threshold. *This is the question §5.1 exists for, and it is
+   the only one on this list that blocks nothing downstream: the floors are a default a user can
+   already override.*
 
 ---
 

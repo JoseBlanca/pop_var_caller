@@ -16,7 +16,6 @@
 //! buffer this table owns instead of allocating a `Vec<u8>` per call.
 //! `copy_fidelity.rs` released this file in that commit.
 
-
 use ahash::AHashMap;
 use smallvec::SmallVec;
 
@@ -948,7 +947,6 @@ impl SortedRecords {
         self.entries.first().map(|(pos, _)| *pos)
     }
 
-
     /// Entries with key strictly below `hi`, ascending — `range(..hi)`.
     fn range_below(&self, hi: u32) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
         let end = self.entries.partition_point(|(pos, _)| *pos < hi);
@@ -956,7 +954,11 @@ impl SortedRecords {
     }
 
     /// Entries with `lo <= key <= hi`, descending — `range(lo..=hi).rev()`.
-    fn range_inclusive_rev(&self, lo: u32, hi: u32) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
+    fn range_inclusive_rev(
+        &self,
+        lo: u32,
+        hi: u32,
+    ) -> impl Iterator<Item = (u32, &OpenPileupRecord)> {
         let start = self.entries.partition_point(|(pos, _)| *pos < lo);
         let end = self.entries.partition_point(|(pos, _)| *pos <= hi);
         self.entries[start..end]

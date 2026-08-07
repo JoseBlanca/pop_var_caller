@@ -11,10 +11,15 @@
 # Usage:
 #   ./ng_str_library_survey.sh OUT.tsv REF CRAM [CRAM ...]
 #
-# Example on rick:
-#   ./scripts/ng_str_library_survey.sh ~/tmp/stutter_by_library.tsv \
+# Example on rick — **rebuild first**, in the container, or the run refuses to start:
+#   ./scripts/dev.sh cargo build --release --example ng_str_stutter_by_library
+#   JOBS=32 ./scripts/ng_str_library_survey.sh ~/tmp/stutter_by_library.tsv \
 #       /home/joxi/refs/S_lycopersicum_chromosomes.4.00.fa \
 #       /media/tomato25_bams/crams/*/*.cram
+#
+# The defaults below are the ones this survey wants: one chromosome, copy floors one step
+# under ng's at the three periods that can move, and ng's own 20 bp bundle radius. Nothing
+# needs to be set beyond JOBS.
 #
 # ## It is built for an archive that is being written to while it runs
 #
@@ -64,6 +69,13 @@
 #                       a period whose own floor never changed. So two settings do not extend one
 #                       curve; they measure different loci. See the finding in
 #                       doc/devel/ng/spec/parameter_prepass_ssr.md §5.1.
+#
+#                       **The default is one step down, `5,3,3,3,3,3`**, which is what the archive
+#                       run wants. One step still costs loci — about half of every shared stratum —
+#                       but the criterion that places the floors for periods 2-6 survives it: the
+#                       guard share at a given stratum agrees between the swept and the default walk
+#                       (dinucleotides at 4 repeats: 0.345 default against 0.344 swept). It is the
+#                       off-reference share, which is all mononucleotides have, that comes back low.
 #   JOBS=8              files walked at once. **The knob that decides whether this finishes.** One
 #                       file over 90 Mb takes ~10 minutes, so 2,475 of them sequentially is 17 days
 #                       and at 32-way is half a day. Each walk is independent — that is what the
@@ -156,8 +168,9 @@ shift 2
 # rather than falling back to the default — which is what the usage above promises.
 CONTIGS=${CONTIGS-SL4.0ch01}
 REGIONS=${REGIONS:-}
-# Empty means ng's defaults — see the knob's note above for why a low uniform value measures less.
-MIN_COPIES=${MIN_COPIES-}
+# One step below ng's `[6,4,4,3,3,3]` at the three periods that can move — see the knob's note
+# above for why it is one step and not a low uniform value. Set to "" for ng's defaults exactly.
+MIN_COPIES=${MIN_COPIES-5,3,3,3,3,3}
 PASSES=${PASSES:-3}
 WAIT=${WAIT:-900}
 WORK=${WORK:-$OUT.work}
