@@ -35,7 +35,7 @@
 use smallvec::SmallVec;
 
 use crate::genetics::lgamma;
-use crate::ng::parameter_estimation::fitting::NoiseModel;
+use crate::ng::parameter_estimation::fitting::{NoiseModel, WeightedCell};
 use crate::ng::parameter_estimation::generic::histogram::{Attribution, Cell};
 use crate::ng::types::{ErrorRate, Ploidy, ReadGroupId};
 
@@ -173,6 +173,22 @@ impl SampleLibraryNoise {
                 )
             });
         &self.libraries[position]
+    }
+}
+
+/// What the profile scan needs of a cell besides how to score it.
+///
+/// Both facts are already on the cell — the ploidy travels with it because one error
+/// rate is fitted across every ploidy a read group covered, and the site count is what
+/// the fit weighs the cell by. The impl sits here rather than beside the type because it
+/// is one of this path's two plugs into `fitting/`, and the other one is below it.
+impl WeightedCell for Cell {
+    fn ploidy(&self) -> Ploidy {
+        self.ploidy
+    }
+
+    fn sites(&self) -> u64 {
+        self.sites
     }
 }
 

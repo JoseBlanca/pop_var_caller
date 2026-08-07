@@ -312,7 +312,7 @@ Then a fourth: on the cell space of one of the harness's worlds, this implementa
 `ln_component_attributed` to floating point. **Any later change to this expression re-runs all
 four first.** *Depends:* B3. *Source:* arch §5.1, spec §1, §12.8.
 
-**D3. `fit_by_profile_scan` and the rail flag.**  ☐
+**D3. `fit_by_profile_scan` and the rail flag.**  ✅
 Step through the ladder, climb to the best frequencies at each rung, keep the best-scoring
 rung. **Every rung is scored — no early exit**, because nobody has shown the curve has a
 single hump. Takes a slice of cells and not a histogram, which is what makes the "shared with

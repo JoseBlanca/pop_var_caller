@@ -18,10 +18,31 @@
 //! joins it in Milestone D. The two result types below are Milestone A.
 
 pub mod mixture_weights;
+pub mod profile_scan;
+
+use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
 use crate::ng::types::{LogProb, Ploidy};
+
+/// What the scan needs to know about a cell **besides how to score it**: which genotype
+/// set it belongs to, and how much of the table it accounts for.
+///
+/// **A trait rather than the `(Cell, Ploidy, u64)` the architecture sketches**
+/// (`arch/parameter_prepass_generic.md` §4.2), for the reason that replaced the same
+/// tuple in `generic/histogram.rs`: nothing in a tuple says which of the three members
+/// is which, and two of them are integers. Both paths' cell types carry these two facts
+/// already, so a tuple would also mean restating them beside a cell that already knows
+/// them — one more place for the two to disagree.
+pub trait WeightedCell {
+    /// The genotype set this cell is scored against. It travels with the cell because
+    /// one noise parameter is fitted across every ploidy its reads covered, so a single
+    /// scan sees cells of more than one.
+    fn ploidy(&self) -> Ploidy;
+    /// How much this cell counts for — how many sites landed in it.
+    fn sites(&self) -> u64;
+}
 
 /// What a path assumes can go wrong with a read.
 ///
@@ -86,10 +107,18 @@ pub trait NoiseModel {
 pub struct ScanResult<P> {
     /// The winning rung.
     pub noise: P,
-    /// The genotype frequencies climbed to at that rung. On the error-rate scan these
-    /// are a means rather than an output — the scan is run for `noise` and they are
-    /// discarded — while the sample's own rates come from a scan run for these.
-    pub frequencies: SmallVec<[f64; 3]>,
+    /// The genotype frequencies climbed to at that rung, **one set per ploidy the cells
+    /// covered**. On the error-rate scan these are a means rather than an output — the
+    /// scan is run for `noise` and they are discarded — while the sample's own rates
+    /// come from a scan run for these.
+    ///
+    /// **Keyed by ploidy rather than a single vector**, which is what the architecture
+    /// sketches (§5.2). A haploid region has two genotype classes and a diploid three,
+    /// so they cannot share a weight vector and the scan climbs once per ploidy (§4.2);
+    /// a single vector would mean picking one of them to report and dropping the rest,
+    /// silently, in the module whose whole difficulty is that its wrong numbers have no
+    /// symptom.
+    pub frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
     /// What makes "the best-scoring iterate" a defined comparison in an alternating
     /// fit. A [`LogProb`] rather than a bare `f64` because comparing is the only thing
     /// it is for, and `LogProb` carries `ln(0)` as `-∞` — the score of a rung nothing
@@ -130,15 +159,16 @@ mod tests {
     /// reader to notice: a scan that railed reports the same shape as one that did not.
     #[test]
     fn a_scan_result_reports_whether_its_answer_sat_on_the_ladders_edge() {
+        let diploid = Ploidy::try_new(2).expect("a positive copy number");
         let railed = ScanResult {
             noise: 0.1_f64,
-            frequencies: SmallVec::from_slice(&[0.98, 0.015, 0.005]),
+            frequencies: BTreeMap::from([(diploid, SmallVec::from_slice(&[0.98, 0.015, 0.005]))]),
             log_likelihood: LogProb(-1.2e9),
             argmax_at_ladder_end: true,
         };
 
         assert!(railed.argmax_at_ladder_end);
-        assert_eq!(railed.frequencies.len(), 3);
+        assert_eq!(railed.frequencies[&diploid].len(), 3);
     }
 
     /// A single-library sample settles after one pass, because the two tables the
