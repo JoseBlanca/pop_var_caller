@@ -38,10 +38,32 @@
 #   CONTIGS=SL4.0ch01   the walk. ~90 Mb gives ~200k loci, which settles these curves; the cost
 #                       scales with the number of libraries, so a wider walk buys precision you do
 #                       not need. Set to "" to walk the whole genome.
-#   MIN_COPIES=2        type from this many copies at every period. **Not optional for this
-#                       question**: at ng's defaults region typing emits nothing below
-#                       [6,4,4,3,3,3], so every curve would start exactly where the floor is meant
-#                       to be decided and the measurement would be censored at the wrong place.
+#   MIN_COPIES=         the copy floors to type from — one number for every period, or a table of
+#                       six (`6,2,4,3,3,3`). Empty means ng's defaults, [6,4,4,3,3,3].
+#
+#                       **Do not set this to a low uniform value, and an earlier version of this
+#                       script defaulted it to 2.** The floor is read twice — once by `prefilter`,
+#                       which runs *before* bundling, and once by `classify`
+#                       (`segment_criteria.rs:601`, `:985`) — so lowering it changes what counts as
+#                       a neighbouring repeat, not only what is admitted as a locus. Two copies of a
+#                       mononucleotide is any `AA`, which occurs every few bases, so every real
+#                       tract acquires a neighbour inside the bundle threshold and the walk emits
+#                       `SsrBundle` where this survey counts only `SsrSegment`. Measured over a
+#                       2 Mb slice of tomato SL4.0ch01:
+#
+#                         floors          STR loci   bundles   bundle bp
+#                         [6,4,4,3,3,3]      6,237     1,943      74,289   (ng's defaults)
+#                         uniform 4          7,434    11,720     675,372
+#                         uniform 3            848     7,950   1,623,636
+#                         uniform 2              0         1   1,177,849   (one bundle, 1.2 Mb)
+#                         [2,4,4,3,3,3]          0        18   1,599,157
+#                         [6,2,4,3,3,3]      1,618    13,913   1,017,906
+#
+#                       **The loss is not confined to the period that moved.** Lowering period 2
+#                       alone takes period-1 tracts at 6 copies from 2,678 loci to 225 — 92% gone at
+#                       a period whose own floor never changed. So two settings do not extend one
+#                       curve; they measure different loci. See the finding in
+#                       doc/devel/ng/spec/parameter_prepass_ssr.md §5.1.
 #   JOBS=8              files walked at once. **The knob that decides whether this finishes.** One
 #                       file over 90 Mb takes ~10 minutes, so 2,475 of them sequentially is 17 days
 #                       and at 32-way is half a day. Each walk is independent — that is what the
@@ -78,7 +100,13 @@ if [[ "${1:-}" == "--one" ]]; then
         done
         return 1
     }
-    [[ -s "$result" ]] && exit 0
+    # **A file counts as done only if it holds a stratum row.** A result that exists but measures
+    # nothing is the failure this survey spent 1,300 files on: the walk succeeded, the table was
+    # empty, and every later pass skipped the file because a result was there.
+    # A stratum row: not a comment block, and not the column header that introduces the rows.
+    has_rows() { grep -q -v -e '^#' -e '^library_key	' -e '^read_group	' "$1" 2>/dev/null; }
+    [[ -s "$result" ]] && has_rows "$result" && exit 0
+    rm -f "$result"
     if [[ ! -f "$cram" ]]; then echo "missing" > "$status"; exit 0; fi
     if ! index=$(index_of); then echo "no index yet" > "$status"; exit 0; fi
     if [[ "$cram" -nt "$index" ]]; then
@@ -105,6 +133,15 @@ if [[ "${1:-}" == "--one" ]]; then
         echo "changed during its own walk — result discarded" > "$status"
         exit 0
     fi
+    # **And the same check against a walk that exited 0 having measured nothing.** The binary refuses
+    # an empty table itself, so this only fires for a binary that predates that refusal — which is
+    # exactly the case that produced 1,300 empty results, so it is worth keeping rather than trusting
+    # everyone to have rebuilt.
+    if ! has_rows "$result.partial"; then
+        rm -f "$result.partial"
+        echo "walked successfully and measured nothing — no stratum rows (stale binary?)" > "$status"
+        exit 0
+    fi
     mv "$result.partial" "$result"
     rm -f "$status"
     exit 0
@@ -119,20 +156,42 @@ shift 2
 # rather than falling back to the default — which is what the usage above promises.
 CONTIGS=${CONTIGS-SL4.0ch01}
 REGIONS=${REGIONS:-}
-MIN_COPIES=${MIN_COPIES:-2}
+# Empty means ng's defaults — see the knob's note above for why a low uniform value measures less.
+MIN_COPIES=${MIN_COPIES-}
 PASSES=${PASSES:-3}
 WAIT=${WAIT:-900}
 WORK=${WORK:-$OUT.work}
 JOBS=${JOBS:-8}
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-BIN="$REPO_ROOT/target/release/examples/ng_str_stutter_by_library"
+SOURCE="$REPO_ROOT/examples/ng_str_stutter_by_library.rs"
 
-[[ -x "$BIN" ]] || {
-    echo "not built: $BIN" >&2
-    echo "  cargo build --release --example ng_str_stutter_by_library" >&2
+# **Two target directories, and looking in only one of them is how a survey runs a stale binary.**
+# `scripts/dev.sh` builds with `CARGO_TARGET_DIR=$PROJECT_DIR/target-container`, so a rebuild done
+# the way CLAUDE.md prescribes lands *beside* the host tree rather than in it. A script hard-coded to
+# `target/` then keeps running whatever was built on the host months ago — which is what happened on
+# rick, where the binary's `#rg` line still had 12 fields. Take the newer of the two and say which.
+BIN=""
+for candidate in "$REPO_ROOT/target-container/release/examples/ng_str_stutter_by_library" \
+                 "$REPO_ROOT/target/release/examples/ng_str_stutter_by_library"; do
+    [[ -x "$candidate" ]] || continue
+    if [[ -z "$BIN" || "$candidate" -nt "$BIN" ]]; then BIN=$candidate; fi
+done
+[[ -n "$BIN" ]] || {
+    echo "not built: no ng_str_stutter_by_library in target/ or target-container/" >&2
+    echo "  ./scripts/dev.sh cargo build --release --example ng_str_stutter_by_library" >&2
     exit 1
 }
+
+# **A binary older than its source is the failure this survey already paid for**, and it is silent:
+# an out-of-date walk writes a well-formed table with the wrong columns in it. Refuse rather than
+# warn — a warning on stderr at the head of a run measured in hours is a warning nobody sees.
+if [[ -f "$SOURCE" && "$SOURCE" -nt "$BIN" ]]; then
+    echo "$BIN is older than $SOURCE — rebuild before surveying:" >&2
+    echo "  ./scripts/dev.sh cargo build --release --example ng_str_stutter_by_library" >&2
+    exit 1
+fi
+echo "using $BIN" >&2
 [[ -f "$REF" ]] || { echo "reference not found: $REF" >&2; exit 1; }
 
 mkdir -p "$WORK"
@@ -179,7 +238,9 @@ if [[ -n "$REGIONS" ]]; then
 elif [[ -n "$CONTIGS" ]]; then
     walk_args=(--contigs "$CONTIGS")
 fi
-walk_args+=(--min-copies "$MIN_COPIES")
+if [[ -n "$MIN_COPIES" ]]; then
+    walk_args+=(--min-copies "$MIN_COPIES")
+fi
 
 command -v samtools >/dev/null && HAVE_QUICKCHECK=1 || HAVE_QUICKCHECK=0
 ((HAVE_QUICKCHECK)) || echo "warning: samtools not on PATH — no EOF check, only indexes and stamps" >&2
@@ -193,7 +254,7 @@ SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}
 
 declare -a pending=("$@")
 total=${#pending[@]}
-echo "surveying $total file(s) over ${REGIONS:-${CONTIGS:-the whole genome}}, from $MIN_COPIES copies, $JOBS at a time" >&2
+echo "surveying $total file(s) over ${REGIONS:-${CONTIGS:-the whole genome}}, copy floors ${MIN_COPIES:-the ng defaults}, $JOBS at a time" >&2
 echo "  work directory: $WORK (delete it to force a full re-run)" >&2
 
 declare -a deferred_files=() deferred_reasons=()
@@ -252,8 +313,11 @@ echo "merging $surveyed result(s)" >&2
     # **The output says what it does not contain.** A survey missing a third of the archive because
     # those CRAMs were mid-write looks exactly like a survey of an archive that size, so the
     # exclusions travel with the numbers rather than in a terminal scrollback.
-    printf '#survey\tcontigs=%s\tmin_copies=%s\tgiven=%s\tsurveyed=%s\tmissing=%s\tpasses=%s\n' \
-        "${CONTIGS:-ALL}" "$MIN_COPIES" "$total" "$surveyed" "${#deferred_files[@]}" "$PASSES"
+    # `walked=` is the BED when one was given, since `REGIONS` overrides `CONTIGS` — an earlier
+    # version printed `contigs=` either way, so a BED-restricted survey claimed a whole chromosome.
+    printf '#survey\twalked=%s\tmin_copies=%s\tgiven=%s\tsurveyed=%s\tmissing=%s\tpasses=%s\n' \
+        "${REGIONS:-${CONTIGS:-ALL}}" "${MIN_COPIES:-default}" "$total" "$surveyed" \
+        "${#deferred_files[@]}" "$PASSES"
     for ((i = 0; i < ${#deferred_files[@]}; i++)); do
         printf '#missing\t%s\t%s\n' "${deferred_files[$i]}" "${deferred_reasons[$i]}"
     done
@@ -266,6 +330,18 @@ echo "merging $surveyed result(s)" >&2
     echo "$results" | while read -r f; do
         awk -F'\t' -v OFS='\t' '
             $1 == "#rg" { n = split($13, path, "/"); $2 = path[n] "::" $3; print }
+        ' "$f"
+    done
+
+    # **What region typing gave each file, beside what its reads said.** A library whose strata are
+    # thin because its tracts bundled is a different finding from one that is merely shallow, and
+    # only this block separates them. Keyed by file, since typing is a property of the reference and
+    # the walk rather than of a read group.
+    printf '#typing_columns\tfile\tspans\tssr_loci\tssr_bundles\tssr_bundle_bp\tsatellites\trepeat_bp_with_no_locus\n'
+    echo "$results" | while read -r f; do
+        awk -F'\t' -v OFS='\t' -v src="$f" '
+            $1 == "#rg" { n = split($13, path, "/"); file = path[n]; next }
+            $1 == "#typing" { $1 = "#typing"; print $1, file, $2, $3, $4, $5, $6, $7 }
         ' "$f"
     done
 

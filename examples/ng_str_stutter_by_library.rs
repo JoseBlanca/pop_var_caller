@@ -41,17 +41,43 @@
 //! floor sits in are spanned by every read length. It is the long-repeat end that a mixed survey
 //! would misread.
 //!
-//! ## Without `--min-copies` the answer is censored at the floors it is trying to measure
+//! ## Lowering `--min-copies` does not extend the curve downward — measured, 2026-08-07
 //!
 //! Region typing applies `MinCopies` **while it types**, so a walk at the defaults never emits a
-//! tract below them and the survey's curves start exactly at `[6, 4, 4, 3, 3, 3]`. That can say
-//! whether a floor should be **raised**; it cannot say whether one could be lowered, and it cannot
-//! see the shape of the curve on the side the floor is meant to cut off. **Pass `--min-copies 2`
-//! for a survey meant to place floors** — ng made `MinCopies` a knob for exactly this question,
-//! where production hardcodes it in a `const fn`.
+//! tract below `[6, 4, 4, 3, 3, 3]` and this survey's curves start exactly where the floor is meant
+//! to be decided. An earlier version of this file told the reader to pass `--min-copies 2` for that
+//! reason, and `scripts/ng_str_library_survey.sh` defaulted to it. **It measures nothing.**
+//!
+//! The floor is read **twice**, and the second reading is the one nobody accounted for: `prefilter`
+//! applies it before bundling (`segment_criteria.rs:601`) and `classify` applies it again
+//! (`:985`). So it decides not only *what is admitted as a locus* but *what counts as a
+//! neighbouring repeat*. Two copies of a mononucleotide is any `AA`, which occurs every few bases,
+//! so at a uniform floor of two every real tract has a neighbour inside the bundle threshold, no
+//! tract has clean flanks, and region typing emits `SsrBundle` — which this survey does not count,
+//! because a bundle names no locus. Over a 2 Mb slice of tomato SL4.0ch01:
+//!
+//! | copy floors | STR loci | bundles | bundle bp |
+//! |---|---:|---:|---:|
+//! | `[6,4,4,3,3,3]` — ng's defaults | 6,237 | 1,943 | 74,289 |
+//! | uniform 4 | 7,434 | 11,720 | 675,372 |
+//! | uniform 3 | 848 | 7,950 | 1,623,636 |
+//! | uniform 2 | **0** | 1 | 1,177,849 |
+//! | `[2,4,4,3,3,3]` | **0** | 18 | 1,599,157 |
+//! | `[6,2,4,3,3,3]` | 1,618 | 13,913 | 1,017,906 |
+//!
+//! **And the damage is not confined to the period that moved**, which is what makes a one-period
+//! sweep no safer than a uniform one: lowering period 2 alone takes period-1 tracts at six copies
+//! from 2,678 loci to 225 — 92% gone at a period whose own floor never changed. Two settings
+//! therefore measure two different populations of loci rather than two ends of one curve.
+//!
+//! **What this survey can still say** is where each period crosses *within* the loci ng's defaults
+//! admit, and how far that crossing moves between libraries — which is the axis nothing has varied.
+//! Extending a curve below its floor needs the two roles separated: a bundling floor held at ng's
+//! defaults and a classification floor that moves. That is a change to `SsrSegmentCriteria`, not to
+//! this program. See `doc/devel/ng/spec/parameter_prepass_ssr.md` §5.1.
 //!
 //! ```text
-//! ng_str_stutter_by_library [--contigs a,b] [--regions r.bed] [--min-copies 2] \
+//! ng_str_stutter_by_library [--contigs a,b] [--regions r.bed] [--min-copies 6,4,4,3,3,3] \
 //!     <reference.fa> <sample.cram> [more...]
 //! ```
 //!
@@ -80,9 +106,9 @@ use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::segment_criteria::MinCopies;
+use pop_var_caller::ng::region_typing::segment_criteria::{MAX_MOTIF_LEN, MinCopies};
 use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionIterator,
+    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionCounts, TypedRegionIterator,
 };
 use pop_var_caller::ng::types::{Bp, ContigId, ReadGroupId};
 use pop_var_caller::regions::ContigBounds;
@@ -255,6 +281,117 @@ fn implied_floor(
     rows.last().map(|(repeats, _)| repeats + 1)
 }
 
+/// Parse `--min-copies`: one number for every period, or a table of six.
+///
+/// **The table form is what the floors question actually needs.** Lowering every period at once
+/// admits two-base homopolymers, which carpet the genome, so every tract acquires a neighbour
+/// inside the bundle threshold and no locus survives (see [`EmptySurvey`]). Lowering **one** period
+/// and leaving the rest at ng's defaults keeps the walk intact and is how a period's own curve is
+/// extended below its floor.
+fn parse_min_copies(value: &str) -> Option<MinCopies> {
+    let fields: Vec<&str> = value.split(',').map(str::trim).collect();
+    match fields.as_slice() {
+        [one] => one.parse().ok().map(MinCopies::uniform),
+        table if table.len() == MAX_MOTIF_LEN => {
+            let mut by_period = [0u32; MAX_MOTIF_LEN];
+            for (slot, field) in by_period.iter_mut().zip(table) {
+                *slot = field.parse().ok()?;
+            }
+            // Periods wider than the table keep production's floor: this survey measures 1 to 6.
+            Some(MinCopies::new(by_period, 3))
+        }
+        _ => None,
+    }
+}
+
+/// Add one walk's typing tally into the run's. Field by field, because the walks are one per contig
+/// or one per BED and the survey's question is about the whole run.
+fn add_typing_counts(total: &mut TypedRegionCounts, walk: &TypedRegionCounts) {
+    total.spans += walk.spans;
+    total.ssr_loci += walk.ssr_loci;
+    total.ssr_bundles += walk.ssr_bundles;
+    total.ssr_bundle_bp += walk.ssr_bundle_bp;
+    total.generic += walk.generic;
+    total.satellites += walk.satellites;
+    total.satellite_bp += walk.satellite_bp;
+    total.repeat_bp_with_no_locus += walk.repeat_bp_with_no_locus;
+    total.rejected_by_reason.copy_floor += walk.rejected_by_reason.copy_floor;
+    total.rejected_by_reason.purity += walk.rejected_by_reason.purity;
+    total.rejected_by_reason.compound += walk.rejected_by_reason.compound;
+    total.rejected_by_reason.no_clean_trim += walk.rejected_by_reason.no_clean_trim;
+    total.rejected_by_reason.flank_clamped += walk.rejected_by_reason.flank_clamped;
+}
+
+/// **A walk that typed nothing this survey can measure.** It is an error and not an empty table:
+/// the driver that runs this over an archive treats a written result as a finished file, so a
+/// silent empty success is skipped on every later pass and the library is never surveyed.
+///
+/// The message names the mechanism from the typing tally, because the two ways to type nothing look
+/// identical from the outside and want opposite responses. Repeats that became **bundles** mean the
+/// copy floor was set so low that neighbouring tracts cluster and no locus can be named — lower
+/// floors then measure *less*, which is the trap `--min-copies` walks into. No repeats **at all**
+/// means the walk covered sequence that has none, which is a region or reference problem.
+#[derive(Debug)]
+struct EmptySurvey {
+    min_copies: Option<MinCopies>,
+    typing: TypedRegionCounts,
+}
+
+impl std::fmt::Display for EmptySurvey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let counts = &self.typing;
+        write!(
+            f,
+            "the walk produced no stratum rows — nothing was measured. Region typing over \
+             {spans} span(s) emitted {loci} STR locus/loci, {bundles} bundle(s) covering \
+             {bundle_bp} bp, {satellites} satellite(s) and {generic} generic region(s); \
+             {no_locus} bp of repeat yielded no locus (copy floor {floor}, purity {purity}, \
+             compound {compound}, no clean trim {trim}, flank clamped {clamped}).",
+            spans = counts.spans,
+            loci = counts.ssr_loci,
+            bundles = counts.ssr_bundles,
+            bundle_bp = counts.ssr_bundle_bp,
+            satellites = counts.satellites,
+            generic = counts.generic,
+            no_locus = counts.repeat_bp_with_no_locus,
+            floor = counts.rejected_by_reason.copy_floor,
+            purity = counts.rejected_by_reason.purity,
+            compound = counts.rejected_by_reason.compound,
+            trim = counts.rejected_by_reason.no_clean_trim,
+            clamped = counts.rejected_by_reason.flank_clamped,
+        )?;
+        if counts.ssr_loci == 0 && counts.ssr_bundles > 0 {
+            write!(
+                f,
+                " Every repeat became a bundle rather than a locus: at this copy floor \
+                 neighbouring tracts sit within the bundle threshold of each other, so no tract \
+                 has the clean flanks a locus needs."
+            )?;
+            if let Some(floors) = self.min_copies {
+                let table: Vec<String> = (1..=6u8)
+                    .map(|p| floors.for_period(p).to_string())
+                    .collect();
+                write!(
+                    f,
+                    " --min-copies was {}: lower one period at a time and leave the rest at ng's \
+                     defaults (`--min-copies 6,2,4,3,3,3`), because lowering every period past the \
+                     point where tracts start touching measures less, not more.",
+                    table.join(",")
+                )?;
+            }
+        } else if counts.ssr_loci > 0 {
+            write!(
+                f,
+                " Loci were typed but no read witnessed one completely — check that the \
+                 alignments cover the walked regions."
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for EmptySurvey {}
+
 fn origin_label(origin: NameOrigin) -> &'static str {
     match origin {
         NameOrigin::Declared => "declared",
@@ -267,7 +404,7 @@ fn run(
     alignments: &[PathBuf],
     contig_filter: &[String],
     regions_bed: Option<&Path>,
-    min_copies: Option<u32>,
+    min_copies: Option<MinCopies>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
     let (info, verify) = read_reference_verifying_or_creating_fai(
@@ -300,13 +437,22 @@ fn run(
         read_groups.iter().count()
     );
 
-    // **Lowering the floor is what lets the survey see below it.** At the defaults the walk emits
-    // nothing under `[6, 4, 4, 3, 3, 3]`, so the curves start where the answer is meant to be
-    // decided and the measurement is censored at exactly the wrong place.
+    // **Lowering the floor is what lets the survey see below it, and lowering it at every period at
+    // once is what stops the survey seeing anything.** At the defaults the walk emits nothing under
+    // `[6, 4, 4, 3, 3, 3]`, so the curves start where the answer is meant to be decided. But a floor
+    // low enough to admit two-copy tracts admits a two-base homopolymer, which occurs every few
+    // bases, so every real tract acquires a neighbour inside the bundle threshold and the whole
+    // walk becomes one bundle carrying no locus at all — measured below on tomato.
     let mut walk_config = TypedRegionConfig::default();
-    if let Some(copies) = min_copies {
-        walk_config.criteria.min_copies = MinCopies::uniform(copies);
-        eprintln!("  typing from {copies} copies at every period, below ng's defaults");
+    if let Some(floors) = min_copies {
+        walk_config.criteria.min_copies = floors;
+        eprintln!(
+            "  typing from {} copies at periods 1-6",
+            (1..=6u8)
+                .map(|p| floors.for_period(p).to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
     }
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
     #[expect(
@@ -383,6 +529,12 @@ fn run(
         }
     }
 
+    // **What region typing produced, not only what this survey could use.** The two differ, and
+    // when they differ the survey measures nothing while reporting success: only `SsrSegment` names
+    // a locus, so a walk that types everything as `SsrBundle` yields zero strata and looks exactly
+    // like a walk over a genome with no repeats in it. Keeping the tally is what lets the failure
+    // below say *which* it was.
+    let mut typing = TypedRegionCounts::default();
     for (label, mut walk) in walks {
         eprintln!("  walking {label}");
         for region in walk.by_ref() {
@@ -400,6 +552,18 @@ fn run(
                 }
             }
         }
+        add_typing_counts(&mut typing, walk.counts());
+    }
+
+    // **An empty survey must not look like a finished one.** A resumable driver treats a written
+    // result as done, so a run that typed nothing usable would be skipped forever
+    // (`scripts/ng_str_library_survey.sh`). Refuse before anything is written, and name the cause
+    // from the tally rather than leaving the reader to guess.
+    if strata.is_empty() {
+        return Err(Box::new(EmptySurvey {
+            min_copies,
+            typing,
+        }));
     }
 
     let stdout = std::io::stdout();
@@ -439,6 +603,26 @@ fn run(
         out,
         "#rg_columns\tread_group\trg_id\tsample\tlibrary\tlibrary_origin\texperiment\t\
          experiment_origin\tplatform\tloci\treads\tmean_tract_bases_per_read\tfile"
+    )?;
+
+    // **What region typing gave, beside what the reads said** — after the `#rg` lines, so a merge
+    // that keys this block by file has already read the file name. A library whose strata are thin
+    // because its tracts bundled is a different finding from one whose library is shallow, and this
+    // line is what separates them.
+    writeln!(
+        out,
+        "#typing\t{}\t{}\t{}\t{}\t{}\t{}",
+        typing.spans,
+        typing.ssr_loci,
+        typing.ssr_bundles,
+        typing.ssr_bundle_bp,
+        typing.satellites,
+        typing.repeat_bp_with_no_locus,
+    )?;
+    writeln!(
+        out,
+        "#typing_columns\tspans\tssr_loci\tssr_bundles\tssr_bundle_bp\tsatellites\t\
+         repeat_bp_with_no_locus"
     )?;
 
     // The per-read-group floors, which are the answer this survey exists for.
@@ -498,7 +682,7 @@ fn main() -> ExitCode {
     let mut positional: Vec<String> = Vec::new();
     let mut contig_filter: Vec<String> = Vec::new();
     let mut regions_bed: Option<PathBuf> = None;
-    let mut min_copies: Option<u32> = None;
+    let mut min_copies: Option<MinCopies> = None;
     let mut rest = std::env::args().skip(1);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -518,10 +702,14 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            "--min-copies" => match rest.next().and_then(|v| v.parse().ok()) {
-                Some(copies) => min_copies = Some(copies),
+            "--min-copies" => match rest.next().as_deref().and_then(parse_min_copies) {
+                Some(floors) => min_copies = Some(floors),
                 None => {
-                    eprintln!("error: --min-copies needs a whole number of copies");
+                    eprintln!(
+                        "error: --min-copies needs one whole number for every period, or a \
+                         comma-separated table of six — `--min-copies 6,2,4,3,3,3` lowers period 2 \
+                         alone and leaves the rest at ng's defaults"
+                    );
                     return ExitCode::from(2);
                 }
             },
