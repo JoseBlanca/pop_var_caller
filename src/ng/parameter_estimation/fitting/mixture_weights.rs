@@ -213,32 +213,10 @@ pub(crate) struct MixtureWeightsFit {
 /// and the reasoning is on [`MAX_CLIMB_PASSES`]: exhausting the cap means the climb ran
 /// out of time on the one summit, not that it found a wrong one.
 ///
-/// # Examples
-///
-/// Two cells and three genotypes, with the cells' likelihoods laid out one cell after
-/// another. The second cell is three times as common as the first, and the third
-/// genotype explains it best, so that is where the weight goes:
-///
-/// ```
-/// use pop_var_caller::ng::parameter_estimation::fitting::mixture_weights::{
-///     fit_mixture_weights, GenotypeLikelihoodTable,
-/// };
-///
-/// let ln_likelihood: Vec<f64> = [
-///     0.8_f64, 0.5, 0.1, // cell 0, under each of the three genotypes
-///     0.1, 0.4, 0.9, //     cell 1, likewise
-/// ]
-/// .iter()
-/// .map(|p| p.ln())
-/// .collect();
-///
-/// let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 3);
-/// let fitted = fit_mixture_weights(table, &[250.0, 750.0]);
-///
-/// assert_eq!(fitted.len(), 3);
-/// assert!((fitted.iter().sum::<f64>() - 1.0).abs() < 1e-12);
-/// assert!(fitted[2] > fitted[0], "{fitted:?}");
-/// ```
+/// **`pub(crate)`, and the worked example that used to be a doctest is now the test
+/// `the_weight_goes_where_the_common_cell_is_best_explained`.** It had no in-crate caller
+/// until Milestone E2's frequency step, and a doctest compiles as an external crate, so
+/// the example was what kept it `pub`. Nothing outside this crate fits a mixture.
 ///
 /// # Panics
 ///
@@ -247,7 +225,7 @@ pub(crate) struct MixtureWeightsFit {
 /// could have produced. Each of those is a caller error that would otherwise leave a
 /// `NaN` to propagate through the fit as a plausible number.
 #[must_use]
-pub fn fit_mixture_weights(
+pub(crate) fn fit_mixture_weights(
     ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
 ) -> SmallVec<[f64; 3]> {
@@ -540,6 +518,32 @@ fn check_start(start: &[f64], genotypes: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The module's worked example**, which was [`fit_mixture_weights`]' `# Examples`
+    /// doctest until Milestone E2 made the function `pub(crate)` and a doctest — compiled
+    /// as an external crate — could no longer reach it. Kept as a test rather than deleted,
+    /// because a smallest-possible call anyone can read is worth as much here as anywhere.
+    ///
+    /// Two cells and three genotypes, with the cells' likelihoods laid out one cell after
+    /// another. The second cell is three times as common as the first, and the third
+    /// genotype explains it best, so that is where the weight goes.
+    #[test]
+    fn the_weight_goes_where_the_common_cell_is_best_explained() {
+        let ln_likelihood: Vec<f64> = [
+            0.8_f64, 0.5, 0.1, // cell 0, under each of the three genotypes
+            0.1, 0.4, 0.9, //     cell 1, likewise
+        ]
+        .iter()
+        .map(|p| p.ln())
+        .collect();
+
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, 3);
+        let fitted = fit_mixture_weights(table, &[250.0, 750.0]);
+
+        assert_eq!(fitted.len(), 3);
+        assert!((fitted.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        assert!(fitted[2] > fitted[0], "{fitted:?}");
+    }
 
     /// A table whose maximiser is known exactly, and known **without a fit**.
     ///

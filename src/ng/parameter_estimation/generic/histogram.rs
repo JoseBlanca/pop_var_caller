@@ -634,6 +634,39 @@ impl<C: CellCounter> DepthAltHistogram<C> {
         })
     }
 
+    /// How many **read observations** entered — the exact depths of every site here,
+    /// summed.
+    ///
+    /// Derived from the same per-cell depth sums [`DepthAltHistogram::mean_depth_in_cell`]
+    /// divides, so a table cannot report a read count its cells' depths disagree with.
+    ///
+    /// **Two consumers, and neither is a diagnostic.** A library's share of a sample's
+    /// reads — the `w_g` of `spec/parameter_prepass_generic.md` §1 — is this number over
+    /// the sample's, and it is what pairs a rate to a library in the multi-library scoring
+    /// rule. And an error rate's `Estimate::observations` is a count of *reads* rather than
+    /// of sites (`arch/parameter_prepass_generic.md` §2.4), because the rate is per read.
+    ///
+    /// # Panics
+    ///
+    /// If the depth sums pass `u64`. Out of reach through this module's entry points, for
+    /// [`DepthAltHistogram::total_loci`]'s reason, and a real check against a later fold.
+    #[must_use]
+    pub fn total_reads(&self) -> u64 {
+        let cells = self
+            .pooled_cells
+            .iter()
+            .chain(self.attributed_cells.values());
+        cells.fold(0u64, |total, tally| {
+            let in_cell: u64 = tally.depth_sum.into();
+            total.checked_add(in_cell).unwrap_or_else(|| {
+                panic!(
+                    "this table's read count passed u64 at {total}, with a cell holding \
+                     {in_cell} more"
+                )
+            })
+        })
+    }
+
     /// **The depth a cell's sites are scored at: the mean of the exact depths that
     /// landed in *that cell*.** A property of this sample's data rather than of the
     /// binning rule, which is why it lives on the table and not on the ladder.

@@ -200,6 +200,7 @@ mod tests {
     use super::*;
     use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
     use crate::ng::parameter_estimation::generic::error_rate_ladder;
+    use crate::ng::parameter_estimation::generic::expected_counts::table_generated_at;
     use crate::ng::parameter_estimation::generic::histogram::DepthAndAltReads;
     use crate::ng::types::Bp;
 
@@ -220,71 +221,6 @@ mod tests {
             .iter()
             .map(|&(copies, set)| (ploidy(copies), SmallVec::from_slice(set)))
             .collect()
-    }
-
-    /// `p_j(ε)` — the same expression `noise_model` scores with, restated here rather
-    /// than reached for, so that the fixture and the model are two statements of the rule
-    /// and a fit that recovers its own rung is a claim about the **scan** rather than
-    /// about the expression. Whether the expression itself is right is D2's four
-    /// identities, not this file's.
-    ///
-    /// **What that division of labour rests on, stated because it is easy to over-read.**
-    /// On a table of expected counts the score is `N · Σ_c p_c(θ₀) · ln p_c(θ)`, which
-    /// Gibbs' inequality maximises at `θ = θ₀` for *any* rule whose cell probabilities sum
-    /// to one over the cell space. So recovery of the generating rung cannot catch an
-    /// expression that is wrong self-consistently — that is exactly what D2's identities
-    /// are for — and it is not vacuous either: it fails the moment the scan mislabels,
-    /// misgathers, misreports or misranks, which is what the tests below turn into
-    /// assertions. The sum-to-one it leans on holds here only because every site sits at
-    /// one exact depth, which is why [`table_generated_at`] takes a single `depth`.
-    fn alternative_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64) -> f64 {
-        let carried = f64::from(alt_copies) / f64::from(ploidy.get());
-        carried * (1.0 - error_rate / 3.0) + (1.0 - carried) * error_rate
-    }
-
-    /// A table of `sites` sites, every one at `depth`, filled with **the counts an
-    /// infinite genome would produce** at these parameters: cell `k` gets
-    /// `sites · Σ_j π_j · Binomial(k; depth, p_j(ε))`, rounded.
-    ///
-    /// The same device the research harnesses use — replace the observed count with its
-    /// probability under a known truth and the answer has no sampling noise in it, so a
-    /// departure from the generating rung is bias rather than luck (research note §1).
-    /// One depth, so the cell's mean depth is that depth exactly, the binning rule
-    /// contributes nothing to the answer, and the cell probabilities sum to one — which is
-    /// what [`alternative_read_probability`]'s note says the recovery claim needs.
-    ///
-    /// Each cell is rounded on its own, so the table holds a site or two either side of
-    /// `sites` (199,998 to 200,000 at the depths used here). Nothing asserts the total
-    /// against `sites`; what is compared against is
-    /// [`DepthAltHistogram::total_loci`](super::histogram::DepthAltHistogram::total_loci)
-    /// of the same table.
-    fn table_generated_at(
-        edges: &Arc<DepthBinEdges>,
-        depth: u32,
-        error_rate: f64,
-        ploidy: Ploidy,
-        genotype_frequencies: &[f64],
-        sites: f64,
-    ) -> DepthAltHistogram<u64> {
-        let mut histogram = DepthAltHistogram::new(Arc::clone(edges));
-        for alt_reads in 0..=depth {
-            let mut probability = 0.0;
-            for (alt_copies, &frequency) in genotype_frequencies.iter().enumerate() {
-                let p = alternative_read_probability(alt_copies as u8, ploidy, error_rate);
-                // The binomial term, built up from `k = 0` rather than through a
-                // factorial, which at depth 20 keeps every intermediate inside `f64`.
-                let mut term = (1.0 - p).powi(depth as i32);
-                for step in 1..=alt_reads {
-                    term *= f64::from(depth - step + 1) / f64::from(step) * p / (1.0 - p);
-                }
-                probability += frequency * term;
-            }
-            let in_cell = (sites * probability).round() as u64;
-            for _ in 0..in_cell {
-                histogram.add_site(DepthAndAltReads::new(depth, alt_reads), Bp(1));
-            }
-        }
-        histogram
     }
 
     /// Tomato-like: heterozygous at 1.5 sites in a thousand, homozygous non-reference at

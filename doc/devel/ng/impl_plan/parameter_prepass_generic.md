@@ -334,7 +334,7 @@ a known rate recovers that rung; a table generated outside Phred 10–50 sets th
 frequencies it climbs to at each rung are a means, not an output. *Depends:* D3, C3.
 *Source:* arch §5.1, spec §3.
 
-**E2. The coupled loop.**  ☐ **Own commit, do not bundle.**
+**E2. The coupled loop.**  ✅ **Own commit, do not bundle.**
 Alternate: each read group's rate from its own table at the previous frequencies, then the
 frequencies from the whole-sample table at those rates, capped at 20 iterations, keeping the
 **best-scoring** iterate and reporting `FitTermination`. **Stop when every read group's winning
