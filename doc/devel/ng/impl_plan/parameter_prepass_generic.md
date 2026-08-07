@@ -349,7 +349,7 @@ frequencies to 0.000% (research note §2.6). At one read group it must terminate
 iteration, because the two tables are then the same table. *Depends:* E1. *Source:* arch §5.2,
 spec §5.1.
 
-**E3. The runs model — a two-state HMM over windows.**  ☐ **Own commit, do not bundle.**
+**E3. The runs model — a two-state HMM over windows.**  ✅ **Own commit, do not bundle.**
 Each state its own three genotype frequencies, fitted freely, with the ordering constraint
 `h << Hout` applied by relabelling after the fit; both transition rates fitted per base; the
 emission a **sum over the window's cells**, never a per-window heterozygote count; the chain

@@ -399,7 +399,7 @@ fn climb_with_cap(
 /// and a `ln_joint` one entry long feeds a stale slot to the log-sum-exp. Both are
 /// plausible wrong numbers rather than crashes. Three comparisons once per call, against a
 /// walk of every cell in the table.
-pub(super) fn weighted_log_likelihood(
+pub(crate) fn weighted_log_likelihood(
     ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
     genotype_frequencies: &[f64],
@@ -453,7 +453,7 @@ pub(super) fn weighted_log_likelihood(
 ///
 /// `−∞` terms contribute nothing and an all-`−∞` slice returns `−∞`, which is the
 /// caller's signal that no genotype could have produced the cell.
-fn ln_sum_exp(terms: &[f64]) -> f64 {
+pub(crate) fn ln_sum_exp(terms: &[f64]) -> f64 {
     let largest_term = terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if largest_term == f64::NEG_INFINITY {
         return f64::NEG_INFINITY;

@@ -11,9 +11,22 @@
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §5.3. The fit itself lands
 //! in Milestone E; the types below are Milestone A.
 
+use std::collections::BTreeMap;
+
 use smallvec::SmallVec;
 
-use crate::ng::parameter_estimation::fitting::FitTermination;
+use crate::ng::parameter_estimation::fitting::mixture_weights::{
+    GenotypeLikelihoodTable, ln_sum_exp, weighted_log_likelihood,
+};
+use crate::ng::parameter_estimation::fitting::{FitTermination, NoiseModel};
+use crate::ng::parameter_estimation::generic::SampleRates;
+use crate::ng::parameter_estimation::generic::accumulators::WindowKey;
+use crate::ng::parameter_estimation::generic::histogram::DepthAltHistogram;
+use crate::ng::parameter_estimation::generic::noise_model::{
+    SampleLibraryNoise, SubstitutionNoiseModel,
+};
+use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError, Provenance};
+use crate::ng::types::{ContigId, InbreedingF, Ploidy};
 
 /// Fewest windows the runs model will accept.
 ///
@@ -131,6 +144,79 @@ pub struct RunsModelFit {
     pub undecided_windows: u32,
 }
 
+/// How many Baum–Welch passes one starting point is allowed.
+///
+/// The research harness's own cap (`examples/ng_inbreeding_harness.rs`, `fit_all_starts`).
+/// Generous: the recovery runs settle in three or four passes at tomato's 8,004 windows.
+pub const MAX_RUNS_MODEL_ITERATIONS: u32 = 300;
+
+/// How long a run of homozygosity a starting point assumes, in windows.
+///
+/// **A start's two transition rates are derived from this and its
+/// [`RunsModelStarts::implied_f`]**: `leave = 1 / MEAN_RUN_WINDOWS_AT_START` and
+/// `enter = leave · F₀ / (1 − F₀)`, which is the rule the research harness generates its
+/// scenarios by (`base_scenario`). Twenty windows is 2 Mb at
+/// [`INBREEDING_WINDOW_BP`](super::INBREEDING_WINDOW_BP), which is the middle of the range
+/// the harness's scenarios use.
+///
+/// **It is a start and not an assumption.** Both rates are fitted, so this decides how
+/// many passes a start takes and not what it converges to — which is why the spread that
+/// matters is over [`RunsModelStarts::separations`] and not over this.
+const MEAN_RUN_WINDOWS_AT_START: f64 = 20.0;
+
+/// A window whose posterior lands outside `[UNDECIDED_LOW, UNDECIDED_HIGH]` was settled by
+/// its own evidence; one inside was settled by the chain.
+const UNDECIDED_LOW: f64 = 0.01;
+const UNDECIDED_HIGH: f64 = 0.99;
+
+/// The floor a rate is clamped to, so that a state the fit emptied can still be re-entered
+/// and so that `ln 0` never reaches the chain.
+const RATE_FLOOR: f64 = 1e-9;
+
+/// What `F` comes back as on a genome with **no runs at all**, at a given window count —
+/// the estimator's resolution, and an `F` below it means *nothing detected*.
+///
+/// **Interpolated from the eight-seed means of research note §3.6 rather than computed
+/// from a formula**, because there is no formula: the number is what a two-state model
+/// reads out of ordinary sampling wobble in window heterozygote counts, and it was
+/// measured at four window counts and nowhere else.
+///
+/// | windows | mean `F` on a genome with no runs |
+/// |---:|---:|
+/// | 1,200 | 0.226 |
+/// | 4,800 | 0.017 |
+/// | 19,200 | 0.0040 |
+/// | 76,800 | 0.0016 |
+///
+/// Log–log linear between those points and flat outside them. That reproduces both figures
+/// the design docs quote — **0.00999 at tomato's 8,004 windows** against their "about
+/// 0.01", and **0.00292 at a human genome's 31,000** against their "0.003" — which is what
+/// makes this an interpolation of the measurement rather than a second, disagreeing
+/// statement of it.
+#[must_use]
+pub fn resolution_at(windows: usize) -> f64 {
+    /// The measured points, ascending in window count.
+    const MEASURED: [(f64, f64); 4] = [
+        (1_200.0, 0.226),
+        (4_800.0, 0.017),
+        (19_200.0, 0.0040),
+        (76_800.0, 0.0016),
+    ];
+
+    let windows = (windows as f64).max(1.0);
+    if windows <= MEASURED[0].0 {
+        return MEASURED[0].1;
+    }
+    for pair in MEASURED.windows(2) {
+        let ((low_windows, low_f), (high_windows, high_f)) = (pair[0], pair[1]);
+        if windows <= high_windows {
+            let along = (windows.ln() - low_windows.ln()) / (high_windows.ln() - low_windows.ln());
+            return (low_f.ln() + along * (high_f.ln() - low_f.ln())).exp();
+        }
+    }
+    MEASURED[MEASURED.len() - 1].1
+}
+
 impl RunsModelFit {
     /// The starting point that scored best — the one `F` was taken from.
     ///
@@ -140,6 +226,653 @@ impl RunsModelFit {
     #[must_use]
     pub fn best_start(&self) -> Option<&StartOutcome> {
         self.starts_tried.first()
+    }
+}
+
+/// Fit the fraction of the analysable genome lying in runs of homozygosity.
+///
+/// **Diploid only.** Above two copies `F` needs several identity-by-descent coefficients
+/// and is deferred (spec §7), and below two there are no heterozygotes to be short of.
+///
+/// `windowed_histograms` is the accumulator's windowed table. Only its
+/// [`WindowKey::InWindow`] entries at `ploidy` take part: a run handed `F` keeps one table
+/// for the whole sample and has no chain to walk.
+///
+/// `noise` carries **every library's share and its own error rate**, not one pooled rate.
+/// A site with few alternative reads keeps which library each came from, and each must be
+/// weighed against its own library's rate; where a site pooled, the same expression reduces
+/// to the share-weighted mean, so no second rule is needed (arch §5.3).
+///
+/// `outside_rates` is where each start's outside state begins — the sample's own genotype
+/// frequencies, as the coupled fit left them. A start's inside state is that state's
+/// heterozygote rate multiplied by one of [`RunsModelStarts::separations`].
+///
+/// # Errors
+///
+/// [`ParameterEstimationError::InbreedingNotFittable`] below
+/// [`MIN_WINDOWS_TO_FIT_INBREEDING`] **windows that hold sites** — the estimator's own
+/// noise is the size of the answer there, and the number it would produce looks like any
+/// other.
+///
+/// [`ParameterEstimationError::InbreedingStatesNotSeparated`] when no start left posterior
+/// mass on both states. **Never a zero**: a failed search and an outcrossing genome leave
+/// identical fitted values, and only this error tells them apart.
+///
+/// # Panics
+///
+/// If `ploidy` is not two, if `starts` is empty on either axis, or if a start's separation
+/// or implied fraction is not strictly inside `(0, 1)`.
+pub fn fit_inbreeding(
+    sample: &str,
+    windowed_histograms: &BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>>,
+    noise: &SampleLibraryNoise,
+    ploidy: Ploidy,
+    outside_rates: &SampleRates,
+    starts: &RunsModelStarts,
+) -> Result<(Estimate<InbreedingF>, RunsModelFit), ParameterEstimationError> {
+    assert_eq!(
+        ploidy.get(),
+        2,
+        "the inbreeding coefficient is diploid-only: above two copies it needs several \
+         identity-by-descent coefficients and below two there are no heterozygotes"
+    );
+    assert!(
+        !starts.separations.is_empty() && !starts.implied_f.is_empty(),
+        "a runs model with no starting points cannot report what it looked for"
+    );
+
+    let chain = WindowChain::over(windowed_histograms, ploidy, noise);
+    if chain.windows_holding_sites < MIN_WINDOWS_TO_FIT_INBREEDING {
+        return Err(ParameterEstimationError::InbreedingNotFittable {
+            sample: sample.to_string(),
+            windows: chain.windows_holding_sites,
+            floor: MIN_WINDOWS_TO_FIT_INBREEDING,
+        });
+    }
+
+    let outside = [
+        outside_rates.by_alt_copies()[0].get(),
+        outside_rates.by_alt_copies()[1].get(),
+        outside_rates.by_alt_copies()[2].get(),
+    ];
+
+    let mut outcomes: Vec<(RunsModelStart, StateFit)> = Vec::new();
+    for &separation in &starts.separations {
+        for &implied_f in &starts.implied_f {
+            let start = RunsModelStart::new(separation, implied_f, outside);
+            let fitted = chain.fit_from(&start, MAX_RUNS_MODEL_ITERATIONS);
+            outcomes.push((start, fitted));
+        }
+    }
+    // Best first, which is the ordering `starts_tried` documents and `best_start` reads.
+    outcomes.sort_by(|left, right| {
+        right
+            .1
+            .log_likelihood
+            .total_cmp(&left.1.log_likelihood)
+            .then(left.0.separation.total_cmp(&right.0.separation))
+    });
+
+    let starts_tried: SmallVec<[StartOutcome; 9]> = outcomes
+        .iter()
+        .map(|(start, fitted)| StartOutcome {
+            separation: start.separation,
+            implied_f: start.implied_f,
+            inbreeding: fitted.inbreeding,
+            log_likelihood: fitted.log_likelihood,
+        })
+        .collect();
+
+    if !outcomes.iter().any(|(_, fitted)| fitted.separated_states) {
+        return Err(ParameterEstimationError::InbreedingStatesNotSeparated {
+            sample: sample.to_string(),
+            starts: starts_tried.len(),
+        });
+    }
+
+    // **The best-scoring start among those that separated the states**, and not simply the
+    // best-scoring start. A collapsed fit can outscore a real one — its inside state is
+    // free to take whatever frequencies fit the whole genome — and keeping it would return
+    // the zero this error path exists to refuse.
+    let (start, best) = outcomes
+        .iter()
+        .find(|(_, fitted)| fitted.separated_states)
+        .expect("some start separated the states, checked above");
+
+    let inbreeding = InbreedingF::try_new(best.inbreeding)
+        .expect("a coverage-weighted posterior occupancy is a fraction");
+    let fit = RunsModelFit {
+        outside_het: best.frequencies[OUTSIDE][1],
+        outside_hom_alt: best.frequencies[OUTSIDE][2],
+        inside_het_floor: best.frequencies[INSIDE][1],
+        inside_hom_alt: best.frequencies[INSIDE][2],
+        enter_run_per_base: per_base(best.enter_run),
+        leave_run_per_base: per_base(best.leave_run),
+        termination: best.termination,
+        starts_tried,
+        resolution: resolution_at(chain.windows()),
+        undecided_windows: best.undecided_windows,
+    };
+    let _ = start;
+
+    Ok((
+        Estimate {
+            value: inbreeding,
+            provenance: Provenance::FittedHere,
+            observations: chain.covered_positions_total(),
+        },
+        fit,
+    ))
+}
+
+/// A per-**window** transition probability as a per-**base** one.
+///
+/// The chain steps window to window, so what Baum–Welch fits is the chance of switching
+/// state across one window. `1 − (1 − r)^L = p` inverted, at the nominal window length —
+/// exact rather than `p / L`, which is its first term.
+///
+/// **Reported and not used.** Nothing in the fit reads a per-base rate; it is on
+/// [`RunsModelFit`] because a caller comparing two samples' runs wants a number that does
+/// not move with the window size.
+fn per_base(per_window: f64) -> f64 {
+    let length = super::INBREEDING_WINDOW_BP.get() as f64;
+    -(1.0 - per_window.min(1.0 - RATE_FLOOR)).ln() / length
+}
+
+/// The state a window is in. `INSIDE` is a run of homozygosity.
+const INSIDE: usize = 0;
+const OUTSIDE: usize = 1;
+const STATES: usize = 2;
+/// Three genotypes: homozygous reference, heterozygous, homozygous non-reference.
+const GENOTYPES: usize = 3;
+
+/// One starting point, expanded from a `(separation, implied_f)` pair.
+#[derive(Copy, Clone, Debug)]
+struct RunsModelStart {
+    separation: f64,
+    implied_f: f64,
+    /// `[state][genotype]`.
+    frequencies: [[f64; GENOTYPES]; STATES],
+    enter_run: f64,
+    leave_run: f64,
+}
+
+impl RunsModelStart {
+    /// # Panics
+    ///
+    /// If `separation` or `implied_f` is not strictly inside `(0, 1)`. A separation of one
+    /// makes the two states identical, at which point `F` is not identified at all — the
+    /// likelihood is exactly flat in it — and a separation of zero fixes the inside
+    /// heterozygote rate at the value the fit exists to estimate.
+    fn new(separation: f64, implied_f: f64, outside: [f64; GENOTYPES]) -> Self {
+        assert!(
+            separation > 0.0 && separation < 1.0,
+            "a separation of {separation} is not a fraction of the outside heterozygote \
+             rate strictly between nothing and all of it"
+        );
+        assert!(
+            implied_f > 0.0 && implied_f < 1.0,
+            "a start that assumes {implied_f} of the genome is inside a run assumes the \
+             answer"
+        );
+
+        let inside_het = outside[1] * separation;
+        let inside = [1.0 - inside_het - outside[2], inside_het, outside[2]];
+        let leave_run = 1.0 / MEAN_RUN_WINDOWS_AT_START;
+        let enter_run = leave_run * implied_f / (1.0 - implied_f);
+
+        Self {
+            separation,
+            implied_f,
+            frequencies: [inside, outside],
+            enter_run: enter_run.clamp(RATE_FLOOR, 1.0 - RATE_FLOOR),
+            leave_run: leave_run.clamp(RATE_FLOOR, 1.0 - RATE_FLOOR),
+        }
+    }
+}
+
+/// What one starting point's Baum–Welch arrived at.
+struct StateFit {
+    /// `[state][genotype]`, after the ordering constraint.
+    frequencies: [[f64; GENOTYPES]; STATES],
+    enter_run: f64,
+    leave_run: f64,
+    /// The coverage-weighted posterior occupancy of the inside state — **this** is `F`.
+    inbreeding: f64,
+    log_likelihood: f64,
+    termination: FitTermination,
+    undecided_windows: u32,
+    /// Whether some window's posterior favoured each state. **The one thing separating a
+    /// genuine `F` near zero from a search that never found the second state**: both leave
+    /// the inside state nearly empty, and only this says whether any window was ever
+    /// assigned to it.
+    separated_states: bool,
+}
+
+/// The windows of a sample in genome order, **including the ones that received no site**,
+/// each with the likelihood table its cells make.
+///
+/// **Absent windows are in the chain and that is not a detail.** The accumulator holds only
+/// windows a locus reached, so walking it directly would step across an unmappable megabase
+/// in one transition and run the end of one chromosome into the start of the next. An empty
+/// window emits nothing — its log-emission is zero under either state — but it still costs
+/// a transition, which is exactly what a gap in the evidence should cost.
+struct WindowChain {
+    /// One entry per window of the chain, in genome order.
+    windows: Vec<ChainWindow>,
+    /// Where each contig's stretch of `windows` begins. The chain restarts at every one.
+    contig_starts: Vec<usize>,
+    /// How many windows actually received a site — what
+    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`] is checked against, because a chain padded with
+    /// empty windows has no more evidence in it than the sites it holds.
+    windows_holding_sites: usize,
+}
+
+/// One window's evidence: how likely each genotype makes each of its cells, how many sites
+/// landed in each, and how many reference positions the window covered.
+struct ChainWindow {
+    /// Row-major, `cells × GENOTYPES`, natural logs. Empty for a window with no sites.
+    ln_likelihood_row_major: Vec<f64>,
+    /// One site count per cell, in the same order.
+    cell_weights: Vec<f64>,
+    /// **Reference positions, not loci** — what `F` is weighted by, so that a window dense
+    /// in widened indel loci is not under-weighted (spec §6.5).
+    covered_positions: f64,
+}
+
+impl WindowChain {
+    /// Build the chain from the accumulator's windowed table.
+    ///
+    /// Each contig runs from **window 0** to the last window that received a site, so a
+    /// leading gap is as present as an interior one.
+    fn over(
+        windowed_histograms: &BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>>,
+        ploidy: Ploidy,
+        noise: &SampleLibraryNoise,
+    ) -> Self {
+        let model = SubstitutionNoiseModel;
+        let mut by_contig: BTreeMap<ContigId, BTreeMap<u32, &DepthAltHistogram<u32>>> =
+            BTreeMap::new();
+        for (&(key, at), table) in windowed_histograms {
+            if at != ploidy {
+                continue;
+            }
+            if let WindowKey::InWindow { contig, window } = key {
+                by_contig
+                    .entry(contig)
+                    .or_default()
+                    .insert(window.get(), table);
+            }
+        }
+
+        let mut windows = Vec::new();
+        let mut contig_starts = Vec::new();
+        let mut windows_holding_sites = 0;
+
+        for tables in by_contig.values() {
+            let last = *tables.keys().next_back().expect("a contig with no windows");
+            contig_starts.push(windows.len());
+            for index in 0..=last {
+                let Some(table) = tables.get(&index) else {
+                    windows.push(ChainWindow {
+                        ln_likelihood_row_major: Vec::new(),
+                        cell_weights: Vec::new(),
+                        covered_positions: 0.0,
+                    });
+                    continue;
+                };
+                let cells = table.cells(ploidy);
+                let mut ln_likelihood_row_major =
+                    Vec::with_capacity(cells.len() * model.genotypes(ploidy));
+                let mut cell_weights = Vec::with_capacity(cells.len());
+                for cell in &cells {
+                    model.append_genotype_likelihoods(
+                        cell,
+                        noise,
+                        ploidy,
+                        &mut ln_likelihood_row_major,
+                    );
+                    cell_weights.push(cell.sites as f64);
+                }
+                if !cell_weights.is_empty() {
+                    windows_holding_sites += 1;
+                }
+                windows.push(ChainWindow {
+                    ln_likelihood_row_major,
+                    cell_weights,
+                    covered_positions: table.total_covered_positions() as f64,
+                });
+            }
+        }
+
+        Self {
+            windows,
+            contig_starts,
+            windows_holding_sites,
+        }
+    }
+
+    fn windows(&self) -> usize {
+        self.windows.len()
+    }
+
+    fn covered_positions_total(&self) -> u64 {
+        self.windows
+            .iter()
+            .map(|window| window.covered_positions as u64)
+            .sum()
+    }
+
+    /// Whether the window at `position` opens a contig — where the chain restarts.
+    fn opens_a_contig(&self, position: usize) -> bool {
+        self.contig_starts.binary_search(&position).is_ok()
+    }
+
+    /// `ln P(window | state)` — **a sum over the window's cells**, never a per-window
+    /// heterozygote count. Dividing by a site count would make a thinly-covered window look
+    /// autozygous (spec §6.1).
+    ///
+    /// A window with no sites scores zero under either state, which is what "no evidence"
+    /// has to be for the forward recursion to leave the chain's own transitions in charge
+    /// of it.
+    fn ln_emission(
+        &self,
+        position: usize,
+        frequencies: &[f64; GENOTYPES],
+        scratch: &mut [f64; GENOTYPES],
+    ) -> f64 {
+        let window = &self.windows[position];
+        if window.cell_weights.is_empty() {
+            return 0.0;
+        }
+        weighted_log_likelihood(
+            GenotypeLikelihoodTable::from_natural_logs(&window.ln_likelihood_row_major, GENOTYPES),
+            &window.cell_weights,
+            frequencies,
+            scratch,
+        )
+    }
+
+    /// One starting point's Baum–Welch: forward–backward over the chain, then re-estimate
+    /// each state's three genotype frequencies and both transition rates, until the
+    /// log-likelihood and the rates both stop moving.
+    ///
+    /// **It climbs to a stationary point on a surface that is not concave**, which is why
+    /// the caller runs it from several starts and why the start is part of the answer. The
+    /// ordering constraint — the state with the *lower* heterozygote rate is the one inside
+    /// a run — is applied by relabelling at the end, because nothing in Baum–Welch imposes
+    /// it.
+    fn fit_from(&self, start: &RunsModelStart, max_iterations: u32) -> StateFit {
+        let n = self.windows.len();
+        let mut frequencies = start.frequencies;
+        let mut enter = start.enter_run;
+        let mut leave = start.leave_run;
+
+        let mut gamma = vec![[0.0f64; STATES]; n];
+        let mut alpha = vec![[f64::NEG_INFINITY; STATES]; n];
+        let mut beta = vec![[0.0f64; STATES]; n];
+        let mut ln_emission = vec![[0.0f64; STATES]; n];
+        let mut scratch = [0.0f64; GENOTYPES];
+
+        let mut log_likelihood = f64::NEG_INFINITY;
+        let mut previous = f64::NEG_INFINITY;
+        let mut iterations = 0;
+        let mut converged = false;
+
+        while iterations < max_iterations {
+            iterations += 1;
+
+            let stationary = enter / (enter + leave);
+            let ln_initial = [
+                stationary.max(RATE_FLOOR).ln(),
+                (1.0 - stationary).max(RATE_FLOOR).ln(),
+            ];
+            // `ln_transition[from][to]`.
+            let ln_transition = [
+                [
+                    (1.0 - leave).max(RATE_FLOOR).ln(),
+                    leave.max(RATE_FLOOR).ln(),
+                ],
+                [
+                    enter.max(RATE_FLOOR).ln(),
+                    (1.0 - enter).max(RATE_FLOOR).ln(),
+                ],
+            ];
+
+            for (position, emissions) in ln_emission.iter_mut().enumerate() {
+                for (state, slot) in emissions.iter_mut().enumerate() {
+                    *slot = self.ln_emission(position, &frequencies[state], &mut scratch);
+                }
+            }
+
+            // Forward, in log space, restarting at every contig boundary.
+            for position in 0..n {
+                let opens = self.opens_a_contig(position);
+                for state in 0..STATES {
+                    alpha[position][state] = if opens {
+                        ln_initial[state] + ln_emission[position][state]
+                    } else {
+                        let reached: [f64; STATES] = std::array::from_fn(|from| {
+                            alpha[position - 1][from] + ln_transition[from][state]
+                        });
+                        ln_sum_exp(&reached) + ln_emission[position][state]
+                    };
+                }
+            }
+
+            // Backward.
+            for position in (0..n).rev() {
+                let closes = position + 1 == n || self.opens_a_contig(position + 1);
+                if closes {
+                    beta[position] = [0.0; STATES];
+                } else {
+                    for state in 0..STATES {
+                        let onward: [f64; STATES] = std::array::from_fn(|to| {
+                            ln_transition[state][to]
+                                + ln_emission[position + 1][to]
+                                + beta[position + 1][to]
+                        });
+                        beta[position][state] = ln_sum_exp(&onward);
+                    }
+                }
+            }
+
+            // Posteriors, and the total log-likelihood as the sum over contigs — one term
+            // per contig, taken where the chain ends, because each contig is its own chain.
+            log_likelihood = 0.0;
+            for position in 0..n {
+                let norm = ln_sum_exp(&[
+                    alpha[position][INSIDE] + beta[position][INSIDE],
+                    alpha[position][OUTSIDE] + beta[position][OUTSIDE],
+                ]);
+                for state in 0..STATES {
+                    gamma[position][state] =
+                        (alpha[position][state] + beta[position][state] - norm).exp();
+                }
+                if position + 1 == n || self.opens_a_contig(position + 1) {
+                    log_likelihood += norm;
+                }
+            }
+
+            // Expected transition counts.
+            let mut transitions = [[0.0f64; STATES]; STATES];
+            for position in 0..n.saturating_sub(1) {
+                if self.opens_a_contig(position + 1) {
+                    continue;
+                }
+                let norm = ln_sum_exp(&[
+                    alpha[position][INSIDE] + beta[position][INSIDE],
+                    alpha[position][OUTSIDE] + beta[position][OUTSIDE],
+                ]);
+                for from in 0..STATES {
+                    for to in 0..STATES {
+                        transitions[from][to] += (alpha[position][from]
+                            + ln_transition[from][to]
+                            + ln_emission[position + 1][to]
+                            + beta[position + 1][to]
+                            - norm)
+                            .exp();
+                    }
+                }
+            }
+
+            let next_frequencies = self.reestimate_frequencies(&gamma, &frequencies);
+            let leaving = transitions[INSIDE][INSIDE] + transitions[INSIDE][OUTSIDE];
+            let entering = transitions[OUTSIDE][INSIDE] + transitions[OUTSIDE][OUTSIDE];
+            let next_leave = if leaving > 0.0 {
+                (transitions[INSIDE][OUTSIDE] / leaving).clamp(RATE_FLOOR, 1.0 - RATE_FLOOR)
+            } else {
+                leave
+            };
+            let next_enter = if entering > 0.0 {
+                (transitions[OUTSIDE][INSIDE] / entering).clamp(RATE_FLOOR, 1.0 - RATE_FLOOR)
+            } else {
+                enter
+            };
+
+            let moved = (next_enter / enter)
+                .ln()
+                .abs()
+                .max((next_leave / leave).ln().abs());
+            frequencies = next_frequencies;
+            enter = next_enter;
+            leave = next_leave;
+
+            // **A relative tolerance on this log-likelihood is a trap, and it bit the
+            // research harness.** The total scales with sites × depth — it is −1.5 × 10⁹ at
+            // three reads a site and −2.0 × 10¹⁰ at sixty — so a tolerance of 10⁻⁷ of the
+            // total is 151 nats at three reads and 2,013 at sixty. Expectation-maximization
+            // stopped after four passes with the answer still moving by hundreds of nats,
+            // reported `converged`, and returned `F` = 1.0000 on a genome 32% covered by
+            // runs. The tolerance is relative to the **per-window** log-likelihood, which
+            // is the quantity that does not grow with the genome, and floored so that it
+            // cannot ask for more than floating point can deliver.
+            let per_window = log_likelihood.abs() / (n as f64).max(1.0);
+            let tolerance = (1e-9 * per_window).max(1e-6) * n as f64;
+            if (log_likelihood - previous).abs() < tolerance && moved < 1e-6 {
+                previous = log_likelihood;
+                converged = true;
+                break;
+            }
+            previous = log_likelihood;
+        }
+        let log_likelihood = if converged { previous } else { log_likelihood };
+
+        // **The ordering constraint, applied by relabelling.** The state with the lower
+        // heterozygote rate is the one inside a run; nothing in the recursion above says
+        // so, and a fit that landed the other way round would report the sample's ordinary
+        // heterozygosity as its inside floor and `1 − F` as `F`.
+        if frequencies[INSIDE][1] > frequencies[OUTSIDE][1] {
+            frequencies.swap(INSIDE, OUTSIDE);
+            std::mem::swap(&mut enter, &mut leave);
+            for window in &mut gamma {
+                window.swap(INSIDE, OUTSIDE);
+            }
+        }
+
+        let covered: f64 = self.windows.iter().map(|w| w.covered_positions).sum();
+        let inbreeding = if covered > 0.0 {
+            gamma
+                .iter()
+                .zip(&self.windows)
+                .map(|(posterior, window)| posterior[INSIDE] * window.covered_positions)
+                .sum::<f64>()
+                / covered
+        } else {
+            0.0
+        };
+
+        let undecided_windows = gamma
+            .iter()
+            .filter(|posterior| {
+                posterior[INSIDE] > UNDECIDED_LOW && posterior[INSIDE] < UNDECIDED_HIGH
+            })
+            .count() as u32;
+
+        // **Posterior mass on both states**, read as "some window's posterior favoured
+        // each" rather than as "`F` is above some floor". The two differ exactly where it
+        // matters: a genuinely outbred genome still hard-assigns a percent or so of its
+        // windows to the inside state — that is the resolution floor of §3.6 — while a fit
+        // whose search collapsed assigns none at all and returns `F` at the rate clamp.
+        let separated_states = gamma.iter().any(|posterior| posterior[INSIDE] > 0.5)
+            && gamma.iter().any(|posterior| posterior[INSIDE] < 0.5);
+
+        StateFit {
+            frequencies,
+            enter_run: enter,
+            leave_run: leave,
+            inbreeding: inbreeding.clamp(0.0, 1.0),
+            log_likelihood,
+            termination: FitTermination {
+                iterations,
+                converged,
+            },
+            undecided_windows,
+            separated_states,
+        }
+    }
+
+    /// The maximization step over the genotype frequencies: each state's expected genotype
+    /// counts under its own window posteriors, normalised.
+    ///
+    /// **Each state's three frequencies are fitted freely**, not tied through one allele
+    /// frequency — that is `bcftools roh`'s form, and with one genome-wide allele frequency
+    /// it forces `F` = 0.57 on an outbred genome (spec §6.1). What identifies the states is
+    /// the ordering constraint, applied after the fit.
+    ///
+    /// **Not [`fit_mixture_weights`](super::super::fitting::mixture_weights::fit_mixture_weights).**
+    /// That fits one free point on the simplex from one table; here there are two points,
+    /// each weighted by a window posterior that the chain itself produced, so the concavity
+    /// D1 relies on does not apply (arch §4.1).
+    fn reestimate_frequencies(
+        &self,
+        gamma: &[[f64; STATES]],
+        frequencies: &[[f64; GENOTYPES]; STATES],
+    ) -> [[f64; GENOTYPES]; STATES] {
+        let mut counts = [[0.0f64; GENOTYPES]; STATES];
+        for (window, posterior) in self.windows.iter().zip(gamma) {
+            for state in 0..STATES {
+                let weight = posterior[state];
+                if weight < 1e-12 {
+                    continue;
+                }
+                for (cell, &sites) in window.cell_weights.iter().enumerate() {
+                    if sites == 0.0 {
+                        continue;
+                    }
+                    let row =
+                        &window.ln_likelihood_row_major[cell * GENOTYPES..(cell + 1) * GENOTYPES];
+                    // In log space, because a deep cell's likelihood underflows: a site of
+                    // depth 124 showing every read alternative is `−857` under the
+                    // homozygous-reference genotype at an error rate of 0.001, which is
+                    // zero in linear space beside a neighbour at 0.883.
+                    let ln_joint: [f64; GENOTYPES] = std::array::from_fn(|genotype| {
+                        frequencies[state][genotype].max(f64::MIN_POSITIVE).ln() + row[genotype]
+                    });
+                    let ln_total = ln_sum_exp(&ln_joint);
+                    if !ln_total.is_finite() {
+                        continue;
+                    }
+                    for genotype in 0..GENOTYPES {
+                        counts[state][genotype] +=
+                            weight * sites * (ln_joint[genotype] - ln_total).exp();
+                    }
+                }
+            }
+        }
+
+        let mut next = *frequencies;
+        for state in 0..STATES {
+            let total: f64 = counts[state].iter().sum();
+            if total > 0.0 {
+                for genotype in 0..GENOTYPES {
+                    // Floored, so that a genotype no window supports cannot pin itself at
+                    // zero for the rest of the fit — the expectation step multiplies by it.
+                    next[state][genotype] = (counts[state][genotype] / total).max(1e-12);
+                }
+            }
+        }
+        next
     }
 }
 
@@ -243,5 +976,577 @@ mod tests {
     #[test]
     fn the_window_floor_is_the_measured_one() {
         assert_eq!(MIN_WINDOWS_TO_FIT_INBREEDING, 3_000);
+    }
+
+    /// **The resolution reproduces the two figures the design docs quote**, which is what
+    /// makes an interpolation of research note §3.6 one statement of that measurement
+    /// rather than a second, disagreeing one.
+    ///
+    /// Both are asserted to two significant figures, which is the precision the docs state
+    /// them at: "about 0.01 at tomato's 8,004 windows and 0.003 at a human genome's
+    /// 31,000".
+    #[test]
+    fn the_resolution_reproduces_the_window_counts_the_design_quotes() {
+        let tomato = resolution_at(8_004);
+        let human = resolution_at(31_000);
+
+        assert!(
+            (tomato - 0.01).abs() < 0.0005,
+            "tomato's 8,004 windows give {tomato}, where the design says about 0.01"
+        );
+        assert!(
+            (human - 0.003).abs() < 0.0005,
+            "a human genome's 31,000 give {human}, where the design says about 0.003"
+        );
+        // The measured points come back exactly, and the curve descends between them.
+        assert!((resolution_at(4_800) - 0.017).abs() < 1e-12);
+        assert!((resolution_at(19_200) - 0.0040).abs() < 1e-12);
+        assert!(tomato > human, "more windows, finer resolution");
+        assert!(
+            resolution_at(200) >= resolution_at(1_200),
+            "flat below the range"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The fit, against a drawn genome whose realised autozygous fraction is known.
+    // -----------------------------------------------------------------
+
+    use std::sync::Arc;
+
+    use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+    use crate::ng::parameter_estimation::generic::expected_counts::alternative_read_probability;
+    use crate::ng::parameter_estimation::generic::histogram::DepthAndAltReads;
+    use crate::ng::parameter_estimation::generic::{SampleRates, WindowIndex};
+    use crate::ng::types::{Bp, ContigId, ErrorRate, GenotypeFrequency, ReadGroupId};
+
+    /// SplitMix64 — the research harness's generator, so a drawn genome here and one there
+    /// are drawn the same way.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn unit(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        /// How many of `n` trials succeed at probability `p`. Linear in `n`, which is fine
+        /// because `n` here is a window's site count and the loop below draws one window's
+        /// cells with a handful of calls.
+        fn binomial(&mut self, n: u64, p: f64) -> u64 {
+            if p <= 0.0 {
+                return 0;
+            }
+            if p >= 1.0 {
+                return n;
+            }
+            (0..n).filter(|_| self.unit() < p).count() as u64
+        }
+    }
+
+    /// What a drawn genome is, and what its realised autozygous fraction turned out to be.
+    ///
+    /// **Realised and never nominal.** A finite genome does not have the `F` its transition
+    /// rates imply — the states are drawn, so the fraction actually covered by runs is its
+    /// own random variable — and scoring against the nominal value reads sampling as bias
+    /// (spec §6.5).
+    struct DrawnGenome {
+        windowed: BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>>,
+        realised_f: f64,
+        windows: usize,
+    }
+
+    /// Tomato-shaped but scaled so a test can run it: **twelve contigs of 300 windows**,
+    /// 3,600 in all against the floor of 3,000, and 400 sites a window at ten reads a site.
+    ///
+    /// **The heterozygosity is raised from tomato's 1 per kb to 5%, and that is what pays
+    /// for the smaller window.** The chain classifies a window on how many heterozygotes it
+    /// holds, so what matters is the *count*: the research harness gets ~100 per window from
+    /// 100,000 sites at 1 per kb, and this gets ~20 from 400 sites at 5%. Fewer, so the
+    /// tolerances below are looser than the harness's four decimal places — which is the
+    /// harness's claim at full scale and not this fixture's.
+    const CONTIGS: u32 = 12;
+    const WINDOWS_PER_CONTIG: u32 = 300;
+    const SITES_PER_WINDOW: u64 = 400;
+    const WINDOW_DEPTH: u32 = 10;
+    const ERROR_RATE: f64 = 0.001;
+    const OUTSIDE_HET: f64 = 0.05;
+    const HOM_ALT: f64 = 0.02;
+    const INSIDE_HET: f64 = 0.002;
+    /// One window in thirty ends a run, so a run is 3 Mb on average.
+    const LEAVE_RUN: f64 = 1.0 / 30.0;
+
+    fn ploidy2() -> Ploidy {
+        Ploidy::try_new(2).expect("a positive copy number")
+    }
+
+    fn draw_genome(nominal_f: f64, false_het_floor: f64, seed: u64) -> DrawnGenome {
+        let edges = Arc::new(DepthBinEdges::new());
+        let mut rng = SplitMix64::new(seed);
+        let enter = LEAVE_RUN * nominal_f / (1.0 - nominal_f);
+        let diploid = ploidy2();
+
+        let state_frequencies = |inside: bool| -> [f64; GENOTYPES] {
+            let het = if inside { INSIDE_HET } else { OUTSIDE_HET } + false_het_floor;
+            [1.0 - het - HOM_ALT, het, HOM_ALT]
+        };
+        // The cell probabilities under each state: `Σ_j π_j · Binomial(k; depth, p_j(ε))`.
+        let cell_probabilities = |inside: bool| -> Vec<f64> {
+            let frequencies = state_frequencies(inside);
+            (0..=WINDOW_DEPTH)
+                .map(|alt_reads| {
+                    let mut total = 0.0;
+                    for (dosage, &frequency) in frequencies.iter().enumerate() {
+                        let p = alternative_read_probability(dosage as u8, diploid, ERROR_RATE);
+                        let mut term = (1.0 - p).powi(WINDOW_DEPTH as i32);
+                        for step in 1..=alt_reads {
+                            term *= f64::from(WINDOW_DEPTH - step + 1) / f64::from(step) * p
+                                / (1.0 - p);
+                        }
+                        total += frequency * term;
+                    }
+                    total
+                })
+                .collect()
+        };
+        let inside_cells = cell_probabilities(true);
+        let outside_cells = cell_probabilities(false);
+
+        let mut windowed = BTreeMap::new();
+        let mut inside_positions = 0u64;
+        let mut total_positions = 0u64;
+
+        for contig in 0..CONTIGS {
+            // Each contig starts in the stationary distribution of the chain.
+            let mut inside = rng.unit() < enter / (enter + LEAVE_RUN);
+            for window in 0..WINDOWS_PER_CONTIG {
+                let cells = if inside {
+                    &inside_cells
+                } else {
+                    &outside_cells
+                };
+                let mut table = DepthAltHistogram::new(Arc::clone(&edges));
+
+                // One multinomial draw over the window's cells, by sequential conditional
+                // binomials — the exact draw, and a few dozen calls rather than one per
+                // site.
+                let mut left = SITES_PER_WINDOW;
+                let mut remaining: f64 = cells.iter().sum();
+                for (alt_reads, &probability) in cells.iter().enumerate() {
+                    if left == 0 {
+                        break;
+                    }
+                    let in_cell = if remaining > 0.0 {
+                        rng.binomial(left, (probability / remaining).clamp(0.0, 1.0))
+                    } else {
+                        0
+                    };
+                    remaining -= probability;
+                    left -= in_cell;
+                    for _ in 0..in_cell {
+                        table
+                            .add_site(DepthAndAltReads::new(WINDOW_DEPTH, alt_reads as u32), Bp(1));
+                    }
+                }
+
+                total_positions += table.total_covered_positions();
+                if inside {
+                    inside_positions += table.total_covered_positions();
+                }
+                windowed.insert(
+                    (
+                        WindowKey::InWindow {
+                            contig: ContigId(contig),
+                            window: WindowIndex(window),
+                        },
+                        diploid,
+                    ),
+                    table,
+                );
+
+                inside = if inside {
+                    rng.unit() >= LEAVE_RUN
+                } else {
+                    rng.unit() < enter
+                };
+            }
+        }
+
+        DrawnGenome {
+            realised_f: inside_positions as f64 / total_positions as f64,
+            windows: windowed.len(),
+            windowed,
+        }
+    }
+
+    fn sample_rates(false_het_floor: f64) -> SampleRates {
+        let het = OUTSIDE_HET + false_het_floor;
+        SampleRates::try_new(
+            ploidy2(),
+            [1.0 - het - HOM_ALT, het, HOM_ALT]
+                .into_iter()
+                .map(|f| GenotypeFrequency::try_new(f).expect("a frequency"))
+                .collect(),
+        )
+        .expect("a well-formed diploid set")
+    }
+
+    fn one_library() -> SampleLibraryNoise {
+        SampleLibraryNoise::single(
+            ReadGroupId(1),
+            ErrorRate::try_new(ERROR_RATE).expect("a probability"),
+        )
+    }
+
+    /// **E3's oracle: `F` recovers the realised autozygous fraction of a drawn genome**, at
+    /// four nominal levels from 0.05 to 0.60.
+    ///
+    /// **Scored against the realised fraction and never the nominal one.** A finite genome
+    /// does not have the `F` its transition rates imply, so comparing against the nominal
+    /// value reads sampling as bias — the drawn fractions here miss their nominal values by
+    /// as much as 0.05 while the fit is within 0.02 of what was drawn.
+    ///
+    /// **The tolerance is this fixture's, not the harness's.** The research note's four
+    /// decimal places come from 8,004 windows of 100,000 sites each; 3,600 windows of 400
+    /// sites hold about a fifth as many heterozygotes per window, so the chain has less to
+    /// classify each one on. What is being checked here is that the estimator is the one
+    /// the harness measured — that it recovers a drawn fraction rather than a nominal one,
+    /// across a five-fold range of it.
+    #[test]
+    fn f_recovers_a_drawn_genomes_realised_autozygous_fraction() {
+        let starts = RunsModelStarts::default();
+        for (seed, nominal) in [0.05_f64, 0.15, 0.30, 0.60].into_iter().enumerate() {
+            let genome = draw_genome(nominal, 0.0, 0xE3_0000 + seed as u64);
+            assert!(
+                genome.windows >= MIN_WINDOWS_TO_FIT_INBREEDING,
+                "{} windows",
+                genome.windows
+            );
+
+            let (estimate, fit) = fit_inbreeding(
+                "drawn",
+                &genome.windowed,
+                &one_library(),
+                ploidy2(),
+                &sample_rates(0.0),
+                &starts,
+            )
+            .expect("a drawn genome of 3,600 windows is fittable");
+
+            let fitted = estimate.value.get();
+            assert!(
+                (fitted - genome.realised_f).abs() < 0.02,
+                "nominal {nominal}: fitted {fitted} against a realised {}",
+                genome.realised_f
+            );
+            assert!(
+                fit.inside_het_floor < fit.outside_het,
+                "the ordering constraint puts the lower heterozygote rate inside: \
+                 inside {}, outside {}",
+                fit.inside_het_floor,
+                fit.outside_het
+            );
+            assert_eq!(fit.starts_tried.len(), 9);
+        }
+    }
+
+    /// **A floor of false heterozygotes does not move `F`.** Collapsed paralogs and
+    /// mismapping lift *both* states together, so what the chain reads — the gap between
+    /// them — is unchanged. That is spec §6.2's second reason for choosing this estimator
+    /// over the ratio one, and the research harness measures it up to five times the real
+    /// rate (§3.3).
+    ///
+    /// The floor here runs to **five times** the outside heterozygote rate, and the same
+    /// genome is drawn at each level so that the realised fraction is the same number to
+    /// compare against.
+    #[test]
+    fn a_floor_of_false_heterozygotes_does_not_move_f() {
+        let starts = RunsModelStarts::default();
+        let mut fitted_at = Vec::new();
+        for multiple in [0.0_f64, 1.0, 3.0, 5.0] {
+            let floor = multiple * OUTSIDE_HET;
+            let genome = draw_genome(0.30, floor, 0xE3_1000);
+
+            let (estimate, _) = fit_inbreeding(
+                "floored",
+                &genome.windowed,
+                &one_library(),
+                ploidy2(),
+                &sample_rates(floor),
+                &starts,
+            )
+            .expect("fittable");
+
+            fitted_at.push((multiple, estimate.value.get(), genome.realised_f));
+        }
+
+        for &(multiple, fitted, realised) in &fitted_at {
+            assert!(
+                (fitted - realised).abs() < 0.05,
+                "at {multiple}× the real heterozygote rate the fit gave {fitted} against a \
+                 realised {realised}; all levels: {fitted_at:?}"
+            );
+        }
+    }
+
+    /// **Starts that share one separation guess return a failed search, not a zero.** This
+    /// is the one place the estimator produces a confident wrong number, and the error path
+    /// is the only thing between it and a caller.
+    ///
+    /// The genome is 30% covered by runs with a floor of false heterozygotes three times
+    /// the real rate, which is what pulls the two states close together — the shape spec
+    /// §6.5 measures. Handed three starts that all guess the inside state at a twentieth of
+    /// the outside rate, every one of them empties the inside state.
+    #[test]
+    fn starts_sharing_one_separation_report_a_failed_search_rather_than_zero() {
+        let floor = 3.0 * OUTSIDE_HET;
+        let genome = draw_genome(0.30, floor, 0xE3_2000);
+        let narrow = RunsModelStarts {
+            separations: SmallVec::from_slice(&[0.05]),
+            implied_f: SmallVec::from_slice(&[0.05, 0.5, 0.75]),
+        };
+
+        let narrow_result = fit_inbreeding(
+            "narrow",
+            &genome.windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates(floor),
+            &narrow,
+        );
+        let spread_result = fit_inbreeding(
+            "spread",
+            &genome.windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates(floor),
+            &RunsModelStarts::default(),
+        );
+
+        let spread = spread_result.expect("the default starts span the separation");
+        assert!(
+            (spread.0.value.get() - genome.realised_f).abs() < 0.05,
+            "the spread starts gave {} against a realised {}",
+            spread.0.value.get(),
+            genome.realised_f
+        );
+        let narrow_error =
+            narrow_result.expect_err("the narrow starts must not return a number at all");
+        assert!(
+            matches!(
+                narrow_error,
+                ParameterEstimationError::InbreedingStatesNotSeparated { starts: 3, .. }
+            ),
+            "the wrong failure: {narrow_error}"
+        );
+        assert!(
+            narrow_error
+                .to_string()
+                .contains("not an inbreeding coefficient"),
+            "the message has to say what it is not: {narrow_error}"
+        );
+    }
+
+    /// Below the window floor the fit fails rather than emitting, and the message names the
+    /// count and the floor.
+    #[test]
+    fn a_genome_below_the_window_floor_is_refused() {
+        let genome = draw_genome(0.30, 0.0, 0xE3_3000);
+        let few: BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>> = genome
+            .windowed
+            .into_iter()
+            .take(MIN_WINDOWS_TO_FIT_INBREEDING - 1)
+            .collect();
+
+        let error = fit_inbreeding(
+            "small",
+            &few,
+            &one_library(),
+            ploidy2(),
+            &sample_rates(0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect_err("2,999 windows is below the floor");
+
+        let message = error.to_string();
+        assert!(message.contains("2999"), "{message}");
+        assert!(message.contains("3000"), "{message}");
+    }
+
+    /// **`F` is weighted by reference positions, not by loci** — so a window dense in
+    /// widened indel loci is not under-weighted. Two windows holding the same number of
+    /// loci but different spans must not count equally.
+    ///
+    /// Asserted on the weighting directly, because the two coincide on every fixture above:
+    /// each locus there spans one position, which is what makes a chain built from them
+    /// unable to tell the two rules apart.
+    #[test]
+    fn the_occupancy_is_weighted_by_covered_positions_and_not_by_loci() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy2();
+        let mut narrow = DepthAltHistogram::new(Arc::clone(&edges));
+        let mut wide = DepthAltHistogram::new(Arc::clone(&edges));
+        for _ in 0..10 {
+            narrow.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(1));
+            wide.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(50));
+        }
+
+        let windowed = BTreeMap::from([
+            (
+                (
+                    WindowKey::InWindow {
+                        contig: ContigId(0),
+                        window: WindowIndex(0),
+                    },
+                    diploid,
+                ),
+                narrow,
+            ),
+            (
+                (
+                    WindowKey::InWindow {
+                        contig: ContigId(0),
+                        window: WindowIndex(1),
+                    },
+                    diploid,
+                ),
+                wide,
+            ),
+        ]);
+
+        let chain = WindowChain::over(&windowed, diploid, &one_library());
+
+        assert_eq!(chain.windows(), 2);
+        assert_eq!(chain.covered_positions_total(), 10 + 500);
+        assert_eq!(chain.windows_holding_sites, 2);
+    }
+
+    /// **Absent windows are in the chain**, so the model cannot step across an unmappable
+    /// megabase in one transition, and the chain restarts at every contig boundary rather
+    /// than running the end of one chromosome into the start of the next.
+    ///
+    /// Two contigs, each with a hole and a leading gap: the chain holds every window from
+    /// zero to the last one that received a site, and only the two that did count towards
+    /// the floor.
+    #[test]
+    fn the_chain_covers_every_window_of_a_contig_and_restarts_at_each_boundary() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy2();
+        let mut windowed = BTreeMap::new();
+        for (contig, window) in [(0u32, 3u32), (1, 5)] {
+            let mut table = DepthAltHistogram::new(Arc::clone(&edges));
+            table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(1));
+            windowed.insert(
+                (
+                    WindowKey::InWindow {
+                        contig: ContigId(contig),
+                        window: WindowIndex(window),
+                    },
+                    diploid,
+                ),
+                table,
+            );
+        }
+
+        let chain = WindowChain::over(&windowed, diploid, &one_library());
+
+        // Windows 0..=3 of the first contig and 0..=5 of the second.
+        assert_eq!(chain.windows(), 4 + 6);
+        assert_eq!(chain.windows_holding_sites, 2);
+        assert_eq!(chain.contig_starts, vec![0, 4]);
+        assert!(chain.opens_a_contig(0) && chain.opens_a_contig(4));
+        assert!(!chain.opens_a_contig(3) && !chain.opens_a_contig(5));
+    }
+
+    /// A window that received no site emits nothing under either state — which is what lets
+    /// the chain's own transitions decide it, rather than its emptiness arguing for one
+    /// state over the other.
+    #[test]
+    fn an_absent_window_emits_the_same_under_both_states() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy2();
+        let mut table = DepthAltHistogram::new(Arc::clone(&edges));
+        table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(1));
+        let windowed = BTreeMap::from([(
+            (
+                WindowKey::InWindow {
+                    contig: ContigId(0),
+                    window: WindowIndex(1),
+                },
+                diploid,
+            ),
+            table,
+        )]);
+        let chain = WindowChain::over(&windowed, diploid, &one_library());
+        let mut scratch = [0.0; GENOTYPES];
+
+        let inside = [1.0 - INSIDE_HET - HOM_ALT, INSIDE_HET, HOM_ALT];
+        let outside = [1.0 - OUTSIDE_HET - HOM_ALT, OUTSIDE_HET, HOM_ALT];
+
+        assert_eq!(chain.ln_emission(0, &inside, &mut scratch), 0.0);
+        assert_eq!(chain.ln_emission(0, &outside, &mut scratch), 0.0);
+        assert_ne!(
+            chain.ln_emission(1, &inside, &mut scratch),
+            chain.ln_emission(1, &outside, &mut scratch),
+            "the window that holds a site must tell the two states apart"
+        );
+    }
+
+    /// A start's separation and implied fraction have to be real guesses. A separation of
+    /// one makes the two states identical, at which point the likelihood is exactly flat in
+    /// `F` and what a fit returns is its own starting point.
+    #[test]
+    #[should_panic(expected = "is not a fraction of the outside heterozygote rate")]
+    fn a_separation_of_one_is_refused() {
+        let _ = RunsModelStart::new(1.0, 0.5, [0.93, 0.05, 0.02]);
+    }
+
+    #[test]
+    #[should_panic(expected = "assumes the answer")]
+    fn a_start_assuming_the_whole_genome_is_inside_a_run_is_refused() {
+        let _ = RunsModelStart::new(0.05, 1.0, [0.93, 0.05, 0.02]);
+    }
+
+    /// A start's two transition rates come from its implied fraction and the stated mean
+    /// run length, so that the stationary inside probability of the chain it starts from is
+    /// the fraction it was asked for.
+    #[test]
+    fn a_starts_transition_rates_imply_the_fraction_it_was_given() {
+        for implied_f in [0.05, 0.5, 0.75] {
+            let start = RunsModelStart::new(1.0 / 3.0, implied_f, [0.93, 0.05, 0.02]);
+            let stationary = start.enter_run / (start.enter_run + start.leave_run);
+
+            assert!(
+                (stationary - implied_f).abs() < 1e-12,
+                "a start asked for {implied_f} begins at {stationary}"
+            );
+            assert!((start.leave_run - 1.0 / MEAN_RUN_WINDOWS_AT_START).abs() < 1e-12);
+        }
+    }
+
+    /// The inbreeding coefficient is diploid-only: above two copies it needs several
+    /// identity-by-descent coefficients, and below two there are no heterozygotes.
+    #[test]
+    #[should_panic(expected = "diploid-only")]
+    fn a_non_diploid_ploidy_is_refused() {
+        let _ = fit_inbreeding(
+            "tetraploid",
+            &BTreeMap::new(),
+            &one_library(),
+            Ploidy::try_new(4).expect("a positive copy number"),
+            &sample_rates(0.0),
+            &RunsModelStarts::default(),
+        );
     }
 }
