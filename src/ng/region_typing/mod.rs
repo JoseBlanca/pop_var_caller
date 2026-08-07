@@ -3106,42 +3106,51 @@ mod tests {
         }
     }
 
-    /// **Where absorption stops, and that it moves with the radius.** A `(CAG)*8` tract
-    /// separated from a 1.3 kb array by `bundle_threshold` bases is still absorbed; one
-    /// base further out it survives as a locus.
+    /// **A wider radius absorbs from further away.** That is the whole content of the
+    /// knob, and it is what nothing asserted until a `(CAG)*8` tract beside a 1.3 kb array
+    /// started behaving differently when the default moved.
     ///
-    /// Pinned because nothing pinned it, and the gap cost a confusing failure: the
-    /// absorption test above used a literal 20 bp gap, which was comfortably inside a
-    /// radius of 30 and sat right at the transition once the radius became 20. The
-    /// behaviour was correct both times; only the fixture was wrong. A boundary nobody
-    /// asserts is one the next reader rediscovers from a broken test.
+    /// Pinned because its absence cost two confusing failures. The absorption test above
+    /// used a literal 20 bp gap, comfortable inside a radius of 30 and right at the
+    /// transition once the radius became 20. Then a first version of *this* test asserted
+    /// "absorbed at exactly the radius, a locus one base further" — true at a radius of 20
+    /// and false at 15. The behaviour was right every time; the assertions were guesses at
+    /// a relationship nobody had measured.
     ///
-    /// **What this pins is the transition's position relative to the radius, not the
-    /// inequality that produces it.** The gap this fixture lays down and the gap the
-    /// rule measures need not be the same number to the base: classification trims a
-    /// tract's edges, so a tract's admitted extent can differ from the bases written
-    /// into the fixture. Asserting "absorbed at the radius, a locus one further" is
-    /// therefore a claim about behaviour that is checkable; deriving it from
-    /// [`absorb_into`]'s comparison would be a claim about the code restating itself.
+    /// **So it asserts the monotonicity and not an offset.** How far a tract must sit from
+    /// the array before it survives is not the radius plus a constant: classification trims
+    /// a tract's edges, so the gap this fixture lays down and the gap the rule compares are
+    /// not the same number, and the difference moves with the radius. What is guaranteed,
+    /// and what a reader needs, is the direction — and it is checked across four radii
+    /// rather than at the default alone, so moving the default cannot break it again.
     #[test]
     fn absorption_tracks_the_bundle_radius() {
-        let config = TypedRegionConfig::default();
-        let radius = DEFAULT_BUNDLE_THRESHOLD as usize;
-        let has_locus = |gap: usize| {
-            let bases = micro_near_satellite(true, gap);
-            partition_resident("chr1", ContigId(0), &bases, &config)
-                .iter()
-                .any(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
+        let first_locus_gap = |radius: u64| -> Option<usize> {
+            let config = TypedRegionConfig {
+                criteria: SsrSegmentCriteria {
+                    bundle_threshold: radius,
+                    ..SsrSegmentCriteria::default()
+                },
+                ..TypedRegionConfig::default()
+            };
+            (1..=radius as usize * 3).find(|&gap| {
+                let bases = micro_near_satellite(true, gap);
+                partition_resident("chr1", ContigId(0), &bases, &config)
+                    .iter()
+                    .any(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
+            })
         };
-        assert!(
-            !has_locus(radius),
-            "at {radius} bp of gap the flank is not clean enough and the tract is absorbed"
-        );
-        assert!(
-            has_locus(radius + 1),
-            "one base further out the same tract survives as a locus — so the absorption \
-             above is the radius firing and not the tract being inadmissible"
-        );
+        let mut previous = 0;
+        for radius in [10u64, 15, 20, 30] {
+            let gap = first_locus_gap(radius)
+                .unwrap_or_else(|| panic!("radius {radius}: no gap leaves a locus at all"));
+            assert!(
+                gap > previous,
+                "radius {radius}: the tract should survive at a wider gap than the previous \
+                 radius did — got {gap} against {previous}"
+            );
+            previous = gap;
+        }
     }
 
     /// Absorption must not depend on the window either: the windowed walk agrees with

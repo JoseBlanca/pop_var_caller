@@ -104,6 +104,36 @@ fn clean_right(motif: &[u8]) -> Vec<u8> {
     f
 }
 
+/// Right flank carrying a **short repeat of its own, just past the junction** — three copies of a
+/// dinucleotide unrelated to the tract's motif.
+///
+/// **This is what the flank guarantee actually permits, and the other flanks here are cleaner than
+/// it.** The bundle radius promises no *admitted* repeat inside the flank, and admission needs
+/// `MinCopies` — six copies for a mononucleotide, four for a dinucleotide. A three-copy tract is
+/// below every floor, so it is invisible to region typing and may sit directly against the
+/// boundary. It eats anchor: at a 15 bp flank these six bases leave eight aperiodic ones to place
+/// the tract's edge against, where a 25 bp flank leaves eighteen.
+///
+/// It is also the flank a *marginal* locus has. Narrowing the radius admits tracts that were
+/// clustered before, and those are by construction the ones with the most repetitive
+/// surroundings — so shortening the anchor and admitting dirtier flanks are the same change, and a
+/// scenario set built only from aperiodic flanks cannot see the interaction.
+fn repetitive_right(motif: &[u8]) -> Vec<u8> {
+    let mut f = clean_right(motif);
+    // A dinucleotide unrelated to the tract's motif, so the detector cannot join the two.
+    let filler_motif: &[u8] = if motif.contains(&b'G') || motif.contains(&b'T') {
+        b"CA"
+    } else {
+        b"GT"
+    };
+    for i in 0..6 {
+        if i + 1 < f.len() {
+            f[i + 1] = filler_motif[i % 2];
+        }
+    }
+    f
+}
+
 /// Right flank that **continues the motif by one base** — the boundary trap: the tract truly ends
 /// where we say, but the next base looks like the start of another unit.
 fn continuing_right(motif: &[u8]) -> Vec<u8> {
@@ -422,6 +452,25 @@ fn scenarios() -> Vec<Scenario> {
                 ref_units,
                 tract(&motif, su as usize),
                 clean_r.clone(),
+                format!("{d:+}u"),
+            ));
+        }
+
+        // DIRTY_FLANK — the same in-frame alleles, but the right flank carries a sub-floor repeat
+        // against the boundary. The case that decides how short the anchor may be, because it is
+        // what the flank guarantee permits and what a marginal locus looks like.
+        let dirty_r = repetitive_right(&motif);
+        for d in [-2i64, -1, 0, 1, 2] {
+            let su = ref_units as i64 + d;
+            if su < 2 {
+                continue;
+            }
+            out.push(complete(
+                "DIRTY_FLANK",
+                period,
+                ref_units,
+                tract(&motif, su as usize),
+                dirty_r.clone(),
                 format!("{d:+}u"),
             ));
         }

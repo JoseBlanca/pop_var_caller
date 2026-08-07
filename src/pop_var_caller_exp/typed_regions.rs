@@ -730,7 +730,7 @@ mod tests {
         assert_eq!(args.max_period, 6);
         assert_eq!(args.max_str_len, 100, "short-read satellite cap");
         assert_eq!(args.window_bp, 100_000);
-        assert_eq!(args.flank_bp, 20, "short-read flank");
+        assert_eq!(args.flank_bp, 15, "short-read flank");
         assert_eq!(args.min_purity, 0.8);
         assert_eq!(args.min_score, 0);
         assert_eq!(args.scan_match_reward, 2);
@@ -812,7 +812,7 @@ mod tests {
             "## max_period: 6",
             "## max_str_len: 100",
             "## window_bp: 100000",
-            "## flank_bp: 20",
+            "## flank_bp: 15",
             "## min_purity: 0.8",
             "## min_score: 0",
             "## min_copies: 6,4,4,3,3,3",

@@ -18,7 +18,7 @@
 #       /media/tomato25_bams/crams/*/*.cram
 #
 # The defaults below are the ones this survey wants: one chromosome, copy floors one step
-# under ng's at the three periods that can move, and ng's own 20 bp bundle radius. Nothing
+# under ng's at the three periods that can move, and ng's own 15 bp bundle radius. Nothing
 # needs to be set beyond JOBS.
 #
 # ## It is built for an archive that is being written to while it runs
@@ -93,6 +93,32 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# **What counts as a finished file, used in all three places that ask**
+# ---------------------------------------------------------------------------
+#
+# A result is finished when it holds at least one stratum row — not when it merely exists. The
+# distinction is the whole point of this survey's last failure: 1,300 walks wrote a well-formed
+# table with no rows in it, and every later pass skipped them because a file was there.
+#
+# **Three callers, and each one was a hole.** The worker skips a file it considers done; the pass
+# loop counts one as walked; and the merge folds one into the output. Checking only the worker
+# leaves a partially-finished run producing a table of phantom libraries — a `#rg` line and zero
+# loci for every file not yet reached.
+#
+# **awk rather than grep**, because `grep -q -v` with several `-e` patterns does not mean the same
+# thing in every grep on every machine (ugrep gets it wrong), and a portability bug here reads as
+# "no results" rather than as an error.
+has_rows() {
+    [[ -s "$1" ]] || return 1
+    awk -F'\t' '
+        /^#/ { next }
+        $1 == "read_group" || $1 == "library_key" { next }
+        { found = 1; exit }
+        END { exit !found }
+    ' "$1"
+}
+
+# ---------------------------------------------------------------------------
 # The per-file worker, re-entered through `--one`
 # ---------------------------------------------------------------------------
 #
@@ -112,12 +138,9 @@ if [[ "${1:-}" == "--one" ]]; then
         done
         return 1
     }
-    # **A file counts as done only if it holds a stratum row.** A result that exists but measures
-    # nothing is the failure this survey spent 1,300 files on: the walk succeeded, the table was
-    # empty, and every later pass skipped the file because a result was there.
-    # A stratum row: not a comment block, and not the column header that introduces the rows.
-    has_rows() { grep -q -v -e '^#' -e '^library_key	' -e '^read_group	' "$1" 2>/dev/null; }
-    [[ -s "$result" ]] && has_rows "$result" && exit 0
+    # A result that exists but measures nothing is not done — drop it and walk again. This is what
+    # replaces the previous run's empty results in place, so a re-run cleans up after itself.
+    has_rows "$result" && exit 0
     rm -f "$result"
     if [[ ! -f "$cram" ]]; then echo "missing" > "$status"; exit 0; fi
     if ! index=$(index_of); then echo "no index yet" > "$status"; exit 0; fi
@@ -301,7 +324,7 @@ for ((pass = 1; pass <= PASSES; pass++)); do
     done_count=0
     for cram in "${pending[@]}"; do
         key=$(key_of "$cram")
-        if [[ -s "$WORK/$key.tsv" ]]; then
+        if has_rows "$WORK/$key.tsv"; then
             done_count=$((done_count + 1))
             continue
         fi
@@ -315,7 +338,17 @@ for ((pass = 1; pass <= PASSES; pass++)); do
     ((${#pending[@]} == 1)) && [[ -z "${pending[0]}" ]] && pending=()
 done
 
-surveyed=$(find "$WORK" -maxdepth 1 -name '*.tsv' -size +0 | wc -l | tr -d ' ')
+# **Only files holding stratum rows are results.** A run stopped part way leaves the rest of the
+# work directory as it was — including any empty result an earlier run wrote — and folding those in
+# would put a `#rg` line and zero loci into the table for every library never actually walked.
+# `if` and not `has_rows "$f" && echo "$f"`: under `set -e` an AND-list whose last command fails is
+# fatal, so the first rejected file would kill the loop — and silently, since it runs in a pipeline.
+list_results() {
+    find "$WORK" -maxdepth 1 -name '*.tsv' -size +0 | sort | while read -r f; do
+        if has_rows "$f"; then echo "$f"; fi
+    done
+}
+surveyed=$(list_results | wc -l | tr -d ' ')
 ((surveyed > 0)) || { echo "no file could be surveyed; nothing written" >&2; exit 1; }
 
 # Merge. **The numeric read_group is minted per invocation**, so rows are re-keyed onto
@@ -337,7 +370,7 @@ echo "merging $surveyed result(s)" >&2
     # Three passes so the file reads top to bottom — every `#rg`, then every `#floor`, then the
     # rows — rather than interleaving one library's three blocks with the next library's.
     # The results are one small file per library, so re-reading them twice more costs nothing.
-    results=$(find "$WORK" -maxdepth 1 -name '*.tsv' -size +0 | sort)
+    results=$(list_results)
 
     printf '#rg_columns\tlibrary_key\trg_id\tsample\tlibrary\tlibrary_origin\texperiment\texperiment_origin\tplatform\tloci\treads\tmean_tract_bases_per_read\tfile\n'
     echo "$results" | while read -r f; do

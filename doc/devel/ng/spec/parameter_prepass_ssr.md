@@ -874,29 +874,56 @@ Raising that floor means overturning a considered choice, not filling a gap. Wha
 the other direction: mononucleotides at 5 repeats read 1.34% off-reference against the survey's 1%
 criterion, and the swept walk's bias understates that, so 5 is worth testing on the archive.
 
-### 5.2 The bundle radius, and why it moved to 20 bp
+### 5.2 The bundle radius, and why it moved to 15 bp
 
 **A tract is only nameable as a locus if it has clean sequence either side**, and how much is the
 bundle radius (`DEFAULT_BUNDLE_THRESHOLD`). It is a second lever on the same problem as the copy
 floors: narrowing it means fewer neighbours spoil a tract, so more tracts survive as loci. Measured
-on the same 2 Mb slice at ng's copy floors — **6,237 loci at 30 bp, 6,709 at 25, 7,245 at 20, 7,820
-at 15** — with the bases locked up in clusters falling from 74,289 to 47,623 across that range. The
-gain is larger in the swept regime the survey walks: 9,242 loci at 30 bp against 13,086 at 20.
+on the same 2 Mb slice at ng's copy floors:
 
-**Decision: 20 bp, changed 2026-08-07 from 30.** The 30 was itself unmeasured, chosen as "more than
+| radius | loci | clusters | bases in clusters |
+|---:|---:|---:|---:|
+| 30 bp | 6,237 | 1,943 | 74,289 |
+| 20 bp | 7,245 | 1,582 | 47,623 |
+| **15 bp** | **7,820** | **1,334** | **36,053** |
+| 10 bp | 8,467 | 1,045 | 24,906 |
+
+**Decision: 15 bp, changed 2026-08-07 from 30.** The 30 was itself unmeasured, chosen as "more than
 enough unique sequence to anchor a short read".
 
-**What had to be checked first, because the survey structurally cannot check it.** The radius caps
+**What had to be checked first, because no real-data measurement can check it.** The radius caps
 `flank_bp`, the anchor the STR aligner places a read against, so narrowing it shortens every read's
 anchor. A mis-anchored read placed a whole repeat off lands in an offset bucket and reads as
-**slippage** — the very parameter this step fits — so no measurement without a truth set can tell the
-two apart. The answer comes from the synthetic bake-off
+**slippage** — the very parameter this step fits — so a measurement with no truth to compare against
+would report the failure as a finding. The answer comes from the synthetic bake-off
 ([`ng_ssr_synthetic_bakeoff.rs`](../../../../examples/ng_ssr_synthetic_bakeoff.rs)), which builds
-each read from a chosen allele and scores the recovered length against it. For the shipped
-delimiter across 136 scenarios, exact-length recovery on clean reads is **1.000 at 25, 20 and 15 bp**
-and the composite moves from 0.9994 to 0.9993. Flat. The older delimiters do lose ground by 15 bp —
-`unit_slip` falls from 0.952 to 0.690 at recognising an allele longer than the read — so the headroom
-belongs to the shipped aligner rather than the family, and 20 keeps a margin that 15 would not.
+each read from a chosen allele and scores the recovered length against it. For the shipped delimiter
+across 166 scenarios — including flanks carrying a repeat of their own below every copy floor, which
+is what the radius permits and what a marginal locus looks like:
+
+| flank | exact on clean reads | exact on noisy | 1 bp flank indel | composite |
+|---:|---:|---:|---:|---:|
+| 25 bp | 1.000 | 0.999 | 1.000 | 0.9994 |
+| 20 bp | 1.000 | 0.999 | 1.000 | 0.9993 |
+| **15 bp** | **1.000** | **0.999** | **1.000** | **0.9992** |
+| 10 bp | 1.000 | 0.999 | 1.000 | 0.9984 |
+| 6 bp | 1.000 | 0.999 | 1.000 | 0.9985 |
+| 4 bp | 1.000 | 0.992 | **0.500** | 0.8699 |
+| 2 bp | 1.000 | 0.927 | **0.250** | 0.7854 |
+
+**Nothing moves until 6 bp, and it breaks between 6 and 4** — so 15 sits at two and a half times the
+width where the first number budges. What gives out first is tolerating a 1 bp indel *inside* the
+anchor, which four bases cannot absorb.
+
+**10 was defensible on the same evidence and not taken.** It buys 8% more loci, and more loci is the
+only thing narrowing buys, so it would spend a third of the margin on something that is not scarce.
+The dimension the harness holds favourable is base composition: its flanks are deliberately
+aperiodic, where real tomato flanks are AT-rich, and 10 bp of AT-rich anchor carries less than 10 bp
+of aperiodic anchor. At 15 that shortfall sits inside the margin.
+
+**The radius does not move this section's answer**, which is worth recording because it means the
+archive survey's floors do not have to be re-measured when it changes: dinucleotides at 3 repeats
+read a guard share of 63%, 62%, 65% and 64% at radii of 30, 25, 20 and 15.
 
 ---
 
