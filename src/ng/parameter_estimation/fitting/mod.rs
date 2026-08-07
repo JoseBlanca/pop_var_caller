@@ -43,11 +43,25 @@ pub trait NoiseModel {
     /// slippage parameters on the STR path.
     type NoiseParams;
 
+    /// How many entries [`Self::append_genotype_likelihoods`] appends per cell, and so
+    /// how wide the row-major table the scan builds is.
+    ///
+    /// **Asked of the model rather than derived from the ploidy, because a genotype is
+    /// not the same object on the two paths.** On the SNP/indel path a genotype is a
+    /// dosage and there are `ploidy + 1` of them. On the STR path it is an unordered
+    /// tuple of allele lengths, so a diploid stratum whose alleles span nine lengths has
+    /// **45**, not three (`spec/parameter_prepass_ssr.md` §4.2). A scan that computed
+    /// the width as `ploidy + 1` would hand
+    /// [`mixture_weights::GenotypeLikelihoodTable`] a width the STR path's rows do not
+    /// have.
+    fn genotypes(&self, ploidy: Ploidy) -> usize;
+
     /// How likely each genotype makes this cell, at these noise parameters, as natural
     /// logarithms.
     ///
-    /// **Appends `ploidy + 1` entries and clears nothing**, one per number of
-    /// alternative copies, ascending from zero. The name says so because the contract is
+    /// **Appends [`Self::genotypes`] entries and clears nothing**, in the model's own
+    /// genotype order — ascending number of alternative copies on the SNP/indel path.
+    /// The name says so because the contract is
     /// what the profile scan is built on: the scan clears one flat buffer per rung and
     /// calls this once per cell, so what comes out is the row-major table
     /// [`mixture_weights::GenotypeLikelihoodTable`] borrows, with no per-cell row and no

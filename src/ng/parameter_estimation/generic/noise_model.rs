@@ -141,16 +141,11 @@ impl SampleLibraryNoise {
     /// as though that group were the sample.
     #[must_use]
     pub fn single(read_group: ReadGroupId, error_rate: ErrorRate) -> Self {
-        Self {
-            libraries: SmallVec::from_elem(
-                LibraryNoise {
-                    read_group,
-                    share_of_reads: 1.0,
-                    error_rate,
-                },
-                1,
-            ),
-        }
+        Self::new([LibraryNoise {
+            read_group,
+            share_of_reads: 1.0,
+            error_rate,
+        }])
     }
 
     /// The libraries, ascending by read group.
@@ -192,6 +187,12 @@ impl NoiseModel for SubstitutionNoiseModel {
     type Cell = Cell;
     type NoiseParams = SampleLibraryNoise;
 
+    /// One genotype per number of alternative copies an individual can carry, from none
+    /// to all of them.
+    fn genotypes(&self, ploidy: Ploidy) -> usize {
+        usize::from(ploidy.get()) + 1
+    }
+
     /// `ln L(cell | genotype)` for every genotype, appended in ascending order of
     /// alternative copies.
     ///
@@ -224,6 +225,16 @@ impl NoiseModel for SubstitutionNoiseModel {
     /// anyway, because the identity that the rule sums to one over the cell space is what
     /// separates it from the plug-in it replaced.
     ///
+    /// **That identity closes at a whole depth, and a binned cell's mean is not one.** At
+    /// a fractional depth the cell space is a binomial series truncated at `⌊n⌋`, which
+    /// does not sum to one — at depth 6.5 on two libraries it comes to 0.998 and 0.061 at
+    /// the two non-reference genotypes. That is not a defect in this rule and there is
+    /// nothing here to repair: the real table is not truncated, because each cell carries
+    /// its own mean rather than sharing one. What stands in the identity's place over the
+    /// binned table is the measured binning bias of the adopted ladder — 0.054 rungs and
+    /// 0.3% (research note §4.3), which is the reason `arch` §2.2's twenty bins were
+    /// chosen over sixteen.
+    ///
     /// # Panics
     ///
     /// If `ploidy` disagrees with the cell's own, if the cell is charged a negative count
@@ -237,7 +248,7 @@ impl NoiseModel for SubstitutionNoiseModel {
     ) {
         assert_eq!(
             ploidy, cell.ploidy,
-            "a cell of ploidy {:?} scored against the genotypes of ploidy {ploidy:?}",
+            "a cell of ploidy {} scored against the genotypes of ploidy {ploidy}",
             cell.ploidy
         );
 
@@ -256,7 +267,7 @@ impl NoiseModel for SubstitutionNoiseModel {
         );
         let reference_reads = reference_reads.max(0.0);
 
-        out.reserve(usize::from(ploidy.get()) + 1);
+        out.reserve(self.genotypes(ploidy));
         for alt_copies in 0..=ploidy.get() {
             out.push(match cell.key.attribution() {
                 Attribution::Pooled => ln_likelihood_pooled(
@@ -311,15 +322,33 @@ fn alternative_read_probability(alt_copies: u8, ploidy: Ploidy, error_rate: f64)
 /// summed over **every** library the sample has, listed at the cell or not: a library that
 /// showed no alternative read here still produced reads that showed the reference. That
 /// is the term the retired plug-in got wrong.
-fn share_weighted_rates(noise: &SampleLibraryNoise, ploidy: Ploidy, alt_copies: u8) -> (f64, f64) {
-    let mut alternative = 0.0;
-    let mut reference = 0.0;
+fn share_weighted_rates(
+    noise: &SampleLibraryNoise,
+    ploidy: Ploidy,
+    alt_copies: u8,
+) -> ShareWeightedRates {
+    let mut rates = ShareWeightedRates {
+        alternative_allele: 0.0,
+        reference_allele: 0.0,
+    };
     for library in noise.libraries() {
         let p = alternative_read_probability(alt_copies, ploidy, library.error_rate.get());
-        alternative += library.share_of_reads * p;
-        reference += library.share_of_reads * (1.0 - p);
+        rates.alternative_allele += library.share_of_reads * p;
+        rates.reference_allele += library.share_of_reads * (1.0 - p);
     }
-    (alternative, reference)
+    rates
+}
+
+/// The two rates [`share_weighted_rates`] returns, named rather than positional: both are
+/// probabilities in the same range, and at a heterozygote they are both near a half, so a
+/// transposed pair is a plausible wrong answer rather than a compile error.
+#[derive(Copy, Clone, Debug)]
+struct ShareWeightedRates {
+    /// `Σ_g w_g·p_j(ε_g)` — the rate one of this sample's reads shows the alternative
+    /// allele at, whichever library it came from.
+    alternative_allele: f64,
+    /// `Σ_g w_g·(1 − p_j(ε_g))` — the same for the reference allele.
+    reference_allele: f64,
 }
 
 /// A cell whose key did not keep which library the alternative reads came from: one
@@ -332,10 +361,10 @@ fn ln_likelihood_pooled(
     ploidy: Ploidy,
     alt_copies: u8,
 ) -> f64 {
-    let (alternative_rate, reference_rate) = share_weighted_rates(noise, ploidy, alt_copies);
+    let rates = share_weighted_rates(noise, ploidy, alt_copies);
     ln_factorial_real(depth) - ln_factorial(alt_reads) - ln_factorial_real(reference_reads)
-        + count_times_ln(f64::from(alt_reads), alternative_rate)
-        + count_times_ln(reference_reads, reference_rate)
+        + count_times_ln(f64::from(alt_reads), rates.alternative_allele)
+        + count_times_ln(reference_reads, rates.reference_allele)
 }
 
 /// A cell whose key kept which library each alternative read came from: one multinomial
@@ -348,7 +377,7 @@ fn ln_likelihood_attributed(
     ploidy: Ploidy,
     alt_copies: u8,
 ) -> f64 {
-    let (_, reference_rate) = share_weighted_rates(noise, ploidy, alt_copies);
+    let rates = share_weighted_rates(noise, ploidy, alt_copies);
     let mut total = ln_factorial_real(depth) - ln_factorial_real(reference_reads);
     for &(read_group, alt_from_group) in listing {
         let library = noise.library(read_group);
@@ -356,7 +385,7 @@ fn ln_likelihood_attributed(
         total += -ln_factorial(u32::from(alt_from_group))
             + count_times_ln(f64::from(alt_from_group), library.share_of_reads * p);
     }
-    total + count_times_ln(reference_reads, reference_rate)
+    total + count_times_ln(reference_reads, rates.reference_allele)
 }
 
 /// `count · ln probability`, with the convention that a count of zero contributes
@@ -759,14 +788,21 @@ mod tests {
     /// decided on
     /// (`doc/devel/ng/research/parameter_estimator_experiments_2026-08-06.md` §2).
     ///
-    /// **Compared as differences between genotypes, and that is the sharper comparison
-    /// rather than the looser one.** The two implementations reach `ln Γ` differently —
-    /// the harness by a Lanczos series, this file through `libm`'s — so their factorial
-    /// prefactors disagree in the last bits. Those prefactors carry no genotype, so they
-    /// cancel from every difference, and what is left is exactly what a fit can see: two
-    /// rules that agree on the differences give the same responsibilities, the same
-    /// climb, and the same answer. The absolute value of the prefactors is held instead
-    /// by `the_rule_sums_to_one_over_the_cell_space`, which cannot pass if they are wrong.
+    /// **Both the absolute values and the differences between genotypes are asserted,
+    /// and the first is the one that took measuring.** The two implementations reach
+    /// `ln Γ` differently — the harness by a Lanczos series, this file through `libm`'s
+    /// — so it is not obvious the absolute values can be compared at all. Measured over
+    /// these 54 numbers, they agree to **1.4 × 10⁻¹⁴**, which is under six units in the
+    /// last place and seventy times inside the tolerance below. An earlier version of
+    /// this test asserted only the differences, on the reasoning that the factorial
+    /// prefactors carry no genotype and so cancel; that is true, and it makes the
+    /// comparison **weaker** rather than sharper — a rule that dropped the library share
+    /// `w_g` adds `−Σ_g k_g·ln w_g`, which also carries no genotype, and slips through a
+    /// difference-only check.
+    ///
+    /// The differences are asserted as well, because they are what a fit actually sees:
+    /// two rules agreeing on them give the same responsibilities, the same climb and the
+    /// same answer.
     #[test]
     fn the_rule_agrees_with_the_research_harness_on_one_of_its_worlds() {
         const HARNESS: [(f64, [u32; 2], [f64; 3]); 18] = [
@@ -938,13 +974,20 @@ mod tests {
         for (depth, split, want) in HARNESS {
             let listing: Vec<(ReadGroupId, u32)> = vec![(group(0), split[0]), (group(1), split[1])];
             let got = score(&cell_of(depth, &listing, 2), &noise);
+            for (alt_copies, (&ours, &theirs)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (ours - theirs).abs() < 1e-12,
+                    "depth {depth}, split {split:?}, {alt_copies} copies: ours {ours}, \
+                     the harness's {theirs}"
+                );
+            }
             for alt_copies in 1..=2_usize {
                 let ours = got[alt_copies] - got[0];
                 let theirs = want[alt_copies] - want[0];
                 assert!(
                     (ours - theirs).abs() < 1e-12,
-                    "depth {depth}, split {split:?}, {alt_copies} copies: ours {ours}, \
-                     the harness's {theirs}"
+                    "depth {depth}, split {split:?}, {alt_copies} copies against 0 \
+                     copies: ours {ours}, the harness's {theirs}"
                 );
             }
         }
@@ -993,6 +1036,30 @@ mod tests {
         assert_eq!(&out[4..7], score(&second, &noise).as_slice());
     }
 
+    /// The width the model **declares** is the width it **writes**, at every ploidy the
+    /// scan can meet. That is the number the profile scan hands
+    /// `GenotypeLikelihoodTable` as its row width, so a model whose two disagreed would
+    /// reshape the table without changing its length.
+    #[test]
+    fn the_declared_genotype_count_is_the_number_of_entries_appended() {
+        let noise = two_libraries();
+        for copies in 1..=6_u8 {
+            let cell = pooled_cell_of(12.0, 3, copies);
+            let mut out = Vec::new();
+            SubstitutionNoiseModel.append_genotype_likelihoods(
+                &cell,
+                &noise,
+                ploidy(copies),
+                &mut out,
+            );
+            assert_eq!(
+                out.len(),
+                SubstitutionNoiseModel.genotypes(ploidy(copies)),
+                "ploidy {copies}"
+            );
+        }
+    }
+
     /// A tetraploid cell gets five genotypes, not three — the loop bound is the cell's
     /// own ploidy and nothing here is diploid.
     #[test]
@@ -1004,9 +1071,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "a cell of ploidy Ploidy(4) scored against the genotypes of ploidy Ploidy(2)"
-    )]
+    #[should_panic(expected = "a cell of ploidy 4 scored against the genotypes of ploidy 2")]
     fn a_cell_scored_against_another_ploidys_genotypes_is_refused() {
         let noise = two_libraries();
         let cell = pooled_cell_of(12.0, 3, 4);
@@ -1079,6 +1144,219 @@ mod tests {
     #[should_panic(expected = "a sample with no libraries")]
     fn a_sample_with_no_libraries_is_refused() {
         let _ = SampleLibraryNoise::new([]);
+    }
+
+    /// **`ε` may legally be 0 or 1, and at either end some category's probability is
+    /// exactly zero — which is where `0 · ln 0` lives.** Two things must hold there and
+    /// neither is a formality: a category no read fell into contributes nothing, and a
+    /// category a read *did* fall into at probability zero contributes `−∞`. Drop the
+    /// first and the score is `NaN`, which does not lose a scan loudly — every
+    /// comparison against it is false, so the rung never wins and the fit reports a
+    /// plausible neighbour. Confuse the two and an impossible genotype is charged
+    /// nothing at all.
+    #[test]
+    fn the_rule_is_a_number_at_both_ends_of_the_error_rate_range() {
+        for end in [0.0_f64, 1.0] {
+            let one = SampleLibraryNoise::single(group(0), rate(end));
+            let two = SampleLibraryNoise::new([
+                LibraryNoise {
+                    read_group: group(0),
+                    share_of_reads: 0.5,
+                    error_rate: rate(end),
+                },
+                LibraryNoise {
+                    read_group: group(1),
+                    share_of_reads: 0.5,
+                    error_rate: rate(1e-3),
+                },
+            ]);
+            for alt_reads in 0..=4_u32 {
+                let cells = [
+                    (&one, pooled_cell_of(4.0, alt_reads, 2)),
+                    (&two, pooled_cell_of(4.0, alt_reads, 2)),
+                    (&one, cell_of(4.0, &[(group(0), alt_reads)], 2)),
+                    (&two, cell_of(4.0, &[(group(1), alt_reads)], 2)),
+                ];
+                for (noise, cell) in cells {
+                    for (alt_copies, value) in score(&cell, noise).into_iter().enumerate() {
+                        assert!(
+                            !value.is_nan() && value <= 0.0,
+                            "error rate {end}, {alt_reads} alternative reads, \
+                             {alt_copies} copies: {value}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The other half of the endpoints: a genotype that **cannot** have produced the
+    /// cell is charged `−∞` and not merely a poor score. With a perfect sequencer an
+    /// individual carrying no alternative copy cannot show an alternative read, and one
+    /// carrying nothing but alternative copies cannot show a reference read.
+    #[test]
+    fn a_genotype_that_cannot_have_produced_the_cell_is_charged_minus_infinity() {
+        let perfect = SampleLibraryNoise::single(group(0), rate(0.0));
+
+        let two_of_four_alternative = pooled_cell_of(4.0, 2, 2);
+        let scores = score(&two_of_four_alternative, &perfect);
+        assert_eq!(
+            scores[0],
+            f64::NEG_INFINITY,
+            "no alternative copy and no misreads, yet two alternative reads"
+        );
+        assert_eq!(
+            scores[2],
+            f64::NEG_INFINITY,
+            "no reference copy and no misreads, yet two reference reads"
+        );
+        assert!(
+            scores[1].is_finite(),
+            "a heterozygote can produce it: {scores:?}"
+        );
+
+        // And on the attributed arm, where the zero sits inside `w_g · p_j`.
+        let attributed = score(&cell_of(4.0, &[(group(0), 2)], 2), &perfect);
+        assert_eq!(attributed[0], f64::NEG_INFINITY);
+        assert_eq!(attributed[2], f64::NEG_INFINITY);
+        assert!(attributed[1].is_finite(), "{attributed:?}");
+    }
+
+    /// A cell whose mean depth sits a whisker below its own alternative count — inside
+    /// [`REFERENCE_READ_TOLERANCE`], so a rounding rather than a fault — is clamped to
+    /// zero reference reads. Left unclamped, a negative count against a category of
+    /// probability zero is `−x · ln 0 = +∞`, and a genotype scored `+∞` wins every rung
+    /// of the scan rather than losing quietly.
+    #[test]
+    fn a_cell_a_whisker_below_its_alternative_count_is_clamped_rather_than_charged() {
+        let perfect = SampleLibraryNoise::single(group(0), rate(0.0));
+        let mut cell = pooled_cell_of(4.0, 4, 2);
+        cell.mean_depth = 4.0 - 1e-12;
+        for (alt_copies, value) in score(&cell, &perfect).into_iter().enumerate() {
+            assert!(
+                !value.is_nan() && value <= 0.0,
+                "{alt_copies} copies: {value}"
+            );
+        }
+    }
+
+    /// **Identity 1 on the configuration production spends most of its time in: one
+    /// library.** 1,550 of the 1,707 samples in the tomato archive survey carry one, and
+    /// every entry of the read-group table is scored this way — through
+    /// [`SampleLibraryNoise::single`], which is the one constructor that does not go
+    /// through [`SampleLibraryNoise::new`]'s invariant checks. Nothing else here scores
+    /// a `single` against the cell space, so nothing else can see a share that is not
+    /// one.
+    ///
+    /// Haploid is included because a contig can be, and `p_j` at `P = 1` has no
+    /// intermediate dosage to hide an error in.
+    #[test]
+    fn the_rule_sums_to_one_for_a_single_library_sample() {
+        let noise = SampleLibraryNoise::single(group(0), rate(2e-3));
+        for depth in [1_u32, 5, 9] {
+            for copies in [1_u8, 2, 4] {
+                let cells = whole_cell_space(depth, 1, copies);
+                for alt_copies in 0..=copies {
+                    let total: f64 = cells
+                        .iter()
+                        .map(|cell| score(cell, &noise)[usize::from(alt_copies)].exp())
+                        .sum();
+                    assert!(
+                        (total - 1.0).abs() < 1e-12,
+                        "depth {depth}, ploidy {copies}, {alt_copies} alternative \
+                         copies: the cell space sums to {total}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The shares are refused when they miss one by a rounding's worth more than a
+    /// rounding — not merely when they miss it by a fifth. A set built from a
+    /// denominator that counted the unmapped reads misses by a fraction of a percent,
+    /// and [`SHARE_SUM_TOLERANCE`] is the constant that says so.
+    #[test]
+    #[should_panic(expected = "rather than one")]
+    fn shares_that_miss_one_by_a_ten_thousandth_are_refused() {
+        let _ = SampleLibraryNoise::new([
+            LibraryNoise {
+                read_group: group(0),
+                share_of_reads: 0.9,
+                error_rate: rate(1e-3),
+            },
+            LibraryNoise {
+                read_group: group(1),
+                share_of_reads: 0.0999,
+                error_rate: rate(4e-3),
+            },
+        ]);
+    }
+
+    /// [`SampleLibraryNoise::single`] builds every entry of the read-group table and the
+    /// 1,550 of the 1,707 tomato-archive samples that carry one library, and it is the
+    /// one constructor that does not go through [`SampleLibraryNoise::new`]. What it
+    /// builds must satisfy `new`'s invariants anyway: the group it was handed, one
+    /// library, and the whole share — a share that is not one makes the rule stop being
+    /// a probability over the cell space, which is the failure this file exists to
+    /// prevent.
+    #[test]
+    fn a_single_library_sample_carries_the_group_it_was_given_and_the_whole_share() {
+        let noise = SampleLibraryNoise::single(group(7), rate(3e-3));
+        assert_eq!(
+            noise.libraries(),
+            [LibraryNoise {
+                read_group: group(7),
+                share_of_reads: 1.0,
+                error_rate: rate(3e-3),
+            }]
+        );
+    }
+
+    /// The other side of [`REFERENCE_READ_TOLERANCE`]: a millionth of a read short is a
+    /// fault and not a rounding. Together with
+    /// `a_cell_a_whisker_below_its_alternative_count_is_clamped_rather_than_charged`
+    /// this brackets the constant, so that widening it to swallow a real shortfall —
+    /// the bin-mean bug, which lands the fit 5.2 rungs low — cannot pass.
+    #[test]
+    #[should_panic(expected = "which charges it")]
+    fn a_cell_a_millionth_below_its_alternative_count_is_refused() {
+        let noise = two_libraries();
+        let mut cell = pooled_cell_of(8.0, 8, 2);
+        cell.mean_depth = 8.0 - 1e-6;
+        let _ = score(&cell, &noise);
+    }
+
+    /// The sum-to-one identity is worth nothing if [`whole_cell_space`] is not the cell
+    /// space: a cell listed twice and one missing cancel, and the sum still comes to
+    /// one. Checked directly — the keys are distinct, and each takes the arm the
+    /// accumulator would give it.
+    #[test]
+    fn the_cell_space_lists_each_cell_exactly_once() {
+        use crate::ng::parameter_estimation::generic::histogram::MAX_ATTRIBUTED_ALT_READS;
+
+        for depth in [1_u32, 5, 9] {
+            for libraries in [1_usize, 2, 4] {
+                let cells = whole_cell_space(depth, libraries, 2);
+                let listed = cells.len();
+                let mut keys: Vec<SiteKey> = cells.iter().map(|cell| cell.key.clone()).collect();
+                keys.sort();
+                keys.dedup();
+                assert_eq!(
+                    keys.len(),
+                    listed,
+                    "depth {depth}, {libraries} libraries: a cell is listed twice"
+                );
+                for cell in &cells {
+                    let alt_reads = cell.key.alt_reads();
+                    assert_eq!(
+                        matches!(cell.key.attribution(), Attribution::Pooled),
+                        alt_reads == 0 || alt_reads > MAX_ATTRIBUTED_ALT_READS,
+                        "depth {depth}, {libraries} libraries, {alt_reads} alternative \
+                         reads: the wrong arm"
+                    );
+                }
+            }
+        }
     }
 
     /// The listing is canonical however it arrives, which the cell keys rely on.
