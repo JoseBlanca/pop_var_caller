@@ -509,6 +509,19 @@ mod tests {
     /// That is not an approximation of the split — it is the exact sum of the attributed
     /// form over the splits a pooled key forgets — so the truth below really is a fixed
     /// point of both blocks rather than of one.
+    ///
+    /// **What this world cannot see, and it is most of what the loop does.** At twenty
+    /// reads a library a heterozygote shows about twenty alternative reads and a
+    /// sequencing error nought or one, so the two classes never overlap: the frequency
+    /// climb returns the same answer whatever error rate it is handed, and the read-group
+    /// scan returns rungs 80 and 64 from **every** start on the ladder — including rung 0,
+    /// a hundred times the true rate. Measured: a whole-sample table claiming thirty
+    /// heterozygotes in a hundred still gives rungs 80 and 64 here. So the arrow from
+    /// block 1 to block 2 carries no information on this world, and four mutations
+    /// survived it, one of them the very estimator the design rejects.
+    ///
+    /// [`CoupledWorld`] is the fixture where the two blocks genuinely trade off, and every
+    /// claim about the *coupling* is asserted there. This one is for the fixed point.
     struct TwoLibraryWorld {
         read_group_histograms: BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
         whole_sample: BTreeMap<Ploidy, DepthAltHistogram<u64>>,
@@ -542,11 +555,19 @@ mod tests {
                 .collect();
 
             // The sample's own table: one entry per site at the total depth, its
-            // alternative reads drawn at the half-and-half mixture of the two rates. Built
-            // by generating at each dosage's share-weighted `p_j` — which is what
-            // `table_generated_at` does when handed a rate, so the rate handed in is the
-            // one whose `p_j` equals the mixture at every dosage. Both libraries carry the
-            // same ploidy, so that rate is the plain mean.
+            // alternative reads drawn at the half-and-half mixture of the two rates.
+            //
+            // **`p_j(ε) = j/P + ε·(1 − 4j/3P)` is affine in `ε`**, so the mean of the two
+            // libraries' per-read probabilities *is* the probability at the mean rate — for
+            // any rates, shares, ploidy and dosage. The check below therefore cannot fail
+            // for the reason a reader would guess; what it pins is that `pooled_rate` was
+            // built with the shares this world actually has (a half each) and not some
+            // other weighting.
+            //
+            // The consequence worth carrying: **the whole-sample table identifies only the
+            // share-weighted mean rate and never the two libraries separately.** That is
+            // why a transposition of the two libraries' rates has to be caught by the
+            // direct test on `noise_from` rather than by any fit on this world.
             let pooled_rate = 0.5 * rates[0] + 0.5 * rates[1];
             for (alt_copies, dosage) in [(0u8, 0), (1, 1), (2, 2)] {
                 let mixture = 0.5
@@ -555,7 +576,7 @@ mod tests {
                 let single = alternative_read_probability(alt_copies, diploid, pooled_rate);
                 assert!(
                     (mixture - single).abs() < 1e-15,
-                    "dosage {dosage}: the share-weighted rate is not the mean rate's"
+                    "dosage {dosage}: the pooled rate was not built from this world's shares"
                 );
             }
 
@@ -1029,26 +1050,10 @@ mod tests {
         assert_eq!(nearest_rung(&ladder, DEFAULT_ERROR_RATE), RUNG_AT_PHRED_30);
         assert!((ladder[RUNG_AT_PHRED_30].get() - DEFAULT_ERROR_RATE).abs() < 1e-15);
 
-        // **The nudge above the geometric midpoint has to stay below the arithmetic one,
-        // and the first version of this test did not.** The ladder is geometric, so a rate
-        // sits between rungs 80 and 81 with two midpoints: the geometric one at
-        // 9.716280 × 10⁻⁴, which is where log-space nearness switches, and the arithmetic
-        // one at 9.720304 × 10⁻⁴ — a factor 1.0004142 higher — which is where nearness in
-        // plain probability switches. A rate between them is the only kind that tells the
-        // two rules apart. `× 1.001` overshoots the arithmetic midpoint, so both rules
-        // answer rung 80 and the assertion discriminates nothing; `× 1.0002` lands
-        // between, where log space still says 80 and probability space says 81.
-        //
-        // Rung 80 is Phred 30 and rung 81 is Phred 30.25, so 80 is the rung of the pair at
-        // the **higher** error rate and the lower Phred.
-        let between = (ladder[80].get() * ladder[81].get()).sqrt();
-        let arithmetic = 0.5 * (ladder[80].get() + ladder[81].get());
-        assert!(
-            between * 1.0002 < arithmetic,
-            "the nudge {} must stay below the arithmetic midpoint {arithmetic}",
-            between * 1.0002
-        );
-        assert_eq!(nearest_rung(&ladder, between * 1.0002), 80);
+        // Which space the nearness is measured in is
+        // `nearest_rung_breaks_the_tie_in_log_space_and_not_in_probability`'s, below —
+        // `DEFAULT_ERROR_RATE` sits exactly on rung 80, at distance zero in either space,
+        // so this test cannot say it.
     }
 
     /// The pairing of a share to a rate goes through one key per library, so a set of
@@ -1235,5 +1240,459 @@ mod tests {
         assert_eq!(through_the_door.error_rate, from_the_tables.error_rate);
         assert_eq!(through_the_door.rates, from_the_tables.rates);
         assert_eq!(through_the_door.termination, from_the_tables.termination);
+    }
+
+    // ------------------------------------------------------------------
+    // Review additions (tmp/review_e2_a) — the tests that kill the
+    // mutations `TwoLibraryWorld` cannot see.
+    // ------------------------------------------------------------------
+
+    /// Phred 15, rung 20 — noisy enough that an error and a heterozygote are the same
+    /// observation at the depths below, which is the regime the alternation exists for.
+    const RUNG_AT_PHRED_15: usize = 20;
+    /// Phred 17, rung 28 — the second library of the coupled world.
+    const RUNG_AT_PHRED_17: usize = 28;
+    /// A variable individual: 7.5 sites in a hundred heterozygous, 2.5 homozygous
+    /// non-reference.
+    const COUPLED_TRUTH: [f64; 3] = [0.90, 0.075, 0.025];
+    /// Three reads per library per site, so the sample's own table sits at six.
+    const COUPLED_DEPTH: u32 = 3;
+    /// What the coupled world costs the loop, measured: four rounds, against the two
+    /// `TwoLibraryWorld` takes from any start at all.
+    const COUPLED_WORLD_ROUNDS: u32 = 4;
+
+    /// **A world where the two blocks are genuinely coupled**, which
+    /// [`TwoLibraryWorld`] is not.
+    ///
+    /// At [`TwoLibraryWorld`]'s depth — twenty reads per library, forty in the sample's
+    /// own table — a heterozygote shows about twenty alternative reads and a sequencing
+    /// error shows nought or one, so the two classes never overlap and the frequency
+    /// climb returns the same answer whatever error rate it is handed. Measured on that
+    /// world: the frequencies climbed at three times the true rates and at the true rates
+    /// agree to ten significant figures (0.998004990024 against 0.998004990011), and the
+    /// read-group scan returns rungs 80 and 64 from **every** start on the ladder,
+    /// including rung 0 — a hundred times the true rate. Nothing there can tell a coupled
+    /// loop from two independent fits.
+    ///
+    /// Here each library reads three deep at Phred 15 and 17 and the individual is
+    /// variable, so an error and a heterozygote are the same observation. Climbing the
+    /// frequencies at three times the true rate moves them by 0.075 — the whole
+    /// heterozygous rate — and moves the rung the read-group scan then picks by ten,
+    /// which is 2.5 Phred.
+    struct CoupledWorld {
+        read_group_histograms: BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
+        whole_sample: BTreeMap<Ploidy, DepthAltHistogram<u64>>,
+        ladder: Vec<ErrorRate>,
+    }
+
+    impl CoupledWorld {
+        fn build_with(truth_in_the_whole_sample_table: [f64; 3]) -> Self {
+            let edges = Arc::new(DepthBinEdges::new());
+            let ladder = error_rate_ladder();
+            let diploid = ploidy(2);
+            let rates = [
+                ladder[RUNG_AT_PHRED_15].get(),
+                ladder[RUNG_AT_PHRED_17].get(),
+            ];
+
+            let read_group_histograms = (1u32..=2)
+                .map(|group| {
+                    (
+                        (ReadGroupId(group), diploid),
+                        table_generated_at(
+                            &edges,
+                            COUPLED_DEPTH,
+                            rates[group as usize - 1],
+                            diploid,
+                            &COUPLED_TRUTH,
+                            SITES,
+                        ),
+                    )
+                })
+                .collect();
+
+            let pooled_rate = 0.5 * rates[0] + 0.5 * rates[1];
+            let whole_sample = BTreeMap::from([(
+                diploid,
+                table_generated_at(
+                    &edges,
+                    2 * COUPLED_DEPTH,
+                    pooled_rate,
+                    diploid,
+                    &truth_in_the_whole_sample_table,
+                    SITES,
+                ),
+            )]);
+
+            Self {
+                read_group_histograms,
+                whole_sample,
+                ladder,
+            }
+        }
+
+        fn build() -> Self {
+            Self::build_with(COUPLED_TRUTH)
+        }
+
+        fn fit_from(
+            &self,
+            start: &BTreeMap<ReadGroupId, usize>,
+            max_iterations: u32,
+        ) -> (CoupledFit, Vec<ScoredIterate>) {
+            fit_by_alternation(
+                "coupled",
+                &self.read_group_histograms,
+                &self.whole_sample,
+                &self.ladder,
+                start,
+                max_iterations,
+            )
+            .expect("the world holds enough sites to fit")
+        }
+    }
+
+    fn start_at(first: usize, second: usize) -> BTreeMap<ReadGroupId, usize> {
+        BTreeMap::from([(ReadGroupId(1), first), (ReadGroupId(2), second)])
+    }
+
+    /// **The frequencies the whole-sample table produced are what the read-group scan is
+    /// handed** — the wire that makes this a coupled fit rather than two independent ones.
+    ///
+    /// Two samples with **identical** read-group tables and whole-sample tables that
+    /// disagree about the individual: one says 7.5 sites in a hundred are heterozygous,
+    /// the other 1.5 in a hundred. If step 2 saw those frequencies, the rates it returns
+    /// must differ; if step 2 re-climbed its own frequencies from the read-group table —
+    /// the estimator arch §5.2 describes and the harness rejected — the two would be
+    /// identical, because nothing else about the two samples differs.
+    ///
+    /// This is the one assertion in the file that fails when the two blocks are
+    /// disconnected. `TwoLibraryWorld` cannot make it: there, a whole-sample table
+    /// claiming 30% heterozygotes still returns rungs 80 and 64.
+    #[test]
+    fn the_whole_sample_tables_frequencies_reach_the_fitted_rates() {
+        let variable = CoupledWorld::build_with(COUPLED_TRUTH);
+        let quiet = CoupledWorld::build_with([0.98, 0.015, 0.005]);
+        for (&(group, at), table) in &variable.read_group_histograms {
+            assert_eq!(
+                table.cells(at),
+                quiet.read_group_histograms[&(group, at)].cells(at),
+                "the two samples must differ only in their whole-sample table"
+            );
+        }
+
+        let start = start_at(RUNG_AT_PHRED_15, RUNG_AT_PHRED_17);
+        let (from_variable, _) = variable.fit_from(&start, MAX_COUPLED_FIT_ITERATIONS);
+        let (from_quiet, _) = quiet.fit_from(&start, MAX_COUPLED_FIT_ITERATIONS);
+
+        assert_ne!(
+            rung_of(&from_variable, &variable.ladder, 1),
+            rung_of(&from_quiet, &quiet.ladder, 1),
+            "read group 1 got the same rate from two different whole-sample tables, so \
+             the frequency block is not feeding the rate block"
+        );
+        assert_ne!(
+            rung_of(&from_variable, &variable.ladder, 2),
+            rung_of(&from_quiet, &quiet.ladder, 2),
+            "read group 2 got the same rate from two different whole-sample tables"
+        );
+    }
+
+    /// **On the coupled world the loop lands on the truth too, and it needs more than the
+    /// two rounds `TwoLibraryWorld` takes.** Pinned as an equality for the same reason the
+    /// two-round count is: a loop that reaches its cap must fail rather than pass slowly.
+    #[test]
+    fn the_coupled_world_reaches_its_truth_and_takes_more_than_two_rounds() {
+        let world = CoupledWorld::build();
+        let start = start_at(
+            nearest_rung(&world.ladder, 3.0 * world.ladder[RUNG_AT_PHRED_15].get()),
+            nearest_rung(&world.ladder, 3.0 * world.ladder[RUNG_AT_PHRED_17].get()),
+        );
+
+        let (fit, _) = world.fit_from(&start, MAX_COUPLED_FIT_ITERATIONS);
+
+        assert_eq!(rung_of(&fit, &world.ladder, 1), RUNG_AT_PHRED_15);
+        assert_eq!(rung_of(&fit, &world.ladder, 2), RUNG_AT_PHRED_17);
+        assert!(fit.termination.converged, "{:?}", fit.termination);
+        assert_eq!(fit.termination.iterations, COUPLED_WORLD_ROUNDS);
+    }
+
+    /// **A fit started at its own answer settles in one round.** The stopping rule is that
+    /// no read group's rung moved, so the round that observes it is the first one — a rule
+    /// that counted rounds instead would report two.
+    #[test]
+    fn a_fit_started_at_its_answer_settles_in_one_round() {
+        let world = TwoLibraryWorld::build();
+
+        let (fit, trace) = world.fit_from(
+            &start_at(RUNG_AT_PHRED_30, RUNG_AT_PHRED_26),
+            MAX_COUPLED_FIT_ITERATIONS,
+        );
+
+        assert_eq!(fit.termination.iterations, 1, "{:?}", fit.termination);
+        assert!(fit.termination.converged);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(rung_of(&fit, &world.ladder, 1), RUNG_AT_PHRED_30);
+        assert_eq!(rung_of(&fit, &world.ladder, 2), RUNG_AT_PHRED_26);
+    }
+
+    /// **One library already at its answer does not stop the loop for the other.** The
+    /// rule is *every* read group's rung, and a rule that watched one of them — the first,
+    /// the last, any single one — would stop a round early here and report a converged fit
+    /// whose second library had just moved nineteen rungs.
+    #[test]
+    fn one_library_already_home_does_not_settle_the_loop() {
+        let world = TwoLibraryWorld::build();
+        let start = start_at(
+            RUNG_AT_PHRED_30,
+            nearest_rung(&world.ladder, 3.0 * world.ladder[RUNG_AT_PHRED_26].get()),
+        );
+        assert_eq!(start[&ReadGroupId(1)], RUNG_AT_PHRED_30);
+        assert_ne!(start[&ReadGroupId(2)], RUNG_AT_PHRED_26);
+
+        let (fit, _) = world.fit_from(&start, MAX_COUPLED_FIT_ITERATIONS);
+
+        assert_eq!(
+            fit.termination.iterations, 2,
+            "read group 1 started on its answer and read group 2 did not, so the first \
+             round cannot be the one that observes nothing moved: {:?}",
+            fit.termination
+        );
+        assert_eq!(rung_of(&fit, &world.ladder, 2), RUNG_AT_PHRED_26);
+    }
+
+    /// **[`fit_coupled_from_tables`] really does start every group at
+    /// [`DEFAULT_ERROR_RATE`]'s rung**, which no test reached before: every start on the
+    /// ladder reaches the same answer on these worlds, so only the round count can see
+    /// where the loop began. A one-library sample whose true rate *is* the default rung
+    /// settles in one round; from anywhere else it takes two.
+    #[test]
+    fn fit_coupled_from_tables_starts_at_the_default_error_rates_rung() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let at_the_default = |rung: usize| {
+            let generate = || {
+                table_generated_at(
+                    &edges,
+                    PER_LIBRARY_DEPTH,
+                    ladder[rung].get(),
+                    diploid,
+                    &TRUTH,
+                    SITES,
+                )
+            };
+            fit_coupled_from_tables(
+                "one-library",
+                &BTreeMap::from([((ReadGroupId(1), diploid), generate())]),
+                &BTreeMap::from([(diploid, generate())]),
+                &ladder,
+            )
+            .expect("enough sites")
+        };
+
+        // The default rung is the answer, so the first round observes that nothing moved.
+        assert_eq!(at_the_default(RUNG_AT_PHRED_30).termination.iterations, 1);
+        // Four Phred away, so it takes a round to get there and a round to see it stayed.
+        assert_eq!(at_the_default(RUNG_AT_PHRED_26).termination.iterations, 2);
+    }
+
+    /// **A sample with two ploidies fits a frequency set for each**, which no test reached
+    /// before: every fixture in this file is diploid throughout, so
+    /// [`climb_frequencies`]'s per-ploidy loop ran exactly once and neither its genotype
+    /// count nor its buffer reuse was ever exercised twice.
+    ///
+    /// A haploid region has two genotype classes and a diploid three, so a climb that used
+    /// one ploidy's count for both, or carried one ploidy's likelihood rows into the
+    /// next's, would be caught here and nowhere else.
+    #[test]
+    fn a_sample_with_a_haploid_and_a_diploid_region_fits_both() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let haploid = ploidy(1);
+        let diploid = ploidy(2);
+        let rate = ladder[RUNG_AT_PHRED_30].get();
+        let haploid_truth = [0.997, 0.003];
+
+        let read_group_histograms = BTreeMap::from([
+            (
+                (ReadGroupId(1), haploid),
+                table_generated_at(
+                    &edges,
+                    PER_LIBRARY_DEPTH,
+                    rate,
+                    haploid,
+                    &haploid_truth,
+                    SITES,
+                ),
+            ),
+            (
+                (ReadGroupId(1), diploid),
+                table_generated_at(&edges, PER_LIBRARY_DEPTH, rate, diploid, &TRUTH, SITES),
+            ),
+        ]);
+        let whole_sample = BTreeMap::from([
+            (
+                haploid,
+                table_generated_at(
+                    &edges,
+                    PER_LIBRARY_DEPTH,
+                    rate,
+                    haploid,
+                    &haploid_truth,
+                    SITES,
+                ),
+            ),
+            (
+                diploid,
+                table_generated_at(&edges, PER_LIBRARY_DEPTH, rate, diploid, &TRUTH, SITES),
+            ),
+        ]);
+
+        let fit = fit_coupled_from_tables(
+            "two-ploidies",
+            &read_group_histograms,
+            &whole_sample,
+            &ladder,
+        )
+        .expect("enough sites at both ploidies");
+
+        // One rate for the read group, spanning both ploidies.
+        assert_eq!(fit.error_rate.len(), 1);
+        assert_eq!(
+            fit.error_rate[&ReadGroupId(1)].value,
+            ladder[RUNG_AT_PHRED_30]
+        );
+
+        // Two frequency sets, each as wide as its own ploidy's genotype set.
+        assert_eq!(fit.rates.len(), 2);
+        let fitted_haploid = &fit.rates[&haploid].value;
+        let fitted_diploid = &fit.rates[&diploid].value;
+        assert_eq!(fitted_haploid.by_alt_copies().len(), 2);
+        assert_eq!(fitted_diploid.by_alt_copies().len(), 3);
+        for (dosage, (fitted, truth)) in fitted_haploid
+            .by_alt_copies()
+            .iter()
+            .zip(&haploid_truth)
+            .enumerate()
+        {
+            assert!(
+                (fitted.get() - truth).abs() < 0.01 * truth,
+                "haploid dosage {dosage}: fitted {}, truth {truth}",
+                fitted.get()
+            );
+        }
+        for (dosage, (fitted, truth)) in fitted_diploid
+            .by_alt_copies()
+            .iter()
+            .zip(&TRUTH)
+            .enumerate()
+        {
+            assert!(
+                (fitted.get() - truth).abs() < 0.01 * truth,
+                "diploid dosage {dosage}: fitted {}, truth {truth}",
+                fitted.get()
+            );
+        }
+    }
+
+    /// **Every iterate is scored at its own rates**, not at the rates it started the round
+    /// with — which is what makes the scores a comparison between iterates rather than a
+    /// mixture of two rounds.
+    ///
+    /// Checked by re-deriving each score from the outside: replay the alternation, and at
+    /// each round score the whole-sample table at the rungs that round *produced*. Nothing
+    /// in the file pinned this, and a loop scoring at the previous rungs is a plausible
+    /// off-by-one — it converges to the same place and reports different scores.
+    #[test]
+    fn every_iterates_score_is_taken_at_the_rates_that_round_produced() {
+        let world = TwoLibraryWorld::build();
+        let start = world.three_times_the_truth();
+        let (_, trace) = world.fit_from(&start, MAX_COUPLED_FIT_ITERATIONS);
+
+        let shares = library_shares(&world.read_group_histograms);
+        let cells_of_ploidy: BTreeMap<Ploidy, Vec<Cell>> = world
+            .whole_sample
+            .iter()
+            .map(|(&ploidy, table)| (ploidy, table.cells(ploidy)))
+            .collect();
+        let all_cells: Vec<Cell> = cells_of_ploidy.values().flatten().cloned().collect();
+
+        let mut rungs = start;
+        for (round, reported) in trace.iter().map(|iterate| iterate.score).enumerate() {
+            let genotype_frequencies = climb_frequencies(
+                &cells_of_ploidy,
+                &noise_from(&shares, &rungs, &world.ladder),
+            );
+            let fitted = fit_read_group_error_rates(
+                &world.read_group_histograms,
+                &genotype_frequencies,
+                &world.ladder,
+            );
+            let next: BTreeMap<ReadGroupId, usize> = fitted
+                .iter()
+                .map(|(&group, fit)| (group, fit.rung))
+                .collect();
+
+            let at_this_rounds_rates = whole_sample_score(
+                &all_cells,
+                &noise_from(&shares, &next, &world.ladder),
+                &genotype_frequencies,
+            )
+            .get();
+            let at_last_rounds_rates = whole_sample_score(
+                &all_cells,
+                &noise_from(&shares, &rungs, &world.ladder),
+                &genotype_frequencies,
+            )
+            .get();
+
+            assert!(
+                (reported - at_this_rounds_rates).abs() < 1e-6,
+                "round {round}: the loop reported {reported}, and the whole-sample table \
+                 scores {at_this_rounds_rates} at that round's own rates"
+            );
+            if round == 0 {
+                assert!(
+                    (at_this_rounds_rates - at_last_rounds_rates).abs() > 1.0,
+                    "round 0 has to separate the two rate sets or this asserts nothing: \
+                     {at_this_rounds_rates} against {at_last_rounds_rates}"
+                );
+            }
+            rungs = next;
+        }
+    }
+
+    /// **`nearest_rung` breaks a tie in log space and not in probability**, and the case
+    /// that separates them is narrow enough to be worth writing down: on a ladder stepping
+    /// by a quarter of a Phred, two adjacent rungs' geometric and arithmetic midpoints sit
+    /// 4 parts in 10,000 apart — a six-hundredth of a rung. A rate inside that band is
+    /// nearest rung 80 in log space and rung 81 in probability.
+    ///
+    /// The existing test's example — the geometric midpoint times 1.001 — is *above* the
+    /// band, where both metrics answer 80, so it does not separate them.
+    #[test]
+    fn nearest_rung_breaks_the_tie_in_log_space_and_not_in_probability() {
+        let ladder = error_rate_ladder();
+        let geometric = (ladder[80].get() * ladder[81].get()).sqrt();
+        let arithmetic = 0.5 * (ladder[80].get() + ladder[81].get());
+        assert!(geometric < arithmetic);
+
+        let inside_the_band = geometric * 1.0002;
+        assert!(inside_the_band < arithmetic, "the band is 4e-4 wide");
+
+        let in_probability = ladder
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                (left.get() - inside_the_band)
+                    .abs()
+                    .total_cmp(&(right.get() - inside_the_band).abs())
+            })
+            .map(|(rung, _)| rung)
+            .expect("the ladder is not empty");
+
+        assert_eq!(nearest_rung(&ladder, inside_the_band), 80);
+        assert_eq!(in_probability, 81, "the two metrics have to disagree here");
     }
 }
