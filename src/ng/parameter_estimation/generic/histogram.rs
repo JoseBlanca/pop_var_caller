@@ -1483,6 +1483,28 @@ mod tests {
     /// would report zero covered positions, the runs model would weight them all at
     /// zero, and the inbreeding coefficient would come out of a weighting that nothing
     /// panics on and nothing prints.
+    /// **The read count sums both arms, and only a multi-library window can say so.**
+    /// Every table the fits' fixtures build enters through
+    /// [`DepthAltHistogram::add_site`], so its attributed map is empty by construction and
+    /// a `total_reads` that summed the pooled arm alone is invisible to every one of them
+    /// — the same shape of gap the test below was written for. What it would cost: a
+    /// multi-library sample's libraries would be given shares computed from a fraction of
+    /// their reads, and the shares are what pair a rate to a library.
+    #[test]
+    fn the_read_count_sums_the_attributed_arm_as_well_as_the_pooled_one() {
+        let mut table = DepthAltHistogram::<u32>::new(ladder());
+
+        table.add_site(DepthAndAltReads::new(12, 0), ONE_POSITION);
+        table.add_attributed_site(DepthAndAltReads::new(30, 1), &[(group(0), 1)], ONE_POSITION);
+
+        assert_eq!(table.total_loci(), 2);
+        assert_eq!(
+            table.total_reads(),
+            42,
+            "twelve reads pooled and thirty attributed"
+        );
+    }
+
     #[test]
     fn a_widened_locus_counts_its_whole_span_on_the_attributed_arm_too() {
         let mut table = DepthAltHistogram::<u32>::new(ladder());

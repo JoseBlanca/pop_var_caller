@@ -7,8 +7,7 @@
 //! one and the frequencies from the whole-sample one
 //! (`spec/parameter_prepass_generic.md` §5.1).
 //!
-//! **What one iteration is**, and it is the alternation the research harness measured
-//! rather than the one an earlier draft of the architecture described:
+//! **What one iteration is**, in the order the research harness runs it:
 //!
 //! 1. **The frequencies**, climbed on the whole-sample table at the rates the previous
 //!    iteration produced — one set per ploidy present, because a haploid region has two
@@ -17,6 +16,13 @@
 //!    table, at the frequencies step 1 just produced and **without re-climbing them**.
 //!    That is `read_group_error_rate::fit_read_group_error_rates`, and it is
 //!    `examples/ng_multilib_key_harness.rs`'s `fit_eps_on_read_group(space, freqs)`.
+//!
+//! **Of those two, only the second is a property the tests defend.** Not re-climbing is
+//! what makes this the estimator that was measured, and E1's
+//! `the_frequencies_handed_in_move_the_fitted_rate` is what holds it. The *order* is
+//! followed because the harness follows it, and nothing here can tell the two orders
+//! apart: they share the same fixed point, and what differs is only which half of a round
+//! an unconverged answer was reported from. Reversing it left every test green.
 //!
 //! **It stops when every read group's winning rung is the one it had last iteration.** The
 //! scan returns a rung index, so "moves by less than one rung" and "does not move" are the
@@ -34,10 +40,10 @@
 //! both frequencies (research note §2.6).
 //!
 //! **How much it can matter.** At one read group the two tables are the same table
-//! (`spec/parameter_prepass_generic.md` §12.6), so the alternation is plain coordinate
-//! ascent on a single objective and reaches the same joint maximum the profile scan
-//! returns. That is 1,550 of the 1,707 samples in the tomato archive survey; the coupling
-//! bites only on the 157 multi-library ones, and on neither cohort in hand.
+//! (`spec/parameter_prepass_generic.md` §1), so the alternation is plain coordinate ascent
+//! on a single objective and reaches the same joint maximum the profile scan returns. That
+//! is 1,550 of the 1,707 samples in the tomato archive survey; the coupling bites only on
+//! the 157 multi-library ones, and on neither cohort in hand.
 //!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §5.2, spec §5.1.
 
@@ -65,9 +71,14 @@ use crate::ng::types::{ErrorRate, GenotypeFrequency, LogProb, Ploidy, ReadGroupI
 /// Fit a sample's error rates and genotype frequencies together, from its accumulators.
 ///
 /// The thin door: it pulls the two tables out and hands them to
-/// [`fit_coupled_from_tables`], which is where the alternation is and what the tests drive.
-/// A fit that could only be reached through an accumulator could only be tested through a
-/// locus stream, and this plan's rule is that the fits are proven before a locus is read.
+/// [`fit_coupled_from_tables`], which is where the alternation is and what most of the
+/// tests drive, because a table built cell by cell is a fixture whose right answer can be
+/// stated and a walked accumulator is not.
+///
+/// **This function has its own test even so**, and it needed one: the ploidy collection and
+/// the fold below are the only things it does, and gutting them left all 3,147 tests green.
+/// An accumulator is built in memory from hand-written loci, so reaching it costs no more
+/// than reaching the tables.
 ///
 /// # Errors
 ///
@@ -126,11 +137,11 @@ pub(crate) fn fit_coupled_from_tables(
     whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     ladder: &[ErrorRate],
 ) -> Result<CoupledFit, ParameterEstimationError> {
-    let start = rung_nearest(ladder, DEFAULT_ERROR_RATE);
+    let start = nearest_rung(ladder, DEFAULT_ERROR_RATE);
     let shares = library_shares(read_group_histograms);
     let start: BTreeMap<ReadGroupId, usize> = shares.keys().map(|&group| (group, start)).collect();
 
-    alternate(
+    fit_by_alternation(
         sample,
         read_group_histograms,
         whole_sample,
@@ -143,23 +154,23 @@ pub(crate) fn fit_coupled_from_tables(
 
 /// The alternation, with the start and the cap named rather than taken from constants.
 ///
-/// **Both are parameters for the same reason [`climb_with_cap`] takes its cap: so that what
-/// they cost is a test rather than a recompile.** The start is what the harness's oracle
-/// moves — three times the true rates — and the cap is what a test needs to see a fit that
-/// ran out of iterations rather than settled.
+/// **Both are parameters for the same reason `mixture_weights`' `climb_with_cap` takes its
+/// cap: so that what they cost is a test rather than a recompile.** The start is what the
+/// harness's oracle moves — three times the true rates — and the cap is what a test needs to
+/// see a fit that ran out of iterations rather than settled.
 ///
-/// Returns the fit and **every iterate's score in order**, which is how a test can assert
-/// that the iterate kept is the best-scoring one rather than the last.
-///
-/// [`climb_with_cap`]: crate::ng::parameter_estimation::fitting::mixture_weights
-fn alternate(
+/// Returns the fit and **every iterate in order**, so that a test can assert the fit is the
+/// argmax of the trace rather than its last entry. The scores alone are not enough for
+/// that: on a converged world every iterate scores the same to the bit, and the rungs and
+/// frequencies are what separate them.
+fn fit_by_alternation(
     sample: &str,
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     ladder: &[ErrorRate],
     start: &BTreeMap<ReadGroupId, usize>,
     max_iterations: u32,
-) -> Result<(CoupledFit, Vec<f64>), ParameterEstimationError> {
+) -> Result<(CoupledFit, Vec<ScoredIterate>), ParameterEstimationError> {
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
     assert!(
         max_iterations > 0,
@@ -191,8 +202,8 @@ fn alternate(
     let all_cells: Vec<Cell> = cells_of_ploidy.values().flatten().cloned().collect();
 
     let mut rungs = start.clone();
-    let mut scores: Vec<f64> = Vec::new();
-    let mut best: Option<Iterate> = None;
+    let mut trace: Vec<ScoredIterate> = Vec::new();
+    let mut best: Option<ScoredIterate> = None;
     let mut iterations = 0;
     let mut converged = false;
 
@@ -218,16 +229,24 @@ fn alternate(
         // to a different table.
         let noise = noise_from(&shares, &next_rungs, ladder);
         let score = whole_sample_score(&all_cells, &noise, &genotype_frequencies);
-        scores.push(score.get());
 
         let settled = next_rungs == rungs;
-        if best.as_ref().is_none_or(|kept| score.get() > kept.score) {
-            best = Some(Iterate {
-                rungs: next_rungs.clone(),
-                genotype_frequencies,
-                score: score.get(),
-            });
+        let scored = ScoredIterate {
+            rungs: next_rungs.clone(),
+            genotype_frequencies,
+            score: score.get(),
+        };
+        // `>=` and not `>`: a tie keeps the **later** iterate, the same positional rule
+        // the ladder scan uses for a tied rung. It is not cosmetic — on a converged world
+        // every iterate scores the same `f64` to the bit, because they differ only at the
+        // eleventh significant figure of the frequencies and a log-likelihood over 200,000
+        // sites cannot resolve that. Keeping the first would then report the *less*
+        // settled of two equally-scoring answers, and the rule exists to guard against a
+        // worse last iterate, not against a more converged one.
+        if best.as_ref().is_none_or(|kept| scored.score >= kept.score) {
+            best = Some(scored.clone());
         }
+        trace.push(scored);
         rungs = next_rungs;
         if settled {
             converged = true;
@@ -242,20 +261,21 @@ fn alternate(
     };
 
     Ok((
-        assemble(
+        into_coupled_fit(
             read_group_histograms,
             whole_sample,
             ladder,
             &best,
             termination,
         )?,
-        scores,
+        trace,
     ))
 }
 
 /// One round's answer, and what it scored — kept so the loop can return the best rather
 /// than the last.
-struct Iterate {
+#[derive(Clone, PartialEq, Debug)]
+struct ScoredIterate {
     rungs: BTreeMap<ReadGroupId, usize>,
     genotype_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
     /// The whole-sample table's weighted log-likelihood at this iterate's rates **and** its
@@ -264,11 +284,11 @@ struct Iterate {
 }
 
 /// Turn the winning iterate into the fit a caller reads, attaching each number's warrant.
-fn assemble(
+fn into_coupled_fit(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     ladder: &[ErrorRate],
-    best: &Iterate,
+    best: &ScoredIterate,
     termination: FitTermination,
 ) -> Result<CoupledFit, ParameterEstimationError> {
     // **Reads and not sites**, because an error rate is per read
@@ -351,7 +371,7 @@ fn library_shares(
 /// **The pairing is made here, in one place, from two maps keyed by read group** — never
 /// from two collections indexed by position. A rule with two libraries' rates swapped
 /// between their read groups is still a probability over the cell space, so none of the
-/// scoring rule's identities can see it (spec §12.8); the only thing that prevents it is
+/// scoring rule's identities can see it (spec §12, check 8); the only thing that prevents it is
 /// that a share and a rate reach [`LibraryNoise`] under the same key.
 ///
 /// # Panics
@@ -436,7 +456,7 @@ fn whole_sample_score(
 /// # Panics
 ///
 /// If `ladder` is empty.
-fn rung_nearest(ladder: &[ErrorRate], rate: f64) -> usize {
+fn nearest_rung(ladder: &[ErrorRate], rate: f64) -> usize {
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
     let wanted = rate.ln();
     ladder
@@ -568,7 +588,7 @@ mod tests {
                 .map(|(index, rung)| {
                     (
                         ReadGroupId(index as u32 + 1),
-                        rung_nearest(&self.ladder, 3.0 * self.ladder[rung].get()),
+                        nearest_rung(&self.ladder, 3.0 * self.ladder[rung].get()),
                     )
                 })
                 .collect()
@@ -578,8 +598,8 @@ mod tests {
             &self,
             start: &BTreeMap<ReadGroupId, usize>,
             max_iterations: u32,
-        ) -> (CoupledFit, Vec<f64>) {
-            alternate(
+        ) -> (CoupledFit, Vec<ScoredIterate>) {
+            fit_by_alternation(
                 "world",
                 &self.read_group_histograms,
                 &self.whole_sample,
@@ -657,7 +677,7 @@ mod tests {
             .map(|group| {
                 (
                     ReadGroupId(group),
-                    rung_nearest(&world.ladder, DEFAULT_ERROR_RATE),
+                    nearest_rung(&world.ladder, DEFAULT_ERROR_RATE),
                 )
             })
             .collect();
@@ -698,7 +718,7 @@ mod tests {
     /// alternation is plain coordinate ascent on a single objective, so it iterates. What
     /// it costs is iterations and not answers: each block is an exact maximisation of one
     /// objective, and at one read group the two tables are the same table
-    /// (`spec/parameter_prepass_generic.md` §12.6), so both procedures converge to the same
+    /// (`spec/parameter_prepass_generic.md` §1), so both procedures converge to the same
     /// joint maximum. That is the stronger property, and it is what is asserted here.
     ///
     /// It is also the only consumer the profiling scan has on this path, which is the other
@@ -767,34 +787,102 @@ mod tests {
     /// reason the loop keeps one at all, since a fixed point of two estimating equations
     /// has no monotonicity to lean on.
     ///
-    /// Asserted by re-scoring the answer against every iterate's score: the fit's own score
-    /// must be the largest of them.
+    /// **A comparison of scores cannot say this on this world, and the first version of
+    /// this test did not know that.** Measured: the two iterates score the same `f64` to
+    /// the bit — `−55460.001665379226` both — because they differ only at the eleventh
+    /// significant figure of the frequencies, which a log-likelihood over 200,000 sites
+    /// cannot resolve. A test asserting "the fit's score is the largest of them" therefore
+    /// passed a loop rewritten to keep the *first* iterate.
     ///
-    /// **What this test cannot say, stated rather than implied.** On this world the
-    /// alternation settles in two iterations and the second scores higher than the first,
-    /// so "keep the best" and "keep the last" agree here — the assertion below separates
-    /// both from "keep an arbitrary iterate" and from a fit that reports numbers it never
-    /// scored, and it does not separate them from each other. No fixture in hand makes a
-    /// later iterate worse than an earlier one, which is the case the rule exists for; the
-    /// real 583-cell tables of Milestone F2 are where such a trace could turn up.
+    /// So the assertion is on the **iterate**, not on its score: the fit must carry the
+    /// rungs and the frequencies of the trace's argmax, compared exactly. That separates
+    /// keep-the-best from keep-the-first at the eleventh figure, where the scores are
+    /// equal.
+    ///
+    /// **What it still cannot say**: with every iterate scoring alike, keep-the-best and
+    /// keep-the-last are the same rule here. A trace whose later iterate is genuinely worse
+    /// is what would separate them, and no fixture in hand produces one — the real
+    /// 583-cell tables of Milestone F2 are where one could turn up.
     #[test]
-    fn the_iterate_kept_is_the_best_scoring_one() {
+    fn the_iterate_kept_is_the_argmax_of_the_trace() {
         let world = TwoLibraryWorld::build();
-        let (fit, scores) = world.fit_from(&world.three_times_the_truth(), 3);
+        let (fit, trace) = world.fit_from(&world.three_times_the_truth(), 3);
         assert_eq!(
-            scores.len(),
+            trace.len(),
             2,
-            "there has to be more than one iterate for 'best' to mean anything: {scores:?}"
+            "there has to be more than one iterate for an argmax to mean anything"
         );
 
-        let shares = library_shares(&world.read_group_histograms);
-        let rungs: BTreeMap<ReadGroupId, usize> = fit
+        let argmax = trace
+            .iter()
+            .max_by(|left, right| left.score.total_cmp(&right.score))
+            .expect("a non-empty trace");
+        let reported_rungs: BTreeMap<ReadGroupId, usize> = fit
             .error_rate
             .keys()
             .map(|&group| (group, rung_of(&fit, &world.ladder, group.get())))
             .collect();
-        let noise = noise_from(&shares, &rungs, &world.ladder);
-        let frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = fit
+        let reported_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = fit
+            .rates
+            .iter()
+            .map(|(&ploidy, estimate)| {
+                (
+                    ploidy,
+                    estimate
+                        .value
+                        .by_alt_copies()
+                        .iter()
+                        .map(|f| f.get())
+                        .collect(),
+                )
+            })
+            .collect();
+
+        assert_eq!(reported_rungs, argmax.rungs);
+        assert_eq!(
+            reported_frequencies, argmax.genotype_frequencies,
+            "the fit reports frequencies from an iterate that is not the argmax"
+        );
+        // The premise of the whole test, stated so that a future fixture whose scores do
+        // separate does not quietly change what is being proven here.
+        assert_eq!(
+            trace[0].score, trace[1].score,
+            "on this world every iterate scores alike, which is why the assertion above is \
+             on the iterate and not on its score"
+        );
+        assert_ne!(
+            trace[0].genotype_frequencies, trace[1].genotype_frequencies,
+            "and they differ in the frequencies, which is what makes it discriminating"
+        );
+    }
+
+    /// **An iterate's score is taken at its own rates**, not at the rates it started the
+    /// round with — the distinction the module doc's "one objective on one table" argument
+    /// rests on.
+    ///
+    /// **Asserted on a capped run, and it has to be.** At a converged iterate the round's
+    /// starting rates and its finishing rates are equal by definition, so the two candidate
+    /// scores coincide and no converged fixture can tell them apart. Capped at one
+    /// iteration the gap is 12,552 nats.
+    #[test]
+    fn an_iterates_score_is_taken_at_its_own_rates() {
+        let world = TwoLibraryWorld::build();
+        let start = world.three_times_the_truth();
+        let (capped, trace) = world.fit_from(&start, 1);
+        assert_eq!(trace.len(), 1);
+        assert!(!capped.termination.converged);
+
+        let shares = library_shares(&world.read_group_histograms);
+        let rungs: BTreeMap<ReadGroupId, usize> = capped
+            .error_rate
+            .keys()
+            .map(|&group| (group, rung_of(&capped, &world.ladder, group.get())))
+            .collect();
+        assert_ne!(
+            rungs, start,
+            "the round has to have moved the rates, or there is nothing to tell apart"
+        );
+        let frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = capped
             .rates
             .iter()
             .map(|(&ploidy, estimate)| {
@@ -815,11 +903,28 @@ mod tests {
             .flat_map(|(&ploidy, table)| table.cells(ploidy))
             .collect();
 
-        let kept = whole_sample_score(&cells, &noise, &frequencies).get();
-        let best = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let at_its_own = whole_sample_score(
+            &cells,
+            &noise_from(&shares, &rungs, &world.ladder),
+            &frequencies,
+        )
+        .get();
+        let at_the_start = whole_sample_score(
+            &cells,
+            &noise_from(&shares, &start, &world.ladder),
+            &frequencies,
+        )
+        .get();
         assert!(
-            (kept - best).abs() < 1e-6,
-            "the fit scores {kept} where the best iterate scored {best}, of {scores:?}"
+            (at_the_start - at_its_own).abs() > 1.0,
+            "the two candidate scores have to differ for this to discriminate: \
+             {at_its_own} against {at_the_start}"
+        );
+        assert!(
+            (trace[0].score - at_its_own).abs() < 1e-6,
+            "the reported score {} is not the score at the iterate's own rates \
+             ({at_its_own}); the start's rates would give {at_the_start}",
+            trace[0].score
         );
     }
 
@@ -921,18 +1026,34 @@ mod tests {
     fn the_default_start_is_the_rung_at_the_default_error_rate() {
         let ladder = error_rate_ladder();
 
-        assert_eq!(rung_nearest(&ladder, DEFAULT_ERROR_RATE), RUNG_AT_PHRED_30);
+        assert_eq!(nearest_rung(&ladder, DEFAULT_ERROR_RATE), RUNG_AT_PHRED_30);
         assert!((ladder[RUNG_AT_PHRED_30].get() - DEFAULT_ERROR_RATE).abs() < 1e-15);
-        // A rate between two rungs goes to the nearer one in log space, which is the
-        // higher-Phred rung when it is nearer there — the half-step lands on the ladder's
-        // own geometric midpoint, so this asks for the rung just below.
+
+        // **The nudge above the geometric midpoint has to stay below the arithmetic one,
+        // and the first version of this test did not.** The ladder is geometric, so a rate
+        // sits between rungs 80 and 81 with two midpoints: the geometric one at
+        // 9.716280 × 10⁻⁴, which is where log-space nearness switches, and the arithmetic
+        // one at 9.720304 × 10⁻⁴ — a factor 1.0004142 higher — which is where nearness in
+        // plain probability switches. A rate between them is the only kind that tells the
+        // two rules apart. `× 1.001` overshoots the arithmetic midpoint, so both rules
+        // answer rung 80 and the assertion discriminates nothing; `× 1.0002` lands
+        // between, where log space still says 80 and probability space says 81.
+        //
+        // Rung 80 is Phred 30 and rung 81 is Phred 30.25, so 80 is the rung of the pair at
+        // the **higher** error rate and the lower Phred.
         let between = (ladder[80].get() * ladder[81].get()).sqrt();
-        assert!(matches!(rung_nearest(&ladder, between * 1.001), 80));
+        let arithmetic = 0.5 * (ladder[80].get() + ladder[81].get());
+        assert!(
+            between * 1.0002 < arithmetic,
+            "the nudge {} must stay below the arithmetic midpoint {arithmetic}",
+            between * 1.0002
+        );
+        assert_eq!(nearest_rung(&ladder, between * 1.0002), 80);
     }
 
     /// The pairing of a share to a rate goes through one key per library, so a set of
     /// shares and a set of rungs that name different libraries is a fault rather than a
-    /// silent mismatch — the failure spec §12.8's identities cannot see, because a rule
+    /// silent mismatch — the failure spec §12's eighth check cannot see, because a rule
     /// with two libraries' rates swapped is still a probability.
     #[test]
     #[should_panic(expected = "different sets")]
@@ -990,9 +1111,129 @@ mod tests {
             fit.rates[&diploid].observations,
             world.whole_sample[&diploid].total_loci()
         );
+        // **The line with independent force**, and the one that catches a `total_reads`
+        // summing site counts: the two assertions above compare each estimate against the
+        // same function that produced it, so a wrong `total_reads` moves both sides
+        // together. Each library reads every site twenty deep here, so an error rate's
+        // warrant is twenty times its frequencies' — pooling the two libraries would give
+        // forty, which is neither estimate's number.
         assert!(
             fit.error_rate[&ReadGroupId(1)].observations > 15 * fit.rates[&diploid].observations,
             "reads and sites differ by the depth, so a swap is not a small error"
         );
+    }
+
+    /// **A library that contributed no reads is left out rather than given a share of
+    /// zero**, which [`SampleLibraryNoise::new`] refuses — a library with no reads has no
+    /// rate to fit and contributes no term to the mixture.
+    #[test]
+    fn a_library_with_no_reads_takes_no_share() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let histograms = BTreeMap::from([
+            (
+                (ReadGroupId(1), diploid),
+                table_generated_at(
+                    &edges,
+                    PER_LIBRARY_DEPTH,
+                    ladder[RUNG_AT_PHRED_30].get(),
+                    diploid,
+                    &TRUTH,
+                    SITES,
+                ),
+            ),
+            (
+                (ReadGroupId(2), diploid),
+                DepthAltHistogram::new(Arc::clone(&edges)),
+            ),
+        ]);
+
+        let shares = library_shares(&histograms);
+
+        assert_eq!(shares.keys().copied().collect::<Vec<_>>(), [ReadGroupId(1)]);
+        assert!((shares[&ReadGroupId(1)] - 1.0).abs() < 1e-15);
+    }
+
+    /// **The public door agrees with the one the tests drive.** `fit_coupled` pulls the
+    /// ploidies out of the windowed table and folds each one's windows into a whole-sample
+    /// table; nothing else in the crate calls it, so without this its wiring could be wrong
+    /// in any way at all and no test would move.
+    ///
+    /// The accumulator is built in memory from hand-written loci, which is what makes this
+    /// cost the same as everything else here — the fit does not need a locus stream to be
+    /// reached, only an accumulator.
+    #[test]
+    fn the_public_door_agrees_with_the_tables_it_folds() {
+        use crate::ng::locus_generation::{
+            LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+        };
+        use crate::ng::parameter_estimation::generic::accumulators::{
+            ConstantPloidy, GenericAccumulators, InbreedingMode,
+        };
+        use crate::ng::types::{ContigId, GenomeRegion, Position};
+
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy(2);
+        let mut accumulators = GenericAccumulators::new(
+            Arc::clone(&edges),
+            &[ReadGroupId(1)],
+            Arc::new(ConstantPloidy(diploid)),
+            InbreedingMode::Fitted,
+        );
+
+        let observation = |bases: &[u8], reads: u32| SequenceObservation {
+            bases: bases.into(),
+            read_witness: ReadWitness::Complete,
+            read_group: ReadGroupId(1),
+            num_obs: reads,
+            num_fwd: 0,
+            q_sum: 0.0,
+            mapq_sum: 0,
+            mapq_sum_sq: 0,
+            placed_left: 0,
+            chain_ids: Vec::new(),
+        };
+
+        // Enough sites to clear `MIN_SITES_TO_FIT`, with one alternative read at every
+        // thousandth of them so the fit has something to explain.
+        for site in 0..MIN_SITES_TO_FIT + 1_000 {
+            let alt = site % 1_000 == 0;
+            let observations = if alt {
+                vec![
+                    observation(b"C", PER_LIBRARY_DEPTH - 1),
+                    observation(b"A", 1),
+                ]
+            } else {
+                vec![observation(b"C", PER_LIBRARY_DEPTH)]
+            };
+            accumulators.add_locus(&SampleLocusObservations {
+                kind: LocusKind::Generic,
+                region: GenomeRegion {
+                    contig: ContigId(0),
+                    start: Position(site + 1),
+                    end: Position(site + 1),
+                },
+                reference_bases: b"C".as_slice().into(),
+                observations,
+                reads_without_observation: 0,
+                reads_discarded_by_cap: 0,
+            });
+        }
+
+        let ladder = error_rate_ladder();
+        let through_the_door = fit_coupled("walked", &accumulators, &ladder)
+            .expect("the accumulator holds enough sites");
+        let from_the_tables = fit_coupled_from_tables(
+            "walked",
+            accumulators.read_group_histograms(),
+            &BTreeMap::from([(diploid, accumulators.whole_sample_histogram(diploid))]),
+            &ladder,
+        )
+        .expect("the same tables");
+
+        assert_eq!(through_the_door.error_rate, from_the_tables.error_rate);
+        assert_eq!(through_the_door.rates, from_the_tables.rates);
+        assert_eq!(through_the_door.termination, from_the_tables.termination);
     }
 }

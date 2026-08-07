@@ -86,7 +86,7 @@ pub const CLIMB_STILLNESS: f64 = 1e-13;
 /// underflows. `−∞` is a legal entry and means this genotype cannot have produced this
 /// cell; it is the only non-finite value accepted.
 #[derive(Copy, Clone, Debug)]
-pub struct GenotypeLikelihoodTable<'a> {
+pub(crate) struct GenotypeLikelihoodTable<'a> {
     ln_likelihood_row_major: &'a [f64],
     genotypes: usize,
 }
@@ -106,7 +106,7 @@ impl<'a> GenotypeLikelihoodTable<'a> {
     /// of `genotypes`, or if any entry is `NaN` or `+∞` — each of those would otherwise
     /// leave a `NaN` to travel through the fit as a plausible number.
     #[must_use]
-    pub fn from_natural_logs(ln_likelihood_row_major: &'a [f64], genotypes: usize) -> Self {
+    pub(crate) fn from_natural_logs(ln_likelihood_row_major: &'a [f64], genotypes: usize) -> Self {
         assert!(
             genotypes > 0,
             "a mixture cannot be fitted over an empty genotype set"
@@ -138,13 +138,13 @@ impl<'a> GenotypeLikelihoodTable<'a> {
     /// How many genotypes each cell is scored against — the width of a row, and so the
     /// length of the answer: three for a diploid, five for a tetraploid.
     #[must_use]
-    pub fn genotypes(&self) -> usize {
+    pub(crate) fn genotypes(&self) -> usize {
         self.genotypes
     }
 
     /// How many cells the table holds.
     #[must_use]
-    pub fn cells(&self) -> usize {
+    pub(crate) fn cells(&self) -> usize {
         self.ln_likelihood_row_major.len() / self.genotypes
     }
 
