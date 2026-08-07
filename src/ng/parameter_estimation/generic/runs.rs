@@ -147,7 +147,7 @@ pub struct RunsModelFit {
 /// How many Baum–Welch passes one starting point is allowed.
 ///
 /// The research harness's own cap (`examples/ng_inbreeding_harness.rs`, `fit_all_starts`).
-/// Generous: the recovery runs settle in three or four passes at tomato's 8,004 windows.
+/// Generous: the recovery runs on this file's own fixtures settle in four to six passes.
 pub const MAX_RUNS_MODEL_ITERATIONS: u32 = 300;
 
 /// How long a run of homozygosity a starting point assumes, in windows.
@@ -156,8 +156,8 @@ pub const MAX_RUNS_MODEL_ITERATIONS: u32 = 300;
 /// [`RunsModelStarts::implied_f`]**: `leave = 1 / MEAN_RUN_WINDOWS_AT_START` and
 /// `enter = leave · F₀ / (1 − F₀)`, which is the rule the research harness generates its
 /// scenarios by (`base_scenario`). Twenty windows is 2 Mb at
-/// [`INBREEDING_WINDOW_BP`](super::INBREEDING_WINDOW_BP), which is the middle of the range
-/// the harness's scenarios use.
+/// [`INBREEDING_WINDOW_BP`](super::INBREEDING_WINDOW_BP), which is the **shortest** of the
+/// three run lengths the harness's scenarios use — it also uses 30 and 50.
 ///
 /// **It is a start and not an assumption.** Both rates are fitted, so this decides how
 /// many passes a start takes and not what it converges to — which is why the spread that
@@ -189,10 +189,22 @@ const RATE_FLOOR: f64 = 1e-9;
 /// | 76,800 | 0.0016 |
 ///
 /// Log–log linear between those points and flat outside them. That reproduces both figures
-/// the design docs quote — **0.00999 at tomato's 8,004 windows** against their "about
-/// 0.01", and **0.00292 at a human genome's 31,000** against their "0.003" — which is what
+/// the design docs quote — **0.009970 at tomato's 8,004 windows** against their "about
+/// 0.01", and **0.002914 at a human genome's 31,000** against their "0.003" — which is what
 /// makes this an interpolation of the measurement rather than a second, disagreeing
 /// statement of it.
+///
+/// **⚠ It is a function of the window *count* alone, and the noise floor is not.** §3.6's
+/// eight seeds were drawn at 100,000 sites a window; how much a two-state model can read
+/// out of sampling wobble depends on how much evidence each window carries, and this
+/// function cannot see that. Measured on a fixture carrying 400 sites a window — about
+/// 250 times less — a genome drawn with **no runs at all** came back at `F` = 0.998,
+/// converged, with this reporting a resolution of 0.029. Nothing in the fit refuses that:
+/// the guarded direction is a failed search returning zero, and this is an absent signal
+/// returning one. Recorded for the owner (Checkpoint E) rather than repaired here, because
+/// the repair is a measurement — the floor as a function of evidence per window — and the
+/// measurement does not exist. Neither cohort in hand is near the regime: tomato's windows
+/// carry about 100,000 sites.
 #[must_use]
 pub fn resolution_at(windows: usize) -> f64 {
     /// The measured points, ascending in window count.
@@ -330,14 +342,8 @@ pub fn fit_inbreeding(
         });
     }
 
-    // **The best-scoring start among those that separated the states**, and not simply the
-    // best-scoring start. A collapsed fit can outscore a real one — its inside state is
-    // free to take whatever frequencies fit the whole genome — and keeping it would return
-    // the zero this error path exists to refuse.
-    let (start, best) = outcomes
-        .iter()
-        .find(|(_, fitted)| fitted.separated_states)
-        .expect("some start separated the states, checked above");
+    let best =
+        best_separated_start(&outcomes).expect("some start separated the states, checked above");
 
     let inbreeding = InbreedingF::try_new(best.inbreeding)
         .expect("a coverage-weighted posterior occupancy is a fraction");
@@ -350,10 +356,15 @@ pub fn fit_inbreeding(
         leave_run_per_base: per_base(best.leave_run),
         termination: best.termination,
         starts_tried,
-        resolution: resolution_at(chain.windows()),
+        // **The windows that hold sites, not the chain's length.** The chain pads every
+        // contig from window zero, so a region-restricted run's chain is far longer than
+        // its evidence: 3,601 windows of sites plus one contig whose only site sits at
+        // window 8,000 gives a chain of 11,601, and reading the resolution off that
+        // reports 0.006768 where the truth is 0.029067 — understated 4.3-fold, on the
+        // one number a consumer uses to decide whether a small `F` means anything.
+        resolution: resolution_at(chain.windows_holding_sites),
         undecided_windows: best.undecided_windows,
     };
-    let _ = start;
 
     Ok((
         Estimate {
@@ -368,8 +379,11 @@ pub fn fit_inbreeding(
 /// A per-**window** transition probability as a per-**base** one.
 ///
 /// The chain steps window to window, so what Baum–Welch fits is the chance of switching
-/// state across one window. `1 − (1 − r)^L = p` inverted, at the nominal window length —
-/// exact rather than `p / L`, which is its first term.
+/// state across one window of [`INBREEDING_WINDOW_BP`](super::INBREEDING_WINDOW_BP) bases.
+/// This is `1 − e^{−rL} = p` inverted — the *continuous* switching rate, not the discrete
+/// `1 − (1 − r)^L = p`, which an earlier version of this comment claimed. The two agree to
+/// about seven significant figures at the rates involved, so the number is the same either
+/// way and only the identity was misstated; it is `p / L` to first order.
 ///
 /// **Reported and not used.** Nothing in the fit reads a per-base rate; it is on
 /// [`RunsModelFit`] because a caller comparing two samples' runs wants a number that does
@@ -377,6 +391,58 @@ pub fn fit_inbreeding(
 fn per_base(per_window: f64) -> f64 {
     let length = super::INBREEDING_WINDOW_BP.get() as f64;
     -(1.0 - per_window.min(1.0 - RATE_FLOOR)).ln() / length
+}
+
+/// **The ordering constraint, applied by relabelling after the fit.** The state with the
+/// **lower** heterozygote rate is the one inside a run; nothing in Baum–Welch says so, and
+/// a fit that landed the other way round would report the sample's ordinary heterozygosity
+/// as its inside floor and `1 − F` as `F`.
+///
+/// Everything indexed by state moves together — the frequencies, the two transition rates
+/// and every window's posterior — which is why this is one function and not three swaps at
+/// the call site. Returns whether it fired.
+///
+/// **Its own function because otherwise it is unreachable.** Every start builds its inside
+/// state at a *fraction* of the outside heterozygote rate, so the fit begins on the right
+/// side of the constraint and no drawn genome in the tests crosses over; deleting the
+/// relabelling left every one of them green. What it guards against is a fit that does
+/// cross, and this is where that is stated and checked.
+fn relabel_if_inverted(
+    frequencies: &mut [[f64; GENOTYPES]; STATES],
+    enter_run: &mut f64,
+    leave_run: &mut f64,
+    posteriors: &mut [[f64; STATES]],
+) -> bool {
+    if frequencies[INSIDE][1] <= frequencies[OUTSIDE][1] {
+        return false;
+    }
+    frequencies.swap(INSIDE, OUTSIDE);
+    std::mem::swap(enter_run, leave_run);
+    for window in posteriors.iter_mut() {
+        window.swap(INSIDE, OUTSIDE);
+    }
+    true
+}
+
+/// The best-scoring start **among those that left posterior mass on both states**, and not
+/// simply the best-scoring start.
+///
+/// A collapsed fit can outscore a real one — its inside state is free to take whatever
+/// frequencies fit the whole genome — so picking the best of everything would return the
+/// zero [`ParameterEstimationError::InbreedingStatesNotSeparated`] exists to refuse.
+///
+/// `outcomes` is best-scoring first, which is the ordering [`RunsModelFit::starts_tried`]
+/// documents; this takes the first that separated.
+///
+/// **Its own function because otherwise it is untestable.** On every drawn genome in the
+/// tests all nine starts land on the same answer with the same score, so "keep the
+/// best-scoring" survives being replaced by "keep the first" — the rule can be checked
+/// here, over outcomes written down, and nowhere else.
+fn best_separated_start(outcomes: &[(RunsModelStart, StateFit)]) -> Option<&StateFit> {
+    outcomes
+        .iter()
+        .find(|(_, fitted)| fitted.separated_states)
+        .map(|(_, fitted)| fitted)
 }
 
 /// The state a window is in. `INSIDE` is a run of homozygosity.
@@ -552,6 +618,13 @@ impl WindowChain {
         }
     }
 
+    /// How long the chain is, padding included.
+    ///
+    /// **Test-only, and that is the finding rather than the tidy-up.** It was what the
+    /// resolution was read from until the review showed the padding inflates it; the
+    /// quantity the fit uses is [`WindowChain::windows_holding_sites`], and nothing outside
+    /// the tests now asks how long the chain is.
+    #[cfg(test)]
     fn windows(&self) -> usize {
         self.windows.len()
     }
@@ -758,17 +831,7 @@ impl WindowChain {
         }
         let log_likelihood = if converged { previous } else { log_likelihood };
 
-        // **The ordering constraint, applied by relabelling.** The state with the lower
-        // heterozygote rate is the one inside a run; nothing in the recursion above says
-        // so, and a fit that landed the other way round would report the sample's ordinary
-        // heterozygosity as its inside floor and `1 − F` as `F`.
-        if frequencies[INSIDE][1] > frequencies[OUTSIDE][1] {
-            frequencies.swap(INSIDE, OUTSIDE);
-            std::mem::swap(&mut enter, &mut leave);
-            for window in &mut gamma {
-                window.swap(INSIDE, OUTSIDE);
-            }
-        }
+        relabel_if_inverted(&mut frequencies, &mut enter, &mut leave, &mut gamma);
 
         let covered: f64 = self.windows.iter().map(|w| w.covered_positions).sum();
         let inbreeding = if covered > 0.0 {
@@ -1139,8 +1202,10 @@ mod tests {
                 let mut table = DepthAltHistogram::new(Arc::clone(&edges));
 
                 // One multinomial draw over the window's cells, by sequential conditional
-                // binomials — the exact draw, and a few dozen calls rather than one per
-                // site.
+                // binomials — the exact draw. It is not cheaper per site than drawing
+                // each site: `binomial(n, p)` consumes `n` uniforms, so a 400-site window
+                // costs about 440 draws. What it buys is that no site is ever *placed*
+                // one at a time, so the cell counts are exact rather than accumulated.
                 let mut left = SITES_PER_WINDOW;
                 let mut remaining: f64 = cells.iter().sum();
                 for (alt_reads, &probability) in cells.iter().enumerate() {
@@ -1215,7 +1280,7 @@ mod tests {
     /// **Scored against the realised fraction and never the nominal one.** A finite genome
     /// does not have the `F` its transition rates imply, so comparing against the nominal
     /// value reads sampling as bias — the drawn fractions here miss their nominal values by
-    /// as much as 0.05 while the fit is within 0.02 of what was drawn.
+    /// as much as 0.027 while the fit is within 0.02 of what was drawn.
     ///
     /// **The tolerance is this fixture's, not the harness's.** The research note's four
     /// decimal places come from 8,004 windows of 100,000 sites each; 3,600 windows of 400
@@ -1226,6 +1291,7 @@ mod tests {
     #[test]
     fn f_recovers_a_drawn_genomes_realised_autozygous_fraction() {
         let starts = RunsModelStarts::default();
+        let mut widest_miss: f64 = 0.0;
         for (seed, nominal) in [0.05_f64, 0.15, 0.30, 0.60].into_iter().enumerate() {
             let genome = draw_genome(nominal, 0.0, 0xE3_0000 + seed as u64);
             assert!(
@@ -1233,6 +1299,7 @@ mod tests {
                 "{} windows",
                 genome.windows
             );
+            widest_miss = widest_miss.max((genome.realised_f - nominal).abs());
 
             let (estimate, fit) = fit_inbreeding(
                 "drawn",
@@ -1259,6 +1326,21 @@ mod tests {
             );
             assert_eq!(fit.starts_tried.len(), 9);
         }
+
+        // **The premise, asserted rather than asserted about.** Scoring against the drawn
+        // fraction only says something different from scoring against the nominal one if
+        // the two differ by more than the tolerance above — and the doc's claim about how
+        // far they differ is exactly the kind of number that goes stale silently.
+        assert!(
+            widest_miss > 0.02,
+            "the drawn fractions sit within the tolerance of their nominal values \
+             ({widest_miss}), so this test would pass against either and says nothing \
+             about which one it scores"
+        );
+        assert!(
+            widest_miss < 0.05,
+            "the widest miss is {widest_miss}, and the doc above says 0.027"
+        );
     }
 
     /// **A floor of false heterozygotes does not move `F`.** Collapsed paralogs and
@@ -1267,9 +1349,15 @@ mod tests {
     /// over the ratio one, and the research harness measures it up to five times the real
     /// rate (§3.3).
     ///
-    /// The floor here runs to **five times** the outside heterozygote rate, and the same
-    /// genome is drawn at each level so that the realised fraction is the same number to
-    /// compare against.
+    /// The floor here runs to **five times** the outside heterozygote rate.
+    ///
+    /// **The four levels are not the same genome, though they share a seed**, and saying so
+    /// matters because the comparison would be a different one if they were. Raising the
+    /// floor changes the cell probabilities, which changes how many draws each window's
+    /// multinomial consumes, which shifts the whole downstream stream — the realised
+    /// fractions come out 0.2056, 0.3153, 0.3253 and 0.3122. So this is not "one genome
+    /// fitted four times"; it is four genomes of the same construction, each scored against
+    /// **its own** realised fraction, which is what the assertion below does.
     #[test]
     fn a_floor_of_false_heterozygotes_does_not_move_f() {
         let starts = RunsModelStarts::default();
@@ -1535,6 +1623,110 @@ mod tests {
         }
     }
 
+    /// **The ordering constraint fires when the fit lands the wrong way round, and moves
+    /// everything indexed by state together.** Deleting it left every drawn genome green,
+    /// because every start builds its inside state *below* the outside one and no fixture
+    /// crosses over — so this is where the constraint is checked.
+    ///
+    /// The two transition rates and the window posteriors are swapped as well as the
+    /// frequencies: a relabelling that moved only the frequencies would report a run's
+    /// entry rate as its exit rate and `1 − F` as `F`, which is the same wrong answer by a
+    /// longer route.
+    #[test]
+    fn the_ordering_constraint_swaps_every_thing_indexed_by_state() {
+        // Inverted: the state at `INSIDE` carries the *higher* heterozygote rate.
+        let mut frequencies = [[0.90, 0.08, 0.02], [0.97, 0.01, 0.02]];
+        let mut enter = 0.01;
+        let mut leave = 0.05;
+        let mut posteriors = [[0.9, 0.1], [0.2, 0.8]];
+
+        assert!(relabel_if_inverted(
+            &mut frequencies,
+            &mut enter,
+            &mut leave,
+            &mut posteriors
+        ));
+
+        assert_eq!(frequencies, [[0.97, 0.01, 0.02], [0.90, 0.08, 0.02]]);
+        assert!((enter - 0.05).abs() < 1e-15 && (leave - 0.01).abs() < 1e-15);
+        assert_eq!(posteriors, [[0.1, 0.9], [0.8, 0.2]]);
+    }
+
+    /// And it leaves a fit that already sits the right way round alone — including when
+    /// the two states' heterozygote rates are *equal*, where a `<` would swap on every
+    /// call and a `<=` does not.
+    #[test]
+    fn the_ordering_constraint_leaves_a_correctly_labelled_fit_alone() {
+        let ordered = [[0.97, 0.01, 0.02], [0.90, 0.08, 0.02]];
+        let mut frequencies = ordered;
+        let mut enter = 0.01;
+        let mut leave = 0.05;
+        let mut posteriors = [[0.9, 0.1]];
+
+        assert!(!relabel_if_inverted(
+            &mut frequencies,
+            &mut enter,
+            &mut leave,
+            &mut posteriors
+        ));
+        assert_eq!(frequencies, ordered);
+
+        let mut tied = [[0.94, 0.04, 0.02], [0.94, 0.04, 0.02]];
+        assert!(!relabel_if_inverted(
+            &mut tied,
+            &mut enter,
+            &mut leave,
+            &mut posteriors
+        ));
+    }
+
+    /// **The start kept is the best-scoring one that separated the states, not the
+    /// best-scoring one.** A collapsed fit can outscore a real one, because its inside
+    /// state is free to take whatever frequencies fit the whole genome — so "best" alone
+    /// would return the zero the error path exists to refuse.
+    ///
+    /// On every drawn genome in this file all nine starts land on the same answer with the
+    /// same score, so the rule survives being replaced by "keep the first" there. Here the
+    /// outcomes are written down: the top-scoring one collapsed, and the answer must be the
+    /// separated one below it.
+    #[test]
+    fn the_start_kept_is_the_best_scoring_one_that_separated_the_states() {
+        let outcome = |inbreeding: f64, log_likelihood: f64, separated: bool| StateFit {
+            frequencies: [[0.97, 0.01, 0.02], [0.90, 0.08, 0.02]],
+            enter_run: 0.01,
+            leave_run: 0.05,
+            inbreeding,
+            log_likelihood,
+            termination: FitTermination {
+                iterations: 4,
+                converged: true,
+            },
+            undecided_windows: 0,
+            separated_states: separated,
+        };
+        let start = RunsModelStart::new(1.0 / 3.0, 0.5, [0.90, 0.08, 0.02]);
+        // Best first, as `starts_tried` is ordered — and the best one collapsed.
+        let outcomes = vec![
+            (start, outcome(0.0, -1.0e9, false)),
+            (start, outcome(0.2634, -1.2e9, true)),
+            (start, outcome(0.2600, -1.3e9, true)),
+        ];
+
+        let kept = best_separated_start(&outcomes).expect("one of them separated");
+
+        assert!(
+            (kept.inbreeding - 0.2634).abs() < 1e-15,
+            "kept {} — the top scorer collapsed, and the best separated one is 0.2634",
+            kept.inbreeding
+        );
+        assert!(best_separated_start(&[]).is_none());
+        assert!(
+            best_separated_start(&[(start, outcome(0.0, -1.0e9, false))]).is_none(),
+            "a set in which nothing separated has no answer, which is what the error \
+             variant is for"
+        );
+    }
+
     /// The inbreeding coefficient is diploid-only: above two copies it needs several
     /// identity-by-descent coefficients, and below two there are no heterozygotes.
     #[test]
@@ -1547,6 +1739,176 @@ mod tests {
             Ploidy::try_new(4).expect("a positive copy number"),
             &sample_rates(0.0),
             &RunsModelStarts::default(),
+        );
+    }
+
+    /// Build a chain of alternating blocks whose windows differ in how many reference
+    /// positions they cover, so that the four ways of averaging a window posterior give
+    /// four different numbers.
+    ///
+    /// `wide_block_is_outside` puts the fifty-positions-a-locus windows on the
+    /// heterozygote-rich state; otherwise they sit on the heterozygote-free one.
+    fn blocks_of_unequal_span(
+        contigs: u32,
+        windows_per_block: u32,
+    ) -> BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>> {
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy2();
+        let mut windowed = BTreeMap::new();
+        for contig in 0..contigs {
+            for block in 0..3u32 {
+                let autozygous = block != 1;
+                let span = if autozygous { Bp(1) } else { Bp(50) };
+                for offset in 0..windows_per_block {
+                    let mut table = DepthAltHistogram::new(Arc::clone(&edges));
+                    for site in 0..200u32 {
+                        let alt = if !autozygous && site % 2 == 0 { 5 } else { 0 };
+                        table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, alt), span);
+                    }
+                    windowed.insert(
+                        (
+                            WindowKey::InWindow {
+                                contig: ContigId(contig),
+                                window: WindowIndex(block * windows_per_block + offset),
+                            },
+                            diploid,
+                        ),
+                        table,
+                    );
+                }
+            }
+        }
+        windowed
+    }
+
+    /// **`F` is the coverage-weighted posterior occupancy, and this is the only test that
+    /// says so.** Every other fixture in this module gives each window the same number of
+    /// sites and one reference position per site, so coverage weighting, site-count
+    /// weighting, a plain mean over windows and the transition rates' ratio are all the
+    /// same number there — a fit cannot tell them apart, and three separate defects
+    /// injected into `fit_from` left the whole module green.
+    ///
+    /// One contig, three blocks of twenty windows: heterozygote-free, heterozygote-rich,
+    /// heterozygote-free. The rich block spans fifty reference positions a locus and the
+    /// other two span one. So forty of sixty windows are inside a run, but they hold
+    /// 8,000 of 208,000 covered positions:
+    ///
+    /// | how the occupancy is averaged | `F` |
+    /// |---|---:|
+    /// | by covered positions — the definition | 0.038 |
+    /// | by site count | 0.667 |
+    /// | by window, unweighted | 0.667 |
+    /// | `enter / (enter + leave)` — spec §6.1's "their ratio" | 0.66 |
+    #[test]
+    fn f_is_the_coverage_weighted_occupancy_and_not_the_three_things_it_coincides_with() {
+        let windowed = blocks_of_unequal_span(1, 20);
+        let chain = WindowChain::over(&windowed, ploidy2(), &one_library());
+        let start = RunsModelStart::new(1.0 / 3.0, 0.5, [0.70, 0.28, 0.02]);
+        let fitted = chain.fit_from(&start, MAX_RUNS_MODEL_ITERATIONS);
+
+        let by_covered_positions = 8_000.0 / 208_000.0;
+        let stationary = fitted.enter_run / (fitted.enter_run + fitted.leave_run);
+        println!(
+            "F {:.5}; covered-position {by_covered_positions:.5}; site-count 0.66667; \
+             stationary {stationary:.5}",
+            fitted.inbreeding
+        );
+
+        assert!(
+            (fitted.inbreeding - by_covered_positions).abs() < 0.01,
+            "F came back {}, not the covered-position occupancy {by_covered_positions}; \
+             the site-count and unweighted averages are 0.6667 and the transition rates' \
+             ratio is {stationary}",
+            fitted.inbreeding
+        );
+    }
+
+    /// **The resolution belongs to the windows that hold evidence, not to the padded
+    /// chain.** A region-restricted run pads every contig from window zero, so the chain
+    /// can be several times longer than the evidence in it — and `resolution` is what a
+    /// consumer compares `F` against to decide *nothing detected*. Reading it off the
+    /// padded length understates the floor.
+    ///
+    /// Here 3,600 windows of evidence sit beside one contig whose only site is at window
+    /// 8,000: 3,601 windows hold sites, 11,601 are in the chain, and the two floors are
+    /// 0.029 against 0.0068 — a factor of four.
+    #[test]
+    fn the_resolution_is_read_from_the_windows_that_hold_sites() {
+        let genome = draw_genome(0.30, 0.0, 0xE3_0000);
+        let mut windowed = genome.windowed;
+        let edges = Arc::new(DepthBinEdges::new());
+        let mut lone = DepthAltHistogram::new(Arc::clone(&edges));
+        lone.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(1));
+        windowed.insert(
+            (
+                WindowKey::InWindow {
+                    contig: ContigId(CONTIGS),
+                    window: WindowIndex(8_000),
+                },
+                ploidy2(),
+            ),
+            lone,
+        );
+
+        let (_, fit) = fit_inbreeding(
+            "padded",
+            &windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates(0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect("3,601 windows of evidence is fittable");
+
+        assert!(
+            (fit.resolution - resolution_at(3_601)).abs() < 1e-9,
+            "resolution came back {} — the padded chain's {} rather than the {} of the \
+             3,601 windows that hold sites",
+            fit.resolution,
+            resolution_at(11_601),
+            resolution_at(3_601)
+        );
+    }
+
+    /// The window floor counts windows that **hold sites**, so a region-restricted run
+    /// cannot pass it on padding. Ten windows of evidence, and one at index 9,999 that
+    /// pads the contig to ten thousand.
+    #[test]
+    fn the_window_floor_cannot_be_passed_on_padding() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let diploid = ploidy2();
+        let mut windowed = BTreeMap::new();
+        for window in [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9_999] {
+            let mut table = DepthAltHistogram::new(Arc::clone(&edges));
+            table.add_site(DepthAndAltReads::new(WINDOW_DEPTH, 0), Bp(1));
+            windowed.insert(
+                (
+                    WindowKey::InWindow {
+                        contig: ContigId(0),
+                        window: WindowIndex(window),
+                    },
+                    diploid,
+                ),
+                table,
+            );
+        }
+
+        let error = fit_inbreeding(
+            "padded",
+            &windowed,
+            &one_library(),
+            diploid,
+            &sample_rates(0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect_err("ten windows of evidence is below the floor, however much padding");
+
+        assert!(
+            matches!(
+                error,
+                ParameterEstimationError::InbreedingNotFittable { windows: 10, .. }
+            ),
+            "the floor counted padding: {error}"
         );
     }
 }
