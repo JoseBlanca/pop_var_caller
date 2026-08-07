@@ -143,8 +143,9 @@ pub struct WholeRepeatOffset(pub i8);
 /// (spec §4.1). What a narrow range costs is the heterozygosity that falls out of the
 /// fitted genotype frequencies — 1.5% at ±1 — which this path does not emit.
 ///
-/// **Four is comfortable on real data**: the end buckets take 1.22% of reads on HG002 at
-/// 300× and 0.05% on tomato (research note §6.8).
+/// **Four is comfortable on real data**: the saturating end buckets take **0.89% of reads**
+/// across GRCh38's typed tracts and **0.14%** across tomato's 138 million (research note
+/// §6.8). Nothing is piling up against the ends.
 ///
 /// **The width that *is* load-bearing is `ALLELE_OFFSET_LIMIT`, and it is not this one.**
 pub const OFFSET_HALF_RANGE: i8 = 4;
@@ -159,11 +160,17 @@ pub const OFFSET_HALF_RANGE: i8 = 4;
 /// fits frequencies for lengths no locus carries — and the count grows as
 /// `A(A+1)/2` (§2.4).
 ///
+/// **It is clipped at the low end, so `A` is a per-stratum quantity and not a constant.**
+/// An allele cannot be shorter than nothing: a stratum at 4 repeats reaches only −4, so it
+/// has 11 lengths and 66 genotypes where a stratum at 6 or more has the full 13 and 91.
+/// The clip is not a special case to remember at the fit — it is what the support *is* —
+/// but it is the reason `fit_mixture_weights` is handed a length rather than assuming one.
+///
 /// **Six comes from the measured distribution, and it is a threshold to clear rather than a
 /// number to tune.** A locus's modal observed length against the reference, on HG002 at
-/// 300×: 88.9% sit exactly at the reference, ±5 holds 99%, ±12 holds 99.9%, ±18 holds
-/// 99.99%; tomato is tighter, ±1 holding 99% (research note §6.8). Six covers all but about
-/// one human locus in 200.
+/// 300×: 88.9% sit exactly at the reference, ±4 holds 99%, ±12 holds 99.9%, ±19 holds
+/// 99.99%; tomato is tighter, 95.7% at zero and ±1 holding 99% (research note §6.8). Six
+/// covers all but about one human locus in 200.
 ///
 /// **What a locus outside the support costs is nothing, and then everything** (research
 /// note §6.4.1): leaving 2.5% of loci out costs 0.1% of the slippage rate, 7.9% costs 2.5%,
@@ -295,9 +302,14 @@ impl StratumTable {
     /// Mismatched over compared — the maximum-likelihood substitution rate, and a division
     /// rather than a search (spec §4.1).
     pub fn substitution_rate(&self) -> Option<ErrorRate>;
-    /// The share of reads differing from the origin that did so by something other than a
-    /// whole number of copies. §5's diagnostic, and the number `GUARD_SHARE_LIMIT` is
-    /// compared against.
+    /// The share of reads differing from the origin — **the reference tract length, not the
+    /// allele** — that did so by something other than a whole number of copies. §5's
+    /// diagnostic, and the number `GUARD_SHARE_LIMIT` is compared against.
+    ///
+    /// The allele is what the *model* means by a slip and is not available here, so a real
+    /// non-reference allele enters this denominator and not its numerator: the reported
+    /// share is diluted relative to the model's, never inflated (spec §4.1). A stratum that
+    /// crosses the limit on this number has crossed it on the model's too.
     pub fn not_whole_repeat_share(&self) -> f64;
 }
 
@@ -465,9 +477,14 @@ frequencies is the same concave problem and the same code. Its declared return t
 pub fn fit_mixture_weights(..) -> SmallVec<[f64; 3]>;
 ```
 
-Three is the diploid generic path's genotype count. A stratum with nine allele lengths has
-`9·10/2 = 45` genotypes, so **the return type has to widen to a `Vec<f64>` or be generic in its
-inline capacity**. One line, and it belongs in the shared module rather than being copied here.
+Three is the diploid generic path's genotype count. **At `ALLELE_OFFSET_LIMIT = 6` the support runs
+±6 around the reference length, so a stratum has up to 13 allele lengths and up to `13·14/2 = 91`
+genotypes** — *up to*, because an allele cannot be shorter than nothing: a stratum at 4 repeats
+reaches only −4, giving 11 lengths and 66 genotypes, and only strata at 6 repeats and above get the
+full 13. So the count is a per-stratum quantity bounded by 91, and **the return type has to widen to
+a `Vec<f64>` or be generic in its inline capacity**. One line, and it belongs in the shared module
+rather than being copied here. *(The spec works its examples at nine lengths and 45 genotypes, which
+is the same arithmetic at a narrower support.)*
 
 **Does not transfer — `fit_by_profile_scan`.** It steps a ladder end to end because nobody had shown
 the profile curve has a single hump. Two things stop it here, both in spec §4.2: a flat scan over
@@ -660,9 +677,11 @@ pub struct StratumFitSummary {
     pub strata_borrowed: u32,
     /// The merged sets, named — a merge is a claim about two strata at once.
     pub strata_merged: Vec<SmallVec<[Stratum; 2]>>,
-    /// Fits whose starting points disagreed by more than one step of the rate's
-    /// resolution, and the worst of them. This is the diagnostic the four starts exist to
-    /// produce.
+    /// Fits whose starting points disagreed by more than `START_AGREEMENT_LIMIT` in the
+    /// slippage rate, and the worst of them. This is the diagnostic the four starts exist
+    /// to produce. **Not "one step of the rate's resolution"**, which an earlier draft said
+    /// and which names nothing on this path: it searches rather than scanning, so it has no
+    /// rungs — the limit is the generic path's ladder spacing, borrowed (§3).
     pub strata_with_disagreeing_starts: u32,
     pub worst_start_disagreement: Option<(Stratum, f64)>,
     /// Strata above `GUARD_SHARE_LIMIT` — the ones this noise model does not describe.

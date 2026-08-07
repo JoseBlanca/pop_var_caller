@@ -1,7 +1,11 @@
 # ng — the parameter pre-pass: the STR path
 
 *Design spec, 2026-08-03. **Revised 2026-08-06 against measurement**, and the measurements changed
-the accumulator's key rather than only its constants:
+the accumulator's key rather than only its constants. **Revised again 2026-08-07**: §5.1 records
+that the copy floors cannot be swept downward by re-typing, so the per-period floors table stays
+pending on a change to region typing rather than on a run of the survey.*
+
+*Source for the 2026-08-06 numbers:*
 [`../research/parameter_estimator_experiments_2026-08-06.md`](../research/parameter_estimator_experiments_2026-08-06.md)
 §6. **No code yet — this settles the design.** One of five documents covering ng step 4. The shared
 framing — why parameters are estimated without calling genotypes, and how the maximum-likelihood fit
@@ -217,7 +221,7 @@ chance of it having slipped twice rather than once is taken to be the same eithe
 inside its own counting error, at 1.5, 0.9, 1.6 and 0.5 standard errors. But the gaining side decays
 faster in **all four** rows, and four consistent signs pool to roughly 2 SE. The finding is "no
 difference we can afford to fit", not "no difference". If the fall-off ever becomes a function of
-level (§8.1), revisit this with the pooled test rather than the per-row one.
+level (§8.2), revisit this with the pooled test rather than the per-row one.
 
 **The fall-off value does not transfer between datasets.** About 10 reads in 100 take a second step in
 human against about 7 in tomato. The structure is portable; the number has to be fitted.
@@ -273,7 +277,8 @@ The read row is equally consistent with two stories the fit has to tell apart: e
 reference-length and one read slipped, or one locus's own allele is a repeat short and it happened
 to get one read. **Keeping a locus's reads together is what distinguishes them**, and the collapse
 is real rather than nominal — at HG002's 300× the table holds 0.43 entries per locus, so most loci
-share a shape with another (§4.1's memory paragraph).
+share a shape with another ([research note](../research/parameter_estimator_experiments_2026-08-06.md)
+§6.8, and the memory paragraph at the end of this section).
 
 Each entry therefore holds:
 
@@ -399,8 +404,10 @@ the marginal rule attribute an end bucket to an allele rather than to a far slip
 recorded range costs is the heterozygosity that falls out of the fitted genotype frequencies — 1.5%
 at ±1, 0.7% at ±2 — and heterozygosity is a by-product here, not something this path emits.
 **A recorded range of ±4 is the working value**, chosen so that the ends absorb little on ordinary
-strata rather than because anything forces it; the fitted allele support is
-[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md)'s to pin (§8.1).
+strata rather than because anything forces it. The fitted allele support is the other width, it is
+the load-bearing one, and §8.1 settles it at **±6** —
+[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) carries both as
+`OFFSET_HALF_RANGE` and `ALLELE_OFFSET_LIMIT`.
 
 **A locus's reads are capped, and the cap is a subsample.** The number of distinct entry shapes grows
 with a locus's depth, so a deep locus is entered from a random subsample of its reads down to the
@@ -409,9 +416,10 @@ thinning of the same multinomial, so the entry is distributed exactly as it woul
 depth. Seed the draw from the locus's position, so a region-sharded walk and a single-threaded one
 keep the same reads and merging stays exact — the same rule and the same reason as
 [`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §2.2. **The cap's
-value is `OPEN` (§8.8)**, bounded from below by what the fit needs and from above by the entry
-count; [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1 carries a working
-value and says what would settle it.
+value is not an open design question** (§8.8): both things that would have made it one are measured
+away below — the table's size and the scoring rule's depth limit — leaving a precision trade against
+the width of the entry's counters. [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md)
+§2.1 carries the working value.
 
 **The guard bucket factorises, which is why it can be a diagnostic rather than a parameter.** A read
 that differs from the allele by something that is not a whole number of copies is modelled as an
@@ -424,7 +432,21 @@ the guard rate depend on the allele.
 
 **And it needs a threshold, which an earlier version left as "a stratum where it is large" — a field
 nobody reads.** The threshold is **one non-whole-repeat read in ten of the reads that differ from the
-allele**, and §5 is where that number comes from rather than being chosen for looking round.
+reference tract length**, and §5 is where that number comes from rather than being chosen for
+looking round.
+
+**Which reads the ten are counted out of is worth pinning, because the model and the diagnostic use
+two different denominators and only one of them is computable here.** The *model* statement above is
+about reads that differ from the **allele** — that is what a slip is. The *diagnostic* cannot be:
+the accumulator does not know the allele, only the reference tract length, so the share it reports
+is over reads differing from the **reference**. The two coincide at a locus whose alleles are the
+reference length and diverge otherwise, always in the same direction: a real non-reference allele
+contributes whole-repeat differences to the denominator and none to the numerator, so **the reported
+guard share is diluted relative to the model's**, never inflated. §5's table is measured on
+known-homozygous loci at the reference length, where the two are the same number, and the research
+note's real-data figures — 1.37% on HG002, 1.97% on tomato — are over the reference denominator
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.8). A stratum that
+crosses the threshold on the diluted number has crossed it on the model's too.
 
 **The composition channel is a division, not a search.** Each read is compared against the tract at
 **the length that read shows**, so a mismatch is a substitution and not a slip, and a read's mismatch
@@ -461,11 +483,12 @@ entry at 300×. **Measured on HG002 at 300× over the 50,000-interval GIAB tande
 uncapped table is 12,727 entries for 29,811 loci — 0.43 entries a locus, 0.36 MB**
 ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.8). Deep data
 deduplicates because most loci at a clean tract are "every read at the reference length", so what
-separates two entries is mostly their depth, and depths repeat. Scaled to a whole genome's STR loci
-that is tens of megabytes, beside a windowed histogram
-[`parameter_prepass_generic.md`](parameter_prepass_generic.md) §9 prices at 115 MB per human
-sample. **This object is not where step 4's memory goes**, and the read cap is not what keeps it
-from being.
+separates two entries is mostly their depth, and depths repeat. **Entries saturate rather than
+scaling with the genome**: a whole tomato genome's 1.73 million STR loci make 70,305 entries —
+2.01 MB — and a whole human genome extrapolates to about 120,000 entries, **3.5 MB**, beside a
+windowed histogram [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §9 prices at
+115 MB per human sample. **This object is not where step 4's memory goes**, and the read cap is not
+what keeps it from being.
 
 **Which leaves the read cap less to do than it was given.** It was introduced to hold the table
 down, which it does not need to do; and it looked like it also marked where the evidence for the
@@ -588,9 +611,10 @@ recorded.
 
 **This path runs one fit per (read group × stratum), against the generic path's four fits in total.**
 How many strata there are is bounded by arithmetic rather than guessed: six periods, each running
-from its copy floor (`[6, 4, 4, 3, 3, 3]`, §5) up to as many repeats as a read can span, which at
-150 bp reads is 150 for homopolymers and 25 for hexamers — **about 370 strata**, of which the ones
-holding loci are fewer. The generic path emits four things beside each fit: whether the answer sat on the edge
+from its copy floor (`[6, 4, 4, 3, 3, 3]`, §5.1) up to as many repeats as a read can span, which at
+150 bp reads is 150 for homopolymers and 25 for hexamers. That is 145 + 72 + 47 + 35 + 28 + 23 =
+**350 strata**, of which the ones holding loci are fewer. *(An earlier version said "about 370",
+which counts each period from one repeat rather than from its floor.)* The generic path emits four things beside each fit: whether the answer sat on the edge
 of its ladder, the starting points tried, the estimator's resolution, and how the fit terminated. At
 four fits those are readable records; at several hundred they are a file nobody opens, and
 [`parameter_prepass.md`](parameter_prepass.md) §3.1 already warns that a flag nobody reads is how a
@@ -601,9 +625,14 @@ each read group:
 
 - **how many strata were fitted in place, how many borrowed, how many merged**, and which — the
   merged sets by name, because a merge is a claim about two strata at once;
-- **how many fits disagreed across their starting points** by more than the level's own spacing, with
-  the worst offender named. This is the diagnostic §4.2's four starts exist to produce, and the one
-  that separates a fitted number from a stopped search;
+- **how many fits disagreed across their starting points**, with the worst offender named. This is
+  the diagnostic §4.2's four starts exist to produce, and the one that separates a fitted number
+  from a stopped search. *"Disagreed" needs a size, and this path has no ladder to read one off* —
+  it searches rather than scanning, so there are no rungs. The size is borrowed from the generic
+  path's ladder spacing, a quarter-Phred or 6%, which is that spec's argued estimate of the finest
+  difference a caller can feel ([`parameter_prepass.md`](parameter_prepass.md) §3);
+  [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) fixes it as
+  `START_AGREEMENT_LIMIT`;
 - **how many strata carry a large guard-bucket share** (§5's threshold), with the worst named;
 - **the observation count distribution across strata** — how many loci stood behind the thinnest fit
   and the thickest.
@@ -641,7 +670,8 @@ rate fitted there is mostly mis-modelled indel however much data stands behind i
 distinguishable from an ordinary thin stratum and should not be silently treated as one, so **the
 fitter reports the non-whole-repeat fraction per stratum alongside the fitted values**.
 
-**The threshold is one non-whole-repeat read in ten of the reads that differ from the allele**, and
+**The threshold is one non-whole-repeat read in ten of the reads that differ from the reference tract
+length** (§4.1 pins that denominator against the model's, which is the allele), and
 the table above is where it comes from rather than a round number chosen for looking like one: the
 strata this model describes well sit at 0.9%, the strata it describes badly at 33.8% and 58.5%, and
 there is nothing in between. Ten percent separates them by a factor of three either way, so a stratum
@@ -762,6 +792,60 @@ HG002's tandem-repeat tier set is selected for long and variable tracts, which i
 selection that distorts the low-repeat strata this question turns on. The floors table lands with
 it.*
 
+**And the instrument built to supply it cannot reach below the floors — measured 2026-08-07, and
+this is why the table is still pending.** The obvious way to see under a floor is to lower it and
+re-type, which is what `examples/ng_str_stutter_by_library.rs` and
+`scripts/ng_str_library_survey.sh` were built to do. It does not work, and the reason is structural
+rather than a bug in either.
+
+**`MinCopies` decides two different things and only one of them is the floor.** It is read by
+`prefilter`, which runs **before** bundling
+([`segment_criteria.rs:601`](../../../../src/ng/region_typing/segment_criteria.rs)), and again by
+`classify` after it (`:985`). The first reading decides **what counts as a neighbouring repeat**;
+the second decides **what is admitted as a locus**. Folding them into one value was deliberate —
+the type's own note calls a swept floor moving both "the whole point" (`:300-306`) — and it is
+correct at the defaults, where the two questions have the same answer. Under a sweep they come
+apart, because two copies of a mononucleotide is any `AA` and occurs every few bases. Admit those
+and every real tract acquires a neighbour inside the bundle threshold, so no tract has clean flanks,
+so region typing emits `SsrBundle` — which names no locus at all.
+
+Over a 2 Mb slice of tomato SL4.0ch01, one library at 80×:
+
+| copy floors | STR loci typed | bundles | bundle bp |
+|---|---:|---:|---:|
+| `[6, 4, 4, 3, 3, 3]` — ng's defaults | 6,237 | 1,943 | 74,289 |
+| uniform 4 | 7,434 | 11,720 | 675,372 |
+| uniform 3 | 848 | 7,950 | 1,623,636 |
+| uniform 2 | **0** | 1 | 1,177,849 |
+| `[2, 4, 4, 3, 3, 3]` — period 1 alone | **0** | 18 | 1,599,157 |
+| `[6, 2, 4, 3, 3, 3]` — period 2 alone | 1,618 | 13,913 | 1,017,906 |
+
+At a uniform floor of two the whole 2 Mb span comes back as **one bundle covering 1.18 Mb** and
+zero loci. That is the failure the archive survey hit on 2,475 tomato CRAMs: every walk succeeded,
+and every walk measured nothing.
+
+**Lowering one period at a time does not rescue it, and that is the finding that closes this
+route.** The loss is not confined to the period that moved: dropping period 2 alone takes
+**period-1 tracts at six copies from 2,678 loci to 225** — 92% gone, at a period whose own floor
+never changed, and with the off-reference share moving with it (0.0263 to 0.0210 at six repeats).
+So two settings do not give two ends of one curve. They give two different populations of loci, and
+the second is a selected subset: the tracts that happened not to acquire a neighbour.
+
+**What follows for §5.1's table.** The survey can still say where each period crosses **within the
+loci ng's defaults admit**, and how far that crossing moves between libraries — which is the axis
+nothing has varied and the reason the survey exists. What it cannot do is extend a period's curve
+below its own floor, so the half of this section that asks whether a floor could be **lowered**
+stays unanswered by it. **What would answer it is separating the two roles**: a bundling floor held
+at ng's defaults, so that what counts as a neighbouring repeat never moves, and a classification
+floor that the sweep lowers. That is a change to `SsrSegmentCriteria` in region typing (step 3),
+not to this step or to the survey, and it is not made here.
+
+**The direction of §5.1's decision survives this intact**, which is worth saying because the
+measurement is a setback and not a reversal. A floor set too low announces itself through the
+guard-share audit; a floor set too high is silent. So the default still comes from the most
+stuttering library available, and what the survey can deliver — the crossing per period per library,
+within the admitted loci — is what places it. **Only the "could it be lower?" half is blocked.**
+
 **And the mononucleotide floor of 6 carries a reason that survives this framing rather than being
 overridden by it.** It was chosen deliberately over ~9 — "the Illumina read-artifact onset, not the
 higher ~9-unit germline-slippage threshold" (`:362-367`). Under the definition above that is right:
@@ -873,9 +957,12 @@ genotype long alleles" is a claim with no number attached to it.
    lengths the fit may place mass on do, because that is what lets an end bucket be attributed to an
    allele rather than to a far slip.
    **The distribution is measured** ([research note](../research/parameter_estimator_experiments_2026-08-06.md)
-   §6.8): on HG002, **88.9 loci in 100 sit exactly at the reference length**, ±5 holds 99%, ±12
-   holds 99.9% and ±18 holds 99.99%; tomato is tighter, ±1 holding 99%. So a limit
-   of about ±6 covers all but roughly one human locus in 200.
+   §6.8): on HG002, **88.9 loci in 100 sit exactly at the reference length**, ±4 holds 99%, ±12
+   holds 99.9% and ±19 holds 99.99%; tomato is tighter, **95.7 in 100 at zero** and ±1 holding 99%,
+   which is what a within-species reference should give against a human sample carrying two
+   haplotypes' divergence from GRCh38. So a limit of about ±6 covers all but roughly one human locus
+   in 200. *(An earlier version of this paragraph wrote ±5 and ±18 for two of those rungs; the
+   research note's ±4 and ±19 are the measurement.)*
    **CLOSED, and what the remaining loci cost turns out to be a threshold rather than a slope.**
    A locus outside the support has its reads explained the only way left, as slippage. Measured
    ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.4.1): leaving
@@ -930,6 +1017,18 @@ genotype long alleles" is a claim with no number attached to it.
    width of the entry's counters, which is an implementation choice
    ([`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1) rather than a
    question about the design.
+9. **Where do the per-period copy floors go?** — OPEN, and **blocked on region typing rather than on
+   a measurement** (§5.1). They cannot be swept downward by lowering `MinCopies` and re-typing:
+   that one value decides both what is admitted as a locus and what counts as a neighbouring
+   repeat, so lowering it makes tracts bundle and the locus count *falls* — 6,237 loci at ng's
+   defaults, 848 at a uniform floor of 3, zero at 2, over a 2 Mb tomato slice. Lowering one period
+   alone is no safer: it takes period-1 tracts at six copies from 2,678 loci to 225, at a period
+   whose own floor never moved. **Settled by:** separating the two roles in `SsrSegmentCriteria` — a
+   bundling floor pinned at ng's defaults and a classification floor the sweep moves — which is a
+   step-3 change. Until then the archive survey can place a floor from above (where each period
+   crosses within the loci the defaults admit, per library) and cannot say whether one could be
+   lower. *This is the question §5.1 exists for, and it is the only one on this list that blocks
+   nothing downstream: the floors are a default a user can already override.*
 
 ---
 
