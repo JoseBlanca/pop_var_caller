@@ -351,6 +351,29 @@ list_results() {
 surveyed=$(list_results | wc -l | tr -d ' ')
 ((surveyed > 0)) || { echo "no file could be surveyed; nothing written" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# Every result must have been walked under the same settings
+# ---------------------------------------------------------------------------
+#
+# **The parameter stamp cannot cover this and it is the case that bites.** The stamp records what
+# the *driver* was asked for, so it catches a resume with a different `--contigs` or `--min-copies`.
+# It cannot see the copy floors and the bundle radius when they come from the binary's own
+# defaults — so **rebuilding part way through a survey silently changes the walk**, and the results
+# from before and after merge into one table that compares nothing. That is not hypothetical: ng's
+# bundle radius moved from 20 bp to 15 on 2026-08-07 while a survey of the tomato archive was
+# running, and only clearing the work directory kept the two apart.
+#
+# So each result carries the settings it was produced under (`#config`), and they must all agree.
+configs=$(list_results | while read -r f; do awk -F'\t' '$1 == "#config" { print; exit }' "$f"; done | sort -u)
+if (($(echo "$configs" | grep -c . ) > 1)); then
+    echo "the results in $WORK were not all walked under the same settings:" >&2
+    echo "$configs" | sed 's/^/  /' >&2
+    echo "This happens when the binary is rebuilt part way through a survey — the copy floors and" >&2
+    echo "the bundle radius come from its defaults, so a rebuild changes the walk with nothing to" >&2
+    echo "say so. Delete $WORK and start over, or move the older results aside." >&2
+    exit 1
+fi
+
 # Merge. **The numeric read_group is minted per invocation**, so rows are re-keyed onto
 # `(file, rg_id)` — the stable identity, since the SAM specification makes `@RG ID` unique within
 # its file — before the per-file results are joined.

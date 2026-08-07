@@ -660,6 +660,22 @@ fn run(
          repeat_bp_with_no_locus"
     )?;
 
+    // **The settings this walk actually ran under, so a merge can refuse to mix two of them.**
+    // The driver stamps what it was *asked* for, which cannot cover the copy floors and the bundle
+    // radius when they come from the binary's own defaults — so a rebuild part way through a survey
+    // changes the walk and leaves nothing to say so. That nearly happened on 2026-08-07, when the
+    // radius default moved from 20 to 15 mid-survey. Emitting it per file makes the mix detectable
+    // after the fact, whoever caused it.
+    writeln!(
+        out,
+        "#config\tbundle_threshold={}\tmin_copies={}",
+        walk_config.criteria.bundle_threshold,
+        (1..=6u8)
+            .map(|p| walk_config.criteria.min_copies.for_period(p).to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )?;
+
     // The per-read-group floors, which are the answer this survey exists for.
     writeln!(
         out,
