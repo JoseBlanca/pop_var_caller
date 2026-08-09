@@ -177,7 +177,16 @@ else
     libraries=("${all_libraries[@]}")
 fi
 
-echo "fitting ${#libraries[@]} of ${#all_libraries[@]} library/libraries over ${REGIONS:-$CONTIGS}, $JOBS at a time" >&2
+# **Say when the parallelism has nothing to spread.** `LIMIT` caps what this run attempts and `JOBS`
+# spreads it, so `LIMIT=1 JOBS=20` runs one library and looks like a broken job pool. It read as
+# "20 at a time" doing one thing at a time, which is exactly what it was, and exactly what nobody
+# would guess from that line.
+if ((${#libraries[@]} < JOBS)); then
+    echo "fitting ${#libraries[@]} of ${#all_libraries[@]} library/libraries over ${REGIONS:-$CONTIGS}" >&2
+    echo "  JOBS=$JOBS but LIMIT=$LIMIT leaves only ${#libraries[@]} to run — raise LIMIT to use the rest" >&2
+else
+    echo "fitting ${#libraries[@]} of ${#all_libraries[@]} library/libraries over ${REGIONS:-$CONTIGS}, $JOBS at a time" >&2
+fi
 echo "  work directory: $WORK (delete it to force a re-run)" >&2
 
 export RATE_WORK="$WORK" RATE_REF="$REF" RATE_BIN="$BIN" RATE_WALK_ARGS="$WALK_ARGS"
