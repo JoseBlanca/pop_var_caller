@@ -1,6 +1,8 @@
 # ng parameter pre-pass, the STR path (step 4) — implementation plan
 
-**Status:** draft, 2026-08-07. The build order for the **STR half of step 4**: one accumulator keyed
+**Status:** draft, 2026-08-07, revised 2026-08-09 for spec §4.5 (a second floor on slipped reads,
+the split provenance it forces, and two new anchors at Milestone G). The build order for the **STR
+half of step 4**: one accumulator keyed
 by `(read group, motif period, reference repeat count)`, the four numbers fitted from it — how often
 a read slips, which way, how far, and a per-base substitution rate — and the summary a person reads
 instead of several hundred per-stratum records. Design is settled in
@@ -53,8 +55,12 @@ scoring *above* the truth is a defect in the test, not a finding about the estim
 **In:** `src/ng/parameter_estimation/ssr/` — `mod.rs`, `locus_offsets.rs`, `stratum_table.rs`,
 `slippage.rs`; the STR vocabulary added to `types.rs` (`SsrPeriod`) and the step-4-local scalars; the
 sparse table of locus shapes with its merge; the slippage noise model and its marginal end-bucket
-rule; the substitution rate's closed form; the multi-start search; borrowing, the monotonicity walk,
-and the per-read-group summary; both entry points. Plus the two additive changes to `fitting/`.
+rule; the substitution rate's closed form; the multi-start search; borrowing against **both** floors
+— loci for the whole model, slipped reads for the direction split and the fall-off alone (spec
+§4.5) — the monotonicity walk, and the per-read-group summary; both entry points. Plus the two
+additive changes to `fitting/`. **One test lands outside this folder**: the agreement between this
+path's substitution rate and the generic path's belongs at step 4's own surface, which is the only
+place holding both (G5).
 
 **Out (each handed to a named owner):**
 
@@ -68,7 +74,7 @@ and the per-read-group summary; both entry points. Plus the two additive changes
 - **The per-period copy floors** — spec §5.1, and blocked on region typing rather than on this step
   (spec §8.9). They decide which tracts arrive here, not what is done with them, and they are a
   default a user can already override (`MinCopies`,
-  [`segment_criteria.rs:308`](../../../../src/ng/region_typing/segment_criteria.rs)). **Nothing in
+  [`segment_criteria.rs:355`](../../../../src/ng/region_typing/segment_criteria.rs)). **Nothing in
   this plan waits on them.**
 - **The STR census, and the per-locus model it would make askable** — spec §8.5, §8.6; the census
   has a spec ([`parameter_prepass_census_sites.md`](../spec/parameter_prepass_census_sites.md)) and
@@ -116,6 +122,20 @@ and the per-read-group summary; both entry points. Plus the two additive changes
 - **The exact-bias harness runs and its numbers are recorded.**
   [`ng_str_stutter_harness.rs`](../../../../examples/ng_str_stutter_harness.rs), research note §6. It
   is the oracle for Milestones D and E and must be green before either starts.
+- **Most of Milestones B and D already exist as working code, and this plan ports rather than
+  re-derives them.** The library survey built them to answer the copy-floor question:
+  [`examples/shared/stutter_model.rs`](../../../../examples/shared/stutter_model.rs) carries the slip
+  kernel with its truncation renormalised, the per-genotype bucket probabilities with the marginal
+  end-bucket rule **and** the edge plug-in beside it as a control, the climb over the genotype
+  frequencies at arbitrary genotype counts, the four starting points and the multi-start driver, and
+  the three algebraic gates; [`examples/shared/stutter_table.rs`](../../../../examples/shared/stutter_table.rs)
+  carries `LocusShape`, the sparse table, `not_whole_repeat_share`, the allele support with its
+  low-end clip, and the per-stratum fit. **Port them; do not write the same mathematics twice.** The
+  reason is not economy: four of this plan's five silent-failure steps produced a wrong number once
+  already, and the end-bucket rule is where two of them were, so a second independent derivation is a
+  second chance at the same mistake rather than a check on it. **What a port does not inherit is the
+  acceptance gate** — every oracle below still has to pass against the ported code, and D2's four
+  identity checks are what prove the port faithful.
 - **No production dependency.** `src/ssr/` and `src/pileup/` are frozen. Production's stutter
   pre-pass is **not** reused (arch §6), for the reason under "What this step can be checked against".
 
@@ -164,13 +184,19 @@ boundaries accepted, out-of-range rejected. *Depends:* A2. *Source:* arch §2.1,
 
 **A5. The output types.**  ☐
 `StratumFit`, `SlippageStart`, `SsrSampleParameters`, `StratumFitSummary`, `SsrAccumulationCounts`.
-Types only. `StratumFit` carries `fitted_over` — which strata this fit's loci actually came from —
-because a borrowed or merged value is a different claim from one fitted in place and a consumer must
-be able to tell. *Depends:* A4. *Source:* arch §2.4, §4.3.
+Types only. `StratumFit` carries **two** provenance lists and not one — `fitted_over` for the level,
+`shares_fitted_over` for the direction split and the fall-off — because those starve at rates 20,000
+apart and a stratum routinely measures the first well while borrowing the second (spec §4.5); plus
+`slipped_reads`, without which a level of 0.0003 standing on 4 reads is indistinguishable downstream
+from one standing on 4,000. A borrowed or merged value is a different claim from one fitted in place
+and a consumer must be able to tell. *Depends:* A4. *Source:* arch §2.4, §4.3.
 
 **A6. `SsrEstimationError`.**  ☐
-`NoFittableStratumAtPeriod`, `SlippageNotIdentified`, `Domain`, with `MIN_LOCI_TO_FIT = 1_000` and
-`START_AGREEMENT_LIMIT = 1.06`. **This path's own enum, not variants bolted onto the generic path's**:
+`NoFittableStratumAtPeriod`, `SlippageNotIdentified`, `Domain`, with `MIN_LOCI_TO_FIT = 1_000`,
+`MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000` and `START_AGREEMENT_LIMIT = 1.06`. **The second floor's
+doc comment must carry its derivation**, because it looks arbitrary and is not: at §3's measured
+values, holding the direction split to 6% of itself takes about 1,400 slipped reads and holding the
+fall-off to the same takes about 4,000, so the fall-off binds. **This path's own enum, not variants bolted onto the generic path's**:
 the two units fail differently — a thin stratum has neighbours to borrow from and a sample's
 heterozygosity does not. `NoFittableStratumAtPeriod` deliberately has **no default value to fall back
 on**, because a slippage rate spans twenty-two-fold across repeat counts within one dataset, so any
@@ -356,12 +382,22 @@ quantity this run measures rather than assumes. Each fit records its starts and 
 `StratumFit::starts_tried`, and raises `SlippageNotIdentified` when they span more than
 `START_AGREEMENT_LIMIT` in the level. *Depends:* D4, E1. *Source:* arch §4.1, spec §4.2.
 
-**E3. Borrowing for a thin stratum.**  ☐
+**E3. Borrowing for a thin stratum — two floors, and the fit splits between them.**  ☐
 Below `MIN_LOCI_TO_FIT`, take the neighbouring repeat counts at the same period rather than fitting
 noise, marked `Provenance::Borrowed` with `fitted_over` naming the strata it came from. A period with
-no fittable stratum anywhere raises `NoFittableStratumAtPeriod` rather than defaulting. Unit tests: a
-thin stratum between two thick ones borrows and says so; a period whose every stratum is thin errors.
-*Depends:* E2. *Source:* arch §4.1, §4.2.
+no fittable stratum anywhere raises `NoFittableStratumAtPeriod` rather than defaulting.
+
+**Then the second floor, which is on slipped reads and not on loci** (spec §4.5). A stratum that
+clears `MIN_LOCI_TO_FIT` can still put single digits behind the direction split and the fall-off,
+because those are measured only by the reads that moved: at the 0.091% level §5 measures below four
+repeats, 100,000 loci at 5 reads each yield 455 slipped reads, 77 gains and about 5 second-step
+gains. **The level is untouched by the same thinness** — a proportion over all 500,000 reads, good
+to about 5% of itself — so below `MIN_SLIPPED_READS_TO_FIT_SHARES` the level is kept and only the
+two shares are borrowed, with `shares_fitted_over` naming their source. Emit `slipped_reads` beside
+the fit either way. Unit tests: a thin stratum between two thick ones borrows the whole model and
+says so; a stratum with a million loci and 40 slipped reads keeps its level and borrows its shares,
+with the two provenance lists differing; a period whose every stratum is thin errors.
+*Depends:* E2. *Source:* arch §4.1, §4.2, spec §4.5.
 
 **E4. The monotonicity walk — merge and refit.**  ☐ **Own commit, do not bundle.**
 Last, because it reads the fitted sequence. Visit each period's strata in repeat-count order; where a
@@ -380,8 +416,12 @@ one must pass through untouched. *Depends:* E3. *Source:* arch §4.1, spec §4.3
 **E5. The summary, which is the part a person reads.**  ☐
 Several hundred fits per sample against the generic path's four, so the diagnostics **aggregate**
 rather than accumulate: how many strata were fitted in place, borrowed and merged, and which; how
-many fits disagreed across their starting points, with the worst named; how many carry a guard share
-above the limit, with the worst named; and how many loci stood behind the thinnest and thickest fit.
+many kept their level but borrowed their two shares, which is a different claim from a borrow and is
+counted apart from one (spec §4.5); how many fits disagreed across their starting points, with the
+worst named; how many carry a guard share above the limit, with the worst named; how many loci stood
+behind the thinnest and thickest fit; and `low_slippage_substitution` — the rate this read group's
+least-slippery strata returned, which this unit emits and does not compare, because the comparison
+needs the generic half.
 The per-stratum record is still written — a fit that looks wrong has to be traceable — but nothing
 downstream is expected to read it. **A flag nobody reads is how a badly-fitted parameter reaches a
 caller**, which is why this step exists at all. *Depends:* E4. *Source:* arch §4.3, spec §4.4.
@@ -452,8 +492,33 @@ not identified — and assert it appears in `StratumFitSummary`, named. **A per-
 debugger would open does not satisfy this**, which is the whole point of §4.4 and the reason the
 summary exists. *Depends:* G2. *Source:* spec §10.6, arch §8.
 
+**G4. A barely-stuttering stratum keeps what it measured and gives up what it did not.**  ☐
+Generate a stratum at the 0.091% level §5 measures below four repeats, at a locus count a real
+low-repeat stratum has. **Two assertions and they pull in opposite directions:** the level comes back
+within its own sampling error — about 5% of itself, which the test computes from the drawn counts
+rather than hardcoding — and the direction split and the fall-off come back marked as borrowed, with
+`shares_fitted_over` naming their source, rather than as the value about 5 second-step reads happened
+to land on. **This needs drawn loci and not the exact method**, unlike everything above it: the whole
+question is what sampling does to an estimate whose truth sits against the zero boundary, and the
+exact method has no sampling in it. *Depends:* G3. *Source:* spec §4.5, §10.8.
+
+**G5. The two halves of step 4 agree on the substitution rate where nothing slips.**  ☐
+**Gated on the generic path's Milestone E1**, and the only step here that is. On one real sample,
+this path's substitution rate at its least-slippery strata against the generic path's for the same
+read group, on strata at full tract purity: within a quarter-Phred, 6% of the rate. **This is the
+second check in the design that does not generate its data from the model it tests** — the other is
+G1's — because the two rates are fitted by different models from different sites, so a
+misspecification shared with the harness cannot make them agree. **The test lives at step 4's own
+surface** (`parameter_estimation/mod.rs`), not in `ssr/`, which never sees the generic half.
+**A gap is a result before it is a defect** (spec §1.1): tract impurity charges interruptions to
+this path's rate alone, and an error rate genuinely higher inside tracts is the unmeasured finding
+§1.1 exists to protect. So the failure message names the purity of the strata compared, and the
+limit is not widened to accommodate a gap that survives it. *Depends:* G4. *Source:* spec §4.5,
+§8.11, §10.8.
+
 > **Checkpoint G:** the fitted parameters agree with assembly truth on the one dataset that has it,
-> and the two diagnostics are proven to discriminate rather than to decorate. Pause for review.
+> the two diagnostics are proven to discriminate rather than to decorate, and a stratum that barely
+> stutters is proven to keep its level and disown its shares. Pause for review.
 
 ---
 
@@ -467,7 +532,7 @@ summary exists. *Depends:* G2. *Source:* spec §10.6, arch §8.
 | D | the three algebraic gates before any fit — sums to one, no negative counts, silent at a zero level — with the un-rescaled plug-in shown to fail the first at 0.9488; agreement with the harness's kernel to floating point; **the control at exactly 0.000% on the level and 0.0000 on both shares, four starts to 1.000×**, paired with the score at the truth unbeaten |
 | E | the harness's own answers: the substitution rate recovered by search, two identical strata merged at exactly zero cost, a non-monotone sequence proven to trigger the merge and a monotone one proven not to |
 | F | recovery from a directly-filled table at ploidy 2 and 4 and at 3 and 45 reads a locus, to zero bias; sharded equals single as an equality; the measured entry counts reproduced against the real accumulator |
-| G | **the fitted parameters against HG002's known-homozygous measurement — 2.0% and 3.4× — which is the only check not generated from the model it tests**; the guard share proven to separate real strata; an unfittable stratum proven to reach the summary |
+| G | **the fitted parameters against HG002's known-homozygous measurement — 2.0% and 3.4× — and, at a low-slippage stratum, this path's substitution rate against the generic path's within a quarter-Phred: the two checks not generated from the model they test**; the guard share proven to separate real strata; an unfittable stratum proven to reach the summary; a stratum at 0.091% proven to keep its level within sampling error while marking its two shares borrowed |
 
 ## Out of scope (next plans)
 
@@ -483,11 +548,16 @@ summary exists. *Depends:* G2. *Source:* spec §10.6, arch §8.
   here and nothing about what is done with them.
 - **The mismatch count from the aligner** — arch §2.3's `OPEN`, and the better of its two answers.
   Changes one function's body and no signature.
-- **Two measurable questions this plan does not settle, both cheap and both wanting the harness
+- **Three measurable questions this plan does not settle, all cheap and all wanting the harness
   rather than the implementation:** whether a thin stratum should use free genotype frequencies or an
-  allele spectrum plus the sample's inbreeding coefficient (spec §8.6), and how often the
-  monotonicity constraint fires on a truly monotone sequence (spec §8.7 — the one question on this
-  path that needs random draws rather than the exact method, because a spurious merge is triggered by
-  sampling noise and the exact method has none). Add worlds to
+  allele spectrum plus the sample's inbreeding coefficient (spec §8.6); how often the monotonicity
+  constraint fires on a truly monotone sequence (spec §8.7); and how a fitted level behaves when the
+  truth sits near the zero boundary (spec §8.10). **The last two need random draws rather than the
+  exact method, and for the same reason** — a spurious merge and a level piling against zero are both
+  sampling effects, and the exact method has no sampling in it. Add worlds to
   [`ng_str_stutter_harness.rs`](../../../../examples/ng_str_stutter_harness.rs) rather than building
   anything new.
+- **What the two substitution rates actually come out at** (spec §8.11). G5 asserts they agree to a
+  quarter-Phred, but that limit is borrowed from the generic path's ladder spacing for want of a
+  measurement — the first run of the comparison is what sets it, and a persistent gap is §1.1's
+  unmeasured finding rather than a failing test.

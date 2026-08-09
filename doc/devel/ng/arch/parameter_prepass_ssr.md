@@ -1,6 +1,8 @@
 # ng step 4 — the STR stutter parameters: types & interfaces
 
-*Status: architecture draft (2026-08-06), companion to the spec
+*Status: architecture draft (2026-08-06, revised 2026-08-09 for spec §4.5 — the second floor on
+slipped reads, the split provenance it forces on `StratumFit`, and the substitution rate emitted for
+comparison against the generic path's), companion to the spec
 [`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) (the design and its
 rationale) and to its shared framing [`../spec/parameter_prepass.md`](../spec/parameter_prepass.md).
 The sibling path's architecture, [`parameter_prepass_generic.md`](parameter_prepass_generic.md),
@@ -81,7 +83,7 @@ pub fn estimate_ssr_parameters(
 /// shard, merged (§4). The half that does no I/O.
 impl SsrAccumulators {
     pub fn estimate(&self, config: &SsrEstimationConfig)
-        -> Result<SsrSampleParameters, ParameterEstimationError>;
+        -> Result<SsrSampleParameters, SsrEstimationError>;
 }
 ```
 
@@ -422,9 +424,22 @@ pub struct StratumFit {
     /// How the search went, and it is what separates a fitted number from a stopped
     /// search: the slippage each starting point reached and what it scored, best first.
     pub starts_tried: SmallVec<[SlippageStart; 4]>,
-    /// Which strata this fit's loci actually came from — itself where it was fitted in
-    /// place, its neighbours where it borrowed, both where a merge fired (§4.2).
+    /// Which strata **the level's** loci actually came from — itself where it was fitted
+    /// in place, its neighbours where it borrowed, both where a merge fired (§4.2).
     pub fitted_over: SmallVec<[Stratum; 2]>,
+    /// Which strata **the direction split and the fall-off** came from, which is not
+    /// always the same answer (spec §4.5). They are measured only by the reads that
+    /// moved, and a stratum can hold 100,000 loci and still put 5 reads behind the
+    /// fall-off's gaining arm — so it can clear `MIN_LOCI_TO_FIT` by four orders of
+    /// magnitude and still have to borrow these two. The level, being a proportion over
+    /// every read rather than over the slipped ones, is unharmed by the same thinness
+    /// and is kept.
+    pub shares_fitted_over: SmallVec<[Stratum; 2]>,
+    /// Reads that showed a length other than the reference tract's. **The count that
+    /// decides whether the two shares are measurable**, and the one a consumer needs in
+    /// order to tell a level of 0.0003 standing on 4 slipped reads from one standing on
+    /// 4,000 — which nothing downstream could otherwise do (spec §4.5).
+    pub slipped_reads: u64,
 }
 
 pub struct SlippageStart { pub start: SlippageModel, pub reached: SlippageModel, pub log_likelihood: f64 }
@@ -615,8 +630,12 @@ zero and is a bug report against region typing if it does not.
    §4.1), not a search, and it needs none of the other three.
 2. **The three slippage parameters.** `fit_by_multistart` over that stratum's shapes, with
    `fit_mixture_weights` climbing the genotype frequencies at each trial.
-3. **Borrowing**, for a stratum below `MIN_LOCI_TO_FIT`: take the neighbouring repeat counts at the
-   same period, marked `Provenance::Borrowed` with `fitted_over` naming them.
+3. **Borrowing**, and it is **two tests against two floors, not one** (spec §4.5). A stratum below
+   `MIN_LOCI_TO_FIT` borrows the whole slippage model from the neighbouring repeat counts at the
+   same period, marked `Provenance::Borrowed` with `fitted_over` naming them. A stratum that clears
+   that floor but falls below `MIN_SLIPPED_READS_TO_FIT_SHARES` **keeps its own level and borrows
+   only the direction split and the fall-off**, with `shares_fitted_over` naming where those two
+   came from.
 4. **The monotonicity walk**, last, because it reads the fitted sequence: visit each period's strata
    in repeat-count order and where a fitted `slip_rate` falls below its predecessor's, merge the two
    strata's tables and refit, repeating until the sequence rises.
@@ -624,6 +643,21 @@ zero and is a bug report against region typing if it does not.
 ```rust
 /// Fewest loci a stratum needs before it is fitted rather than borrowing. *Soft.*
 pub const MIN_LOCI_TO_FIT: u64 = 1_000;
+
+/// Fewest **slipped** reads a stratum needs before its direction split and fall-off are
+/// its own rather than a neighbour's. The level has no such floor: it is a proportion
+/// over every read, so the same stratum measures it to about 5% of itself where the
+/// fall-off is measured to about 45% (spec §4.5).
+///
+/// **Derived from the precision wanted, not chosen.** At the values spec §3 measures — a
+/// direction split of 0.17 and a fall-off of 0.065 — holding the split to 6% of itself
+/// takes about 1,400 slipped reads and holding the fall-off to the same takes about
+/// 4,000. The fall-off binds, which is a second argument for spec §3's one fall-off
+/// shared between the directions. *Soft*, and expected to be missed by every stratum at
+/// the bottom of the range: at a level of 0.091% it takes about 880,000 loci at 5 reads
+/// each, and tomato holds 1.73 million STR loci in total. **That is the rule working** —
+/// the alternative is a share fitted on 5 reads and reported as measured.
+pub const MIN_SLIPPED_READS_TO_FIT_SHARES: u64 = 4_000;
 
 /// What a merge costs, so the constant above can be read against it: two strata pooled
 /// return close to the loci-weighted mean of their rates, so each carries its own distance
@@ -675,6 +709,16 @@ wrong has to be traceable — but nothing downstream is expected to read it.
 pub struct StratumFitSummary {
     pub strata_fitted_here: u32,
     pub strata_borrowed: u32,
+    /// Strata that kept their own level and borrowed the direction split and the
+    /// fall-off (§4.1's rule 3, spec §4.5). Counted apart from `strata_borrowed`
+    /// because it is a different claim: those two report a level they measured.
+    pub strata_with_borrowed_shares: u32,
+    /// The substitution rate this read group's lowest-slippage strata returned, and
+    /// how many loci stood behind it. **Emitted so step 4's own surface can put it
+    /// beside the generic path's rate for the same read group**, which is where the
+    /// two must agree to a quarter-Phred (spec §4.5). This unit cannot make the
+    /// comparison — it never sees the generic half — so it emits the operand.
+    pub low_slippage_substitution: Option<(ErrorRate, u64)>,
     /// The merged sets, named — a merge is a claim about two strata at once.
     pub strata_merged: Vec<SmallVec<[Stratum; 2]>>,
     /// Fits whose starting points disagreed by more than `START_AGREEMENT_LIMIT` in the
@@ -727,6 +771,15 @@ pub struct StratumFitSummary {
   subsample is exact and costs precision only (§2.1).
 - **No trait over the accumulator — decided.** Nothing generic drives it, and the walk knows which
   object it is filling. `fitting/` is the only place with a genuine swappable seam.
+- **Thinness is two floors and the fit is split between them — decided** (spec §4.5). Loci gate the
+  whole model; slipped reads gate the direction split and the fall-off alone. The two counts come
+  apart by a factor of 20,000 at the bottom of the repeat range, so one floor would either throw
+  away a level that was well measured or report shares standing on 5 reads. This is why `StratumFit`
+  carries two provenance lists rather than one.
+- **This path's substitution rate is checked against the generic path's, and only where slippage is
+  small — decided** (spec §4.5). Not a tie: §1.1's decision to fit them separately stands, and the
+  interesting outcome is a persistent gap. This unit emits `low_slippage_substitution` and makes no
+  comparison, because the comparison needs both halves and lives at `parameter_estimation/mod.rs`.
 
 ## 6. Reconciliation with existing code
 
@@ -802,6 +855,13 @@ Five anchors:
 - **The summary is what fails, not a per-stratum record.** Feed a deliberately unfittable stratum —
   loci generated with the slippage rate at zero and the alleles spread — and assert it appears in
   `StratumFitSummary`. A record only a debugger would open does not satisfy this (spec §10.6).
+- **A barely-stuttering stratum keeps its level and gives up its shares** (spec §10.8). Generate a
+  stratum at a level of 0.091% with a real low-repeat locus count: the level must come back within
+  its own sampling error, and the direction split and fall-off must come back marked as borrowed
+  with `shares_fitted_over` naming their source — not as the value 5 slipped reads happened to
+  land on. The cross-path half of that check — this path's substitution rate against the generic
+  path's for one read group, within a quarter-Phred — belongs to step 4's own surface, which is the
+  only place that holds both.
 
 No `bench/`: this unit has no competing implementations, and its cost claims are measured rather
 than open — [`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs) drives the real

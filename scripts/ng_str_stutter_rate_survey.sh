@@ -36,9 +36,9 @@
 #                  tables, so watch memory on the first batch before trusting a large value.
 #   LIMIT=1        how many libraries from the list to attempt this run. 0 means all of them.
 #   CONTIGS=SL4.0ch01   the walk. One chromosome gives ~644k STR loci, which is ample per stratum.
-#   MIN_LOCI=500   fewest loci a stratum needs before it is fitted at all. Below it the row is not
+#   MIN_LOCI=100   fewest loci a stratum needs before it is fitted at all. Below it the row is not
 #                  emitted, because a rate fitted on a handful of loci is noise wearing a number.
-#   MAX_REPEATS=30 strata above this are skipped. The cost of a fit grows with the stratum's
+#   MAX_REPEATS=40 strata above this are skipped. The cost of a fit grows with the stratum's
 #                  distinct shapes, and the longest tracts are both the thinnest and the slowest.
 
 set -euo pipefail
@@ -108,8 +108,8 @@ LIST=${3:?"usage: $0 OUT.tsv REF LIBRARIES.txt"}
 JOBS=${JOBS:-20}
 LIMIT=${LIMIT:-1}
 CONTIGS=${CONTIGS:-SL4.0ch01}
-MIN_LOCI=${MIN_LOCI:-500}
-MAX_REPEATS=${MAX_REPEATS:-30}
+MIN_LOCI=${MIN_LOCI:-100}
+MAX_REPEATS=${MAX_REPEATS:-40}
 WORK=${WORK:-$OUT.work}
 
 [[ -f "$REF" ]] || { echo "reference not found: $REF" >&2; exit 1; }

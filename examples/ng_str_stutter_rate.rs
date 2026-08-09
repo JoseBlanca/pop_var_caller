@@ -34,24 +34,31 @@
 //! 2. **Exact recovery of a known truth.** Every possible locus shape, weighted by its exact
 //!    probability under a chosen truth, then fitted. There is no sampling noise in this, so the
 //!    answer is decided rather than estimated and the bias must be **zero**.
-//! 3. **Recovery from drawn loci at the depth this archive actually has.** The realistic case:
-//!    loci drawn rather than enumerated, so what comes back carries sampling error, and the
-//!    question is whether the estimate lands on the truth within it.
+//! 3. **The answer is converged, not merely stopped.** Refit with ten times the climb passes; if
+//!    the answer moves, what the previous check reported was this program's convergence rather
+//!    than a property of the estimator. It caught exactly that on its first run.
 //! 4. **The score at the truth.** A correctly specified model cannot be beaten at the truth, so a
 //!    fitted point scoring *above* it is a defect here rather than a finding. This is the check
 //!    that a spread across starting points cannot make: a deterministic search returns the same
 //!    point from every start wherever the objective is flat, which is how a fall-off 0.02 out once
-//!    passed four agreeing starts.
+//!    passed four agreeing starts. It caught a second defect — a warm-started climb that made the
+//!    objective depend on the order candidates were tried in.
 //! 5. **A silent world.** Loci generated with no slippage at all must fit to no slippage.
 //!
-//! `--self-check` runs them and stops. Any real run runs them first and refuses to walk if one
-//! fails, because a number produced by an unchecked instrument is what this exercise exists to
-//! stop producing.
+//! **All of that takes about ten seconds**, so every run does it and refuses to walk on a failure.
+//! A number from an unchecked instrument is what this exercise exists to stop producing.
+//!
+//! **`--drawn` adds a sixth**, and it is opt-in because it costs minutes rather than seconds:
+//! recovery from tens of thousands of *drawn* loci at the depth this archive has, which carries
+//! sampling error and so answers a different question — not "is the estimator biased" but "is
+//! there enough data here to see". Worth running when the model or the fit changes; not worth
+//! paying before every walk. An earlier version bundled it into `--self-check` and left the reader
+//! in front of a silent terminal for twenty minutes.
 //!
 //! ```text
-//! ng_str_stutter_rate --self-check
-//! ng_str_stutter_rate [--contigs a,b] [--regions r.bed] [--min-loci 2000]
-//!     [--max-loci 20000] [--max-repeats 30] <reference.fa> <sample.cram> [more...]
+//! ng_str_stutter_rate --self-check [--drawn]
+//! ng_str_stutter_rate [--contigs a,b] [--regions r.bed] [--min-loci 100]
+//!     [--max-repeats 40] <reference.fa> <sample.cram> [more...]
 //! ```
 //!
 //! Output: one row per (library, period, reference repeat count) with the fitted slippage rate, the
@@ -411,6 +418,33 @@ struct CheckOutcome {
     passed: bool,
 }
 
+/// The checks, printed **as each one finishes** rather than collected and printed at the end.
+///
+/// A buffered report is fine for a check that takes a second and useless for one that takes
+/// minutes: the reader sits in front of a silent terminal with no way to tell a slow check from a
+/// hung one, and a run they interrupt shows nothing at all — including the results that had already
+/// passed. That happened, so the collector prints on push.
+#[derive(Default)]
+struct Checks(Vec<CheckOutcome>);
+
+impl Checks {
+    fn push(&mut self, outcome: CheckOutcome) {
+        eprintln!(
+            "  [{}] {}\n        {}",
+            if outcome.passed { "ok" } else { "FAILED" },
+            outcome.name,
+            outcome.detail
+        );
+        self.0.push(outcome);
+    }
+    fn iter(&self) -> std::slice::Iter<'_, CheckOutcome> {
+        self.0.iter()
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 /// Run the checks. `include_drawn` adds the two that draw tens of thousands of loci.
 ///
 /// **The split is about cost, not about importance.** Everything below the drawn pair runs on a
@@ -419,7 +453,8 @@ struct CheckOutcome {
 /// whenever the model or the fit changes, and not worth paying before every walk. `--self-check`
 /// runs everything.
 fn run_self_check(report: &mut String, include_drawn: bool) -> bool {
-    let mut outcomes: Vec<CheckOutcome> = Vec::new();
+    let mut outcomes = Checks::default();
+    eprintln!("# self-check\n");
     let alleles = vec![-2, -1, 0, 1, 2];
     let truth = measured_slip();
 
@@ -603,19 +638,9 @@ fn run_self_check(report: &mut String, include_drawn: bool) -> bool {
     }
 
     let passed = outcomes.iter().all(|o| o.passed);
-    let _ = writeln!(report, "# self-check\n");
-    for outcome in &outcomes {
-        let _ = writeln!(
-            report,
-            "  [{}] {}\n        {}",
-            if outcome.passed { "ok" } else { "FAILED" },
-            outcome.name,
-            outcome.detail
-        );
-    }
     let _ = writeln!(
         report,
-        "\n  {} of {} checks passed",
+        "  {} of {} checks passed",
         outcomes.iter().filter(|o| o.passed).count(),
         outcomes.len()
     );
@@ -882,10 +907,12 @@ fn main() -> ExitCode {
     let mut min_loci: u64 = 2_000;
     let mut max_repeats: u32 = 30;
     let mut only_check = false;
+    let mut include_drawn = false;
     let mut rest = std::env::args().skip(1);
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--self-check" => only_check = true,
+            "--drawn" => include_drawn = true,
             "--regions" => regions_bed = rest.next().map(PathBuf::from),
             "--contigs" => {
                 contig_filter = rest
@@ -908,7 +935,7 @@ fn main() -> ExitCode {
     // what this exercise exists to stop producing, so a failure here stops the run rather than
     // printing a warning above thousands of rows nobody will scroll back through.
     let mut report = String::new();
-    let checks_passed = run_self_check(&mut report, only_check);
+    let checks_passed = run_self_check(&mut report, include_drawn);
     eprint!("{report}");
     if !checks_passed {
         eprintln!("\nerror: the self-check failed — refusing to measure anything");
