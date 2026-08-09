@@ -18,10 +18,18 @@
 //!   a site carries one, two or three alternative copies rather than only one, so a
 //!   dosage-indexed answer returned off by one is a wrong number rather than a compile error
 //!   — and `SampleRates`' accessors index by dosage.
-//! - **Three reads a site and 124.** At three reads every site sits in a one-per-depth bin,
-//!   so the binning rule contributes nothing and a fault in it cannot show. At 124 the site
-//!   lands in the widest geometric bin, `98..=124`, where the row offset and the bin index
-//!   both have to be right for the cell to be scored at all.
+//! - **Shallow and at 124.** Shallow, every site sits in a bin of its own, so the binning rule
+//!   contributes nothing and a fault in it cannot show. At 124 the site lands in the widest
+//!   geometric bin, `98..=124`, where the row offset and the bin index both have to be right
+//!   for the cell to be scored at all.
+//!
+//! **"Shallow" is three reads for a diploid and eight for a tetraploid, and the difference is
+//! measured rather than chosen.** The counting argument says a depth-`d` table carries `d`
+//! independent numbers against a ploidy-`P` truth's `P` free frequencies, so `d ≥ P`. That is
+//! the condition for the frequencies given the error rate, and this fit must find the rate
+//! too: at `P = 4`, four reads leaves the rate at the rung the fit started from and the
+//! frequencies 7.2% away. Both are identified by eight. The two tests that pin three and four
+//! reads as *not* identified are what keep that boundary honest.
 //!
 //! **On the plan's "300×", which this cannot do and does not need to.** F2 is specified at
 //! "3 reads a site and at 300×". A table filled directly cannot hold a site above the
@@ -43,10 +51,20 @@ mod tests {
     use super::super::{error_rate_ladder, histogram::DepthAltHistogram};
     use crate::ng::types::{Ploidy, ReadGroupId};
 
-    /// The rung of [`error_rate_ladder`] nearest Phred 30, which is where the arms below are
-    /// generated. Interior to the ladder by a wide margin, so a recovered rung has room to be
-    /// wrong in either direction rather than being held in place by an end.
-    const RUNG_AT_PHRED_30: usize = 80;
+    /// The rung the arms below are generated at — Phred 27.5, interior to the ladder by a
+    /// wide margin so a recovered rung has room to be wrong in either direction.
+    ///
+    /// **Deliberately not rung 80, and that is the whole point of the constant.** Rung 80 is
+    /// Phred 30, which is `DEFAULT_ERROR_RATE`, which is where the coupled fit *starts*. An
+    /// earlier version of this file generated there, so an arm where the rate is not
+    /// identified returned rung 80 by never moving — and passed. Measured: at ploidy 4 and
+    /// depths 3 and 4 the fit returns 80 whatever the truth. Generating ten rungs away turns
+    /// "the fit found the rate" into a claim with content.
+    const GENERATING_RUNG: usize = 70;
+
+    /// The shallow arm's depth, shared by the arms and by the premise test below so that the
+    /// claim "every site sits in a bin of its own here" is about the depth actually used.
+    const SHALLOW: u32 = 3;
 
     /// The deepest a cell table can hold a site — the ladder's cap, and the top of the widest
     /// geometric bin, `98..=124`.
@@ -76,7 +94,7 @@ mod tests {
     fn recover(at_ploidy: u8, depth: u32, truth: &[f64]) -> Recovered {
         let edges = Arc::new(DepthBinEdges::new());
         let ladder = error_rate_ladder();
-        let rate = ladder[RUNG_AT_PHRED_30].get();
+        let rate = ladder[GENERATING_RUNG].get();
         let at = ploidy(at_ploidy);
         let group = ReadGroupId(1);
 
@@ -117,8 +135,8 @@ mod tests {
     /// **The tolerance is one rung of the error-rate ladder**, which the design already argues
     /// is finer than a caller can feel (`spec/parameter_prepass.md` §3) — not a number chosen
     /// to make these pass.
-    fn assert_recovered(recovered: &Recovered, truth: &[f64], arm: &str) {
-        let moved = recovered.rung.abs_diff(RUNG_AT_PHRED_30);
+    fn assert_recovered(recovered: &Recovered, truth: &[f64], tolerance: f64, arm: &str) {
+        let moved = recovered.rung.abs_diff(GENERATING_RUNG);
         assert!(
             moved <= 1,
             "{arm}: the error rate came back {moved} rungs from the one it was generated at"
@@ -128,14 +146,20 @@ mod tests {
         for (dosage, (&fitted, &expected)) in
             recovered.frequencies.iter().zip(truth.iter()).enumerate()
         {
-            // **1% relative, and the reason is measured rather than picked**: the adopted
-            // depth ladder's own binning bias on the frequencies is 0.3% (research note
-            // §4.3), so this is loose enough that binning alone cannot fail it and tight
-            // enough that a real fault cannot pass.
+            // **The tolerance is the arm's, because the arms differ by two orders of
+            // magnitude and one number for all of them would be slack on three.**
+            //
+            // An earlier version asserted 1% everywhere, on the grounds that the depth
+            // ladder's binning bias on the frequencies is 0.3% (research note §4.3). **That
+            // figure does not apply here**: it was measured on a mixed-depth world, and every
+            // table in this file puts all its sites at one exact depth — which is what
+            // `expected_counts`' doc says makes the binning rule contribute nothing. The
+            // looseness had a measured cost rather than a theoretical one: at 1% the fixture
+            // underflow this milestone exists to have fixed passes the whole suite.
             assert!(
-                (fitted - expected).abs() <= 0.01 * expected,
+                (fitted - expected).abs() <= tolerance * expected,
                 "{arm}: dosage {dosage} came back at {fitted} against a generating \
-                 {expected}, which is {:.2}% away",
+                 {expected}, which is {:.4}% away",
                 100.0 * (fitted - expected).abs() / expected
             );
         }
@@ -143,10 +167,22 @@ mod tests {
 
     /// A diploid sample at three reads a site — tomato's regime, and the one every fit before
     /// F2 was proven in.
+    ///
+    /// **Its tolerance is a hundred times the deep arms', and the reason is the coupling
+    /// rather than noise.** At three reads the error rate lands **one rung** from the one that
+    /// generated the table — inside the tolerance the design argues for, and about 6% in the
+    /// rate — and the frequencies are conditional on the rate, so they absorb it: measured,
+    /// 0.334%. That is the coupled fit doing what it is for, not a fault, and it is why this
+    /// arm asserts 0.5% where the arms that recover the rung exactly assert 0.01%.
     #[test]
     fn a_diploid_sample_at_three_reads_recovers_what_generated_it() {
         const TRUTH: [f64; 3] = [0.880, 0.100, 0.020];
-        assert_recovered(&recover(2, 3, &TRUTH), &TRUTH, "diploid at 3 reads");
+        assert_recovered(
+            &recover(2, SHALLOW, &TRUTH),
+            &TRUTH,
+            0.005,
+            "diploid at 3 reads",
+        );
     }
 
     /// The same truth at the deepest a cell can be, where the site lands in the widest
@@ -161,6 +197,7 @@ mod tests {
         assert_recovered(
             &recover(2, DEEPEST, &TRUTH),
             &TRUTH,
+            0.0001,
             "diploid at the ladder's cap",
         );
     }
@@ -169,35 +206,45 @@ mod tests {
     /// rather than a compile error.** The truth is deliberately not symmetric across dosages,
     /// so a set returned reversed or rotated fails rather than coinciding.
     ///
-    /// **At four reads and not three, and the difference is identifiability rather than
-    /// precision.** A table at depth `d` has `d + 1` cells, whose probabilities sum to one, so
-    /// it carries `d` independent numbers; a ploidy-`P` truth has `P` free frequencies. At
-    /// `d = 3` and `P = 4` that is three equations for four unknowns and the answer is a ridge
-    /// rather than a point — pinned by the test below. Four reads is the shallowest depth at
-    /// which a tetraploid sample is identified at all, so it is the one worth asserting.
+    /// **At eight reads, which is where a tetraploid becomes identified at all** — see the
+    /// two tests below for what three and four reads do instead, and for the counting argument
+    /// that gets the boundary wrong on its own.
     #[test]
-    fn a_tetraploid_sample_at_four_reads_recovers_what_generated_it() {
+    fn a_tetraploid_sample_at_eight_reads_recovers_what_generated_it() {
         const TRUTH: [f64; 5] = [0.700, 0.150, 0.090, 0.040, 0.020];
-        assert_recovered(&recover(4, 4, &TRUTH), &TRUTH, "tetraploid at 4 reads");
+        assert_recovered(
+            &recover(4, 8, &TRUTH),
+            &TRUTH,
+            0.0001,
+            "tetraploid at 8 reads",
+        );
     }
 
-    /// **And one read shallower it is not identified, which is a property of the model rather
-    /// than a failure of the fit.** Three reads give three independent cell probabilities
-    /// against four free frequencies, so a whole ridge of truths produces the same table and
-    /// the climb lands somewhere on it: measured, dosage 1 comes back at 0.158 against a
-    /// generating 0.150, 5.6% away, with the error rate on the right rung throughout.
+    /// **Four reads is not enough for a tetraploid either, and finding that out corrected the
+    /// rule this file first stated.**
     ///
-    /// **Pinned rather than left out**, because the shallow-and-polyploid corner is exactly
-    /// where a later reader would assume the fit is at fault. The rule is `depth ≥ ploidy`,
-    /// and tomato at three reads a site satisfies it only because tomato is diploid.
+    /// The counting argument — a depth-`d` table carries `d` independent numbers against a
+    /// ploidy-`P` truth's `P` free frequencies, so `d ≥ P` — is the condition for the
+    /// frequencies to be identified **given the error rate**. It is not the condition for this
+    /// fit, which must find the rate too. Measured at `P = 4`: at `d = 4` the rate never
+    /// leaves the rung the fit started from, and the frequencies come back **7.2%** away; both
+    /// are identified by `d = 8`.
+    ///
+    /// **An earlier version of this file asserted that `d = 4` recovers a tetraploid, and it
+    /// passed** — because the table was generated at Phred 30, which is `DEFAULT_ERROR_RATE`,
+    /// which is exactly where the fit begins. The rate looked recovered by never moving, and
+    /// the frequencies were right because they were conditional on a rate that happened to be
+    /// correct. Generating ten rungs away is what turned both halves of that arm into claims
+    /// with content.
     #[test]
-    fn a_tetraploid_sample_at_three_reads_is_not_identified() {
+    fn four_reads_is_not_enough_for_a_tetraploid_either() {
         const TRUTH: [f64; 5] = [0.700, 0.150, 0.090, 0.040, 0.020];
-        let recovered = recover(4, 3, &TRUTH);
+        let recovered = recover(4, 4, &TRUTH);
 
-        assert_eq!(
-            recovered.rung, RUNG_AT_PHRED_30,
-            "the error rate is still recovered exactly — it is the frequencies that are free"
+        assert_ne!(
+            recovered.rung, GENERATING_RUNG,
+            "four reads at four copies has started to identify the error rate, so the arm \
+             below can move down to it"
         );
         let worst = recovered
             .frequencies
@@ -207,8 +254,8 @@ mod tests {
             .fold(0.0f64, f64::max);
         assert!(
             worst > 0.01,
-            "three reads at four copies recovered the truth to within {:.2}%, so the \
-             under-determination this pins has gone away and the arm above should move down",
+            "four reads recovered a tetraploid to within {:.2}%, which the arm below assumes \
+             it cannot",
             100.0 * worst
         );
     }
@@ -228,6 +275,7 @@ mod tests {
         assert_recovered(
             &recover(4, DEEPEST, &TRUTH),
             &TRUTH,
+            0.0001,
             "tetraploid at the ladder's cap",
         );
     }
@@ -240,7 +288,7 @@ mod tests {
     fn the_two_depth_arms_sit_on_opposite_sides_of_the_binning_rule() {
         let edges = DepthBinEdges::new();
 
-        let shallow = edges.depth_range(edges.bin_for(3));
+        let shallow = edges.depth_range(edges.bin_for(SHALLOW));
         assert_eq!(
             shallow.start(),
             shallow.end(),
