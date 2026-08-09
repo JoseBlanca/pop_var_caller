@@ -105,6 +105,16 @@ fixtures, generated outputs, or temporary files, create a project-local
 using it). This keeps everything inside the project mount and avoids
 leaving state on the host.
 
+**This includes any scratch directory the assistant's own harness offers.**
+Claude Code hands each session a scratchpad under the host's
+`/private/tmp/...` and tells it to prefer that over `/tmp`; that instruction
+is overridden here. Everything — probe scripts, extracted patches, agent
+reports, generated fixtures, draft commit messages — goes under this
+repository's `tmp/`. Two reasons: a path outside the project mount is
+invisible inside the dev container, so anything written there cannot be
+handed to `cargo`; and scratch that outlives the session is state left on the
+host, which the container sandbox exists to prevent.
+
 ## Profiling (samply, flamegraph, perf)
 
 Sampling profilers inside the container use `perf_event_open(2)` on

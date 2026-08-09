@@ -1975,9 +1975,23 @@ mod tests {
     /// fits whose two states coincided, at 0.968 and 0.929 of each other, where every
     /// legitimate fit in this file sits at 0.842 or below.
     ///
-    /// The seed below is the worse of those two. **One and not both**, because a fit whose
-    /// states never separate runs to the iteration cap from all nine starts, and the second
-    /// seed costs another sixty seconds of the suite to say the same thing.
+    /// **Swept over twenty-four seeds after the check went in**, of which twenty-three drew
+    /// no runs at all: **nine are now refused and fourteen answered, and the largest `F` any
+    /// of them returns is 0.042** — against a reported resolution of 0.029, and in line with
+    /// research note §3.6's own floor for this window count (mean 0.017, worst seed 0.086 at
+    /// 4,800 windows). Nothing comes back near one any more.
+    ///
+    /// **That nine in twenty-three are refused is the check working, not over-firing.** On a
+    /// genome with no runs the two states genuinely coincide, so `F` is not identified at
+    /// all (§3.1's proof), and spec §6.1's instruction for this parameter is *fail rather
+    /// than emit*. It does change what an outbred sample looks like from the outside: an
+    /// error saying *supply `F`* rather than a small number. Milestone G3, which expects
+    /// `F` ≈ 0 on HG002, should expect either.
+    ///
+    /// The seed below is the worse of the two original failures. **One and not both**,
+    /// because a fit whose states never separate runs to the iteration cap from all nine
+    /// starts, and the second seed costs another sixty seconds of the suite to say the same
+    /// thing — it is refused too, measured in the sweep above.
     #[test]
     fn a_genome_with_no_runs_does_not_come_back_almost_entirely_autozygous() {
         let seed = 3u64;
