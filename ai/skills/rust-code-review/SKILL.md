@@ -159,6 +159,9 @@ Each sub-agent prompt:
 > 3. Read each in-scope file.
 > 4. Apply each rule and produce findings in the specified format.
 > 5. **You are in your own isolated git worktree.** Build, mutate and revert freely *there* — nothing you do can collide with another agent, so mutation-test aggressively rather than reviewing by reading. Run the project's build tooling **from your own worktree's copy, by its absolute path** (`<your-worktree>/scripts/dev.sh …`): the script builds whichever tree it lives in, so the main checkout's copy would build the wrong code.
+> 5a. **Before recording a mutation as a survivor, prove it changed behaviour.** A mutant that takes the same path on every fixture is not a finding, and reporting one sends the author to defend a hazard that does not exist. Report three numbers, not two: mutations run, survived, and changed-no-behaviour.
+> 5b. **Also challenge the tests that already exist.** For each, name what in its fixture makes the asserted failure reachable; if nothing does, that is the finding. Ask of every assertion which *wrong* implementations also satisfy it — if several do, the fixture is not discriminating.
+> 5c. **Tell me what I already know.** If the dispatch listed mutations already run and their outcomes, do not spend a round re-finding them; verify them if you doubt them, and say so.
 > 6. Write findings to the **absolute path** `<main-checkout>/tmp/review_<date>_<slug>/<category>.md` — outside your worktree, which is temporary and will be discarded. If no findings apply, write only the line `No findings.`
 > 7. Do not invent file paths, line numbers, command output, or behavior. Cite only locations you have read.
 > 8. Stay within the category. Issues that belong elsewhere go under a `## Cross-category observations` heading at the bottom of your file.
@@ -182,6 +185,17 @@ The point of this step is to do the routing once, deterministically, before synt
 ### 8. Verify the test challenge
 
 The `reliability` sub-agent runs the "challenge tests" pass for every non-trivial function. Spot-check that it did so for the changed-code surface; if a non-trivial function was missed, supplement with the missing entries before synthesis.
+
+### 8a. Verify the diff's own quantitative claims
+
+**Every number in a changed doc comment, test comment or commit message that describes *this work's* reach is measured or it is wrong.** How many cases a fixture covers, how far apart two values are, what a mutation cost, how many tests were added — re-derive each one, and report it CHECKED-CORRECT or WRONG with the right value.
+
+This is its own step and not a category because it is about the diff's prose rather than any one file, and because it is where the errors concentrate. Measured on one plan in this repo: **fifteen wrong numbers in a single milestone, every one the author's own claim about their own fixture, while about forty figures quoted from the design and research documents were all correct.** A figure copied from a source is usually right; a figure describing the author's own test is where to look.
+
+Two habits make the step cheap:
+
+- **Compute, do not read.** A claim that a test covers 2,875 cells is checked by running the fixture, not by re-reading the sentence. Several wrong numbers survived a report, a commit message and a chat summary because everyone re-read them.
+- **Check the mechanism, not only the magnitude.** An explanation of *why* something behaves as it does is a claim, and a wrong one is worse than a wrong number: it sends the next reader hunting a symptom that does not occur. Reproduce the story. Two examples from one milestone: a comment attributing a fixture's insensitivity to one cause when restoring that cause makes the test fail on *correct* code, and a comment justifying a selection rule by a failure mode that the measurement shows scores 2,165 nats in the opposite direction.
 
 ### 9. Synthesize the unified report
 

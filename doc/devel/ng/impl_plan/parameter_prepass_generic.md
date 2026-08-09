@@ -102,6 +102,19 @@ profile scan; the coupled error-rate/frequency loop; the runs model; the fallbac
   exactly rather than simulated, so "matches the harness" is a real assertion and not a
   tautology. Where an identity is available it is asserted directly instead (arch §9, spec
   §12.8).
+- **Choose every fixture's depth against the regime where the thing being tested stops being
+  distinguishable** (added 2026-08-09, Milestone E; it cost two steps to learn). Almost
+  everything this plan fits is a competition between two explanations of the same alternative
+  read — sequencing error against real variation — and **at twenty reads a site those two
+  explanations never overlap**: a heterozygote shows about ten alternative reads and a
+  homozygous-reference site about one in fifty. A fixture there is not a weak test of the
+  coupling, it is *no* test of it. Measured: E1's frequency test returned the same rung under
+  the true frequencies and under ten times them until it moved to six reads; and E2's world
+  returned the right rates from **every** start on the ladder — rung 0 included, a hundred
+  times the true rate — so four mutations survived it, one of them the estimator the design
+  explicitly rejects. **Where a step tests an interaction, the fixture belongs at three to six
+  reads a site.** Deep fixtures still earn their place for what is genuinely depth-dependent:
+  the binning rule is invisible below about 100× (F2), and the cap of C2 fires nowhere else.
 - **Isolate the steps whose failure is silent, and say so.** Most of this module fails loudly
   — a panic, a test. **Six do not**: the depth ladder (A4), the depth a cell is scored at (B3),
   the depth cap's draw (C2), the multi-library scoring rule (D2), the coupled loop (E2) and the

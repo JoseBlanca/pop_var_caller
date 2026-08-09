@@ -18,6 +18,29 @@
 - **Regression tests** exist for every doc-comment invariant, every previously-fixed bug, and every `unsafe` safety condition. The test would fail if the invariant were violated.
 - **Test names** describe the behavior under test and the expected outcome (`parse_returns_error_on_empty_input`, not `test_parse_2`). The name alone communicates the bug on a CI failure.
 
+## Mutation testing: prove the mutant differs before recording a survivor
+
+You are in your own worktree so that you can change the code and re-run, which finds what reading does not. **But a mutation that does not change behaviour is not evidence of coverage.** Before recording a survivor, show the mutated code takes a different path on at least one fixture — print from both arms, assert the two answers differ, or diff the outputs. Then say which.
+
+A no-op mutant is not a finding, and reporting one as a survivor sends the author to write a test against a hazard that does not exist. Three shapes account for most of them:
+
+- **A guard on a condition no fixture reaches.** `genotypes.max(2)` is `genotypes` for every fixture in the file; a `lender != group` filter on a branch that group cannot enter is dead code.
+- **A widening that never narrows.** `Vec::resize` truncates as well as extends, so deleting a preceding `clear()` changes nothing when every slot is overwritten.
+- **A reordering with the same fixed point.** Two blocks of an alternating fit can be swapped without moving where it converges; only the intermediate reports differ.
+
+Say plainly in your report how many mutations you ran, how many survived, and how many changed no behaviour — the three numbers are different and only the first two are findings.
+
+## Challenge the tests that exist, not only the ones that do not
+
+The pass below asks what input class is *missing*. This one asks the inverse, and it is where the Blockers are: **on one plan in this repo, ten of sixteen review rounds had a Blocker that was a test unable to fail** — not wrong code.
+
+**For every existing test in the changed code, name what in its fixture makes the asserted failure reachable.** If nothing does, that is the finding, and the fix is the fixture rather than the assertion. Two causes recur:
+
+- **A fixture where several wrong implementations give the same number.** Four different ways of averaging a per-window posterior coincide exactly when every window carries the same weight; three separate defects then leave the suite green. Ask of each assertion: *which wrong implementations also satisfy it?* If the answer is "several", the fixture is not discriminating and the test is decoration.
+- **A fixture in a regime where the interaction under test does not occur.** A test of a *coupling* between two quantities, run where they do not overlap, passes whatever the code does — measured, a coupled fit tested at a depth where a real variant and a sequencing error are never confusable returned the right answer from **every** starting point, including one a hundred times off, and four mutations survived it. **Choose the fixture against the regime where the thing being tested stops being distinguishable**, not against the regime that is convenient.
+
+A test that genuinely cannot separate two rules is not always a defect — sometimes no fixture can. When that is the case, say so on the test itself rather than leaving the next reader to rediscover it, and file the limitation rather than the test.
+
 ## Challenge tests (additional pass)
 
 For each non-trivial function in the changed code, identify at least one input class **not** covered by existing tests, name the specific bug that input class would expose, and provide the test as code. Add these under a `## Missing tests` heading at the bottom of your output file (in addition to per-rule findings). Each entry:
