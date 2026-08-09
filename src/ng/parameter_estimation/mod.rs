@@ -146,8 +146,15 @@ pub enum ParameterEstimationError {
         total: f64,
     },
 
-    /// Every starting point emptied one of the runs model's two states, so no
-    /// separation between them was found.
+    /// No starting point found two states that were both used **and** distinguishable, so
+    /// no separation between them was established.
+    ///
+    /// **Two conditions and not one**, which the message's "found no second state" covers
+    /// only loosely: a start fails it either by emptying the inside state — the collapsed
+    /// search — or by arriving at two states within
+    /// [`MAX_IDENTIFIED_STATE_RATIO`](crate::ng::parameter_estimation::generic::runs::MAX_IDENTIFIED_STATE_RATIO)
+    /// of each other, where `F` is not identified at all because the likelihood is exactly
+    /// flat in it.
     ///
     /// **This is not `F` = 0**, and the distinction is the reason the variant exists.
     /// An outcrossing genome and a search that failed leave identical fitted values —
@@ -169,10 +176,10 @@ pub enum ParameterEstimationError {
     /// [`Self::InbreedingStatesNotSeparated`].** There the search never found a second
     /// state; here it found one from every start and found a *different* one each time,
     /// with nothing to choose between them — which is what a chain reading sampling noise
-    /// looks like from the outside. Measured on genomes drawn with no runs at all, where
-    /// the two states came out at 0.31 and 0.62 of each other, well inside the ratio the
-    /// other check refuses on, and nine starts returned `F` from 0.0003 to 0.8497 while
-    /// scoring **within 0.91 nats of one another**
+    /// looks like from the outside. Measured on a genome drawn with no runs at all, where
+    /// nine starts returned `F` from 0.0003 to 0.8497 while scoring **within 0.91 nats of
+    /// one another**, and the winning start's two states sat at a ratio of 0.086 — nowhere
+    /// near the 0.9 the other check refuses on, so it saw nothing at all
     /// (`doc/devel/ng/research/inbreeding_resolution_2026-08-09.md` §1, §4, §6).
     ///
     /// **Only the tied starts count**, which is what keeps this from refusing a fit the
@@ -313,6 +320,51 @@ mod tests {
         assert!(
             message.contains("not an inbreeding coefficient"),
             "the reader must not take this for F = 0: {message}"
+        );
+    }
+
+    /// **The other message that has to say what it is not — and it also has to be tellable
+    /// apart from the one above.** Both refusals mean *no `F` was established*, and a
+    /// consumer that cannot tell which fired cannot act on either: one says widen the
+    /// separations, the other says the genome carries no signal to widen towards. So this
+    /// asserts the shared warning, the numbers only this variant has, and that the two
+    /// messages differ.
+    #[test]
+    fn the_disagreeing_starts_message_says_what_it_is_not_and_is_not_the_other_refusal() {
+        let disagreed = ParameterEstimationError::InbreedingStartsDisagree {
+            sample: "SL_landrace_07".to_string(),
+            tied_starts: 9,
+            starts: 9,
+            spread: 0.8494,
+            threshold: 0.05,
+        };
+        let message = disagreed.to_string();
+
+        assert!(message.contains("SL_landrace_07"), "{message}");
+        assert!(
+            message.contains("0.8494"),
+            "how far apart they landed: {message}"
+        );
+        assert!(
+            message.contains("0.05"),
+            "and what that was measured against: {message}"
+        );
+        assert!(
+            message.contains("not an inbreeding coefficient of zero"),
+            "the reader must not take this for F = 0 either: {message}"
+        );
+        assert!(
+            message.contains("supply F"),
+            "what to do about it: {message}"
+        );
+        assert_ne!(
+            message,
+            ParameterEstimationError::InbreedingStatesNotSeparated {
+                sample: "SL_landrace_07".to_string(),
+                starts: 9,
+            }
+            .to_string(),
+            "the two refusals have to be tellable apart in a log"
         );
     }
 

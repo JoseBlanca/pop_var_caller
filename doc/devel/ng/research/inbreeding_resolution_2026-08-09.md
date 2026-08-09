@@ -151,7 +151,8 @@ accepted, the smallest is 0.0004 and the largest 0.9980.
 §5 should have named.** Milestone E3's own fixtures do carry one — collapsed paralogs and
 mismapping lift both states together, and spec §6.2 requires the estimator to survive a
 floor of **five times** the real heterozygote rate. Applying a threshold of 0.05 to the raw
-spread refused three of `runs.rs`'s tests, two of them fits that recover their genome:
+spread refused three of `runs.rs`'s tests, and **all three assert a fit that recovers its
+genome**:
 
 | fixture | fitted `F` against realised | raw spread across nine starts |
 |---|---|---:|
@@ -164,7 +165,8 @@ on `F` = 0.3157 and three collapse to `F` = 0.0000 — and the three that collap
 **1,473 nats worse**. The fit has already rejected them, by a likelihood ratio of e^1473.
 
 **The failure looks nothing like that.** On a genome with no runs at five heterozygotes a
-window, the nine starts return `F` = 0.0010, 0.8497, 0.6015, 0.5722, 0.0003, 0.0051 and
+window, the nine starts return seven distinct values — `F` = 0.0010 from three of them, then
+0.8497, 0.6015, 0.5722, 0.0003, 0.0051 and
 0.0159 — and every one is within **0.91 nats** of the best, odds of 2.5 to 1, which decides
 nothing. That is §3.1's proof showing through: when the two states coincide the likelihood is
 *exactly* flat in `F`, so every answer scores the same.

@@ -210,30 +210,38 @@ pub const MAX_IDENTIFIED_STATE_RATIO: f64 = 0.9;
 /// apart, and the used-both-states check refuses a search that collapsed. Neither sees the
 /// failure measured in `research/inbreeding_resolution_2026-08-09.md`: on a genome with **no
 /// runs at all**, at five heterozygotes a window, the chain manufactures a separation out of
-/// sampling noise — the fitted inside rate comes out at 0.31 and 0.62 of the outside one,
-/// comfortably inside the ratio threshold — and returns `F` = 0.99. It is not a floor that
-/// can be raised: 3,000 windows × 5 heterozygotes fails where 6,000 × 5 does not, so what
-/// has to be detected is the failure mode and not a magnitude (§1).
+/// sampling noise and returns `F` = 0.99 with both other checks satisfied. On the harness's
+/// two worst cells the fitted state ratio averages 0.31 and 0.62 — nowhere near the 0.9 that
+/// would refuse it (§2); the fixture behind this file's own test is further out still, its
+/// winning start at a ratio of 0.086. It is not a floor that can be raised either: 3,000
+/// windows × 5 heterozygotes fails where 6,000 × 5 does not, so what has to be detected is
+/// the failure mode and not a magnitude (§1).
 ///
-/// **Where the number comes from.** Over **160 fits on genomes that have runs**, spanning
-/// twenty shapes — runs of 3 Mb and of 300 kb, covering 30%, 10% and 5% of the genome, each
-/// at 2, 5, 20 and 100 heterozygotes a window — every one of the nine starts landed on the
-/// same `F` to four decimal places. A spread of **0.0000**, everywhere (§3, §4). On genomes
-/// with no runs the tied starts land 0.0004 to 0.9980 apart.
+/// **The two populations do not overlap, and the reason is not margin.** Where the runs are
+/// real, the tied starts do not merely agree closely — they agree **exactly**. Measured at
+/// 0.0000 over the 160 fits of §3 and §4 (twelve window-count shapes plus twenty run shapes),
+/// and at 3.7 × 10⁻¹¹ on this file's own fixture where the assertion is on a printed value
+/// rather than a rounded table. A review swept a selfing landrace to a realised `F` of 0.9719
+/// across three evidence levels and false-heterozygote floors of 0 to 5 times the real rate:
+/// **every one at 0.0000**.
 ///
-/// A twentieth is inside that band with the nearest measured failure — a genome with no runs
-/// whose tied starts land 0.1147 apart — a factor of 2.3 above it, and every measured
-/// legitimate fit three orders of magnitude below. **It is set nearer the bottom on
-/// purpose**: the with-runs population is drawn from the model the fit assumes, so the honest
-/// reading of "exactly 0.0000" is *no measured lower bound on the margin*, and real data will
-/// not be that clean. Spec §6.1's instruction for this parameter is *fail rather than emit* —
-/// refusing costs an error the caller answers by supplying `F`, and accepting costs `F` = 0.99
-/// on an outcrosser, with the cohort's diversity divided by `1 − F`.
+/// **Where a genome has no runs, there is no cluster to sit outside of.** Twenty-four seeds at
+/// this file's fixture shape, all drawn with no runs: seven refused for never separating, and
+/// the rest spread **0.0213, 0.0264, 0.0323, 0.0337, 0.0483, 0.0521, 0.0541, 0.0584, 0.0621,
+/// 0.0675, 0.0722, 0.0740, 0.1027, 0.1144, 0.1368, 0.1375, 0.2749** — a continuum, with no gap
+/// at a twentieth or anywhere else. **So this threshold is not separating two clusters. It
+/// chooses how aggressively to refuse a population that is unidentified at every point in
+/// it**, and the only bound measurement gives is that it must be above zero and below the
+/// worst case. At 0.05 it refuses 41 of the 46 no-runs genomes drawn for it and accepts five
+/// returning `F` between 0.0019 and 0.0505.
 ///
-/// **What it also refuses, deliberately.** Benign fits on genomes with no runs, whose starts
-/// scatter while `F` itself comes back below its own resolution. Those cost nothing: on a
-/// genome with no runs `F` is not identified, and the design's own answer there is to say so
-/// rather than to emit a number that means *nothing was found*.
+/// **A twentieth rather than a thousandth, and the reason is real data.** Nothing measured
+/// distinguishes them — both accept every legitimate fit and refuse every catastrophic one —
+/// so what decides it is that the legitimate population's *exactly* 0.0000 is a property of
+/// genomes drawn from the model the fit assumes, and real data will not be that clean. The
+/// cost of the choice runs the other way from spec §6.1's *fail rather than emit*, and it is
+/// bounded: what a twentieth lets through instead of a thousandth is an outbred genome
+/// answered at an `F` of a few hundredths.
 pub const MAX_IDENTIFIED_START_SPREAD: f64 = 0.05;
 
 /// How far behind the best-scoring start another start may sit and still count as **tied**
@@ -248,20 +256,27 @@ pub const MAX_IDENTIFIED_START_SPREAD: f64 = 0.05;
 /// e^1473.
 ///
 /// **The failure looks nothing like that, and the score is what says so.** On a genome with
-/// no runs at all the nine starts return `F` = 0.0010, 0.8497, 0.6015, 0.5722, 0.0003,
-/// 0.0051 and 0.0159 — and every one of them is within **0.91 nats** of the best. They are
-/// not competing answers; they are the same answer, because research note §3.1's proof says
-/// the likelihood is flat in `F` when the two states coincide. A start beaten by 0.91 nats
-/// has been beaten by odds of 2.5 to 1, which decides nothing.
+/// no runs at all the nine starts return seven distinct values — `F` = 0.0010 from three of
+/// them, then 0.8497, 0.6015, 0.5722, 0.0003, 0.0051 and 0.0159 — and every one is within
+/// **0.91 nats** of the best. They are not competing answers; they are the same answer,
+/// because research note §3.1's proof says the likelihood is flat in `F` when the two states
+/// coincide. A start beaten by 0.91 nats has been beaten by about five to two, which decides
+/// nothing.
 ///
 /// So the two populations are separated by the **score gap** and not by the spread: 0.91
-/// nats where the answer is not identified, 1,473 where a start was genuinely rejected —
-/// a factor of 1,600. Ten nats sits between them, eleven times above the first and a
-/// hundred and forty-seven times below the second. It is an odds ratio of about 22,000 to
-/// one, which is decisive by any convention; and it is an absolute number rather than a
-/// fraction of the total because a likelihood **ratio** is what compares two fits, and that
-/// does not grow with the genome. (The totals here differ eightfold, −225,690 against
-/// −1,802,300, and the two gaps do not track them.)
+/// nats where the answer is not identified, 1,473 where a start was genuinely rejected — a
+/// factor of 1,600. Ten nats sits between them, eleven times above the first and a hundred
+/// and forty-seven times below the second.
+///
+/// **Why an absolute number of nats is the right shape, and it is the opposite of the obvious
+/// argument.** A log-likelihood difference between two genuinely different fits *does* grow
+/// with the genome — each window contributes, so 1,473 nats on this fixture would be about
+/// 2,900 on one twice as long. What does **not** grow is the gap in the failure case: there
+/// the two fits are the same distribution, so their difference is sampling noise and stays of
+/// order one at any genome size. An absolute cut therefore separates them at every scale, and
+/// a cut proportional to the total would drift into the failure population as the genome grew.
+/// (The two totals measured here differ eightfold, −225,690 against −1,802,300, and the two
+/// gaps differ by 1,600 — so proportionality does not describe them either way.)
 pub const MAX_TIED_START_LOG_LIKELIHOOD_GAP: f64 = 10.0;
 
 // **The bounds the two constants above were measured between, checked at build time.** Each
@@ -269,10 +284,27 @@ pub const MAX_TIED_START_LOG_LIKELIHOOD_GAP: f64 = 10.0;
 // anything, and each has a measured side it must not cross; a compile error says so at the
 // moment of the edit, where a red test says so after a build. The same device guards the
 // error-rate ladder's rung count (`generic/mod.rs`).
+//
+// **The spread's two bounds are not alike in strength, and saying so is the point.** The lower
+// one is tight: the measured legitimate population sits at 3.7 × 10⁻¹¹, so anything at or
+// below that refuses fits that recovered their genome. The upper one is **weak** — it only
+// says the criterion still refuses the worst case ever measured. There is no tight upper
+// bound to be had, because the no-runs population is a continuum with no gap in it; what
+// picks a twentieth out of that interval is the judgement recorded on the constant, not a
+// measurement. An earlier version of this assert claimed 0.1147 as "the narrowest
+// disagreement measured on a genome with no runs" and was wrong: 0.1147 was the narrowest
+// among the fits this very threshold had *refused*, so the sample was censored by the number
+// it was being used to justify. Uncensored, the same shape gives 0.0213.
 const _: () = assert!(
-    MAX_IDENTIFIED_START_SPREAD < 0.1147,
-    "the narrowest disagreement measured on a genome with no runs is 0.1147, and a threshold \
-     at or above it stops refusing the failure this exists for"
+    MAX_IDENTIFIED_START_SPREAD > 1e-6,
+    "the tied starts of a fit that recovered its genome agree to 3.7e-11, and a threshold at \
+     or below that refuses every fit this estimator is for"
+);
+const _: () = assert!(
+    MAX_IDENTIFIED_START_SPREAD < 0.8494,
+    "0.8494 is the narrowest spread measured on a genome with no runs that the fit would \
+     otherwise have answered near one; at or above it this check stops refusing its own worst \
+     case"
 );
 const _: () = assert!(
     MAX_TIED_START_LOG_LIKELIHOOD_GAP > 0.91,
@@ -362,6 +394,20 @@ impl RunsModelFit {
     pub fn spread_across_tied_starts(&self) -> f64 {
         spread_across_tied_starts(&self.starts_tried)
     }
+
+    /// The starting points the spread above was taken over: those within
+    /// [`MAX_TIED_START_LOG_LIKELIHOOD_GAP`] of the best.
+    ///
+    /// **Exposed because a spread of zero means two different things and this is what tells
+    /// them apart.** Nine starts agreeing is the margin the threshold rests on; *one* start
+    /// compared with itself is a criterion that did nothing, and both report 0.0000. It
+    /// happens: at a realised `F` of 0.95 with a floor of spurious heterozygotes five times
+    /// the real rate, one start in nine is tied. Without this, no test and no consumer can
+    /// see the difference.
+    #[must_use]
+    pub fn tied_starts(&self) -> &[StartOutcome] {
+        tied_starts(&self.starts_tried)
+    }
 }
 
 /// The starts that scored within [`MAX_TIED_START_LOG_LIKELIHOOD_GAP`] of the best.
@@ -388,19 +434,27 @@ fn tied_starts(starts: &[StartOutcome]) -> &[StartOutcome] {
 ///
 /// Zero for an empty slice, which the fit does not produce — it refuses an empty start set
 /// before this is reached.
+///
+/// **A `NaN` among the fitted values makes the whole spread `NaN`**, which the caller treats
+/// as a refusal. It has to be written out rather than left to `f64::max`, which *ignores*
+/// `NaN` and would have dropped such a start from the range silently — and if every tied
+/// start were `NaN` the fold would return `−∞`, compare false against the threshold, and
+/// **accept**. That is the exact inversion of [`tied_starts`]' rule for an unreadable score,
+/// in the one place a fit is waved through rather than refused.
 fn spread_across_tied_starts(starts: &[StartOutcome]) -> f64 {
     let tied = tied_starts(starts);
     if tied.is_empty() {
         return 0.0;
     }
-    let highest = tied
-        .iter()
-        .map(|start| start.inbreeding)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let lowest = tied
-        .iter()
-        .map(|start| start.inbreeding)
-        .fold(f64::INFINITY, f64::min);
+    let mut highest = f64::NEG_INFINITY;
+    let mut lowest = f64::INFINITY;
+    for start in tied {
+        if start.inbreeding.is_nan() {
+            return f64::NAN;
+        }
+        highest = highest.max(start.inbreeding);
+        lowest = lowest.min(start.inbreeding);
+    }
     highest - lowest
 }
 
@@ -513,11 +567,12 @@ pub fn fit_inbreeding(
     }
 
     // **The third refusal, and the one the other two are blind to.** A genome with no runs
-    // at all can have its chain manufacture a separation out of sampling noise: the two
-    // states come out 0.31 and 0.62 of each other, well inside `MAX_IDENTIFIED_STATE_RATIO`,
-    // both are used, and `F` comes back at 0.99. What gives it away is that the starts which
-    // cannot be told apart by score then land in completely different places — 0.0000 across
-    // 160 fits wherever the runs are real, and up to 0.9980 wherever they are not
+    // at all can have its chain manufacture a separation out of sampling noise: both states
+    // are used, the two of them come out far enough apart to clear
+    // `MAX_IDENTIFIED_STATE_RATIO` with room to spare, and `F` comes back near one. What
+    // gives it away is that the starts which cannot be told apart by score then land in
+    // completely different places — 0.0000 across 160 fits wherever the runs are real, and up
+    // to 0.9980 wherever they are not
     // (`research/inbreeding_resolution_2026-08-09.md` §4, §6).
     //
     // **Checked after the separation checks and not before**, so that a collapsed search —
@@ -525,7 +580,10 @@ pub fn fit_inbreeding(
     // a disagreement about a value none of them found.
     let tied = tied_starts(&starts_tried).len();
     let spread = spread_across_tied_starts(&starts_tried);
-    if spread > MAX_IDENTIFIED_START_SPREAD {
+    // `is_nan()` first and not folded into the comparison: every comparison against `NaN` is
+    // false, so `spread > threshold` alone would **accept** a fit whose starts disagreed by an
+    // unreadable amount.
+    if spread.is_nan() || spread > MAX_IDENTIFIED_START_SPREAD {
         return Err(ParameterEstimationError::InbreedingStartsDisagree {
             sample: sample.to_string(),
             tied_starts: tied,
@@ -1254,16 +1312,28 @@ mod tests {
     /// **The spread is the full range over the *tied* starts** — not the gap between the
     /// best two, and not the range over all of them.
     ///
-    /// Four properties, and each is a rule the others cannot see, written on outcomes in
-    /// best-score order as the fit produces them.
+    /// Five properties, each a rule the others cannot see, written on outcomes in best-score
+    /// order as the fit produces them.
+    ///
+    /// **These four outcomes are written down rather than fitted, and the two log-likelihood
+    /// gaps in them are the measured ones** — 0.02 nats for a start that cannot be told from
+    /// the best, 1,473 for one the data rejected (`research/inbreeding_resolution` §6.2).
     ///
     /// - The widest pair is deliberately **not** the top two: taking the best and
     ///   second-best would report 0.02 where the answer is 0.30.
-    /// - The fourth start is 1,473 nats behind — the measured gap to a collapsed start on a
-    ///   genome with real runs — so it is excluded. Including it would report 0.32 and refuse
-    ///   this fit, which is the failure the tie rule exists to prevent.
+    /// - The fourth start is 1,473 nats behind, so it is excluded. Including it would report
+    ///   0.32 and refuse this fit, which is the failure the tie rule exists to prevent.
     /// - The three that are kept sit 0.00, 0.02 and 0.30 behind, which brackets the tie gap
     ///   from below: a rule that kept only the exactly-equal starts would report 0.00 here.
+    /// - A second slice straddles the gap at 5 and 50 nats, which is what makes the **value**
+    ///   of [`MAX_TIED_START_LOG_LIKELIHOOD_GAP`] load-bearing rather than merely bounded.
+    ///   Without it the constant survives anywhere from 0.92 to 1,472.9 — the whole range its
+    ///   build-time asserts permit — because no other fixture has a start between 0.3 and
+    ///   1,473 nats behind.
+    /// - A `NaN` score counts as tied, so the disagreement it carries refuses the fit. That
+    ///   is stated in [`tied_starts`]' doc and nothing else checks it: inverting the
+    ///   comparison to `!(gap <= limit)`, which reads as equivalent, drops the `NaN` start
+    ///   instead.
     #[test]
     fn the_spread_is_the_range_over_the_starts_that_scored_alike() {
         let outcome = |inbreeding: f64, log_likelihood: f64| StartOutcome {
@@ -1281,9 +1351,31 @@ mod tests {
 
         assert_eq!(tied_starts(&starts).len(), 3);
         assert!((spread_across_tied_starts(&starts) - 0.30).abs() < 1e-12);
+
+        // Five nats behind is tied — beaten by 150 to 1, which settles nothing. Fifty is
+        // not: 5 × 10²¹ to 1.
+        let straddling = [
+            outcome(0.30, -1_000.0),
+            outcome(0.31, -1_005.0),
+            outcome(0.90, -1_050.0),
+        ];
+        assert_eq!(tied_starts(&straddling).len(), 2);
+        assert!((spread_across_tied_starts(&straddling) - 0.01).abs() < 1e-12);
+
+        // An unreadable score cannot be told apart from the best, so it ties, and the
+        // disagreement it brings with it refuses — spec §6.1's direction.
+        let unreadable = [outcome(0.10, -1.0), outcome(0.90, f64::NAN)];
+        assert_eq!(tied_starts(&unreadable).len(), 2);
+        assert!(spread_across_tied_starts(&unreadable) > MAX_IDENTIFIED_START_SPREAD);
+
+        // An unreadable *`F`* refuses too, and by a different route: `f64::max` ignores
+        // `NaN`, so a fold would have dropped this start from the range and reported 0.0.
+        assert!(
+            spread_across_tied_starts(&[outcome(0.10, -1.0), outcome(f64::NAN, -1.0)]).is_nan()
+        );
+
         // One start is no spread at all, and no start is none either — the fit refuses an
-        // empty start set long before this, and a NaN here would compare false against the
-        // threshold and admit everything.
+        // empty start set long before this.
         assert_eq!(spread_across_tied_starts(&[outcome(0.26, -1.0)]), 0.0);
         assert_eq!(spread_across_tied_starts(&[]), 0.0);
     }
@@ -1293,10 +1385,53 @@ mod tests {
     /// they have to sit between are checked at build time instead** — see the
     /// `const _: () = assert!` block beside the constants, which makes moving either one
     /// outside the measurement an `error[E0080]` rather than a red test.
+    ///
+    /// **A pin is a weak test and it is worth saying which part is weak.** It catches a
+    /// value that was changed without the doc being changed; it says nothing about whether
+    /// the value is right. What constrains the spread from both sides is
+    /// `the_spread_threshold_answers_the_measured_spread_below_it_and_refuses_the_one_above`,
+    /// and what constrains the tie gap from both sides is the straddling slice above.
     #[test]
     fn the_start_agreement_thresholds_are_the_measured_ones() {
         assert!((MAX_IDENTIFIED_START_SPREAD - 0.05).abs() < 1e-12);
         assert!((MAX_TIED_START_LOG_LIKELIHOOD_GAP - 10.0).abs() < 1e-12);
+    }
+
+    /// **Both sides of the threshold, on numbers the drawn genomes cannot reach.** Every
+    /// fixture in this file either agrees to 3.7 × 10⁻¹¹ or disagrees by more than 0.1, so
+    /// the whole interval between is untested by them — a review moved the constant to
+    /// 0.001 and to 0.1146 and the entire suite stayed green both times.
+    ///
+    /// The two spreads below are measured ones, from an uncensored sweep of twenty-four
+    /// genomes drawn with **no runs at all** at twenty heterozygotes a window: 0.0213 was
+    /// answered and 0.0521 refused, and they are adjacent in that sweep's ordering. **What
+    /// they bracket is a judgement, not a boundary in the data** — the no-runs spreads run
+    /// 0.0213, 0.0264, 0.0323, 0.0337, 0.0483, 0.0521, 0.0541 … in an unbroken line, so
+    /// there is no gap here for a threshold to sit in. These two pin where it was put.
+    #[test]
+    fn the_spread_threshold_answers_the_measured_spread_below_it_and_refuses_the_one_above() {
+        let outcome = |inbreeding: f64| StartOutcome {
+            separation: 1.0 / 3.0,
+            implied_f: 0.5,
+            inbreeding,
+            log_likelihood: -1_000.0,
+        };
+
+        let answered = spread_across_tied_starts(&[outcome(0.30), outcome(0.30 + 0.0213)]);
+        assert!(
+            answered <= MAX_IDENTIFIED_START_SPREAD,
+            "a spread of {answered} has to be inside the threshold of \
+             {MAX_IDENTIFIED_START_SPREAD}; tightening it below this refuses a fit whose \
+             starts nearly agree"
+        );
+
+        let refused = spread_across_tied_starts(&[outcome(0.30), outcome(0.30 + 0.0521)]);
+        assert!(
+            refused > MAX_IDENTIFIED_START_SPREAD,
+            "a spread of {refused} has to be outside the threshold of \
+             {MAX_IDENTIFIED_START_SPREAD}; loosening it past this answers a genome that \
+             has no runs in it at all"
+        );
     }
 
     /// The runs model's floor is stated where the model lives, not beside the
@@ -1628,6 +1763,16 @@ mod tests {
                 fit.spread_across_tied_starts() < 0.0001,
                 "nominal {nominal}: the nine starts spread by {}",
                 fit.spread_across_tied_starts()
+            );
+            // **A spread of zero over one start is not agreement, it is an empty
+            // comparison** — and both print 0.0000. Asserting the tie set's size is what
+            // makes the line above say something; at a realised `F` of 0.95 under a
+            // five-fold false-heterozygote floor only one start in nine ties, and there the
+            // criterion contributes nothing.
+            assert_eq!(
+                fit.tied_starts().len(),
+                9,
+                "nominal {nominal}: the margin above is claimed over all nine starts"
             );
         }
 
@@ -2309,13 +2454,46 @@ mod tests {
         )
         .expect_err("nine starts landing 0.85 apart have not identified an F");
 
-        let ParameterEstimationError::InbreedingStartsDisagree { spread, .. } = error else {
+        let ParameterEstimationError::InbreedingStartsDisagree {
+            sample,
+            tied_starts,
+            starts,
+            spread,
+            threshold,
+        } = &error
+        else {
             panic!("the wrong failure, so this says nothing about the spread: {error}");
         };
         assert!(
-            spread > 0.5,
+            *spread > 0.5,
             "the nine starts have to land far apart for this fixture to be the failure it \
              is named for: {spread}"
+        );
+        assert_eq!(sample, "noisy");
+        assert_eq!(*starts, 9);
+        assert_eq!(
+            *tied_starts, 9,
+            "every start scored within the tie gap on this fixture, which is what makes the \
+             disagreement a disagreement rather than a set of rejected competitors"
+        );
+        assert!((*threshold - MAX_IDENTIFIED_START_SPREAD).abs() < 1e-12);
+
+        // **The message, which is the whole point of the variant.** A caller who reads this
+        // as *nothing was found* will divide the cohort's diversity by `1 − F` with a
+        // defaulted `F`, which is the harm the third refusal exists to prevent. Its sibling
+        // `InbreedingStatesNotSeparated` is guarded on exactly this and it must be too.
+        let message = error.to_string();
+        assert!(
+            message.contains("not an inbreeding coefficient of zero"),
+            "the message has to say what it is not: {message}"
+        );
+        assert!(
+            message.contains("supply F"),
+            "the message has to say what to do about it: {message}"
+        );
+        assert!(
+            message.contains("noisy"),
+            "a cohort run of hundreds needs the sample named: {message}"
         );
     }
 
@@ -2359,6 +2537,11 @@ mod tests {
              MAX_IDENTIFIED_START_SPREAD to be this fixture's: {}",
             fit.spread_across_tied_starts()
         );
+        assert_eq!(
+            fit.tied_starts().len(),
+            9,
+            "all nine tie here, so the agreement above is over all of them"
+        );
     }
 
     /// And neither check refuses a fit that **is** identified — including the hardest one
@@ -2401,6 +2584,12 @@ mod tests {
             fit.spread_across_tied_starts() < 0.0001,
             "the starts that scored alike have to agree: {}",
             fit.spread_across_tied_starts()
+        );
+        assert_eq!(
+            fit.tied_starts().len(),
+            6,
+            "six of the nine tie and three are the rejected collapse — a tie set of one \
+             would satisfy the line above while comparing a start with itself"
         );
         let raw_range = fit
             .starts_tried

@@ -22,7 +22,8 @@ same question of genomes whose runs are shorter or rarer — 300 kb runs, and 10
 coverage — crossed with the four evidence levels, five seeds each.
 
 **All 100 answered, none refused, worst recovery error 0.0100, and every one has a spread of
-0.0000.** Over §3 and §4 together — **160 fits at twenty shapes** — the largest spread is
+0.0000.** Over §3 and §4 together — **160 fits, twenty run shapes crossed with §3's twelve
+window-count shapes** — the largest spread is
 0.0000. The suspicion does not hold up: the starts agree wherever the runs are real.
 
 ### 2. The shape nobody had named, and it is the one that matters (note §6.2)
@@ -32,8 +33,8 @@ E3's own fixtures are not: collapsed paralogs and mismapping lift both states to
 spec §6.2 requires this estimator to survive a floor of five times the real heterozygote
 rate.
 
-Applied as the note recommended, the criterion refused three of `runs.rs`'s tests — two of
-them fits that recover their genome:
+Applied as the note recommended, the criterion refused three of `runs.rs`'s tests, and **all
+three assert a fit that recovers its genome**:
 
 | fixture | fitted `F` against realised | raw spread over nine starts |
 |---|---|---:|
@@ -47,10 +48,11 @@ and the three that collapsed score **1,473 nats worse**. They are not disagreein
 answer; they have been rejected by a likelihood ratio of e^1473.
 
 The failure looks nothing like that. On a genome with no runs at five heterozygotes a window
-the nine starts return `F` = 0.0010, 0.8497, 0.6015, 0.5722, 0.0003, 0.0051 and 0.0159 — and
-every one is within **0.91 nats** of the best, odds of 2.5 to 1. That is research note §3.1's
-proof showing through: at coincident states the likelihood is exactly flat in `F`, so every
-answer scores the same.
+the nine starts return seven distinct values — `F` = 0.0010 from three of them, then 0.8497,
+0.6015, 0.5722, 0.0003, 0.0051 and 0.0159 — and
+every one is within **0.91 nats** of the best, about five to two. That is research note
+§3.1's proof showing through: at coincident states the likelihood is exactly flat in `F`, so
+every answer scores the same.
 
 **So the score separates the two populations where the spread does not** — 0.91 nats against
 1,473, a factor of 1,600 — while the spreads themselves overlap, 0.30 to 0.33 legitimate
@@ -59,21 +61,42 @@ against 0.0004 to 0.998 not.
 ## What was built
 
 **`MAX_TIED_START_LOG_LIKELIHOOD_GAP = 10.0` nats.** Which starts count as tied with the
-best. Eleven times above the measured tie, 147 times below the measured rejection; an odds
-ratio of about 22,000 to one. **An absolute number and not a fraction of the total**, because
-a likelihood *ratio* is what compares two fits and it does not grow with the genome — the two
-totals behind those gaps differ eightfold and the gaps do not track them.
+best. Eleven times above the measured tie, 147 times below the measured rejection.
 
-**`MAX_IDENTIFIED_START_SPREAD = 0.05`.** How far the tied starts may disagree about `F`.
-Above every measured legitimate fit by three orders of magnitude and 2.3× below the nearest
-measured failure.
+**An absolute number of nats rather than a fraction of the total, and the reason is the
+opposite of the obvious one.** A log-likelihood difference between two genuinely different
+fits *does* grow with the genome — every window contributes, so 1,473 nats here would be
+about 2,900 on a genome twice as long. What does **not** grow is the gap in the failure case,
+where the two fits are the same distribution and their difference is sampling noise. An
+absolute cut therefore separates them at every scale, and a proportional one would drift into
+the failure population as the genome grew. (An earlier draft of this argued the reverse — that
+a likelihood ratio does not grow with the genome — which is false and is the kind of wrong
+story this project rates worse than a wrong number.)
+
+**`MAX_IDENTIFIED_START_SPREAD = 0.05`, and its justification is weaker than the tie gap's —
+which is the honest thing to record.** An uncensored sweep of 24 no-runs seeds at this
+fixture's own shape gives spreads of 0.0213, 0.0264, 0.0323, 0.0337, 0.0483, 0.0521, 0.0541,
+0.0584, 0.0621, 0.0675, 0.0722, 0.0740, 0.1027, 0.1144, 0.1368, 0.1375 and 0.2749: **a
+continuum, with no gap at a twentieth or anywhere else**. So this threshold is not separating
+two clusters — it chooses how aggressively to refuse a population that is unidentified at
+every point in it. The legitimate side is what makes any choice safe: not merely small but
+*exactly* 0.0000 across 160 harness fits, and 3.7 × 10⁻¹¹ on this file's own fixture. A
+twentieth rather than a thousandth is a judgement that real data will be less clean than a
+drawn genome, and what it costs is an outbred genome answered at an `F` of a few hundredths.
+
+**An earlier version of this section claimed a factor of 2.3 between the threshold and the
+nearest measured failure. There is no such margin.** The 0.1147 it rested on was the smallest
+spread among the fits *this threshold had refused* — a sample censored by the very number it
+was being used to justify. Its build-time assert has been replaced.
 
 **`tied_starts` and `spread_across_tied_starts`,** the second exposed as
 `RunsModelFit::spread_across_tied_starts()`. A **method rather than a field**, so the number a
 consumer reads and the number the fit was accepted on cannot drift apart; the harness reads it
 through the same method for the same reason. `tied_starts` returns a **prefix**, because
 `starts_tried` is documented best-first — so a stray start further down cannot be picked up.
-A `NaN` likelihood counts as tied, which refuses rather than admits.
+A `NaN` likelihood counts as tied, which refuses rather than admits; a `NaN` fitted `F`
+makes the whole spread `NaN`, which the caller also treats as a refusal — written out rather
+than left to `f64::max`, which ignores `NaN` and would have dropped the start silently.
 
 **`ParameterEstimationError::InbreedingStartsDisagree`,** carrying the sample, how many starts
 tied, how many were tried, the spread and the threshold. **A fifth variant rather than a reuse
@@ -110,9 +133,26 @@ why the test asserts the variant rather than merely asserting a refusal.
 - **`f_recovers_a_drawn_genomes_realised_autozygous_fraction`** gained a spread assertion at
   all four nominal levels — the margin the threshold is set against, on this file's own
   genomes rather than only the harness's.
-- **Three `const _: () = assert!` blocks** put the measured bounds on both constants at build
+- **`a_fit_whose_tied_starts_land_a_fiftieth_apart_is_still_answered`** — the threshold's
+  lower side, which nothing else reaches. Every drawn fixture either agrees to 3.7 × 10⁻¹¹ or
+  disagrees by more than 0.1, so tightening 0.05 to 0.001 left the whole suite green; a review
+  demonstrated exactly that.
+- **The straddling slice at 5 and 50 nats** in the unit test, which makes the tie gap's
+  *value* load-bearing. Without it the constant survived anywhere from 0.92 to 1,472.9 — the
+  entire range its build-time asserts permit — because no other fixture has a start between
+  0.3 and 1,473 nats behind.
+- **The error's payload and message**, asserted field by field, including that it says *not an
+  inbreeding coefficient of zero* and *supply F*, and that it does not render identically to
+  `InbreedingStatesNotSeparated`. Before this, garbling all five fields and replacing the whole
+  message left 291 tests green.
+- **The tie set's size**, asserted wherever the margin is claimed. A spread of zero over one
+  start is an empty comparison and prints the same 0.0000 as nine starts agreeing; at a
+  realised `F` of 0.95 under a five-fold floor only one start in nine ties.
+- **Four `const _: () = assert!` blocks** put the measured bounds on both constants at build
   time, so moving either outside its measurement is an `error[E0080]` rather than a red test.
-  The same device guards the error-rate ladder's rung count.
+  The same device guards the error-rate ladder's rung count. **The spread's upper bound is
+  deliberately weak** — it says only that the criterion still refuses the worst case measured
+  — because there is no tight bound to be had from a continuum.
 
 ### The harness re-run with it in place (note §6.4)
 
@@ -134,21 +174,34 @@ what it does to every cell that was measured before it existed.
 - **The criterion is not the note's.** The note recommends a bare threshold on the raw spread;
   what is built is a threshold on the spread over the tied starts. Adopting the note's form as
   written would refuse the robustness spec §6.2 requires. Recorded in the note itself as §6.
-- **A fifth error variant** where arch §5.4 and the plan's A6 name four. The enum is
+- **A new error variant** where arch §5.4 and the plan's A6 name four. The enum is
   `#[non_exhaustive]` and its doc anticipates growth, so this is not a breaking change — but
   the design docs now understate the count, and that is on the drift list below.
 
 ## Design-doc drift this creates, for the owner
 
 1. **arch §5.4 and the plan's A6 name four `ParameterEstimationError` variants**; there are
-   five.
+   **six**. This commit adds one, and `GenotypeFrequenciesOffSimplex` predates it and is
+   absent from arch §5.4 too. The same block is stale three further ways, all pre-existing:
+   `InbreedingNotFittable` and `GenotypeFrequenciesNotFittable` both gained a `floor` field,
+   and `Domain` is a struct variant carrying `sample` and `fit` rather than
+   `#[error(transparent)] Domain(#[from] DomainError)`.
 2. **arch §5.3's contract** rejects a fit "when no start left posterior mass on both states".
    There are now three refusals, and this is the only one of them the architecture names.
 3. **spec §6.5's third emitted quantity** is "the spread across starting points — the best and
    second-best `F` and their scores". Two things about that sentence are now measured: the
-   spread is a *criterion* and not only a report, and *best-and-second-best* is exactly the
-   pair the measurement rejects — at the 5× floor it reports 0.02 where the range over the
-   tied starts is 0.30.
+   spread is a *criterion* and not only a report, and *best-and-second-best* is the wrong pair
+   — on the four written-down outcomes of the unit test it reports 0.02 where the range over
+   the tied starts is 0.30. (At the 5× floor the six tied starts all return 0.315740, so both
+   readings give 0.0000 there; an earlier version of this item attributed the 0.02/0.30 pair
+   to that fixture, which does not produce it.)
+4. **spec §6.5's second bullet** — *"A run where every start returned the same `F` at the same
+   score has not measured zero autozygosity; it has failed to find anything"* — now states the
+   inverse of the criterion as prose. Every legitimate fit measured is exactly that: all nine
+   starts returning the same `F` at the same score. The sentence's intent is covered by
+   `InbreedingStatesNotSeparated`, but as written it reads against what was adopted.
+5. **The plan's E3 step**, "return `InbreedingStatesNotSeparated` — never zero — when no start
+   left mass on both states", has the same defect item 2 records for arch §5.3.
 
 ## What this does not establish
 
