@@ -25,6 +25,8 @@ pub mod fallback;
 pub mod histogram;
 pub mod noise_model;
 pub mod read_group_error_rate;
+#[cfg(test)]
+mod recovery;
 pub mod runs;
 
 use std::collections::BTreeMap;

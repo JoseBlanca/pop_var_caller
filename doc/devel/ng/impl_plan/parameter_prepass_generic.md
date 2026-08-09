@@ -423,7 +423,7 @@ so the two cannot diverge. A `LocusGenerationError` in the stream is fatal and p
 loci a walk failed to produce are missing evidence, not zero evidence, and a rate fitted over a
 truncated genome is wrong in a way nothing announces. *Depends:* E4. *Source:* arch §1.1.
 
-**F2. Recovery from a directly-filled accumulator — no reads, no reference.**  ☐
+**F2. Recovery from a directly-filled accumulator — no reads, no reference.**  ✅
 Fill a histogram cell by cell from known parameters and refit. At ploidy 2 **and 4**, and
 **at 3 reads a site and at 300×**: at tomato's depth every site sits in a one-per-depth bin,
 so a binning fault is invisible below about 100×, and the deep arm is the only one that

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use super::depth_bins::DepthBinEdges;
 use super::histogram::{DepthAltHistogram, DepthAndAltReads};
+use crate::genetics::lgamma;
 use crate::ng::types::{Bp, Ploidy};
 
 /// `p_j(ε)` — the chance one read shows something other than the reference base, at `j`
@@ -72,13 +73,7 @@ pub(super) fn table_generated_at(
         let mut probability = 0.0;
         for (alt_copies, &frequency) in genotype_frequencies.iter().enumerate() {
             let p = alternative_read_probability(alt_copies as u8, ploidy, error_rate);
-            // The binomial term, built up from `k = 0` rather than through a factorial,
-            // which at the depths used here keeps every intermediate inside `f64`.
-            let mut term = (1.0 - p).powi(depth as i32);
-            for step in 1..=alt_reads {
-                term *= f64::from(depth - step + 1) / f64::from(step) * p / (1.0 - p);
-            }
-            probability += frequency * term;
+            probability += frequency * binomial_probability(alt_reads, depth, p);
         }
         let in_cell = (sites * probability).round() as u64;
         for _ in 0..in_cell {
@@ -86,4 +81,33 @@ pub(super) fn table_generated_at(
         }
     }
     histogram
+}
+
+/// `Binomial(k; n, p)`, computed through logs.
+///
+/// **An earlier version built the term up from `k = 0` by repeated multiplication**, starting
+/// at `(1 − p)^n`, on the stated grounds that it "keeps every intermediate inside `f64` at the
+/// depths used here". It did — until F2 raised the depth. At `n = 124` and a homozygous
+/// non-reference genotype, `p` is `1 − ε/3` and the starting term is `0.00033^124`, which is
+/// about `10⁻⁴³¹` and **underflows to exactly zero**; every later multiplication keeps it
+/// there. The whole genotype then contributes nothing to any cell, so the table silently
+/// omits its homozygous non-reference sites and the fit correctly reports a frequency of
+/// 0.0000 for a class the fixture never generated.
+///
+/// That is the failure mode this file exists to avoid, in the file every fit's tests share: a
+/// fixture that quietly asks a different question than the one written down. Logs have no
+/// such cliff — `ln` of the same term is −992, an ordinary number — and `exp` at the end
+/// returns a genuinely tiny probability as a tiny probability rather than as nothing.
+fn binomial_probability(successes: u32, trials: u32, p: f64) -> f64 {
+    if p <= 0.0 {
+        return f64::from(u8::from(successes == 0));
+    }
+    if p >= 1.0 {
+        return f64::from(u8::from(successes == trials));
+    }
+    let ln_choose = lgamma(f64::from(trials) + 1.0)
+        - lgamma(f64::from(successes) + 1.0)
+        - lgamma(f64::from(trials - successes) + 1.0);
+    (ln_choose + f64::from(successes) * p.ln() + f64::from(trials - successes) * (1.0 - p).ln())
+        .exp()
 }
