@@ -173,6 +173,28 @@ const UNDECIDED_HIGH: f64 = 0.99;
 /// and so that `ln 0` never reaches the chain.
 const RATE_FLOOR: f64 = 1e-9;
 
+/// How close the two states' heterozygote rates may come before `F` stops being identified
+/// at all: the inside rate must be **at most this fraction** of the outside one.
+///
+/// **The design's identifying constraint is `h << Hout`** (spec §6.1) — much less than, not
+/// merely less than — and this is that constraint given a number. Research note §3.1 proves
+/// why it is not a matter of precision: at coincident states every window's emission is the
+/// same under either state, so the likelihood is *exactly* flat in `F` and what a fit
+/// returns is its own accident.
+///
+/// **Where the number comes from.** Measured across this file's own fixtures, a legitimate
+/// fit's inside rate sits at 0.036 to 0.045 of its outside rate with no false heterozygotes,
+/// rising to **0.842** under a floor of spurious heterozygotes five times the real rate —
+/// which is the most extreme case spec §6.2 asks this estimator to survive. The two
+/// confident wrong answers on genomes with no runs at all sat at **0.929 and 0.968**. Nine
+/// tenths is between them, nearer the failures than the extreme legitimate case.
+///
+/// **The asymmetry is what settles it.** Refusing a fit costs an error the caller answers by
+/// supplying `F`; accepting one costs `F` = 0.9995 on an outcrossing genome, and a cohort's
+/// diversity divides by `1 − F`. Spec §6.1's own instruction for this parameter is *fail
+/// rather than emit*.
+const MAX_IDENTIFIED_STATE_RATIO: f64 = 0.9;
+
 /// What `F` comes back as on a genome with **no runs at all**, at a given window count —
 /// the estimator's resolution, and an `F` below it means *nothing detected*.
 ///
@@ -852,13 +874,38 @@ impl WindowChain {
             })
             .count() as u32;
 
-        // **Posterior mass on both states**, read as "some window's posterior favoured
-        // each" rather than as "`F` is above some floor". The two differ exactly where it
-        // matters: a genuinely outbred genome still hard-assigns a percent or so of its
-        // windows to the inside state — that is the resolution floor of §3.6 — while a fit
-        // whose search collapsed assigns none at all and returns `F` at the rate clamp.
-        let separated_states = gamma.iter().any(|posterior| posterior[INSIDE] > 0.5)
+        // **Two conditions, and each catches a failure the other cannot see.**
+        //
+        // *Both states were used.* Read as "some window's posterior favoured each" rather
+        // than as "`F` is above some floor": a genuinely outbred genome still hard-assigns
+        // a percent or so of its windows to the inside state — that is the resolution floor
+        // of research note §3.6 — while a fit whose **search** collapsed assigns none at
+        // all and returns `F` at the rate clamp, with the inside heterozygote rate left at
+        // exactly its starting value (§3.4's fingerprint).
+        //
+        // *And the two states are actually different.* This is the other failure, and it
+        // arrives from the opposite side. Research note §3.1 is a **proof** rather than a
+        // measurement: if both states carry the same genotype frequencies then every
+        // window's emission is the same under either, the observed sequence is independent
+        // draws from one distribution, and `P(data | θ)` does not contain the transition
+        // rates at all — the likelihood is exactly flat in `F`. What a fit returns there is
+        // an accident. Measured on eight genomes drawn with **no runs at all**: six behave
+        // (five return `F` between 0.0013 and 0.0100, below their 0.029 resolution, and one
+        // fails the used-both-states check), and **two return `F` = 0.9995 and 0.8475** —
+        // confident, converged, and wrong by the whole range of the parameter. Those two are
+        // exactly the fits whose states coincided, at 0.97 and 0.93 of each other, where
+        // every legitimate fit measured here sits at 0.84 or below.
+        //
+        // The used-both-states check cannot see it: on coincident states the assignment
+        // happily uses both, because they are the same distribution — it is splitting noise.
+        // Only the *states* say so, and the design's own identifying constraint is
+        // `h << Hout` (spec §6.1), which is strictly stronger than the `h <= Hout` the
+        // relabelling imposes.
+        let used_both_states = gamma.iter().any(|posterior| posterior[INSIDE] > 0.5)
             && gamma.iter().any(|posterior| posterior[INSIDE] < 0.5);
+        let states_differ =
+            frequencies[INSIDE][1] <= MAX_IDENTIFIED_STATE_RATIO * frequencies[OUTSIDE][1];
+        let separated_states = used_both_states && states_differ;
 
         StateFit {
             frequencies,
@@ -1910,5 +1957,78 @@ mod tests {
             ),
             "the floor counted padding: {error}"
         );
+    }
+
+    /// **A genome with no runs at all must not come back near one**, which is the failure
+    /// this estimator produces from the side the collapsed-search check cannot see.
+    ///
+    /// Research note §3.1 is a proof rather than a measurement: when the two states carry
+    /// the same genotype frequencies the likelihood is **exactly flat** in `F`, so what a
+    /// fit returns is an accident of where it started. Measured over eight genomes drawn
+    /// with no runs, two came back at `F` = 0.9995 and 0.8475 — and both are exactly the
+    /// fits whose two states coincided, at 0.968 and 0.929 of each other, where every
+    /// legitimate fit in this file sits at 0.842 or below.
+    ///
+    /// The seed below is the worse of those two. **One and not both**, because a fit whose
+    /// states never separate runs to the iteration cap from all nine starts, and the second
+    /// seed costs another sixty seconds of the suite to say the same thing.
+    #[test]
+    fn a_genome_with_no_runs_does_not_come_back_almost_entirely_autozygous() {
+        let seed = 3u64;
+        let genome = draw_genome(0.001, 0.0, 0xE3_9000 + seed * 7919);
+        assert_eq!(
+            genome.realised_f, 0.0,
+            "the seed has to have drawn no runs at all for this to say anything"
+        );
+
+        let error = fit_inbreeding(
+            "outbred",
+            &genome.windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates(0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect_err("a genome with no runs must not come back with a number");
+
+        assert!(
+            matches!(
+                error,
+                ParameterEstimationError::InbreedingStatesNotSeparated { .. }
+            ),
+            "the wrong failure: {error}"
+        );
+        assert!(
+            error.to_string().contains("not an inbreeding coefficient"),
+            "the message has to say what it is not: {error}"
+        );
+    }
+
+    /// And the check does not refuse a fit that **is** identified — including the hardest
+    /// one this file has, where a floor of spurious heterozygotes five times the real rate
+    /// pulls the two states to 0.842 of each other. A threshold set too tight would turn
+    /// spec §6.2's own robustness claim into an error.
+    #[test]
+    fn the_separation_check_does_not_refuse_the_closest_legitimate_fit() {
+        let floor = 5.0 * OUTSIDE_HET;
+        let genome = draw_genome(0.30, floor, 0xE3_1000);
+
+        let (estimate, fit) = fit_inbreeding(
+            "floored",
+            &genome.windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates(floor),
+            &RunsModelStarts::default(),
+        )
+        .expect("a fit at five times the real heterozygote rate is still identified");
+
+        let ratio = fit.inside_het_floor / fit.outside_het;
+        assert!(
+            ratio > 0.8 && ratio <= MAX_IDENTIFIED_STATE_RATIO,
+            "the closest legitimate fit sits at {ratio}, which has to be inside the \
+             threshold of {MAX_IDENTIFIED_STATE_RATIO} for this test to say anything"
+        );
+        assert!((estimate.value.get() - genome.realised_f).abs() < 0.05);
     }
 }
