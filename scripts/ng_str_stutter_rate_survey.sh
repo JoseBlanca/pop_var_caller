@@ -38,6 +38,9 @@
 #   CONTIGS=SL4.0ch01   the walk. One chromosome gives ~644k STR loci, which is ample per stratum.
 #   MIN_LOCI=100   fewest loci a stratum needs before it is fitted at all. Below it the row is not
 #                  emitted, because a rate fitted on a handful of loci is noise wearing a number.
+#   MAX_LOCI=20000 loci kept per stratum, spread evenly across the region. **Not a prefix**: taking
+#                  the first N biases every capped rate low by 22-33%% (measured on 20 Mb of tomato
+#                  chromosome 1), because tracts near a chromosome start stutter less.
 #   MAX_REPEATS=40 strata above this are skipped. The cost of a fit grows with the stratum's
 #                  distinct shapes, and the longest tracts are both the thinnest and the slowest.
 
@@ -80,7 +83,8 @@ if [[ "${1:-}" == "--one" ]]; then
     read -r -a walk_args <<< "$RATE_WALK_ARGS"
     started=$(date +%s)
     if ! "$RATE_BIN" "${walk_args[@]}" --min-loci "$RATE_MIN_LOCI" \
-            --max-repeats "$RATE_MAX_REPEATS" "$RATE_REF" "$cram" \
+            --max-repeats "$RATE_MAX_REPEATS" --max-loci-per-stratum "$RATE_MAX_LOCI" \
+            "$RATE_REF" "$cram" \
             > "$result.partial" 2> "$RATE_WORK/$key.err"; then
         rm -f "$result.partial"
         echo "failed: $(tail -n 1 "$RATE_WORK/$key.err" 2>/dev/null | tr '\t' ' ')" > "$status"
@@ -110,6 +114,9 @@ LIMIT=${LIMIT:-1}
 CONTIGS=${CONTIGS:-SL4.0ch01}
 MIN_LOCI=${MIN_LOCI:-100}
 MAX_REPEATS=${MAX_REPEATS:-40}
+# Loci kept per stratum, spread evenly across the region rather than taken as a prefix — a prefix
+# biases every capped rate low by a quarter (measured; see the example's skip comment).
+MAX_LOCI=${MAX_LOCI:-20000}
 WORK=${WORK:-$OUT.work}
 
 [[ -f "$REF" ]] || { echo "reference not found: $REF" >&2; exit 1; }
@@ -154,7 +161,7 @@ else
     WALK_ARGS="--contigs $CONTIGS"
 fi
 
-PARAMS="walk=${REGIONS:-$CONTIGS} min_loci=$MIN_LOCI max_repeats=$MAX_REPEATS"
+PARAMS="walk=${REGIONS:-$CONTIGS} min_loci=$MIN_LOCI max_repeats=$MAX_REPEATS max_loci=$MAX_LOCI"
 STAMP="$WORK/.rate-params"
 if [[ -f "$STAMP" ]] && [[ "$(cat "$STAMP")" != "$PARAMS" ]]; then
     echo "$WORK was built with different settings:" >&2
@@ -190,7 +197,7 @@ fi
 echo "  work directory: $WORK (delete it to force a re-run)" >&2
 
 export RATE_WORK="$WORK" RATE_REF="$REF" RATE_BIN="$BIN" RATE_WALK_ARGS="$WALK_ARGS"
-export RATE_MIN_LOCI="$MIN_LOCI" RATE_MAX_REPEATS="$MAX_REPEATS"
+export RATE_MIN_LOCI="$MIN_LOCI" RATE_MAX_REPEATS="$MAX_REPEATS" RATE_MAX_LOCI="$MAX_LOCI"
 export -f has_rows
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 
