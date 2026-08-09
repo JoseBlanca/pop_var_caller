@@ -16,16 +16,25 @@
 //! 3. **`loci_overlapping_previous` is zero.** The generic loci must partition the
 //!    positions they cover, or a site enters the windowed table twice. A non-zero count
 //!    here is a bug report against locus generation, not something this unit absorbs.
-//! 4. **The whole path runs end to end and lands nowhere near its ladder's ends** — the
-//!    only one of the four that runs a fit, and the first time any fit in this module sees
-//!    a read.
+//! 4. **Not an identity, and here because it runs on the same walk** — the whole path end
+//!    to end, the only one of the four that runs a fit, and the first time any fit in this
+//!    module sees a read. Its console lines say `end to end:` where the others say
+//!    `identity n:`.
 //!
 //! # What these cannot say
 //!
-//! **Nothing here is evidence about any of the four numbers.** Identities 1–3 compare
-//! objects the walk already built against each other; identity 4 asserts only that the fit
-//! returned and did not rail. The values themselves are anchored in Milestone G, against
-//! the GIAB truth set and against a coverage sweep.
+//! **Nothing here is evidence about the four parameters this step fits** — the per-read
+//! error rate, heterozygosity, the homozygous-non-reference rate and `F`. Identities 1–3
+//! compare objects the walk already built against each other; the end-to-end test asserts
+//! only that every rate was fitted from the sample's own sites and that none sits on an end
+//! rung of the ladder. The values themselves are anchored in Milestone G, against the GIAB
+//! truth set and against a coverage sweep.
+//!
+//! **Every site is scored at ploidy 2**, because `ConstantPloidy` is the only `PloidyMap`
+//! this plan builds and nothing here overrides it. Both cohorts' BEDs are autosomal, so the
+//! assumption is met — but a BED reaching a sex chromosome, or a polyploid organism, would
+//! have its cells labelled with genotype classes they do not have, and identities 1–3 would
+//! not notice, because they compare the same labels against each other.
 //!
 //! **The attributed arm of the cell key is not exercised.** Every sample in both cohorts
 //! carries one read group — checked, not assumed, by
@@ -33,17 +42,27 @@
 //! site is ever keyed by the library its alternative reads came from. A real multi-library
 //! alignment is what would test that, and neither cohort holds one.
 //!
-//! **`F` is not fitted.** The runs model needs
+//! **`F` is not fitted.** The runs model refuses unless
 //! [`MIN_WINDOWS_TO_FIT_INBREEDING`](super::runs::MIN_WINDOWS_TO_FIT_INBREEDING) = 3,000
-//! windows, which is 300 Mb that must hold sites, and both cohorts' BEDs are a few
-//! megabytes of scattered spans. Identity 4 therefore runs with `F` supplied.
+//! *separate* 100 kb windows each hold at least one site — `fit_inbreeding` tests
+//! `windows_holding_sites`, not a base count. What disqualifies both cohorts is therefore
+//! scatter rather than size: the tomato BED is 8.0 Mb in 80 spans and the GIAB one 572 kb in
+//! 100, so between them they touch a couple of hundred windows. The end-to-end test
+//! therefore runs with `F` supplied.
 //!
 //! # Running them
 //!
 //! `#[ignore]`d and driven by environment, so one file serves both organisms — the
-//! convention `locus_generation/pileup/parity.rs` set. **`--release` is not an
-//! optimisation**: real paired-end data hits production's reachable `debug_assert!`
-//! constantly, and a debug build is also some twenty times slower over a walk this size.
+//! convention `locus_generation/pileup/parity.rs` set.
+//!
+//! **`--release` here is only speed, unlike in `parity.rs`.** That file needs release
+//! because real paired-end data trips a reachable `debug_assert!` in *production's* walker,
+//! which it runs alongside ng's; nothing here runs production, and the debug build
+//! completes — measured, because copying the neighbouring justification would have stated a
+//! failure mode this path does not have. What it costs is time:
+//! `no_locus_overlaps_the_one_before_it` on the HG002 30x arm takes **12.4 s in release and
+//! 128.7 s in debug**, 10.4 times longer, and the tomato arms walk fourteen times as much
+//! sequence again (8.0 Mb of BED against 572 kb).
 //!
 //! The alignments live outside this worktree — `crams/` is git-ignored, so a worktree does
 //! not carry them — so the run needs `DEV_EXTRA_MOUNT` to reach them and `env` to carry the
@@ -73,13 +92,26 @@
 //!     -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! **The 300x arm is the one worth running when only one is.** It is the only alignment in
-//! either cohort deep enough to reach the ladder's cap of 124 reads: 545,863 of its 550,049
-//! sites are subsampled there, against zero on the 30x arm and zero on two of the three
-//! tomato samples. Above the cap the two tables are filled by **different draws** — one per
-//! read group against each group's own depth, one shared draw for the site as a whole
-//! (C2, C3) — and identity 1's claim that they nonetheless coincide at a single read group
-//! is untested by any shallower run.
+//! **The 300x arm is the one worth running when only one is, and it is identity 2 that
+//! needs it — not identity 1.** A site above the ladder's cap of 124 reads keeps a
+//! subsample, and `depth_and_alt_reads.rs`'s `seed_at` draws it from the contig and the
+//! start position and nothing else. So a region-sharded walk has to keep the *same reads*
+//! at every capped site as an unsharded one, and identity 2 is the only test in this
+//! module that can see it fail. On this alignment 545,863 of 550,049 sites are drawn that
+//! way; on the 30x arm none are, and on tomato SRR7279483 9,273 of 7,213,401 are, about one
+//! site in 780.
+//!
+//! **Identity 1, by contrast, is the same tautology at every depth**, and an earlier
+//! version of this comment said the opposite. It claimed the two tables are filled above
+//! the cap by *different draws* — one per read group, one shared for the whole site — which
+//! describes a multi-library sample. The shared-draw function, `count_whole_site_by_library`,
+//! is called only when the accumulator's `multi_library` is set, and identity 1 asserts
+//! there is exactly one read group. At one read group `count_whole_site` and
+//! `count_by_read_group` both end in `CountedSite::capped(depth, alt, cap, seed_at(region))`
+//! with the same four arguments, and the draw is a pure function of them: one draw,
+//! evaluated twice. `accumulators.rs`'s
+//! `the_two_tables_agree_cell_for_cell_above_the_cap_too` already pins that on synthetic
+//! depths of 300 to 963, and its doc had the mechanism right all along.
 //!
 //! `--test-threads=1` because the four tests each walk the same alignment file and the
 //! useful output is the `--nocapture` lines, which interleave otherwise.
@@ -97,6 +129,7 @@ use crate::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig
 use crate::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
+use crate::ng::parameter_estimation::Provenance;
 use crate::ng::parameter_estimation::generic::accumulators::{
     AccumulationCounts, ConstantPloidy, GenericAccumulators, InbreedingMode,
 };
@@ -122,18 +155,21 @@ use crate::ng::types::{GenomeRegion, InbreedingF, Ploidy, Position};
 
 use noodles_fasta::fai;
 
-/// The widest piece the sharded arm cuts a generic region into.
+/// The widest piece [`cut_into_pieces`] will make. A ceiling, not the width.
 ///
-/// **A ceiling and not the width** — see [`in_pieces`], which never cuts a region into
-/// fewer than two pieces. A fixed width alone is a knob that silently does nothing: at
-/// 10,000 bases it left the HG002 walk's 3,142 typed regions as 3,142 pieces, because
-/// region typing had already fragmented the BED's spans to a mean of 176 bases and not one
-/// of them reached the width. The arm then tested the merge and nothing about region
-/// boundaries, and said so nowhere.
-const PIECE_BP: u64 = 1_000;
+/// **A fixed width alone is a knob that can silently do nothing**, which is how this one
+/// started: at 10,000 bases it left the HG002 walk's 3,142 typed regions as 3,142 pieces.
+/// Region typing cuts a BED span into runs of generic sequence between repeat tracts, and
+/// those runs are short — 3,142 regions carry 552,284 covered positions between them — so
+/// none of them came near 10,000, and the unchanged piece count is the evidence of that.
+/// The arm then compared a walk against the same region boundaries, tested only the merge,
+/// and said so nowhere. What guarantees a cut now is the thirds rule in
+/// [`cut_into_pieces`], not this number.
+const MAX_PIECE_BP: u64 = 1_000;
 
-/// How many accumulators the pieces are dealt to.
-const SHARDS: usize = 4;
+/// How many accumulators the pieces are dealt to — **a maximum**, not a promise.
+/// [`deal_into_shards`] gives fewer when there are fewer regions than this.
+const SHARD_COUNT: usize = 4;
 
 /// What a walk produced, counted **outside** the accumulator.
 ///
@@ -162,7 +198,7 @@ struct WalkTally {
 /// Held together because a walk needs all of it and the sharding identity makes five:
 /// one parsed `.fai`, one contig table and one `OpenReference` shared by every walk, so
 /// that what the arms differ in is the region list and nothing else.
-struct Target {
+struct WalkInputs {
     fasta: PathBuf,
     contigs: Arc<ContigList>,
     index: Arc<fai::Index>,
@@ -175,16 +211,17 @@ struct Target {
     /// every test rather than dropped**: a stale index would mean every arm agreed about
     /// the wrong bases, which is a green run that proves nothing.
     verification: Option<VerificationHandle>,
-    /// How the run names itself in an assertion message — the alignment file and the BED,
-    /// since a failure is read by whoever ran the command and not by whoever wrote it.
-    where_: String,
+    /// The alignment file and the BED, as one string — every assertion message opens with
+    /// it, because a failure here is read by whoever ran the command and not by whoever
+    /// wrote it.
+    run_label: String,
 }
 
-impl Target {
+impl WalkInputs {
     fn from_env() -> Self {
-        let fasta = PathBuf::from(required("PVC_PREPASS_FASTA"));
-        let reads = PathBuf::from(required("PVC_PREPASS_READS"));
-        let bed = PathBuf::from(required("PVC_PREPASS_BED"));
+        let fasta = PathBuf::from(required_env_var("PVC_PREPASS_FASTA"));
+        let reads = PathBuf::from(required_env_var("PVC_PREPASS_READS"));
+        let bed = PathBuf::from(required_env_var("PVC_PREPASS_BED"));
 
         // The convenience path, for parity.rs's two reasons: it sets
         // `ReferenceInfo.fasta_path`, without which a CRAM cannot be opened at all, and
@@ -211,14 +248,6 @@ impl Target {
             .collect();
         let spans = GenomeRegions::from_bed_path(&bed, &bounds)
             .expect("the BED resolves against this reference's contigs");
-        // An unknown contig or a malformed line is `from_bed_path`'s to reject, so what is
-        // left for this to catch is an empty file — which would walk nothing and pass every
-        // identity below.
-        assert!(
-            !spans.is_empty(),
-            "{} resolved to no span, so the walk would cover nothing",
-            bed.display()
-        );
 
         let read_groups = build_read_groups(std::slice::from_ref(&reads))
             .expect("the alignment file's header declares its read groups");
@@ -231,7 +260,7 @@ impl Target {
             ),
         };
 
-        let where_ = format!("{} over {}", reads.display(), bed.display());
+        let run_label = format!("{} over {}", reads.display(), bed.display());
         Self {
             fasta,
             contigs,
@@ -241,7 +270,7 @@ impl Target {
             read_groups,
             sample,
             verification,
-            where_,
+            run_label,
         }
     }
 
@@ -293,7 +322,7 @@ impl Target {
             generic > 0,
             "{}: the catalog typed no generic region, so a generic-path identity would \
              be asserted over an empty table",
-            self.where_
+            self.run_label
         );
         typed
     }
@@ -383,9 +412,16 @@ impl Target {
         )
     }
 
-    /// Join the background `.fai` check. Called at the end of every test that walked.
-    fn confirm_reference(self) {
-        if let Some(handle) = self.verification {
+    /// Join the background check that the `.fai` describes this FASTA.
+    ///
+    /// **Called before a test's assertions, not after.** `VerificationHandle`'s `Drop` is
+    /// deliberately silent while unwinding, so joining at the end means a failing test
+    /// abandons the check with no output — and *the index does not match the FASTA, so
+    /// every arm read the wrong bases* is the first hypothesis a reader of a red identity
+    /// needs ruled out. The verification runs on a background thread and a walk over half a
+    /// million loci has long outlasted it, so waiting costs nothing.
+    fn confirm_reference(&mut self) {
+        if let Some(handle) = self.verification.take() {
             handle
                 .join()
                 .expect("the .fai beside the reference describes it");
@@ -393,25 +429,37 @@ impl Target {
     }
 }
 
-fn required(variable: &str) -> String {
+fn required_env_var(variable: &str) -> String {
     std::env::var(variable)
         .unwrap_or_else(|_| panic!("set {variable} — see this module's doc comment"))
 }
 
-/// Cut every generic region **in at least two**, and into pieces no wider than
-/// [`PIECE_BP`], leaving every other kind whole.
+/// Cut every generic region of three bases or more into **at least three** pieces, none
+/// wider than [`MAX_PIECE_BP`]; leave one- and two-base regions, and every non-generic
+/// region, whole.
 ///
-/// **At least two, because a fixed width is a knob that can silently do nothing.** Region
-/// typing fragments a BED span into runs of generic sequence between repeat tracts, and on
-/// HG002 those average 176 bases — so any width worth setting for a 100 kb tomato span
-/// leaves every HG002 region whole and the arm compares a walk against itself. Halving
-/// puts an interior seam in every region longer than one base whatever the organism, and
-/// the width then caps how long a piece may be on top of that.
+/// **Thirds rather than a width, because a width does nothing on short regions and both
+/// cohorts' regions are short.** The point of the sharded arm is that the generator meets
+/// boundaries the unsharded arm did not, and the boundary worth having is an *interior*
+/// piece — one with a cut at each end, so the reads that flank it were fetched for a
+/// neighbouring region. A fixed width gives that only where a region exceeds twice the
+/// width; halving never gives it at all. Thirds give it on every region of three bases or
+/// more, whatever the organism, and [`MAX_PIECE_BP`] then caps a long region on top of that.
+///
+/// **A region of one or two bases yields one or two pieces** — there is no interior piece
+/// to be had — so this function does not on its own guarantee the arm cuts anything. What
+/// does is the caller's assertion that some region produced three pieces.
 ///
 /// **The generic ones only**, because those are the regions this step's accumulator reads
-/// and the only ones whose splitting the identity is about; an STR tract cut in half is a
+/// and the only ones whose splitting the identity is about; an STR tract cut in three is a
 /// different tract, which is a question for the STR path's own plan.
-fn in_pieces(regions: &[TypedRegion]) -> Vec<TypedRegion> {
+///
+/// A third copy of the `split_generic` in `examples/ng_generic_walk_probe.rs` and
+/// `examples/ng_generic_loci_dump.rs`, deliberately and for the reason the probe's copy
+/// gives — and it differs from both: they cut at a fixed width, this one takes thirds and
+/// treats the width as a ceiling, because a test that must not become a no-op cannot depend
+/// on the regions being long.
+fn cut_into_pieces(regions: &[TypedRegion]) -> Vec<TypedRegion> {
     let mut pieces = Vec::new();
     for region in regions {
         if region.kind != RegionKind::Generic {
@@ -423,9 +471,13 @@ fn in_pieces(regions: &[TypedRegion]) -> Vec<TypedRegion> {
             region.region.start.get(),
             region.region.end.get(),
         );
-        // `.max(1)` so a one-base region yields one piece rather than a zero-width one
-        // that would not advance the loop.
-        let width = PIECE_BP.min((end - start + 1).div_ceil(2)).max(1);
+        // **Rounded *down*, and the first draft rounded up.** At `ceil(L/3)` a four-base
+        // region gets a width of two and comes back in two pieces, not three — the
+        // guarantee this function exists for, broken at the one length nobody would check
+        // by hand. `L / 3` gives a width no larger than a third, so `ceil(L / width)` is
+        // three or more for every `L >= 3`. `.max(1)` keeps a one- or two-base region from
+        // getting a zero-width piece that would not advance the loop.
+        let width = MAX_PIECE_BP.min(((end - start + 1) / 3).max(1));
         let mut at = start;
         while at <= end {
             // Saturating, so a width wider than what is left gives the remainder rather
@@ -445,28 +497,67 @@ fn in_pieces(regions: &[TypedRegion]) -> Vec<TypedRegion> {
     pieces
 }
 
-/// Deal `regions` to [`SHARDS`] groups in **contiguous blocks**, the way a region-sharded
-/// run divides a genome.
+/// How many pieces the longest-cut generic region of `regions` produced.
 ///
-/// Contiguous and not round-robin: a shard records the stretch of each contig its loci
-/// covered, and `adjustments().shard_spans_overlapping` — a counter that must read zero —
-/// would report every interleaved shard as overlapping every other.
-fn in_shards(regions: Vec<TypedRegion>) -> Vec<Vec<TypedRegion>> {
-    let per_shard = regions.len().div_ceil(SHARDS).max(1);
+/// The arm's guard against silently testing nothing: three or more means at least one piece
+/// has a cut at **both** ends, which is the case the sharded arm exists to reach.
+fn deepest_cut(regions: &[TypedRegion]) -> usize {
+    regions
+        .iter()
+        .filter(|region| region.kind == RegionKind::Generic)
+        .map(|region| cut_into_pieces(std::slice::from_ref(region)).len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Deal `regions` into at most [`SHARD_COUNT`] groups of **contiguous blocks**, the way a
+/// region-sharded run divides a genome. Fewer groups when there are fewer regions.
+///
+/// Contiguous and not round-robin: a shard records only the first start and last end of
+/// each contig it saw, so four interleaved shards would each span nearly the whole contig
+/// and `adjustments().shard_spans_overlapping` — a counter that must read zero — would
+/// count three overlapping adjacent pairs in the sorted span list.
+fn deal_into_shards(regions: Vec<TypedRegion>) -> Vec<Vec<TypedRegion>> {
+    let per_shard = regions.len().div_ceil(SHARD_COUNT).max(1);
     regions
         .chunks(per_shard)
         .map(<[TypedRegion]>::to_vec)
         .collect()
 }
 
-/// Every cell of a table, with the ploidy each is to be scored at.
-fn cells_of(table: &DepthAltHistogram<u64>, ploidy: Ploidy) -> Vec<Cell> {
-    table.cells(ploidy)
+/// The first cell on which two tables disagree, rendered — or, when they differ only in
+/// length, that.
+///
+/// **A failing `assert_eq!` on two `Vec<Cell>` prints both in full**, and the measured runs
+/// hold 155 to 565 occupied cells apiece. The reader is in a terminal, per this module's
+/// invocation, and what they need is the one cell that moved.
+///
+/// Exact equality on `Cell` is sound despite its `f64` `mean_depth`, and only because that
+/// field is a ratio of two integers: `CellTally::mean_depth` is `depth_sum / sites`, IEEE-754
+/// division is correctly rounded, and both operands are far inside the integers an `f64`
+/// represents exactly (the largest reachable depth sum is 3.1 × 10¹¹). Equal integers
+/// therefore give bit-identical quotients on both sides. **Were a weighted or smoothed depth
+/// ever introduced, every `assert_eq!` on cells in this file would silently become the wrong
+/// comparison.**
+fn first_difference(one: &[Cell], two: &[Cell]) -> String {
+    one.iter()
+        .zip(two)
+        .find(|(left, right)| left != right)
+        .map_or_else(
+            || {
+                format!(
+                    "no cell differs, but the tables hold {} and {}",
+                    one.len(),
+                    two.len()
+                )
+            },
+            |(left, right)| format!("first difference: {left:?} against {right:?}"),
+        )
 }
 
 /// A one-line summary of a table, for an assertion message that has to be read in a
 /// terminal rather than in a debugger.
-fn describe(table: &DepthAltHistogram<u64>, ploidy: Ploidy) -> String {
+fn one_line_summary(table: &DepthAltHistogram<u64>, ploidy: Ploidy) -> String {
     format!(
         "{} loci over {} positions, {} reads, {} occupied cells",
         table.total_loci(),
@@ -493,27 +584,28 @@ fn describe(table: &DepthAltHistogram<u64>, ploidy: Ploidy) -> String {
 #[test]
 #[ignore = "needs a real BAM/CRAM, reference and BED; see the module doc comment"]
 fn the_two_tables_agree_cell_for_cell() {
-    let target = Target::from_env();
+    let mut inputs = WalkInputs::from_env();
+    inputs.confirm_reference();
     assert_eq!(
-        target.sample.read_groups.len(),
+        inputs.sample.read_groups.len(),
         1,
         "{}: sample {} carries {} read groups, and this identity holds only at one — at \
          two the read-group table splits a site the windowed table enters whole",
-        target.where_,
-        target.sample.sample,
-        target.sample.read_groups.len()
+        inputs.run_label,
+        inputs.sample.sample,
+        inputs.sample.read_groups.len()
     );
-    let group = target.sample.read_groups[0];
+    let group = inputs.sample.read_groups[0];
 
-    let config = target.config(InbreedingMode::Fitted);
+    let config = inputs.config(InbreedingMode::Fitted);
     let mut accumulators = config.accumulators();
-    let walked = target.accumulate(target.typed_regions(), &mut accumulators);
+    let walked = inputs.accumulate(inputs.typed_regions(), &mut accumulators);
 
     let ploidies = accumulators.ploidies();
     assert!(
         !ploidies.is_empty(),
         "{}: the walk entered no site, so this equality would compare two empty tables",
-        target.where_
+        inputs.run_label
     );
 
     for ploidy in ploidies {
@@ -525,30 +617,31 @@ fn the_two_tables_agree_cell_for_cell() {
                 panic!(
                     "{}: the windowed table holds ploidy {ploidy} and the read-group \
                      table holds nothing for {group:?} there",
-                    target.where_
+                    inputs.run_label
                 )
             });
 
-        assert_eq!(
-            cells_of(&folded, ploidy),
-            cells_of(by_group, ploidy),
+        let (folded_cells, group_cells) = (folded.cells(ploidy), by_group.cells(ploidy));
+        assert!(
+            folded_cells == group_cells,
             "{}: at ploidy {ploidy} the folded windowed table ({}) and the read-group \
-             table ({}) differ",
-            target.where_,
-            describe(&folded, ploidy),
-            describe(by_group, ploidy)
+             table ({}) differ — {}",
+            inputs.run_label,
+            one_line_summary(&folded, ploidy),
+            one_line_summary(by_group, ploidy),
+            first_difference(&folded_cells, &group_cells)
         );
         assert_eq!(
             folded.total_covered_positions(),
             by_group.total_covered_positions(),
             "{}: at ploidy {ploidy} the two tables disagree about how much reference \
              they covered",
-            target.where_
+            inputs.run_label
         );
         eprintln!(
             "identity 1: {} ploidy {ploidy} — {}",
-            target.where_,
-            describe(&folded, ploidy)
+            inputs.run_label,
+            one_line_summary(&folded, ploidy)
         );
     }
 
@@ -568,7 +661,7 @@ fn the_two_tables_agree_cell_for_cell() {
         (walked.loci, walked.positions),
         "{}: the walk yielded {walked:?} and the tables hold {entered} sites over {} \
          positions",
-        target.where_,
+        inputs.run_label,
         accumulators.covered_positions()
     );
     assert!(
@@ -576,10 +669,9 @@ fn the_two_tables_agree_cell_for_cell() {
         "{}: every one of the {} loci covered exactly one position, so nothing here \
          exercises a locus widened to an indel's reference span and the covered-position \
          comparison above is the site count again",
-        target.where_,
+        inputs.run_label,
         walked.loci
     );
-    target.confirm_reference();
 }
 
 /// **Identity 2 — the same sample walked in one set of regions and in many gives identical
@@ -594,38 +686,85 @@ fn the_two_tables_agree_cell_for_cell() {
 /// **What it cannot say.** It compares this walk against this walk, so a locus the
 /// generator drops at *every* boundary alike is invisible to it. What it can see is a
 /// locus generated differently at a seam, and any count that `merge` fails to carry.
+///
+/// # Known red: tomato SRR7279481, and it is a bug report against locus generation
+///
+/// **This test fails on one of the five alignments it has been run on, and the failure is
+/// real.** On `tomato1/crams/SRR7279481.p1.bench.cram` the cut walk yields **7,424,467
+/// generic loci against the uncut walk's 7,424,484** — seventeen fewer, over seventeen
+/// fewer positions, with none gained.
+///
+/// The seventeen are one contiguous run, `SL4.0ch01:32,931,592–32,931,608`, and they are
+/// the opening of a piece that starts at 32,931,592. The read
+/// `SRR7279481.13095921` is aligned at 32,931,402 with CIGAR `116M91D22M5S`: its
+/// **91-base deletion spans 32,931,518 to 32,931,608**, its match resumes at 32,931,609 —
+/// the first position that is *not* lost — and the piece boundary falls 74 bases inside
+/// the deletion. So a generic locus widened to a deletion's reference span is **clipped at
+/// the region's end and its tail is picked up by no later region**. The positions are
+/// covered, at depth 4 to 6; this is not a coverage gap.
+///
+/// **It is the cutting and not the sharding**: one stream over the same pieces into one
+/// accumulator loses the same seventeen, so `merge` and the per-shard readers are not
+/// involved. It is also boundary-density dependent — at an earlier, coarser cut (63,357
+/// pieces rather than 97,732) this sample passed, and the other four alignments pass at the
+/// finer cut. `locus_generation_pileup_generator.md`'s fixture 6 is *"a deletion across a
+/// region boundary — the halo, checked against the same fixture walked as one region"*, so
+/// the case is known to that plan and its fixture does not reach this one.
+///
+/// **Left failing on purpose.** Loosening the assertion, or coarsening the cut until it
+/// passes, would bury a defect that changes which sites a sharded run analyses. Fixing it
+/// belongs to locus generation, not to this unit — the same rule
+/// [`no_locus_overlaps_the_one_before_it`] states for its own counter.
 #[test]
 #[ignore = "needs a real BAM/CRAM, reference and BED; see the module doc comment"]
 fn one_walk_and_four_shards_give_identical_tables() {
-    let target = Target::from_env();
-    let config = target.config(InbreedingMode::Fitted);
-    let regions = target.typed_regions();
+    let mut inputs = WalkInputs::from_env();
+    inputs.confirm_reference();
+    let config = inputs.config(InbreedingMode::Fitted);
+    let regions = inputs.typed_regions();
 
     let mut whole = config.accumulators();
-    let walked_once = target.accumulate(regions.clone(), &mut whole);
+    let walked_once = inputs.accumulate(regions.clone(), &mut whole);
+    // **The premise the other two identities have and this one lacked.** Every comparison
+    // below is satisfied by two *empty* accumulators — two empty ploidy sets, two vacuous
+    // per-ploidy loops, two empty key lists, two default counter sets. And `walked_once`
+    // does not rescue it, because the tally is built from `locus.region` outside the
+    // accumulator and stays non-zero when nothing is entered. Measured: gutting
+    // `add_locus` to return immediately fails identities 1 and 3 and panics the end-to-end
+    // test, and left this one green.
+    assert!(
+        walked_once.loci > 0 && whole.covered_positions() > 0,
+        "{}: the walk entered no site, so the two arms would compare empty tables and this          identity would hold whatever the merge did",
+        inputs.run_label
+    );
 
-    let pieces = in_pieces(&regions);
+    let pieces = cut_into_pieces(&regions);
+    assert!(
+        deepest_cut(&regions) >= 3,
+        "{}: no generic region was cut into more than two pieces, so not one piece has a          boundary at both ends and the sharded arm never puts the generator anywhere the          unsharded arm did not go",
+        inputs.run_label
+    );
     assert!(
         pieces.len() > regions.len(),
         "{}: cutting {} typed regions gave {} pieces — nothing was cut, so this arm \
          would compare a walk against the same region boundaries and test only the merge",
-        target.where_,
+        inputs.run_label,
         regions.len(),
         pieces.len()
     );
     let piece_count = pieces.len();
-    let shards = in_shards(pieces);
+    let shards = deal_into_shards(pieces);
     assert!(
         shards.len() > 1,
         "{}: the pieces fell into one shard, so this arm merged nothing",
-        target.where_
+        inputs.run_label
     );
     let shard_count = shards.len();
     let mut merged = config.accumulators();
     let mut walked_sharded = WalkTally::default();
     for shard in shards {
         let mut accumulators = config.accumulators();
-        let shard_tally = target.accumulate(shard, &mut accumulators);
+        let shard_tally = inputs.accumulate(shard, &mut accumulators);
         walked_sharded.loci += shard_tally.loci;
         walked_sharded.positions += shard_tally.positions;
         walked_sharded.overlapping += shard_tally.overlapping;
@@ -639,31 +778,32 @@ fn one_walk_and_four_shards_give_identical_tables() {
         walked_once, walked_sharded,
         "{}: one walk yielded {walked_once:?} and {shard_count} shards yielded \
          {walked_sharded:?} — the region boundaries changed which loci exist",
-        target.where_
+        inputs.run_label
     );
 
     assert_eq!(
         whole.ploidies(),
         merged.ploidies(),
         "{}: the two arms saw different ploidies",
-        target.where_
+        inputs.run_label
     );
     for ploidy in whole.ploidies() {
         let one = whole.whole_sample_histogram(ploidy);
         let many = merged.whole_sample_histogram(ploidy);
-        assert_eq!(
-            cells_of(&one, ploidy),
-            cells_of(&many, ploidy),
-            "{}: at ploidy {ploidy} one walk gave {} and {shard_count} shards gave {}",
-            target.where_,
-            describe(&one, ploidy),
-            describe(&many, ploidy)
+        let (one_cells, many_cells) = (one.cells(ploidy), many.cells(ploidy));
+        assert!(
+            one_cells == many_cells,
+            "{}: at ploidy {ploidy} one walk gave {} and {shard_count} shards gave {} — {}",
+            inputs.run_label,
+            one_line_summary(&one, ploidy),
+            one_line_summary(&many, ploidy),
+            first_difference(&one_cells, &many_cells)
         );
         assert_eq!(
             one.total_covered_positions(),
             many.total_covered_positions(),
             "{}: at ploidy {ploidy} the two arms covered different amounts of reference",
-            target.where_
+            inputs.run_label
         );
     }
 
@@ -671,18 +811,19 @@ fn one_walk_and_four_shards_give_identical_tables() {
         whole.read_group_histograms().keys().collect::<Vec<_>>(),
         merged.read_group_histograms().keys().collect::<Vec<_>>(),
         "{}: the two arms disagree about which (read group, ploidy) pairs exist",
-        target.where_
+        inputs.run_label
     );
     for (&(group, ploidy), one) in whole.read_group_histograms() {
         let many = &merged.read_group_histograms()[&(group, ploidy)];
-        assert_eq!(
-            cells_of(one, ploidy),
-            cells_of(many, ploidy),
+        let (one_cells, many_cells) = (one.cells(ploidy), many.cells(ploidy));
+        assert!(
+            one_cells == many_cells,
             "{}: {group:?} at ploidy {ploidy} — one walk gave {} and {shard_count} \
-             shards gave {}",
-            target.where_,
-            describe(one, ploidy),
-            describe(many, ploidy)
+             shards gave {} — {}",
+            inputs.run_label,
+            one_line_summary(one, ploidy),
+            one_line_summary(many, ploidy),
+            first_difference(&one_cells, &many_cells)
         );
     }
 
@@ -690,15 +831,14 @@ fn one_walk_and_four_shards_give_identical_tables() {
         whole.adjustments(),
         merged.adjustments(),
         "{}: the two arms adjusted the loci differently",
-        target.where_
+        inputs.run_label
     );
     eprintln!(
         "identity 2: {} — {} regions as one walk, {piece_count} pieces over \
          {shard_count} shards, identical",
-        target.where_,
+        inputs.run_label,
         regions.len()
     );
-    target.confirm_reference();
 }
 
 /// **Identity 3 — no generic locus begins before the one before it on its contig ended**
@@ -726,10 +866,11 @@ fn one_walk_and_four_shards_give_identical_tables() {
 #[test]
 #[ignore = "needs a real BAM/CRAM, reference and BED; see the module doc comment"]
 fn no_locus_overlaps_the_one_before_it() {
-    let target = Target::from_env();
-    let config = target.config(InbreedingMode::Fitted);
+    let mut inputs = WalkInputs::from_env();
+    inputs.confirm_reference();
+    let config = inputs.config(InbreedingMode::Fitted);
     let mut accumulators = config.accumulators();
-    let walked = target.accumulate(target.typed_regions(), &mut accumulators);
+    let walked = inputs.accumulate(inputs.typed_regions(), &mut accumulators);
 
     let AccumulationCounts {
         loci_with_upstream_subsample,
@@ -742,7 +883,7 @@ fn no_locus_overlaps_the_one_before_it() {
     assert!(
         accumulators.covered_positions() > 0,
         "{}: the walk covered no position, so a zero overlap count says nothing",
-        target.where_
+        inputs.run_label
     );
     // **The accumulator's answer beside one computed outside it** — two implementations of
     // the same predicate over the same loci, so the partition claim does not rest on the
@@ -756,7 +897,7 @@ fn no_locus_overlaps_the_one_before_it() {
          same {} loci counted {}. A non-zero first number is a defect in locus generation \
          rather than in this accumulator; a zero first and non-zero second means the \
          accumulator's detector is silent",
-        target.where_,
+        inputs.run_label,
         walked.loci,
         walked.overlapping
     );
@@ -764,7 +905,7 @@ fn no_locus_overlaps_the_one_before_it() {
         shard_spans_overlapping, 0,
         "{}: one unsharded walk reported {shard_spans_overlapping} overlapping shard \
          spans, so the span bookkeeping has false positives",
-        target.where_
+        inputs.run_label
     );
     // Printed and not asserted: these three are properties of the data, and a run where
     // they are large is one whose fitted rate describes a different population of reads
@@ -774,10 +915,9 @@ fn no_locus_overlaps_the_one_before_it() {
          {loci_with_upstream_subsample} loci already subsampled upstream, \
          {reads_without_observation} reads witnessed nothing, \
          {sites_subsampled_to_cap} sites subsampled to the ladder's cap",
-        target.where_,
+        inputs.run_label,
         accumulators.covered_positions()
     );
-    target.confirm_reference();
 }
 
 /// **The whole generic path, end to end on real reads** — the first time any fit in this
@@ -797,15 +937,57 @@ fn no_locus_overlaps_the_one_before_it() {
 #[test]
 #[ignore = "needs a real BAM/CRAM, reference and BED; see the module doc comment"]
 fn the_generic_path_fits_a_real_sample_without_railing() {
-    let target = Target::from_env();
+    let mut inputs = WalkInputs::from_env();
+    inputs.confirm_reference();
     let supplied = InbreedingF::try_new(0.0).expect("zero is a fraction");
-    let config = target.config(InbreedingMode::Supplied(supplied));
+    let config = inputs.config(InbreedingMode::Supplied(supplied));
     let mut accumulators = config.accumulators();
-    target.accumulate(target.typed_regions(), &mut accumulators);
+    inputs.accumulate(inputs.typed_regions(), &mut accumulators);
+
+    // **§12.6 on the collapsed table, which is the arm a real run over either cohort's BED
+    // must use.** A supplied `F` drops the window key and pours the sample into
+    // `whole_sample`, the `u64` table `6112803b` had to add; identities 1–3 all run in
+    // `Fitted` mode and never touch it. The equality is covered synthetically — two
+    // accumulator tests chain the collapsed fold to the fitted fold to the read-group
+    // table — but not on a table a real walk filled.
+    if inputs.sample.read_groups.len() == 1 {
+        let group = inputs.sample.read_groups[0];
+        for ploidy in accumulators.ploidies() {
+            let folded = accumulators.whole_sample_histogram(ploidy);
+            let by_group = &accumulators.read_group_histograms()[&(group, ploidy)];
+            let (folded_cells, group_cells) = (folded.cells(ploidy), by_group.cells(ploidy));
+            assert!(
+                folded_cells == group_cells,
+                "{}: at ploidy {ploidy} §12.6 fails on the collapsed table a supplied F \
+                 builds — {}",
+                inputs.run_label,
+                first_difference(&folded_cells, &group_cells)
+            );
+        }
+    }
+
+    // **Arch §9's other half of "no fit rails", on a table a real walk built.** A cell
+    // scored below its own alternative count is what the per-*bin* mean produces, and it
+    // costs 5.2 rungs and 29% of the homozygous-non-reference rate with nothing visible on
+    // the outside (spec §12.10). It is asserted on synthetic tables in `histogram.rs` and,
+    // until now, on nothing a walk produced.
+    for ploidy in accumulators.ploidies() {
+        for cell in accumulators.whole_sample_histogram(ploidy).cells(ploidy) {
+            assert!(
+                f64::from(cell.key.alt_reads()) <= cell.mean_depth,
+                "{}: the cell {:?} is scored at depth {}, below its own {} alternative \
+                 reads",
+                inputs.run_label,
+                cell.key,
+                cell.mean_depth,
+                cell.key.alt_reads()
+            );
+        }
+    }
 
     let parameters = accumulators
         .estimate(&config)
-        .unwrap_or_else(|error| panic!("{}: {error}", target.where_));
+        .unwrap_or_else(|error| panic!("{}: {error}", inputs.run_label));
 
     // **The ladder ascends in Phred and so *descends* in error rate**: rung 0 is Phred 10,
     // an error rate of 0.1, and the last rung is Phred 50, or 10⁻⁵. Naming the ends by
@@ -815,30 +997,49 @@ fn the_generic_path_fits_a_real_sample_without_railing() {
     let ladder = error_rate_ladder();
     let coarsest = ladder.first().expect("the ladder has rungs").get();
     let finest = ladder.last().expect("the ladder has rungs").get();
+    assert!(
+        !parameters.error_rate.is_empty(),
+        "{}: the fit returned no error rate at all, so the loop below checks nothing",
+        inputs.run_label
+    );
     for (group, rate) in &parameters.error_rate {
+        // **Rail-checking a number no scan chose says nothing.** `resolve_error_rates`
+        // hands back `DEFAULT_ERROR_RATE` = 0.001 with `Provenance::Defaulted` for a read
+        // group below `MIN_SITES_TO_FIT` with no sibling to lend, and 0.001 sits
+        // comfortably inside the ladder — so a sample whose every group defaulted passes
+        // the check below while nothing was fitted. Unreachable on a cohort of
+        // single-library samples with half a million sites, and this file takes an
+        // alignment path from the environment.
+        assert_eq!(
+            rate.provenance,
+            Provenance::FittedHere,
+            "{}: {group:?}'s rate came back {:?} rather than fitted from its own sites, so              the rail check below would be a statement about a scan that never ran",
+            inputs.run_label,
+            rate.provenance
+        );
         let value = rate.value.get();
         assert!(
             value < coarsest && value > finest,
             "{}: {group:?}'s error rate came back at {value}, an end of the ladder \
              [{finest}, {coarsest}] — a railed fit, which is the one way this estimator \
              returns a confident wrong number rather than failing",
-            target.where_
+            inputs.run_label
         );
         eprintln!(
             "end to end: {} {group:?} — error rate {value:.3e} ({:?}, {} reads)",
-            target.where_, rate.provenance, rate.observations
+            inputs.run_label, rate.provenance, rate.observations
         );
     }
     assert!(
         parameters.coupled_fit.converged,
         "{}: the coupled fit ran out after {} iterations",
-        target.where_, parameters.coupled_fit.iterations
+        inputs.run_label, parameters.coupled_fit.iterations
     );
     for (ploidy, rates) in &parameters.rates {
         eprintln!(
             "end to end: {} ploidy {ploidy} — heterozygosity {}, hom-non-ref {:.6} \
              ({} sites)",
-            target.where_,
+            inputs.run_label,
             rates
                 .value
                 .observed_heterozygosity()
@@ -847,5 +1048,122 @@ fn the_generic_path_fits_a_real_sample_without_railing() {
             rates.observations
         );
     }
-    target.confirm_reference();
+}
+
+/// The two region-cutting helpers, which need no alignment and until now ran on none.
+///
+/// **Every caller above is `#[ignore]`d**, so `cargo test` compiled
+/// [`cut_into_pieces`] and [`deal_into_shards`] and executed neither. Both do inclusive
+/// 1-based index arithmetic, where an off-by-one either drops a base — shrinking the
+/// sharded arm's territory, which identity 2 would catch only after a seven-million-locus
+/// tomato walk — or emits overlapping pieces, which identity 3 would report as a defect in
+/// locus generation. These run in the ordinary suite, in milliseconds.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ng::types::ContigId;
+
+    fn generic(start: u64, end: u64) -> TypedRegion {
+        TypedRegion {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(end),
+            },
+            kind: RegionKind::Generic,
+        }
+    }
+
+    /// The pieces tile the region exactly: no base lost, no base in two pieces.
+    ///
+    /// The lengths straddle every branch — one and two bases (no interior piece to be had),
+    /// three (the smallest that gets one), and either side of `3 × MAX_PIECE_BP`, where the
+    /// ceiling takes over from the thirds.
+    #[test]
+    fn cut_pieces_tile_a_region_exactly_at_every_length() {
+        for length in [1u64, 2, 3, 4, 176, 2_999, 3_000, 3_001, 10_000] {
+            let region = generic(1_000, 1_000 + length - 1);
+            let pieces = cut_into_pieces(std::slice::from_ref(&region));
+            let mut expected_start = 1_000;
+            for piece in &pieces {
+                assert_eq!(
+                    piece.region.start.get(),
+                    expected_start,
+                    "length {length}: a gap or an overlap between pieces"
+                );
+                expected_start = piece.region.end.get() + 1;
+            }
+            assert_eq!(
+                expected_start - 1,
+                1_000 + length - 1,
+                "length {length}: the pieces stop short of the region's last base"
+            );
+            assert_eq!(
+                pieces.iter().map(|piece| piece.region.len()).sum::<u64>(),
+                length,
+                "length {length}: the pieces do not sum to the region"
+            );
+        }
+    }
+
+    /// Three bases is the shortest region that yields a piece with a boundary at both ends,
+    /// and one and two bases yield none — which is why the caller asserts on
+    /// [`deepest_cut`] rather than trusting this function.
+    #[test]
+    fn a_region_of_three_bases_or_more_is_cut_into_at_least_three() {
+        for length in [3u64, 4, 176, 3_000, 10_000] {
+            assert!(
+                cut_into_pieces(&[generic(1, length)]).len() >= 3,
+                "a region of {length} bases must yield an interior piece"
+            );
+        }
+        assert_eq!(cut_into_pieces(&[generic(1, 1)]).len(), 1);
+        assert_eq!(cut_into_pieces(&[generic(1, 2)]).len(), 2);
+        assert_eq!(deepest_cut(&[generic(1, 1), generic(10, 11)]), 2);
+    }
+
+    /// The ceiling binds above `3 × MAX_PIECE_BP` and the thirds rule below it. Pinned
+    /// because the ceiling doing nothing is precisely how this arm was silently a no-op.
+    #[test]
+    fn the_thirds_rule_and_the_ceiling_each_bind_where_they_should() {
+        assert_eq!(cut_into_pieces(&[generic(1, 3_000)]).len(), 3);
+        assert_eq!(cut_into_pieces(&[generic(1, 9_000)]).len(), 9);
+    }
+
+    /// A non-generic region passes through whole however long it is: an STR tract cut in
+    /// three is a different tract.
+    #[test]
+    fn a_non_generic_region_is_never_cut() {
+        let mut tract = generic(1, 50_000);
+        tract.kind = RegionKind::SsrBundle {
+            tracts: Box::default(),
+        };
+        let pieces = cut_into_pieces(std::slice::from_ref(&tract));
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].region, tract.region);
+        assert_eq!(deepest_cut(std::slice::from_ref(&tract)), 0);
+    }
+
+    /// The shards are contiguous blocks holding every region exactly once and in order —
+    /// the property `shard_spans_overlapping` depends on, since interleaved shards would
+    /// each span the whole contig.
+    #[test]
+    fn shards_partition_the_regions_into_contiguous_blocks() {
+        for count in [1usize, 2, 4, 5, 9, 100] {
+            let regions: Vec<_> = (0..count as u64)
+                .map(|at| generic(1 + at * 10, 5 + at * 10))
+                .collect();
+            let shards = deal_into_shards(regions.clone());
+            assert!(
+                !shards.is_empty() && shards.len() <= SHARD_COUNT,
+                "{count} regions gave {} shards",
+                shards.len()
+            );
+            assert_eq!(
+                shards.concat(),
+                regions,
+                "{count} regions were not partitioned in order"
+            );
+        }
+    }
 }
