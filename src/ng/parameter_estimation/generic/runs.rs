@@ -131,10 +131,24 @@ pub struct RunsModelFit {
     /// [`Self::best_start`] rather than indexing, so the ordering is stated in one place.
     pub starts_tried: SmallVec<[StartOutcome; 9]>,
 
-    /// The noise floor at this run's window count — what `F` comes back as on a genome
-    /// with no runs at all. About 0.01 at tomato's 8,004 windows and 0.003 at a human
-    /// genome's 31,000. **An `F` below it is *nothing detected*, and a consumer that
-    /// cannot see this number cannot tell that from a small autozygous fraction.**
+    /// **A reference point, not a threshold**: what `F` came back as on genomes with no runs
+    /// at this window count *in the one regime it was measured in* — 100,000 sites a window,
+    /// which is about a hundred heterozygotes. About 0.01 at tomato's 8,004 windows and 0.003
+    /// at a human genome's 31,000. See [`resolution_at`], which says what it can and cannot
+    /// support.
+    ///
+    /// **It is not a line below which nothing was detected, and it was demoted from claiming
+    /// to be one** (owner, 2026-08-09). Measured on a fixture at a fifth of that evidence —
+    /// 3,600 windows of 400 sites — three of the five accepted fits on genomes with **no runs
+    /// at all** returned `F` = 0.0322, 0.0359 and 0.0505 against a reported resolution of
+    /// 0.0291. A consumer treating it as a floor would have called those detections.
+    ///
+    /// **What does separate a real `F` from nothing found is
+    /// [`RunsModelFit::spread_across_tied_starts`]**, which is measured on both populations
+    /// and is a property of *this* fit rather than an interpolation from a different regime.
+    /// The failure this number was standing in for is now refused outright
+    /// (`MAX_IDENTIFIED_START_SPREAD`), so what remains here is a comparison a reader can make
+    /// against other runs, not a test a fit has passed.
     pub resolution: f64,
 
     /// Windows whose posterior landed between 0.01 and 0.99 — the ones the chain rather
@@ -317,8 +331,15 @@ const _: () = assert!(
      refuses the fit spec §6.2 requires the estimator to survive"
 );
 
-/// What `F` comes back as on a genome with **no runs at all**, at a given window count —
-/// the estimator's resolution, and an `F` below it means *nothing detected*.
+/// What `F` came back as on genomes with **no runs at all**, at a given window count, in the
+/// **one regime it was measured in**: 100,000 sites a window, about a hundred heterozygotes.
+///
+/// **A reference point and not a threshold** (owner, 2026-08-09). An earlier version of this
+/// sentence said *an `F` below it means nothing detected*, and that is not a property it has —
+/// it is a function of the window count alone, and the noise floor is not. See the two
+/// paragraphs at the end for what was measured against it, and
+/// [`RunsModelFit::spread_across_tied_starts`] for the quantity that *does* separate a real
+/// `F` from a search that found nothing.
 ///
 /// **Interpolated from the eight-seed means of research note §3.6 rather than computed
 /// from a formula**, because there is no formula: the number is what a two-state model
@@ -339,16 +360,30 @@ const _: () = assert!(
 /// statement of it.
 ///
 /// **⚠ It is a function of the window *count* alone, and the noise floor is not.** §3.6's
-/// eight seeds were drawn at 100,000 sites a window; how much a two-state model can read
-/// out of sampling wobble depends on how much evidence each window carries, and this
-/// function cannot see that. Measured on a fixture carrying 400 sites a window — about
-/// 250 times less — a genome drawn with **no runs at all** came back at `F` = 0.998,
-/// converged, with this reporting a resolution of 0.029. Nothing in the fit refuses that:
-/// the guarded direction is a failed search returning zero, and this is an absent signal
-/// returning one. Recorded for the owner (Checkpoint E) rather than repaired here, because
-/// the repair is a measurement — the floor as a function of evidence per window — and the
-/// measurement does not exist. Neither cohort in hand is near the regime: tomato's windows
-/// carry about 100,000 sites.
+/// eight seeds were drawn at 100,000 sites a window; how much a two-state model can read out
+/// of sampling wobble depends on how much evidence each window carries, and this function
+/// cannot see that. **And no second argument would repair it**, which is the finding that
+/// settled this: research note §1 measures the floor across three window counts crossed with
+/// four evidence levels and it is not smooth in either — 3,000 windows × 5 heterozygotes fails
+/// where 6,000 × 5 does not, and 3,000 × 100 behaves perfectly where 12,000 × 5 did not. What
+/// varies is not a magnitude but whether a rare catastrophic mode fires.
+///
+/// **⚠ And it is exceeded in practice, which is why it is not a threshold.** Measured on a
+/// fixture at a fifth of §3.6's evidence — 3,600 windows of 400 sites — of the five fits this
+/// module accepted on genomes with **no runs at all**, three returned `F` = 0.0322, 0.0359 and
+/// 0.0505 against the 0.0291 reported here. A consumer using this as a floor would have called
+/// all three detections.
+///
+/// **What the number is still good for** is comparing one run against another: two samples at
+/// the same window count are being read at the same resolution, and a fitted `F` far above it
+/// means more than one just above it. What it is not good for is deciding whether a single fit
+/// found anything — the fit itself now answers that, by refusing outright when the starting
+/// points that scored alike disagree (`MAX_IDENTIFIED_START_SPREAD`), which is the failure
+/// this number was standing in for.
+///
+/// **Kept rather than removed** (owner, 2026-08-09): spec §6.5 names it as one of three things
+/// that go out with `F`, nothing reads it yet, and the repair its ⚠ asks for — the floor as a
+/// function of evidence per window — is a measurement §1 shows cannot exist in that form.
 #[must_use]
 pub fn resolution_at(windows: usize) -> f64 {
     /// The measured points, ascending in window count.
