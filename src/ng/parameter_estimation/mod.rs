@@ -207,6 +207,24 @@ pub enum ParameterEstimationError {
         threshold: f64,
     },
 
+    /// The walk that was to produce this sample's loci failed part-way through.
+    ///
+    /// **Fatal, and never absorbed.** The loci a walk failed to produce are *missing*
+    /// evidence, not zero evidence: a rate fitted over a truncated genome is a plausible
+    /// number describing a genome nobody chose, and nothing downstream would announce it.
+    /// The stream's own error type already says the same thing by yielding `Err` once and
+    /// then ending, so that `?` makes it un-ignorable rather than a silent end of stream.
+    ///
+    /// **The cause is a rendered message rather than the error itself, and that is a real
+    /// loss.** `LocusGenerationError` is `Debug + Error` and neither `Clone` nor
+    /// `PartialEq`, which this enum is and its tests rely on; carrying it would mean
+    /// dropping both from every variant. What is lost is `source()` chaining — a caller
+    /// cannot match on which stage of the walk failed, only read what it said. The field is
+    /// therefore **not** named `source`: that name would claim a chain this does not
+    /// provide, and `thiserror` would try to treat a `String` as one.
+    #[error("sample {sample}: the walk that produces its loci failed — {cause}")]
+    LocusGeneration { sample: String, cause: String },
+
     /// A constrained scalar rejected its value while a named fit was running — a rate
     /// outside `[0, 1]`, a ploidy of zero.
     ///

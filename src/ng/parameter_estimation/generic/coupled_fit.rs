@@ -387,7 +387,7 @@ fn into_coupled_fit(
 /// A group whose table holds no reads is left out rather than given a share of zero, which
 /// [`SampleLibraryNoise::new`] would refuse: a library with no reads has no rate to fit and
 /// contributes no term to the mixture.
-fn library_shares(
+pub(super) fn library_shares(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
 ) -> BTreeMap<ReadGroupId, f64> {
     let mut reads_of_group: BTreeMap<ReadGroupId, u64> = BTreeMap::new();

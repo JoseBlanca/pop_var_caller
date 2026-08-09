@@ -475,6 +475,22 @@ impl GenericAccumulators {
     pub fn inbreeding_mode(&self) -> InbreedingMode {
         self.inbreeding
     }
+
+    /// **Reference positions this sample's loci covered, over every ploidy** — the warrant a
+    /// supplied inbreeding coefficient carries, since it says how much genome the number is
+    /// being applied to.
+    ///
+    /// **From the windowed table and not the read-group one**, because a site covered by two
+    /// libraries enters the read-group table twice and its positions would be counted twice
+    /// with it. The windowed table enters each site once, whole, which is the whole reason
+    /// both tables exist.
+    #[must_use]
+    pub fn covered_positions(&self) -> u64 {
+        self.by_window
+            .values()
+            .map(DepthAltHistogram::total_covered_positions)
+            .sum()
+    }
 }
 
 #[cfg(test)]

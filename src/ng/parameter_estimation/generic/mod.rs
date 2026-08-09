@@ -18,6 +18,7 @@ pub mod accumulators;
 pub mod coupled_fit;
 pub mod depth_and_alt_reads;
 pub mod depth_bins;
+pub mod estimate;
 #[cfg(test)]
 mod expected_counts;
 pub mod fallback;

@@ -415,7 +415,7 @@ runs detected* from *a small autozygous fraction*. Unit tests: a thin read group
 
 ### Milestone F — the entry points and end to end
 
-**F1. The two ways in.**  ☐
+**F1. The two ways in.**  ✅
 `GenericEstimationConfig`, `estimate_generic_parameters(loci, config)` for a caller with
 nothing else to do with the stream, and `GenericAccumulators::estimate(config)` for one that
 drove the accumulator itself. The first is the second over an accumulator fed by the stream,
