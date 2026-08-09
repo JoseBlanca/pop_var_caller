@@ -810,6 +810,29 @@ So a three-copy dinucleotide is a tract where two reads in three that move at al
 STR path cannot express, and a six-copy one is a tract where fewer than one in ten do. The floor is
 where a period crosses ten and stays across.
 
+**Split into its two parts, the criterion says something sharper than the ratio does.** Per 100
+reads at a dinucleotide tract:
+
+| dinucleotide | 3 repeats | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|
+| moved by whole copies | 0.19 | 0.72 | 2.58 | **9.07** | 15.30 | 23.17 |
+| moved by something else | 0.38 | 0.54 | 0.90 | 0.90 | 0.95 | 0.39 |
+
+**The second line barely moves and the first climbs 122-fold.** Ordinary indel error is a property
+of the sequencer rather than of the tract, so it sits at roughly half a read in 100 at every repeat
+count — inside a factor of 2.5 across the whole range. Repeat slippage is a property of the tract
+and rises steeply with it. **So a period's floor is not where tracts stop taking indels; it is where
+whole-copy movement finally outruns a constant indel floor.** At four copies the two are comparable,
+0.72 against 0.54, so a slippage rate fitted there is fitting about as much indel as slippage even
+though the majority is nominally the right kind. At six copies it is ten to one.
+
+**One thing the whole-copy line is not: a slippage rate.** It counts reads differing from the
+**reference** by whole copies, and that is slippage *plus* reads that correctly measured an allele
+the sample genuinely carries. Nothing here separates the two, and nothing here needs to — telling
+them apart is what §4's fit does by summing over the genotype, and it is why the fit exists. The
+criterion above asks only which *kind* of movement a tract produces, which is answerable from the
+reference alone.
+
 *(Mononucleotides are absent because the quantity is vacuous for them — every integer is a multiple
 of one, so no read can differ by a non-whole number of copies and the share is always zero. They
 need the other criterion, how often a read differs from the reference length at all. The walk also
