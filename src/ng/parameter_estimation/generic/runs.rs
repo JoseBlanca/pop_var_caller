@@ -199,7 +199,7 @@ const RATE_FLOOR: f64 = 1e-9;
 /// supplying `F`; accepting one costs `F` = 0.9995 on an outcrossing genome, and a cohort's
 /// diversity divides by `1 − F`. Spec §6.1's own instruction for this parameter is *fail
 /// rather than emit*.
-const MAX_IDENTIFIED_STATE_RATIO: f64 = 0.9;
+pub const MAX_IDENTIFIED_STATE_RATIO: f64 = 0.9;
 
 /// What `F` comes back as on a genome with **no runs at all**, at a given window count —
 /// the estimator's resolution, and an `F` below it means *nothing detected*.
