@@ -319,6 +319,16 @@ fn into_coupled_fit(
     // the per-group answer rather than passing the loop's own `fitted` straight on: the
     // rate a group gets is the one the best-scoring iterate chose, and only its site count
     // comes from the fit.
+    // Both maps come from `fit_read_group_error_rates` over the same histograms, so their
+    // key sets are the same every round. Stated as a check rather than assumed: a group in
+    // one and not the other would silently take a lower rung of the fallback ladder — a
+    // borrowed or defaulted rate where it had a fitted one — with nothing to show for it.
+    assert!(
+        fitted_sites.keys().eq(best.rungs.keys()),
+        "the winning iterate names read groups {:?} and the last round's fits name {:?}",
+        best.rungs.keys().collect::<Vec<_>>(),
+        fitted_sites.keys().collect::<Vec<_>>()
+    );
     let at_the_winning_rungs: BTreeMap<ReadGroupId, ReadGroupErrorRateFit> = fitted_sites
         .iter()
         .filter_map(|(&group, fit)| {
@@ -851,9 +861,11 @@ mod tests {
     /// equal.
     ///
     /// **What it still cannot say**: with every iterate scoring alike, keep-the-best and
-    /// keep-the-last are the same rule here. A trace whose later iterate is genuinely worse
-    /// is what would separate them, and no fixture in hand produces one — the real
-    /// 583-cell tables of Milestone F2 are where one could turn up.
+    /// keep-the-last are the same rule *on this world*. They are separated by
+    /// `the_reported_rates_are_the_winning_iterates_and_not_the_last_rounds`, on the quiet
+    /// `CoupledWorld`, whose trace really does end on a round scoring worse than an earlier
+    /// one. An earlier version of this paragraph said no fixture in hand produced such a
+    /// trace; one three functions down the file does.
     #[test]
     fn the_iterate_kept_is_the_argmax_of_the_trace() {
         let world = TwoLibraryWorld::build();
@@ -1238,6 +1250,80 @@ mod tests {
         );
     }
 
+    /// **What the run supplied reaches the fit a caller reads.** With *both* libraries below
+    /// [`MIN_SITES_TO_FIT`] there is no lender, so the ladder falls past `Borrowed` to its
+    /// two lower rungs: the group the run supplied a rate for comes out `Supplied` carrying
+    /// that rate, and the group it said nothing about comes out `Defaulted`.
+    ///
+    /// This is the only test that hands either public door a non-empty supplied map, so it
+    /// is what stops the parameter being threaded in and then dropped — a fit that ignored
+    /// it would report `Defaulted` for both and no other test would notice.
+    ///
+    /// The whole-sample table still holds [`SITES`], because the frequencies' floor is a
+    /// different floor from the per-group one this test is about.
+    #[test]
+    fn a_supplied_rate_reaches_the_coupled_fit_when_no_group_can_lend() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let thin = 500.0;
+        assert!(thin < MIN_SITES_TO_FIT as f64);
+
+        let read_group_histograms: BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>> = (1u32
+            ..=2)
+            .map(|group| {
+                (
+                    (ReadGroupId(group), diploid),
+                    table_generated_at(
+                        &edges,
+                        PER_LIBRARY_DEPTH,
+                        ladder[RUNG_AT_PHRED_30].get(),
+                        diploid,
+                        &TRUTH,
+                        thin,
+                    ),
+                )
+            })
+            .collect();
+        let whole_sample = BTreeMap::from([(
+            diploid,
+            table_generated_at(
+                &edges,
+                PER_LIBRARY_DEPTH,
+                ladder[RUNG_AT_PHRED_30].get(),
+                diploid,
+                &TRUTH,
+                SITES,
+            ),
+        )]);
+        let supplied = BTreeMap::from([(ReadGroupId(1), ladder[RUNG_AT_PHRED_26])]);
+
+        let fit = fit_coupled_from_tables(
+            "supplied",
+            &read_group_histograms,
+            &whole_sample,
+            &ladder,
+            &supplied,
+        )
+        .expect("the whole-sample table holds enough sites");
+
+        let told = &fit.error_rate[&ReadGroupId(1)];
+        assert_eq!(told.provenance, Provenance::Supplied);
+        assert_eq!(
+            told.value, ladder[RUNG_AT_PHRED_26],
+            "the rate the run handed in, not the one the thin table fitted"
+        );
+        assert_eq!(
+            told.observations, 0,
+            "a value nothing in this sample stood behind carries no observations"
+        );
+        assert_eq!(
+            fit.error_rate[&ReadGroupId(2)].provenance,
+            Provenance::Defaulted,
+            "the group the run said nothing about falls to the last rung"
+        );
+    }
+
     /// **A library that contributed no reads is left out rather than given a share of
     /// zero**, which [`SampleLibraryNoise::new`] refuses — a library with no reads has no
     /// rate to fit and contributes no term to the mixture.
@@ -1507,6 +1593,48 @@ mod tests {
             rung_of(&from_variable, &variable.ladder, 2),
             rung_of(&from_quiet, &quiet.ladder, 2),
             "read group 2 got the same rate from two different whole-sample tables"
+        );
+    }
+
+    /// **The rates a caller reads are the winning iterate's, not the last round's** — and
+    /// unlike `the_iterate_kept_is_the_argmax_of_the_trace`, this fixture can tell the two
+    /// apart. That test says in its own doc comment that no fixture in hand produces a trace
+    /// whose last iterate is not the argmax; this one does. The coupled world whose
+    /// whole-sample table claims 1.5 heterozygotes in a hundred, started at the *other*
+    /// world's answer, ends on a round that scores worse than an earlier one, so
+    /// keep-the-best and keep-the-last name different rungs.
+    ///
+    /// It is the assertion `into_coupled_fit`'s rebuild exists for: the fits the loop hands
+    /// on belong to the last round, and only their site counts may be used — the rate has to
+    /// come from `best`.
+    #[test]
+    fn the_reported_rates_are_the_winning_iterates_and_not_the_last_rounds() {
+        let world = CoupledWorld::build_with([0.98, 0.015, 0.005]);
+        let start = start_at(RUNG_AT_PHRED_15, RUNG_AT_PHRED_17);
+
+        let (fit, trace) = world.fit_from(&start, MAX_COUPLED_FIT_ITERATIONS);
+
+        // `max_by` keeps the later of two equal maxima, which is the loop's own `>=` rule.
+        let argmax = trace
+            .iter()
+            .max_by(|left, right| left.score.total_cmp(&right.score))
+            .expect("a non-empty trace");
+        let last = trace.last().expect("a non-empty trace");
+        assert_ne!(
+            argmax.rungs, last.rungs,
+            "the premise of this test: on this world the last round's rungs differ from the \
+             best-scoring round's, which is what lets it separate the two rules"
+        );
+
+        let reported: BTreeMap<ReadGroupId, usize> = fit
+            .error_rate
+            .keys()
+            .map(|&group| (group, rung_of(&fit, &world.ladder, group.get())))
+            .collect();
+
+        assert_eq!(
+            reported, argmax.rungs,
+            "the fit reports the last round's rates rather than the best-scoring round's"
         );
     }
 

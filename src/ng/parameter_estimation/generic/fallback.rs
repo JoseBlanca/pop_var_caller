@@ -46,12 +46,27 @@ use crate::ng::types::{ErrorRate, InbreedingF, ReadGroupId};
 /// own data could not resolve, and weighting by the *lenders'* yields would say the
 /// deepest library's chemistry is the most likely to be this one's.
 ///
-/// **⚠ The order is the design's, and it is worth a second look.** `arch` §5.4 and the
-/// plan both list *fitted here → borrowed → supplied → defaulted*, so a thin group in a
-/// sample with one good group takes the borrowed rate even when the run supplied one. A
-/// supplied value reads like an override, and an override that loses to a borrowed
-/// neighbour is surprising. Implemented as documented and recorded for the owner rather
-/// than quietly reordered.
+/// **⚠ The order is the design's, and what it turns on is what *supplied* means.** `arch`
+/// §5.4 and the plan both list *fitted here → borrowed → supplied → defaulted*, so a thin
+/// group in a sample with one good group takes the borrowed rate even when the run supplied
+/// one.
+///
+/// Read as a **fallback**, that order is principled and matches the rest of the ladder —
+/// measurement over assertion, the same reason a fit outranks a borrow. A borrowed rate is
+/// still a number measured from this sample's own reads; a supplied one is an assertion
+/// from outside the data. And the docs do phrase it that way: rung 3 is "Supplied, **if**
+/// the run was given one", and the default applies "when none can be fitted and **none was
+/// supplied**".
+///
+/// Read as an **override**, it is wrong, and arch §5.4 supplies the counterargument itself:
+/// borrowing is "a compromise and is marked as one", because chemistry differs between
+/// libraries. An operator who supplies a rate *because* this library is unlike its siblings
+/// — a different platform in the same sample — gets the neighbour's number instead, and
+/// `Provenance::Borrowed` lets a consumer notice without letting anyone fix it.
+///
+/// Implemented as documented and left for the owner, who should settle it **when F1 names
+/// the configuration field**: `fallback_error_rates` and this order stands;
+/// `error_rate_overrides` and it must flip. Nothing can supply a rate until then.
 ///
 /// # Panics
 ///
@@ -66,7 +81,7 @@ pub fn resolve_error_rates(
 ) -> BTreeMap<ReadGroupId, Estimate<ErrorRate>> {
     // Which groups' own fits stand on enough sites to be worth keeping — computed once,
     // because every borrowing group asks the same question about the same set.
-    let qualifying: Vec<(ReadGroupId, ErrorRate)> = fitted
+    let groups_above_the_floor: Vec<(ReadGroupId, ErrorRate)> = fitted
         .iter()
         .filter(|(_, fit)| fit.sites >= floor)
         .map(|(&group, fit)| (group, fit.error_rate))
@@ -91,13 +106,13 @@ pub fn resolve_error_rates(
             // qualifies too — and it cannot, since it is here. Filtering anyway, so that
             // the rule reads as what it is rather than as a consequence of the branch
             // above.
-            let lenders: Vec<f64> = qualifying
+            let lenders_rates: Vec<f64> = groups_above_the_floor
                 .iter()
                 .filter(|&&(lender, _)| lender != group)
                 .map(|&(_, rate)| rate.get())
                 .collect();
-            if !lenders.is_empty() {
-                let mean = lenders.iter().sum::<f64>() / lenders.len() as f64;
+            if !lenders_rates.is_empty() {
+                let mean = lenders_rates.iter().sum::<f64>() / lenders_rates.len() as f64;
                 return (
                     group,
                     Estimate {
@@ -107,7 +122,7 @@ pub fn resolve_error_rates(
                         // **The lenders' reads, not this group's.** The warrant belongs to
                         // the evidence the number came from, and this group's own reads are
                         // precisely the ones that were not enough.
-                        observations: qualifying
+                        observations: groups_above_the_floor
                             .iter()
                             .filter(|&&(lender, _)| lender != group)
                             .filter_map(|(lender, _)| reads_of_group.get(lender))
@@ -140,7 +155,7 @@ pub fn resolve_error_rates(
         .collect()
 }
 
-/// The inbreeding coefficient a run was handed, if it was handed one.
+/// Take the inbreeding coefficient a run was handed, if it was handed one.
 ///
 /// **Its own function rather than a branch inside the fit**, because a supplied `F` changes
 /// what the accumulator *stores*: [`InbreedingMode::Supplied`] drops the window key
@@ -152,7 +167,7 @@ pub fn resolve_error_rates(
 /// supplied one carries it too — it says how much genome the number is being applied to,
 /// which is the only quantity a consumer can compare across samples.
 #[must_use]
-pub fn supplied_inbreeding(
+pub fn take_supplied_inbreeding(
     mode: InbreedingMode,
     covered_positions: u64,
 ) -> Option<Estimate<InbreedingF>> {
@@ -216,8 +231,10 @@ mod tests {
     /// just rejected.
     ///
     /// Two lenders at different rates, so a rule that took one of them rather than their
-    /// mean lands on neither. The thin group sits one site below the floor, which is what
-    /// makes the floor's comparison — `>=` against `>` — reachable.
+    /// mean lands on neither. **The two lenders sit exactly *at* the floor**, and that is
+    /// what makes its comparison reachable: `>=` accepts them and `>` does not. A group one
+    /// site below the floor — which the thin group is — is rejected by both, so it says
+    /// nothing about the operator.
     #[test]
     fn a_thin_group_borrows_the_mean_of_the_others() {
         let fitted = BTreeMap::from([
@@ -298,6 +315,31 @@ mod tests {
         assert_eq!(resolved[&ReadGroupId(2)].value, rate(0.001));
     }
 
+    /// **A supplied rate does not displace a group's own fit.** `fitted here` is the top
+    /// rung, so a run that supplied a rate for a group holding enough sites of its own is
+    /// told what was measured rather than what it asked for — the same ordering question as
+    /// `borrowing_outranks_a_supplied_rate`, asked one rung higher.
+    #[test]
+    fn a_supplied_rate_does_not_displace_a_group_fitted_on_its_own_sites() {
+        let fitted = BTreeMap::from([(ReadGroupId(1), fit(0.001, MIN_SITES_TO_FIT))]);
+        let supplied = BTreeMap::from([(ReadGroupId(1), rate(0.02))]);
+
+        let resolved = resolve_error_rates(
+            &fitted,
+            &reads(&[(1, 4_000_000)]),
+            &supplied,
+            MIN_SITES_TO_FIT,
+        );
+
+        assert_eq!(resolved[&ReadGroupId(1)].provenance, Provenance::FittedHere);
+        assert_eq!(resolved[&ReadGroupId(1)].value, rate(0.001));
+        assert_eq!(
+            resolved[&ReadGroupId(1)].observations,
+            4_000_000,
+            "the warrant is the group's own reads, not the supplied value's nothing"
+        );
+    }
+
     /// The ladder's order is the design's: **borrowed outranks supplied**. Recorded on a
     /// test rather than only in prose, so that reordering it is a visible decision.
     #[test]
@@ -325,12 +367,12 @@ mod tests {
     fn a_supplied_inbreeding_coefficient_is_marked_as_one() {
         let value = InbreedingF::try_new(0.4).expect("a fraction");
 
-        let supplied = supplied_inbreeding(InbreedingMode::Supplied(value), 800_000_000)
+        let supplied = take_supplied_inbreeding(InbreedingMode::Supplied(value), 800_000_000)
             .expect("a supplied mode yields a value");
 
         assert_eq!(supplied.value, value);
         assert_eq!(supplied.provenance, Provenance::Supplied);
         assert_eq!(supplied.observations, 800_000_000);
-        assert!(supplied_inbreeding(InbreedingMode::Fitted, 800_000_000).is_none());
+        assert!(take_supplied_inbreeding(InbreedingMode::Fitted, 800_000_000).is_none());
     }
 }
