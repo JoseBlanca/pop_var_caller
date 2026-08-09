@@ -2,8 +2,9 @@
 
 *Design spec, 2026-08-03. **Revised 2026-08-06 against measurement**, and the measurements changed
 the accumulator's key rather than only its constants. **Revised again 2026-08-07**: §5.1 records
-that the copy floors cannot be swept downward by re-typing, so the per-period floors table stays
-pending on a change to region typing rather than on a run of the survey.*
+that the copy floors cannot be swept downward far by re-typing. **Revised 2026-08-08**: the archive
+survey of 2,457 tomato libraries delivers the per-period floors table, and it is a measurement rather
+than a decision — §5.1 records what adopting it would cost.*
 
 *Source for the 2026-08-06 numbers:*
 [`../research/parameter_estimator_experiments_2026-08-06.md`](../research/parameter_estimator_experiments_2026-08-06.md)
@@ -786,11 +787,71 @@ therefore no evidence either way", arriving from the other direction. So the gua
 a period crosses **its own** curve, and monos need the other criterion: how often a read differs
 from the reference length at all.
 
-**The per-period evidence.** *Pending: the guard share by (period, repeat count) over an unselected
-whole-genome walk on tomato, checked against HG002. §5's three pooled bands cannot supply it, and
-HG002's tandem-repeat tier set is selected for long and variable tracts, which is exactly the
-selection that distorts the low-repeat strata this question turns on. The floors table lands with
-it.*
+**The per-period evidence — measured 2026-08-07 over the tomato archive.** 2,457 libraries walked
+across chromosome 1 at copy floors one step under ng's, one setting throughout. The guard share by
+(period, repeat count), pooled over every library, and the repeat count at which each period first
+crosses the one-in-ten threshold and stays across:
+
+| period | 3 repeats | 4 | 5 | 6 | 7 | crosses at |
+|---|---:|---:|---:|---:|---:|---:|
+| 2 — dinucleotide | 0.662 | 0.427 | 0.258 | **0.091** | 0.058 | **6** |
+| 3 — trinucleotide | 0.643 | 0.391 | 0.098 | 0.203 | **0.056** | **7** |
+| 4 — tetranucleotide | 0.758 | 0.321 | 0.267 | **0.050** | 0.023 | **6** |
+| 5 — pentanucleotide | 0.522 | 0.132 | **0.066** | 0.116 | — | **5** |
+| 6 — hexanucleotide | 0.121 | **0.036** | — | — | — | **4** |
+
+*(Mononucleotides are absent because their guard share is zero by arithmetic. The walk censors every
+period below the floor it was swept to, so nothing here sees a period-1 tract under 5 repeats.)*
+
+The evidence behind each cell is large: the dinucleotide 3-repeat entry pools 292 million loci and
+3.4 billion reads.
+
+**Measured floors: `[6, 6, 7, 6, 5, 4]` against ng's `[6, 4, 4, 3, 3, 3]`.** Every period except
+mononucleotides is currently set too low, periods 4 and 5 by three copies. **This confirms the
+prediction this section recorded**: keyed in copies rather than bases, the floors come out far
+closer to uniform than they are, and periods 4 to 6 rise substantially.
+
+**Period 1 is not moved by this survey.** Its only criterion is how often a read differs from the
+reference length at all, and both 5 and 6 repeats clear the one-in-a-hundred rate the survey uses
+(1.13% and 2.54%) — a rate that is chosen rather than derived. The floor of 6 keeps the reason it
+already had, the Illumina read-artifact onset, which this measurement neither supports nor
+contradicts.
+
+**Read the pooled curve, not the per-library one, and the reason is a bias worth recording.** The
+survey also reports a floor per library, and those sit systematically **below** the pooled crossing
+— pentanucleotides call 4 in three libraries out of four where the pooled curve says 5. A thin
+stratum in one library often observes *no* non-whole-repeat read at all, so its guard share is
+exactly zero and passes. The per-library floor is therefore optimistic wherever data is thin, which
+is precisely the low-repeat strata a floor is placed on. The pooled curve has no such problem.
+
+**Two of the crossings rest on a single stratum and should be read as softer than the others.**
+Trinucleotides pass at 5 repeats (0.098), fail at 6 (0.203) and pass again at 7; the floor of 7
+follows from requiring the crossing to hold, and a rule accepting the first crossing would say 5.
+Pentanucleotides pass at 5 and fail at 6 on 5,333 loci, which is thin. Dinucleotides, trinucleotides
+at the low end, and tetranucleotides are not in doubt.
+
+**How far the floor moves between libraries — the axis nothing had varied, and the reason for the
+survey.** It moves by two to four repeats. Dinucleotide floors run 5 to 8 across libraries with 7%,
+38%, 34% and 19% of them at each; tetranucleotides run 4 to 6. So a single number is a compromise
+across real variation rather than a constant of the species.
+
+**What that variation is has *not* been established, and the obvious reading is not available.**
+Grouping libraries by their project accounts for 45% of the variance in the dinucleotide floor — but
+a project is only a proxy for how a library was prepared, and a poor one in both directions:
+libraries within a project need not share a preparation, and a project also bundles the instrument,
+the submission batch and the **read length**. Read length is the confound this survey documents and
+cannot see, and it would produce exactly this pattern for purely geometric reasons, since a 100 bp
+library cannot span the tracts a 150 bp one spans. Separating preparation from read length needs the
+join to `rick_sample_manifest.sh` that the survey's own header calls for, and until that is done
+"PCR amplification stutters more" remains the motivating hypothesis rather than a finding.
+
+**What is ruled out is depth**, which is the alternative that would have made the whole axis an
+artifact. The median dinucleotide floor is flat — 6, 7, 7, 6, 7 — across depth quintiles spanning
+2,606 to 55.9 million reads a library, a twenty-thousand-fold range.
+
+**And 28 libraries produced nothing**, each because no read witnessed a locus on chromosome 1 while
+region typing found the same 644,194 as everywhere else. They are reported rather than counted as
+surveyed, which is the failure this section's instrument was rebuilt to make loud.
 
 **And the instrument built to supply it cannot reach below the floors — measured 2026-08-07, and
 this is why the table is still pending.** The obvious way to see under a floor is to lower it and
@@ -863,6 +924,26 @@ period ever comes back near the threshold rather than far from it.
 through the guard-share audit; a floor set too high is silent. So the default still comes from the
 most stuttering library available, and the crossing per period per library — which the archive
 survey delivers — is what places it.
+
+**What adopting the measured floors would cost, because it is larger than "changing a default"
+suggests and is the reason the constant has not been moved here.** Against the loci ng emits today:
+
+| period | current | measured | STR loci today | kept | re-routed |
+|---|---:|---:|---:|---:|---:|
+| 1 | 6 | 6 | 272,444,044 | 272,444,044 | 0.0% |
+| 2 | 4 | 6 | 38,651,283 | 3,716,800 | 90.4% |
+| 3 | 4 | 7 | 5,168,746 | 355,932 | 93.1% |
+| 4 | 3 | 6 | 7,976,568 | 83,722 | 99.0% |
+| 5 | 3 | 5 | 1,338,183 | 25,771 | 98.1% |
+| 6 | 3 | 4 | 523,635 | 58,836 | 88.8% |
+
+**15.2% of ng's STR loci in total, and roughly nine in ten of every non-mononucleotide one.** The
+total is small only because mononucleotides are 84% of the loci and do not move. **Nothing is lost
+by this** — §5.1's own argument is that those tracts are re-described rather than dropped, and they
+go to the generic path where an ordinary indel is what the model expects, which is exactly what
+their 30% to 76% guard shares say they are producing. But it is a large change to what the STR path
+sees, so it is recorded here as measured and left to be taken deliberately rather than folded in as
+a default edit.
 
 **And the mononucleotide floor of 6 carries a reason that survives this framing rather than being
 overridden by it.** It was chosen deliberately over ~9 — "the Illumina read-artifact onset, not the
@@ -1089,22 +1170,17 @@ genotype long alleles" is a claim with no number attached to it.
    width of the entry's counters, which is an implementation choice
    ([`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1) rather than a
    question about the design.
-9. **Where do the per-period copy floors go?** — OPEN, and **waiting on the archive survey rather
-   than on a design decision** (§5.1). Two things were settled getting here. They cannot be swept
-   downward far: `MinCopies` decides both what is admitted as a locus and what counts as a
-   neighbouring repeat, so lowering it makes tracts cluster and the locus count *falls* — 6,237 loci
-   at ng's defaults, 848 at a uniform floor of 3, zero at 2, over a 2 Mb tomato slice. But **one
-   step down works**, because the guard share — the criterion that places the floors for periods 2
-   to 6 — is essentially unmoved by it (0.345 default against 0.344 swept, at dinucleotides/4
-   repeats). **Periods 2 and 3 are already answered on that slice**: 3-repeat tracts read a guard
-   share of 63% and 51% against a one-in-ten threshold, so their floor of 4 stands. **What is left
-   is periods 4, 5 and 6**, which hold 67, 20 and 7 loci at 3 repeats there — locus-starved, not
-   biased — plus the library axis nothing has varied. **Settled by:** the archive survey at
-   `[5, 3, 3, 3, 3, 3]` (`scripts/ng_str_library_survey.sh`). Separating `MinCopies`' two roles in
-   `SsrSegmentCriteria` remains the clean way to reach further below a floor, and is not needed
-   unless a period comes back near the threshold. *This is the question §5.1 exists for, and it is
-   the only one on this list that blocks nothing downstream: the floors are a default a user can
-   already override.*
+9. **Where do the per-period copy floors go?** — **MEASURED, and the change is not made** (§5.1).
+   The archive survey walked 2,457 tomato libraries and puts them at `[6, 6, 7, 6, 5, 4]` against
+   ng's `[6, 4, 4, 3, 3, 3]` — every period but mononucleotides too low, periods 4 and 5 by three
+   copies. Adopting them re-routes 15% of ng's STR loci to the generic path, and nine in ten of
+   every non-mononucleotide one, which is why it is recorded rather than folded in as a default
+   edit. **What remains open is the decision, not the number.**
+   *Two things that stay soft:* the trinucleotide and pentanucleotide crossings each rest on one
+   noisy stratum, and the two-to-four-repeat spread between libraries is **not** yet attributable to
+   preparation — grouping by project explains 45% of it, but a project bundles preparation with the
+   instrument, the batch and the read length, and read length alone would produce the same pattern
+   geometrically. Separating them needs the read-length join the survey's header calls for.
 
 ---
 
