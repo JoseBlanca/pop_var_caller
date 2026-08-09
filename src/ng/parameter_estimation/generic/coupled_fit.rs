@@ -99,11 +99,10 @@ pub fn fit_coupled(
     ladder: &[ErrorRate],
     supplied: &BTreeMap<ReadGroupId, ErrorRate>,
 ) -> Result<CoupledFit, ParameterEstimationError> {
-    let ploidies: BTreeSet<Ploidy> = accumulators
-        .windowed_histograms()
-        .keys()
-        .map(|&(_, ploidy)| ploidy)
-        .collect();
+    // **From the accumulator and not from `windowed_histograms()`**, which holds nothing
+    // when `F` was supplied: the sites are in the collapsed table then, and deriving the
+    // ploidies from the windows would fit no sample at all in that mode.
+    let ploidies: BTreeSet<Ploidy> = accumulators.ploidies();
     let whole_sample: BTreeMap<Ploidy, DepthAltHistogram<u64>> = ploidies
         .into_iter()
         .map(|ploidy| (ploidy, accumulators.whole_sample_histogram(ploidy)))

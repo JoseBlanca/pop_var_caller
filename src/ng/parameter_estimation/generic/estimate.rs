@@ -500,4 +500,145 @@ mod tests {
             "the group nothing was supplied for falls through to the last rung"
         );
     }
+
+    /// One locus that **both** libraries covered, five reads each.
+    ///
+    /// The shape every other fixture here lacks: elsewhere each site belongs to one read
+    /// group, so the read-group table and the windowed one hold the same number of entries
+    /// and a count taken from the wrong one is invisible.
+    fn shared_site(
+        start: u64,
+        heterozygous: bool,
+        groups: [ReadGroupId; 2],
+    ) -> SampleLocusObservations {
+        let mut observations = Vec::new();
+        for group in groups {
+            if heterozygous {
+                observations.push(observation(b"C", group, 2));
+                observations.push(observation(b"A", group, 3));
+            } else {
+                observations.push(observation(b"A", group, 5));
+            }
+        }
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(start),
+            },
+            reference_bases: b"A".as_slice().into(),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// **A site two libraries covered is one reference position, not two.**
+    ///
+    /// The read-group table enters that site **twice** — once per group, at each group's own
+    /// depth — and the windowed table once, at their combined depth. So a warrant summed
+    /// over the wrong table doubles on exactly this shape and on no other fixture in this
+    /// file: everywhere else a site belongs to one group, and the two tables agree.
+    /// Measured: 20,002 against the 10,001 asserted below.
+    #[test]
+    fn a_site_two_libraries_covered_counts_one_position_and_not_two() {
+        let groups = [ReadGroupId(1), ReadGroupId(2)];
+        let mut config = config(supplied(0.3));
+        config.read_groups = groups.to_vec();
+        let loci: Vec<SampleLocusObservations> = (0..=MIN_SITES_TO_FIT)
+            .map(|index| shared_site(index + 1, index.is_multiple_of(20), groups))
+            .collect();
+
+        let parameters = estimate_generic_parameters(loci.into_iter().map(Ok), &config)
+            .expect("a two-library sample above the site floor is fittable");
+
+        assert_eq!(
+            parameters.inbreeding.expect("supplied").observations,
+            MIN_SITES_TO_FIT + 1,
+            "each site covers one reference position, however many libraries covered it"
+        );
+    }
+
+    /// **The `Fitted` arm is entered at all**, which no other test here does — every other
+    /// one supplies `F` to keep the runs model out of the way, and that left the whole arm
+    /// dead: replacing it with `unreachable!()` left the suite green, as did suppressing the
+    /// runs model with a bare `Ok((None, None))`.
+    ///
+    /// The fixture's 10,001 one-base sites all fall in one 100 kb window, against a floor of
+    /// 3,000, so the runs model refuses — which is the point. Reaching that refusal proves
+    /// the arm runs, the ploidy-2 lookup finds its entry and `library_noise` was built. **It
+    /// says nothing about whether the runs model gets the right numbers**; that needs 300 Mb
+    /// of windows and is F2's question.
+    #[test]
+    fn a_fitted_coefficient_is_attempted_rather_than_reported_absent() {
+        let config = config(InbreedingMode::Fitted);
+
+        let error = estimate_generic_parameters(
+            a_samples_loci(ReadGroupId(1)).into_iter().map(Ok),
+            &config,
+        )
+        .expect_err("one window of evidence is far below the runs model's floor");
+
+        assert!(
+            matches!(
+                error,
+                ParameterEstimationError::InbreedingNotFittable { windows: 1, .. }
+            ),
+            "the wrong failure, so the Fitted arm may not have run: {error}"
+        );
+    }
+
+    /// **How the coupled fit terminated is reported rather than invented.** It is one of five
+    /// fields on the emitted parameters and the equality test above cannot see it: both sides
+    /// of that comparison would carry the same constant. A fit that ran out of iterations
+    /// reported as converged is the failure this closes.
+    #[test]
+    fn the_coupled_fits_termination_is_the_one_it_reached() {
+        let config = config(supplied(0.2));
+
+        let parameters = estimate_generic_parameters(
+            a_samples_loci(ReadGroupId(1)).into_iter().map(Ok),
+            &config,
+        )
+        .expect("fittable");
+
+        assert!(parameters.coupled_fit.converged);
+        assert_eq!(
+            parameters.coupled_fit.iterations, 2,
+            "a single-library sample reaches its fixed point in two rounds — one to settle \
+             and one to see nothing move"
+        );
+    }
+
+    /// **Two shards merged answer as one walk did** — the sharded path is the whole reason
+    /// the second entry point exists and nothing had exercised it.
+    ///
+    /// It also puts `accumulators()`'s stated contract under test: every shard must come from
+    /// the config so that all of them share one `edges` object, which `merge` proves by
+    /// pointer identity. Handing each call a fresh `Arc` instead leaves every other test in
+    /// this file green and panics here.
+    #[test]
+    fn two_shards_merged_answer_as_one_walk() {
+        let group = ReadGroupId(1);
+        let config = config(supplied(0.2));
+        let loci = a_samples_loci(group);
+        let seam = loci.len() / 2;
+
+        let mut first = config.accumulators();
+        for locus in &loci[..seam] {
+            first.add_locus(locus);
+        }
+        let mut second = config.accumulators();
+        for locus in &loci[seam..] {
+            second.add_locus(locus);
+        }
+        first.merge(second);
+
+        let sharded = first.estimate(&config).expect("fittable");
+        let single =
+            estimate_generic_parameters(loci.into_iter().map(Ok), &config).expect("fittable");
+
+        assert_eq!(sharded, single);
+    }
 }

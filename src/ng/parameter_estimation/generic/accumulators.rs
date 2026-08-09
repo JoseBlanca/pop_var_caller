@@ -19,7 +19,7 @@
 //!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §3.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
@@ -186,10 +186,31 @@ pub struct GenericAccumulators {
     /// no fold widens it**: on a human sample its busiest cell's depth sum passes
     /// 4.29 × 10⁹ about a third of the way through the run (owner's call, 2026-08-06).
     by_group: BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
-    /// The windowed table. `u32`: 100 kb of sites can reach neither ceiling, and a
-    /// sample holds about 8,000 of these, which is where the narrower counter buys
-    /// something — 37 MB rather than 74.
+    /// The windowed table, used when `F` is being fitted. `u32`: 100 kb of sites can reach
+    /// neither ceiling, and a sample holds about 8,000 of these, which is where the narrower
+    /// counter buys something — 37 MB rather than 74.
+    ///
+    /// **Empty when `F` was supplied**, because the collapsed arm is not a window and the
+    /// `u32` justification above does not survive the collapse. See [`Self::whole_sample`].
     by_window: BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>>,
+    /// The collapsed table, used when `F` was **supplied** — one per ploidy, no window key.
+    ///
+    /// **`u64`, and the width is the whole reason this is a second field rather than another
+    /// key in `by_window`.** That map's `u32` is justified by a window holding at most
+    /// 100,000 sites; dropping the window key pours the entire genome into one table, and
+    /// tomato's ~800 Mb at 30× puts well over 300 million sites into the modal-depth
+    /// zero-alternative cell. Measured before this split: a panic at **143,165,576 sites at
+    /// depth 30 in one cell** — loud rather than wrapping, which is the counter's overflow
+    /// guard working, but every supplied-`F` run on a real genome died there.
+    ///
+    /// **Widening costs nothing here and would have cost 37 MB there.** This map holds one
+    /// table per ploidy — a few kB — where `by_window` holds about 8,000 of them, which is
+    /// the memory `InbreedingMode::Supplied` exists to save in the first place
+    /// (`spec/parameter_prepass_generic.md` §6.4, §9).
+    ///
+    /// **The two are never both populated**: [`Self::add_locus`] routes by
+    /// [`InbreedingMode`], and `merge` refuses two accumulators whose modes differ.
+    whole_sample: BTreeMap<Ploidy, DepthAltHistogram<u64>>,
     counts: AccumulationCounts,
     /// One entry per contig this shard saw. Bounded by shards × contigs — tens to
     /// hundreds of pairs — so nothing is saved by collapsing it.
@@ -227,6 +248,7 @@ impl GenericAccumulators {
             inbreeding,
             by_group: BTreeMap::new(),
             by_window: BTreeMap::new(),
+            whole_sample: BTreeMap::new(),
             counts: AccumulationCounts::default(),
             covered_spans: Vec::new(),
             previous_end: BTreeMap::new(),
@@ -282,26 +304,42 @@ impl GenericAccumulators {
         }
         self.by_group_scratch = by_group_scratch;
 
-        let window = match self.inbreeding {
-            InbreedingMode::Fitted => WindowKey::of_locus(region),
-            InbreedingMode::Supplied(_) => WindowKey::WholeSample,
-        };
-        let table = self
-            .by_window
-            .entry((window, ploidy))
-            .or_insert_with(|| DepthAltHistogram::new(Arc::clone(&edges)));
-
+        // **The site is counted once and filed once, into whichever of the two tables this
+        // run's mode uses.** The counting is identical; only the width of what receives it
+        // differs, which is why the two arms below duplicate a call rather than a rule.
+        let mut alt_by_group = std::mem::take(&mut self.alt_by_group_scratch);
         let whole = if self.multi_library {
-            let mut alt_by_group = std::mem::take(&mut self.alt_by_group_scratch);
-            let whole = count_whole_site_by_library(locus, &edges, &mut alt_by_group);
-            table.add_attributed_site(whole.counts(), &alt_by_group, covered);
-            self.alt_by_group_scratch = alt_by_group;
-            whole
+            count_whole_site_by_library(locus, &edges, &mut alt_by_group)
         } else {
-            let whole = count_whole_site(locus, &edges);
-            table.add_site(whole.counts(), covered);
-            whole
+            alt_by_group.clear();
+            count_whole_site(locus, &edges)
         };
+        let multi_library = self.multi_library;
+        match self.inbreeding {
+            InbreedingMode::Fitted => {
+                let table = self
+                    .by_window
+                    .entry((WindowKey::of_locus(region), ploidy))
+                    .or_insert_with(|| DepthAltHistogram::new(Arc::clone(&edges)));
+                if multi_library {
+                    table.add_attributed_site(whole.counts(), &alt_by_group, covered);
+                } else {
+                    table.add_site(whole.counts(), covered);
+                }
+            }
+            InbreedingMode::Supplied(_) => {
+                let table = self
+                    .whole_sample
+                    .entry(ploidy)
+                    .or_insert_with(|| DepthAltHistogram::new(Arc::clone(&edges)));
+                if multi_library {
+                    table.add_attributed_site(whole.counts(), &alt_by_group, covered);
+                } else {
+                    table.add_site(whole.counts(), covered);
+                }
+            }
+        }
+        self.alt_by_group_scratch = alt_by_group;
         if whole.subsampled_from().is_some() {
             self.counts.sites_subsampled_to_cap += 1;
         }
@@ -383,6 +421,14 @@ impl GenericAccumulators {
                 }
             }
         }
+        for (ploidy, table) in other.whole_sample {
+            match self.whole_sample.get_mut(&ploidy) {
+                Some(existing) => existing.merge(&table),
+                None => {
+                    self.whole_sample.insert(ploidy, table);
+                }
+            }
+        }
         for (key, table) in other.by_window {
             match self.by_window.get_mut(&key) {
                 Some(mine) => mine.merge(&table),
@@ -460,13 +506,37 @@ impl GenericAccumulators {
     /// exact, which is why no third accumulator is kept.
     #[must_use]
     pub fn whole_sample_histogram(&self, ploidy: Ploidy) -> DepthAltHistogram<u64> {
-        fold_windows_of_one_ploidy(
-            &self.edges,
-            self.by_window
-                .iter()
-                .filter(|((_, at), _)| *at == ploidy)
-                .map(|(_, table)| table),
-        )
+        match self.inbreeding {
+            InbreedingMode::Fitted => fold_windows_of_one_ploidy(
+                &self.edges,
+                self.by_window
+                    .iter()
+                    .filter(|((_, at), _)| *at == ploidy)
+                    .map(|(_, table)| table),
+            ),
+            // **A fold over nought or one table, and it is still a fold.** The collapsed
+            // arm is already whole-sample and already `u64`, so this copies rather than
+            // widens — but going through the same function is what keeps one definition of
+            // what "the whole sample at this ploidy" means. `Option` is an iterator of at
+            // most one item, so a ploidy this sample never saw folds to an empty table,
+            // which is the same answer the arm above gives.
+            InbreedingMode::Supplied(_) => {
+                fold_windows_of_one_ploidy(&self.edges, self.whole_sample.get(&ploidy))
+            }
+        }
+    }
+
+    /// Every ploidy this sample's loci landed at.
+    ///
+    /// **Its own accessor because the two modes keep their sites in different maps**, and a
+    /// caller deriving the set from `windowed_histograms().keys()` — which is what the
+    /// coupled fit did — sees nothing at all when `F` was supplied.
+    #[must_use]
+    pub fn ploidies(&self) -> BTreeSet<Ploidy> {
+        match self.inbreeding {
+            InbreedingMode::Fitted => self.by_window.keys().map(|&(_, ploidy)| ploidy).collect(),
+            InbreedingMode::Supplied(_) => self.whole_sample.keys().copied().collect(),
+        }
     }
 
     /// What this run was told about inbreeding, which decides whether the windowed table
@@ -489,7 +559,12 @@ impl GenericAccumulators {
         self.by_window
             .values()
             .map(DepthAltHistogram::total_covered_positions)
-            .sum()
+            .sum::<u64>()
+            + self
+                .whole_sample
+                .values()
+                .map(DepthAltHistogram::total_covered_positions)
+                .sum::<u64>()
     }
 }
 
@@ -941,6 +1016,13 @@ mod tests {
     /// **A supplied `F` drops the window key**, collapsing the windowed object from one
     /// table per 100 kb to one for the sample. The object itself stays, because the
     /// per-site rates still need whole sites.
+    ///
+    /// **And the collapsed arm is a different table with a wider counter, which is the
+    /// property this asserts rather than a detail of where it lives.** The windowed map's
+    /// `u32` is justified by a window holding at most 100,000 sites; a table with no window
+    /// key holds the genome, and before the split that overflowed at 143 million sites at
+    /// depth 30 in one cell. So the assertion is that the `u32` map receives **nothing** in
+    /// this mode — a site landing there is a site on the path that overflowed.
     #[test]
     fn a_supplied_inbreeding_coefficient_collapses_the_windowed_table() {
         let edges = ladder();
@@ -955,15 +1037,22 @@ mod tests {
             with_supplied_f.add_locus(&locus);
         }
 
-        let windows = with_supplied_f.windowed_histograms();
-        assert_eq!(windows.len(), 1, "one table, not one per window");
-        assert!(windows.contains_key(&(WindowKey::WholeSample, diploid())));
+        assert!(
+            with_supplied_f.windowed_histograms().is_empty(),
+            "the u32-counted map must receive nothing when there is no window key to bound \
+             what one of its tables can hold"
+        );
+        assert_eq!(
+            with_supplied_f.ploidies(),
+            BTreeSet::from([diploid()]),
+            "and the ploidies are still findable, which the coupled fit needs"
+        );
         assert_eq!(
             with_supplied_f
                 .whole_sample_histogram(diploid())
                 .total_loci(),
             12,
-            "and it still holds every site"
+            "one table, and it still holds every site"
         );
 
         // Against the same walk with F fitted, which is where the 37 MB goes.
