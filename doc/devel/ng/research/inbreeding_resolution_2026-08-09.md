@@ -116,3 +116,110 @@ that nothing was found.
 - **`MIN_WINDOWS_TO_FIT_INBREEDING` is untouched by this.** If the across-start spread becomes
   the criterion, a window-count floor may no longer be the right gate at all — 3,000 windows
   at 100 heterozygotes each behaves perfectly and 12,000 at five does not.
+
+---
+
+## 6. Adopting it: what the first bullet of §5 found, and the correction it forced
+
+Written later the same day, while turning §4 into a criterion in `fit_inbreeding`. The
+harness gained a §4 and a §5; three measurements below are new, and the second of them
+**changes the criterion §4 proposed**.
+
+### 6.1 The shape §5 asked for behaves exactly like the twelve
+
+Twenty run shapes now instead of one — runs of 3 Mb and of 300 kb (three windows), covering
+30%, 10% and 5% of the genome, each crossed with the four evidence levels, at 6,000 windows
+and five seeds. **All 100 fits answered, none was refused, the worst recovery error is
+0.0100, and every one has an across-start spread of exactly 0.0000.**
+
+| runs | worst recovery error over the four evidence levels | worst spread |
+|---|---:|---:|
+| 30% at 3 Mb | 0.0014 | 0.0000 |
+| 30% at 300 kb | 0.0057 | 0.0000 |
+| 10% at 1 Mb | 0.0023 | 0.0000 |
+| 5% at 3 Mb | 0.0016 | 0.0000 |
+| 5% at 300 kb | 0.0100 | 0.0000 |
+
+So §5's suspicion does not hold up: the starts agree wherever the runs are real, including
+where they are short and where they are rare. Over §3 and §4 together — **160 fits at twenty
+shapes** — the largest spread is 0.0000. On the other side, over the 46 no-runs fits §1
+accepted, the smallest is 0.0004 and the largest 0.9980.
+
+### 6.2 But a bare threshold on the spread refuses a fit the design requires to work
+
+**The genomes in this harness carry no floor of false heterozygotes, and that is the shape
+§5 should have named.** Milestone E3's own fixtures do carry one — collapsed paralogs and
+mismapping lift both states together, and spec §6.2 requires the estimator to survive a
+floor of **five times** the real heterozygote rate. Applying a threshold of 0.05 to the raw
+spread refused three of `runs.rs`'s tests, two of them fits that recover their genome:
+
+| fixture | fitted `F` against realised | raw spread across nine starts |
+|---|---|---:|
+| 30% runs, floor 1× | 0.3150 against 0.3153 | 0.0000 |
+| 30% runs, floor 3× | recovers, within 0.05 | 0.3250 |
+| 30% runs, floor 5× | 0.3157 against 0.3122 | 0.3157 |
+
+**What the nine starts are doing is not a disagreement.** At the 5× floor, six starts land
+on `F` = 0.3157 and three collapse to `F` = 0.0000 — and the three that collapsed score
+**1,473 nats worse**. The fit has already rejected them, by a likelihood ratio of e^1473.
+
+**The failure looks nothing like that.** On a genome with no runs at five heterozygotes a
+window, the nine starts return `F` = 0.0010, 0.8497, 0.6015, 0.5722, 0.0003, 0.0051 and
+0.0159 — and every one is within **0.91 nats** of the best, odds of 2.5 to 1, which decides
+nothing. That is §3.1's proof showing through: when the two states coincide the likelihood is
+*exactly* flat in `F`, so every answer scores the same.
+
+**The score separates the two populations where the spread does not**: 0.91 nats against
+1,473, a factor of 1,600, where the spreads themselves overlap (0.30–0.33 legitimate against
+0.0004–0.998 not).
+
+### 6.3 The criterion as adopted
+
+The spread over the **tied** starts — those within `MAX_TIED_START_LOG_LIKELIHOOD_GAP` = 10
+nats of the best, an odds ratio of about 22,000 to one — must not exceed
+`MAX_IDENTIFIED_START_SPREAD` = 0.05. Ten nats sits 11× above the measured tie and 147× below
+the measured rejection; an **absolute** number rather than a fraction of the total, because a
+likelihood ratio is what compares two fits and it does not grow with the genome (the two
+totals above differ eightfold and the two gaps do not track them).
+
+It is the third refusal and it catches a third failure. The used-both-states check catches a
+search that collapsed; `MAX_IDENTIFIED_STATE_RATIO` catches two states that coincide; this
+catches a chain that found a different answer from every start and could not tell them apart.
+
+**Measured on `runs.rs`'s own fixtures at five heterozygotes a window**, which is a quarter
+of what its other genomes carry: over eight seeds drawn with no runs, **seven are refused**,
+with the tied starts landing 0.1147 to 0.8494 apart — and every one of the seven had passed
+both other checks. The eighth seed drew a small run, 0.28% of the genome, and is answered:
+`F` = 0.0028 against a realised 0.0028, with all nine starts agreeing. So five heterozygotes
+a window is not *too little evidence to fit*; it is where an **absent** signal gets read as a
+total one.
+
+### 6.4 The harness re-run with the criterion in place
+
+The tables in §1–§3 were measured before it existed, so the last check is to run the whole
+sweep again with it. **The two catastrophic cells are the ones to watch — 3,000 windows × 5
+heterozygotes and 12,000 × 5, which returned `F` = 0.9912 and 0.9922 on a genome with no runs
+at all.**
+
+- **Both now refuse all five seeds.** So do 3,000 × 2, 6,000 × 2, 12,000 × 2, 6,000 × 5 and
+  12,000 × 20. Across §1, refusals go from **14 of 60 to 48 of 60**.
+- **The largest `F` any genome with no runs now returns anywhere in the sweep is 0.0152**,
+  against a reported resolution of 0.0409 at that window count. It was 0.9922. **Every
+  no-runs fit that is still answered comes back below its own reported resolution**, which is
+  the property that was missing and the whole reason `resolution` is emitted.
+- **§3 and §4 are untouched: 0 refusals across all 160 fits**, the same answers, worst
+  recovery error 0.0100. The criterion costs nothing where the runs are real.
+
+A cell where every seed was refused has no fitted values to average, and the mean and worst
+columns print `NaN` and `0.0000` for it — read those as *nothing was answered here*, not as a
+fit that returned zero.
+
+### 6.5 What §6 still does not settle
+
+- **The tie gap is measured at two points**, 0.91 and 1,473 nats, on one fixture each. They
+  are three orders of magnitude apart, so ten nats is not a tuned constant — but nothing here
+  measures where between them a real genome sits.
+- **Still no real data**, and §5's second bullet stands unchanged.
+- **`resolution_at` and `MIN_WINDOWS_TO_FIT_INBREEDING` are still untouched**, and §5's third
+  bullet is now sharper: the failure they were standing in for is the one §6.3 refuses
+  directly, so what a window-count floor is still for is an open question for the owner.

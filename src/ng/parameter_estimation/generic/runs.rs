@@ -201,6 +201,90 @@ const RATE_FLOOR: f64 = 1e-9;
 /// rather than emit*.
 pub const MAX_IDENTIFIED_STATE_RATIO: f64 = 0.9;
 
+/// How far the **tied** starting points may disagree about `F` before `F` stops being
+/// identified: the largest fitted value minus the smallest, over the starts that scored
+/// within [`MAX_TIED_START_LOG_LIKELIHOOD_GAP`] of the best.
+///
+/// **The third refusal, and it catches a failure the other two cannot see.**
+/// [`MAX_IDENTIFIED_STATE_RATIO`] refuses a fit whose two states came out too close to tell
+/// apart, and the used-both-states check refuses a search that collapsed. Neither sees the
+/// failure measured in `research/inbreeding_resolution_2026-08-09.md`: on a genome with **no
+/// runs at all**, at five heterozygotes a window, the chain manufactures a separation out of
+/// sampling noise — the fitted inside rate comes out at 0.31 and 0.62 of the outside one,
+/// comfortably inside the ratio threshold — and returns `F` = 0.99. It is not a floor that
+/// can be raised: 3,000 windows × 5 heterozygotes fails where 6,000 × 5 does not, so what
+/// has to be detected is the failure mode and not a magnitude (§1).
+///
+/// **Where the number comes from.** Over **160 fits on genomes that have runs**, spanning
+/// twenty shapes — runs of 3 Mb and of 300 kb, covering 30%, 10% and 5% of the genome, each
+/// at 2, 5, 20 and 100 heterozygotes a window — every one of the nine starts landed on the
+/// same `F` to four decimal places. A spread of **0.0000**, everywhere (§3, §4). On genomes
+/// with no runs the tied starts land 0.0004 to 0.9980 apart.
+///
+/// A twentieth is inside that band with the nearest measured failure — a genome with no runs
+/// whose tied starts land 0.1147 apart — a factor of 2.3 above it, and every measured
+/// legitimate fit three orders of magnitude below. **It is set nearer the bottom on
+/// purpose**: the with-runs population is drawn from the model the fit assumes, so the honest
+/// reading of "exactly 0.0000" is *no measured lower bound on the margin*, and real data will
+/// not be that clean. Spec §6.1's instruction for this parameter is *fail rather than emit* —
+/// refusing costs an error the caller answers by supplying `F`, and accepting costs `F` = 0.99
+/// on an outcrosser, with the cohort's diversity divided by `1 − F`.
+///
+/// **What it also refuses, deliberately.** Benign fits on genomes with no runs, whose starts
+/// scatter while `F` itself comes back below its own resolution. Those cost nothing: on a
+/// genome with no runs `F` is not identified, and the design's own answer there is to say so
+/// rather than to emit a number that means *nothing was found*.
+pub const MAX_IDENTIFIED_START_SPREAD: f64 = 0.05;
+
+/// How far behind the best-scoring start another start may sit and still count as **tied**
+/// with it, in nats of log-likelihood.
+///
+/// **Without this, the spread above refuses the robustness spec §6.2 requires.** A genome
+/// 30% covered by runs, with a floor of spurious heterozygotes five times the real rate,
+/// fits perfectly: six of the nine starts land on `F` = 0.3157 against a realised 0.3122.
+/// The other three collapse to `F` = 0.0000 — and they score **1,473 nats worse**. The raw
+/// range across all nine is 0.3157, which a threshold of a twentieth refuses, and what it
+/// would be refusing is three starts the fit has already rejected by a likelihood ratio of
+/// e^1473.
+///
+/// **The failure looks nothing like that, and the score is what says so.** On a genome with
+/// no runs at all the nine starts return `F` = 0.0010, 0.8497, 0.6015, 0.5722, 0.0003,
+/// 0.0051 and 0.0159 — and every one of them is within **0.91 nats** of the best. They are
+/// not competing answers; they are the same answer, because research note §3.1's proof says
+/// the likelihood is flat in `F` when the two states coincide. A start beaten by 0.91 nats
+/// has been beaten by odds of 2.5 to 1, which decides nothing.
+///
+/// So the two populations are separated by the **score gap** and not by the spread: 0.91
+/// nats where the answer is not identified, 1,473 where a start was genuinely rejected —
+/// a factor of 1,600. Ten nats sits between them, eleven times above the first and a
+/// hundred and forty-seven times below the second. It is an odds ratio of about 22,000 to
+/// one, which is decisive by any convention; and it is an absolute number rather than a
+/// fraction of the total because a likelihood **ratio** is what compares two fits, and that
+/// does not grow with the genome. (The totals here differ eightfold, −225,690 against
+/// −1,802,300, and the two gaps do not track them.)
+pub const MAX_TIED_START_LOG_LIKELIHOOD_GAP: f64 = 10.0;
+
+// **The bounds the two constants above were measured between, checked at build time.** Each
+// is a number a later edit could move for a plausible-sounding reason without re-running
+// anything, and each has a measured side it must not cross; a compile error says so at the
+// moment of the edit, where a red test says so after a build. The same device guards the
+// error-rate ladder's rung count (`generic/mod.rs`).
+const _: () = assert!(
+    MAX_IDENTIFIED_START_SPREAD < 0.1147,
+    "the narrowest disagreement measured on a genome with no runs is 0.1147, and a threshold \
+     at or above it stops refusing the failure this exists for"
+);
+const _: () = assert!(
+    MAX_TIED_START_LOG_LIKELIHOOD_GAP > 0.91,
+    "starts 0.91 nats apart could not be told apart by the data and must all count as tied, \
+     or the failure this exists for is invisible"
+);
+const _: () = assert!(
+    MAX_TIED_START_LOG_LIKELIHOOD_GAP < 1473.0,
+    "a start beaten by 1,473 nats has been rejected by the data, and counting it as tied \
+     refuses the fit spec §6.2 requires the estimator to survive"
+);
+
 /// What `F` comes back as on a genome with **no runs at all**, at a given window count —
 /// the estimator's resolution, and an `F` below it means *nothing detected*.
 ///
@@ -267,6 +351,57 @@ impl RunsModelFit {
     pub fn best_start(&self) -> Option<&StartOutcome> {
         self.starts_tried.first()
     }
+
+    /// **How far the tied starting points disagreed about `F`** — the criterion
+    /// [`MAX_IDENTIFIED_START_SPREAD`] is applied to, reported so that a consumer can see
+    /// how much margin an accepted fit had.
+    ///
+    /// A method rather than a field, so the number a caller reads and the number the fit was
+    /// accepted on cannot drift apart.
+    #[must_use]
+    pub fn spread_across_tied_starts(&self) -> f64 {
+        spread_across_tied_starts(&self.starts_tried)
+    }
+}
+
+/// The starts that scored within [`MAX_TIED_START_LOG_LIKELIHOOD_GAP`] of the best.
+///
+/// **A prefix, because `starts_tried` is best-first** — the ordering is the type's
+/// documented one, so the tied starts are its leading run and this cannot silently pick up
+/// a stray start from further down.
+///
+/// A start beaten by more than the gap is not a competing answer, it is a rejected one, and
+/// including it in the spread is what would refuse a fit that recovered its genome. A start
+/// whose likelihood is `NaN` is treated as tied, so a fit that produced one is refused
+/// rather than waved through — which is the direction spec §6.1 asks for.
+fn tied_starts(starts: &[StartOutcome]) -> &[StartOutcome] {
+    let Some(best) = starts.first() else {
+        return starts;
+    };
+    let beaten = starts.iter().position(|start| {
+        best.log_likelihood - start.log_likelihood > MAX_TIED_START_LOG_LIKELIHOOD_GAP
+    });
+    &starts[..beaten.unwrap_or(starts.len())]
+}
+
+/// The largest fitted `F` minus the smallest, over the tied starts.
+///
+/// Zero for an empty slice, which the fit does not produce — it refuses an empty start set
+/// before this is reached.
+fn spread_across_tied_starts(starts: &[StartOutcome]) -> f64 {
+    let tied = tied_starts(starts);
+    if tied.is_empty() {
+        return 0.0;
+    }
+    let highest = tied
+        .iter()
+        .map(|start| start.inbreeding)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let lowest = tied
+        .iter()
+        .map(|start| start.inbreeding)
+        .fold(f64::INFINITY, f64::min);
+    highest - lowest
 }
 
 /// Fit the fraction of the analysable genome lying in runs of homozygosity.
@@ -295,8 +430,15 @@ impl RunsModelFit {
 /// other.
 ///
 /// [`ParameterEstimationError::InbreedingStatesNotSeparated`] when no start left posterior
-/// mass on both states. **Never a zero**: a failed search and an outcrossing genome leave
-/// identical fitted values, and only this error tells them apart.
+/// mass on both states, or when every start's two states came out within
+/// [`MAX_IDENTIFIED_STATE_RATIO`] of each other. **Never a zero**: a failed search and an
+/// outcrossing genome leave identical fitted values, and only this error tells them apart.
+///
+/// [`ParameterEstimationError::InbreedingStartsDisagree`] when the starts landed further
+/// than [`MAX_IDENTIFIED_START_SPREAD`] apart. **Three refusals and three different
+/// failures**: a search that collapsed, two states that coincide, and a chain that found a
+/// different answer from every start — which is what reading sampling noise looks like, and
+/// what the first two are blind to.
 ///
 /// # Panics
 ///
@@ -367,6 +509,29 @@ pub fn fit_inbreeding(
         return Err(ParameterEstimationError::InbreedingStatesNotSeparated {
             sample: sample.to_string(),
             starts: starts_tried.len(),
+        });
+    }
+
+    // **The third refusal, and the one the other two are blind to.** A genome with no runs
+    // at all can have its chain manufacture a separation out of sampling noise: the two
+    // states come out 0.31 and 0.62 of each other, well inside `MAX_IDENTIFIED_STATE_RATIO`,
+    // both are used, and `F` comes back at 0.99. What gives it away is that the starts which
+    // cannot be told apart by score then land in completely different places — 0.0000 across
+    // 160 fits wherever the runs are real, and up to 0.9980 wherever they are not
+    // (`research/inbreeding_resolution_2026-08-09.md` §4, §6).
+    //
+    // **Checked after the separation checks and not before**, so that a collapsed search —
+    // whose starts also disagree — is reported as the collapsed search it is rather than as
+    // a disagreement about a value none of them found.
+    let tied = tied_starts(&starts_tried).len();
+    let spread = spread_across_tied_starts(&starts_tried);
+    if spread > MAX_IDENTIFIED_START_SPREAD {
+        return Err(ParameterEstimationError::InbreedingStartsDisagree {
+            sample: sample.to_string(),
+            tied_starts: tied,
+            starts: starts_tried.len(),
+            spread,
+            threshold: MAX_IDENTIFIED_START_SPREAD,
         });
     }
 
@@ -1086,6 +1251,54 @@ mod tests {
         );
     }
 
+    /// **The spread is the full range over the *tied* starts** — not the gap between the
+    /// best two, and not the range over all of them.
+    ///
+    /// Four properties, and each is a rule the others cannot see, written on outcomes in
+    /// best-score order as the fit produces them.
+    ///
+    /// - The widest pair is deliberately **not** the top two: taking the best and
+    ///   second-best would report 0.02 where the answer is 0.30.
+    /// - The fourth start is 1,473 nats behind — the measured gap to a collapsed start on a
+    ///   genome with real runs — so it is excluded. Including it would report 0.32 and refuse
+    ///   this fit, which is the failure the tie rule exists to prevent.
+    /// - The three that are kept sit 0.00, 0.02 and 0.30 behind, which brackets the tie gap
+    ///   from below: a rule that kept only the exactly-equal starts would report 0.00 here.
+    #[test]
+    fn the_spread_is_the_range_over_the_starts_that_scored_alike() {
+        let outcome = |inbreeding: f64, log_likelihood: f64| StartOutcome {
+            separation: 1.0 / 3.0,
+            implied_f: 0.5,
+            inbreeding,
+            log_likelihood,
+        };
+        let starts = [
+            outcome(0.60, -1_802_299.7),
+            outcome(0.58, -1_802_299.72),
+            outcome(0.30, -1_802_300.0),
+            outcome(0.28, -1_803_772.9),
+        ];
+
+        assert_eq!(tied_starts(&starts).len(), 3);
+        assert!((spread_across_tied_starts(&starts) - 0.30).abs() < 1e-12);
+        // One start is no spread at all, and no start is none either — the fit refuses an
+        // empty start set long before this, and a NaN here would compare false against the
+        // threshold and admit everything.
+        assert_eq!(spread_across_tied_starts(&[outcome(0.26, -1.0)]), 0.0);
+        assert_eq!(spread_across_tied_starts(&[]), 0.0);
+    }
+
+    /// The two thresholds are the measured ones, and the values themselves are pinned
+    /// rather than left to a doc comment that a later edit can contradict. **The bounds
+    /// they have to sit between are checked at build time instead** — see the
+    /// `const _: () = assert!` block beside the constants, which makes moving either one
+    /// outside the measurement an `error[E0080]` rather than a red test.
+    #[test]
+    fn the_start_agreement_thresholds_are_the_measured_ones() {
+        assert!((MAX_IDENTIFIED_START_SPREAD - 0.05).abs() < 1e-12);
+        assert!((MAX_TIED_START_LOG_LIKELIHOOD_GAP - 10.0).abs() < 1e-12);
+    }
+
     /// The runs model's floor is stated where the model lives, not beside the
     /// site-count floor it is unlike: that one guards against a rate fitted from too
     /// little, this one against an answer that is entirely the estimator's own noise.
@@ -1207,14 +1420,35 @@ mod tests {
         Ploidy::try_new(2).expect("a positive copy number")
     }
 
+    /// The fixture at its own shape — 400 sites a window at 5% heterozygous, which is about
+    /// twenty heterozygotes a window.
     fn draw_genome(nominal_f: f64, false_het_floor: f64, seed: u64) -> DrawnGenome {
+        draw_genome_at(
+            SITES_PER_WINDOW,
+            OUTSIDE_HET,
+            nominal_f,
+            false_het_floor,
+            seed,
+        )
+    }
+
+    /// **The same genome at a stated evidence level**, because how many heterozygotes a
+    /// window holds is what the chain classifies it on, and one of the tests below needs a
+    /// window that holds few. `sites_per_window × outside_het` is that count.
+    fn draw_genome_at(
+        sites_per_window: u64,
+        outside_het: f64,
+        nominal_f: f64,
+        false_het_floor: f64,
+        seed: u64,
+    ) -> DrawnGenome {
         let edges = Arc::new(DepthBinEdges::new());
         let mut rng = SplitMix64::new(seed);
         let enter = LEAVE_RUN * nominal_f / (1.0 - nominal_f);
         let diploid = ploidy2();
 
         let state_frequencies = |inside: bool| -> [f64; GENOTYPES] {
-            let het = if inside { INSIDE_HET } else { OUTSIDE_HET } + false_het_floor;
+            let het = if inside { INSIDE_HET } else { outside_het } + false_het_floor;
             [1.0 - het - HOM_ALT, het, HOM_ALT]
         };
         // The cell probabilities under each state: `Σ_j π_j · Binomial(k; depth, p_j(ε))`.
@@ -1259,7 +1493,7 @@ mod tests {
                 // each site: `binomial(n, p)` consumes `n` uniforms, so a 400-site window
                 // costs about 440 draws. What it buys is that no site is ever *placed*
                 // one at a time, so the cell counts are exact rather than accumulated.
-                let mut left = SITES_PER_WINDOW;
+                let mut left = sites_per_window;
                 let mut remaining: f64 = cells.iter().sum();
                 for (alt_reads, &probability) in cells.iter().enumerate() {
                     if left == 0 {
@@ -1309,7 +1543,14 @@ mod tests {
     }
 
     fn sample_rates(false_het_floor: f64) -> SampleRates {
-        let het = OUTSIDE_HET + false_het_floor;
+        sample_rates_at(OUTSIDE_HET, false_het_floor)
+    }
+
+    /// The frequencies the fit starts its outside state from, at a stated heterozygosity —
+    /// the partner of [`draw_genome_at`], since a genome drawn at one rate and started at
+    /// another is a different experiment.
+    fn sample_rates_at(outside_het: f64, false_het_floor: f64) -> SampleRates {
+        let het = outside_het + false_het_floor;
         SampleRates::try_new(
             ploidy2(),
             [1.0 - het - HOM_ALT, het, HOM_ALT]
@@ -1378,6 +1619,16 @@ mod tests {
                 fit.outside_het
             );
             assert_eq!(fit.starts_tried.len(), 9);
+            // **The margin `MAX_IDENTIFIED_START_SPREAD` is set against, on this file's own
+            // genomes rather than only on the research harness's.** All nine starts landing
+            // together is what makes a twentieth a threshold with three orders of magnitude
+            // to spare rather than a tuned constant — and it is what a mutation that made
+            // the starts disagree would break here before it broke anything downstream.
+            assert!(
+                fit.spread_across_tied_starts() < 0.0001,
+                "nominal {nominal}: the nine starts spread by {}",
+                fit.spread_across_tied_starts()
+            );
         }
 
         // **The premise, asserted rather than asserted about.** Scoring against the drawn
@@ -2024,12 +2275,107 @@ mod tests {
         );
     }
 
-    /// And the check does not refuse a fit that **is** identified — including the hardest
-    /// one this file has, where a floor of spurious heterozygotes five times the real rate
-    /// pulls the two states to 0.842 of each other. A threshold set too tight would turn
-    /// spec §6.2's own robustness claim into an error.
+    /// **The failure the other two checks are blind to, and the check that sees it.**
+    ///
+    /// A genome with **no runs at all** at five heterozygotes a window — a quarter of what
+    /// the fixtures above carry, and what a shallow or region-restricted run leaves. Both
+    /// separation checks pass: some window's posterior favours each state, and the two
+    /// states come out far enough apart to clear [`MAX_IDENTIFIED_STATE_RATIO`]. The chain
+    /// has manufactured a separation out of sampling noise, and it looks entirely real
+    /// (`research/inbreeding_resolution_2026-08-09.md` §2).
+    ///
+    /// **That this error and not another one is the assertion.** The disagreement check runs
+    /// last, so reaching it is itself the proof that the other two passed — which is why the
+    /// test asserts the variant rather than merely asserting a refusal.
+    ///
+    /// **Eight seeds were swept at this shape and seven are refused here**, with spreads from
+    /// 0.1147 to 0.8494; this is the widest. The eighth is the test below it: the one seed
+    /// that drew a run.
     #[test]
-    fn the_separation_check_does_not_refuse_the_closest_legitimate_fit() {
+    fn starts_that_land_in_different_places_are_refused_rather_than_averaged() {
+        let genome = draw_genome_at(200, 0.025, 0.001, 0.0, 0xE3_A000 + 7 * 7919);
+        assert_eq!(
+            genome.realised_f, 0.0,
+            "the seed has to have drawn no runs at all for this to say anything"
+        );
+
+        let error = fit_inbreeding(
+            "noisy",
+            &genome.windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates_at(0.025, 0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect_err("nine starts landing 0.85 apart have not identified an F");
+
+        let ParameterEstimationError::InbreedingStartsDisagree { spread, .. } = error else {
+            panic!("the wrong failure, so this says nothing about the spread: {error}");
+        };
+        assert!(
+            spread > 0.5,
+            "the nine starts have to land far apart for this fixture to be the failure it \
+             is named for: {spread}"
+        );
+    }
+
+    /// **And the same evidence level answers where a run is genuinely there.** The one seed
+    /// in eight at this shape that drew any run at all drew a small one — 0.28% of the
+    /// genome — and the fit returns it to four decimal places with every start agreeing.
+    ///
+    /// This is the half that stops the criterion being a way to refuse everything hard: five
+    /// heterozygotes a window is where the estimator fails on a genome with nothing to find,
+    /// and it is *not* where it fails on a genome with something to find. The margin is the
+    /// whole threshold — the starts agree to 0.0000 against a criterion of
+    /// [`MAX_IDENTIFIED_START_SPREAD`].
+    #[test]
+    fn a_real_run_at_the_same_evidence_level_is_still_answered_and_the_starts_agree() {
+        let genome = draw_genome_at(200, 0.025, 0.001, 0.0, 0xE3_A000 + 3 * 7919);
+        assert!(
+            genome.realised_f > 0.0,
+            "the seed has to have drawn a run for this to say anything: {}",
+            genome.realised_f
+        );
+
+        let (estimate, fit) = fit_inbreeding(
+            "small run",
+            &genome.windowed,
+            &one_library(),
+            ploidy2(),
+            &sample_rates_at(0.025, 0.0),
+            &RunsModelStarts::default(),
+        )
+        .expect("a genome that has a run is identified even at five heterozygotes a window");
+
+        assert!(
+            (estimate.value.get() - genome.realised_f).abs() < 0.001,
+            "fitted {} against a realised {}",
+            estimate.value.get(),
+            genome.realised_f
+        );
+        assert!(
+            fit.spread_across_tied_starts() < 0.0001,
+            "the starts have to agree for the margin claimed on \
+             MAX_IDENTIFIED_START_SPREAD to be this fixture's: {}",
+            fit.spread_across_tied_starts()
+        );
+    }
+
+    /// And neither check refuses a fit that **is** identified — including the hardest one
+    /// this file has, where a floor of spurious heterozygotes five times the real rate pulls
+    /// the two states to 0.842 of each other. A threshold set too tight on either would turn
+    /// spec §6.2's own robustness claim into an error.
+    ///
+    /// **This fixture is why the spread is taken over the tied starts and not over all of
+    /// them.** Six of the nine agree on `F` = 0.3157 against a realised 0.3122; the other
+    /// three collapse to zero. The raw range is therefore 0.3157 — six times the threshold —
+    /// and a criterion that used it would refuse the very fit spec §6.2 requires to survive.
+    /// The three collapsed starts score **1,473 nats worse**, so the data has already
+    /// rejected them, and the tie rule is what says so. Both numbers are asserted below,
+    /// because it is their *difference* that carries the argument: a mutation that widened
+    /// the tie gap past 1,473 would leave every other test in this file green.
+    #[test]
+    fn neither_check_refuses_the_closest_legitimate_fit() {
         let floor = 5.0 * OUTSIDE_HET;
         let genome = draw_genome(0.30, floor, 0xE3_1000);
 
@@ -2050,5 +2396,27 @@ mod tests {
              threshold of {MAX_IDENTIFIED_STATE_RATIO} for this test to say anything"
         );
         assert!((estimate.value.get() - genome.realised_f).abs() < 0.05);
+
+        assert!(
+            fit.spread_across_tied_starts() < 0.0001,
+            "the starts that scored alike have to agree: {}",
+            fit.spread_across_tied_starts()
+        );
+        let raw_range = fit
+            .starts_tried
+            .iter()
+            .map(|start| start.inbreeding)
+            .fold(f64::NEG_INFINITY, f64::max)
+            - fit
+                .starts_tried
+                .iter()
+                .map(|start| start.inbreeding)
+                .fold(f64::INFINITY, f64::min);
+        assert!(
+            raw_range > MAX_IDENTIFIED_START_SPREAD,
+            "the range over *all* the starts is {raw_range}, which is inside the threshold \
+             of {MAX_IDENTIFIED_START_SPREAD} — so this fixture no longer says that taking \
+             the spread over the tied starts is what saves it"
+        );
     }
 }

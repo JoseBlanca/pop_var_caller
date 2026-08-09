@@ -19,6 +19,13 @@
 //! on genomes with no runs, where the states genuinely coincide and every fit should be
 //! refused; and on genomes with real runs, where they do not and none should be.
 //!
+//! **§4 and §5 were added when the answer was adopted** (research note §6). §1–§3 showed the
+//! across-start spread separating the two populations at twelve shapes, all of them 30% of the
+//! genome in runs of 3 Mb; §4 asks the same question where the runs are short (300 kb) or rare
+//! (5% of the genome), and §5 prints the band a threshold has to sit in. What §4 cannot reach
+//! is a genome carrying a floor of **false** heterozygotes, which is where the criterion had to
+//! be corrected — that fixture lives in `runs.rs`.
+//!
 //! **This harness simulates rather than computing a bias exactly**, as
 //! `ng_inbreeding_harness.rs` does and for the same reason: the runs model's objective is a
 //! chain over windows, not a sum over independent cells, so there is no infinite-genome
@@ -32,6 +39,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use pop_var_caller::ng::parameter_estimation::ParameterEstimationError;
 use pop_var_caller::ng::parameter_estimation::generic::accumulators::WindowKey;
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::generic::histogram::{
@@ -39,7 +47,8 @@ use pop_var_caller::ng::parameter_estimation::generic::histogram::{
 };
 use pop_var_caller::ng::parameter_estimation::generic::noise_model::SampleLibraryNoise;
 use pop_var_caller::ng::parameter_estimation::generic::runs::{
-    MAX_IDENTIFIED_STATE_RATIO, RunsModelStarts, fit_inbreeding, resolution_at,
+    MAX_IDENTIFIED_START_SPREAD, MAX_IDENTIFIED_STATE_RATIO, RunsModelStarts, fit_inbreeding,
+    resolution_at,
 };
 use pop_var_caller::ng::parameter_estimation::generic::{SampleRates, WindowIndex};
 use pop_var_caller::ng::types::{
@@ -51,7 +60,8 @@ const ERROR_RATE: f64 = 0.001;
 /// The homozygous-non-reference rate, the same in both states — a landrace far from the
 /// reference, as `ng_inbreeding_harness.rs`'s scenarios have it.
 const HOM_ALT: f64 = 0.02;
-/// One window in thirty ends a run, so a run is 3 Mb at 100 kb windows.
+/// One window in thirty ends a run, so a run is 3 Mb at 100 kb windows. The run length
+/// §1–§3 draw at; §4 varies it.
 const LEAVE_RUN: f64 = 1.0 / 30.0;
 /// The inside state's heterozygote rate as a fraction of the outside one — the real
 /// separation a drawn genome has, before any fit looks at it.
@@ -115,20 +125,55 @@ impl Shape {
     }
 }
 
+/// **The run structure a genome is drawn with** — how much of it lies in runs and how long
+/// they are. §1–§3 draw one shape, 30% of the genome in runs of 3 Mb; §4 exists because
+/// that is a single shape and the across-start spread it produced was *exactly* zero, which
+/// is worth confirming somewhere the signal is harder to find.
+#[derive(Copy, Clone)]
+struct Runs {
+    /// The fraction of the genome the runs are drawn to cover, before sampling.
+    nominal_f: f64,
+    /// The chance a run ends at each window — the reciprocal of its mean length in windows.
+    /// [`LEAVE_RUN`] is one in thirty, so 3 Mb at 100 kb windows.
+    leave_run: f64,
+    /// What the tables call it.
+    label: &'static str,
+}
+
+impl Runs {
+    /// No runs at all: the genome `F` must come back at nothing on.
+    const NONE: Self = Self {
+        nominal_f: 0.0,
+        leave_run: LEAVE_RUN,
+        label: "none",
+    };
+    /// §1–§3's own genome, and §4's anchor against them.
+    const THIRTY_PERCENT_AT_3MB: Self = Self {
+        nominal_f: 0.30,
+        leave_run: LEAVE_RUN,
+        label: "30% at 3 Mb",
+    };
+}
+
 /// A drawn genome, and the autozygous fraction it actually realised.
 struct Drawn {
     windowed: BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>>,
     realised_f: f64,
 }
 
-fn draw(shape: Shape, nominal_f: f64, seed: u64) -> Drawn {
+fn draw(shape: Shape, runs: Runs, seed: u64) -> Drawn {
     let edges = Arc::new(DepthBinEdges::new());
     let diploid = Ploidy::try_new(2).expect("a positive copy number");
     let mut rng = SplitMix64::new(seed);
+    let Runs {
+        nominal_f,
+        leave_run,
+        ..
+    } = runs;
     let enter = if nominal_f <= 0.0 {
         0.0
     } else {
-        LEAVE_RUN * nominal_f / (1.0 - nominal_f)
+        leave_run * nominal_f / (1.0 - nominal_f)
     };
 
     let frequencies = |inside: bool| -> [f64; GENOTYPES] {
@@ -167,7 +212,7 @@ fn draw(shape: Shape, nominal_f: f64, seed: u64) -> Drawn {
     let mut total_positions = 0u64;
 
     for contig in 0..contigs {
-        let mut inside = enter > 0.0 && rng.unit() < enter / (enter + LEAVE_RUN);
+        let mut inside = enter > 0.0 && rng.unit() < enter / (enter + leave_run);
         for window in 0..per_contig {
             let cells = if inside {
                 &inside_cells
@@ -210,7 +255,7 @@ fn draw(shape: Shape, nominal_f: f64, seed: u64) -> Drawn {
             );
 
             inside = if inside {
-                rng.unit() >= LEAVE_RUN
+                rng.unit() >= leave_run
             } else {
                 enter > 0.0 && rng.unit() < enter
             };
@@ -236,15 +281,26 @@ struct Outcome {
     ///
     /// Spec §6.5 names this as the one thing separating a genuine answer from a search that
     /// found nothing — "a run where every start returned the same `F` at the same score has
-    /// not measured zero autozygosity; it has failed to find anything" — and E3 reports it
-    /// in `starts_tried` without ever reading it. If the failures disagree across starts
-    /// and the real fits agree, it is the criterion the ratio check could not be.
+    /// not measured zero autozygosity; it has failed to find anything". This harness's first
+    /// run measured the inverse and nobody had: the failures disagree across starts and the
+    /// real fits agree, so the spread is the criterion the state-ratio check could not be.
+    /// It is now `MAX_IDENTIFIED_START_SPREAD`, and the columns below are what set it.
+    ///
+    /// **It is the spread over the *tied* starts**, which the harness reads through the
+    /// fit's own method rather than recomputing. The correction is not cosmetic: on a genome
+    /// with real runs and a floor of false heterozygotes — which no genome drawn here has,
+    /// and which spec §6.2 requires the estimator to survive — three of the nine starts
+    /// collapse while scoring 1,473 nats worse, and counting them would refuse a fit that
+    /// recovered its genome (research note §6.2).
+    ///
+    /// `None` only where the fit was refused for one of the *other* two reasons, which
+    /// report no spread.
     across_starts: Option<f64>,
 }
 
-fn fit(shape: Shape, nominal_f: f64, seed: u64) -> Outcome {
+fn fit(shape: Shape, runs: Runs, seed: u64) -> Outcome {
     let diploid = Ploidy::try_new(2).expect("a positive copy number");
-    let drawn = draw(shape, nominal_f, seed);
+    let drawn = draw(shape, runs, seed);
     let noise = SampleLibraryNoise::single(
         ReadGroupId(1),
         ErrorRate::try_new(ERROR_RATE).expect("a probability"),
@@ -270,24 +326,24 @@ fn fit(shape: Shape, nominal_f: f64, seed: u64) -> Outcome {
         &rates,
         &RunsModelStarts::default(),
     ) {
-        Ok((estimate, model)) => {
-            let spread = model
-                .starts_tried
-                .iter()
-                .map(|start| start.inbreeding)
-                .fold(f64::NEG_INFINITY, f64::max)
-                - model
-                    .starts_tried
-                    .iter()
-                    .map(|start| start.inbreeding)
-                    .fold(f64::INFINITY, f64::min);
-            Outcome {
-                realised_f: drawn.realised_f,
-                fitted_f: Some(estimate.value.get()),
-                state_ratio: Some(model.inside_het_floor / model.outside_het),
-                across_starts: Some(spread),
-            }
-        }
+        Ok((estimate, model)) => Outcome {
+            realised_f: drawn.realised_f,
+            fitted_f: Some(estimate.value.get()),
+            state_ratio: Some(model.inside_het_floor / model.outside_het),
+            // **The fit's own number, not one recomputed here**, so that what this harness
+            // measures and what the fit is accepted on cannot drift apart.
+            across_starts: Some(model.spread_across_tied_starts()),
+        },
+        // **A fit refused for disagreeing across starts still reports its spread**, because
+        // the error carries it. That is what keeps the spread columns below readable after
+        // the criterion went in: without it, every cell the criterion fires on would show a
+        // blank where the evidence for the criterion used to be.
+        Err(ParameterEstimationError::InbreedingStartsDisagree { spread, .. }) => Outcome {
+            realised_f: drawn.realised_f,
+            fitted_f: None,
+            state_ratio: None,
+            across_starts: Some(spread),
+        },
         Err(_) => Outcome {
             realised_f: drawn.realised_f,
             fitted_f: None,
@@ -335,6 +391,48 @@ fn grid() -> Vec<Shape> {
     shapes
 }
 
+/// The window count §4 holds fixed. The middle of §1–§3's three, so its rows can be read
+/// against their 6,000-window ones directly.
+const WINDOWS_IN_SECTION_4: usize = 6_000;
+
+/// **The run structures §4 asks about**, chosen so that each departs from §3's genome in one
+/// direction: shorter runs, rarer runs, and both at once. A run of three windows is 300 kb,
+/// which is at the short end of what a real run of homozygosity is; 5% coverage is what an
+/// outbred population's occasional recent common ancestor leaves.
+fn section_4_runs() -> Vec<Runs> {
+    vec![
+        Runs::THIRTY_PERCENT_AT_3MB,
+        Runs {
+            nominal_f: 0.30,
+            leave_run: 1.0 / 3.0,
+            label: "30% at 300 kb",
+        },
+        Runs {
+            nominal_f: 0.10,
+            leave_run: 1.0 / 10.0,
+            label: "10% at 1 Mb",
+        },
+        Runs {
+            nominal_f: 0.05,
+            leave_run: LEAVE_RUN,
+            label: "5% at 3 Mb",
+        },
+        Runs {
+            nominal_f: 0.05,
+            leave_run: 1.0 / 3.0,
+            label: "5% at 300 kb",
+        },
+    ]
+}
+
+/// §4's evidence levels — [`grid`]'s four, at one window count.
+fn section_4_shapes() -> Vec<Shape> {
+    grid()
+        .into_iter()
+        .filter(|shape| shape.windows == WINDOWS_IN_SECTION_4)
+        .collect()
+}
+
 fn main() {
     let mut report = String::new();
     let _ = writeln!(
@@ -372,15 +470,24 @@ fn main() {
     );
 
     let mut floor_rows: Vec<(Shape, usize, f64, f64)> = Vec::new();
+    // Every spread seen on a genome with no runs, for the band §4 closes from the other side.
+    let mut no_runs_spreads: Vec<f64> = Vec::new();
     for shape in grid() {
         let outcomes: Vec<Outcome> = (0..SEEDS)
-            .map(|seed| fit(shape, 0.0, 0xF100_0000 + seed * 7919 + shape.windows as u64))
+            .map(|seed| {
+                fit(
+                    shape,
+                    Runs::NONE,
+                    0xF100_0000 + seed * 7919 + shape.windows as u64,
+                )
+            })
             .collect();
         let answered: Vec<f64> = outcomes.iter().filter_map(|o| o.fitted_f).collect();
         let refused = outcomes.len() - answered.len();
         let shipped = resolution_at(shape.windows);
         let (m, w) = (mean(&answered), worst(&answered));
         let spreads: Vec<f64> = outcomes.iter().filter_map(|o| o.across_starts).collect();
+        no_runs_spreads.extend(spreads.iter().copied());
         let _ = writeln!(
             report,
             "{:>8} {:>8.0} {:>7} {:>8.4} {:>8.4} {:>9.4} {:>13.2} {:>11.4}",
@@ -417,16 +524,16 @@ fn main() {
     );
 
     for shape in grid() {
-        let ratios = |nominal: f64, salt: u64| -> Vec<f64> {
+        let ratios = |runs: Runs, salt: u64| -> Vec<f64> {
             (0..SEEDS)
                 .filter_map(|seed| {
-                    fit(shape, nominal, salt + seed * 7919 + shape.windows as u64).state_ratio
+                    fit(shape, runs, salt + seed * 7919 + shape.windows as u64).state_ratio
                 })
                 .collect()
         };
         // A refused fit still reports its ratio, so both columns are over all seeds.
-        let none = ratios(0.0, 0xF100_0000);
-        let some = ratios(0.30, 0xF200_0000);
+        let none = ratios(Runs::NONE, 0xF100_0000);
+        let some = ratios(Runs::THIRTY_PERCENT_AT_3MB, 0xF200_0000);
         let (none_mean, none_worst) = (mean(&none), worst(&none));
         let (some_mean, some_worst) = (mean(&some), worst(&some));
         let _ = writeln!(
@@ -457,12 +564,13 @@ fn main() {
         "{:>8} {:>8} {:>7} {:>9} {:>9} {:>9} {:>13}",
         "windows", "het/win", "refused", "realised", "mean F", "worst err", "starts spread"
     );
+    let mut with_runs_spreads: Vec<f64> = Vec::new();
     for shape in grid() {
         let outcomes: Vec<Outcome> = (0..SEEDS)
             .map(|seed| {
                 fit(
                     shape,
-                    0.30,
+                    Runs::THIRTY_PERCENT_AT_3MB,
                     0xF200_0000 + seed * 7919 + shape.windows as u64,
                 )
             })
@@ -475,6 +583,7 @@ fn main() {
             .filter_map(|o| o.fitted_f.map(|f| (f - o.realised_f).abs()))
             .collect();
         let spreads: Vec<f64> = outcomes.iter().filter_map(|o| o.across_starts).collect();
+        with_runs_spreads.extend(spreads.iter().copied());
         let _ = writeln!(
             report,
             "{:>8} {:>8.0} {:>7} {:>9.4} {:>9.4} {:>9.4} {:>13.4}",
@@ -488,12 +597,106 @@ fn main() {
         );
     }
 
+    // ------------------------------------------------------------------
+    let _ = writeln!(
+        report,
+        "\n## 4. The same question where the runs are **short or sparse**\n"
+    );
+    let _ = writeln!(
+        report,
+        "§3's across-start spread is *exactly* 0.0000 at every one of its twelve shapes, \
+         which is a suspiciously clean number to build a threshold on: its genomes are all \
+         30% covered by runs of 3 Mb, where the signal is as easy to find as it ever gets. \
+         This section asks the same question of genomes whose runs are **shorter** (300 kb, \
+         three windows) or **rarer** (5% of the genome), at {WINDOWS_IN_SECTION_4} windows. \
+         A legitimate fit refused here is what a threshold on the spread would cost.\n"
+    );
+    let _ = writeln!(
+        report,
+        "{:>14} {:>8} {:>7} {:>9} {:>9} {:>9} {:>13}",
+        "runs", "het/win", "refused", "realised", "mean F", "worst err", "worst spread"
+    );
+
+    for runs in section_4_runs() {
+        for shape in section_4_shapes() {
+            let outcomes: Vec<Outcome> = (0..SEEDS)
+                .map(|seed| {
+                    fit(
+                        shape,
+                        runs,
+                        0xF400_0000
+                            + seed * 7919
+                            + (runs.nominal_f * 1e6) as u64
+                            + (runs.leave_run * 1e6) as u64,
+                    )
+                })
+                .collect();
+            let refused = outcomes.iter().filter(|o| o.fitted_f.is_none()).count();
+            let realised = mean(&outcomes.iter().map(|o| o.realised_f).collect::<Vec<_>>());
+            let answered: Vec<f64> = outcomes.iter().filter_map(|o| o.fitted_f).collect();
+            let errors: Vec<f64> = outcomes
+                .iter()
+                .filter_map(|o| o.fitted_f.map(|f| (f - o.realised_f).abs()))
+                .collect();
+            let spreads: Vec<f64> = outcomes.iter().filter_map(|o| o.across_starts).collect();
+            with_runs_spreads.extend(spreads.iter().copied());
+            let _ = writeln!(
+                report,
+                "{:>14} {:>8.0} {:>7} {:>9.4} {:>9.4} {:>9.4} {:>13.4}",
+                runs.label,
+                shape.heterozygotes_per_window(),
+                refused,
+                realised,
+                mean(&answered),
+                worst(&errors),
+                worst(&spreads)
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    let _ = writeln!(
+        report,
+        "\n## 5. The band a threshold on the across-start spread has to sit in\n"
+    );
+    let _ = writeln!(
+        report,
+        "Over every fit above that reported one. **The largest spread on a genome that has \
+         runs** is what a threshold must stay above, or it refuses a real answer; **the \
+         smallest spread on a genome with no runs** is what it would have to stay below to \
+         refuse every one of them, which is more than the design asks — a benign no-runs fit \
+         returns an `F` below its own resolution either way. Shipped: \
+         {MAX_IDENTIFIED_START_SPREAD}.\n"
+    );
+    let largest_with_runs = worst(&with_runs_spreads);
+    let smallest_no_runs = no_runs_spreads
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let _ = writeln!(
+        report,
+        "- genomes **with** runs (§3 + §4), {} fits: largest spread **{:.4}**",
+        with_runs_spreads.len(),
+        largest_with_runs
+    );
+    let _ = writeln!(
+        report,
+        "- genomes with **no** runs (§1), {} fits: smallest spread **{:.4}**, \
+         largest **{:.4}**",
+        no_runs_spreads.len(),
+        smallest_no_runs,
+        worst(&no_runs_spreads)
+    );
+
     // A sanity line so a reader can tell a run that measured nothing from one that did.
     let _ = writeln!(
         report,
-        "\n{} grid points × {SEEDS} seeds × 3 questions; `InbreedingF` accepts \
-         [0, 1] and every fitted value above was inside it.",
-        grid().len()
+        "\n{} grid points × {SEEDS} seeds × 3 questions, plus {} run shapes × {} evidence \
+         levels × {SEEDS} seeds in §4; `InbreedingF` accepts [0, 1] and every fitted value \
+         above was inside it.",
+        grid().len(),
+        section_4_runs().len(),
+        section_4_shapes().len()
     );
     let _ = InbreedingF::try_new(0.5).expect("a fraction");
 

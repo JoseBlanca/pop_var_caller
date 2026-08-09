@@ -162,6 +162,44 @@ pub enum ParameterEstimationError {
     )]
     InbreedingStatesNotSeparated { sample: String, starts: usize },
 
+    /// The runs model's starting points scored alike and answered differently, so the
+    /// data did not determine an inbreeding coefficient.
+    ///
+    /// **Also not `F` = 0, and a different failure from
+    /// [`Self::InbreedingStatesNotSeparated`].** There the search never found a second
+    /// state; here it found one from every start and found a *different* one each time,
+    /// with nothing to choose between them — which is what a chain reading sampling noise
+    /// looks like from the outside. Measured on genomes drawn with no runs at all, where
+    /// the two states came out at 0.31 and 0.62 of each other, well inside the ratio the
+    /// other check refuses on, and nine starts returned `F` from 0.0003 to 0.8497 while
+    /// scoring **within 0.91 nats of one another**
+    /// (`doc/devel/ng/research/inbreeding_resolution_2026-08-09.md` §1, §4, §6).
+    ///
+    /// **Only the tied starts count**, which is what keeps this from refusing a fit the
+    /// data did determine: on a genome with real runs and a floor of spurious
+    /// heterozygotes five times the real rate, six starts agree on `F` = 0.3157 and three
+    /// collapse to zero — and those three score 1,473 nats worse, so they have been
+    /// rejected rather than disagreed with.
+    #[error(
+        "sample {sample}: {tied_starts} of the runs model's {starts} starting points \
+         scored alike and disagreed about the inbreeding coefficient by {spread:.4}, more \
+         than the {threshold} that leaves it identified — this is a genome the model could \
+         not read, not an inbreeding coefficient of zero; supply F instead"
+    )]
+    InbreedingStartsDisagree {
+        sample: String,
+        /// How many of them could not be told apart by score — the ones the spread is
+        /// over.
+        tied_starts: usize,
+        /// How many were tried in all.
+        starts: usize,
+        /// The largest fitted `F` minus the smallest, across the tied starting points.
+        spread: f64,
+        /// What it was compared against, so the message does not have to be read against
+        /// a constant the reader has to go and find.
+        threshold: f64,
+    },
+
     /// A constrained scalar rejected its value while a named fit was running — a rate
     /// outside `[0, 1]`, a ploidy of zero.
     ///
