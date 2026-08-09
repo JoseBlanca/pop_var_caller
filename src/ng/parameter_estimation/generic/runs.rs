@@ -35,7 +35,7 @@ use crate::ng::types::{ContigId, InbreedingF, Ploidy};
 /// fitted from too little; this one guards against an answer that is entirely the
 /// estimator's own noise. A genome generated with **no runs at all** returned `F`
 /// averaging 0.23 at 1,200 windows, and 0.84 on one seed of eight
-/// (`spec/parameter_prepass_generic.md` §6.1). A tomato genome is 8,004 windows and a
+/// (`spec/parameter_prepass_generic.md` §6.5; §6.1 carries the resolution figures). A tomato genome is 8,004 windows and a
 /// human 31,000, so no real run comes near this — but a development fixture or a
 /// region-restricted run does, and the number it would produce looks like any other.
 /// Fail rather than emit.
@@ -138,9 +138,15 @@ pub struct RunsModelFit {
     pub resolution: f64,
 
     /// Windows whose posterior landed between 0.01 and 0.99 — the ones the chain rather
-    /// than their own reads decided. **Zero at 100 kb**, which is the measurement saying
-    /// the transitions changed no window's classification. Non-zero is not a fault; it
-    /// is the chain earning its keep.
+    /// than their own reads decided. Non-zero is not a fault; it is the chain earning its
+    /// keep.
+    ///
+    /// **Zero at 100 kb on the research harness's genomes**, which is the measurement saying
+    /// the transitions changed no window's classification there. Do not read it as the
+    /// expected value on real data: this chain includes every window of a contig, absent ones
+    /// as empty, and an empty window emits nothing under either state — so it is decided by
+    /// the chain by definition. A genome with unmappable stretches has a non-zero count for
+    /// that reason alone.
     pub undecided_windows: u32,
 }
 

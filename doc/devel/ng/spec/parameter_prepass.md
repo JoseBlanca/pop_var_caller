@@ -519,9 +519,13 @@ would mean the coarse pass has to be dense enough to find it.
 **Decision: step through the noise parameters; at each step, climb to the best genotype frequencies.**
 In full:
 
-1. **Scan the error rate across its whole plausible range**, coarsely at first, with the steps
-   spaced on a log scale for the reason §3 gives. **The coarse pass is what looks everywhere**; how
-   coarse it may be is bounded by §9.3, since a hump narrower than the spacing can be stepped over.
+1. **Scan the error rate across its whole plausible range**, with the steps spaced on a log scale
+   for the reason §3 gives. **The scan is what looks everywhere.** An earlier version of this point
+   said "coarsely at first", implying a refinement stage; point 3 below and
+   [`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §4.2 both say the
+   opposite, and the implementation follows them — a single flat pass over 161 rungs at a quarter of
+   a Phred, every one scored, because nobody has shown the curve has a single hump. How coarse the
+   spacing may be is bounded by §9.3, since a hump narrower than it can be stepped over.
    *On the STR path this step is replaced by a search from several starting points*
    ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.2), for the two reasons §3 above gives
    — three parameters times several hundred strata, and a measurement of the curve's shape that this
@@ -1040,13 +1044,19 @@ costs: a factor of 8,000 on this object, and nothing at all on the other four.
 **Errors, and how well determined each parameter is.** Two different things, and every parameter
 carries both.
 
-*Where it came from.* Too little data to fit is not an error, it is a provenance. **There are two
-different borrows and they happen at different levels**, which is worth keeping straight:
+*Where it came from.* Too little data to fit is not an error, it is a provenance. **There are
+three different borrows and they happen at different levels**, which is worth keeping straight:
 
-- **within a sample** — a thin stratum takes its neighbouring strata's value, adjacent repeat
-  counts at the same period;
-- **at the cohort gather** — a read group too thin to fit *at all* takes the panel-pooled value,
-  which is the only borrow that needs other samples.
+- **within a sample, across strata** — a thin stratum takes its neighbouring strata's value,
+  adjacent repeat counts at the same period;
+- **within a sample, across read groups** — a library below `MIN_SITES_TO_FIT` takes the mean of
+  the sample's other libraries' fitted rates. This one was missing from an earlier version of this
+  list, which sent the read-group borrow to the cohort gather; it is
+  [`parameter_prepass_generic.md`](parameter_prepass_generic.md)'s architecture §5.4 and it needs
+  no other sample;
+- **at the cohort gather** — a read group too thin to fit *at all*, in a sample where **every**
+  library is thin, takes the panel-pooled value. That is the only borrow that needs other samples,
+  and it is the rung below the within-sample one.
 
 Either way the parameter is **marked as having borrowed**, because one that came from a neighbour is
 softer than one fitted in place and the consumer should be able to tell. Four states — **fitted

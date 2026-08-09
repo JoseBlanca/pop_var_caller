@@ -50,8 +50,9 @@ Every milestone below is proven against them or against an identity, never again
 
 ## Scope
 
-**In:** `src/ng/parameter_estimation/` — `mod.rs`, `fitting/{mod.rs, mixture_weights.rs}`,
-`generic/{mod.rs, depth_and_alt_reads.rs, depth_bins.rs, histogram.rs, runs.rs}`; the four constrained
+**In:** `src/ng/parameter_estimation/` — `mod.rs`, `fitting/{mod.rs, mixture_weights.rs, ladder_scan.rs}`,
+`generic/{mod.rs, accumulators.rs, coupled_fit.rs, depth_and_alt_reads.rs, depth_bins.rs,
+fallback.rs, histogram.rs, noise_model.rs, read_group_error_rate.rs, runs.rs}`; the four constrained
 newtypes step 4 adds to `types.rs`; `DepthBinEdges` and the cell table; the read-group and
 windowed accumulators with their merge; `fit_mixture_weights`, the `NoiseModel` seam and the
 profile scan; the coupled error-rate/frequency loop; the runs model; the fallback ladder and
@@ -330,14 +331,21 @@ a known rate recovers that rung; a table generated outside Phred 10–50 sets th
 ### Milestone E — the four fits
 
 **E1. The per-read-group error rate.**  ✅
-`fit_by_profile_scan` over `ReadGroupHistograms`, once per read group, keeping only `ε` — the
-frequencies it climbs to at each rung are a means, not an output. *Depends:* D3, C3.
-*Source:* arch §5.1, spec §3.
+A scan over `ReadGroupHistograms`, once per read group, keeping only `ε`. **Not
+`fit_by_profile_scan`** — that climbs its own frequencies at every rung, which is a different
+estimator and the one never measured. E1 is the `ε` half of E2's alternation, so it scores
+every rung at the genotype frequencies it is **handed**, one shared set across the read
+groups, and climbs nothing (owner's call, 2026-08-07; the harness's own
+`fit_eps_on_read_group(space, freqs)`). That is a **sibling** of the profile scan rather than
+a mode of it, because a scan at fixed frequencies is not a profile likelihood.
+*Depends:* D3, C3. *Source:* arch §5.1, spec §3, §5.1.
 
 **E2. The coupled loop.**  ✅ **Own commit, do not bundle.**
-Alternate: each read group's rate from its own table at the previous frequencies, then the
-frequencies from the whole-sample table at those rates, capped at 20 iterations, keeping the
-**best-scoring** iterate and reporting `FitTermination`. **Stop when every read group's winning
+Alternate: the frequencies from the whole-sample table at the previous rates, then each read
+group's rate from its own table at **those** frequencies and without re-climbing them —
+capped at 20 iterations, keeping the **best-scoring** iterate and reporting `FitTermination`.
+(An earlier draft had the two blocks the other way round and the rate step re-climbing; the
+order is a phase and changes no fixed point, but the re-climbing is a different estimator.) **Stop when every read group's winning
 rung is unchanged** — the scan returns a rung index, so "moves by less than one rung" and "does
 not move" are the same condition and only the second is testable. **The silent failure this
 isolates:** this is a fixed point of two estimating equations rather than a climb on one
@@ -345,9 +353,12 @@ objective, so a wrong alternation converges to a plausible wrong pair and report
 loop oscillating between two adjacent rungs would satisfy a movement tolerance forever.
 *Oracle:* from a start at three times the true rates and half the true frequencies, the fixed
 point is the truth in the harness's 25 worlds — error rates to 0.000 rungs and both
-frequencies to 0.000% (research note §2.6). At one read group it must terminate after one
-iteration, because the two tables are then the same table. *Depends:* E1. *Source:* arch §5.2,
-spec §5.1.
+frequencies to 0.000% (research note §2.6). And **at one read group the alternation must reach
+the profile scan's answer**: with one library the two tables are the same table, so both
+procedures converge to the same joint maximum — each block being an exact maximisation of one
+objective. (It does **not** terminate after one iteration, which an earlier version of this
+oracle asked for: that is true of a profile scan and false of coordinate ascent. What the
+difference costs is iterations, not answers.) *Depends:* E1. *Source:* arch §5.2, spec §5.1.
 
 **E3. The runs model — a two-state HMM over windows.**  ✅ **Own commit, do not bundle.**
 Each state its own three genotype frequencies, fitted freely, with the ordering constraint

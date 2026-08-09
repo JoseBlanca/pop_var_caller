@@ -26,15 +26,31 @@ shaping of data and the mathematics on it never live in one file:
 src/ng/parameter_estimation/
 ├── mod.rs                    – step 4's surface; routes one locus by LocusKind (§3)
 ├── fitting/                  – the mathematics. Knows nothing about markers, loci or windows
-│   ├── mod.rs                – NoiseModel, the profile scan (§4.2)
-│   └── mixture_weights.rs    – the concave climb (§4.1), shared by two fits
+│   ├── mod.rs                – the seam: NoiseModel, WeightedCell, FitTermination (§4)
+│   ├── ladder_scan.rs        – both scans over a ladder, and the rung loop they share (§4.2)
+│   └── mixture_weights.rs    – the concave climb (§4.1)
 └── generic/
-    ├── mod.rs                – the two accumulators and what each fits (§3, §5)
+    ├── mod.rs                – the vocabulary, the ladder, the floors, the output types
+    ├── accumulators.rs       – the two keyed tables and add_locus (§3)
+    ├── coupled_fit.rs        – the error-rate/frequency alternation (§5.2)
     ├── depth_and_alt_reads.rs – data shaping: one locus → one cell key (§2.3)
     ├── depth_bins.rs         – the binning rule: which depths share a bin (§2.2)
+    ├── expected_counts.rs    – #[cfg(test)]: the infinite-genome table every fit is proven on
+    ├── fallback.rs           – the fallback ladder and each value's provenance (§5.4)
     ├── histogram.rs          – the cell table, and the fold over it (§2.2)
+    ├── noise_model.rs        – §5.1's closed form, and this path's plug into fitting/
+    ├── read_group_error_rate.rs – one error rate per read group (§5.1)
     └── runs.rs               – the inbreeding coefficient: a two-state HMM over windows (§5.3)
 ```
+
+**The two scans share a file and it is not called `profile_scan.rs`** (renamed 2026-08-07,
+Milestone E1). `fit_by_profile_scan` climbs the genotype frequencies at every rung;
+`fit_by_fixed_frequency_scan` scores every rung at frequencies handed in and climbs nothing,
+which is the `ε` half of §5.2's alternation. They share the rung loop — the per-ploidy plan, the
+declared-width check, the value checks that name the rung, the tie rule and the rail flag — and
+differ only in the scoring step. A **sibling rather than a mode**, because a scan at fixed
+frequencies is not a profile likelihood and a function named for one that sometimes is not one is
+a name that has stopped being true.
 
 **Why the binning rule is its own file** (added 2026-08-06, when Milestone A4 built it; an
 earlier draft of this table put it in `histogram.rs`). It fits neither side of `generic/`'s
@@ -77,6 +93,12 @@ pub struct GenericEstimationConfig {
     pub read_groups: Vec<ReadGroupId>,
     pub ploidy: Arc<dyn PloidyMap>,
     pub inbreeding: InbreedingMode,
+    /// Error rates the run states rather than fits — the third rung of §5.4's ladder, below
+    /// *fitted here* and below *borrowed*. **The name is the decision** (owner, 2026-08-09):
+    /// `fallback_error_rates` says these apply only where the sample's own data could not
+    /// answer, which is the order §5.4 specifies. A field named `error_rate_overrides` would
+    /// be a different feature and would have to sit above *fitted here*, not below *borrowed*.
+    pub fallback_error_rates: BTreeMap<ReadGroupId, ErrorRate>,
     pub edges: Arc<DepthBinEdges>,
     /// The read-admission policy the loci were produced under, recorded so that every
     /// emitted `ε` says what population of reads it describes (spec §2).
@@ -661,6 +683,11 @@ pub struct Estimate<T> {
     pub value: T,
     pub provenance: Provenance,
     pub observations: u64,      // reads for a noise rate, sites for a per-site rate
+                                // — and the two differ by the mean depth, so which one an
+                                // estimate carries is not a detail. A borrowed rate carries
+                                // the *lenders'* reads (§5.4); a supplied or defaulted one
+                                // carries none, because nothing in this sample stood behind
+                                // it.
 }
 
 /// Everything the generic path estimates for one sample. Named for what it holds, not
@@ -961,10 +988,16 @@ binary, which at two implementations is not worth weighing.
 
 ### 5.1 The per-base error rate
 
-`fit_by_profile_scan` over `ReadGroupHistograms`, once per read group, with the generic
-`NoiseModel` — a read over a reference copy shows another base with probability `ε`, one over an
-alternative copy reverts with `ε/3` (spec §2). Only `ε` is kept from this table; the genotype
-frequencies it climbs to at each rung are a means, not an output (spec §3).
+A scan over `ReadGroupHistograms`, once per read group, with the generic `NoiseModel` — a read
+over a reference copy shows another base with probability `ε`, one over an alternative copy
+reverts with `ε/3` (spec §2). Only `ε` is kept from this table.
+
+**`fit_by_fixed_frequency_scan`, not `fit_by_profile_scan`**, because this is the `ε` half of
+§5.2's alternation: it scores every rung at the genotype frequencies §5.2's step 1 produced and
+does not re-climb them. One shared frequency set across the read groups, since the frequencies
+are a property of the individual and the rates of the chemistry. The profile scan remains for
+the case where the frequencies are not being held anywhere — at one read group it is what §5.2's
+alternation is checked against.
 
 **How a cell is scored, and it is a likelihood rather than an approximation.** `p_j(ε)` is the
 per-read probability above at `j` alternative copies, `w_g` is library `g`'s share of the sample's
@@ -1009,7 +1042,22 @@ without the other, and the loop below is how that is resolved.
 /// **Fallible**, because a sample too thin to fit its genotype frequencies at some ploidy
 /// is a real condition and `GenotypeFrequenciesNotFittable` exists for it (§5.4).
 pub fn fit_coupled(
+    sample: &str,
     accumulators: &GenericAccumulators,
+    ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
+) -> Result<CoupledFit, ParameterEstimationError>;
+
+/// The same over the two tables handed in directly — `pub(crate)`, and where the
+/// alternation actually lives. A fit reachable only through an accumulator would be
+/// testable only through a locus stream, and this plan proves the fits before a locus is
+/// read.
+pub(crate) fn fit_coupled_from_tables(
+    sample: &str,
+    read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
+    whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
+    ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
 ) -> Result<CoupledFit, ParameterEstimationError>;
 
 pub struct CoupledFit {
@@ -1048,25 +1096,32 @@ pub struct ScanResult<P> {
 /// of iterations is still a number a caller would otherwise consume as if it had settled.
 pub struct FitTermination { pub iterations: u32, pub converged: bool }
 
-/// The cap. Generous: a single-library sample converges in one iteration, and only the
-/// 157-in-1,707 multi-library samples iterate at all.
+/// The cap. Generous: a start already at its answer settles in one iteration and a start
+/// away from it in two, because the second is what observes that no rung moved. Single-library
+/// samples iterate too — they are coordinate ascent, not a profile scan.
 pub const MAX_COUPLED_FIT_ITERATIONS: u32 = 20;
 ```
 
 **The loop, and what "hold fixed" means in each half.** One iteration is:
 
-1. **Each read group's error rate, from the read-group table**, at the genotype frequencies the
-   previous iteration produced. This is `fit_by_profile_scan`, so it *does* re-climb the frequencies
-   at every rung of the ladder — that is what a profile likelihood is — but the frequencies it
-   arrives at are **discarded**. Only the winning rung is kept. What is "held fixed" between
-   iterations is therefore the frequencies used in step 2, not anything inside the scan.
-2. **The genotype frequencies, from the whole-sample table**, at the rates step 1 just produced.
-   One climb per ploidy present (§4.1), because a haploid region has two genotype classes and a
-   diploid three.
+1. **The genotype frequencies, from the whole-sample table**, at the rates the previous
+   iteration produced. One climb per ploidy present (§4.1), because a haploid region has two
+   genotype classes and a diploid three.
+2. **Each read group's error rate, from the read-group table**, at the frequencies step 1 just
+   produced — **scored at them and not re-climbed from them**. This is
+   `fit_by_fixed_frequency_scan`, the sibling of `fit_by_profile_scan`, and it is what the
+   research harness measured: `fit_eps_on_read_group(space, freqs)` scores each candidate rate
+   at the frequencies it is handed and never re-climbs them (owner's call, 2026-08-07, from the
+   rule *if we measured something and it worked OK, build that*).
 
-An earlier version of this paragraph said the frequencies were held fixed while the rates were
-fitted, which contradicts the scan it calls — and the contradiction mattered, because the claim
-below about single-library samples depends on the scan re-climbing.
+**Two earlier versions of this paragraph were wrong and it is worth saying how.** The first said
+the frequencies were held fixed while the rates were fitted, and named `fit_by_profile_scan` —
+which contradicts itself, because that scan re-climbs. The second resolved the contradiction the
+wrong way, by keeping the scan and reinterpreting "held fixed" as applying only between
+iterations. What the harness actually does is the first reading taken literally: the rate step
+holds the frequencies where they are. The re-climbing version is a **different estimator**, and
+it is the one never measured. The block order is a phase and changes no fixed point; the
+re-climbing is not.
 
 **Stop when every read group's winning rung is the same as last iteration's.** The scan returns a
 rung index, so "moves by less than one rung" and "does not move" are the same condition, and only
@@ -1082,10 +1137,16 @@ kept, which is the behaviour already specified below.
 a start at three times the true rates and half the true frequencies, the fixed point is exact in all
 25 worlds tried.
 
-**At one read group it ends after one iteration**, which is the reason the decision is low-risk. The
-two tables are then the same table (§1), so step 1's scan — which climbs to the best frequencies at
-every rung — already returns the joint maximum, and step 2 re-derives what it just found. That is
-1,550 of the 1,707 samples in the archive survey.
+**At one read group the alternation reaches the profile scan's answer**, which is the reason the
+decision is low-risk. The two tables are then the same table (§1), so the alternation is plain
+coordinate ascent on a single objective and both procedures converge to the same joint maximum —
+each block being an exact maximisation of one objective. That is 1,550 of the 1,707 samples in the
+archive survey.
+
+**It does not end after one iteration**, which an earlier version of this paragraph claimed and
+which the plan's E2 oracle asked for. That is true of a profile scan, which returns the joint
+maximum of the one table it has, and false of coordinate ascent, which iterates. What the
+difference costs is iterations, not answers.
 
 **Why alternate rather than scan both jointly.** GATK scans jointly, on a 2-D grid of variant prior
 crossed with error rate
@@ -1129,9 +1190,12 @@ reads.
 /// too far apart empties the inside state and returns `F` = 0 with every appearance of
 /// having converged, so the error path is the only thing between that and a caller.
 pub fn fit_inbreeding(
-    windows: &WindowedHistograms,
-    error_rate: &BTreeMap<ReadGroupId, ErrorRate>,
+    sample: &str,
+    windowed_histograms: &BTreeMap<(WindowKey, Ploidy), DepthAltHistogram<u32>>,
+    noise: &SampleLibraryNoise,
     ploidy: Ploidy,
+    outside_rates: &SampleRates,
+    starts: &RunsModelStarts,
 ) -> Result<(Estimate<InbreedingF>, RunsModelFit), ParameterEstimationError>;
 
 /// The starting points the fit climbs from. **They must disagree about the state
@@ -1202,7 +1266,10 @@ pub struct StartOutcome {
   of three and past 10³⁵ for fifteen of thirty.
 - **The emission is a sum over the window's cells**, never a per-window heterozygote count.
   Dividing by a site count would make a thinly-covered window look autozygous.
-- **Both transition rates are fitted, per base**, and converted to a per-window probability. Fixing
+- **Both transition rates are fitted per *window*** — the chain steps window to window, so what
+  Baum–Welch fits is the chance of switching state across one window — and converted to a per-base
+  rate for **reporting** only. An earlier version of this bullet had the conversion the other way
+  round; the research harness fits per window too. Fixing
   them would set the chain's stationary inside-probability and so assume the shape of the answer —
   but **that stationary probability is not `F`** (spec §6.1); `F` is the coverage-weighted posterior
   occupancy below, and the two differ by 3.5–11% on a finite genome. Fitting the rates makes this
@@ -1295,9 +1362,15 @@ they were declared and unreachable. **A consumer that treats all four alike is t
 provenance exists to prevent** — a defaulted error rate is a guess, and a caller that cannot tell it
 from a rate measured on 80,000 reads will trust both equally.
 
-**Ties on the ladder resolve to the lower error rate**, stated so two implementations cannot differ.
-Given §2.2's fixed iteration order the scores are bit-reproducible, so this is about agreement
-between implementations rather than between runs.
+**Ties on the *error-rate* ladder resolve to the lower rate**, stated so two implementations cannot
+differ. Given §2.2's fixed iteration order the scores are bit-reproducible, so this is about
+agreement between implementations rather than between runs.
+
+**That is the ladder of §4.2's rungs and not the fallback ladder above** — a distinction worth
+making because "ladder" carries three meanings in this document: the depth bins of §2.2, the
+error-rate rungs a scan steps through, and the four fallback rungs here. The fallback ladder
+computes no scores; its rungs are chosen by a site count against a floor, which cannot tie in the
+way a likelihood can.
 
 ## 6. Design decisions — decided
 
