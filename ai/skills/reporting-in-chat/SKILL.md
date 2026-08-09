@@ -228,6 +228,48 @@ Three failures, and the first two are already rules:
    earlier in the conversation is not defined for the reply the reader is reading now** —
    if a recommendation cannot be stated without it, the recommendation is not finished.
 
+### 2026-08-09 — a defect reported without saying who caused it
+
+A test failure on real data was reported to the owner over two replies as *"cutting a
+generic region loses a deletion's tail"*, with coordinates, a CIGAR, and a
+recommendation. **The cutting was done by the test itself.** Nothing in the pipeline
+splits a region; the test split them to manufacture the boundaries a future parallel run
+would have. That sentence appeared in neither reply.
+
+> ❌ "**⛦ Stop-and-ask: cutting a generic region loses a deletion's tail.** On tomato
+> SRR7279481 the cut walk yields 7,424,467 generic loci against the uncut walk's
+> 7,424,484 — seventeen fewer, none gained."
+>
+> Owner: *"cutting why? is there a str there? why cut in one run and not in another? I am
+> missing context in your text, so it's impossible for me to understand and to decide
+> anything."*
+
+> ✅ "**I do the cutting — it is my test, not the caller.** The design asks for proof that
+> a genome split across parallel workers gives the same counts as one worker doing all of
+> it. To test that I chop each region into thirds, so the generator meets boundaries a
+> single-threaded run would never see. Nothing in the pipeline chops regions today."
+
+Four failures, and the first is the one that made the rest unreadable:
+
+1. **The agent was the cause and the sentence had no agent.** *"Cutting"* was written as
+   something that happens, so the owner reasonably asked what in the system does it. Every
+   noun in that headline — *cutting*, *generic region*, *tail* — was mine, and one of them
+   named an action only my test performs. **New rule: when the reported behaviour is
+   something your own tooling does, the subject of the first sentence is you.**
+2. **"Why in one run and not another" had a one-word answer that was never given:** I had
+   changed the test between the two runs (halves, then thirds). Reporting a difference
+   across runs without saying what differed reads as a property of the data.
+3. **The owner's question "is there a str there?" was answerable and unanswered** — there
+   were two repeat tracts, 6 and 8 bases, bracketing the region, and they were why the
+   region was short enough for my cut to land inside a deletion. It took one command to
+   find out and should not have needed asking.
+4. **The skill was never loaded.** Same as 2026-08-04 below, in a worktree where
+   `CLAUDE.md` *was* present and does name this file as mandatory. So the symlink fix of
+   2026-08-04 was necessary and is not sufficient: the file being reachable does not make
+   it read. **Rule for the next reader: load this file when the task begins, not when a
+   reply is being drafted** — by the time a result exists, the working that made it opaque
+   has already happened.
+
 ### 2026-08-04 — the rules existed and were never loaded
 
 `CLAUDE.md` already contained a section named *"Writing for the reader — including in
