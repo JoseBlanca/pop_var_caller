@@ -26,6 +26,8 @@ pub mod histogram;
 pub mod noise_model;
 pub mod read_group_error_rate;
 #[cfg(test)]
+mod real_alignments;
+#[cfg(test)]
 mod recovery;
 pub mod runs;
 

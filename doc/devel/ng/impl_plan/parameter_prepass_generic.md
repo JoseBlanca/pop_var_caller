@@ -434,7 +434,7 @@ the two frequencies the measured binning bias of the adopted ladder is 0.3% (res
 §4.3), so assert 1% relative: loose enough that binning alone cannot fail it, tight enough
 that a real fault cannot pass. *Depends:* F1. *Source:* arch §9, spec parameter_prepass §10.1.
 
-**F3. The identities that need no simulated truth, on both real cohorts.**  ☐
+**F3. The identities that need no simulated truth, on both real cohorts.**  ✅
 Three assertions on the tomato CRAMs and the HG002 alignments as they stand, all of which hold
 by construction and none of which needs a truth set: the read-group histogram equals the
 windowed one folded over its windows, cell for cell, on a single-library sample (which is every
