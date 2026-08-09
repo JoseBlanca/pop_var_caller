@@ -16,7 +16,7 @@ use crate::ng::locus_generation::{LocusGenerationError, SampleLocusObservations}
 use crate::ng::parameter_estimation::generic::accumulators::{
     GenericAccumulators, InbreedingMode, PloidyMap,
 };
-use crate::ng::parameter_estimation::generic::coupled_fit::{fit_coupled, library_shares};
+use crate::ng::parameter_estimation::generic::coupled_fit::{fit_coupled, library_shares_over};
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::generic::fallback::take_supplied_inbreeding;
 use crate::ng::parameter_estimation::generic::noise_model::{LibraryNoise, SampleLibraryNoise};
@@ -95,9 +95,10 @@ impl GenericEstimationConfig {
 /// # Errors
 ///
 /// A [`LocusGenerationError`] in the stream is **fatal and propagates**, as
-/// [`ParameterEstimationError::LocusGeneration`]. The loci a walk failed to produce are
-/// missing evidence, not zero evidence, and a rate fitted over a truncated genome is wrong
-/// in a way nothing downstream would announce.
+/// [`ParameterEstimationError::LocusGeneration`], carrying the walk's own error so that a
+/// caller can see *which* stage broke and over which region. The loci a walk failed to
+/// produce are missing evidence, not zero evidence, and a rate fitted over a truncated
+/// genome is wrong in a way nothing downstream would announce.
 ///
 /// Otherwise as [`GenericAccumulators::estimate`].
 pub fn estimate_generic_parameters(
@@ -108,7 +109,7 @@ pub fn estimate_generic_parameters(
     for locus in loci {
         let locus = locus.map_err(|failure| ParameterEstimationError::LocusGeneration {
             sample: config.sample_name.clone(),
-            cause: failure.to_string(),
+            source: failure,
         })?;
         accumulators.add_locus(&locus);
     }
@@ -134,6 +135,20 @@ impl GenericAccumulators {
     /// the parameter that differs most between an outcrosser and a selfing landrace, and a
     /// cohort's diversity divides by `1 − F`, so a wrong constant would be amplified rather
     /// than absorbed. The answer to all three is to supply one.
+    ///
+    /// **Any of those three discards the three parameters that *were* fitted, and that is
+    /// deliberate** (owner, 2026-08-09). The error rates and the genotype frequencies are
+    /// settled before the runs model runs, and they are dropped with them — on the streaming
+    /// entry point, after a whole-genome walk. The reason is downstream: **`F` is a prior the
+    /// calling step needs**, so a sample with the other three and no `F` cannot be called
+    /// anyway, and returning it would only move the failure to a place with less context. It
+    /// is worth knowing what that costs before running a cohort: on a genome with no runs the
+    /// refusal rate is about **nine in twenty-three** (research note §6.3), and the two floors
+    /// are far apart — [`MIN_SITES_TO_FIT`](super::MIN_SITES_TO_FIT) is 10,000 sites where
+    /// [`MIN_WINDOWS_TO_FIT_INBREEDING`](super::runs::MIN_WINDOWS_TO_FIT_INBREEDING) is 3,000
+    /// windows, which is 300 Mb that must hold sites. A region-restricted run, and an
+    /// outcrossing cohort run without a supplied `F`, will meet this. **The answer in both
+    /// cases is `InbreedingMode::Supplied`**, which is per-sample.
     ///
     /// # Panics
     ///
@@ -196,7 +211,7 @@ impl GenericAccumulators {
             return Ok((None, None));
         };
 
-        let noise = self.library_noise(settled_rates);
+        let noise = self.library_noise(settled_rates, diploid);
         let (estimate, fit) = fit_inbreeding(
             &config.sample_name,
             self.windowed_histograms(),
@@ -220,6 +235,14 @@ impl GenericAccumulators {
     /// **The rates are the *settled* ones, so a borrowed or supplied rate reaches the runs
     /// model** — the alternative is a library scored against a rate nobody chose.
     ///
+    /// **And the shares are restricted to the ploidy being fitted**, which pooling them
+    /// across the sample is not. The runs model walks the diploid windows and nothing else,
+    /// so a library that contributed only to a haploid arm must not be given a share of the
+    /// reads it is scoring: measured on a fixture whose two arms come from different
+    /// libraries, pooling reports 0.5 and 0.5 where the diploid arm's reads are entirely one
+    /// of them, and at Phred 20 against Phred 30 that puts the share-weighted rate 5.5 times
+    /// above the truth.
+    ///
     /// # Panics
     ///
     /// If a library has a share of the reads but no settled rate. `resolve_error_rates`
@@ -230,9 +253,10 @@ impl GenericAccumulators {
     fn library_noise(
         &self,
         settled_rates: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        at: Ploidy,
     ) -> SampleLibraryNoise {
         SampleLibraryNoise::new(
-            library_shares(self.read_group_histograms())
+            library_shares_over(self.read_group_histograms(), |ploidy| ploidy == at)
                 .into_iter()
                 .map(|(read_group, share_of_reads)| LibraryNoise {
                     read_group,

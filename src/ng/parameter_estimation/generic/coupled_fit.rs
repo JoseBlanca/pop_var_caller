@@ -390,8 +390,29 @@ fn into_coupled_fit(
 pub(super) fn library_shares(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
 ) -> BTreeMap<ReadGroupId, f64> {
+    library_shares_over(read_group_histograms, |_| true)
+}
+
+/// The same, over the entries a predicate on ploidy keeps.
+///
+/// **Its own function because the two callers weigh different populations of reads, and
+/// pooling across ploidies is wrong for one of them.** The coupled fit scores every ploidy's
+/// cells, so it wants every ploidy's reads. The runs model is **diploid only** — its chain
+/// walks the diploid windows and nothing else — so a share computed over the whole sample
+/// tells it that a library which contributed nothing to the diploid arm produced some of the
+/// reads it is scoring. On a genome whose haploid and diploid arms were sequenced from
+/// different libraries at different chemistries, that is the share-weighted mean rate landing
+/// several-fold away from the truth, on the one model whose job is separating real
+/// heterozygotes from error.
+pub(super) fn library_shares_over(
+    read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
+    keep: impl Fn(Ploidy) -> bool,
+) -> BTreeMap<ReadGroupId, f64> {
     let mut reads_of_group: BTreeMap<ReadGroupId, u64> = BTreeMap::new();
-    for (&(group, _), table) in read_group_histograms {
+    for (&(group, ploidy), table) in read_group_histograms {
+        if !keep(ploidy) {
+            continue;
+        }
         *reads_of_group.entry(group).or_default() += table.total_reads();
     }
     reads_of_group.retain(|_, reads| *reads > 0);

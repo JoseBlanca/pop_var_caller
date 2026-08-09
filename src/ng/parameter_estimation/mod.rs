@@ -88,7 +88,7 @@ pub struct Estimate<T> {
 /// chemistry varies far less between runs than biology does between samples. Neither
 /// the genotype frequencies nor the inbreeding coefficient has any such rung.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ParameterEstimationError {
     /// Too few sites to fit this sample's genotype frequencies at this ploidy.
     ///
@@ -215,15 +215,24 @@ pub enum ParameterEstimationError {
     /// The stream's own error type already says the same thing by yielding `Err` once and
     /// then ending, so that `?` makes it un-ignorable rather than a silent end of stream.
     ///
-    /// **The cause is a rendered message rather than the error itself, and that is a real
-    /// loss.** `LocusGenerationError` is `Debug + Error` and neither `Clone` nor
-    /// `PartialEq`, which this enum is and its tests rely on; carrying it would mean
-    /// dropping both from every variant. What is lost is `source()` chaining — a caller
-    /// cannot match on which stage of the walk failed, only read what it said. The field is
-    /// therefore **not** named `source`: that name would claim a chain this does not
-    /// provide, and `thiserror` would try to treat a `String` as one.
-    #[error("sample {sample}: the walk that produces its loci failed — {cause}")]
-    LocusGeneration { sample: String, cause: String },
+    /// **It carries the walk's own error, and that cost this enum its `Clone` and
+    /// `PartialEq`.** `LocusGenerationError` has neither, so holding one means dropping both
+    /// from every variant here. F1's first draft rendered the cause to a `String` to keep
+    /// them — on the stated grounds that the tests relied on them, which a review measured
+    /// and disproved: removing the two derives compiles with **zero** errors across
+    /// `--all-targets`.
+    ///
+    /// What the `String` was costing is the part worth keeping. Five of
+    /// `LocusGenerationError`'s six variants name the [`GenomeRegion`](crate::ng::types::GenomeRegion)
+    /// where the walk broke, and rendering flattens that to prose a caller would have to
+    /// parse. A cohort driver deciding whether to retry one region or abandon the sample
+    /// needs to `matches!` on the inner variant, which it can now do.
+    #[error("sample {sample}: the walk that produces its loci failed")]
+    LocusGeneration {
+        sample: String,
+        #[source]
+        source: crate::ng::locus_generation::LocusGenerationError,
+    },
 
     /// A constrained scalar rejected its value while a named fit was running — a rate
     /// outside `[0, 1]`, a ploidy of zero.

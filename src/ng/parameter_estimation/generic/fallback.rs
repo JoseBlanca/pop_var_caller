@@ -64,9 +64,10 @@ use crate::ng::types::{ErrorRate, InbreedingF, ReadGroupId};
 /// — a different platform in the same sample — gets the neighbour's number instead, and
 /// `Provenance::Borrowed` lets a consumer notice without letting anyone fix it.
 ///
-/// Implemented as documented and left for the owner, who should settle it **when F1 names
-/// the configuration field**: `fallback_error_rates` and this order stands;
-/// `error_rate_overrides` and it must flip. Nothing can supply a rate until then.
+/// **Settled (owner, 2026-08-09), and F1 is what settled it**: the configuration field is
+/// named `fallback_error_rates`, so by this comment's own rule the order stands as
+/// implemented. `GenericEstimationConfig::fallback_error_rates` is now a production source
+/// for the third rung, exercised by `a_supplied_rate_is_used_where_no_group_can_fit_or_lend`.
 ///
 /// # Panics
 ///
@@ -163,9 +164,15 @@ pub fn resolve_error_rates(
 /// this is asked there is no chain to walk and the runs model cannot be run even if a
 /// caller wanted it.
 ///
-/// `covered_positions` is what the fitted value's warrant would have been counted in, and a
-/// supplied one carries it too — it says how much genome the number is being applied to,
-/// which is the only quantity a consumer can compare across samples.
+/// `covered_positions` says how much genome the number is being applied to, which is the only
+/// quantity a consumer can compare across samples.
+///
+/// **It is not quite what the fitted value's warrant would have been, and on a mixed-ploidy
+/// genome it is larger.** A fitted `F` is warranted by the **diploid** windows' covered
+/// positions, because that is the only part of the genome its chain walked; this counts every
+/// ploidy, since a supplied coefficient was not fitted from any of them. On a fixture whose
+/// two arms are equal that is 20,002 positions against the 10,001 a fit would have reported.
+/// A consumer comparing the two across samples is comparing different denominators.
 #[must_use]
 pub fn take_supplied_inbreeding(
     mode: InbreedingMode,
