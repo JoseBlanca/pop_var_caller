@@ -24,6 +24,24 @@ The wrapper picks a runtime automatically: **podman** if present
 (Linux dev box), otherwise Apple's **`container`** CLI on macOS
 (https://github.com/apple/container).
 
+**Some machines have neither, and `rick` is one of them** — the Linux box the
+archive-scale walks run on has no container runtime installed. There
+`./scripts/dev.sh` refuses to run rather than falling through to the host,
+because a silent fallback would drop the only guarantee it offers. On such a
+machine **run `cargo` directly**, and expect two differences:
+
+- the binary lands in `target/release/...`, not `target-container/release/...`
+  — the container build points `CARGO_TARGET_DIR` at the second, so the two
+  trees can hold different builds of the same example at once. **A script that
+  looks for a built binary must check both and take the newer**, which is what
+  `scripts/ng_str_library_survey.sh` does;
+- `cargo` writes to `~/.cargo` and `~/.rustup` as usual, which the
+  containerised run does not.
+
+So **"all write-side build tooling runs in the container" is the rule wherever a
+runtime exists, not a fact about every machine.** Do not tell someone working on
+`rick` to build with `./scripts/dev.sh`; it will only tell them what is missing.
+
 **One-time macOS setup** (Apple container only):
 
 ```

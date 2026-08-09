@@ -11,8 +11,10 @@
 # Usage:
 #   ./ng_str_library_survey.sh OUT.tsv REF CRAM [CRAM ...]
 #
-# Example on rick — **rebuild first**, in the container, or the run refuses to start:
-#   ./scripts/dev.sh cargo build --release --example ng_str_stutter_by_library
+# Example on rick — **rebuild first**, or the run refuses to start. rick has no container
+# runtime, so build with cargo directly; `./scripts/dev.sh` only reports what is missing there
+# (CLAUDE.md, "Container vs. host"):
+#   cargo build --release --example ng_str_stutter_by_library
 #   JOBS=32 ./scripts/ng_str_library_survey.sh ~/tmp/stutter_by_library.tsv \
 #       /home/joxi/refs/S_lycopersicum_chromosomes.4.00.fa \
 #       /media/tomato25_bams/crams/*/*.cram
@@ -215,7 +217,8 @@ for candidate in "$REPO_ROOT/target-container/release/examples/ng_str_stutter_by
 done
 [[ -n "$BIN" ]] || {
     echo "not built: no ng_str_stutter_by_library in target/ or target-container/" >&2
-    echo "  ./scripts/dev.sh cargo build --release --example ng_str_stutter_by_library" >&2
+    echo "  cargo build --release --example ng_str_stutter_by_library" >&2
+    echo "  (prefix with ./scripts/dev.sh where a container runtime exists; rick has none)" >&2
     exit 1
 }
 
@@ -224,7 +227,8 @@ done
 # warn — a warning on stderr at the head of a run measured in hours is a warning nobody sees.
 if [[ -f "$SOURCE" && "$SOURCE" -nt "$BIN" ]]; then
     echo "$BIN is older than $SOURCE — rebuild before surveying:" >&2
-    echo "  ./scripts/dev.sh cargo build --release --example ng_str_stutter_by_library" >&2
+    echo "  cargo build --release --example ng_str_stutter_by_library" >&2
+    echo "  (prefix with ./scripts/dev.sh where a container runtime exists; rick has none)" >&2
     exit 1
 fi
 echo "using $BIN" >&2
