@@ -18,7 +18,7 @@ doc comment). Each test builds the real stream — typed-region catalog over the
 | test | what it asserts |
 |---|---|
 | `the_two_tables_agree_cell_for_cell` | the windowed table folded over its windows equals the read-group table, cell for cell, at one read group (spec §12.6) |
-| `one_walk_and_four_shards_give_identical_tables` | the same territory as the catalog's regions, and as pieces dealt to four accumulators and merged, gives identical tables |
+| `one_walk_and_sixteen_shards_of_whole_regions_agree` | the same territory as one stream, and as sixteen shards of **whole** typed regions merged, gives identical tables |
 | `no_locus_overlaps_the_one_before_it` | `loci_overlapping_previous` is zero, and so is a second count made outside the accumulator |
 | `the_generic_path_fits_a_real_sample_without_railing` | the coupled fit returns, converges, and lands on neither end of the error-rate ladder |
 
@@ -28,7 +28,7 @@ structural identities hold"*, and nothing else in the milestone runs a fit over 
 produced. `F` is supplied rather than fitted, because both cohorts' BEDs hold a few hundred
 windows against `MIN_WINDOWS_TO_FIT_INBREEDING`'s 3,000.
 
-## The runs — five alignments, twenty test instances, nineteen green
+## The runs — five alignments, twenty test instances, all green
 
 Each row is one invocation of the module doc's command with the reads and the BED swapped
 (HG002 30x BAM, HG002 300x CRAM, and three tomato CRAMs, against the GIAB and tomato1 BEDs):
@@ -42,40 +42,46 @@ Each row is one invocation of the module doc's command with the reads and the BE
 | tomato SRR7279483 | 7,213,401 | 7,224,396 | 103,069,962 | 565 | 9,273 |
 
 `loci_overlapping_previous` is **zero on all five**, and so is the independent count. The
-sharded arm cuts 3,142 HG002 typed regions into 7,453 pieces and 41,824 tomato ones into
-97,732, over four accumulators.
+sharded arm deals the 3,142 HG002 and 41,824 tomato typed regions — whole, never split — into
+sixteen contiguous blocks, walks each in its own stream with its own reader and generator, and
+merges the sixteen accumulators.
 
-**Identity 2 fails on tomato SRR7279481, and the failure is a real defect in locus
-generation** — the next section. The other nineteen instances are green.
+## The rule this step settled: whole segments to each worker
 
-## The failure: cutting a region loses a deletion's tail
+The sharded arm originally cut each generic region into thirds, to manufacture boundaries a
+single-threaded walk would not have. **That lost 17 positions of 7,429,336 on
+`tomato1/crams/SRR7279481.p1.bench.cram`**, in one contiguous run at
+`SL4.0ch01:32,931,592–32,931,608`: read `SRR7279481.13095921` is aligned at 32,931,402 with
+CIGAR `116M91D22M5S`, so its 91-base deletion spans 32,931,518–32,931,608, a cut landed 74
+bases inside it, and the part of the deletion's reference span past the cut was emitted by no
+region at all. Isolated to the cutting rather than the merge: one stream over the same pieces
+into one accumulator loses the same seventeen.
 
-On `tomato1/crams/SRR7279481.p1.bench.cram` the cut walk yields **7,424,467 generic loci
-against the uncut walk's 7,424,484** — seventeen fewer, over seventeen fewer positions, none
-gained.
+**Owner's decision, 2026-08-09** — *"Once we start parallelizing we will send whole segments
+to each worker, never a segment shall be cut"* — and the measurements behind it separate what
+is avoidable from what is not.
 
-The seventeen are one contiguous run, `SL4.0ch01:32,931,592–32,931,608`, and they open a
-piece that starts at 32,931,592. The read `SRR7279481.13095921` is aligned at 32,931,402 with
-CIGAR `116M91D22M5S`, so its **91-base deletion spans 32,931,518 to 32,931,608** and its match
-resumes at 32,931,609 — the first position that is *not* lost. The piece boundary falls 74
-bases inside that deletion. **A generic locus widened to a deletion's reference span is clipped
-at the region's end, and its tail is picked up by no later region.** The positions are covered
-at depth 4 to 6, so this is not a coverage gap.
+**Not avoidable.** The genome is divided from the reference alone, never consulting a read, so
+a read's deletion can cross any boundary that division makes. Where a deletion runs from
+ordinary sequence into a repeat tract, the generic path **should** drop the bases past the
+boundary: they are the STR path's. On this sample 87 read-deletion spans cross a catalog
+boundary and **81 of them are ordinary↔repeat**.
 
-Three things narrow it:
+**Avoidable.** A boundary invented inside territory that is wholly the generic path's own.
+The catalog never creates one — over 41,823 typed regions the adjacencies are 17,192
+ordinary→repeat, 17,187 repeat→ordinary, 3,651 and 3,653 ordinary↔repeat-bundle, 30 and 30 to
+other, and **zero ordinary→ordinary** — so only a splitter can. Sharding on whole segments
+costs nothing and removes the case by construction.
 
-- **It is the cutting, not the sharding.** One stream over the same pieces into one
-  accumulator loses the same seventeen, so `merge` and the per-shard readers are not involved.
-- **It is boundary-density dependent.** At an earlier, coarser cut — 63,357 tomato pieces
-  rather than 97,732 — this sample passed. The other four alignments pass at the finer cut.
-- **The case is known to the locus-generation plan and its fixture does not reach it.**
-  `locus_generation_pileup_generator.md`'s fixture 6 is *"a deletion across a region boundary
-  — the halo, checked against the same fixture walked as one region."*
-
-**Left failing on purpose.** Loosening the assertion, or coarsening the cut until it passes,
-would bury a defect that changes which sites a sharded run analyses. Repairing it belongs to
-locus generation, which is another plan's territory — the same rule the plan states for
-`loci_overlapping_previous`. **This is the stop-and-ask Milestone F ends on.**
+**The residue, recorded rather than chased.** Six read-deletions on this sample, at three
+distinct sites, start in one ordinary region, jump a repeat tract and end in a *later*
+ordinary region: `SL4.0ch03:34,016,779` (10 bp), `SL4.0ch08:36,087,969` (26 bp) and
+`SL4.0ch11:6,851,413` (19 bp). Both ends are the generic path's, so if the second region
+behaves as the cut piece did, those bases are lost from our own territory. **Untested** — the
+loss was demonstrated only at a cut with no tract in between. At most a few tens of positions
+in 7,429,336, about **3 in 100,000**, and there is no repeat generator yet
+(`PileupGenerator` is the only implementor of `LocusGenerator`), so nothing consumes the
+intervening tract today either way.
 
 ## The run where the cap fires, and what it is actually worth
 
@@ -267,17 +273,15 @@ All via `./scripts/dev.sh`, after the review fixes:
 
 - `cargo fmt --check` — clean.
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean.
-- `cargo test --lib --bins --tests --all-features` — **3,214 passed, 0 failed, 9 ignored** in
-  the library target. The five new unit tests over the region-cutting helpers raise the passed
-  count from 3,209; the four real-alignment tests are `#[ignore]`d and raise the ignored count
-  from 5. (The command's *total* across its eleven binaries is larger — 3,283 — and earlier
-  reports on this plan have quoted the library line as though it were the total.)
-- `cargo test --lib parameter_estimation -- --list | grep -c ': test$'` — the module holds
-  **316** tests, four of them ignored. **F2's report and its handoff both say the module held
-  308 before this step; it held 307** — counting `#[test]` over
-  `src/ng/parameter_estimation/` at `5d7c9a6e` gives 307, and so does the `--list` command
-  once F3's nine are subtracted. One test out, and again a number about the author's own tests
-  rather than one copied from a design document.
+- `cargo test --lib --bins --tests --all-features` — **3,211 passed, 0 failed, 9 ignored** in
+  the library target. The two unit tests over `deal_into_shards` raise the passed count from
+  3,209; the four real-alignment tests are `#[ignore]`d and raise the ignored count from 5.
+  (The command's *total* across its eleven binaries is larger, and earlier reports on this
+  plan have quoted the library line as though it were the total.)
+- The module holds **313** tests, four of them ignored. **F2's report and its handoff both
+  say it held 308 before this step; it held 307** — counting `#[test]` over
+  `src/ng/parameter_estimation/` at `5d7c9a6e` gives 307. One test out, and again a number
+  about the author's own tests rather than one copied from a design document.
 - `cargo doc --no-deps --lib` — 12 unresolved links, the pre-existing baseline, none in this
   module.
 

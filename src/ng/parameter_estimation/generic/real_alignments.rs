@@ -9,10 +9,11 @@
 //!    (`spec/parameter_prepass_generic.md` §12.6). That is the property §1 leans on to
 //!    avoid keeping a third object, and it is the reason the accumulator may build both
 //!    without the multi-library machinery costing a single-library sample anything.
-//! 2. **Sharded accumulation is exact.** The same territory walked as the catalog's own
-//!    regions, and again with every generic region cut into pieces and the pieces dealt
-//!    to four accumulators, must give identical tables — which the integer merge makes an
-//!    equality rather than a tolerance (`arch/parameter_prepass_generic.md` §9).
+//! 2. **Sharded accumulation is exact.** The same territory walked as one stream, and
+//!    again as sixteen shards of **whole typed regions** merged together, must give
+//!    identical tables — which the integer merge makes an equality rather than a tolerance
+//!    (`arch/parameter_prepass_generic.md` §9). Whole regions and never part of one: see
+//!    [`deal_into_shards`] for the rule and the measurement behind it.
 //! 3. **`loci_overlapping_previous` is zero.** The generic loci must partition the
 //!    positions they cover, or a site enters the windowed table twice. A non-zero count
 //!    here is a bug report against locus generation, not something this unit absorbs.
@@ -92,14 +93,17 @@
 //!     -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! **The 300x arm is the one worth running when only one is, and it is identity 2 that
-//! needs it — not identity 1.** A site above the ladder's cap of 124 reads keeps a
-//! subsample, and `depth_and_alt_reads.rs`'s `seed_at` draws it from the contig and the
-//! start position and nothing else. So a region-sharded walk has to keep the *same reads*
-//! at every capped site as an unsharded one, and identity 2 is the only test in this
-//! module that can see it fail. On this alignment 545,863 of 550,049 sites are drawn that
-//! way; on the 30x arm none are, and on tomato SRR7279483 9,273 of 7,213,401 are, about one
-//! site in 780.
+//! **The 300x arm is the one worth running when only one is.** It is where the subsampling
+//! of Milestone C2 fires on real reads at all: 545,863 of its 550,049 sites arrive above the
+//! ladder's cap of 124 and are drawn down to it, against zero on the 30x arm and 9,273 of
+//! 7,213,401 on tomato SRR7279483 — about one site in 780. On any shallower run every
+//! identity below is asserted over a table no site was ever subsampled into, so the deep
+//! bins of the ladder, and `CountedSite::capped`'s draw, are exercised by nothing.
+//!
+//! **It does not test that sharding preserves the draw, and that is now true by
+//! construction rather than by test.** The draw is seeded from the locus's own contig and
+//! start (`seed_at`), and shards are whole typed regions, so no locus's coordinates differ
+//! between the two arms and no draw can.
 //!
 //! **Identity 1, by contrast, is the same tautology at every depth**, and an earlier
 //! version of this comment said the opposite. It claimed the two tables are filled above
@@ -155,21 +159,14 @@ use crate::ng::types::{GenomeRegion, InbreedingF, Ploidy, Position};
 
 use noodles_fasta::fai;
 
-/// The widest piece [`cut_into_pieces`] will make. A ceiling, not the width.
-///
-/// **A fixed width alone is a knob that can silently do nothing**, which is how this one
-/// started: at 10,000 bases it left the HG002 walk's 3,142 typed regions as 3,142 pieces.
-/// Region typing cuts a BED span into runs of generic sequence between repeat tracts, and
-/// those runs are short — 3,142 regions carry 552,284 covered positions between them — so
-/// none of them came near 10,000, and the unchanged piece count is the evidence of that.
-/// The arm then compared a walk against the same region boundaries, tested only the merge,
-/// and said so nowhere. What guarantees a cut now is the thirds rule in
-/// [`cut_into_pieces`], not this number.
-const MAX_PIECE_BP: u64 = 1_000;
-
-/// How many accumulators the pieces are dealt to — **a maximum**, not a promise.
+/// How many shards the typed regions are dealt to — **a maximum**, not a promise.
 /// [`deal_into_shards`] gives fewer when there are fewer regions than this.
-const SHARD_COUNT: usize = 4;
+///
+/// Sixteen rather than four: a shard boundary is the only thing the sharded arm has that
+/// the unsharded one does not, so the arm is worth as many of them as it can have cheaply.
+/// The work is the same either way — the same regions walked once — plus fifteen more file
+/// opens.
+const SHARD_COUNT: usize = 16;
 
 /// What a walk produced, counted **outside** the accumulator.
 ///
@@ -296,7 +293,7 @@ impl WalkInputs {
     /// The typed-region catalog over the BED, walked **once** and kept.
     ///
     /// Both arms of the sharding identity are fed from this one list, so the only thing
-    /// they differ in is how the regions are cut and which accumulator each locus reaches.
+    /// they differ in is which accumulator each region's loci reach.
     /// Re-typing per arm would put region typing inside the comparison, and a difference
     /// there would read as a difference in the accumulator.
     fn typed_regions(&self) -> Vec<TypedRegion> {
@@ -434,89 +431,31 @@ fn required_env_var(variable: &str) -> String {
         .unwrap_or_else(|_| panic!("set {variable} — see this module's doc comment"))
 }
 
-/// Cut every generic region of three bases or more into **at least three** pieces, none
-/// wider than [`MAX_PIECE_BP`]; leave one- and two-base regions, and every non-generic
-/// region, whole.
+/// Deal `regions` into at most [`SHARD_COUNT`] groups of **contiguous blocks of whole typed
+/// regions**, the way a region-sharded run divides a genome.
 ///
-/// **Thirds rather than a width, because a width does nothing on short regions and both
-/// cohorts' regions are short.** The point of the sharded arm is that the generator meets
-/// boundaries the unsharded arm did not, and the boundary worth having is an *interior*
-/// piece — one with a cut at each end, so the reads that flank it were fetched for a
-/// neighbouring region. A fixed width gives that only where a region exceeds twice the
-/// width; halving never gives it at all. Thirds give it on every region of three bases or
-/// more, whatever the organism, and [`MAX_PIECE_BP`] then caps a long region on top of that.
+/// # Whole segments to each worker, never a segment cut
 ///
-/// **A region of one or two bases yields one or two pieces** — there is no interior piece
-/// to be had — so this function does not on its own guarantee the arm cuts anything. What
-/// does is the caller's assertion that some region produced three pieces.
+/// **Owner's rule, 2026-08-09** — *"Once we start parallelizing we will send whole segments
+/// to each worker, never a segment shall be cut"* — **and it was settled by a measurement
+/// this file produced.** An earlier version cut each generic region into thirds to
+/// manufacture extra boundaries, and that lost seventeen positions on
+/// `tomato1/crams/SRR7279481.p1.bench.cram`: a read's 91-base deletion spanned
+/// `SL4.0ch01:32,931,518–32,931,608`, a cut fell 74 bases inside it, and the part of the
+/// deletion's reference span past the cut was emitted by no region at all.
 ///
-/// **The generic ones only**, because those are the regions this step's accumulator reads
-/// and the only ones whose splitting the identity is about; an STR tract cut in three is a
-/// different tract, which is a question for the STR path's own plan.
-///
-/// A third copy of the `split_generic` in `examples/ng_generic_walk_probe.rs` and
-/// `examples/ng_generic_loci_dump.rs`, deliberately and for the reason the probe's copy
-/// gives — and it differs from both: they cut at a fixed width, this one takes thirds and
-/// treats the width as a ceiling, because a test that must not become a no-op cannot depend
-/// on the regions being long.
-fn cut_into_pieces(regions: &[TypedRegion]) -> Vec<TypedRegion> {
-    let mut pieces = Vec::new();
-    for region in regions {
-        if region.kind != RegionKind::Generic {
-            pieces.push(region.clone());
-            continue;
-        }
-        let (contig, start, end) = (
-            region.region.contig,
-            region.region.start.get(),
-            region.region.end.get(),
-        );
-        // **Rounded *down*, and the first draft rounded up.** At `ceil(L/3)` a four-base
-        // region gets a width of two and comes back in two pieces, not three — the
-        // guarantee this function exists for, broken at the one length nobody would check
-        // by hand. `L / 3` gives a width no larger than a third, so `ceil(L / width)` is
-        // three or more for every `L >= 3`. `.max(1)` keeps a one- or two-base region from
-        // getting a zero-width piece that would not advance the loop.
-        let width = MAX_PIECE_BP.min(((end - start + 1) / 3).max(1));
-        let mut at = start;
-        while at <= end {
-            // Saturating, so a width wider than what is left gives the remainder rather
-            // than a `piece_end` below `at`.
-            let piece_end = at.saturating_add(width - 1).min(end);
-            pieces.push(TypedRegion {
-                region: GenomeRegion {
-                    contig,
-                    start: Position(at),
-                    end: Position(piece_end),
-                },
-                kind: RegionKind::Generic,
-            });
-            at = piece_end + 1;
-        }
-    }
-    pieces
-}
-
-/// How many pieces the longest-cut generic region of `regions` produced.
-///
-/// The arm's guard against silently testing nothing: three or more means at least one piece
-/// has a cut at **both** ends, which is the case the sharded arm exists to reach.
-fn deepest_cut(regions: &[TypedRegion]) -> usize {
-    regions
-        .iter()
-        .filter(|region| region.kind == RegionKind::Generic)
-        .map(|region| cut_into_pieces(std::slice::from_ref(region)).len())
-        .max()
-        .unwrap_or(0)
-}
-
-/// Deal `regions` into at most [`SHARD_COUNT`] groups of **contiguous blocks**, the way a
-/// region-sharded run divides a genome. Fewer groups when there are fewer regions.
+/// **The walk is not what needs repairing.** The genome is divided from the reference
+/// alone, without ever seeing a read, so a read's deletion can cross any boundary the
+/// division makes — that much is unavoidable, and where a deletion crosses into a repeat
+/// tract, the generic path dropping those bases is *correct*, because they are the STR
+/// path's. What is avoidable is a boundary we invent inside territory that is entirely the
+/// generic path's own. Splitting between whole segments costs nothing and removes the case
+/// by construction, so this test divides that way and so must the parallel driver.
 ///
 /// Contiguous and not round-robin: a shard records only the first start and last end of
-/// each contig it saw, so four interleaved shards would each span nearly the whole contig
-/// and `adjustments().shard_spans_overlapping` — a counter that must read zero — would
-/// count three overlapping adjacent pairs in the sorted span list.
+/// each contig it saw, so interleaved shards would each span nearly the whole contig and
+/// `adjustments().shard_spans_overlapping` — a counter that must read zero — would count
+/// every adjacent pair in the sorted span list as an overlap.
 fn deal_into_shards(regions: Vec<TypedRegion>) -> Vec<Vec<TypedRegion>> {
     let per_shard = regions.len().div_ceil(SHARD_COUNT).max(1);
     regions
@@ -677,47 +616,26 @@ fn the_two_tables_agree_cell_for_cell() {
 /// **Identity 2 — the same sample walked in one set of regions and in many gives identical
 /// tables** (`arch/parameter_prepass_generic.md` §9).
 ///
-/// The unsharded arm walks the catalog's regions as they came. The sharded arm cuts every
-/// generic one into [`PIECE_BP`]-base pieces, deals the pieces to [`SHARDS`] accumulators
-/// in contiguous blocks, and merges them — so it differs in **both** ways a real run can:
-/// the generator sees different region boundaries, and the counts arrive in four pieces
-/// that integer addition has to put back together.
+/// The unsharded arm walks the catalog's regions in one stream. The sharded arm deals the
+/// same regions — **whole, never split** — into sixteen contiguous blocks, walks each in its
+/// own stream with its own reader and its own generator, and merges the sixteen
+/// accumulators. So it differs in both ways a real parallel run does: the generator is
+/// restarted at fifteen seams, and the counts arrive in sixteen pieces that integer addition
+/// has to put back together.
 ///
-/// **What it cannot say.** It compares this walk against this walk, so a locus the
-/// generator drops at *every* boundary alike is invisible to it. What it can see is a
-/// locus generated differently at a seam, and any count that `merge` fails to carry.
+/// **Whole regions is the contract, not a convenience** (owner, 2026-08-09). An earlier
+/// version cut each generic region into thirds and lost seventeen positions to a read's
+/// 91-base deletion straddling one of the cuts; [`deal_into_shards`] carries the
+/// measurement and the reasoning.
 ///
-/// # Known red: tomato SRR7279481, and it is a bug report against locus generation
-///
-/// **This test fails on one of the five alignments it has been run on, and the failure is
-/// real.** On `tomato1/crams/SRR7279481.p1.bench.cram` the cut walk yields **7,424,467
-/// generic loci against the uncut walk's 7,424,484** — seventeen fewer, over seventeen
-/// fewer positions, with none gained.
-///
-/// The seventeen are one contiguous run, `SL4.0ch01:32,931,592–32,931,608`, and they are
-/// the opening of a piece that starts at 32,931,592. The read
-/// `SRR7279481.13095921` is aligned at 32,931,402 with CIGAR `116M91D22M5S`: its
-/// **91-base deletion spans 32,931,518 to 32,931,608**, its match resumes at 32,931,609 —
-/// the first position that is *not* lost — and the piece boundary falls 74 bases inside
-/// the deletion. So a generic locus widened to a deletion's reference span is **clipped at
-/// the region's end and its tail is picked up by no later region**. The positions are
-/// covered, at depth 4 to 6; this is not a coverage gap.
-///
-/// **It is the cutting and not the sharding**: one stream over the same pieces into one
-/// accumulator loses the same seventeen, so `merge` and the per-shard readers are not
-/// involved. It is also boundary-density dependent — at an earlier, coarser cut (63,357
-/// pieces rather than 97,732) this sample passed, and the other four alignments pass at the
-/// finer cut. `locus_generation_pileup_generator.md`'s fixture 6 is *"a deletion across a
-/// region boundary — the halo, checked against the same fixture walked as one region"*, so
-/// the case is known to that plan and its fixture does not reach this one.
-///
-/// **Left failing on purpose.** Loosening the assertion, or coarsening the cut until it
-/// passes, would bury a defect that changes which sites a sharded run analyses. Fixing it
-/// belongs to locus generation, not to this unit — the same rule
-/// [`no_locus_overlaps_the_one_before_it`] states for its own counter.
+/// **What it cannot say.** It compares this walk against this walk, so a locus the generator
+/// drops at *every* boundary alike is invisible to it — including a deletion that crosses a
+/// boundary the *catalog* made, which no arrangement of shards can move. What it can see is
+/// a locus generated differently when its region is reached by a fresh stream, and any count
+/// that `merge` fails to carry.
 #[test]
 #[ignore = "needs a real BAM/CRAM, reference and BED; see the module doc comment"]
-fn one_walk_and_four_shards_give_identical_tables() {
+fn one_walk_and_sixteen_shards_of_whole_regions_agree() {
     let mut inputs = WalkInputs::from_env();
     inputs.confirm_reference();
     let config = inputs.config(InbreedingMode::Fitted);
@@ -738,26 +656,13 @@ fn one_walk_and_four_shards_give_identical_tables() {
         inputs.run_label
     );
 
-    let pieces = cut_into_pieces(&regions);
+    let shards = deal_into_shards(regions.clone());
     assert!(
-        deepest_cut(&regions) >= 3,
-        "{}: no generic region was cut into more than two pieces, so not one piece has a          boundary at both ends and the sharded arm never puts the generator anywhere the          unsharded arm did not go",
-        inputs.run_label
-    );
-    assert!(
-        pieces.len() > regions.len(),
-        "{}: cutting {} typed regions gave {} pieces — nothing was cut, so this arm \
-         would compare a walk against the same region boundaries and test only the merge",
+        shards.len() > 1 && shards.iter().all(|shard| !shard.is_empty()),
+        "{}: {} typed regions fell into {} shards, so this arm merged nothing",
         inputs.run_label,
         regions.len(),
-        pieces.len()
-    );
-    let piece_count = pieces.len();
-    let shards = deal_into_shards(pieces);
-    assert!(
-        shards.len() > 1,
-        "{}: the pieces fell into one shard, so this arm merged nothing",
-        inputs.run_label
+        shards.len()
     );
     let shard_count = shards.len();
     let mut merged = config.accumulators();
@@ -834,8 +739,8 @@ fn one_walk_and_four_shards_give_identical_tables() {
         inputs.run_label
     );
     eprintln!(
-        "identity 2: {} — {} regions as one walk, {piece_count} pieces over \
-         {shard_count} shards, identical",
+        "identity 2: {} — {} typed regions as one walk and as {shard_count} shards of \
+         whole regions, identical",
         inputs.run_label,
         regions.len()
     );
@@ -1050,14 +955,14 @@ fn the_generic_path_fits_a_real_sample_without_railing() {
     }
 }
 
-/// The two region-cutting helpers, which need no alignment and until now ran on none.
+/// [`deal_into_shards`], which needs no alignment and until now ran on none.
 ///
-/// **Every caller above is `#[ignore]`d**, so `cargo test` compiled
-/// [`cut_into_pieces`] and [`deal_into_shards`] and executed neither. Both do inclusive
-/// 1-based index arithmetic, where an off-by-one either drops a base — shrinking the
-/// sharded arm's territory, which identity 2 would catch only after a seven-million-locus
-/// tomato walk — or emits overlapping pieces, which identity 3 would report as a defect in
-/// locus generation. These run in the ordinary suite, in milliseconds.
+/// **Every caller above is `#[ignore]`d**, so `cargo test` compiled this function and
+/// executed it never. What it decides is which regions each worker gets, and its two ways
+/// of being wrong are both silent: a shard that drops regions makes the sharded arm compare
+/// a smaller genome, and shards that interleave make
+/// `adjustments().shard_spans_overlapping` — a counter that must read zero — report
+/// overlaps that are not there. These run in the ordinary suite, in microseconds.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1074,82 +979,14 @@ mod tests {
         }
     }
 
-    /// The pieces tile the region exactly: no base lost, no base in two pieces.
+    /// The shards hold every region exactly once, in order, in contiguous blocks — and
+    /// there are never more than [`SHARD_COUNT`] of them.
     ///
-    /// The lengths straddle every branch — one and two bases (no interior piece to be had),
-    /// three (the smallest that gets one), and either side of `3 × MAX_PIECE_BP`, where the
-    /// ceiling takes over from the thirds.
-    #[test]
-    fn cut_pieces_tile_a_region_exactly_at_every_length() {
-        for length in [1u64, 2, 3, 4, 176, 2_999, 3_000, 3_001, 10_000] {
-            let region = generic(1_000, 1_000 + length - 1);
-            let pieces = cut_into_pieces(std::slice::from_ref(&region));
-            let mut expected_start = 1_000;
-            for piece in &pieces {
-                assert_eq!(
-                    piece.region.start.get(),
-                    expected_start,
-                    "length {length}: a gap or an overlap between pieces"
-                );
-                expected_start = piece.region.end.get() + 1;
-            }
-            assert_eq!(
-                expected_start - 1,
-                1_000 + length - 1,
-                "length {length}: the pieces stop short of the region's last base"
-            );
-            assert_eq!(
-                pieces.iter().map(|piece| piece.region.len()).sum::<u64>(),
-                length,
-                "length {length}: the pieces do not sum to the region"
-            );
-        }
-    }
-
-    /// Three bases is the shortest region that yields a piece with a boundary at both ends,
-    /// and one and two bases yield none — which is why the caller asserts on
-    /// [`deepest_cut`] rather than trusting this function.
-    #[test]
-    fn a_region_of_three_bases_or_more_is_cut_into_at_least_three() {
-        for length in [3u64, 4, 176, 3_000, 10_000] {
-            assert!(
-                cut_into_pieces(&[generic(1, length)]).len() >= 3,
-                "a region of {length} bases must yield an interior piece"
-            );
-        }
-        assert_eq!(cut_into_pieces(&[generic(1, 1)]).len(), 1);
-        assert_eq!(cut_into_pieces(&[generic(1, 2)]).len(), 2);
-        assert_eq!(deepest_cut(&[generic(1, 1), generic(10, 11)]), 2);
-    }
-
-    /// The ceiling binds above `3 × MAX_PIECE_BP` and the thirds rule below it. Pinned
-    /// because the ceiling doing nothing is precisely how this arm was silently a no-op.
-    #[test]
-    fn the_thirds_rule_and_the_ceiling_each_bind_where_they_should() {
-        assert_eq!(cut_into_pieces(&[generic(1, 3_000)]).len(), 3);
-        assert_eq!(cut_into_pieces(&[generic(1, 9_000)]).len(), 9);
-    }
-
-    /// A non-generic region passes through whole however long it is: an STR tract cut in
-    /// three is a different tract.
-    #[test]
-    fn a_non_generic_region_is_never_cut() {
-        let mut tract = generic(1, 50_000);
-        tract.kind = RegionKind::SsrBundle {
-            tracts: Box::default(),
-        };
-        let pieces = cut_into_pieces(std::slice::from_ref(&tract));
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0].region, tract.region);
-        assert_eq!(deepest_cut(std::slice::from_ref(&tract)), 0);
-    }
-
-    /// The shards are contiguous blocks holding every region exactly once and in order —
-    /// the property `shard_spans_overlapping` depends on, since interleaved shards would
-    /// each span the whole contig.
+    /// The counts straddle the three cases: fewer regions than shards, an exact multiple,
+    /// and a remainder.
     #[test]
     fn shards_partition_the_regions_into_contiguous_blocks() {
-        for count in [1usize, 2, 4, 5, 9, 100] {
+        for count in [1usize, 2, 15, 16, 17, 32, 100] {
             let regions: Vec<_> = (0..count as u64)
                 .map(|at| generic(1 + at * 10, 5 + at * 10))
                 .collect();
@@ -1159,11 +996,40 @@ mod tests {
                 "{count} regions gave {} shards",
                 shards.len()
             );
+            assert!(
+                shards.iter().all(|shard| !shard.is_empty()),
+                "{count} regions gave an empty shard"
+            );
             assert_eq!(
                 shards.concat(),
                 regions,
                 "{count} regions were not partitioned in order"
             );
         }
+    }
+
+    /// **No shard boundary falls inside a region** — the owner's rule of 2026-08-09, which
+    /// this function exists to keep and which no assertion above could see, since every
+    /// comparison in the sharded arm holds whether or not a region was split.
+    #[test]
+    fn no_region_is_ever_split_between_shards() {
+        let regions: Vec<_> = (0..100u64)
+            .map(|at| generic(1 + at * 1_000, 900 + at * 1_000))
+            .collect();
+        let shards = deal_into_shards(regions.clone());
+        for shard in &shards {
+            for region in shard {
+                assert!(
+                    regions.contains(region),
+                    "a shard holds {region:?}, which is not one of the regions handed in — \
+                     a region was split"
+                );
+            }
+        }
+        assert_eq!(
+            shards.iter().map(Vec::len).sum::<usize>(),
+            regions.len(),
+            "the shards hold a different number of regions than were handed in"
+        );
     }
 }
