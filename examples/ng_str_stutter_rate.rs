@@ -84,6 +84,7 @@ use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
+use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
 use pop_var_caller::ng::region_typing::{
     GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionIterator,
 };
@@ -147,6 +148,25 @@ fn keying() -> Keying {
 struct Stratum {
     period: u8,
     repeats: u32,
+}
+
+/// The stratum a **typed segment** belongs to, read off the reference tract before any read is
+/// touched.
+///
+/// This is what lets a full stratum's segments be skipped without paying for them. The expensive
+/// half of the walk is fetching a locus's reads and aligning them, and that happens inside
+/// `next_locus`; the stratum is a property of the reference, so the decision can be taken before
+/// the generator is asked for anything.
+fn stratum_of_segment(segment: &SsrSegment) -> Option<Stratum> {
+    let period = segment.period();
+    let length = segment.tract_len();
+    if period == 0 || length % period as u64 != 0 {
+        return None;
+    }
+    Some(Stratum {
+        period: period as u8,
+        repeats: (length / period as u64) as u32,
+    })
 }
 
 /// The stratum a locus belongs to, from the **reference** tract alone — a pure function of the
@@ -691,6 +711,7 @@ fn run(
     contig_filter: &[String],
     regions_bed: Option<&Path>,
     min_loci: u64,
+    max_loci_per_stratum: u64,
     max_repeats: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(ReferenceInfoCache::new());
@@ -765,35 +786,74 @@ fn run(
                 .is_some_and(|e| contig_filter.iter().any(|n| n == &e.name))
     };
 
-    let mut walks: Vec<(String, TypedRegionIterator<WindowedRefSeq>)> = Vec::new();
-    match bed_spans {
-        Some(spans) => {
-            let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-            walks.push((
-                "BED".to_string(),
-                TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
-            ));
-        }
-        None => {
-            for (index, entry) in contigs.entries.iter().enumerate() {
-                if !wanted_contig(ContigId(index as u32)) {
-                    continue;
-                }
+    // **Built on demand rather than once, because the region walk is made twice**: a
+    // reference-only pass to count each stratum's segments, then the real pass that fetches reads.
+    // A `TypedRegionIterator` is consumed by walking it, so the second pass needs its own.
+    let build_walks = || -> Result<Vec<(String, TypedRegionIterator<WindowedRefSeq>)>, Box<dyn std::error::Error>> {
+        let mut walks = Vec::new();
+        match bed_spans.clone() {
+            Some(spans) => {
                 let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
                 walks.push((
-                    entry.name.clone(),
-                    TypedRegionIterator::over_contig(
-                        walk_reference,
-                        ContigId(index as u32),
-                        walk_config.clone(),
-                    )?,
+                    "BED".to_string(),
+                    TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
                 ));
+            }
+            None => {
+                for (index, entry) in contigs.entries.iter().enumerate() {
+                    if !wanted_contig(ContigId(index as u32)) {
+                        continue;
+                    }
+                    let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
+                    walks.push((
+                        entry.name.clone(),
+                        TypedRegionIterator::over_contig(
+                            walk_reference,
+                            ContigId(index as u32),
+                            walk_config.clone(),
+                        )?,
+                    ));
+                }
+            }
+        }
+        Ok(walks)
+    };
+
+    // **A reference-only pre-pass, so the sample can be spread instead of truncated.**
+    //
+    // Region typing reads the reference and nothing else, so counting how many segments each
+    // stratum holds costs no read fetching and no alignment — the two things that make the real
+    // walk expensive. Knowing the totals up front is what lets the cap keep an even spread across
+    // the whole region rather than the first N it meets, which measurement showed is biased by a
+    // quarter (see the skip below).
+    let mut segments_by_stratum: BTreeMap<Stratum, u64> = BTreeMap::new();
+    if max_loci_per_stratum < u64::MAX {
+        for (label, mut walk) in build_walks()? {
+            eprintln!("  counting strata over {label} (reference only)");
+            for region in walk.by_ref() {
+                let region = region?;
+                let RegionKind::SsrSegment(segment) = &region.kind else {
+                    continue;
+                };
+                if !wanted_contig(region.region.contig) {
+                    continue;
+                }
+                if let Some(stratum) = stratum_of_segment(segment) {
+                    if stratum.repeats <= max_repeats {
+                        *segments_by_stratum.entry(stratum).or_insert(0) += 1;
+                    }
+                }
             }
         }
     }
 
     let mut tables: BTreeMap<(ReadGroupId, Stratum), StratumTable> = BTreeMap::new();
-    for (label, mut walk) in walks {
+    // How many segments of each stratum have been seen, and how many were skipped by the cap.
+    // Counted per **segment** and not per read group, because the skip covers every sample at
+    // once — they all walk the same reference.
+    let mut walked_by_stratum: BTreeMap<Stratum, u64> = BTreeMap::new();
+    let mut skipped_by_stratum: BTreeMap<Stratum, u64> = BTreeMap::new();
+    for (label, mut walk) in build_walks()? {
         eprintln!("  walking {label}");
         for region in walk.by_ref() {
             let region = region?;
@@ -803,6 +863,43 @@ fn run(
             if !wanted_contig(region.region.contig) {
                 continue;
             }
+
+            // **Decide before fetching anything, and spread the sample rather than truncating it.**
+            //
+            // A stratum holding enough loci learns nothing from another one, and the reads it would
+            // cost are the walk's whole expense — fetching and aligning happen inside `next_locus`
+            // below, while the stratum is a property of the reference tract and needs no reads to
+            // read off. So a cap can be applied here, for free.
+            //
+            // **But "the first N" is not "N of them", and the difference is a quarter of the
+            // answer.** Measured over 20 Mb of tomato chromosome 1: capping mononucleotides at 6
+            // repeats to the first 2,953 of 28,125 returns 0.0541% against the full 0.0803% —
+            // **32.6% low** — with every uncapped stratum in the same run agreeing to the digit.
+            // Tracts near the start of a chromosome stutter measurably less, so a prefix is a
+            // biased sample of one and the bias is one-directional.
+            //
+            // The counts come from a reference-only pre-pass, so each stratum takes an **even
+            // spread across the whole region**: segment `i` of `n` is kept when it falls on the
+            // next of `cap` evenly spaced slots. Deterministic, exactly `cap` kept, and no reliance
+            // on where a stratum's segments happen to sit.
+            if let Some(stratum) = stratum_of_segment(segment) {
+                if stratum.repeats > max_repeats {
+                    continue;
+                }
+                let total = *segments_by_stratum.get(&stratum).unwrap_or(&0);
+                let seen = walked_by_stratum.entry(stratum).or_insert(0);
+                let index = *seen;
+                *seen += 1;
+                if total > max_loci_per_stratum {
+                    let before = index * max_loci_per_stratum / total;
+                    let after = (index + 1) * max_loci_per_stratum / total;
+                    if before == after {
+                        *skipped_by_stratum.entry(stratum).or_insert(0) += 1;
+                        continue;
+                    }
+                }
+            }
+
             for (sample, generator) in samples.iter().zip(generators.iter_mut()) {
                 generator.begin_segment(region.region);
                 while let Some(locus) = generator.next_locus(segment, sample)? {
@@ -906,6 +1003,7 @@ fn main() -> ExitCode {
     let mut regions_bed: Option<PathBuf> = None;
     let mut min_loci: u64 = 2_000;
     let mut max_repeats: u32 = 30;
+    let mut max_loci_per_stratum: u64 = 20_000;
     let mut only_check = false;
     let mut include_drawn = false;
     let mut rest = std::env::args().skip(1);
@@ -921,6 +1019,12 @@ fn main() -> ExitCode {
                     .unwrap_or_default()
             }
             "--min-loci" => min_loci = rest.next().and_then(|v| v.parse().ok()).unwrap_or(min_loci),
+            "--max-loci-per-stratum" => {
+                max_loci_per_stratum = rest
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(max_loci_per_stratum)
+            }
             "--max-repeats" => {
                 max_repeats = rest
                     .next()
@@ -962,6 +1066,7 @@ fn main() -> ExitCode {
         &contig_filter,
         regions_bed.as_deref(),
         min_loci,
+        max_loci_per_stratum,
         max_repeats,
     ) {
         Ok(()) => ExitCode::SUCCESS,
