@@ -788,20 +788,33 @@ a period crosses **its own** curve, and monos need the other criterion: how ofte
 from the reference length at all.
 
 **The per-period evidence — measured 2026-08-07 over the tomato archive.** 2,457 libraries walked
-across chromosome 1 at copy floors one step under ng's, one setting throughout. The guard share by
-(period, repeat count), pooled over every library, and the repeat count at which each period first
-crosses the one-in-ten threshold and stays across:
+across chromosome 1 at copy floors one step under ng's, one setting throughout.
 
-| period | 3 repeats | 4 | 5 | 6 | 7 | crosses at |
+**What the table below holds, in one sentence: of the reads whose tract came out a different length
+from the reference, how many differed by something that is *not* a whole number of motif copies.**
+That is the guard share of §4.1, and it is the sharp criterion because it asks whether the movement
+is **the kind this noise model can describe**. A dinucleotide read that came out 1 bp short did not
+lose a `CA`; it took an ordinary deletion, and a slippage rate fitted from such reads is
+mis-modelled indel however many of them there are. Counted out of every 100 reads that differ from
+the reference, so the one-in-ten threshold is the number 10:
+
+| period | at 3 repeats | 4 | 5 | 6 | 7 | floor |
 |---|---:|---:|---:|---:|---:|---:|
-| 2 — dinucleotide | 0.662 | 0.427 | 0.258 | **0.091** | 0.058 | **6** |
-| 3 — trinucleotide | 0.643 | 0.391 | 0.098 | 0.203 | **0.056** | **7** |
-| 4 — tetranucleotide | 0.758 | 0.321 | 0.267 | **0.050** | 0.023 | **6** |
-| 5 — pentanucleotide | 0.522 | 0.132 | **0.066** | 0.116 | — | **5** |
-| 6 — hexanucleotide | 0.121 | **0.036** | — | — | — | **4** |
+| 2 — dinucleotide | 66 | 43 | 26 | **9** | 6 | **6** |
+| 3 — trinucleotide | 64 | 39 | 10 | 20 | **6** | **7** |
+| 4 — tetranucleotide | 76 | 32 | 27 | **5** | 2 | **6** |
+| 5 — pentanucleotide | 52 | 13 | **7** | 12 | — | **5** |
+| 6 — hexanucleotide | 12 | **4** | — | — | — | **4** |
 
-*(Mononucleotides are absent because their guard share is zero by arithmetic. The walk censors every
-period below the floor it was swept to, so nothing here sees a period-1 tract under 5 repeats.)*
+So a three-copy dinucleotide is a tract where two reads in three that move at all move in a way the
+STR path cannot express, and a six-copy one is a tract where fewer than one in ten do. The floor is
+where a period crosses ten and stays across.
+
+*(Mononucleotides are absent because the quantity is vacuous for them — every integer is a multiple
+of one, so no read can differ by a non-whole number of copies and the share is always zero. They
+need the other criterion, how often a read differs from the reference length at all. The walk also
+censors every period below the floor it was swept to, so nothing here sees a period-1 tract under 5
+repeats.)*
 
 The evidence behind each cell is large: the dinucleotide 3-repeat entry pools 292 million loci and
 3.4 billion reads.
