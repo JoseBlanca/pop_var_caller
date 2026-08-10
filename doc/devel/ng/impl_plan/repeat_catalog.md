@@ -163,13 +163,13 @@ and on a fixture carrying overlapping detections (a tract detected at two primit
 intersecting tracts). The one stated exception is tracts closer than 15 bp to a contig end, so the
 comparison runs at a reader flank of 15 bp or more. *Depends:* D1. *Source:* spec §5.1, §10.1, §9.4.
 
-**D3. `str_loci` and `count_loci_per_stratum`.**  ☐
+**D3. `str_loci` and `count_loci_per_stratum`.**  ✅
 The loci alone, and the per-stratum tally keyed by (period, **trimmed** span / period). Tests: the
 tally equals a count taken by scanning the fixture directly; `str_loci` equals `genome_segments`
 filtered to `RegionKind::SsrSegment`; both refuse an under-permissive policy **eagerly**, before any
 row is read. *Depends:* D1. *Source:* arch §2.3, spec §5.3, §5.4, §10.3.
 
-**D4. `sample_loci_per_stratum`.**  ☐  **Own commit, do not bundle.**
+**D4. `sample_loci_per_stratum`.**  ✅  **Own commit, do not bundle.**
 The `cap` lowest `hash(contig, start, seed)` per stratum, from a bounded heap, returning the counts
 from the same pass. **Silent** (a biased sample is a biased parameter estimate, and nothing reports
 it). Tests: a stratum with fewer than `cap` loci keeps all of them; the same seed gives the same set
