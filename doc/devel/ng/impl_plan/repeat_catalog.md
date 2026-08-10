@@ -127,7 +127,7 @@ caught; a file truncated mid-write fails to open. *Depends:* B1. *Source:* arch 
 
 ### Milestone C — the builder and the seam
 
-**C1. `ReferenceBasesObserver` in `reference_info.rs`.**  ☐
+**C1. `ReferenceBasesObserver` in `reference_info.rs`.**  ✅
 The trait, `read_reference_info_observing`, and `read_reference_info` reduced to a call with a no-op
 observer. `reference_info` gains no import from `repeat_catalog`. Tests: the observer sees
 `contig_started → bases* → contig_finished` in file order; the bases it receives, concatenated and

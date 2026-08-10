@@ -268,15 +268,28 @@ pub enum ReferenceInfoError {
 /// Milestone A implements the cheap `Fai` arm; the `Fasta` streaming pass lands in
 /// Milestone B (spec §4).
 pub fn read_reference_info(source: ReferenceSource) -> Result<ReferenceInfo, ReferenceInfoError> {
+    read_reference_info_observing(source, &mut IgnoreBases)
+}
+
+/// [`read_reference_info`], with each contig's bases handed to `observer` as they stream by.
+///
+/// The same read, the same digests, the same errors — the observer is the only difference,
+/// and it exists so that a value derived from one forward pass over the reference costs no
+/// second read of it (`doc/devel/ng/spec/repeat_catalog.md` §2.1). A `.fai`-only source has
+/// no bases, so the observer hears nothing at all.
+pub fn read_reference_info_observing(
+    source: ReferenceSource,
+    observer: &mut dyn ReferenceBasesObserver,
+) -> Result<ReferenceInfo, ReferenceInfoError> {
     match source {
         ReferenceSource::Fai(path) => read_fai(&path),
         // Read the FASTA alone: names, order, lengths, every MD5, the reference digest.
-        ReferenceSource::Fasta { fasta, fai: None } => read_fasta(&fasta),
+        ReferenceSource::Fasta { fasta, fai: None } => read_fasta(&fasta, observer),
         // Read the FASTA and prove the supplied `.fai` describes the same genome (spec §3.3).
         ReferenceSource::Fasta {
             fasta,
             fai: Some(fai),
-        } => read_fasta_verifying(&fasta, &fai),
+        } => read_fasta_verifying(&fasta, &fai, observer),
     }
 }
 
@@ -287,11 +300,15 @@ pub fn read_reference_info(source: ReferenceSource) -> Result<ReferenceInfo, Ref
 /// geometry every reader seeks by, so the check is exactly what a fetch depends on
 /// (`offset`, `length`, `line_bases`, `line_width`). A reordering is caught here too — the
 /// comparison is position-wise, so a permuted `.fai` disagrees on `name` (T1).
-fn read_fasta_verifying(fasta: &Path, fai: &Path) -> Result<ReferenceInfo, ReferenceInfoError> {
+fn read_fasta_verifying(
+    fasta: &Path,
+    fai: &Path,
+    observer: &mut dyn ReferenceBasesObserver,
+) -> Result<ReferenceInfo, ReferenceInfoError> {
     // Read the cheap `.fai` first so a missing or malformed index (T4, T2, FASTQ, a bad
     // field) fails fast, before the expensive whole-genome pass.
     let index = read_fai(fai)?;
-    let info = read_fasta(fasta)?;
+    let info = read_fasta(fasta, observer)?;
 
     if info.contigs.len() != index.contigs.len() {
         return Err(ReferenceInfoError::FastaFaiMismatch {
@@ -455,21 +472,27 @@ const FASTA_PASS_BUFFER_SIZE: usize = 64 * 1024;
 /// From byte zero, not seeking by an index, because a `.fai`-driven reader can only confirm
 /// the index agrees with itself (spec §3.3 — the circular check). One buffer, never a whole
 /// contig.
-fn read_fasta(path: &Path) -> Result<ReferenceInfo, ReferenceInfoError> {
-    let mut info = read_fasta_bases(path)?;
+fn read_fasta(
+    path: &Path,
+    observer: &mut dyn ReferenceBasesObserver,
+) -> Result<ReferenceInfo, ReferenceInfoError> {
+    let mut info = read_fasta_bases(path, observer)?;
     // The bases came from here, so a consumer that needs them (CRAM decoding)
     // can get back to them.
     info.fasta_path = Some(path.to_path_buf());
     Ok(info)
 }
 
-fn read_fasta_bases(path: &Path) -> Result<ReferenceInfo, ReferenceInfoError> {
+fn read_fasta_bases(
+    path: &Path,
+    observer: &mut dyn ReferenceBasesObserver,
+) -> Result<ReferenceInfo, ReferenceInfoError> {
     let mut file = File::open(path).map_err(|source| ReferenceInfoError::FastaRead {
         path: path.to_path_buf(),
         source,
     })?;
     let mut buf = [0u8; FASTA_PASS_BUFFER_SIZE];
-    let mut pass = FastaPass::new(path);
+    let mut pass = FastaPass::new(path, observer);
     let mut first_window = true;
     loop {
         let n = file
@@ -509,12 +532,48 @@ enum PassMode {
     Sequence,
 }
 
+/// Something that wants each contig's bases as the reference pass streams them by.
+///
+/// The pass computes the digests from these same bytes; anything else derived from one
+/// forward read of the reference attaches here rather than costing a second read — the
+/// tandem-repeat catalog is the first (`doc/devel/ng/spec/repeat_catalog.md` §2.2).
+///
+/// Calls arrive as `contig_started` → `bases`\* → `contig_finished`, once per contig, in
+/// file order. **`bases` delivers uppercased bytes in whatever batches the pass flushed**,
+/// never a whole contig, so an observer that needs one accumulates it. Only the arms that
+/// read the FASTA call any of these: a `.fai`-only read has no bases to give.
+///
+/// **Deliberately infallible.** This module imports `crate::fasta` and noodles and knows
+/// nothing else about ng, and taking an observer's error type would end that. An observer
+/// that fails records it, ignores the rest of the pass, and reports at its own `finish`.
+pub trait ReferenceBasesObserver {
+    /// A new contig begins; `index` is its position in reference order.
+    fn contig_started(&mut self, name: &str, index: usize);
+    /// The next bases of the current contig, uppercased.
+    fn bases(&mut self, upper: &[u8]);
+    /// The current contig is complete, with the geometry and digest the pass reconstructed.
+    fn contig_finished(&mut self, info: &ContigInfo);
+}
+
+/// The observer for a run that wants nothing but the digests — the pass as it was before
+/// the seam existed.
+pub struct IgnoreBases;
+
+impl ReferenceBasesObserver for IgnoreBases {
+    fn contig_started(&mut self, _name: &str, _index: usize) {}
+    fn bases(&mut self, _upper: &[u8]) {}
+    fn contig_finished(&mut self, _info: &ContigInfo) {}
+}
+
 /// The from-byte-zero streaming state. Holds only bounded state — the current contig's
 /// name, the running line counters, the two MD5 states, and one flush buffer — never a
 /// whole contig. `offset`/geometry are reconstructed the way htslib's own indexer does, so
 /// a `.fai` comparison (B3) is like-for-like (spec §4).
 struct FastaPass<'a> {
     path: &'a Path,
+    /// Where each contig's bases are handed on as they stream by. [`IgnoreBases`] for a run
+    /// that wants only the digests.
+    observer: &'a mut dyn ReferenceBasesObserver,
     /// Byte offset of the current byte being processed (0-based).
     pos: u64,
     mode: PassMode,
@@ -551,9 +610,10 @@ struct FastaPass<'a> {
 }
 
 impl<'a> FastaPass<'a> {
-    fn new(path: &'a Path) -> Self {
+    fn new(path: &'a Path, observer: &'a mut dyn ReferenceBasesObserver) -> Self {
         FastaPass {
             path,
+            observer,
             pos: 0,
             mode: PassMode::Start,
             at_line_start: true,
@@ -598,6 +658,10 @@ impl<'a> FastaPass<'a> {
                     self.seq_offset = self.pos + 1;
                     self.mode = PassMode::Sequence;
                     self.at_line_start = true;
+                    // The name is complete exactly here, which is why the observer hears
+                    // about the contig now and not in `begin_header`.
+                    let name = String::from_utf8_lossy(&self.name_bytes).into_owned();
+                    self.observer.contig_started(&name, self.contigs.len());
                     self.cur_line_bases = 0;
                     self.cur_line_width = 0;
                 } else if !self.name_done {
@@ -665,6 +729,9 @@ impl<'a> FastaPass<'a> {
         if !self.upper.is_empty() {
             self.contig_md5.update(&self.upper);
             self.reference_md5.update(&self.upper);
+            // The one place uppercased bases leave the pass, which is why the observer
+            // seam is here: it sees exactly the bytes the digests do.
+            self.observer.bases(&self.upper);
             self.upper.clear();
         }
     }
@@ -741,6 +808,11 @@ impl<'a> FastaPass<'a> {
             line_width: self.line_width0,
             md5: Some(digest),
         });
+        self.observer.contig_finished(
+            self.contigs
+                .last()
+                .expect("a contig was just pushed onto the table"),
+        );
         Ok(())
     }
 
@@ -1550,6 +1622,116 @@ mod tests {
             fasta: path,
             fai: None,
         })
+    }
+
+    /// Records every call the pass makes, so a test can assert both the order and the
+    /// bytes.
+    #[derive(Default)]
+    struct RecordingObserver {
+        calls: Vec<String>,
+        bases_by_contig: Vec<(String, Vec<u8>)>,
+    }
+
+    impl ReferenceBasesObserver for RecordingObserver {
+        fn contig_started(&mut self, name: &str, index: usize) {
+            self.calls.push(format!("start {name} #{index}"));
+            self.bases_by_contig.push((name.to_string(), Vec::new()));
+        }
+        fn bases(&mut self, upper: &[u8]) {
+            self.calls.push(format!("bases {}", upper.len()));
+            self.bases_by_contig
+                .last_mut()
+                .expect("bases arrive after a contig starts")
+                .1
+                .extend_from_slice(upper);
+        }
+        fn contig_finished(&mut self, info: &ContigInfo) {
+            self.calls.push(format!("finish {}", info.name));
+        }
+    }
+
+    /// The seam's contract: one `start` per contig in file order, `bases` only between a
+    /// start and its finish, and the bytes the observer sees are the bases the digests saw
+    /// — uppercased, terminators and whitespace already gone.
+    #[test]
+    fn the_observer_sees_each_contig_started_then_its_bases_then_finished() {
+        let (_dir, path) = write_bytes_fasta(b">chr1 first\nacgtACGT\nGGTT\n>chr2\nTTTTAAAA\n");
+        let mut observer = RecordingObserver::default();
+        let info = read_reference_info_observing(
+            ReferenceSource::Fasta {
+                fasta: path,
+                fai: None,
+            },
+            &mut observer,
+        )
+        .expect("parses");
+
+        let shape: Vec<&str> = observer
+            .calls
+            .iter()
+            .map(|c| c.split(' ').next().expect("a verb"))
+            .collect();
+        assert_eq!(
+            shape,
+            vec!["start", "bases", "finish", "start", "bases", "finish"],
+            "calls: {:?}",
+            observer.calls
+        );
+        assert_eq!(
+            observer.calls[0], "start chr1 #0",
+            "the name is the first word"
+        );
+        assert_eq!(observer.calls[3], "start chr2 #1");
+
+        assert_eq!(
+            observer.bases_by_contig,
+            vec![
+                ("chr1".to_string(), b"ACGTACGTGGTT".to_vec()),
+                ("chr2".to_string(), b"TTTTAAAA".to_vec()),
+            ],
+            "the observer's bases are the digested ones: uppercased, no newlines"
+        );
+        assert_eq!(info.contigs.len(), 2);
+    }
+
+    /// A `.fai` describes a genome's geometry and holds no bases, so an observer hears
+    /// nothing at all rather than an empty contig.
+    #[test]
+    fn a_fai_only_read_tells_the_observer_nothing() {
+        let (_dir, fai) = write_fai_text("chr1\t10\t6\t60\t61\n");
+        let mut observer = RecordingObserver::default();
+        let info = read_reference_info_observing(ReferenceSource::Fai(fai), &mut observer)
+            .expect("parses");
+
+        assert_eq!(info.contigs.len(), 1);
+        assert!(
+            observer.calls.is_empty(),
+            "a .fai has no bases to hand on: {:?}",
+            observer.calls
+        );
+    }
+
+    /// The bases the observer accumulates must digest to the very MD5 the pass reports —
+    /// the property that lets the catalog builder scan what the digest attests to.
+    #[test]
+    fn the_observed_bases_digest_to_the_contig_md5_the_pass_reports() {
+        let mut observer = RecordingObserver::default();
+        let info = read_reference_info_observing(
+            ReferenceSource::Fasta {
+                fasta: golden_ref_path(),
+                fai: None,
+            },
+            &mut observer,
+        )
+        .expect("golden FASTA parses");
+
+        assert_eq!(observer.bases_by_contig.len(), info.contigs.len());
+        for (contig, (name, bases)) in info.contigs.iter().zip(&observer.bases_by_contig) {
+            assert_eq!(&contig.name, name);
+            assert_eq!(bases.len() as u64, contig.length, "{name} length");
+            let digest: [u8; 16] = Md5::digest(bases).into();
+            assert_eq!(contig.md5, Some(digest), "{name} digest");
+        }
     }
 
     #[test]
