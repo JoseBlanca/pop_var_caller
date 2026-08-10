@@ -157,7 +157,7 @@ pub struct TypedRegionsArgs {
     #[arg(
         long,
         value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
-        default_value = "6,4,4,3,3,3",
+        default_value = "8,6,6,6,5,4",
         help_heading = "Advanced"
     )]
     pub min_copies: MinCopies,
@@ -742,7 +742,7 @@ mod tests {
         // sweep (spec §10) that moves one without the other fails here rather than
         // silently applying two different defaults.
         let floors: Vec<u32> = (1..=6).map(|p| args.min_copies.for_period(p)).collect();
-        assert_eq!(floors, vec![6, 4, 4, 3, 3, 3], "the short-read floors");
+        assert_eq!(floors, vec![8, 6, 6, 6, 5, 4], "the short-read floors");
         assert_eq!(
             args.min_copies,
             MinCopies::default(),
@@ -815,7 +815,7 @@ mod tests {
             "## flank_bp: 15",
             "## min_purity: 0.8",
             "## min_score: 0",
-            "## min_copies: 6,4,4,3,3,3",
+            "## min_copies: 8,6,6,6,5,4",
             "## scan_match_reward: 2",
             "## scan_mismatch_penalty: 7",
             "## scan_min_copies: 2",

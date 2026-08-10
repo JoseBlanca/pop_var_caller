@@ -1069,6 +1069,50 @@ through the guard-share audit; a floor set too high is silent. So the default st
 most stuttering library available, and the crossing per period per library — which the archive
 survey delivers — is what places it.
 
+### 5.1.1 The floors as set, 2026-08-10 — `[8, 6, 6, 6, 5, 4]`
+
+**Two measurements stand behind them, asking different questions, and where both can answer they
+agree.**
+
+- **Where the model applies** — the guard share, over 2,457 libraries (§5.1 above). Crossing one in
+  ten puts it at `[·, 6, 7, 6, 5, 4]`.
+- **Where stutter grows large enough to matter** — the per-read slippage rate, fitted by summing
+  over the genotype, over 181 libraries
+  ([`ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs)). The repeat count at
+  which the rate first reaches **5%**:
+
+| tract | libraries | earliest | median | latest |
+|---|---:|---:|---:|---:|
+| mononucleotide | 165 | 9 | 11 | 13 |
+| dinucleotide | 46 | 6 | 7 | 9 |
+
+**The floor tracks the earliest library, not the median**, and that follows from this section's
+asymmetry rather than from caution: a stuttering tract sent to the generic path is genotyped by a
+model that cannot express what it does, and nothing reports it; a quiet tract sent to the STR path
+is genotyped correctly, only more slowly. **So the library axis this survey exists to measure moves
+the answer by three to four repeats**, and the floor has to sit under all of it.
+
+**Mononucleotides at 8 rather than the measured 9**, for one repeat of margin: the most-stuttering
+library reaches 3.6% at 8 against 1.0% at 7 and 0.9% at 6, so 8 is where the margin stops being
+free.
+
+**Trinucleotides at 6 rather than the model-fit 7** — the one place the two criteria disagree, and
+the same asymmetry decides it. The worst library reaches 3.4% at 6 repeats and the rate climbs about
+2.5-fold per repeat, so 6 catches a library that 7 would miss. **This is a deliberate step below
+where the noise model describes the data well**, and it is not free: at 6 repeats about one in five
+of the reads that differ do so by a non-whole number of copies, so a slippage rate fitted there is
+part ordinary indel. The trade is taken knowingly — a mis-modelled rate on a tract that is genotyped
+beats a correct rate on a tract that is not.
+
+**Periods 4 to 6 have no 5% crossing in this data at all** — no library reached it at any repeat
+count holding enough loci to fit — so those floors are the guard share's alone. What the rate survey
+adds there is only a bound: the most-stuttering library reaches 1.1%, 0.55% and 2.4%.
+
+*What is thin, said plainly.* The dinucleotide range rests on 46 libraries against the
+mononucleotide's 165, and the trinucleotide extrapolation on 37 libraries at 6 repeats. The run was
+cut short at 181 of 1,400 libraries; more would tighten the tails, and nothing seen so far suggests
+the medians would move.
+
 **What adopting the measured floors would cost, because it is larger than "changing a default"
 suggests and is the reason the constant has not been moved here.** Against the loci ng emits today:
 
