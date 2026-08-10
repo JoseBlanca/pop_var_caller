@@ -190,7 +190,7 @@ file; the per-period tally printed on completion. Tests: a build writes the file
 a second run without `--force` refuses and leaves the file untouched; a misspelled knob exits non-zero.
 *Depends:* C3, D3. *Source:* spec §2.6.
 
-**E2. Measure, and record it.**  ☐
+**E2. Measure, and record it.**  ✅
 On the tomato reference and one human one: file size, row count by period, wall clock with and without
 the scan, and peak RSS. This is what settles spec §9.1, and it is a report under
 `ia/reports/implementations/`, not a spec edit. *Depends:* E1. *Source:* spec §10.4, §9.1.
