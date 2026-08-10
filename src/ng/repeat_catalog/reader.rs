@@ -12,8 +12,13 @@ use std::path::{Path, PathBuf};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
+use crate::ng::region_typing::TypedRegion;
+use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, row_from_batch};
+use crate::ng::repeat_catalog::segments::segments_of_contig;
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, RepeatCatalogHeader};
+use crate::ng::tandem_repeat::ScanParams;
+use crate::ng::types::Bp;
 use crate::ng::types::ContigId;
 
 /// An opened catalog: its header, already checked against this run's reference.
@@ -128,6 +133,66 @@ impl RepeatCatalog {
         }))
     }
 
+    /// The genome's segments in coordinate order — the STR segments and the generic
+    /// stretches between them — derived from the file with no FASTA open (spec §5.1).
+    ///
+    /// **The criteria are checked once, here, before any row is read.** A refusal is a fact
+    /// about the file and the policy, not about a row, so it arrives at the call rather
+    /// than part-way through a loop the caller has already started.
+    ///
+    /// The iterator then streams **one contig at a time**: a contig's rows and its segments
+    /// are in memory, the genome's are not.
+    pub fn genome_segments(
+        &self,
+        criteria: &StrRepeatCriteria,
+        contig: Option<ContigId>,
+    ) -> Result<GenomeSegments<'_>, RepeatCatalogError> {
+        self.check_serves(criteria)?;
+
+        let contigs: Vec<(ContigId, String, Bp)> = self
+            .header
+            .contigs
+            .iter()
+            .enumerate()
+            .map(|(i, info)| (ContigId(i as u32), info.name.clone(), Bp(info.length)))
+            .filter(|(id, _, _)| contig.is_none_or(|wanted| *id == wanted))
+            .collect();
+
+        Ok(GenomeSegments {
+            catalog: self,
+            criteria: criteria.clone(),
+            contigs: contigs.into_iter(),
+            buffered: Vec::new().into_iter(),
+        })
+    }
+
+    /// Whether this catalog can answer a reader asking with `criteria`, and whether it was
+    /// scored the same way (spec §4.1, §4.2).
+    ///
+    /// The weights are checked for **equality**, not permissiveness: a different match
+    /// reward or mismatch penalty is a different set of tracts, not a subset of this one,
+    /// and no filter over the file reproduces it.
+    fn check_serves(&self, criteria: &StrRepeatCriteria) -> Result<(), RepeatCatalogError> {
+        self.header.built_under.serves(criteria)?;
+        Ok(())
+    }
+
+    /// The scoring weights the file was built with, for a caller that scans as well as
+    /// reads and must not mix the two.
+    pub fn check_scored_with(&self, scan: &ScanParams) -> Result<(), RepeatCatalogError> {
+        if self.header.scan.match_reward != scan.match_reward
+            || self.header.scan.mismatch_penalty != scan.mismatch_penalty
+        {
+            return Err(RepeatCatalogError::ScoringWeightsDiffer {
+                built_match_reward: self.header.scan.match_reward,
+                built_mismatch_penalty: self.header.scan.mismatch_penalty,
+                wanted_match_reward: scan.match_reward,
+                wanted_mismatch_penalty: scan.mismatch_penalty,
+            });
+        }
+        Ok(())
+    }
+
     fn unreadable(
         &self,
         source: impl std::error::Error + Send + Sync + 'static,
@@ -135,6 +200,41 @@ impl RepeatCatalog {
         RepeatCatalogError::Unreadable {
             path: self.path.clone(),
             source: Box::new(source),
+        }
+    }
+}
+
+/// The genome's segments, one contig at a time.
+///
+/// Holding a contig's rows and its segments at once is the memory this costs; the genome's
+/// are never all in hand, which is what "streams" means here (spec §5.3).
+pub struct GenomeSegments<'a> {
+    catalog: &'a RepeatCatalog,
+    criteria: StrRepeatCriteria,
+    contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
+    buffered: std::vec::IntoIter<TypedRegion>,
+}
+
+impl Iterator for GenomeSegments<'_> {
+    type Item = Result<TypedRegion, RepeatCatalogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(region) = self.buffered.next() {
+                return Some(Ok(region));
+            }
+            let (contig, name, length) = self.contigs.next()?;
+            let rows: Result<Vec<FoundRepeat>, RepeatCatalogError> =
+                match self.catalog.repeats_in_region(Some(contig)) {
+                    Ok(iter) => iter.collect(),
+                    Err(e) => Err(e),
+                };
+            let rows = match rows {
+                Ok(rows) => rows,
+                Err(e) => return Some(Err(e)),
+            };
+            self.buffered =
+                segments_of_contig(&name, contig, length, &rows, &self.criteria).into_iter();
         }
     }
 }

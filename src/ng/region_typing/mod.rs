@@ -486,7 +486,7 @@ pub fn partition_resident(
 /// and the microsat's bases silently became `Generic`. Same situation, two different
 /// wrong answers. Probed before believing it, then fixed —
 /// `a_microsatellite_beside_a_satellite_is_absorbed_into_it`.
-fn resolve_features(
+pub(crate) fn resolve_features(
     runs: &[CoverageRun],
     loci: Vec<SsrSegment>,
     bundled: &[RepeatInterval],
@@ -698,7 +698,7 @@ fn merge_runs(runs: &mut Vec<CoverageRun>) {
 
 /// A merged run of repeat coverage, 1-based inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CoverageRun {
+pub(crate) struct CoverageRun {
     start: u64,
     end: u64,
 }
@@ -718,7 +718,7 @@ impl CoverageRun {
 /// Input is `RepeatInterval`'s 0-based half-open; output is ng's 1-based
 /// inclusive, so `[s, e)` becomes `[s + 1, e]` — the same one conversion `classify`
 /// makes (spec §4).
-fn coverage_runs(intervals: &[RepeatInterval]) -> Vec<CoverageRun> {
+pub(crate) fn coverage_runs(intervals: &[RepeatInterval]) -> Vec<CoverageRun> {
     let mut spans: Vec<CoverageRun> = intervals
         .iter()
         .filter(|iv| iv.end > iv.start)
@@ -1645,7 +1645,7 @@ impl BlockWalk {
 /// one `Generic` per gap, however long.
 ///
 /// `features` must be coordinate-ordered and non-overlapping.
-fn fill_generic_gaps(
+pub(crate) fn fill_generic_gaps(
     features: Vec<TypedRegion>,
     contig: ContigId,
     contig_len: u64,
