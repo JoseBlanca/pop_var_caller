@@ -142,7 +142,16 @@ the marginal; and end to end, a sample with two populations of site emits a rate
 **not a ladder rung** — a marginal of two rungs is not one, which is what catches the rate
 and the pair being swapped between the fit and the summary.
 
-### N4. The harnesses.  ☐
+### N4. The harnesses.  ✅ — report
+`reports/implementations/ng_noise_model_extension_n4_2026-08-10.md`. Both programs extended.
+E2's 25 one-rate samples re-fitted and unchanged (0.000 rungs, 0.000%), which is the regression
+this step asks for and no more than that. **The new evidence is the question single-library
+data could not ask**: six simulated samples with a second class, each built as one library and
+as two and fitted through both cell keys, recover all five quantities **exactly** — so the
+per-sample pair survives a key that has thrown the library away. And a noisy class does not move
+`F` (at most 1 part in 10,000 over 21 fits), while the two heterozygote rates the runs model
+reads a run from collapse from a 20-fold gap to 3.7-fold if the fit is told only the clean rate
+— which measures N3c's decision to carry the pair rather than the marginal into that model.
 
 `ng_multilib_key_harness.rs` and `ng_inbreeding_harness.rs` extended to the new model, and
 **E2's 25 worlds re-run**. The gate is that the coupled fixed point is still the truth in all 25

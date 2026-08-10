@@ -313,6 +313,16 @@ struct World {
     /// Every fit assumes `MODEL_HET_BALANCE`; a world that generates from something else is
     /// the misspecification of spec §8.
     het_balance: f64,
+    /// **A second class of site**: with probability `share`, a site's reads disagree with the
+    /// reference at `rate` instead of at their library's own `ε`
+    /// (`research/noise_model_overdispersion_2026-08-10.md`). `None` is a world with one
+    /// class, which is what every world here was before the noise-model milestone.
+    ///
+    /// **One rate, shared by every library at a noisy site, while `ε` stays per library** —
+    /// which is the production model's own asymmetry and the reason this harness can say
+    /// something no fixture in `src/` can: whether the estimate stays unbiased once the cell
+    /// key has thrown away which library produced each alternative read.
+    site_noise: Option<(f64, f64)>,
 }
 
 impl World {
@@ -593,7 +603,41 @@ fn ln_component_plug_in(
 /// The `GENOTYPES` component log-likelihoods of one cell under one rule, scored at
 /// `depth` — the cell's own depth where the ladder is exact, and the mean of the exact
 /// depths that landed in it where it is not.
+///
+/// **`site_noise` is the second class of site, and it wraps the whole rule rather than
+/// entering it.** A site is clean with probability `1 − share` and noisy with probability
+/// `share`, and the reads at a noisy site disagree with the reference at `rate` whichever
+/// library produced them — so the cell's likelihood is the same rule evaluated twice, at the
+/// libraries' own rates and at the noisy rate, and averaged by the share. **That is why the
+/// multi-library closed form needs no rewriting**: the site's class is a property of the
+/// *site* and the library split is a property of the *reads*, so the sum over which library
+/// produced each alternative read happens inside each branch.
 fn ln_components(
+    cell: &Cell,
+    depth: f64,
+    rule: Rule,
+    weights: &[f64],
+    eps: &[f64],
+    site_noise: Option<(f64, f64)>,
+    clamped: &mut bool,
+) -> [f64; GENOTYPES] {
+    let clean = ln_components_at(cell, depth, rule, weights, eps, clamped);
+    let Some((share, rate)) = site_noise else {
+        return clean;
+    };
+    // Every library at a noisy site reads at the same rate, which is the one place the two
+    // classes differ in shape: `eps` is per library and this is not.
+    let noisy_eps = vec![rate; eps.len()];
+    let noisy = ln_components_at(cell, depth, rule, weights, &noisy_eps, clamped);
+    let mut out = [0.0; GENOTYPES];
+    for (j, slot) in out.iter_mut().enumerate() {
+        *slot = ln_sum_exp(&[(1.0 - share).ln() + clean[j], share.ln() + noisy[j]]);
+    }
+    out
+}
+
+/// The rule itself, at one class of site.
+fn ln_components_at(
     cell: &Cell,
     depth: f64,
     rule: Rule,
@@ -743,6 +787,24 @@ impl CellSpace {
             }
         };
 
+        // **The world's own second class of site, applied to the truth rather than to a
+        // rule.** A site is clean with probability `1 − share` and noisy with probability
+        // `share`, and at a noisy site every library reads at the same `rate` — so a cell's
+        // probability under one genotype is the same closed form evaluated at two rate
+        // vectors and averaged. `None` leaves every world in this file exactly as it was.
+        let noisy_eps: Option<(f64, Vec<f64>)> = world
+            .site_noise
+            .map(|(share, rate)| (share, vec![rate; libraries]));
+        let over_classes = |at: &dyn Fn(&[f64]) -> f64| -> f64 {
+            let clean = at(&world.eps);
+            match &noisy_eps {
+                None => clean,
+                Some((share, eps)) => {
+                    ln_sum_exp(&[(1.0 - share).ln() + clean, share.ln() + at(eps)])
+                }
+            }
+        };
+
         // Probability of a cell = P(depth) × Σ_j π_j · P(cell | depth, j).
         let mixture = |components: &[f64; GENOTYPES]| -> f64 {
             let mut terms = [0.0; GENOTYPES];
@@ -762,13 +824,9 @@ impl CellSpace {
                 for_each_breakdown(depth, libraries, &mut |per_lib| {
                     let mut components = [0.0; GENOTYPES];
                     for j in 0..GENOTYPES {
-                        components[j] = ln_component_whole(
-                            per_lib,
-                            &world.weights,
-                            &world.eps,
-                            balance,
-                            j as u32,
-                        );
+                        components[j] = over_classes(&|eps| {
+                            ln_component_whole(per_lib, &world.weights, eps, balance, j as u32)
+                        });
                     }
                     push(
                         Cell::Whole(per_lib.to_vec()),
@@ -787,14 +845,16 @@ impl CellSpace {
                 for_each_alt_split(alt_total, libraries, &mut |split| {
                     let mut components = [0.0; GENOTYPES];
                     for j in 0..GENOTYPES {
-                        components[j] = ln_component_attributed(
-                            f64::from(depth),
-                            split,
-                            &world.weights,
-                            &world.eps,
-                            balance,
-                            j as u32,
-                        );
+                        components[j] = over_classes(&|eps| {
+                            ln_component_attributed(
+                                f64::from(depth),
+                                split,
+                                &world.weights,
+                                eps,
+                                balance,
+                                j as u32,
+                            )
+                        });
                     }
                     push(
                         Cell::Attributed {
@@ -813,14 +873,16 @@ impl CellSpace {
             for alt in (coarsening.max_attributed + 1)..=depth {
                 let mut components = [0.0; GENOTYPES];
                 for j in 0..GENOTYPES {
-                    components[j] = ln_component_pooled(
-                        f64::from(depth),
-                        alt,
-                        &world.weights,
-                        &world.eps,
-                        balance,
-                        j as u32,
-                    );
+                    components[j] = over_classes(&|eps| {
+                        ln_component_pooled(
+                            f64::from(depth),
+                            alt,
+                            &world.weights,
+                            eps,
+                            balance,
+                            j as u32,
+                        )
+                    });
                 }
                 push(
                     Cell::Pooled { bin, alt },
@@ -951,14 +1013,20 @@ fn build_read_group_spaces(world: &World) -> Vec<ReadGroupSpace> {
             let mut mass = Vec::new();
             for m in 1..depth_probs.len() as u32 {
                 for k in 0..=m {
+                    // The same two classes of site as the whole-sample table: a noisy site
+                    // is noisy for every library that read it, so this group's own table
+                    // carries the sample's share and the sample's noisy rate.
+                    let (share, noisy_rate) = world.site_noise.unwrap_or((0.0, world.eps[g]));
                     let mut p = 0.0;
                     for (j, &pi) in freqs.iter().enumerate() {
-                        let q = p_alt(j as u32, world.eps[g], world.het_balance);
-                        p += pi
-                            * (ln_binomial_coefficient(m, k)
+                        let at = |rate: f64| {
+                            let q = p_alt(j as u32, rate, world.het_balance);
+                            (ln_binomial_coefficient(m, k)
                                 + x_ln_y(f64::from(k), q)
                                 + x_ln_y(f64::from(m - k), 1.0 - q))
-                            .exp();
+                            .exp()
+                        };
+                        p += pi * ((1.0 - share) * at(world.eps[g]) + share * at(noisy_rate));
                     }
                     let p = depth_probs[m as usize] * p;
                     if p > 0.0 {
@@ -976,18 +1044,35 @@ fn build_read_group_spaces(world: &World) -> Vec<ReadGroupSpace> {
         .collect()
 }
 
-/// `Σ over entries  P_true(entry) · ln L(entry ; ε_g, π)` — the objective the error-rate
-/// fit climbs on one library's table.
-fn score_read_group(space: &ReadGroupSpace, eps_g: f64, freqs: &[f64; GENOTYPES]) -> f64 {
+/// `Σ over entries  P_true(entry) · ln L(entry ; ε_g, π, site noise)` — the objective the
+/// error-rate fit climbs on one library's table.
+///
+/// `site_noise` is the **fitted** pair, and it enters exactly as it does in production's
+/// per-read-group scan: every candidate rate is scored with the second class beside it.
+/// Leaving it out is what made production's clean rate the one-class rate on every sample it
+/// had ever seen (`reports/implementations/ng_noise_model_extension_n5_fix_2026-08-10.md`).
+fn score_read_group(
+    space: &ReadGroupSpace,
+    eps_g: f64,
+    freqs: &[f64; GENOTYPES],
+    site_noise: Option<(f64, f64)>,
+) -> f64 {
+    let (share, noisy_rate) = site_noise.unwrap_or((0.0, eps_g));
     let mut total = 0.0;
     for (&(m, k), &w) in space.cells.iter().zip(&space.mass) {
         let mut terms = [0.0; GENOTYPES];
         for (j, slot) in terms.iter_mut().enumerate() {
-            let q = p_alt(j as u32, eps_g, MODEL_HET_BALANCE);
+            let at = |rate: f64| {
+                let q = p_alt(j as u32, rate, MODEL_HET_BALANCE);
+                ln_binomial_coefficient(m, k)
+                    + x_ln_y(f64::from(k), q)
+                    + x_ln_y(f64::from(m - k), 1.0 - q)
+            };
             *slot = freqs[j].max(1e-300).ln()
-                + ln_binomial_coefficient(m, k)
-                + x_ln_y(f64::from(k), q)
-                + x_ln_y(f64::from(m - k), 1.0 - q);
+                + ln_sum_exp(&[
+                    (1.0 - share).max(1e-300).ln() + at(eps_g),
+                    share.max(1e-300).ln() + at(noisy_rate),
+                ]);
         }
         total += w * ln_sum_exp(&terms);
     }
@@ -996,26 +1081,30 @@ fn score_read_group(space: &ReadGroupSpace, eps_g: f64, freqs: &[f64; GENOTYPES]
 
 /// Maximise one library's error rate on its own table, with the genotype frequencies held
 /// where the caller put them. Golden section in `ln ε`.
-fn fit_eps_on_read_group(space: &ReadGroupSpace, freqs: &[f64; GENOTYPES]) -> f64 {
+fn fit_eps_on_read_group(
+    space: &ReadGroupSpace,
+    freqs: &[f64; GENOTYPES],
+    site_noise: Option<(f64, f64)>,
+) -> f64 {
     let inverse_phi = 0.5 * (5f64.sqrt() - 1.0);
     let (mut lo, mut hi) = ((1e-7f64).ln(), (0.3f64).ln());
     let mut c = hi - inverse_phi * (hi - lo);
     let mut d = lo + inverse_phi * (hi - lo);
-    let mut fc = score_read_group(space, c.exp(), freqs);
-    let mut fd = score_read_group(space, d.exp(), freqs);
+    let mut fc = score_read_group(space, c.exp(), freqs, site_noise);
+    let mut fd = score_read_group(space, d.exp(), freqs, site_noise);
     for _ in 0..80 {
         if fc > fd {
             hi = d;
             d = c;
             fd = fc;
             c = hi - inverse_phi * (hi - lo);
-            fc = score_read_group(space, c.exp(), freqs);
+            fc = score_read_group(space, c.exp(), freqs, site_noise);
         } else {
             lo = c;
             c = d;
             fc = fd;
             d = lo + inverse_phi * (hi - lo);
-            fd = score_read_group(space, d.exp(), freqs);
+            fd = score_read_group(space, d.exp(), freqs, site_noise);
         }
         if (hi - lo) < 1e-9 {
             break;
@@ -1079,7 +1168,7 @@ fn question_coupled_fit(report: &mut String) {
             // Block 2: each library's rate, from its own table at the current frequencies.
             let next_eps: Vec<f64> = groups
                 .iter()
-                .map(|g| fit_eps_on_read_group(g, &next_freqs))
+                .map(|g| fit_eps_on_read_group(g, &next_freqs, None))
                 .collect();
             let moved = next_eps
                 .iter()
@@ -1159,7 +1248,7 @@ fn question_coupled_fit(report: &mut String) {
             let next_freqs = climb_frequencies(&components, &cell_weights);
             let next_eps: Vec<f64> = groups
                 .iter()
-                .map(|g| fit_eps_on_read_group(g, &next_freqs))
+                .map(|g| fit_eps_on_read_group(g, &next_freqs, None))
                 .collect();
             let moved = next_eps
                 .iter()
@@ -1237,7 +1326,7 @@ fn score_at(
         .cells
         .iter()
         .zip(depths)
-        .map(|(c, &d)| ln_components(c, d, rule, &world.weights, eps, &mut clamped))
+        .map(|(c, &d)| ln_components(c, d, rule, &world.weights, eps, None, &mut clamped))
         .collect();
     let freqs = climb_frequencies(&components, weights);
     let mut score = 0.0;
@@ -1378,6 +1467,459 @@ fn candidates() -> Vec<Candidate> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// The second class of site — the question `src/` cannot ask
+// ---------------------------------------------------------------------------
+
+/// One point of the profile: its score, the rates and frequencies that settled around it,
+/// and the pair itself.
+type ProfilePoint = (f64, Vec<f64>, [f64; GENOTYPES], (f64, f64));
+
+/// The whole-sample objective at one point: `Σ_c P_true(c) · ln Σ_j π_j · L(c | j, θ)`.
+fn score_whole_sample(
+    space: &CellSpace,
+    depths: &[f64],
+    rule: Rule,
+    world: &World,
+    eps: &[f64],
+    freqs: &[f64; GENOTYPES],
+    site_noise: Option<(f64, f64)>,
+) -> f64 {
+    let mut clamped = false;
+    let mut total = 0.0;
+    for ((cell, &depth), &w) in space.cells.iter().zip(depths).zip(&space.mass) {
+        if w == 0.0 {
+            continue;
+        }
+        let comp = ln_components(
+            cell,
+            depth,
+            rule,
+            &world.weights,
+            eps,
+            site_noise,
+            &mut clamped,
+        );
+        let mut terms = [0.0; GENOTYPES];
+        for j in 0..GENOTYPES {
+            terms[j] = freqs[j].max(1e-300).ln() + comp[j];
+        }
+        total += w * ln_sum_exp(&terms);
+    }
+    total
+}
+
+/// The share of noisy sites that best explains the table, with everything else held — the
+/// same expectation-maximisation production climbs, and concave in the share for a fixed
+/// noisy rate because both branches are then constants.
+fn climb_noisy_share(
+    space: &CellSpace,
+    depths: &[f64],
+    rule: Rule,
+    world: &World,
+    eps: &[f64],
+    freqs: &[f64; GENOTYPES],
+    noisy_rate: f64,
+) -> f64 {
+    let mut clamped = false;
+    let noisy_eps = vec![noisy_rate; eps.len()];
+    // The two branches, marginalised over the genotypes once: neither moves as the share does.
+    let mut branches = Vec::with_capacity(space.cells.len());
+    for (cell, &depth) in space.cells.iter().zip(depths) {
+        let at = |rates: &[f64], clamped: &mut bool| {
+            let comp = ln_components_at(cell, depth, rule, &world.weights, rates, clamped);
+            let mut terms = [0.0; GENOTYPES];
+            for j in 0..GENOTYPES {
+                terms[j] = freqs[j].max(1e-300).ln() + comp[j];
+            }
+            ln_sum_exp(&terms)
+        };
+        branches.push((at(eps, &mut clamped), at(&noisy_eps, &mut clamped)));
+    }
+
+    let total: f64 = space.mass.iter().sum();
+    let mut share: f64 = 0.5;
+    for _ in 0..400 {
+        let mut responsibility = 0.0;
+        for ((clean, noisy), &w) in branches.iter().zip(&space.mass) {
+            let (from_clean, from_noisy) = (
+                (1.0 - share).max(1e-300).ln() + clean,
+                share.max(1e-300).ln() + noisy,
+            );
+            let larger = from_clean.max(from_noisy);
+            let (a, b) = ((from_clean - larger).exp(), (from_noisy - larger).exp());
+            responsibility += w * b / (a + b);
+        }
+        let next = responsibility / total;
+        let settled = (next - share).abs() < 1e-14;
+        share = next;
+        if settled {
+            break;
+        }
+    }
+    share
+}
+
+/// **The coupled fit with a second class of site, fitted the way production fits it.** The
+/// noisy rate is *profiled* — held at each point of a grid while the rates, the frequencies
+/// and the share are refitted around it — and the best-scoring point wins.
+///
+/// **Why the profile and not a third block in the alternation**, and it is production's own
+/// measurement rather than a preference: fitting the pair once at whatever the previous round
+/// settled on leaves the answer at a point that is optimal in each block and not jointly. On
+/// tomato SRR7279481 that cost 209 nats
+/// (`reports/implementations/ng_noise_model_extension_n5_fix_2026-08-10.md`).
+///
+/// The grid is continuous rather than the design's quarter-Phred ladder, for this file's
+/// standing reason: the bias being measured is a property of the objective, and quantising
+/// the search would hide anything below a rung.
+fn fit_coupled_with_site_noise(
+    whole: &CellSpace,
+    depths: &[f64],
+    rule: Rule,
+    world: &World,
+    groups: &[ReadGroupSpace],
+    start_eps: &[f64],
+    start_freqs: [f64; GENOTYPES],
+) -> (Vec<f64>, [f64; GENOTYPES], Option<(f64, f64)>) {
+    // **Started where the caller says and then warm-started**, which is what makes this
+    // affordable: the profile refits everything at every point of its grid, and from a cold
+    // start at three times the truth that is a full alternation each time. Every point after
+    // the first begins at the previous point's answer, and the rate step inside is an
+    // exhaustive search rather than a local one, so a warm start cannot pin an answer — only
+    // reach it sooner. Measured: the whole question goes from over 40 minutes to under two.
+    let settle = |site_noise: Option<(f64, f64)>,
+                  from_eps: &[f64],
+                  from_freqs: [f64; GENOTYPES]|
+     -> (Vec<f64>, [f64; GENOTYPES]) {
+        let mut eps = from_eps.to_vec();
+        let mut freqs = from_freqs;
+        for _ in 0..60 {
+            let next_freqs = {
+                let mut clamped = false;
+                let components: Vec<[f64; GENOTYPES]> = whole
+                    .cells
+                    .iter()
+                    .zip(depths)
+                    .map(|(c, &d)| {
+                        ln_components(c, d, rule, &world.weights, &eps, site_noise, &mut clamped)
+                    })
+                    .collect();
+                climb_frequencies(&components, &whole.mass)
+            };
+            let next_eps: Vec<f64> = groups
+                .iter()
+                .map(|g| fit_eps_on_read_group(g, &next_freqs, site_noise))
+                .collect();
+            let moved = next_eps
+                .iter()
+                .zip(&eps)
+                .map(|(a, b)| (a / b).ln().abs())
+                .fold(0.0f64, f64::max)
+                .max(
+                    next_freqs
+                        .iter()
+                        .zip(&freqs)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f64, f64::max),
+                );
+            eps = next_eps;
+            freqs = next_freqs;
+            if moved < 1e-12 {
+                break;
+            }
+        }
+        (eps, freqs)
+    };
+
+    // The control: one class of site, which is what a world without a second class must come
+    // back to and the score every candidate has to beat.
+    let (one_eps, one_freqs) = settle(None, start_eps, start_freqs);
+    let one_score = score_whole_sample(whole, depths, rule, world, &one_eps, &one_freqs, None);
+
+    // One point of the profile: the noisy rate is held and everything else refitted around
+    // it. Returns `None` where the share collapses, which is this rate buying no class at all.
+    let mut warm_eps = one_eps.clone();
+    let mut warm_freqs = one_freqs;
+    let at_rate = |rate: f64, warm_eps: &mut Vec<f64>, warm_freqs: &mut [f64; GENOTYPES]| {
+        let (mut eps, mut freqs) = (warm_eps.clone(), *warm_freqs);
+        let mut share = 0.0;
+        for _ in 0..12 {
+            let next = climb_noisy_share(whole, depths, rule, world, &eps, &freqs, rate);
+            let settled = (next - share).abs() < 1e-13;
+            share = next;
+            let (e, f) = settle(Some((share, rate)), &eps, freqs);
+            eps = e;
+            freqs = f;
+            if settled {
+                break;
+            }
+        }
+        *warm_eps = eps.clone();
+        *warm_freqs = freqs;
+        if share <= 0.0 {
+            return None;
+        }
+        let score = score_whole_sample(
+            whole,
+            depths,
+            rule,
+            world,
+            &eps,
+            &freqs,
+            Some((share, rate)),
+        );
+        Some((score, eps, freqs, (share, rate)))
+    };
+
+    // **A grid, then a continuous refinement between the winner's neighbours.** The grid alone
+    // is not enough and the reason is arithmetic rather than judgement: 25 points spanning
+    // 10⁻³ to 0.3 step by a factor of 1.27, which is **4.3 rungs of the ladder**, so the noisy
+    // rate could only ever come back within about two rungs of the truth — and it did, at 1.0
+    // to 2.3 rungs, which reads as bias and is nothing but the spacing. Golden section in
+    // `ln rate` between the neighbours of the best point removes the grid from the answer, for
+    // the same reason every other search in this file is continuous: what is being measured is
+    // a property of the objective, and quantising the search hides anything finer than a step.
+    const STEPS: usize = 24;
+    let rate_at = |step: f64| (1e-3f64.ln() + (0.3f64.ln() - 1e-3f64.ln()) * step / 24.0).exp();
+    let mut best: Option<ProfilePoint> = None;
+    let mut best_step = 0usize;
+    for step in 0..=STEPS {
+        let Some(point) = at_rate(rate_at(step as f64), &mut warm_eps, &mut warm_freqs) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(kept, ..)| point.0 > *kept) {
+            best = Some(point);
+            best_step = step;
+        }
+    }
+
+    if best.is_some() {
+        let inverse_phi = 0.5 * (5f64.sqrt() - 1.0);
+        let (mut lo, mut hi) = (
+            rate_at(best_step.saturating_sub(1) as f64).ln(),
+            rate_at(best_step.saturating_add(1).min(STEPS) as f64).ln(),
+        );
+        let mut c = hi - inverse_phi * (hi - lo);
+        let mut d = lo + inverse_phi * (hi - lo);
+        let mut point_c = at_rate(c.exp(), &mut warm_eps, &mut warm_freqs);
+        let mut point_d = at_rate(d.exp(), &mut warm_eps, &mut warm_freqs);
+        for _ in 0..40 {
+            let (score_c, score_d) = (
+                point_c.as_ref().map_or(f64::NEG_INFINITY, |p| p.0),
+                point_d.as_ref().map_or(f64::NEG_INFINITY, |p| p.0),
+            );
+            if score_c > score_d {
+                hi = d;
+                d = c;
+                point_d = point_c;
+                c = hi - inverse_phi * (hi - lo);
+                point_c = at_rate(c.exp(), &mut warm_eps, &mut warm_freqs);
+            } else {
+                lo = c;
+                c = d;
+                point_c = point_d;
+                d = lo + inverse_phi * (hi - lo);
+                point_d = at_rate(d.exp(), &mut warm_eps, &mut warm_freqs);
+            }
+            if (hi - lo) < 1e-9 {
+                break;
+            }
+        }
+        for point in [point_c, point_d].into_iter().flatten() {
+            if best.as_ref().is_none_or(|(kept, ..)| point.0 > *kept) {
+                best = Some(point);
+            }
+        }
+    }
+
+    match best {
+        // **Production's three-nat floor does not belong here, and putting it here made every
+        // two-class sample decline its own second class.** That floor is a likelihood-ratio
+        // test on a real table, whose weights are counts of sites — χ²(2) at p ≈ 0.05 is
+        // 5.99, a gain of 3 nats over half a million sites. The weights in this file are
+        // *probabilities summing to one*, so a nat here is a nat **per site**, and three of
+        // them is a threshold five orders of magnitude above any gain a real second class
+        // buys. What this file measures is the argmax at infinite data, where a floor has no
+        // meaning at all: the only thing worth rejecting is arithmetic noise.
+        Some((score, eps, freqs, pair)) if score - one_score > 1e-12 => (eps, freqs, Some(pair)),
+        _ => (one_eps, one_freqs, None),
+    }
+}
+
+/// The worlds that have a second class of site, at the shares and rates HG002 and the tomato
+/// samples actually returned — crossed with one and two libraries, because **the second class
+/// is per sample while `ε` is per library, and no fixture in `src/` can ask what that costs a
+/// key that has thrown the library away.**
+fn two_class_worlds() -> Vec<World> {
+    let mut out = Vec::new();
+    for &(share, noisy, label) in &[
+        (0.0088, 5.31e-2, "hg002-30x"),
+        (0.0127, 4.22e-2, "hg002-300x"),
+        (0.0142, 6.31e-2, "tomato"),
+    ] {
+        for &(libraries, split_name) in &[(1usize, "one library"), (2, "two libraries")] {
+            let (eps, weights) = if libraries == 1 {
+                (vec![1.9e-3], vec![1.0])
+            } else {
+                (vec![1.9e-3, 7.6e-3], vec![0.5, 0.5])
+            };
+            out.push(World {
+                name: format!("{label} {split_name}"),
+                eps,
+                weights,
+                mean_depth: 10.0,
+                pi_het: 1e-3,
+                pi_hom_alt: 6e-4,
+                het_balance: MODEL_HET_BALANCE,
+                site_noise: Some((share, noisy)),
+            });
+        }
+    }
+    out
+}
+
+/// **Is the second class of site recovered when the cell key has thrown away which library
+/// produced each alternative read?**
+///
+/// Everything else about this milestone was decided on single-library evidence: both cohorts
+/// carry one read group, and the research note's two synthetic worlds have one rate. The
+/// question that leaves open is this one, and it is the question this harness exists for —
+/// the cells are weighted by their exact probability under a known truth, so what the fit
+/// converges to is what an infinite genome would give and a departure is bias with no
+/// sampling noise in it.
+///
+/// **A control that must return nothing**: the same worlds with the second class removed.
+fn question_the_second_class_of_site(report: &mut String) {
+    let _ = writeln!(
+        report,
+        "\n## The second class of site, under a coarsened key\n"
+    );
+    let _ = writeln!(
+        report,
+        "A site is clean with probability `1 − w` and noisy with probability `w`, and at a\n\
+         noisy site every library reads at `ε_noisy` — one rate for the sample, where `ε` is\n\
+         one rate per library. The fit is handed none of the three. Bias is exact: every cell\n\
+         carries its probability under the truth, so a non-zero entry is bias and not noise.\n\
+         Error rates are in rungs of the ladder; `w` and the frequencies in relative error.\n"
+    );
+    let _ = writeln!(
+        report,
+        "{:<28} {:<22} {:>9} {:>9} {:>9} {:>9} {:>10}",
+        "world", "key", "ε₁ rungs", "ε_noisy", "w", "π_het", "π_hom_alt"
+    );
+
+    for world in two_class_worlds() {
+        let truth = world.genotype_freqs();
+        let (true_share, true_noisy) = world.site_noise.expect("a two-class world");
+        let ladder = DepthLadder::exact(world.max_depth());
+        let groups = build_read_group_spaces(&world);
+        let start_eps: Vec<f64> = world.eps.iter().map(|e| e * 3.0).collect();
+        let start_freqs = [
+            1.0 - 0.5 * (truth[1] + truth[2]),
+            0.5 * truth[1],
+            0.5 * truth[2],
+        ];
+
+        for (label, coarsening) in [
+            ("pooled K=0 D=0", Coarsening::pooled()),
+            ("attributed K=4 D=0", Coarsening::attributed(4, 0)),
+        ] {
+            let space = CellSpace::build(&world, coarsening, &ladder);
+            let depths = space.score_depths(DepthScoring::PerCell);
+            let (eps, freqs, pair) = fit_coupled_with_site_noise(
+                &space,
+                &depths,
+                Rule::Marginal,
+                &world,
+                &groups,
+                &start_eps,
+                start_freqs,
+            );
+            match pair {
+                Some((share, noisy)) => {
+                    let _ = writeln!(
+                        report,
+                        "{:<28} {:<22} {:>9.3} {:>9.3} {:>8.2}% {:>8.2}% {:>9.2}%",
+                        world.name,
+                        label,
+                        rungs(eps[0] / world.eps[0]),
+                        rungs(noisy / true_noisy),
+                        100.0 * (share / true_share - 1.0),
+                        100.0 * (freqs[1] / truth[1] - 1.0),
+                        100.0 * (freqs[2] / truth[2] - 1.0),
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        report,
+                        "{:<28} {:<22} {:>9.3} {:>9} {:>9} {:>9.2} {:>10.2}",
+                        world.name,
+                        label,
+                        rungs(eps[0] / world.eps[0]),
+                        "DECLINED",
+                        "-",
+                        100.0 * (freqs[1] / truth[1] - 1.0),
+                        100.0 * (freqs[2] / truth[2] - 1.0),
+                    );
+                }
+            }
+        }
+    }
+
+    let _ = writeln!(
+        report,
+        "\nAnd the control — the same worlds with the second class taken out of the truth.\n\
+         Every row must decline it: the two-class model contains the one-class model, so on\n\
+         a world generated by one rate the maximum is the truth and the extra pair buys\n\
+         nothing above the three-nat floor.\n"
+    );
+    let _ = writeln!(
+        report,
+        "{:<28} {:<22} {:>9} {:>12} {:>9} {:>10}",
+        "world", "key", "ε₁ rungs", "second class", "π_het", "π_hom_alt"
+    );
+    for world in two_class_worlds() {
+        let control = World {
+            site_noise: None,
+            ..world.clone()
+        };
+        let truth = control.genotype_freqs();
+        let ladder = DepthLadder::exact(control.max_depth());
+        let groups = build_read_group_spaces(&control);
+        let start_eps: Vec<f64> = control.eps.iter().map(|e| e * 3.0).collect();
+        let start_freqs = [
+            1.0 - 0.5 * (truth[1] + truth[2]),
+            0.5 * truth[1],
+            0.5 * truth[2],
+        ];
+        let space = CellSpace::build(&control, Coarsening::pooled(), &ladder);
+        let depths = space.score_depths(DepthScoring::PerCell);
+        let (eps, freqs, pair) = fit_coupled_with_site_noise(
+            &space,
+            &depths,
+            Rule::Marginal,
+            &control,
+            &groups,
+            &start_eps,
+            start_freqs,
+        );
+        let _ = writeln!(
+            report,
+            "{:<28} {:<22} {:>9.3} {:>12} {:>8.3}% {:>9.3}%",
+            control.name,
+            "pooled K=0 D=0",
+            rungs(eps[0] / control.eps[0]),
+            match pair {
+                None => "declined".to_string(),
+                Some((share, rate)) => format!("{:.3}% at {rate:.1e}", 100.0 * share),
+            },
+            100.0 * (freqs[1] / truth[1] - 1.0),
+            100.0 * (freqs[2] / truth[2] - 1.0),
+        );
+    }
+}
+
 fn worlds() -> Vec<World> {
     let mut out = Vec::new();
     for &(ratio, ratio_name) in &[(1.0, "1"), (4.0, "4"), (10.0, "10")] {
@@ -1394,6 +1936,7 @@ fn worlds() -> Vec<World> {
                     pi_het: 1e-2,
                     pi_hom_alt: 6e-3,
                     het_balance: MODEL_HET_BALANCE,
+                    site_noise: None,
                 });
             }
         }
@@ -1406,6 +1949,7 @@ fn worlds() -> Vec<World> {
         pi_het: 1e-2,
         pi_hom_alt: 6e-3,
         het_balance: MODEL_HET_BALANCE,
+        site_noise: None,
     });
     out
 }
@@ -1437,8 +1981,15 @@ fn algebraic_checks(world: &World) -> String {
             let mut total = 0.0;
             let depth_probs = world.depth_distribution();
             for (cell, &depth) in space.cells.iter().zip(&depths) {
-                let comp =
-                    ln_components(cell, depth, rule, &world.weights, &world.eps, &mut clamped);
+                let comp = ln_components(
+                    cell,
+                    depth,
+                    rule,
+                    &world.weights,
+                    &world.eps,
+                    None,
+                    &mut clamped,
+                );
                 let mut terms = [0.0; GENOTYPES];
                 let freqs = world.genotype_freqs();
                 for j in 0..GENOTYPES {
@@ -1496,13 +2047,22 @@ fn algebraic_checks(world: &World) -> String {
             let mut clamped = false;
             let mut worst: f64 = 0.0;
             for (cell, &depth) in null_space.cells.iter().zip(&null_depths) {
-                let got = ln_components(cell, depth, rule, &null.weights, &null.eps, &mut clamped);
+                let got = ln_components(
+                    cell,
+                    depth,
+                    rule,
+                    &null.weights,
+                    &null.eps,
+                    None,
+                    &mut clamped,
+                );
                 let want = ln_components(
                     cell,
                     depth,
                     Rule::Marginal,
                     &null.weights,
                     &null.eps,
+                    None,
                     &mut clamped,
                 );
                 for j in 1..GENOTYPES {
@@ -1553,6 +2113,7 @@ fn algebraic_checks(world: &World) -> String {
                 rule,
                 &single.weights,
                 &single.eps,
+                None,
                 &mut clamped,
             );
             for j in 1..GENOTYPES {
@@ -1610,6 +2171,7 @@ fn binning_worlds() -> Vec<World> {
                     pi_het: 1e-2,
                     pi_hom_alt: 6e-3,
                     het_balance: MODEL_HET_BALANCE,
+                    site_noise: None,
                 });
             }
         }
@@ -1664,6 +2226,7 @@ fn binning_checks(report: &mut String, world: &World) {
                     Rule::Marginal,
                     &world.weights,
                     &world.eps,
+                    None,
                     &mut clamped,
                 ),
             )
@@ -1706,6 +2269,7 @@ fn binning_checks(report: &mut String, world: &World) {
                         Rule::Marginal,
                         &world.weights,
                         &world.eps,
+                        None,
                         &mut clamped,
                     );
                     // What the fit actually sums is the *mixture* over genotypes, and each
@@ -1753,6 +2317,7 @@ fn binning_checks(report: &mut String, world: &World) {
                 Rule::Marginal,
                 &world.weights,
                 &world.eps,
+                None,
                 &mut clamped,
             );
             let mut terms = [0.0; GENOTYPES];
@@ -2009,6 +2574,7 @@ fn question_het_allele_balance(report: &mut String) {
                     pi_het,
                     pi_hom_alt,
                     het_balance: b,
+                    site_noise: None,
                 };
                 let truth = world.genotype_freqs();
                 let ladder = DepthLadder::exact(world.max_depth());
@@ -2271,6 +2837,14 @@ fn main() {
     if wanted("balance") {
         let mut report = String::new();
         question_het_allele_balance(&mut report);
+        print!("{report}");
+    }
+    // Its own section, and printed the moment it is done: it profiles a rate at 25 points
+    // and refits everything at each, so it is the slowest question here by an order of
+    // magnitude. Buffered behind another section, a timeout would take both.
+    if wanted("noise") {
+        let mut report = String::new();
+        question_the_second_class_of_site(&mut report);
         print!("{report}");
     }
     // Print-only, and reachable only by naming it: `--only=oracle`. It computes nothing

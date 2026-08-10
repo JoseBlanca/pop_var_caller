@@ -5,7 +5,7 @@
 //! hidden Markov model over 100 kb windows: *inside a run* and *outside* one, each
 //! carrying its own three genotype frequencies, with both transition rates fitted too.
 //! Nothing downstream can check it — there is no truth for a real sample — so an error
-//! here is a plausible wrong number nobody notices. This program asks nine questions of
+//! here is a plausible wrong number nobody notices. This program asks ten questions of
 //! it, and each is a way the number could be wrong while looking right.
 //!
 //! **Unlike the multi-library harness next door, this one cannot compute bias exactly.**
@@ -54,9 +54,16 @@
 //! 9. **What does the fit do at 20 and 60 reads a site**, start by start rather than winner
 //!    alone. This is the section that caught two defects in *this program* that fire only
 //!    above about 40 reads a site; see `SplitMix64::binomial` and the convergence test.
+//! 10. **Does a second class of site move `F`?** The noise model now has one: a site is clean
+//!     with probability `1 − w` and noisy with probability `w`, and at a noisy site a read
+//!     disagrees with the reference at a rate tens of times the clean one. That is not
+//!     question 4's floor — the excess lands on about one site in a hundred and on none of
+//!     the rest — and §10 draws genomes that have one, then fits `F` three ways: told the
+//!     pair, told the clean rate alone, and told the two classes' share-weighted marginal.
 //!
 //! ```text
 //! cargo run --release --example ng_inbreeding_harness
+//! cargo run --release --example ng_inbreeding_harness -- --only=noisy
 //! ```
 
 use std::borrow::Cow;
@@ -162,6 +169,23 @@ fn p_alt(j: usize, eps: f64) -> f64 {
     frac * (1.0 - eps / 3.0) + (1.0 - frac) * eps
 }
 
+/// **A second class of site**, as `generic/noise_model.rs` defines it: a site is clean with
+/// probability `1 − share` and noisy with probability `share`, and at a noisy site every read
+/// disagrees with the reference at `rate` rather than at the sample's own error rate. The
+/// class is drawn once per **site** and applies to every read over it, which is what makes it
+/// a different animal from the uniform floor of question 4.
+///
+/// Measured on real alignments (`reports/implementations/ng_noise_model_extension_n5_fix_2026-08-10.md`):
+/// a share between 0.42% and 1.42% at a rate between 4.2 × 10⁻² and 6.3 × 10⁻², against clean
+/// rates of 1.9 to 3.8 × 10⁻³.
+#[derive(Clone, Copy)]
+struct NoisySites {
+    /// How often a site is drawn from the noisy class — `w` in the scoring rule.
+    share: f64,
+    /// How often a read disagrees with the reference at a noisy site.
+    rate: f64,
+}
+
 #[derive(Clone)]
 struct Scenario {
     /// What the world is, for a reader of the source. Not printed — the runs are
@@ -183,6 +207,10 @@ struct Scenario {
     /// A uniform rate of spurious heterozygotes added to **both** states, taken out of
     /// the homozygous-reference class. Collapsed paralogs and mismapping, in one number.
     false_het_floor: f64,
+    /// The second class of site, if the genome has one. `None` is the world every section
+    /// but §10 draws, and it takes a branch of its own rather than a share of zero so that
+    /// no number published before the noise model gained a second class can move.
+    noisy_sites: Option<NoisySites>,
     /// How deeply each window is covered, as multipliers of `mean_depth`, assigned to
     /// windows in turn. **One level means every window has the same depth distribution**,
     /// which is the case where a cell's per-window mean depth and its whole-sample mean
@@ -403,6 +431,32 @@ impl CellSpace {
                 .map(|j| freqs[j] * self.alt_count_probability(cell, j, eps))
                 .sum::<f64>()
     }
+
+    /// `P(cell)` when the genome has a second class of site — the expression above evaluated
+    /// at each class's rate and weighted by how often that class occurs.
+    ///
+    /// A site's class is drawn before its reads are, and both classes carry the same genotype
+    /// frequencies, so the mixture sits **outside** the sum over genotypes. That is the same
+    /// place `generic/noise_model.rs` puts it, and it is why a genome with a second class can
+    /// still be tallied from one multinomial: drawing each site's class and then its cell
+    /// gives exactly this distribution over cells.
+    fn probability_over_site_classes(
+        &self,
+        cell: Cell,
+        freqs: &[f64; GENOTYPES],
+        eps: f64,
+        noisy: Option<NoisySites>,
+        depth_probs: &[f64],
+    ) -> f64 {
+        let clean = self.probability_at(cell, freqs, eps, depth_probs);
+        match noisy {
+            None => clean,
+            Some(noisy) => {
+                (1.0 - noisy.share) * clean
+                    + noisy.share * self.probability_at(cell, freqs, noisy.rate, depth_probs)
+            }
+        }
+    }
 }
 
 /// One simulated sample: the per-window cell tallies, plus the truth to score against.
@@ -441,7 +495,15 @@ fn simulate(scenario: &Scenario, space: &CellSpace, seed: u64) -> Sample {
                     space
                         .cells
                         .iter()
-                        .map(|&c| space.probability_at(c, &freqs, scenario.eps, depth_probs))
+                        .map(|&c| {
+                            space.probability_over_site_classes(
+                                c,
+                                &freqs,
+                                scenario.eps,
+                                scenario.noisy_sites,
+                                depth_probs,
+                            )
+                        })
                         .collect()
                 })
                 .collect()
@@ -569,15 +631,41 @@ impl<'a> Emissions<'a> {
     }
 
     /// One cell per exact `(depth, alt count)` — the emission of spec §6.1 as written,
-    /// before any binning.
+    /// before any binning, and with one class of site.
     fn exact(space: &CellSpace, sample: &'a Sample, eps: f64) -> Self {
+        Self::exact_over_site_classes(space, sample, eps, None)
+    }
+
+    /// The same emission for a fitter that has been **told the sample has a second class of
+    /// site**: each genotype's likelihood is the one-class rule at `eps` and at the noisy
+    /// rate, mixed by the share, exactly as
+    /// `SubstitutionNoiseModel::append_genotype_likelihoods` mixes them.
+    ///
+    /// The mixture goes inside the per-genotype component rather than around
+    /// `window_ln_emission`, because a site's class is drawn per site and a window holds
+    /// hundreds of thousands of them: a window is not clean or noisy, its sites are.
+    ///
+    /// `None` takes no branch at all, so every number this program printed before the noise
+    /// model gained a second class is untouched.
+    fn exact_over_site_classes(
+        space: &CellSpace,
+        sample: &'a Sample,
+        eps: f64,
+        noisy: Option<NoisySites>,
+    ) -> Self {
         let components: Vec<[f64; GENOTYPES]> = space
             .cells
             .iter()
             .map(|&c| {
                 let mut out = [0.0; GENOTYPES];
                 for (j, slot) in out.iter_mut().enumerate() {
-                    *slot = space.component(c, j, eps);
+                    *slot = match noisy {
+                        None => space.component(c, j, eps),
+                        Some(noisy) => {
+                            (1.0 - noisy.share) * space.component(c, j, eps)
+                                + noisy.share * space.component(c, j, noisy.rate)
+                        }
+                    };
                 }
                 out
             })
@@ -1013,6 +1101,7 @@ fn base_scenario(name: &str, true_f: f64, mean_run_windows: f64) -> Scenario {
         enter_run: enter,
         leave_run: leave,
         false_het_floor: 0.0,
+        noisy_sites: None,
         coverage_levels: vec![1.0],
     }
 }
@@ -1237,6 +1326,171 @@ fn question_4_false_het_floor(report: &mut String) {
             observed_het
         );
     }
+}
+
+/// **Does a second class of site move `F`?** — the question next door to §4, and not the
+/// same one.
+///
+/// §4's floor is uniform: every site carries the same small excess of spurious
+/// heterozygotes, so every window carries the same excess and the two states are lifted
+/// together. A noisy class is the opposite shape. About one site in a hundred is drawn from
+/// it, every read over that site disagrees with the reference at 4–6 × 10⁻² rather than at
+/// 10⁻³, and the other ninety-nine sites carry nothing. Two ways that could hurt where the
+/// floor does not: a window's count of noisy sites is itself a draw, so windows differ in
+/// how much excess they carry even before any run exists; and at three reads a site the
+/// excess is not small next to the signal. A homozygous-reference site covered by exactly
+/// three reads shows at least one alternative read 15 times in 100 at 5.3 × 10⁻², against 3
+/// times in 1,000 at the clean 10⁻³, so one noisy site in a hundred adds about 1.5
+/// alternative-showing sites per 1,000 — where the heterozygote rate this program generates
+/// is 1 per 1,000 outside a run and 1 in 20,000 inside one. Each block below prints the
+/// realised figure, counted off the genome it drew.
+///
+/// Each genome is fitted three ways:
+///
+/// - **told the pair** — the fitter mixes the two classes at the generating share and rate.
+///   This is what the caller does: `parameter_prepass` hands the runs model `ε_clean` and the
+///   pair, not one number (`impl_plan/noise_model_extension.md` N3c).
+/// - **told the clean rate alone** — the one-class fitter, blind to the second class. What
+///   this program did before the noise model was extended.
+/// - **told the marginal** — one class at `(1 − w)·ε_clean + w·ε_noisy`, the rate a sample
+///   emits. N3c argues that folding the pair into one number before the runs model would put
+///   the misspecification back inside it; this row is that argument, measured.
+fn question_10_noisy_site_class(report: &mut String) {
+    let _ = writeln!(report, "\n## 10. Does a second class of site move `F`?\n");
+    let _ = writeln!(
+        report,
+        "A site is clean with probability `1 − w` and noisy with probability `w`; at a noisy\n\
+         site every read disagrees with the reference at `ε_noisy` rather than at the clean\n\
+         10⁻³. Real alignments give `w` between 0.42% and 1.42% at `ε_noisy` between\n\
+         4.2 × 10⁻² and 6.3 × 10⁻² (`ng_noise_model_extension_n5_fix_2026-08-10.md`); the\n\
+         sweep spans that and goes past it. Each block draws one genome at `F` = 0.30 with\n\
+         30-window runs and fits it three times. `F − realised` is the column to read: the\n\
+         genomes differ from block to block because the draw and the walk share one random\n\
+         stream, so the error is comparable across rows where `F` itself is not.\n\
+         **`w` = 0 is the control** — the three fitters are then the same fitter, and their\n\
+         three rows must agree to the last digit.\n"
+    );
+    let _ = writeln!(
+        report,
+        "{:<24} {:>10} {:>12} {:>13} {:>11} {:>11} {:>10}",
+        "what the fit was told",
+        "realised F",
+        "F posterior",
+        "F − realised",
+        "h",
+        "Hout",
+        "undecided"
+    );
+    let true_f = 0.30;
+    for (block, &(share, noisy_rate)) in [
+        (0.0f64, 5.3e-2f64),
+        (0.005, 5.3e-2),
+        (0.0088, 5.3e-2),
+        (0.0142, 5.3e-2),
+        (0.03, 5.3e-2),
+        (0.0088, 4.2e-2),
+        (0.0088, 6.3e-2),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut scenario = base_scenario("noisy class", true_f, 30.0);
+        scenario.noisy_sites = Some(NoisySites {
+            share,
+            rate: noisy_rate,
+        });
+        let space = CellSpace::for_scenario(&scenario);
+        let sample = simulate(&scenario, &space, 0x9015_0000 + block as u64);
+
+        // How big the perturbation actually is, counted off the drawn genome rather than
+        // predicted: the share of sites showing at least one alternative read. It is the
+        // only thing the fitter can see of the noisy class at all.
+        let mut showing_alt = 0u64;
+        let mut total_sites = 0u64;
+        for window in &sample.windows {
+            for (i, &c) in window.iter().enumerate() {
+                total_sites += c;
+                if space.cells[i].alt >= 1 {
+                    showing_alt += c;
+                }
+            }
+        }
+        let marginal = (1.0 - share) * scenario.eps + share * noisy_rate;
+        let _ = writeln!(
+            report,
+            "\nw = {:.2}%, ε_noisy = {:.1e}, marginal rate {:.3e} — {:.2} sites in 1,000 show \
+             an alternative read",
+            100.0 * share,
+            noisy_rate,
+            marginal,
+            1000.0 * showing_alt as f64 / total_sites as f64
+        );
+
+        for (told, fitter) in [
+            (
+                "the pair (production)",
+                Emissions::exact_over_site_classes(
+                    &space,
+                    &sample,
+                    scenario.eps,
+                    scenario.noisy_sites,
+                ),
+            ),
+            (
+                "the clean rate alone",
+                Emissions::exact(&space, &sample, scenario.eps),
+            ),
+            ("the marginal", Emissions::exact(&space, &sample, marginal)),
+        ] {
+            // The same nine starts as everywhere else, built from the *generating*
+            // heterozygosity — which the noisy class does not change, since a noisy site is
+            // not a heterozygote. §4 raises this start by its floor because a floor really is
+            // extra heterozygotes; there is nothing to raise it by here.
+            let (fit, _, _) =
+                fit_all_starts(&fitter, &sample, scenario.outside[1], scenario.outside[2]);
+            let _ = writeln!(
+                report,
+                "{:<24} {:>10.4} {:>12.4} {:>13.4} {:>11.6} {:>11.6} {:>9.2}%",
+                told,
+                sample.true_f(),
+                fit.f_posterior,
+                fit.f_posterior - sample.true_f(),
+                fit.freqs[INSIDE][1],
+                fit.freqs[OUTSIDE][1],
+                100.0 * fit.undecided
+            );
+        }
+    }
+
+    let _ = writeln!(
+        report,
+        "\n**A second class of site does not move `F`.** Over the 21 fits above the largest\n\
+         gap between the fitted `F` and the genome's realised autozygous fraction is\n\
+         1 × 10⁻⁴, and nothing reaches it twice over: not a share twice the largest one a\n\
+         real alignment has shown, not either measured noisy rate, and not any of the three\n\
+         rates the fitter was told. Told the pair it rounds to zero at four decimal places\n\
+         in all seven blocks. §4's uniform floor, on the same estimator and the same genome\n\
+         size, misses by up to 9 × 10⁻⁴.\n\
+         \n\
+         What the second class does move is the pair of heterozygote rates the model reads a\n\
+         run from. Told only the clean rate, at `w` = 0.88% the fit returns an outside rate\n\
+         of 1.59 per 1,000 where the genome was generated at 1.00, and an inside rate of 4.3\n\
+         per 10,000 where it was generated at 0.5 — closing the gap between the two states\n\
+         from 20-fold to 3.7-fold, and at `w` = 3% to 1.6-fold. Told the marginal it closes\n\
+         to 4.6-fold at `w` = 0.88%. Told the pair, both rates come back at the generating\n\
+         values to two significant figures at every share in the sweep, and the gap stays\n\
+         20-fold.\n\
+         \n\
+         So the cost is paid in the heterozygote rates and not in `F`, and the reason is that\n\
+         a noisy class is far more uniform across windows than it is across sites. One site\n\
+         in a hundred is noisy, but a window holds 100,000 sites, so a window's count of them\n\
+         is a draw around 1,000 with a standard deviation of 32 — 3% — and every window is\n\
+         lifted by very nearly the same amount. That is §4's cancellation reappearing for a\n\
+         perturbation §4 does not cover: both states rise together and the contrast the chain\n\
+         reads survives. The only trace left in the chain is its confidence, and it is small\n\
+         — the share of windows whose posterior landed between 0.01 and 0.99 goes from 0.00%\n\
+         at `w` = 0 to 0.49% at `w` = 3% told the clean rate alone."
+    );
 }
 
 /// **Does the chain do any work?** The decision made about a window depends on that
@@ -1630,6 +1884,9 @@ fn main() {
     }
     if wanted("highdepth") {
         question_9_high_depth_diagnosis(&mut report);
+    }
+    if wanted("noisy") {
+        question_10_noisy_site_class(&mut report);
     }
     if !only.is_empty() {
         print!("{report}");
