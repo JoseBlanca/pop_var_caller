@@ -361,6 +361,35 @@ fn fit_at_a_pinned_noisy_rate(
     if share <= 0.0 {
         return Ok(None);
     }
+
+    // **The second class must be the noisier one, and without saying so the pair is not
+    // identified at all.** Swapping the two labels describes the same distribution: a class
+    // holding `w` of the sites at one rate and `1 − w` at another is the same mixture read the
+    // other way round. So the profile can settle on a "noisy" class that is *finer* than every
+    // library's clean rate and holds most of the genome — which is the clean class wearing the
+    // other label, and it is not a curiosity. Two fixtures in this file did exactly that
+    // before this check: one returned 90.0% of sites at 10⁻⁵ against clean rates of 1 to
+    // 4 × 10⁻³, and the other 51.4% at 3.2 × 10⁻⁴ against 1.0 and 2.5 × 10⁻³.
+    //
+    // **What it costs is not cosmetic**, which is why this is a refusal and not a warning: a
+    // sample emits the two rates weighted by the share (`SiteNoise::marginal_error_rate`), so
+    // a 90% share at 10⁻⁵ reports 2.1 × 10⁻⁴ for a library fitted at 2 × 10⁻³ — an order of
+    // magnitude, with nothing else on the way out to notice.
+    //
+    // The runs model has the same ambiguity between its two states and resolves it by
+    // relabelling after the fit (`h << Hout`, spec §6.1). Relabelling is not available here:
+    // the clean rate is one per read group and the noisy rate is one per sample, so there is
+    // no single rate to swap it with. The constraint goes into the search instead — a rung at
+    // or below the coarsest fitted clean rate buys no *second* class and is skipped, leaving
+    // the one-class fit to win on its own score.
+    let coarsest_clean = fit
+        .error_rate
+        .values()
+        .map(|estimate| estimate.value.get())
+        .fold(0.0f64, f64::max);
+    if noisy_rate.get() <= coarsest_clean {
+        return Ok(None);
+    }
     Ok(Some((
         fit,
         SiteNoise::try_new(share, noisy_rate).expect("a climbed share is a fraction"),
@@ -381,9 +410,15 @@ fn fit_at_a_pinned_noisy_rate(
 /// budget without the share settling. Those rungs are not silently accepted: whether the
 /// winner settled is returned and folded into the fit's `FitTermination`.
 ///
-/// Raising it would buy a little score at those rungs and cost a full alternation at every
-/// one of the 161; five is where it sits until a measurement moves it.
-const MAX_SITE_NOISE_PASSES: u32 = 5;
+/// **Twelve, and the number is measured rather than chosen.** It was five, and five was one
+/// pass short of what a real sample needs: on HG002 at 30x the winning rung's share goes
+/// 0.006721, 0.008062, 0.008770, 0.0087700694, 0.00877006949716, 0.00877006949717 — settling
+/// on the **sixth** pass, so the fit ran out and, once the profile's settling was reported
+/// honestly, said so. Rungs far from the winner converge far more slowly (at 5.3 × 10⁻³ the
+/// share is still climbing through 0.31 after six), which is why this is a cap and not a
+/// convergence criterion: those rungs lose on score anyway, and letting them run costs a full
+/// alternation each across all 161.
+const MAX_SITE_NOISE_PASSES: u32 = 12;
 
 /// The rungs a finished fit's rates sit on, for handing back to [`noise_from`].
 fn rungs_of(fit: &CoupledFit, ladder: &[ErrorRate]) -> BTreeMap<ReadGroupId, usize> {
@@ -2633,6 +2668,88 @@ mod tests {
     /// nats higher than the argument alone. A human sample, and a generated table shaped like
     /// a tomato one, agree either way.
     ///
+    /// **A class finer than the clean rate is the clean class wearing the other label, and the
+    /// fit must refuse it.** Swapping the two labels of a mixture describes the same
+    /// distribution — `w` of the sites at one rate and `1 − w` at another reads identically
+    /// either way round — so nothing in the likelihood prefers one reading to the other, and
+    /// the profile is free to settle on the wrong one.
+    ///
+    /// **The shape that provokes it is a sample whose two tables disagree**, which is exactly
+    /// `a_supplied_rate_reaches_the_coupled_fit_when_no_group_can_lend`'s: two read-group
+    /// tables of 500 sites each beside a whole-sample table of 200,000, all generated at the
+    /// same rate. Nothing in the per-library rates can explain a whole-sample table four
+    /// hundred times their size, and a majority class at a finer rate is the cheapest thing
+    /// that can. Before the ordering constraint that fixture came out of the whole fit at
+    /// **51.4% of sites at 3.2 × 10⁻⁴** against clean rates of 1.0 and 2.5 × 10⁻³, and a
+    /// three-library one at **90.0% at 10⁻⁵** against 1 to 4 × 10⁻³.
+    ///
+    /// **What the refusal is worth is the emitted rate, not tidiness**: a sample reports the
+    /// two rates weighted by the share, so a 90% share at 10⁻⁵ reports 2.1 × 10⁻⁴ for a
+    /// library fitted at 2 × 10⁻³ — an order of magnitude, with nothing else on the way out to
+    /// notice it.
+    #[test]
+    fn a_second_class_cleaner_than_the_first_is_refused() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let diploid = ploidy(2);
+        let rate = ladder[RUNG_AT_PHRED_30].get();
+        let thin = 500.0;
+
+        let read_group_histograms: BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>> = (1u32
+            ..=2)
+            .map(|group| {
+                (
+                    (ReadGroupId(group), diploid),
+                    table_generated_at(&edges, PER_LIBRARY_DEPTH, rate, diploid, &TRUTH, thin),
+                )
+            })
+            .collect();
+        let whole_sample = BTreeMap::from([(
+            diploid,
+            table_generated_at(&edges, PER_LIBRARY_DEPTH, rate, diploid, &TRUTH, SITES),
+        )]);
+
+        // The supplied rate is part of the shape: it pins one library four Phred away from
+        // the other, so the two rates the mixture is offered cannot between them explain a
+        // whole-sample table four hundred times their tables' size.
+        let supplied = BTreeMap::from([(ReadGroupId(1), ladder[RUNG_AT_PHRED_26])]);
+        let fit = fit_coupled_from_tables(
+            "tables that disagree",
+            &read_group_histograms,
+            &whole_sample,
+            &ladder,
+            &supplied,
+        )
+        .expect("the whole-sample table is far above the frequencies' floor");
+
+        let coarsest_clean = fit
+            .error_rate
+            .values()
+            .map(|estimate| estimate.value.get())
+            .fold(0.0f64, f64::max);
+        if let Some(pair) = fit.site_noise {
+            assert!(
+                pair.noisy_error_rate().get() > coarsest_clean,
+                "a second class at {:e} holding {:.4} of the sites, at or below the coarsest \
+                 clean rate of {coarsest_clean:e} — that is the first class relabelled",
+                pair.noisy_error_rate().get(),
+                pair.noisy_fraction()
+            );
+        }
+
+        // And the consequence the refusal exists for: whatever it returned, the rate the
+        // sample emits must still be the one its reads support, not a tenth of it.
+        for (group, estimate) in &fit.error_rate {
+            let emitted = fit.site_noise.map_or(estimate.value.get(), |pair| {
+                pair.marginal_error_rate(estimate.value).get()
+            });
+            assert!(
+                emitted > 0.3 * rate,
+                "{group:?} emits {emitted:e} for a table generated at {rate:e}"
+            );
+        }
+    }
+
     /// **The whole fit declines a second class on a table that does not need one**, and until
     /// this was written nothing asserted it. `a_world_with_one_error_rate_is_given_no_second_class`
     /// exercises `fit_site_noise` directly — one block, handed the true clean rate — where the
