@@ -1170,7 +1170,12 @@ fn finish_locus(
 }
 
 /// ASCII upper-case copy of `bytes`.
-fn upper(bytes: &[u8]) -> Vec<u8> {
+///
+/// **Shared with the repeat catalog's builder** ([`crate::ng::repeat_catalog`]), which
+/// records a tract's motif and purity at build time so that a reader never has to open the
+/// FASTA to recompute them (`repeat_catalog.md` spec §3.2). The builder must produce the
+/// bytes [`classify`] would, so it calls this rather than upper-casing its own way.
+pub(crate) fn upper(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|b| b.to_ascii_uppercase()).collect()
 }
 
@@ -1214,7 +1219,14 @@ fn is_compound(motif: &[u8]) -> bool {
 /// motif boundary within `min(3·|motif|, |rep|/2)` of each end.
 ///
 /// Offsets, not coordinates — no rebase applies.
-fn minimal_trim(rep: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
+///
+/// **It reads only the tract and its motif, never the criteria**, which is what lets the
+/// repeat catalog store the cut at build time and every reader inherit it: a different copy
+/// floor or purity floor changes which tracts survive, never where this cut falls
+/// (`repeat_catalog.md` spec §3.2). Shared with that builder for the same reason
+/// [`upper`] is — one implementation, so the stored trim is the trim [`classify`] would
+/// make.
+pub(crate) fn minimal_trim(rep: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
     let m = motif.len();
     let ll = m * 2;
     let max_trim_len = (m * 3).min(rep.len() / 2);
@@ -1258,7 +1270,12 @@ fn minimal_trim(rep: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
 /// Fraction of `tract` matching a perfect tiling of `motif` from phase 0. With
 /// `motif == tract[..period]`, the first repeat always matches, so a perfect
 /// tract scores 1.0 and interruptions lower it proportionally.
-fn recompute_purity(tract: &[u8], motif: &[u8]) -> f32 {
+///
+/// **Measured over the trimmed tract**, which is what [`finish_locus`] passes and what the
+/// repeat catalog stores; a purity taken over the untrimmed span would count the ragged
+/// ends the locus does not have. Criteria-free like [`minimal_trim`], so the stored value
+/// is the value any policy would compute (`repeat_catalog.md` spec §3.2).
+pub(crate) fn recompute_purity(tract: &[u8], motif: &[u8]) -> f32 {
     if tract.is_empty() || motif.is_empty() {
         return 0.0;
     }
