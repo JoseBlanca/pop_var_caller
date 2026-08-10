@@ -85,7 +85,14 @@ reproduces the exact per-library likelihood, and agreement with `ng_multilib_key
 floating point at `w = 0`. Plus a fifth that is new and is what catches a mis-weighted branch:
 **at `ε_noisy = ε_clean` the rule must reproduce the one-class rule exactly, at every `w`.**
 
-### N3. Fitting the two new parameters.  ☐ **Own commit, do not bundle.**
+### N3a. The oracle's world: a measured depth distribution, generated in closed form.  ✅
+
+ and  in
+. Landed ahead of the fit because the histogram came from a walk
+over an alignment no worktree carries and could not be re-derived from anything in the
+repository; everything else in N3 can.
+
+### N3b. Fitting the two new parameters.  ☐ **Own commit, do not bundle.**
 
 Expectation-maximisation for `w` and `ε_noisy` inside the coupled loop, beside the ladder scan
 that settles each library's `ε`. Multi-start over the separation between the two classes, not
