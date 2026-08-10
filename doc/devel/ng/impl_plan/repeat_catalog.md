@@ -107,14 +107,14 @@ detected count clears it **is kept** (the bundling-preservation rule). *Depends:
 
 ### Milestone B — the file
 
-**B1. The Parquet schema and writer.**  ☐
+**B1. The Parquet schema and writer.**  ✅
 `parquet_file.rs`: the seven columns of arch §3 with their types and encodings, one row group per
 contig, the header as footer key-value metadata, atomic write (`.tmp` + rename). Fixed codec, level
 and writer-version string. Tests: a file written from synthetic rows opens; its footer metadata
 round-trips; two writes of the same rows are **byte-identical**. *Depends:* A1. *Source:* arch §3,
 spec §3.5, §6.
 
-**B2. The reader: header and rows.**  ☐
+**B2. The reader: header and rows.**  ✅
 `open_checking_against_reference` (contig table, order, per-contig MD5s, scoring weights, tool
 version), `header()`, `contigs()`, and `repeats_in_region` streaming a row group at a time. Tests:
 round-trip of B1's rows; **a missing file and a mismatched reference are different errors**, the first
