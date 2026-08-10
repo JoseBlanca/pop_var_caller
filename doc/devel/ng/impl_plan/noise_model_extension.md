@@ -103,15 +103,20 @@ about how much of the genome was inside a run returned `F` = 0.0000, converged a
 **The silent failure this isolates:** two classes that collapse into one, or swap, both return
 a plausible pair and report convergence.
 
-*Oracle:* the two exact controls of the research note, both computed in closed form over the
-real depth distribution with no sampling noise in them.
-- **On a world with one error rate the genotype frequencies must be unchanged**: measured, the
-  extension returns heterozygosity **−0.0006%** and the homozygous-non-reference rate
-  **+0.0000%** from the truth, while splitting off a spurious `w` = 0.48% and reporting a clean
-  rate **1.10% low**. That last number is the price of the extension and the test pins it, so a
-  later change that makes it worse is visible.
-- **On a world that has a noisy class it must be recovered**: `w` to four decimal places,
-  `ε_noisy` to 0.02%, both frequencies to 0.000%.
+*Oracle:* the two closed-form worlds of the research note, over the depth distribution N3a
+embedded, with no sampling noise in either.
+- **On a world with one error rate the fit must return the generating parameters.** The
+  two-class model contains the one-class model exactly — any `w` with
+  `ε_noisy = ε_clean` — so the maximum is the truth and there is nothing to trade against
+  it. **This oracle is stricter than the plan first stated:** an earlier draft asked only
+  that the genotype frequencies survive and pinned a 1.10% cost to the error rate, which
+  turned out to be an unconverged optimiser rather than a property of the model. There is
+  no price to pin.
+- **On a world that has a noisy class it must be recovered**: `w`, `ε_clean` and
+  `ε_noisy`, and both genotype frequencies.
+- **Convergence is asserted, not assumed.** The failure above was a fit that stopped short
+  and looked settled, so the test compares the score it reached against the score at the
+  truth and fails if the truth is higher.
 
 ### N4. The harnesses.  ☐
 
