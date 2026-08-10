@@ -140,7 +140,7 @@ group per contig, `finish` returning the per-period tally. Tests on the fixture 
 tract comes out as **one row**; repeats at both contig ends behave as A4 specifies; the row order is
 (contig, start, period, end). *Depends:* A4, B1, C1. *Source:* arch §2.2, spec §2.3, §10.6.
 
-**C3. `--threads`: contigs in flight, rows in reference order.**  ☐
+**C3. `--threads`: contigs in flight, rows in reference order.**  ✅
 Up to N contigs scanned at once, completed contigs written in reference order. Tests: the file is
 **byte-identical** at 1, 2 and 4 threads, on a fixture whose contigs differ enough in size that they
 finish out of order. *Depends:* C2. *Source:* spec §2.4, §10.5.

@@ -64,10 +64,13 @@ pub struct RepeatCatalogBuilder {
     writer: Option<RepeatCatalogWriter>,
     path: PathBuf,
 
-    /// The contig being accumulated: its index, its bases, and the rows found in it.
+    /// The contig being accumulated: its index and its bases.
     contig: Option<ContigId>,
     bases: Vec<u8>,
-    rows: Vec<FoundRepeat>,
+    /// Contigs finished but not yet scanned — at most [`threads`](Self::with_threads) of
+    /// them, which is what bounds the memory a parallel build uses (spec §2.4).
+    pending: Vec<PendingContig>,
+    threads: usize,
 
     tally: BuildTally,
     failure: Option<RepeatCatalogError>,
@@ -90,7 +93,8 @@ impl RepeatCatalogBuilder {
             path: path.to_path_buf(),
             contig: None,
             bases: Vec::new(),
-            rows: Vec::new(),
+            pending: Vec::new(),
+            threads: 1,
             tally: BuildTally::default(),
             failure: None,
         })
@@ -106,6 +110,9 @@ impl RepeatCatalogBuilder {
         reference: &ReferenceInfo,
         tool_version: &str,
     ) -> Result<BuildTally, RepeatCatalogError> {
+        // Whatever is still held back is scanned and written before the footer, in
+        // reference order like everything else.
+        self.flush_pending();
         if let Some(failure) = self.failure.take() {
             return Err(failure);
         }
@@ -134,50 +141,112 @@ impl RepeatCatalogBuilder {
         Ok(self.tally)
     }
 
-    /// Scan the accumulated contig and write its rows as one row group.
-    fn scan_and_write(&mut self, info: &ContigInfo) {
-        let Some(contig) = self.contig else { return };
-        let Some(writer) = self.writer.as_mut() else {
+    /// Scan up to `threads` contigs at once instead of one at a time.
+    ///
+    /// **A speed knob and nothing else** (spec §2.4): contigs are written in the
+    /// reference's order however many are scanned together, so the file is byte-identical
+    /// at every thread count. What it costs is `threads` contigs resident rather than one.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
+    }
+
+    /// Scan every contig held back, and write their rows in **reference order**.
+    ///
+    /// Held-back contigs are scanned together when there is more than one thread; the
+    /// results are collected in order before any is written, so completion order cannot
+    /// reach the file.
+    fn flush_pending(&mut self) {
+        if self.pending.is_empty() || self.writer.is_none() {
+            self.pending.clear();
             return;
+        }
+
+        let criteria = &self.criteria;
+        let scan = &self.scan;
+        let scanned: Vec<ScannedContig> = if self.threads == 1 {
+            self.pending
+                .iter()
+                .map(|contig| scan_contig(contig, criteria, scan))
+                .collect()
+        } else {
+            use rayon::prelude::*;
+            self.pending
+                .par_iter()
+                .map(|contig| scan_contig(contig, criteria, scan))
+                .collect()
         };
 
-        // One call over the whole contig: no window, so no margin and no length at which a
-        // tract stops being caught whole (spec §2.3).
-        let intervals = find_tandem_repeats(
-            &self.bases,
-            self.criteria.classification.periods,
-            &self.scan,
-        );
-
-        self.rows.clear();
-        self.rows.reserve(intervals.len());
-        for interval in &intervals {
-            match row_for_interval(
-                contig,
-                Bp(info.length),
-                &self.bases,
-                interval,
-                &self.criteria,
-            ) {
-                Ok(row) => self.rows.push(row),
-                Err(rejection) => self.tally.charge(rejection),
+        for result in scanned {
+            for rejection in result.rejections {
+                self.tally.charge(rejection);
+            }
+            for row in &result.rows {
+                self.tally.rows.count(row.period);
+            }
+            let Some(writer) = self.writer.as_mut() else {
+                break;
+            };
+            if let Err(e) = writer.write_contig(&result.rows) {
+                self.failure = Some(e);
+                self.writer = None;
+                break;
             }
         }
 
-        // The file's order (spec §3.1). `find_tandem_repeats` emits period by period, so
-        // rows arrive grouped by period rather than by position; the sort is what makes
-        // the file's order a property of the format instead of of the detector's loop.
-        self.rows
-            .sort_by_key(|row| (row.detected.start, row.period, row.detected.end));
-        for row in &self.rows {
-            self.tally.rows.count(row.period);
-        }
+        // Nothing accumulates across flushes (spec §6).
+        self.pending.clear();
+        self.pending.shrink_to_fit();
+    }
+}
 
-        if let Err(e) = writer.write_contig(&self.rows) {
-            self.failure = Some(e);
-            self.writer = None;
+/// One contig's bases, held until it is scanned.
+struct PendingContig {
+    contig: ContigId,
+    length: Bp,
+    bases: Vec<u8>,
+}
+
+/// What scanning one contig produced. Rejections travel with the rows so that a parallel
+/// scan's tally is assembled in reference order rather than in completion order.
+struct ScannedContig {
+    rows: Vec<FoundRepeat>,
+    rejections: Vec<RowRejection>,
+}
+
+/// Detect every tandem repeat in one contig and turn each into a row.
+///
+/// Free-standing rather than a method because it is what runs on a worker: it borrows the
+/// criteria and the weights, and touches nothing the builder mutates.
+fn scan_contig(
+    pending: &PendingContig,
+    criteria: &StrRepeatCriteria,
+    scan: &ScanParams,
+) -> ScannedContig {
+    // One call over the whole contig: no window, so no margin and no length at which a
+    // tract stops being caught whole (spec §2.3).
+    let intervals = find_tandem_repeats(&pending.bases, criteria.classification.periods, scan);
+
+    let mut rows = Vec::with_capacity(intervals.len());
+    let mut rejections = Vec::new();
+    for interval in &intervals {
+        match row_for_interval(
+            pending.contig,
+            pending.length,
+            &pending.bases,
+            interval,
+            criteria,
+        ) {
+            Ok(row) => rows.push(row),
+            Err(rejection) => rejections.push(rejection),
         }
     }
+
+    // The file's order (spec §3.1). `find_tandem_repeats` emits period by period, so rows
+    // arrive grouped by period rather than by position; the sort is what makes the file's
+    // order a property of the format instead of of the detector's loop.
+    rows.sort_by_key(|row| (row.detected.start, row.period, row.detected.end));
+    ScannedContig { rows, rejections }
 }
 
 impl ReferenceBasesObserver for RepeatCatalogBuilder {
@@ -203,11 +272,18 @@ impl ReferenceBasesObserver for RepeatCatalogBuilder {
             info.length,
             "the accumulated bases are the contig the pass just finished"
         );
-        self.scan_and_write(info);
-        // Nothing accumulates across contigs (spec §6).
-        self.bases.clear();
-        self.bases.shrink_to_fit();
-        self.rows.clear();
+        let Some(contig) = self.contig else { return };
+
+        self.pending.push(PendingContig {
+            contig,
+            length: Bp(info.length),
+            // The bases move to the pending contig; the next one starts from an empty
+            // buffer rather than reusing this one, since a worker may still be reading it.
+            bases: std::mem::take(&mut self.bases),
+        });
+        if self.pending.len() >= self.threads {
+            self.flush_pending();
+        }
     }
 }
 
@@ -240,14 +316,24 @@ mod tests {
     }
 
     fn build(dir: &Path, contigs: &[(&str, String)]) -> (PathBuf, ReferenceInfo, BuildTally) {
+        build_with_threads(dir, contigs, 1, "ref.fa.repeats.parquet")
+    }
+
+    fn build_with_threads(
+        dir: &Path,
+        contigs: &[(&str, String)],
+        threads: usize,
+        catalog_name: &str,
+    ) -> (PathBuf, ReferenceInfo, BuildTally) {
         let fasta = write_fasta(dir, contigs);
-        let catalog_path = dir.join("ref.fa.repeats.parquet");
+        let catalog_path = dir.join(catalog_name);
         let mut builder = RepeatCatalogBuilder::create(
             &catalog_path,
             StrRepeatCriteria::default(),
             ScanParams::default(),
         )
-        .expect("builder");
+        .expect("builder")
+        .with_threads(threads);
         let reference = read_reference_info_observing(
             ReferenceSource::Fasta {
                 fasta: fasta.clone(),
@@ -399,6 +485,54 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted, "rows: {rows:#?}");
+    }
+
+    /// Spec §10.5: `--threads` is a speed knob and must not reach the file. The contigs
+    /// differ in size on purpose, so workers finish out of order and the writer has to put
+    /// them back.
+    #[test]
+    fn the_thread_count_does_not_change_the_bytes() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let contigs = [
+            (
+                "chr_big",
+                format!(
+                    "{}{}{}{}{}",
+                    filler(4_000),
+                    "CAG".repeat(20),
+                    filler(4_000),
+                    "AT".repeat(30),
+                    filler(4_000)
+                ),
+            ),
+            (
+                "chr_small",
+                format!("{}{}{}", filler(80), "TTA".repeat(9), filler(80)),
+            ),
+            (
+                "chr_middling",
+                format!("{}{}{}", filler(600), "GAAT".repeat(15), filler(600)),
+            ),
+        ];
+
+        let mut bytes_at = Vec::new();
+        let mut tallies = Vec::new();
+        for threads in [1usize, 2, 4] {
+            let (path, _reference, tally) = build_with_threads(
+                dir.path(),
+                &contigs,
+                threads,
+                &format!("t{threads}.parquet"),
+            );
+            bytes_at.push(std::fs::read(&path).expect("read back"));
+            tallies.push(tally);
+        }
+
+        assert!(!bytes_at[0].is_empty());
+        assert_eq!(bytes_at[0], bytes_at[1], "1 thread vs 2");
+        assert_eq!(bytes_at[0], bytes_at[2], "1 thread vs 4");
+        assert_eq!(tallies[0], tallies[1], "the tally is order-independent too");
+        assert_eq!(tallies[0], tallies[2]);
     }
 
     /// A build over a reference read without digests has nothing for a reader to check
