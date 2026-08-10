@@ -15,6 +15,7 @@
 //! sit below every floor a caller routes on, so every routing question stays answerable by
 //! filtering the file (spec §1, §4.1).
 
+pub mod builder;
 pub mod criteria;
 pub mod parquet_file;
 pub mod reader;
@@ -26,6 +27,7 @@ use crate::ng::reference_info::ContigInfo;
 use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::{ContigId, Motif, Position};
 
+pub use builder::{BuildTally, RepeatCatalogBuilder};
 pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
 pub use parquet_file::RepeatCatalogWriter;
 pub use reader::RepeatCatalog;

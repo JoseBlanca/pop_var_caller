@@ -134,7 +134,7 @@ observer. `reference_info` gains no import from `repeat_catalog`. Tests: the obs
 uppercased, equal the contig's; a `.fai`-only read calls nothing; the existing `reference_info` suite
 is unchanged and green. *Depends:* A1. *Source:* arch §2.1, spec §2.2.
 
-**C2. `RepeatCatalogBuilder` — sequential.**  ☐
+**C2. `RepeatCatalogBuilder` — sequential.**  ✅
 The observer impl: accumulate a contig, `find_tandem_repeats` over it whole, rows through A4, one row
 group per contig, `finish` returning the per-period tally. Tests on the fixture reference: a 2 kb
 tract comes out as **one row**; repeats at both contig ends behave as A4 specifies; the row order is
