@@ -1736,12 +1736,12 @@ mod tests {
         assert_eq!(c.window_bp, Bp(100_000), "100 kb window");
         assert_eq!(c.scan, ScanParams::default());
         assert_eq!(c.criteria, SsrSegmentCriteria::default());
-        // The short-read copy-number floors `[6,4,4,3,3,3]` (§2.3): the mono floor
+        // The short-read copy-number floors `[8,6,6,6,5,4]` (spec ssr §5.1): the mono floor
         // drops to 6 (Illumina read-artifact onset), the di floor to 4.
         let floors: Vec<u32> = (1..=6)
             .map(|p| c.criteria.min_copies.for_period(p))
             .collect();
-        assert_eq!(floors, vec![6, 4, 4, 3, 3, 3], "the short-read floors");
+        assert_eq!(floors, vec![8, 6, 6, 6, 5, 4], "the short-read floors");
     }
 
     /// The catalog's settings — what [`TypedRegionConfig::default`] carried before
@@ -2360,47 +2360,59 @@ mod tests {
             .collect()
     }
 
-    /// **The mononucleotide floor is exactly 6** (spec §2.3): five copies fall
-    /// through as `Generic`, six are a period-1 locus.
+    /// **The mononucleotide floor is exactly 8**: seven copies fall through as
+    /// `Generic`, eight are a period-1 locus.
     ///
     /// `a_homopolymer_of_six_or_more_is_a_period_one_locus_at_default` uses a
     /// 20 bp run — it proves homopolymers are typed at all, but sits far from the
     /// line and so would stay green through any floor edit. This pins the line
-    /// itself, which is what §10's sweep will move.
+    /// itself.
+    ///
+    /// **8 since 2026-08-10, measured, replacing an unmeasured 6.** The per-read
+    /// slippage rate fitted over 181 tomato libraries first reaches 5% at 9 to 13
+    /// repeats depending on the library; 8 takes one repeat of margin, since the
+    /// most-stuttering library reaches 3.6% there against 1.0% at 7
+    /// ([`MinCopies::default`](segment_criteria::MinCopies)).
     #[test]
-    fn the_mononucleotide_copy_floor_is_exactly_six() {
-        let below = loci_at_default(&contig_with_one_guarded_run(&[b'A'; 5], b'C'), "poly-A x5");
+    fn the_mononucleotide_copy_floor_is_exactly_eight() {
+        let below = loci_at_default(&contig_with_one_guarded_run(&[b'A'; 7], b'C'), "poly-A x7");
         assert!(
             below.is_empty(),
-            "5 copies is under the mono floor of 6 — the run stays Generic, got {below:?}"
+            "7 copies is under the mono floor of 8 — the run stays Generic, got {below:?}"
         );
 
-        let at = loci_at_default(&contig_with_one_guarded_run(&[b'A'; 6], b'C'), "poly-A x6");
-        assert_eq!(at.len(), 1, "6 copies clears the mono floor: {at:?}");
+        let at = loci_at_default(&contig_with_one_guarded_run(&[b'A'; 8], b'C'), "poly-A x8");
+        assert_eq!(at.len(), 1, "8 copies clears the mono floor: {at:?}");
         assert_eq!(at[0].period(), 1, "a homopolymer is period 1");
         assert_eq!(at[0].motif().as_bytes(), b"A");
-        assert_eq!(at[0].tract_len(), 6, "the whole run, and only the run");
+        assert_eq!(at[0].tract_len(), 8, "the whole run, and only the run");
     }
 
-    /// **The dinucleotide floor is exactly 4** (spec §2.3): three copies fall
-    /// through, four are a locus.
+    /// **The dinucleotide floor is exactly 6**: five copies fall through, six are a
+    /// locus.
     ///
-    /// This is the boundary B1 *moved* — the catalog's floor was 5, so a 4-copy
-    /// dinucleotide used to be `Generic` and is now a locus. Nothing recorded
-    /// that change until this test.
+    /// **6 since 2026-08-10, and it is the one floor two independent measurements
+    /// agree on.** The archive survey of 2,457 libraries puts the model-fit
+    /// crossing at 6 — below it, most of what differs from the reference differs by
+    /// something other than a whole number of copies — and the fitted slippage rate
+    /// over 181 libraries first reaches 5% at 6 to 9 repeats. Both land on 6 for the
+    /// most-stuttering library, which is the one a floor has to track.
     #[test]
-    fn the_dinucleotide_copy_floor_is_exactly_four() {
-        let below = loci_at_default(&contig_with_one_guarded_run(b"ATATAT", b'C'), "(AT)x3");
+    fn the_dinucleotide_copy_floor_is_exactly_six() {
+        let below = loci_at_default(&contig_with_one_guarded_run(b"ATATATATAT", b'C'), "(AT)x5");
         assert!(
             below.is_empty(),
-            "3 copies is under the di floor of 4 — the run stays Generic, got {below:?}"
+            "5 copies is under the di floor of 6 — the run stays Generic, got {below:?}"
         );
 
-        let at = loci_at_default(&contig_with_one_guarded_run(b"ATATATAT", b'C'), "(AT)x4");
-        assert_eq!(at.len(), 1, "4 copies clears the di floor: {at:?}");
+        let at = loci_at_default(
+            &contig_with_one_guarded_run(b"ATATATATATAT", b'C'),
+            "(AT)x6",
+        );
+        assert_eq!(at.len(), 1, "6 copies clears the di floor: {at:?}");
         assert_eq!(at[0].period(), 2);
         assert_eq!(at[0].motif().as_bytes(), b"AT");
-        assert_eq!(at[0].tract_len(), 8, "four copies of a 2 bp motif");
+        assert_eq!(at[0].tract_len(), 12, "six copies of a 2 bp motif");
     }
 
     /// **A rejected repeat is generic territory, not a hole** (spec §2.2). A
