@@ -17,6 +17,7 @@
 
 pub mod criteria;
 pub mod parquet_file;
+pub mod reader;
 pub mod row;
 
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ use crate::ng::types::{ContigId, Motif, Position};
 
 pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
 pub use parquet_file::RepeatCatalogWriter;
+pub use reader::RepeatCatalog;
 pub use row::{RowRejection, row_for_interval};
 
 /// How many rows a build wrote, per period — what `repeat-catalog` prints when it finishes
