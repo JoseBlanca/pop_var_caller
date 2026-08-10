@@ -60,13 +60,14 @@ use crate::ng::parameter_estimation::generic::accumulators::GenericAccumulators;
 use crate::ng::parameter_estimation::generic::fallback::resolve_error_rates;
 use crate::ng::parameter_estimation::generic::histogram::{Cell, DepthAltHistogram};
 use crate::ng::parameter_estimation::generic::noise_model::{
-    LibraryNoise, SampleLibraryNoise, SubstitutionNoiseModel,
+    LibraryNoise, SampleLibraryNoise, SubstitutionNoiseModel, append_genotype_likelihoods_at_class,
 };
 use crate::ng::parameter_estimation::generic::read_group_error_rate::{
     ReadGroupErrorRateFit, fit_read_group_error_rates,
 };
 use crate::ng::parameter_estimation::generic::{
     CoupledFit, DEFAULT_ERROR_RATE, MAX_COUPLED_FIT_ITERATIONS, MIN_SITES_TO_FIT, SampleRates,
+    SiteNoise,
 };
 use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError, Provenance};
 use crate::ng::types::{ErrorRate, GenotypeFrequency, LogProb, Ploidy, ReadGroupId};
@@ -146,7 +147,27 @@ pub(crate) fn fit_coupled_from_tables(
     let shares = library_shares(read_group_histograms);
     let start: BTreeMap<ReadGroupId, usize> = shares.keys().map(|&group| (group, start)).collect();
 
-    fit_by_alternation(
+    // **The second class of site is an outer layer, not a third block inside the
+    // alternation, and putting it inside was measured to be wrong.**
+    //
+    // Two reasons, and the first is the one that decided it. `fit_site_noise` misbehaves at
+    // a *wrong* clean rate: handed rates three times the truth it puts the second class on
+    // the ladder's finest rung, because a class at 10⁻⁵ is the cheapest way to absorb the
+    // all-reference sites a too-high clean rate cannot explain. Inside the loop that
+    // happens on every early round — on the two-library world of E2's oracle the first
+    // round claimed 72% of sites noisy at 1.3 × 10⁻², gaining 20,603 nats, and only after
+    // three more rounds did it correctly report none. The answers still converged, but the
+    // fit was being steered by a block reading a rate that had not settled.
+    //
+    // Second, it moved the shape of the alternation's trace on worlds with no second class
+    // at all — an extra round on four of E2's tests, and one oracle lost the premise that
+    // made it able to separate "the best iterate" from "the last iterate". A layer that is
+    // supposed to change nothing where it is not needed should change nothing.
+    //
+    // So: settle the rates and frequencies, fit the second class **at settled rates**, and
+    // if it moved, settle them again with it held fixed.
+    let mut site_noise: Option<SiteNoise> = None;
+    let mut fit = fit_by_alternation(
         sample,
         read_group_histograms,
         whole_sample,
@@ -154,8 +175,68 @@ pub(crate) fn fit_coupled_from_tables(
         supplied,
         &start,
         MAX_COUPLED_FIT_ITERATIONS,
+        site_noise,
     )
-    .map(|(fit, _)| fit)
+    .map(|(fit, _)| fit)?;
+
+    for _ in 0..MAX_SITE_NOISE_PASSES {
+        let cells: Vec<Cell> = whole_sample
+            .iter()
+            .flat_map(|(&ploidy, table)| table.cells(ploidy))
+            .collect();
+        let noise = noise_from(&shares, &rungs_of(&fit, ladder), ladder, None);
+        let frequencies = frequencies_of(&fit);
+        let found = fit_site_noise(&cells, &noise, &frequencies, ladder).site_noise;
+        if found.map(SiteNoise::noisy_error_rate) == site_noise.map(SiteNoise::noisy_error_rate) {
+            break;
+        }
+        site_noise = found;
+        fit = fit_by_alternation(
+            sample,
+            read_group_histograms,
+            whole_sample,
+            ladder,
+            supplied,
+            &start,
+            MAX_COUPLED_FIT_ITERATIONS,
+            site_noise,
+        )
+        .map(|(fit, _)| fit)?;
+    }
+    Ok(fit)
+}
+
+/// How many times the rates may be settled again after the second class of site moved.
+///
+/// Two is the ordinary answer — one pass finds the class, the second confirms it did not
+/// move once the rates were re-settled around it — and the cap is the guard against a pair
+/// that oscillates rather than a budget the fit is expected to spend.
+const MAX_SITE_NOISE_PASSES: u32 = 5;
+
+/// The rungs a finished fit's rates sit on, for handing back to [`noise_from`].
+fn rungs_of(fit: &CoupledFit, ladder: &[ErrorRate]) -> BTreeMap<ReadGroupId, usize> {
+    fit.error_rate
+        .iter()
+        .map(|(&group, estimate)| (group, nearest_rung(ladder, estimate.value.get())))
+        .collect()
+}
+
+/// A finished fit's genotype frequencies, in the shape the site-noise block reads.
+fn frequencies_of(fit: &CoupledFit) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
+    fit.rates
+        .iter()
+        .map(|(&ploidy, estimate)| {
+            (
+                ploidy,
+                estimate
+                    .value
+                    .by_alt_copies()
+                    .iter()
+                    .map(|frequency| frequency.get())
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// The alternation, with the start and the cap named rather than taken from constants.
@@ -169,6 +250,10 @@ pub(crate) fn fit_coupled_from_tables(
 /// argmax of the trace rather than its last entry. The scores alone are not enough for
 /// that: on a converged world every iterate scores the same to the bit, and the rungs and
 /// frequencies are what separate them.
+// Eight arguments, one over clippy's default. Six of them are the tables, the ladder and
+// the two knobs a test moves; grouping them into a config struct would add a type whose
+// only job is to be destructured at the single production call site and three test ones.
+#[allow(clippy::too_many_arguments)]
 fn fit_by_alternation(
     sample: &str,
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
@@ -177,6 +262,7 @@ fn fit_by_alternation(
     supplied: &BTreeMap<ReadGroupId, ErrorRate>,
     start: &BTreeMap<ReadGroupId, usize>,
     max_iterations: u32,
+    site_noise: Option<SiteNoise>,
 ) -> Result<(CoupledFit, Vec<ScoredIterate>), ParameterEstimationError> {
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
     assert!(
@@ -220,7 +306,7 @@ fn fit_by_alternation(
 
     while iterations < max_iterations {
         iterations += 1;
-        let noise = noise_from(&shares, &rungs, ladder);
+        let noise = noise_from(&shares, &rungs, ladder, site_noise);
 
         // Step 1 — the frequencies, from the whole-sample table at the current rates.
         let genotype_frequencies = climb_frequencies(&cells_of_ploidy, &noise);
@@ -239,7 +325,7 @@ fn fit_by_alternation(
         // table, which is what makes "best-scoring" a defined comparison between rounds.
         // Neither block's own score is: step 1's belongs to the previous rates and step 2's
         // to a different table.
-        let noise = noise_from(&shares, &next_rungs, ladder);
+        let noise = noise_from(&shares, &next_rungs, ladder, site_noise);
         let score = whole_sample_score(&all_cells, &noise, &genotype_frequencies);
 
         let settled = next_rungs == rungs;
@@ -439,6 +525,7 @@ fn noise_from(
     shares: &BTreeMap<ReadGroupId, f64>,
     rungs: &BTreeMap<ReadGroupId, usize>,
     ladder: &[ErrorRate],
+    site_noise: Option<SiteNoise>,
 ) -> SampleLibraryNoise {
     assert_eq!(
         shares.keys().collect::<Vec<_>>(),
@@ -446,15 +533,17 @@ fn noise_from(
         "the libraries with a share of the reads and the libraries with a fitted rate are \
          different sets"
     );
-    SampleLibraryNoise::new(
-        shares
-            .iter()
-            .map(|(&read_group, &share_of_reads)| LibraryNoise {
-                read_group,
-                share_of_reads,
-                error_rate: ladder[rungs[&read_group]],
-            }),
-    )
+    let libraries = shares
+        .iter()
+        .map(|(&read_group, &share_of_reads)| LibraryNoise {
+            read_group,
+            share_of_reads,
+            error_rate: ladder[rungs[&read_group]],
+        });
+    match site_noise {
+        None => SampleLibraryNoise::new(libraries),
+        Some(site_noise) => SampleLibraryNoise::with_site_noise(libraries, site_noise),
+    }
 }
 
 /// Step 1 — the genotype frequencies that best explain the whole-sample table at these
@@ -484,6 +573,234 @@ fn climb_frequencies(
         climbed.insert(ploidy, fit_mixture_weights(table, &cell_weights));
     }
     climbed
+}
+
+/// What fitting the second class of site returned, and how hard it had to look.
+///
+/// `site_noise` is `None` when no second class beat the one-class score, which is the
+/// answer a sample whose sites really do come from one population should get.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) struct SiteNoiseFit {
+    pub(super) site_noise: Option<SiteNoise>,
+    /// How much better than the one-class score, in nats over the whole table. Zero when
+    /// `site_noise` is `None`.
+    pub(super) gained: f64,
+    /// Whether the winning noisy rate is an **end** of the ladder, where the fit is
+    /// reporting the edge of the search rather than a maximum inside it — the same bit
+    /// `ScanResult::argmax_at_ladder_end` carries for the clean rates, and the same reason:
+    /// it is what separates a railed fit from a plausible-looking number.
+    pub(super) noisy_rate_at_ladder_end: bool,
+}
+
+/// How many rounds the share and the noisy rate may take to settle before the fit gives up
+/// on them moving. Reached only by a surface flat to the last bits; the measured worlds
+/// settle in under ten.
+const MAX_SITE_NOISE_ROUNDS: u32 = 100;
+
+/// How much log-likelihood a second class of site must buy before it is reported at all.
+///
+/// **A likelihood-ratio floor, not a tolerance.** The second class costs two parameters —
+/// a share and a rate — and χ²(2) at p ≈ 0.05 is 5.99, which is a log-likelihood gain of
+/// 3.0. Below that the data does not distinguish two classes of site from one, and
+/// emitting a share and a rate anyway would put two fabricated numbers in front of a
+/// reader who has no way to tell them from measured ones.
+///
+/// **It also has to clear the arithmetic.** On a real sample the score is a sum over
+/// hundreds of cells weighted by hundreds of millions of sites, so summing it in `f64`
+/// carries a rounding error of order 10⁻⁴ nats; on a world generated by one error rate the
+/// best rung beats the one-class score by about 3 × 10⁻⁵. Any floor between those and the
+/// thousands of nats a real second class buys would do — 3.0 is the one with a reason.
+const MIN_SITE_NOISE_GAIN: f64 = 3.0;
+
+/// How still the noisy-site share must be for a round to count as settled.
+///
+/// **A tolerance, unlike everywhere else in this module, and the reason is structural.**
+/// Every other quantity the alternation settles is a rung, so "moves by less than one rung"
+/// and "does not move" are the same testable condition. A share is a real number on `[0, 1]`
+/// with no ladder under it. What keeps the tolerance from mattering: the share's own step is
+/// an expectation-maximisation update, which is monotone in the score, so stopping early
+/// costs a little score and never a different answer.
+const SITE_NOISE_SHARE_TOLERANCE: f64 = 1e-12;
+
+/// The second class of site that best explains `cells`, given the frequencies and the
+/// libraries' own rates.
+///
+/// # Why there is no multi-start here, against what the plan expected
+///
+/// The milestone plan asked for multi-start over the separation between the two classes,
+/// on the precedent of the inbreeding fit — where starts that disagreed only about how much
+/// of the genome sat inside a run all missed a genome whose states were close together, and
+/// returned `F` = 0.0000 converged and silent. **That trap does not exist on this surface,
+/// and the reason is worth stating rather than discovering twice.**
+///
+/// The noisy rate is not searched from a start at all: it is taken from **every rung of the
+/// ladder**, exhaustively, so no starting point can miss it. And for a fixed noisy rate the
+/// score is `Σ_c n_c · ln((1 − w)·A_c + w·B_c)` with `A_c` and `B_c` held constant, which is
+/// concave in `w` — one maximum, reached from anywhere. An exhaustive scan crossed with a
+/// concave climb has nowhere for a second optimum to hide.
+///
+/// # What it returns
+///
+/// `None` when the best pair does not beat scoring every site at the libraries' own rates.
+/// A world with one class of site reaches that exactly, since the clean rate is itself a
+/// rung and a noisy class at the same rate is the one-class rule again.
+///
+/// # Panics
+///
+/// If `ladder` is empty, or if a ploidy present among the cells has no frequencies.
+pub(super) fn fit_site_noise(
+    cells: &[Cell],
+    libraries: &SampleLibraryNoise,
+    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    ladder: &[ErrorRate],
+) -> SiteNoiseFit {
+    assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
+
+    // The clean branch does not move as the noisy rate is scanned, so it is marginalised
+    // over the genotypes once and reused by all 161 rungs.
+    let clean = marginal_over_genotypes(cells, libraries, genotype_frequencies, None);
+    let weights: Vec<f64> = cells.iter().map(|cell| cell.sites as f64).collect();
+    let one_class: f64 = weights
+        .iter()
+        .zip(&clean)
+        .map(|(weight, ln_likelihood)| weight * ln_likelihood)
+        .sum();
+
+    let mut best: Option<(f64, usize, f64)> = None;
+    let mut noisy = Vec::new();
+    for (rung, rate) in ladder.iter().enumerate() {
+        noisy.clear();
+        noisy.extend(marginal_over_genotypes(
+            cells,
+            libraries,
+            genotype_frequencies,
+            Some(rate.get()),
+        ));
+        let (share, score) = climb_the_share(&clean, &noisy, &weights);
+        // `>` and not `>=`: the ladder ascends in Phred, so a tie keeps the **coarser**
+        // rate — the same direction the clean-rate scan resolves a tie in, and the one
+        // that refuses to claim a finer noisy class than the data distinguishes.
+        if best.as_ref().is_none_or(|&(kept, _, _)| score > kept) {
+            best = Some((score, rung, share));
+        }
+    }
+
+    let (score, rung, share) = best.expect("a non-empty ladder leaves a best rung");
+    // A share that has collapsed to nothing is a sample with one class of site, whatever
+    // rung the scan happened to stop on: the rate of a class holding no sites is not a
+    // number about this sample.
+    if score - one_class <= MIN_SITE_NOISE_GAIN || share <= 0.0 {
+        return SiteNoiseFit {
+            site_noise: None,
+            gained: 0.0,
+            noisy_rate_at_ladder_end: false,
+        };
+    }
+    SiteNoiseFit {
+        site_noise: Some(
+            SiteNoise::try_new(share, ladder[rung]).expect("a climbed share is a fraction"),
+        ),
+        gained: score - one_class,
+        noisy_rate_at_ladder_end: rung == 0 || rung == ladder.len() - 1,
+    }
+}
+
+/// `ln Σ_j π_j · L(cell | j)` for every cell, at one class of site — the cell's likelihood
+/// with the genotype summed out, which is what the share is weighed on.
+fn marginal_over_genotypes(
+    cells: &[Cell],
+    libraries: &SampleLibraryNoise,
+    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    noisy_rate: Option<f64>,
+) -> Vec<f64> {
+    let mut per_genotype = Vec::new();
+    cells
+        .iter()
+        .map(|cell| {
+            per_genotype.clear();
+            append_genotype_likelihoods_at_class(
+                cell,
+                libraries,
+                cell.ploidy,
+                noisy_rate,
+                &mut per_genotype,
+            );
+            let frequencies = genotype_frequencies
+                .get(&cell.ploidy)
+                .unwrap_or_else(|| panic!("no genotype frequencies for ploidy {}", cell.ploidy));
+            ln_weighted_sum(&per_genotype, frequencies)
+        })
+        .collect()
+}
+
+/// `ln Σ_j w_j e^{x_j}`, over the largest term so that no genotype's likelihood overflows,
+/// and answering `−∞` rather than `NaN` when every term is impossible.
+fn ln_weighted_sum(ln_terms: &[f64], weights: &[f64]) -> f64 {
+    let largest = ln_terms
+        .iter()
+        .zip(weights)
+        .filter(|&(_, &weight)| weight > 0.0)
+        .map(|(&term, _)| term)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if largest == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    let sum: f64 = ln_terms
+        .iter()
+        .zip(weights)
+        .map(|(&term, &weight)| weight * (term - largest).exp())
+        .sum();
+    largest + sum.ln()
+}
+
+/// The share of noisy sites that best explains the two branches, and the score there.
+///
+/// Expectation-maximisation on a two-component mixture whose component likelihoods are
+/// fixed, so each round cannot lower the score and the surface it climbs has one maximum.
+fn climb_the_share(clean: &[f64], noisy: &[f64], weights: &[f64]) -> (f64, f64) {
+    let total: f64 = weights.iter().sum();
+    if total <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let mut share: f64 = 0.5;
+    for _ in 0..MAX_SITE_NOISE_ROUNDS {
+        let (ln_clean_share, ln_noisy_share) = ((1.0 - share).ln(), share.ln());
+        let mut responsibility = 0.0;
+        for ((&weight, &a), &b) in weights.iter().zip(clean).zip(noisy) {
+            let (from_clean, from_noisy) = (ln_clean_share + a, ln_noisy_share + b);
+            let larger = from_clean.max(from_noisy);
+            if larger == f64::NEG_INFINITY {
+                continue;
+            }
+            let (a, b) = ((from_clean - larger).exp(), (from_noisy - larger).exp());
+            responsibility += weight * b / (a + b);
+        }
+        let next = responsibility / total;
+        let settled = (next - share).abs() < SITE_NOISE_SHARE_TOLERANCE;
+        share = next;
+        if settled {
+            break;
+        }
+    }
+    (share, score_at_share(clean, noisy, weights, share))
+}
+
+/// The whole table's score at one share of noisy sites.
+fn score_at_share(clean: &[f64], noisy: &[f64], weights: &[f64], share: f64) -> f64 {
+    let (ln_clean_share, ln_noisy_share) = ((1.0 - share).ln(), share.ln());
+    weights
+        .iter()
+        .zip(clean)
+        .zip(noisy)
+        .map(|((&weight, &a), &b)| {
+            let (from_clean, from_noisy) = (ln_clean_share + a, ln_noisy_share + b);
+            let larger = from_clean.max(from_noisy);
+            if larger == f64::NEG_INFINITY {
+                return 0.0;
+            }
+            weight * (larger + ((from_clean - larger).exp() + (from_noisy - larger).exp()).ln())
+        })
+        .sum()
 }
 
 /// The whole-sample table's weighted log-likelihood at one pair of rates and frequencies,
@@ -538,7 +855,7 @@ mod tests {
     use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
     use crate::ng::parameter_estimation::generic::error_rate_ladder;
     use crate::ng::parameter_estimation::generic::expected_counts::{
-        alternative_read_probability, table_generated_at,
+        alternative_read_probability, cells_over_a_real_depth_distribution, table_generated_at,
     };
 
     /// Phred 30 — rung 80 of the adopted ladder, which starts at Phred 10 and steps by
@@ -686,6 +1003,7 @@ mod tests {
                 &BTreeMap::new(),
                 start,
                 max_iterations,
+                None,
             )
             .expect("the world holds enough sites to fit")
         }
@@ -988,13 +1306,13 @@ mod tests {
 
         let at_its_own = whole_sample_score(
             &cells,
-            &noise_from(&shares, &rungs, &world.ladder),
+            &noise_from(&shares, &rungs, &world.ladder, None),
             &frequencies,
         )
         .get();
         let at_the_start = whole_sample_score(
             &cells,
-            &noise_from(&shares, &start, &world.ladder),
+            &noise_from(&shares, &start, &world.ladder, None),
             &frequencies,
         )
         .get();
@@ -1130,7 +1448,7 @@ mod tests {
         let shares = BTreeMap::from([(ReadGroupId(1), 0.5), (ReadGroupId(2), 0.5)]);
         let rungs = BTreeMap::from([(ReadGroupId(1), 80), (ReadGroupId(3), 64)]);
 
-        let _ = noise_from(&shares, &rungs, &ladder);
+        let _ = noise_from(&shares, &rungs, &ladder, None);
     }
 
     /// Each library's rate reaches the library that produced it. Two libraries whose rungs
@@ -1145,7 +1463,7 @@ mod tests {
             (ReadGroupId(2), RUNG_AT_PHRED_26),
         ]);
 
-        let noise = noise_from(&shares, &rungs, &ladder);
+        let noise = noise_from(&shares, &rungs, &ladder, None);
 
         let libraries = noise.libraries();
         assert_eq!(libraries.len(), 2);
@@ -1565,6 +1883,7 @@ mod tests {
                 &BTreeMap::new(),
                 start,
                 max_iterations,
+                None,
             )
             .expect("the world holds enough sites to fit")
         }
@@ -1884,7 +2203,7 @@ mod tests {
         for (round, reported) in trace.iter().map(|iterate| iterate.score).enumerate() {
             let genotype_frequencies = climb_frequencies(
                 &cells_of_ploidy,
-                &noise_from(&shares, &rungs, &world.ladder),
+                &noise_from(&shares, &rungs, &world.ladder, None),
             );
             let fitted = fit_read_group_error_rates(
                 &world.read_group_histograms,
@@ -1898,13 +2217,13 @@ mod tests {
 
             let at_this_rounds_rates = whole_sample_score(
                 &all_cells,
-                &noise_from(&shares, &next, &world.ladder),
+                &noise_from(&shares, &next, &world.ladder, None),
                 &genotype_frequencies,
             )
             .get();
             let at_last_rounds_rates = whole_sample_score(
                 &all_cells,
-                &noise_from(&shares, &rungs, &world.ladder),
+                &noise_from(&shares, &rungs, &world.ladder, None),
                 &genotype_frequencies,
             )
             .get();
@@ -1956,5 +2275,234 @@ mod tests {
 
         assert_eq!(nearest_rung(&ladder, inside_the_band), 80);
         assert_eq!(in_probability, 81, "the two metrics have to disagree here");
+    }
+
+    // -----------------------------------------------------------------
+    // The second class of site: `fit_site_noise` against the two worlds of
+    // `research/noise_model_overdispersion_2026-08-10.md`, generated in closed form over
+    // the depth distribution of a real 30x human walk. No sampling noise in either, so a
+    // departure is bias.
+    // -----------------------------------------------------------------
+
+    /// The truth both worlds are drawn from: a hundredth of sites heterozygous, a
+    /// thousandth homozygous non-reference.
+    const TRUE_FREQUENCIES: [f64; 3] = [0.9885, 0.0105, 0.0010];
+
+    fn ladder_rung_nearest(rate: f64) -> f64 {
+        let ladder = error_rate_ladder();
+        ladder[nearest_rung(&ladder, rate)].get()
+    }
+
+    fn frequencies_of(values: [f64; 3]) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
+        let mut out: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = BTreeMap::new();
+        out.insert(ploidy(2), SmallVec::from_slice(&values));
+        out
+    }
+
+    /// **The control: a world that does not need a second class must not be given one.**
+    ///
+    /// The two-class model *contains* the one-class model — any share with the two rates
+    /// equal is the one-class rule again — so on a world generated by a single error rate
+    /// the maximum is the generating truth and there is nothing to trade against it. The
+    /// fit must therefore either decline the second class outright, or take one whose rate
+    /// is the clean rate, which is the same answer written differently.
+    ///
+    /// **An earlier measurement claimed this cost the error rate 1.10% and produced a
+    /// spurious 0.48% noisy class. That was an expectation-maximisation stopped after a
+    /// fixed number of rounds, not a property of the model** — scored directly, the truth
+    /// beat the point it stopped at. This test is what would have caught that, because it
+    /// asserts against the truth rather than against whatever the optimiser reached.
+    #[test]
+    fn a_world_with_one_error_rate_is_given_no_second_class() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        for &rate in &[ladder_rung_nearest(1.0e-3), ladder_rung_nearest(4.0e-3)] {
+            let cells = cells_over_a_real_depth_distribution(
+                &edges,
+                rate,
+                None,
+                ploidy(2),
+                &TRUE_FREQUENCIES,
+            );
+            let libraries = SampleLibraryNoise::single(
+                ReadGroupId(0),
+                ErrorRate::try_new(rate).expect("a probability"),
+            );
+            let fit = fit_site_noise(
+                &cells,
+                &libraries,
+                &frequencies_of(TRUE_FREQUENCIES),
+                &ladder,
+            );
+            assert!(
+                fit.site_noise.is_none(),
+                "a one-class world at {rate:e} was given a second class at {:e} holding \
+                 {:.4} of its sites, gaining {:e} nats",
+                fit.site_noise.expect("checked").noisy_error_rate().get(),
+                fit.site_noise.expect("checked").noisy_fraction(),
+                fit.gained
+            );
+            // **Relative to the table's own scale, because that is what "no gain" means
+            // here.** The weights sum to about 5.5 × 10¹¹ and the score to about −10¹², so
+            // summing it in `f64` carries a rounding error near 10⁻⁴ nats — and the
+            // fixture's own cell counts are rounded to a millionth of a site. An absolute
+            // threshold below either is a test of arithmetic noise. Per site, the gain
+            // must be nothing that could move an answer.
+            let sites: f64 = cells.iter().map(|cell| cell.sites as f64).sum();
+            assert!(
+                fit.gained / sites < 1e-12,
+                "a one-class world at {rate:e} gained {:e} nats over {sites:e} sites of \
+                 weight from a second class, and the maximum of a model that contains the \
+                 truth is the truth",
+                fit.gained
+            );
+        }
+    }
+
+    /// **Recovery: a world that has a second class must have it found**, both the share and
+    /// the rate, from a fit that was told neither.
+    ///
+    /// The rate is asserted to the rung, which is all the ladder can express; the share to
+    /// four decimal places, which is what the research note measured.
+    #[test]
+    fn a_world_with_a_noisy_class_has_it_recovered() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let clean = ladder_rung_nearest(1.0e-3);
+        for &(share, noisy) in &[(0.0100, 5.0e-2), (0.0050, 2.0e-2), (0.0300, 8.0e-2)] {
+            let noisy = ladder_rung_nearest(noisy);
+            let cells = cells_over_a_real_depth_distribution(
+                &edges,
+                clean,
+                Some((share, noisy)),
+                ploidy(2),
+                &TRUE_FREQUENCIES,
+            );
+            let libraries = SampleLibraryNoise::single(
+                ReadGroupId(0),
+                ErrorRate::try_new(clean).expect("a probability"),
+            );
+            let fit = fit_site_noise(
+                &cells,
+                &libraries,
+                &frequencies_of(TRUE_FREQUENCIES),
+                &ladder,
+            );
+            let site = fit.site_noise.unwrap_or_else(|| {
+                panic!(
+                    "a world with {share} of its sites noisy at {noisy:e} was given no second class"
+                )
+            });
+            assert!(
+                (site.noisy_error_rate().get() - noisy).abs() < 1e-12,
+                "the noisy rate came back {:e} for a generating {noisy:e}",
+                site.noisy_error_rate().get()
+            );
+            assert!(
+                (site.noisy_fraction() - share).abs() < 1e-4,
+                "the noisy share came back {:.6} for a generating {share}",
+                site.noisy_fraction()
+            );
+            assert!(
+                !fit.noisy_rate_at_ladder_end,
+                "the noisy rate landed on an end of the ladder"
+            );
+            assert!(fit.gained > 0.0, "a real second class must beat one class");
+        }
+    }
+
+    /// **This block cannot repair a wrong clean rate, and when it tries it rails and says
+    /// so.** Written expecting the opposite, and the measurement corrected it.
+    ///
+    /// Handed a clean rate three times the truth — the deliberate wrongness E2's oracle
+    /// uses — the fit does not find the noisy class at 5 × 10⁻². It puts the second class
+    /// at the ladder's **finest** rung instead, because with the clean rate too high the
+    /// table holds far more all-reference sites than that rate predicts, and a class at
+    /// 10⁻⁵ is the cheapest way to absorb them.
+    ///
+    /// That is correct behaviour for a block whose only job is the second class: the clean
+    /// rate belongs to the read-group scan, and repairing a wrong one is the alternation's
+    /// business, not this function's. **What matters is that the answer is not silent** —
+    /// a noisy rate on an end of the ladder is the edge of the search rather than a maximum
+    /// inside it, and `noisy_rate_at_ladder_end` is the bit that separates the two.
+    #[test]
+    fn a_wrong_clean_rate_rails_the_second_class_and_the_flag_says_so() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let clean = ladder_rung_nearest(1.0e-3);
+        let noisy = ladder_rung_nearest(5.0e-2);
+        let cells = cells_over_a_real_depth_distribution(
+            &edges,
+            clean,
+            Some((0.01, noisy)),
+            ploidy(2),
+            &TRUE_FREQUENCIES,
+        );
+        let libraries = SampleLibraryNoise::single(
+            ReadGroupId(0),
+            ErrorRate::try_new(ladder_rung_nearest(3.0e-3)).expect("a probability"),
+        );
+        let fit = fit_site_noise(
+            &cells,
+            &libraries,
+            &frequencies_of(TRUE_FREQUENCIES),
+            &ladder,
+        );
+        let site = fit
+            .site_noise
+            .expect("a second class is preferred to none even from a wrong clean rate");
+        assert!(
+            fit.noisy_rate_at_ladder_end,
+            "the second class came back at {:e}, off the ladder's ends, so this fixture no \
+             longer exercises the rail flag",
+            site.noisy_error_rate().get()
+        );
+        assert!(
+            site.noisy_error_rate().get() < ladder_rung_nearest(3.0e-3),
+            "the rail is expected at the fine end, absorbing all-reference sites the too-high \
+             clean rate cannot explain, and it came back at {:e}",
+            site.noisy_error_rate().get()
+        );
+        // And with the clean rate right, the same cells put the class where it belongs and
+        // the flag clears — so the flag is reporting the clean rate's wrongness and not a
+        // property of this world.
+        let honest = fit_site_noise(
+            &cells,
+            &SampleLibraryNoise::single(
+                ReadGroupId(0),
+                ErrorRate::try_new(clean).expect("a probability"),
+            ),
+            &frequencies_of(TRUE_FREQUENCIES),
+            &ladder,
+        );
+        assert!(!honest.noisy_rate_at_ladder_end);
+    }
+
+    /// A share that has collapsed to nothing is reported as **no second class**, whatever
+    /// rung the scan stopped on — the rate of a class holding no sites is not a number
+    /// about the sample, and emitting one would put a fabricated rate in front of a reader.
+    #[test]
+    fn a_collapsed_share_is_reported_as_no_second_class() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let rate = ladder_rung_nearest(2.0e-3);
+        let cells =
+            cells_over_a_real_depth_distribution(&edges, rate, None, ploidy(2), &TRUE_FREQUENCIES);
+        let libraries = SampleLibraryNoise::single(
+            ReadGroupId(0),
+            ErrorRate::try_new(rate).expect("a probability"),
+        );
+        let fit = fit_site_noise(
+            &cells,
+            &libraries,
+            &frequencies_of(TRUE_FREQUENCIES),
+            &ladder,
+        );
+        if let Some(site) = fit.site_noise {
+            assert!(
+                site.noisy_fraction() > 0.0,
+                "a second class holding no sites was emitted"
+            );
+        }
     }
 }

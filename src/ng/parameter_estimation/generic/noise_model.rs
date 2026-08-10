@@ -337,25 +337,16 @@ impl NoiseModel for SubstitutionNoiseModel {
 
         out.reserve(self.genotypes(ploidy));
         for alt_copies in 0..=ploidy.get() {
-            let at = |class: SiteClass| match cell.key.attribution() {
-                Attribution::Pooled => ln_likelihood_pooled(
+            let at = |class: SiteClass| {
+                ln_likelihood_at(
+                    cell,
                     depth,
-                    alt_reads,
                     reference_reads,
                     noise,
                     ploidy,
                     alt_copies,
                     class,
-                ),
-                Attribution::ByReadGroup(listing) => ln_likelihood_attributed(
-                    depth,
-                    reference_reads,
-                    listing,
-                    noise,
-                    ploidy,
-                    alt_copies,
-                    class,
-                ),
+                )
             };
             // **The site class is drawn before the reads are, so it factors out in front
             // of the whole multinomial** rather than into any of its categories. That is
@@ -373,6 +364,80 @@ impl NoiseModel for SubstitutionNoiseModel {
                 }
             });
         }
+    }
+}
+
+/// `ln L(cell | genotype)` at **one** class of site.
+///
+/// The rule [`SubstitutionNoiseModel::append_genotype_likelihoods`] applies is these two
+/// combined. A fit that has to weigh the classes against each other needs them apart, and
+/// taking both from here rather than re-deriving one of them is what keeps the fit and the
+/// score it is maximising from drifting into different expressions.
+fn ln_likelihood_at(
+    cell: &Cell,
+    depth: f64,
+    reference_reads: f64,
+    noise: &SampleLibraryNoise,
+    ploidy: Ploidy,
+    alt_copies: u8,
+    class: SiteClass,
+) -> f64 {
+    match cell.key.attribution() {
+        Attribution::Pooled => ln_likelihood_pooled(
+            depth,
+            cell.key.alt_reads(),
+            reference_reads,
+            noise,
+            ploidy,
+            alt_copies,
+            class,
+        ),
+        Attribution::ByReadGroup(listing) => ln_likelihood_attributed(
+            depth,
+            reference_reads,
+            listing,
+            noise,
+            ploidy,
+            alt_copies,
+            class,
+        ),
+    }
+}
+
+/// Every genotype's `ln L(cell | genotype)` at one class of site, appended in the model's
+/// own order — the two halves the mixed rule combines, for a fit that must weigh them.
+///
+/// `noisy_rate` of `None` asks for the clean class, where each library uses its own rate.
+///
+/// # Panics
+///
+/// As [`SubstitutionNoiseModel::append_genotype_likelihoods`].
+pub(super) fn append_genotype_likelihoods_at_class(
+    cell: &Cell,
+    noise: &SampleLibraryNoise,
+    ploidy: Ploidy,
+    noisy_rate: Option<f64>,
+    out: &mut Vec<f64>,
+) {
+    assert_eq!(
+        ploidy, cell.ploidy,
+        "a cell of ploidy {} scored against the genotypes of ploidy {ploidy}",
+        cell.ploidy
+    );
+    let depth = cell.mean_depth;
+    let reference_reads = (depth - f64::from(cell.key.alt_reads())).max(0.0);
+    let class = noisy_rate.map_or(SiteClass::Clean, SiteClass::Noisy);
+    out.reserve(usize::from(ploidy.get()) + 1);
+    for alt_copies in 0..=ploidy.get() {
+        out.push(ln_likelihood_at(
+            cell,
+            depth,
+            reference_reads,
+            noise,
+            ploidy,
+            alt_copies,
+            class,
+        ));
     }
 }
 

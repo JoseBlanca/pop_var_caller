@@ -92,13 +92,21 @@ floating point at `w = 0`. Plus a fifth that is new and is what catches a mis-we
 over an alignment no worktree carries and could not be re-derived from anything in the
 repository; everything else in N3 can.
 
-### N3b. Fitting the two new parameters.  ☐ **Own commit, do not bundle.**
+### N3b. Fitting the two new parameters.  ✅ **Own commit, do not bundle.**
 
-Expectation-maximisation for `w` and `ε_noisy` inside the coupled loop, beside the ladder scan
-that settles each library's `ε`. Multi-start over the separation between the two classes, not
-over `w` alone — **the same trap the inbreeding fit hit**, where starts that disagreed only
-about how much of the genome was inside a run returned `F` = 0.0000, converged and silent
-(research note 2026-08-06 §3.4).
+**Two deviations from what this step expected, both measured.**
+**No multi-start, because the surface has no trap.** `ε_noisy` is taken from every rung of the
+ladder exhaustively, so no start can miss it, and for a fixed rate the score is concave in
+`w` — an exhaustive scan crossed with a concave climb has nowhere for a second optimum to
+hide. The inbreeding fit's trap does not transfer.
+**And the fit is an outer layer, not a third block inside the alternation**, which is where it
+was first put. `fit_site_noise` misbehaves at a *wrong* clean rate — handed rates three times
+the truth it rails at the ladder's finest rung, absorbing the all-reference sites the too-high
+rate cannot explain — and inside the loop that happens on every early round: on E2's
+two-library world the first round claimed 72% of sites noisy at 1.3 × 10⁻², gaining 20,603
+nats. It still converged, but it also moved the alternation's trace on worlds with **no**
+second class, costing one oracle the premise that let it separate the best iterate from the
+last. A layer that should change nothing where it is not needed must change nothing.
 
 **The silent failure this isolates:** two classes that collapse into one, or swap, both return
 a plausible pair and report convergence.
