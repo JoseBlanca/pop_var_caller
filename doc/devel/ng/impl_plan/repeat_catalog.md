@@ -182,7 +182,7 @@ identical set. *Depends:* D3. *Source:* arch §2.3, spec §5.3.
 
 ### Milestone E — the command
 
-**E1. `pop_var_caller_exp repeat-catalog`.**  ☐
+**E1. `pop_var_caller_exp repeat-catalog`.**  ✅
 `RepeatCatalogArgs`, `run_repeat_catalog`, `RepeatCatalogCliError`, and the new
 `PopVarCallerExpCommand` variant — mirroring `typed_regions.rs`. `--reference` required; `--output`
 defaulting to a sibling of the FASTA; `--threads`; the criteria knobs; `--force` guarding an existing

@@ -720,7 +720,9 @@ mod tests {
             "regions.tsv",
         ])
         .unwrap();
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd;
+        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+            panic!("the parsed command is not type-regions");
+        };
         assert_eq!(args.reference, PathBuf::from("r.fa"));
         assert_eq!(args.output, PathBuf::from("regions.tsv"));
         assert_eq!(args.regions, None);
@@ -1338,7 +1340,9 @@ mod tests {
             argv.push(bed.display().to_string());
         }
         let cli = Cli::try_parse_from(argv).expect("the args parse");
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd;
+        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+            panic!("the parsed command is not type-regions");
+        };
         args
     }
 
@@ -1958,7 +1962,9 @@ mod tests {
             "9,5,4,3,3,3",
         ])
         .expect("six values parse");
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd;
+        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+            panic!("the parsed command is not type-regions");
+        };
         assert_eq!(args.min_copies.for_period(1), 9);
         assert_eq!(args.min_copies.for_period(2), 5);
     }

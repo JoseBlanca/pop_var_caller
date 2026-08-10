@@ -9,7 +9,9 @@
 //! its `Args`, its `run_*`, and its `#[non_exhaustive]` error enum.
 
 pub mod cli;
+pub mod repeat_catalog;
 pub mod typed_regions;
 
 pub use cli::{Cli, PopVarCallerExpCommand};
+pub use repeat_catalog::{RepeatCatalogArgs, RepeatCatalogCliError, run_repeat_catalog};
 pub use typed_regions::{TypedRegionsArgs, TypedRegionsCliError, run_typed_regions};
