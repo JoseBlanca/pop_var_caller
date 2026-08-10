@@ -1200,7 +1200,7 @@ fn count_motif(repeat: &[u8], motif: &[u8]) -> usize {
 /// `true` if `motif` is itself internally periodic — a non-fundamental period
 /// such as `ATAT = (AT)²` (GangSTR `is_compound`, threshold 0.8). A motif whose
 /// shorter prefix `sub` tiles more than 80% of it is compound.
-fn is_compound(motif: &[u8]) -> bool {
+pub(crate) fn is_compound(motif: &[u8]) -> bool {
     let l = motif.len();
     const THRESHOLD: f64 = 0.8;
     for i in 1..=(l / 2) {
@@ -1409,7 +1409,7 @@ pub fn bundle_clusters(
 /// No source comment of GangSTR's says why bundles are dropped at all (spec §10);
 /// keeping selection and disposal separable is what lets that question be asked
 /// later, with the evidence in hand.
-fn split_bundles(
+pub(crate) fn split_bundles(
     recs: Vec<RepeatInterval>,
     thresh: u64,
 ) -> (Vec<RepeatInterval>, Vec<RepeatInterval>) {

@@ -20,6 +20,7 @@ pub mod criteria;
 pub mod parquet_file;
 pub mod reader;
 pub mod row;
+pub mod segments;
 
 use std::path::PathBuf;
 

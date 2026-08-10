@@ -150,12 +150,12 @@ finish out of order. *Depends:* C2. *Source:* spec §2.4, §10.5.
 
 ### Milestone D — the queries
 
-**D1. `genome_segments` — the segmentation.**  ☐  **Own commit, do not bundle.**
+**D1. `genome_segments` — the segmentation.**  ✅  **Own commit, do not bundle.**
 Rows → `prefilter` → bundling → `classify`'s admission, over the stored spans, yielding `TypedRegion`s
 that cover the region with no gap. **Silent** (a wrong segmentation is a wrong genotype downstream).
 Its oracle is D2, which lands with it. *Depends:* A4, B2. *Source:* arch §2.3, spec §5.1.
 
-**D2. The differential against `partition_resident`.**  ☐  *(lands with D1 — it is D1's guard.)*
+**D2. The differential against `partition_resident`.**  ✅  *(lands with D1 — it is D1's guard.)*
 Build a catalog over the fixture reference; derive the segmentation; compare against
 `partition_resident` at the same policy — regions, kinds, coordinates, motifs, purities identical.
 **Run it at several policies**, including ones differing from the build settings on every bounded axis,
