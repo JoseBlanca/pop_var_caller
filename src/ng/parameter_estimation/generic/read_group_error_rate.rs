@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 use smallvec::SmallVec;
 
 use crate::ng::parameter_estimation::fitting::ladder_scan::fit_by_fixed_frequency_scan;
+use crate::ng::parameter_estimation::generic::SiteNoise;
 use crate::ng::parameter_estimation::generic::histogram::{Cell, DepthAltHistogram};
 use crate::ng::parameter_estimation::generic::noise_model::{
     SampleLibraryNoise, SubstitutionNoiseModel,
@@ -96,6 +97,16 @@ pub struct ReadGroupErrorRateFit {
 /// Taken rather than built here so that a caller alternating twenty times builds it once,
 /// and so that a test can hand in a short ladder whose right answer it can state.
 ///
+/// `site_noise` is the sample's second class of site, when it has one, and **every rung is
+/// scored with it.** Leaving it out was a defect rather than a simplification: a candidate
+/// clean rate scored under the one-class rule is being asked to explain a table whose tail
+/// belongs to the other class, so the scan returns the tail-inflated rate no matter what pair
+/// sits beside it — and since this scan is where the coupled fit's rate comes from, the rate
+/// then never moves. Measured on a world generated at HG002's own parameters it came back
+/// **three rungs high**, the same rung the one-class fit chose, on that world and on all five
+/// real alignments, with the whole fit scoring 351 nats below the truth
+/// (`reports/implementations/ng_noise_model_extension_n5_2026-08-10.md`).
+///
 /// **A read group holding no cells at all is left out of the answer** rather than fitted
 /// or defaulted. It cannot arise through `add_locus`, which creates a histogram only when
 /// a site enters it; if it does arise, there is nothing to fit, and Milestone E4's fallback
@@ -118,6 +129,7 @@ pub fn fit_read_group_error_rates(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
     genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
     ladder: &[ErrorRate],
+    site_noise: Option<SiteNoise>,
 ) -> BTreeMap<ReadGroupId, ReadGroupErrorRateFit> {
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
 
@@ -156,7 +168,9 @@ pub fn fit_read_group_error_rates(
         // construction stays here, and stop holding the moment it moves.
         let noise_ladder: Vec<SampleLibraryNoise> = ladder
             .iter()
-            .map(|&error_rate| SampleLibraryNoise::single(read_group, error_rate))
+            .map(|&error_rate| {
+                SampleLibraryNoise::single_with_site_noise(read_group, error_rate, site_noise)
+            })
             .collect();
 
         let scanned =
@@ -249,7 +263,8 @@ mod tests {
             );
         }
 
-        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+        let fitted =
+            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder, None);
 
         assert_eq!(fitted.len(), 2);
         assert_eq!(fitted[&ReadGroupId(1)].rung, RUNG_AT_PHRED_30);
@@ -287,6 +302,7 @@ mod tests {
             &BTreeMap::from([((ReadGroupId(1), diploid), pooled)]),
             &frequencies(&[(2, &TRUTH)]),
             &ladder,
+            None,
         );
         assert_eq!(
             pooled[&ReadGroupId(1)].rung,
@@ -339,11 +355,12 @@ mod tests {
         )]);
 
         let at_the_truth =
-            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder, None);
         let told_it_is_variable = fit_read_group_error_rates(
             &histograms,
             &frequencies(&[(2, &[0.98, 0.015, 0.005])]),
             &ladder,
+            None,
         );
 
         assert_eq!(
@@ -397,6 +414,7 @@ mod tests {
             &histograms,
             &frequencies(&[(1, &[0.999, 0.001]), (2, &TRUTH)]),
             &ladder,
+            None,
         );
 
         assert_eq!(fitted.len(), 1, "one rate, not one per ploidy");
@@ -429,7 +447,8 @@ mod tests {
             table_generated_at(&edges, DEPTH, 10f64.powf(-0.5), diploid, &TRUTH, SITES),
         )]);
 
-        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+        let fitted =
+            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder, None);
 
         let fit = &fitted[&ReadGroupId(1)];
         assert_eq!(fit.rung, 0, "clamped to the noisiest rung the ladder has");
@@ -462,7 +481,8 @@ mod tests {
             ),
         ]);
 
-        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+        let fitted =
+            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder, None);
 
         assert_eq!(fitted.keys().copied().collect::<Vec<_>>(), [ReadGroupId(1)]);
     }
@@ -498,7 +518,8 @@ mod tests {
             ),
         )]);
 
-        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+        let fitted =
+            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder, None);
 
         let fit = fitted
             .get(&ReadGroupId(1))
@@ -533,8 +554,12 @@ mod tests {
             ),
         )]);
 
-        let fitted =
-            fit_read_group_error_rates(&histograms, &frequencies(&[(1, &[0.999, 0.001])]), &ladder);
+        let fitted = fit_read_group_error_rates(
+            &histograms,
+            &frequencies(&[(1, &[0.999, 0.001])]),
+            &ladder,
+            None,
+        );
 
         assert_eq!(fitted[&ReadGroupId(1)].rung, RUNG_AT_PHRED_30);
     }
@@ -573,7 +598,8 @@ mod tests {
             histograms.insert((ReadGroupId(group), diploid), table);
         }
 
-        let fitted = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder);
+        let fitted =
+            fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &ladder, None);
 
         assert_eq!(fitted[&ReadGroupId(1)].rung, RUNG_AT_PHRED_30);
         assert_eq!(fitted[&ReadGroupId(2)].rung, RUNG_AT_PHRED_26);
@@ -604,7 +630,7 @@ mod tests {
         )]);
         let frequencies = frequencies(&[(2, &TRUTH)]);
         let score_at = |rung: usize| {
-            fit_read_group_error_rates(&histograms, &frequencies, &ladder[rung..=rung])
+            fit_read_group_error_rates(&histograms, &frequencies, &ladder[rung..=rung], None)
                 [&ReadGroupId(1)]
                 .log_likelihood
                 .get()
@@ -622,7 +648,7 @@ mod tests {
             score_at(RUNG_AT_PHRED_26)
         );
 
-        let whole_ladder = fit_read_group_error_rates(&histograms, &frequencies, &ladder);
+        let whole_ladder = fit_read_group_error_rates(&histograms, &frequencies, &ladder, None);
         assert_eq!(
             whole_ladder[&ReadGroupId(1)].log_likelihood.get(),
             at_the_truth,
@@ -640,6 +666,6 @@ mod tests {
             table_generated_at(&edges, DEPTH, 0.001, diploid, &TRUTH, 1_000.0),
         )]);
 
-        let _ = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &[]);
+        let _ = fit_read_group_error_rates(&histograms, &frequencies(&[(2, &TRUTH)]), &[], None);
     }
 }

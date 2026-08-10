@@ -147,27 +147,60 @@ pub(crate) fn fit_coupled_from_tables(
     let shares = library_shares(read_group_histograms);
     let start: BTreeMap<ReadGroupId, usize> = shares.keys().map(|&group| (group, start)).collect();
 
-    // **The second class of site is an outer layer, not a third block inside the
-    // alternation, and putting it inside was measured to be wrong.**
+    // **The noisy rate is profiled, and the reason is a measurement rather than a
+    // preference** (owner's call, 2026-08-10; `reports/implementations/`
+    // `ng_noise_model_extension_n5_2026-08-10.md`).
     //
-    // Two reasons, and the first is the one that decided it. `fit_site_noise` misbehaves at
-    // a *wrong* clean rate: handed rates three times the truth it puts the second class on
-    // the ladder's finest rung, because a class at 10⁻⁵ is the cheapest way to absorb the
-    // all-reference sites a too-high clean rate cannot explain. Inside the loop that
-    // happens on every early round — on the two-library world of E2's oracle the first
-    // round claimed 72% of sites noisy at 1.3 × 10⁻², gaining 20,603 nats, and only after
-    // three more rounds did it correctly report none. The answers still converged, but the
-    // fit was being steered by a block reading a rate that had not settled.
+    // The first version of this function settled the rates and frequencies with one class of
+    // site, fitted the second class **at those settled rates**, and re-settled the rates with
+    // the pair held. It never escaped its first answer. On a world generated at HG002's own
+    // measured parameters — clean 1.8836 × 10⁻³, 0.88% of sites noisy at 5.29 × 10⁻², over the
+    // measured depth distribution — it returned a clean rate of 2.2387 × 10⁻³, **three rungs
+    // high**, where the generating parameters scored **351 nats better** than the point it
+    // stopped at. The same rung came back on all five real alignments, at both depths and in
+    // both organisms, always equal to the rung the one-class fit chose.
     //
-    // Second, it moved the shape of the alternation's trace on worlds with no second class
-    // at all — an extra round on four of E2's tests, and one oracle lost the premise that
-    // made it able to separate "the best iterate" from "the last iterate". A layer that is
-    // supposed to change nothing where it is not needed should change nothing.
+    // **Two things were wrong, and only one of them was this loop's shape.**
     //
-    // So: settle the rates and frequencies, fit the second class **at settled rates**, and
-    // if it moved, settle them again with it held fixed.
-    let mut site_noise: Option<SiteNoise> = None;
-    let mut fit = fit_by_alternation(
+    // The first was a missing argument, and it is the larger of the two.
+    // `fit_read_group_error_rates` — the block this loop re-settles the rates with, and the
+    // only place the fit's rate ever comes from — was never handed the second class, so every
+    // rung was scored under the one-class rule against a table whose tail belongs to the other
+    // class. *Re-settle the rates with the pair held* was re-deriving the number it already
+    // had, which is why the clean rate equalled the one-class rung on all five alignments.
+    // That argument alone takes the fixture below from failing by 351 nats to passing.
+    //
+    // The second is that a one-class fit's rate is inflated by exactly the tail the second
+    // class exists to remove, and `fit_site_noise` cannot survive a wrong clean rate: handed
+    // rates three times the truth it rails at the ladder's finest rung, because a class at
+    // 10⁻⁵ is the cheapest way to absorb the all-reference sites a too-high rate cannot
+    // explain. So a loop that fits the pair *once*, at whatever the previous round settled on,
+    // can still stop at a point that is optimal in each block and not jointly.
+    //
+    // **So the noisy rate is pinned and everything else refitted around it, at every rung.**
+    // That is a profile likelihood in one parameter, which is what `fit_by_profile_scan`
+    // already does for the one-class model, and it conditions on nothing that has not been
+    // settled against it. One dimension and not two, because the noisy rate is per sample
+    // while `ε` is per read group: profiling the clean rate would be `161^groups`.
+    //
+    // **The profile is measured to earn its cost, on real data and not on a fixture.** With
+    // the argument fixed but no profile, tomato SRR7279481 scores −1,504,289.10; with the
+    // profile it scores **209 nats higher**, at −1,504,079.98, and reports a different pair
+    // (1.42% at 6.310 × 10⁻² against 1.07% at 7.079 × 10⁻²). Both HG002 arms return the *same*
+    // answer either way, so a human sample alone would have said the profile was free to
+    // delete. What it costs is 23 s → 37 s on that tomato run, and 0.5 s → 39.5 s on the
+    // fixture below.
+    //
+    // The reasoning the old comment gave for keeping the site-noise fit *outside* the
+    // alternation still holds and is why it is not a third block: what changed is that the
+    // outer layer no longer takes the inner fit's word for where the rates are.
+    let cells: Vec<Cell> = whole_sample
+        .iter()
+        .flat_map(|(&ploidy, table)| table.cells(ploidy))
+        .collect();
+    // The control: the fit with one class of site, which is the answer where the second
+    // class does not earn its two parameters, and the score every candidate must beat.
+    let one_class = fit_by_alternation(
         sample,
         read_group_histograms,
         whole_sample,
@@ -175,35 +208,145 @@ pub(crate) fn fit_coupled_from_tables(
         supplied,
         &start,
         MAX_COUPLED_FIT_ITERATIONS,
-        site_noise,
+        None,
     )
     .map(|(fit, _)| fit)?;
+    let one_class_score = whole_sample_score(
+        &cells,
+        &noise_from(&shares, &rungs_of(&one_class, ladder), ladder, None),
+        &frequencies_of(&one_class),
+    )
+    .get();
 
-    for _ in 0..MAX_SITE_NOISE_PASSES {
-        let cells: Vec<Cell> = whole_sample
-            .iter()
-            .flat_map(|(&ploidy, table)| table.cells(ploidy))
-            .collect();
-        let noise = noise_from(&shares, &rungs_of(&fit, ladder), ladder, None);
-        let frequencies = frequencies_of(&fit);
-        let found = fit_site_noise(&cells, &noise, &frequencies, ladder).site_noise;
-        if found.map(SiteNoise::noisy_error_rate) == site_noise.map(SiteNoise::noisy_error_rate) {
-            break;
-        }
-        site_noise = found;
-        fit = fit_by_alternation(
+    // Every candidate starts from the one-class answer's rungs rather than from the ladder's
+    // default: it is the nearest settled point to all of them, so the alternation inside each
+    // candidate converges in a round or two instead of a dozen. It is a start and not a
+    // constraint — the rate scan inside is exhaustive, so a warm start cannot pin an answer,
+    // only reach it sooner.
+    let warm = rungs_of(&one_class, ladder);
+    let mut best: Option<(f64, CoupledFit, SiteNoise)> = None;
+    for &rate in ladder {
+        let Some((fit, pair, score)) = fit_at_a_pinned_noisy_rate(
             sample,
             read_group_histograms,
             whole_sample,
             ladder,
             supplied,
-            &start,
+            &warm,
+            &cells,
+            &shares,
+            rate,
+        )?
+        else {
+            continue;
+        };
+        // `>` and not `>=`, so a tie keeps the coarser noisy rate — the direction every other
+        // ladder tie in this module resolves in.
+        if best.as_ref().is_none_or(|&(kept, _, _)| score > kept) {
+            best = Some((score, fit, pair));
+        }
+    }
+
+    match best {
+        Some((score, fit, pair)) if score - one_class_score > MIN_SITE_NOISE_GAIN => {
+            Ok(CoupledFit {
+                site_noise: Some(pair),
+                ..fit
+            })
+        }
+        _ => Ok(CoupledFit {
+            site_noise: None,
+            ..one_class
+        }),
+    }
+}
+
+/// One point of the profile: the noisy rate is **held** at `noisy_rate` and everything else —
+/// the per-read-group clean rates, the genotype frequencies and the noisy share — is fitted
+/// around it, alternating until the share stops moving.
+///
+/// Returns `None` when the share collapses to nothing at this rate, which is the same
+/// statement as "this rung buys no second class" and leaves the one-class fit to win on its
+/// own score rather than through a special case here.
+///
+/// **The share comes from [`fit_site_noise`] handed a ladder of one rung**, rather than from a
+/// second copy of its expectation-maximisation. That is the whole of the difference between
+/// the two functions: `fit_site_noise` asks *which* noisy rate and how much of the genome is
+/// at it, and this asks only the second question, at a rate its caller chose. The likelihood
+/// floor it applies is right here too — a rung that buys less than
+/// [`MIN_SITE_NOISE_GAIN`] over one class is a rung that buys no second class.
+///
+/// **Its `noisy_rate_at_ladder_end` is meaningless through this path and is ignored**: a
+/// one-rung ladder is all ends. What the rail flag is about — an argmax on the edge of the
+/// search — is the caller's to check, against the real ladder, once the profile has a winner.
+// Nine arguments: the three tables, the ladder, the two fitting knobs, and the two quantities
+// the caller has already derived from the tables and would otherwise rebuild 161 times.
+// Grouping them would add a type destructured at one call site.
+#[allow(clippy::too_many_arguments)]
+fn fit_at_a_pinned_noisy_rate(
+    sample: &str,
+    read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
+    whole_sample: &BTreeMap<Ploidy, DepthAltHistogram<u64>>,
+    ladder: &[ErrorRate],
+    supplied: &BTreeMap<ReadGroupId, ErrorRate>,
+    warm_start: &BTreeMap<ReadGroupId, usize>,
+    cells: &[Cell],
+    shares: &BTreeMap<ReadGroupId, f64>,
+    noisy_rate: ErrorRate,
+) -> Result<Option<(CoupledFit, SiteNoise, f64)>, ParameterEstimationError> {
+    let one_rung = [noisy_rate];
+    let mut share = 0.0;
+    let mut settled: Option<(CoupledFit, f64)> = None;
+
+    for _ in 0..MAX_SITE_NOISE_PASSES {
+        let pair = SiteNoise::try_new(share, noisy_rate).expect("a climbed share is a fraction");
+        let fit = fit_by_alternation(
+            sample,
+            read_group_histograms,
+            whole_sample,
+            ladder,
+            supplied,
+            warm_start,
             MAX_COUPLED_FIT_ITERATIONS,
-            site_noise,
+            Some(pair),
         )
         .map(|(fit, _)| fit)?;
+
+        // The share, re-climbed at the rates and frequencies this round settled on.
+        let libraries = noise_from(shares, &rungs_of(&fit, ladder), ladder, None);
+        let frequencies = frequencies_of(&fit);
+        let next_share = fit_site_noise(cells, &libraries, &frequencies, &one_rung)
+            .site_noise
+            .map_or(0.0, SiteNoise::noisy_fraction);
+        let score = whole_sample_score(
+            cells,
+            &noise_from(
+                shares,
+                &rungs_of(&fit, ladder),
+                ladder,
+                SiteNoise::try_new(next_share, noisy_rate).ok(),
+            ),
+            &frequencies,
+        )
+        .get();
+
+        let still = (next_share - share).abs() < SITE_NOISE_SHARE_TOLERANCE;
+        share = next_share;
+        settled = Some((fit, score));
+        if still {
+            break;
+        }
     }
-    Ok(CoupledFit { site_noise, ..fit })
+
+    let (fit, score) = settled.expect("the loop runs at least once");
+    if share <= 0.0 {
+        return Ok(None);
+    }
+    Ok(Some((
+        fit,
+        SiteNoise::try_new(share, noisy_rate).expect("a climbed share is a fraction"),
+        score,
+    )))
 }
 
 /// How many times the rates may be settled again after the second class of site moved.
@@ -311,9 +454,15 @@ fn fit_by_alternation(
         // Step 1 — the frequencies, from the whole-sample table at the current rates.
         let genotype_frequencies = climb_frequencies(&cells_of_ploidy, &noise);
 
-        // Step 2 — each read group's rate, from its own table at those frequencies.
-        let fitted =
-            fit_read_group_error_rates(read_group_histograms, &genotype_frequencies, ladder);
+        // Step 2 — each read group's rate, from its own table at those frequencies **and at
+        // the sample's second class of site**. Scoring the rungs without the pair is what
+        // made the clean rate the one-class rate on every sample this fit has ever seen.
+        let fitted = fit_read_group_error_rates(
+            read_group_histograms,
+            &genotype_frequencies,
+            ladder,
+            site_noise,
+        );
         let next_rungs: BTreeMap<ReadGroupId, usize> = fitted
             .iter()
             .map(|(&group, fit)| (group, fit.rung))
@@ -2211,6 +2360,7 @@ mod tests {
                 &world.read_group_histograms,
                 &genotype_frequencies,
                 &world.ladder,
+                None,
             );
             let next: BTreeMap<ReadGroupId, usize> = fitted
                 .iter()
@@ -2430,19 +2580,34 @@ mod tests {
     /// parameters sees the other one — `estimate` marginalises when it assembles
     /// `GenericSampleParameters` and nowhere earlier.
     ///
-    /// The genotype frequencies get a 5% tolerance where the rates get their exact rung: this
-    /// world is a table of whole sites, so a cell holding a third of a heterozygous site
-    /// rounds away, and at 550 heterozygous sites in 551,843 that rounding is worth a few
-    /// percent. It is the rates this fixture exists to pin.
+    /// **The genotype frequencies get an 8% tolerance where the rates get their exact rung,
+    /// and the number is measured rather than chosen.** This world is a table of whole sites,
+    /// so a cell holding a third of a heterozygous site rounds away, and there are only 550
+    /// heterozygous sites in 551,843. Built by the same generator with **one** class of site
+    /// and fitted, heterozygosity comes back at 9.2367 × 10⁻⁴ for a generating 9.9666 × 10⁻⁴ —
+    /// **7.3% low with no second class anywhere in it**, which is the fixture's rounding and
+    /// not this fit. The two-class fit lands at 9.2610 × 10⁻⁴, marginally *closer* to the
+    /// truth than that control, so the second class costs the frequencies nothing. It is the
+    /// rates this fixture exists to pin.
     ///
-    /// **⚠ This test FAILS, and that is what it is for.** It is `#[ignore]`d so that the
-    /// suite stays green while the defect it found is the owner's to schedule, not because
-    /// it is slow or needs anything the repository lacks — it runs in 0.3 s on nothing but
-    /// itself. Run it with
-    /// `cargo test --lib the_whole_fit_finds_both_classes -- --ignored`.
+    /// **It takes 39.5 s on its own in a debug build**, because the profile refits everything
+    /// at all 161 rungs over 2,464 cells. What it costs the suite is **8 s of wall clock**
+    /// (81 s → 89 s), since the harness runs tests in parallel and this one overlaps the
+    /// other three thousand. That is the same order as the runs model's state-separation
+    /// check and is bought for the same reason: it is the only test that can see the defect
+    /// it was written for.
+    ///
+    /// **What this fixture cannot see, and a tomato sample can.** It passes in 0.5 s with the
+    /// missing argument restored and no profile at all — so on its own it would have argued
+    /// the profile away. Real tomato SRR7279481 is what kept it: there the profile scores 209
+    /// nats higher than the argument alone. A human sample and a synthetic world shaped like
+    /// one both agree either way.
+    ///
+    /// **This test failed when it was written, and finding that is what led to both changes.**
+    /// Against the fit as N3b left it, it returned 2.2387 × 10⁻³ — three rungs high, the same
+    /// rung the one-class fit chose, and the same rung the fit returned on all five real
+    /// alignments — while the generating parameters scored 351 nats better.
     #[test]
-    #[ignore = "FAILS: records the stall — the clean rate comes back 3 rungs high and the \
-                generating parameters score 351 nats above where the fit stops"]
     fn the_whole_fit_finds_both_classes_when_it_is_given_neither() {
         let edges = Arc::new(DepthBinEdges::new());
         let ladder = error_rate_ladder();
@@ -2561,7 +2726,7 @@ mod tests {
             .enumerate()
         {
             assert!(
-                (fitted.get() - expected).abs() < 0.05 * expected,
+                (fitted.get() - expected).abs() < 0.08 * expected,
                 "dosage {dosage}: fitted {}, generating {expected}",
                 fitted.get()
             );

@@ -186,6 +186,25 @@ impl SampleLibraryNoise {
         }])
     }
 
+    /// [`SampleLibraryNoise::single`] for a caller that may or may not have a second class of
+    /// site — the shape the read-group error-rate scan needs, since it builds one of these per
+    /// rung and the sample's second class is the same at every rung.
+    ///
+    /// A separate constructor rather than an `Option` on `single`, so that the two existing
+    /// call shapes keep reading as they do, and so that *one library means share one* is
+    /// stated in one place rather than copied beside every site-noise pair.
+    #[must_use]
+    pub fn single_with_site_noise(
+        read_group: ReadGroupId,
+        error_rate: ErrorRate,
+        site_noise: Option<SiteNoise>,
+    ) -> Self {
+        Self {
+            site_noise,
+            ..Self::single(read_group, error_rate)
+        }
+    }
+
     /// The libraries, ascending by read group.
     #[must_use]
     pub fn libraries(&self) -> &[LibraryNoise] {

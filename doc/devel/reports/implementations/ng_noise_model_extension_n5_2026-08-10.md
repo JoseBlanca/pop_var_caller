@@ -1,5 +1,15 @@
 # N5 — the anchors re-measured, and the fit that does not reach them
 
+> **⚠ Superseded in one respect, the same day.** The defect this report found is real and its
+> measurements stand, but **its account of the cause is incomplete and its emphasis is wrong**.
+> The larger half is that the per-read-group rate scan was never handed the second class of
+> site at all, so every candidate rate was scored under the one-class rule — nothing to do with
+> coordinate ascent. The profile scan recommended below is the smaller half, and it is kept:
+> with the argument restored it still buys 209 nats on a real tomato sample, while every
+> fixture and both human arms said it was unnecessary. See
+> `ng_noise_model_extension_n5_fix_2026-08-10.md`, which carries the re-measured table. Every
+> number below is what the fit returned *before* both changes.
+
 **Step:** N5 of `impl_plan/noise_model_extension.md`, the milestone inserted between
 Milestones F and G of `impl_plan/parameter_prepass_generic.md`.
 **Date:** 2026-08-10.

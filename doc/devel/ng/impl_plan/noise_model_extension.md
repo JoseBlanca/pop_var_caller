@@ -150,12 +150,15 @@ from a start at three times the true rates, and that `F` still recovers a drawn 
 realised autozygous fraction to four decimal places under a false-heterozygote floor. Any world
 that moves is a finding, not a tolerance to widen.
 
-### N5. The anchors, re-measured.  ✅ **and the gate is not met** — see
-`reports/implementations/ng_noise_model_extension_n5_2026-08-10.md`. Heterozygosity on HG002
-30x moved 1.41 → 1.06 times the benchmark, better than this plan predicted. The fit that
-produced it does not reach the maximum: on a world generated at the research note's own HG002
-parameters it returns a clean rate three rungs high and scores 351 nats below the truth, and
-the noisy class rails at the ladder's coarsest rung on two of the three tomato samples.
+### N5. The anchors, re-measured.  ✅ — reports
+`ng_noise_model_extension_n5_2026-08-10.md` and `…_n5_fix_2026-08-10.md`. Heterozygosity on
+HG002 30x moved **1.41 → 1.085** times the benchmark and the emitted rate sits **3.1%** from the
+model-free count, half a ladder rung, against the +3.6% this plan predicted. Getting there
+needed a defect fixing that N5 itself found: the per-read-group rate scan was never handed the
+second class, so the clean rate could not move off the one-class rung. Two things remain open —
+the noisy class rails at the ladder's coarsest rung on the two deeper tomato samples, and this
+plan's "halves the error rate's drift across depth" is not reproducible, both rates moving
+exactly one rung.
 
 F3's four real-alignment tests re-run on all five alignments, and G1's model-free comparison
 computed before and after, on HG002 at 30× and 300× and on three tomato CRAMs. **The deliverable
