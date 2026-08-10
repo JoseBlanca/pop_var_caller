@@ -16,6 +16,7 @@
 //! filtering the file (spec §1, §4.1).
 
 pub mod criteria;
+pub mod parquet_file;
 pub mod row;
 
 use std::path::PathBuf;
@@ -25,7 +26,50 @@ use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::{ContigId, Motif, Position};
 
 pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
+pub use parquet_file::RepeatCatalogWriter;
 pub use row::{RowRejection, row_for_interval};
+
+/// How many rows a build wrote, per period — what `repeat-catalog` prints when it finishes
+/// (spec §2.6), and the measurement open question 1 asks for.
+///
+/// Periods beyond [`MAX_MOTIF_LEN`](crate::ng::types::MAX_MOTIF_LEN) are counted together:
+/// a scan cannot emit one, and a tally with a slot nothing can reach explains less than a
+/// tally that says so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RowsByPeriod {
+    by_period: [u64; crate::ng::types::MAX_MOTIF_LEN],
+    beyond_table: u64,
+}
+
+impl RowsByPeriod {
+    /// Count one row of `period`.
+    #[inline]
+    pub fn count(&mut self, period: u8) {
+        match period
+            .checked_sub(1)
+            .and_then(|i| self.by_period.get_mut(usize::from(i)))
+        {
+            Some(slot) => *slot += 1,
+            None => self.beyond_table += 1,
+        }
+    }
+
+    /// Rows written at `period`.
+    #[inline]
+    pub fn for_period(&self, period: u8) -> u64 {
+        period
+            .checked_sub(1)
+            .and_then(|i| self.by_period.get(usize::from(i)))
+            .copied()
+            .unwrap_or(self.beyond_table)
+    }
+
+    /// Rows written, all periods.
+    #[inline]
+    pub fn total(&self) -> u64 {
+        self.by_period.iter().sum::<u64>() + self.beyond_table
+    }
+}
 
 /// A tandem-repeat tract's span on one contig: **1-based inclusive**, ng's convention
 /// (`ng_step_interfaces.md` §1).

@@ -4079,7 +4079,10 @@ mod tests {
             .expect("the deleter's complete observation");
         assert_eq!(
             shortie_observation.chain_ids,
-            Vec::new(),
+            // Spelled out because `serde_json` (pulled in by the repeat catalog's parquet
+            // dependency) adds `impl PartialEq<Value> for u64`, so a bare `Vec::new()` no
+            // longer infers its element type here.
+            Vec::<ChainId>::new(),
             "the shortie agreed with the reference across everything it witnessed, so it \
              carries no id — production's positional rule would have given it one, because \
              its partial observation is not `alleles[0]`"
