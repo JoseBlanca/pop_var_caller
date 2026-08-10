@@ -53,7 +53,7 @@ against its own site class can, without another fit.
 
 ## The steps
 
-### N1. The types, and the emitted rate.  ☐
+### N1. The types, and the emitted rate.  ✅
 
 `SiteNoise { noisy_fraction, noisy_error_rate }` as constrained newtypes beside the existing
 ones; `SampleLibraryNoise` gains it. `GenericSampleParameters` keeps `error_rate` as the

@@ -426,6 +426,14 @@ pub enum DomainError {
     /// A [`MismatchFraction`] was constructed from a value outside `[0, 1]`.
     #[error("mismatch fraction {0} is outside [0, 1]")]
     MismatchFraction(f32),
+
+    /// A `SiteNoise` was constructed with a noisy-site share outside `[0, 1]`.
+    ///
+    /// Its own variant rather than a shared "not a probability", for the reason the four
+    /// scalars above have four: a share of *sites* and a rate per *read* are different
+    /// quantities, and a message naming the wrong one sends the reader to the wrong fit.
+    #[error("noisy-site fraction {0} is outside [0, 1]")]
+    SiteNoiseFraction(f64),
     /// A per-base error rate is not a probability in `[0, 1]`.
     ///
     /// **Three constructors raise this one variant** — [`ErrorRate::try_new`],

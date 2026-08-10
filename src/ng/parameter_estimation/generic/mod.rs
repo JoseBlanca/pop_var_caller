@@ -38,7 +38,93 @@ use smallvec::SmallVec;
 use crate::ng::parameter_estimation::fitting::FitTermination;
 use crate::ng::parameter_estimation::generic::runs::RunsModelFit;
 use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError};
-use crate::ng::types::{Bp, ErrorRate, GenotypeFrequency, InbreedingF, Ploidy, ReadGroupId};
+use crate::ng::types::{
+    Bp, DomainError, ErrorRate, GenotypeFrequency, InbreedingF, Ploidy, ReadGroupId,
+};
+
+/// How often a site is one where reads disagree with the reference far more than the
+/// library's chemistry explains, and how badly they disagree there.
+///
+/// **Why the generic path needs a second class of site at all.** Its noise model is one
+/// substitution rate per read group, and measured on HG002's confident regions the body of
+/// that distribution is right while its tail is not: 818 loci carrying no benchmark variant
+/// showed three or more alternative reads where the model predicts 29. Mismapped reads and
+/// error-prone sequence contexts produce sites like that, and a mixture over three genotypes
+/// has exactly one class that can explain them — so the surplus arrived as heterozygosity,
+/// **1.41 times the benchmark count on that sample**
+/// (`research/noise_model_overdispersion_2026-08-10.md`).
+///
+/// A site is *clean* with probability `1 − noisy_fraction` and *noisy* with probability
+/// `noisy_fraction`; the genotype emission then uses that site's own rate. Fitted
+/// independently at two depths on HG002 this comes out at about one site in 110 disagreeing
+/// at 4–5% against a clean 0.19%.
+///
+/// **Fitted per sample and shared across its read groups, while `ε` stays per read group.**
+/// No data distinguishes a per-sample from a per-library noisy class: every sample in both
+/// cohorts carries one library. The per-sample choice is the one that keeps each library's
+/// rate on a one-dimensional ladder. **An assumption to revisit when a multi-library
+/// alignment exists**, not a measured conclusion — mapping difficulty is partly a property of
+/// read length and insert size, which are the library's.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SiteNoise {
+    noisy_fraction: f64,
+    noisy_error_rate: ErrorRate,
+}
+
+impl SiteNoise {
+    /// The only constructor.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::SiteNoiseFraction`] when the fraction is not a probability. The rate
+    /// is already checked by its own type.
+    pub fn try_new(noisy_fraction: f64, noisy_error_rate: ErrorRate) -> Result<Self, DomainError> {
+        if (0.0..=1.0).contains(&noisy_fraction) {
+            Ok(Self {
+                noisy_fraction,
+                noisy_error_rate,
+            })
+        } else {
+            Err(DomainError::SiteNoiseFraction(noisy_fraction))
+        }
+    }
+
+    /// The share of sites drawn from the noisy class.
+    #[must_use]
+    pub fn noisy_fraction(self) -> f64 {
+        self.noisy_fraction
+    }
+
+    /// How often a read disagrees with the reference at a noisy site.
+    #[must_use]
+    pub fn noisy_error_rate(self) -> ErrorRate {
+        self.noisy_error_rate
+    }
+
+    /// The rate a read disagrees at a site drawn at **random** — the two classes' rates
+    /// weighted by how often each class occurs.
+    ///
+    /// **This is what a sample emits as its error rate, and the choice is deliberate**
+    /// (owner-approved, 2026-08-10). It keeps `Estimate<ErrorRate>` and every consumer of it
+    /// unchanged; it is the quantity the model-free count at benchmark
+    /// homozygous-reference positions measures, so `arch/parameter_prepass_generic.md` §9's
+    /// anchor still applies — measured 2.344 × 10⁻³ against a model-free 2.263 × 10⁻³, 3.6%
+    /// high and inside one rung of the error-rate ladder. Emitting the *clean* rate instead
+    /// would report 16% **below** the model-free count, which that same section calls an
+    /// unambiguous bug.
+    ///
+    /// # Panics
+    ///
+    /// Never through this type: a convex combination of two values in `[0, 1]` is in
+    /// `[0, 1]`, so the checked constructor cannot reject it.
+    #[must_use]
+    pub fn marginal_error_rate(self, clean: ErrorRate) -> ErrorRate {
+        let marginal = (1.0 - self.noisy_fraction) * clean.get()
+            + self.noisy_fraction * self.noisy_error_rate.get();
+        ErrorRate::try_new(marginal)
+            .expect("a convex combination of two probabilities is a probability")
+    }
+}
 
 /// Which fixed-width window of the reference a locus falls in — its start position
 /// divided by [`INBREEDING_WINDOW_BP`], within a contig. Windows never span contigs.
@@ -363,6 +449,81 @@ pub struct CoupledFit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rate(x: f64) -> ErrorRate {
+        ErrorRate::try_new(x).expect("a probability")
+    }
+
+    /// The share of noisy sites is a probability and nothing else is accepted, including
+    /// the two values a floating-point fit can drift to.
+    #[test]
+    fn a_noisy_site_share_outside_zero_to_one_is_refused() {
+        assert!(
+            SiteNoise::try_new(0.0, rate(0.05)).is_ok(),
+            "no noisy sites at all"
+        );
+        assert!(
+            SiteNoise::try_new(1.0, rate(0.05)).is_ok(),
+            "every site noisy"
+        );
+        for refused in [
+            -1e-9,
+            1.000_000_001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(
+                matches!(
+                    SiteNoise::try_new(refused, rate(0.05)),
+                    Err(DomainError::SiteNoiseFraction(_))
+                ),
+                "{refused} is not a share of sites"
+            );
+        }
+    }
+
+    /// **The number a sample emits, worked by hand.** At the fitted HG002 30x values —
+    /// 0.88% of sites noisy at 5.29e-2, the rest clean at 1.895e-3 — the marginal is
+    /// 0.9912 x 1.895e-3 + 0.0088 x 5.29e-2 = 1.878324e-3 + 4.6552e-4 = 2.343844e-3, which
+    /// is what the model-free count
+    /// of 2.263e-3 is compared against (3.6% high, inside one ladder rung). Pinned here
+    /// because a transposition of the two rates, or of the share and its complement, still
+    /// returns a probability and would be caught by nothing else.
+    #[test]
+    fn the_emitted_rate_is_the_two_classes_weighted_by_how_often_each_occurs() {
+        let measured = SiteNoise::try_new(0.0088, rate(5.29e-2)).expect("a share and a rate");
+        let marginal = measured.marginal_error_rate(rate(1.895e-3)).get();
+        assert!(
+            (marginal - 2.343_844e-3).abs() < 1e-9,
+            "expected 2.343844e-3 by hand, got {marginal:e}"
+        );
+
+        // Transposing the two rates gives a wildly different answer, so the test bites.
+        let transposed = SiteNoise::try_new(0.0088, rate(1.895e-3))
+            .expect("a share and a rate")
+            .marginal_error_rate(rate(5.29e-2))
+            .get();
+        assert!(
+            transposed > 20.0 * marginal,
+            "the transposition must not be mistakable for the truth: {transposed:e}"
+        );
+    }
+
+    /// **No noisy sites means the emitted rate is the clean one, exactly** — the property
+    /// that lets a one-class sample keep every number it has today, and the reason the
+    /// scoring rule can branch on it.
+    #[test]
+    fn a_sample_with_no_noisy_sites_emits_its_clean_rate_unchanged() {
+        let none = SiteNoise::try_new(0.0, rate(0.5)).expect("a share and a rate");
+        for clean in [1e-5, 1.895e-3, 0.1] {
+            assert_eq!(
+                none.marginal_error_rate(rate(clean)).get(),
+                clean,
+                "a sample with no noisy sites reports its clean rate"
+            );
+        }
+    }
 
     fn ploidy(copies: u8) -> Ploidy {
         Ploidy::try_new(copies).expect("a positive copy number")
