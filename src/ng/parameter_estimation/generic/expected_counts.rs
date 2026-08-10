@@ -261,6 +261,58 @@ pub(super) fn cells_over_a_real_depth_distribution(
     cells
 }
 
+/// The same world as [`cells_over_a_real_depth_distribution`], as a **table** rather than as
+/// cells — which is what the whole coupled fit takes, where `fit_site_noise` alone takes
+/// cells.
+///
+/// The difference matters for exactly one question: `fit_site_noise` is handed the clean rate,
+/// so a test built on cells asks whether the *second* class is recovered given the first,
+/// while the coupled fit is handed nothing and has to find both. On real alignments the clean
+/// rate came back on the same rung the one-class fit chose, twice, which is a claim only a
+/// table-shaped world can check.
+///
+/// **A count of sites and not a scaled weight**, so cells below half a site round away
+/// entirely — a table is what an accumulator built and holds whole loci. That is the one way
+/// this world is coarser than its cells-shaped sibling, and it is why the site total is the
+/// depth distribution's own 551,843 rather than a millionfold weight.
+///
+/// # Panics
+///
+/// If `genotype_frequencies` is not one entry per dosage of `ploidy`.
+pub(super) fn table_over_a_real_depth_distribution(
+    edges: &Arc<DepthBinEdges>,
+    error_rate: f64,
+    site_noise: Option<(f64, f64)>,
+    ploidy: Ploidy,
+    genotype_frequencies: &[f64],
+) -> DepthAltHistogram<u64> {
+    assert_eq!(
+        genotype_frequencies.len(),
+        usize::from(ploidy.get()) + 1,
+        "a ploidy-{ploidy} truth needs one frequency per dosage"
+    );
+    let (noisy_fraction, noisy_rate) = site_noise.unwrap_or((0.0, error_rate));
+
+    let mut histogram = DepthAltHistogram::new(Arc::clone(edges));
+    for &(depth, loci) in REAL_DEPTH_DISTRIBUTION {
+        for alt_reads in 0..=depth {
+            let mut probability = 0.0;
+            for (alt_copies, &frequency) in genotype_frequencies.iter().enumerate() {
+                let clean = alternative_read_probability(alt_copies as u8, ploidy, error_rate);
+                let noisy = alternative_read_probability(alt_copies as u8, ploidy, noisy_rate);
+                probability += frequency
+                    * ((1.0 - noisy_fraction) * binomial_probability(alt_reads, depth, clean)
+                        + noisy_fraction * binomial_probability(alt_reads, depth, noisy));
+            }
+            let in_cell = (probability * loci as f64).round() as u64;
+            for _ in 0..in_cell {
+                histogram.add_site(DepthAndAltReads::new(depth, alt_reads), Bp(1));
+            }
+        }
+    }
+    histogram
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -59,12 +59,31 @@ use crate::ng::types::{
 /// independently at two depths on HG002 this comes out at about one site in 110 disagreeing
 /// at 4–5% against a clean 0.19%.
 ///
-/// **Fitted per sample and shared across its read groups, while `ε` stays per read group.**
-/// No data distinguishes a per-sample from a per-library noisy class: every sample in both
-/// cohorts carries one library. The per-sample choice is the one that keeps each library's
-/// rate on a one-dimensional ladder. **An assumption to revisit when a multi-library
-/// alignment exists**, not a measured conclusion — mapping difficulty is partly a property of
-/// read length and insert size, which are the library's.
+/// **What makes a site noisy, and why more than one cause matters here** (owner,
+/// 2026-08-10). At least three things produce a population of sites where reads disagree with
+/// the reference far more often than chemistry explains, and they do not belong to the same
+/// thing:
+///
+/// - **Duplications the reference does not carry.** A sequenced sample holding two copies of
+///   a region the reference holds once collects both copies' reads at one locus, and the
+///   positions where the copies differ show alternative reads at every depth. This is a
+///   property of the **genome**, so it is shared by every library made from it.
+/// - **Contamination in a library.** Reads from another individual raise the alternative
+///   count at exactly the loci where that individual differs from this one. This is a
+///   property of the **library**, and two libraries of the same sample can differ in it.
+/// - **Error-prone sequence context and mismapping**, which is partly the library's too:
+///   mapping difficulty depends on read length and insert size.
+///
+/// So a noisy population is expected in most samples rather than in unlucky ones, and its
+/// share is not necessarily the same in two libraries of one sample.
+///
+/// **Fitted per sample and shared across its read groups all the same, while `ε` stays per
+/// read group.** No data distinguishes the two: every sample in both cohorts carries one
+/// library, so a per-library share would be fitted from the same sites as the per-sample one.
+/// The per-sample choice is also the one that keeps each library's rate on a one-dimensional
+/// ladder. **An assumption to revisit as soon as a multi-library alignment exists**, not a
+/// measured conclusion — and contamination is the case that would break it first, because it
+/// can raise one library's noisy share while leaving its sibling's untouched.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct SiteNoise {
     noisy_fraction: f64,
@@ -444,18 +463,30 @@ pub struct GenericSampleParameters {
 /// because a haploid region has two genotype classes and a diploid three.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CoupledFit {
-    /// **The rate a read disagrees at a site drawn at random**, per read group — the
-    /// share-weighted marginal of the two site classes where there are two, and the fitted
-    /// rate itself where there is one. See [`SiteNoise::marginal_error_rate`] for why one
-    /// number and why this one.
+    /// **The rate a read disagrees at a *clean* site**, per read group — not the rate at a
+    /// site drawn at random, which is what a sample emits.
+    ///
+    /// The two differ by 15% on a sample like HG002, and the distinction is the whole reason
+    /// the pair travels: everything inside the fit scores with this rate and [`site_noise`]
+    /// beside it, because that is the pair the scoring rule takes, and
+    /// [`GenericSampleParameters::error_rate`] is where the two are folded into the one
+    /// number a consumer reads. Folding sooner would put the tail misspecification back
+    /// inside the runs model.
+    ///
+    /// Where the fit found no second class the two are the same number.
+    ///
+    /// [`site_noise`]: CoupledFit::site_noise
     pub error_rate: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
     pub rates: BTreeMap<Ploidy, Estimate<SampleRates>>,
     /// The sample's second class of site, when its data asked for one.
     ///
-    /// **A diagnostic, not something a consumer must read.** `error_rate` already folds it
-    /// in. What it is here for is a consumer that wants to score a read against its own
-    /// site's class rather than against the sample's average, and a reader who wants to
-    /// know whether this sample had a badly-behaved population of sites at all.
+    /// **The other half of a pair, not a diagnostic to be ignored here.** Unlike
+    /// [`GenericSampleParameters::site_noise`], whose partner rate has already been
+    /// marginalised, this one is still needed to say what [`error_rate`] means: the two
+    /// together are the sample's noise model, and reading the rate without the share
+    /// understates how often a read disagrees.
+    ///
+    /// [`error_rate`]: CoupledFit::error_rate
     pub site_noise: Option<SiteNoise>,
     pub termination: FitTermination,
 }

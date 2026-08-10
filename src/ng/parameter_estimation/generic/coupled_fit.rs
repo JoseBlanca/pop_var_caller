@@ -857,6 +857,7 @@ mod tests {
     use crate::ng::parameter_estimation::generic::error_rate_ladder;
     use crate::ng::parameter_estimation::generic::expected_counts::{
         alternative_read_probability, cells_over_a_real_depth_distribution, table_generated_at,
+        table_over_a_real_depth_distribution,
     };
 
     /// Phred 30 — rung 80 of the adopted ladder, which starts at Phred 10 and steps by
@@ -2409,6 +2410,161 @@ mod tests {
                 "the noisy rate landed on an end of the ladder"
             );
             assert!(fit.gained > 0.0, "a real second class must beat one class");
+        }
+    }
+
+    /// **The whole fit on a world with two classes, where nothing is given** — the oracle
+    /// above hands `fit_site_noise` the true clean rate, so it asks whether the *second*
+    /// class is found given the first. This asks the question the real alignments raised:
+    /// with the clean rate fitted too, does the second class pull it?
+    ///
+    /// **The world is HG002 30x as the research note fitted it** — a clean rate of
+    /// 1.895 × 10⁻³, 0.88% of sites noisy at 5.29 × 10⁻², over the measured depth
+    /// distribution, at that sample's benchmark genotype frequencies. It is the closest a
+    /// fixture gets to the alignment, and it is here because on the real alignment the clean
+    /// rate came back on **the same rung the one-class fit chose**, at both 30x and 300x, and
+    /// a fixture is the only place that can be told apart from the model's own answer.
+    ///
+    /// **`CoupledFit::error_rate` is the clean rate and not the marginal**, asserted here
+    /// because the two differ by 15% on this world and every consumer of the sample's
+    /// parameters sees the other one — `estimate` marginalises when it assembles
+    /// `GenericSampleParameters` and nowhere earlier.
+    ///
+    /// The genotype frequencies get a 5% tolerance where the rates get their exact rung: this
+    /// world is a table of whole sites, so a cell holding a third of a heterozygous site
+    /// rounds away, and at 550 heterozygous sites in 551,843 that rounding is worth a few
+    /// percent. It is the rates this fixture exists to pin.
+    ///
+    /// **⚠ This test FAILS, and that is what it is for.** It is `#[ignore]`d so that the
+    /// suite stays green while the defect it found is the owner's to schedule, not because
+    /// it is slow or needs anything the repository lacks — it runs in 0.3 s on nothing but
+    /// itself. Run it with
+    /// `cargo test --lib the_whole_fit_finds_both_classes -- --ignored`.
+    #[test]
+    #[ignore = "FAILS: records the stall — the clean rate comes back 3 rungs high and the \
+                generating parameters score 351 nats above where the fit stops"]
+    fn the_whole_fit_finds_both_classes_when_it_is_given_neither() {
+        let edges = Arc::new(DepthBinEdges::new());
+        let ladder = error_rate_ladder();
+        let clean = ladder_rung_nearest(1.895e-3);
+        let noisy = ladder_rung_nearest(5.29e-2);
+        let share = 0.0088;
+        let truth = [1.0 - 9.9666e-4 - 5.7444e-4, 9.9666e-4, 5.7444e-4];
+
+        // Built twice rather than cloned: at one read group the two tables *are* the same
+        // table, and `DepthAltHistogram` is not `Clone` — deliberately, since a table is
+        // megabytes and copying one is never what a caller meant.
+        let build = || {
+            table_over_a_real_depth_distribution(
+                &edges,
+                clean,
+                Some((share, noisy)),
+                ploidy(2),
+                &truth,
+            )
+        };
+        let read_group_histograms = BTreeMap::from([((ReadGroupId(0), ploidy(2)), build())]);
+        let whole_sample = BTreeMap::from([(ploidy(2), build())]);
+
+        let fit = fit_coupled_from_tables(
+            "hg002-shaped",
+            &read_group_histograms,
+            &whole_sample,
+            &ladder,
+            &BTreeMap::new(),
+        )
+        .expect("half a million sites is above every floor");
+
+        // **Convergence is asserted and not assumed**, which is what separates "the model's
+        // answer" from "where the optimiser stopped": score the generating parameters and the
+        // fitted ones on the same cells, and a fit that reached less than the truth did not
+        // find the maximum.
+        let cells: Vec<Cell> = whole_sample
+            .iter()
+            .flat_map(|(&ploidy, table)| table.cells(ploidy))
+            .collect();
+        let shares = library_shares(&read_group_histograms);
+        let score_at = |rate: f64, noise: Option<SiteNoise>, frequencies: &[f64; 3]| {
+            let rungs = BTreeMap::from([(ReadGroupId(0), nearest_rung(&ladder, rate))]);
+            whole_sample_score(
+                &cells,
+                &noise_from(&shares, &rungs, &ladder, noise),
+                &frequencies_of(*frequencies),
+            )
+            .get()
+        };
+        let at_truth = score_at(
+            clean,
+            Some(
+                SiteNoise::try_new(share, ErrorRate::try_new(noisy).expect("a probability"))
+                    .expect("a share and a rate"),
+            ),
+            &truth,
+        );
+        let mut fitted_frequencies = [0.0; 3];
+        for (slot, fitted) in fitted_frequencies
+            .iter_mut()
+            .zip(fit.rates[&ploidy(2)].value.by_alt_copies())
+        {
+            *slot = fitted.get();
+        }
+        let at_fit = score_at(
+            fit.error_rate[&ReadGroupId(0)].value.get(),
+            fit.site_noise,
+            &fitted_frequencies,
+        );
+        assert!(
+            at_fit >= at_truth,
+            "the fit reached {at_fit} where the generating parameters score {at_truth}, \
+             {:.1} nats higher — so the fit stopped short of the maximum rather than \
+             finding a better explanation than the truth",
+            at_truth - at_fit
+        );
+
+        let fitted_clean = fit.error_rate[&ReadGroupId(0)].value.get();
+        assert!(
+            (fitted_clean - clean).abs() < 1e-12,
+            "the clean rate came back {fitted_clean:e} for a generating {clean:e}, which is \
+             {:.2} rungs away",
+            (fitted_clean / clean).ln() / 10f64.powf(0.025).ln()
+        );
+        let site = fit
+            .site_noise
+            .expect("a world with 0.88% of its sites at 5.29e-2 has a second class");
+        assert!(
+            (site.noisy_error_rate().get() - noisy).abs() < 1e-12,
+            "the noisy rate came back {:e} for a generating {noisy:e}",
+            site.noisy_error_rate().get()
+        );
+        assert!(
+            (site.noisy_fraction() - share).abs() < 1e-3,
+            "the noisy share came back {:.5} for a generating {share}",
+            site.noisy_fraction()
+        );
+        assert!(
+            (site
+                .marginal_error_rate(fit.error_rate[&ReadGroupId(0)].value)
+                .get()
+                / fitted_clean
+                - 1.0)
+                .abs()
+                > 0.1,
+            "the marginal and the clean rate have to differ here, or the assertion above \
+             cannot tell which of the two this field carries"
+        );
+
+        for (dosage, (fitted, expected)) in fit.rates[&ploidy(2)]
+            .value
+            .by_alt_copies()
+            .iter()
+            .zip(&truth)
+            .enumerate()
+        {
+            assert!(
+                (fitted.get() - expected).abs() < 0.05 * expected,
+                "dosage {dosage}: fitted {}, generating {expected}",
+                fitted.get()
+            );
         }
     }
 

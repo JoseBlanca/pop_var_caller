@@ -138,9 +138,9 @@ use crate::ng::parameter_estimation::generic::accumulators::{
     AccumulationCounts, ConstantPloidy, GenericAccumulators, InbreedingMode,
 };
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-use crate::ng::parameter_estimation::generic::error_rate_ladder;
 use crate::ng::parameter_estimation::generic::estimate::GenericEstimationConfig;
 use crate::ng::parameter_estimation::generic::histogram::{Cell, DepthAltHistogram};
+use crate::ng::parameter_estimation::generic::{GenericSampleParameters, error_rate_ladder};
 use crate::ng::read::ReadFilterConfig;
 use crate::ng::read::input::SampleReads;
 use crate::ng::read::input::read_groups::{ReadGroups, SampleReadGroups, build_read_groups};
@@ -951,6 +951,86 @@ fn the_generic_path_fits_a_real_sample_without_railing() {
                 .map_or_else(|| "n/a".to_string(), |het| format!("{:.6}", het.get())),
             rates.value.homozygous_non_reference_rate().get(),
             rates.observations
+        );
+    }
+
+    report_the_second_class_of_site(&parameters, &inputs.run_label, coarsest, finest);
+}
+
+/// **The second class of site, printed and checked for the three ways it can come back
+/// meaningless** — the half of the end-to-end test that the noise-model milestone added.
+///
+/// Neither cohort has a truth set for it, so nothing here can say the share or the rate is
+/// *right*; what it can say is that the fit did not answer with a shape that carries no
+/// information. Three such shapes, and each is a way this fit is known to fail:
+///
+/// 1. **A share at 0 or 1.** Every site noisy, or none, is one class of site wearing two
+///    names, and the fit is supposed to have declined instead — `fit_site_noise` returns
+///    nothing when the share collapses or the likelihood gain misses its floor.
+/// 2. **A noisy class no noisier than the clean one.** Handed a clean rate well above the
+///    truth, `fit_site_noise` rails at the ladder's *finest* rung, because a class at 10⁻⁵ is
+///    the cheapest way to absorb the all-reference sites a too-high rate cannot explain. That
+///    returns a perfectly well-formed pair describing nothing, and only the ordering of the
+///    two rates sees it.
+/// 3. **A noisy rate on either end of the ladder**, which is the same railed-fit failure the
+///    caller above checks for the clean rate — an argmax at an endpoint is where this
+///    estimator returns a confident wrong number instead of failing
+///    (`arch/parameter_prepass_generic.md` §9).
+///
+/// The clean rate is not carried out of the fit — a sample emits the share-weighted marginal
+/// and the pair — so it is recovered here by inverting the marginal,
+/// `ε_clean = (ε_marginal − w·ε_noisy) / (1 − w)`, which is exact and needs the share to be
+/// below one, checked first.
+fn report_the_second_class_of_site(
+    parameters: &GenericSampleParameters,
+    run_label: &str,
+    coarsest: f64,
+    finest: f64,
+) {
+    let Some(noise) = parameters.site_noise else {
+        eprintln!(
+            "end to end: {run_label} — no second class of site: the fit declined one, so every \
+             emitted rate is a single population of sites"
+        );
+        return;
+    };
+
+    // **Printed before anything is asserted, and the order is deliberate.** A run that fails
+    // one of the three checks below is a run whose numbers someone is about to want, and an
+    // assertion that fires first takes them with it: the two tomato samples whose class rails
+    // reported no rate at all until this was turned round.
+    let share = noise.noisy_fraction();
+    let noisy = noise.noisy_error_rate().get();
+    let mut clean_rates = Vec::new();
+    for (group, rate) in &parameters.error_rate {
+        let marginal = rate.value.get();
+        let clean = share.mul_add(-noisy, marginal) / (1.0 - share);
+        eprintln!(
+            "end to end: {run_label} {group:?} — {:.4}% of sites noisy at {noisy:.3e}, the rest \
+             clean at {clean:.3e}, emitted as {marginal:.3e}",
+            100.0 * share
+        );
+        clean_rates.push((*group, clean));
+    }
+
+    assert!(
+        share > 0.0 && share < 1.0,
+        "{run_label}: the fit returned a second class of site holding {share} of them, which \
+         is one class of site under two names — it was supposed to decline instead"
+    );
+    assert!(
+        noisy < coarsest && noisy > finest,
+        "{run_label}: the noisy class's rate came back at {noisy}, an end of the ladder \
+         [{finest}, {coarsest}] — a railed fit, which is how this estimator returns a \
+         confident wrong number rather than failing"
+    );
+    for (group, clean) in clean_rates {
+        assert!(
+            noisy > clean,
+            "{run_label}: {group:?}'s noisy class disagrees with the reference at {noisy}, no \
+             more often than its clean class at {clean} — the shape `fit_site_noise` returns \
+             when it is handed a clean rate above the truth and absorbs the all-reference \
+             sites instead"
         );
     }
 }

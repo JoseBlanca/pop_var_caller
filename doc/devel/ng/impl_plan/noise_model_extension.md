@@ -87,8 +87,8 @@ floating point at `w = 0`. Plus a fifth that is new and is what catches a mis-we
 
 ### N3a. The oracle's world: a measured depth distribution, generated in closed form.  ✅
 
- and  in
-. Landed ahead of the fit because the histogram came from a walk
+`REAL_DEPTH_DISTRIBUTION` and `cells_over_a_real_depth_distribution` in
+`generic/expected_counts.rs`. Landed ahead of the fit because the histogram came from a walk
 over an alignment no worktree carries and could not be re-derived from anything in the
 repository; everything else in N3 can.
 
@@ -150,7 +150,12 @@ from a start at three times the true rates, and that `F` still recovers a drawn 
 realised autozygous fraction to four decimal places under a false-heterozygote floor. Any world
 that moves is a finding, not a tolerance to widen.
 
-### N5. The anchors, re-measured.  ☐
+### N5. The anchors, re-measured.  ✅ **and the gate is not met** — see
+`reports/implementations/ng_noise_model_extension_n5_2026-08-10.md`. Heterozygosity on HG002
+30x moved 1.41 → 1.06 times the benchmark, better than this plan predicted. The fit that
+produced it does not reach the maximum: on a world generated at the research note's own HG002
+parameters it returns a clean rate three rungs high and scores 351 nats below the truth, and
+the noisy class rails at the ladder's coarsest rung on two of the three tomato samples.
 
 F3's four real-alignment tests re-run on all five alignments, and G1's model-free comparison
 computed before and after, on HG002 at 30× and 300× and on three tomato CRAMs. **The deliverable
