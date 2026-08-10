@@ -92,6 +92,14 @@ overflow-checks = true
 [dependencies]
 ahash = "0.8.12"
 anyhow = "1.0.102"
+# `arrow-array` / `arrow-schema`: the in-memory column batches ng's repeat
+# catalog is written from and read into (doc/devel/ng/spec/repeat_catalog.md
+# §3.5). Promoted from transitive (via `parquet`'s `arrow` feature) to
+# explicit because ng names their types directly, and a transitive
+# re-export surface can shrink at any minor bump. Same version as
+# `parquet`: the arrow-rs crates release together.
+arrow-array = "59.2"
+arrow-schema = "59.2"
 # bytemuck: zero-copy `cast_slice` in PSP's `encode_list_column_csr`
 # fast path (src/psp/block.rs). Avoids user-side `unsafe`; single
 # dependent call site.

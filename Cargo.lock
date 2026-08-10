@@ -1298,6 +1298,8 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
+ "arrow-array",
+ "arrow-schema",
  "bstr",
  "bytemuck",
  "clap",
