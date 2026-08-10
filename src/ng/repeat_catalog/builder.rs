@@ -4,9 +4,12 @@
 //! **Whole contigs, not windows** (spec §2.3). A scanner fed buffer-sized chunks needs a
 //! margin carried across each one, a rule for which side a straddling detection belongs to,
 //! and a cap on the repeat length it can promise to catch whole. Scanning a contig in one
-//! slice removes all three: a satellite of any size comes out as one row. What it costs is
-//! that contig resident while it is scanned — 90 MB for tomato's largest chromosome, 250 MB
-//! for human chromosome 1.
+//! slice removes all three: a satellite of any size comes out as one row.
+//!
+//! **What it costs is set by the largest contig, at about 16 bytes a base** — measured at
+//! 1.49 GB on tomato (largest contig 90 Mb) and 3.89 GB on GRCh38 (248 Mb), times the thread
+//! count. Most of that is the scan's own working set rather than the bases, which are a
+//! sixteenth of it (`doc/devel/reports/implementations/ng-repeat-catalog-E_2026-08-10.md`).
 
 use std::path::{Path, PathBuf};
 
