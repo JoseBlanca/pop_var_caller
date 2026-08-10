@@ -186,6 +186,43 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-10 — a handoff note answered as if it were the owner's question
+
+The session opened with a briefing written **for** the agent, not **by** the owner. It
+named steps `N4` and `N5`, "E2's 25 worlds", "a world that has a second class", and it
+closed with *"raise that with the owner"*. The session's first reply answered that
+document, in that document's words:
+
+> ❌ "**Yes — give each harness a world that has a second class of site, and the one
+> worth the session is in `ng_multilib_key_harness.rs`.**"
+>
+> Owner: *"what the fuck are you talking about? It seems to me that might be lost in
+> your own world."*
+
+> ✅ "The caller assumes every position of the genome mis-reads at the same rate. On
+> HG002 that fails at 818 positions, and the fit can only explain them by calling the
+> sample heterozygous, so heterozygosity comes out 1.41 times the benchmark's count.
+> The programs that check this estimator for bias only ever simulate genomes where
+> every position is equally error-prone, so re-running them cannot show the fix works.
+> I want to give one of them the bad positions — most of a day."
+
+Three failures, and the first is new:
+
+1. **Step 0 of the pass was run against the wrong text.** It says paste *the reader's
+   question, in their words*. There was no message from the reader — the turn opened
+   with a handoff brief. **New rule: when a turn opens with a handoff, a plan or a
+   briefing rather than a message from the owner, there is no question to quote —
+   write for a reader who has not read that document.** Every name in it is one of
+   yours until this reply defines it. A briefing is the previous session's working,
+   and working is exactly what rule W deletes.
+2. **Every load-bearing noun was internal**: `N4`, `N5`, `E2`, `Checkpoint N`, *a world
+   with a second class of site*, *the cell key*, *a flat ridge*. Identical to the
+   `H1`/`H3` failure of 2026-08-04, with a fresh excuse — the labels came from a
+   committed plan document, which makes them feel published rather than private.
+3. **"Yes —" answered a question the owner had never asked.** Answer-first does not
+   licence answering a question that exists only in the agent's own context; it made
+   the whole reply read as one side of a conversation the reader was not in.
+
 ### 2026-08-04 — a performance review reported in finding codes
 
 Replies referred to findings as `H1`, `H3`, `H5`, `L1` for two days. The owner:
