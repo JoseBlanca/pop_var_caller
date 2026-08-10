@@ -197,6 +197,7 @@ impl GenericAccumulators {
             runs_model,
             site_noise: coupled.site_noise,
             site_noise_off_the_ladder: coupled.site_noise_off_the_ladder,
+            error_rate_on_a_ladder_end: coupled.error_rate_on_a_ladder_end,
             coupled_fit: coupled.termination,
         })
     }

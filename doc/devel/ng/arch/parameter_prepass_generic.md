@@ -1538,11 +1538,15 @@ Every row read before it was written.
   class alone, a refusal above some rate, and keeping the clamp while carrying the
   `noisy_rate_at_ladder_end` bit out to the caller so a run can say what happened. The last of
   those is the one this milestone recommends, and it needs the item below.
-- **ADDED 2026-08-10 — `OPEN:` `argmax_at_ladder_end` is still dropped between the fit and
-  `GenericSampleParameters`,** so no consumer can read the bit §9 calls one of the two ways this
-  estimator returns a confident wrong number. It now matters more than when it was recorded: the
-  clamp above is exactly the case it would announce, and it happens on two of the five real
-  alignments this step has been run on. Carrying it changes a public type.
+- **CLOSED 2026-08-10 — `argmax_at_ladder_end` is carried out.** It was computed by the scan and
+  dropped between the fit and `GenericSampleParameters`, so no consumer could read the bit §9
+  calls one of the two ways this estimator returns a confident wrong number. `CoupledFit` and
+  `GenericSampleParameters` now carry `error_rate_on_a_ladder_end`, the read groups whose rate
+  was clamped rather than found — **fitted groups only**, since a borrowed, supplied or defaulted
+  rate is not the argmax of anything. It is the other half of the shape the second class of site
+  already reports through `site_noise_off_the_ladder`. Empty on all five real alignments, and the
+  end-to-end test now asserts both that and its own reconstruction of the same fact, so the two
+  cannot drift apart.
 - `OPEN:` **what a site deeper than the cap costs.** §2.2 specifies subsampling it down by a
   hypergeometric draw, and no harness implements one — the worlds measured above all sit
   below the cap, so the subsampling rule is the one depth mechanism with no measurement

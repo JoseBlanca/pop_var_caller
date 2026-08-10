@@ -703,8 +703,28 @@ fn into_coupled_fit(
         );
     }
 
+    // **The railed-rate bit, carried out instead of dropped.** A group whose winning rung is
+    // an end of the ladder had its answer clamped rather than found, and `arch §9` calls that
+    // one of the two ways this estimator returns a confident wrong number. It was computed by
+    // the scan and thrown away here, so no consumer could see it; the second class of site now
+    // reports the same shape (`site_noise_off_the_ladder`), and this is the other half.
+    //
+    // **Only a rate this sample fitted can be railed**: a borrowed, supplied or defaulted rate
+    // is not the argmax of anything, so the set is keyed on the groups that were fitted here.
+    let error_rate_on_a_ladder_end: BTreeSet<ReadGroupId> = at_the_winning_rungs
+        .iter()
+        .filter(|(group, fit)| {
+            fit.argmax_at_ladder_end
+                && error_rate
+                    .get(group)
+                    .is_some_and(|estimate| estimate.provenance == Provenance::FittedHere)
+        })
+        .map(|(&group, _)| group)
+        .collect();
+
     Ok(CoupledFit {
         error_rate,
+        error_rate_on_a_ladder_end,
         rates,
         site_noise: None,
         // The alternation itself never refuses anything: the decision belongs to the profile

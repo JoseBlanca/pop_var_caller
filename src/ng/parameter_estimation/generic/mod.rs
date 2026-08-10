@@ -31,7 +31,7 @@ mod real_alignments;
 mod recovery;
 pub mod runs;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smallvec::SmallVec;
 
@@ -454,6 +454,9 @@ pub struct GenericSampleParameters {
     /// — see [`CoupledFit::site_noise_off_the_ladder`]. `site_noise` is then `None` for a
     /// reason a consumer should not read as *no second class was needed*.
     pub site_noise_off_the_ladder: bool,
+    /// **The read groups whose error rate was clamped to an end of the ladder** — as
+    /// [`CoupledFit::error_rate_on_a_ladder_end`]. Empty on every sample measured so far.
+    pub error_rate_on_a_ladder_end: BTreeSet<ReadGroupId>,
     /// How the coupled error-rate/frequency fit ended.
     pub coupled_fit: FitTermination,
 }
@@ -481,6 +484,22 @@ pub struct CoupledFit {
     ///
     /// [`site_noise`]: CoupledFit::site_noise
     pub error_rate: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+    /// **The read groups whose rate was clamped to an end of the ladder rather than found
+    /// inside it** — Phred 10 or Phred 50, one base in ten or one in a hundred thousand.
+    ///
+    /// An argmax on an edge is the edge of the search and not a maximum in it, which
+    /// `arch/parameter_prepass_generic.md` §9 names as one of the two ways this estimator
+    /// returns a confident wrong number rather than failing. **It was computed and then
+    /// dropped**, so no consumer could tell a clamped rate from a fitted one; the second class
+    /// of site reports the same shape in [`site_noise_off_the_ladder`], and this is the other
+    /// half of it.
+    ///
+    /// Empty on every sample measured so far: a real library's rate sits far inside Phred 10
+    /// to 50. Only groups whose rate was **fitted here** can appear — a borrowed, supplied or
+    /// defaulted rate is not the argmax of anything.
+    ///
+    /// [`site_noise_off_the_ladder`]: CoupledFit::site_noise_off_the_ladder
+    pub error_rate_on_a_ladder_end: BTreeSet<ReadGroupId>,
     pub rates: BTreeMap<Ploidy, Estimate<SampleRates>>,
     /// The sample's second class of site, when its data asked for one.
     ///

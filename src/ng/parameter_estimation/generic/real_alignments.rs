@@ -935,6 +935,17 @@ fn the_generic_path_fits_a_real_sample_without_railing() {
             inputs.run_label, rate.provenance, rate.observations
         );
     }
+    // **The bit that used to be dropped, now asserted on real reads.** A rate clamped to an
+    // end of the ladder is the edge of the search rather than a maximum inside it; the loop
+    // above reconstructs that by comparing against the ladder's ends, and this is the fit's
+    // own answer to the same question. They must agree, and on every alignment run so far
+    // both say no group railed.
+    assert!(
+        parameters.error_rate_on_a_ladder_end.is_empty(),
+        "{}: the fit reports {:?} clamped to an end of the ladder",
+        inputs.run_label,
+        parameters.error_rate_on_a_ladder_end
+    );
     assert!(
         parameters.coupled_fit.converged,
         "{}: the coupled fit ran out after {} iterations",

@@ -63,11 +63,18 @@ and the fit's score is no lower than the truth's.
 | HG002 30x | 2.239 × 10⁻³ | 1.884 × 10⁻³ | 0.8770% | 5.309 × 10⁻² | 2.333 × 10⁻³ | 1.081 × 10⁻³ |
 | HG002 300x | 2.371 × 10⁻³ | 1.995 × 10⁻³ | 1.2662% | 4.217 × 10⁻² | 2.504 × 10⁻³ | 1.146 × 10⁻³ |
 | tomato SRR7279481 | 4.467 × 10⁻³ | 3.758 × 10⁻³ | 1.4194% | 6.310 × 10⁻² | 4.601 × 10⁻³ | 5.52 × 10⁻⁴ |
-| tomato SRR7279482 | 2.371 × 10⁻³ | 2.113 × 10⁻³ | 0.4175% | **1.000 × 10⁻¹ (railed)** | 2.522 × 10⁻³ | 7.85 × 10⁻⁴ |
-| tomato SRR7279483 | 3.758 × 10⁻³ | 3.350 × 10⁻³ | 0.4921% | **1.000 × 10⁻¹ (railed)** | 3.825 × 10⁻³ | 8.35 × 10⁻⁴ |
+| tomato SRR7279482 | 2.371 × 10⁻³ | — | — | **refused: off the ladder** | 2.371 × 10⁻³ | 1.525 × 10⁻³ |
+| tomato SRR7279483 | 3.758 × 10⁻³ | — | — | **refused: off the ladder** | 3.758 × 10⁻³ | 1.415 × 10⁻³ |
 
-**The clean rate now moves on every one of the five**, by two to three rungs, where before the
-fix it sat on the one-class rung on all five.
+**The clean rate now moves on all three the model covers**, by two to three rungs, where before
+the fix it sat on the one-class rung on all five.
+
+**The last two rows changed again after this report was first written** (owner, 2026-08-10).
+They asked for a second class noisier than the ladder's coarsest rung, which is the search
+asking to leave the range this model claims, so **the class is now refused and those samples are
+fitted with one rate** — and they come back at exactly the numbers they had before this
+milestone began. They carry `site_noise_off_the_ladder`, so a consumer can tell that refusal
+from the ordinary one. See spec §2.1.
 
 ### Two implementations that share no code now agree
 
