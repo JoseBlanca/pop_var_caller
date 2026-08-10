@@ -36,6 +36,7 @@ use smallvec::SmallVec;
 
 use crate::genetics::lgamma;
 use crate::ng::parameter_estimation::fitting::{NoiseModel, WeightedCell};
+use crate::ng::parameter_estimation::generic::SiteNoise;
 use crate::ng::parameter_estimation::generic::histogram::{Attribution, Cell};
 use crate::ng::types::{ErrorRate, Ploidy, ReadGroupId};
 
@@ -91,6 +92,18 @@ pub struct SampleLibraryNoise {
     /// library and the rest carry a handful, so the heap allocation is the exception
     /// (`spec/parameter_prepass_generic.md` §1).
     libraries: SmallVec<[LibraryNoise; 2]>,
+    /// The sample's second class of site, when it has one.
+    ///
+    /// **`None` is not `noisy_fraction = 0`, and the difference is the point.** `None`
+    /// takes the scoring rule down the single expression it has always used, so a caller
+    /// that has not asked for the extension gets bit-identical answers to before it
+    /// existed. A `Some` with a zero share reaches the convex combination and comes back
+    /// to the same value, which the fifth identity asserts — but through arithmetic that
+    /// could in principle differ in the last bit, and there is no reason to make every
+    /// existing fit take that route.
+    ///
+    /// Per sample, not per library: see [`SiteNoise`].
+    site_noise: Option<SiteNoise>,
 }
 
 impl SampleLibraryNoise {
@@ -133,7 +146,32 @@ impl SampleLibraryNoise {
             "the libraries' shares sum to {total_share} rather than one"
         );
 
-        Self { libraries }
+        Self {
+            libraries,
+            site_noise: None,
+        }
+    }
+
+    /// The same, for a sample whose sites come in two classes.
+    ///
+    /// # Panics
+    ///
+    /// As [`SampleLibraryNoise::new`].
+    #[must_use]
+    pub fn with_site_noise(
+        libraries: impl IntoIterator<Item = LibraryNoise>,
+        site_noise: SiteNoise,
+    ) -> Self {
+        Self {
+            site_noise: Some(site_noise),
+            ..Self::new(libraries)
+        }
+    }
+
+    /// The sample's second class of site, when it has one.
+    #[must_use]
+    pub fn site_noise(&self) -> Option<SiteNoise> {
+        self.site_noise
     }
 
     /// A sample sequenced from one library, which is the common case and the whole of the
@@ -229,6 +267,20 @@ impl NoiseModel for SubstitutionNoiseModel {
     /// reads that showed the reference. The product before it runs only over the ones
     /// listed, which is the same thing, since a `k_g` of zero contributes a factor of one.
     ///
+    /// **A sample with a second class of site scores this expression twice and mixes
+    /// the two**, at `ε_clean` and at `ε_noisy`, weighted by how often each class occurs:
+    ///
+    /// ```text
+    /// L(cell | j)  =  (1 − w) · L(cell | j, ε_clean)  +  w · L(cell | j, ε_noisy)
+    /// ```
+    ///
+    /// The class is a property of the **site** and the library split is a property of the
+    /// **reads**, so the mixture sits outside the whole multinomial and the sum over which
+    /// library produced each alternative read happens inside each branch, unchanged. A
+    /// sample with no second class takes neither branch: the expression below is evaluated
+    /// once, exactly as it was before the extension existed
+    /// (`research/noise_model_overdispersion_2026-08-10.md`).
+    ///
     /// A **pooled** cell is the same expression with the `G` alternative categories
     /// collapsed into one, which leaves a binomial at the share-weighted rate
     /// `Σ_g w_g·p_j(ε_g)`. Nothing is approximated in either: the pooled form is the exact
@@ -285,7 +337,7 @@ impl NoiseModel for SubstitutionNoiseModel {
 
         out.reserve(self.genotypes(ploidy));
         for alt_copies in 0..=ploidy.get() {
-            out.push(match cell.key.attribution() {
+            let at = |class: SiteClass| match cell.key.attribution() {
                 Attribution::Pooled => ln_likelihood_pooled(
                     depth,
                     alt_reads,
@@ -293,6 +345,7 @@ impl NoiseModel for SubstitutionNoiseModel {
                     noise,
                     ploidy,
                     alt_copies,
+                    class,
                 ),
                 Attribution::ByReadGroup(listing) => ln_likelihood_attributed(
                     depth,
@@ -301,10 +354,64 @@ impl NoiseModel for SubstitutionNoiseModel {
                     noise,
                     ploidy,
                     alt_copies,
+                    class,
                 ),
+            };
+            // **The site class is drawn before the reads are, so it factors out in front
+            // of the whole multinomial** rather than into any of its categories. That is
+            // what makes the extension a convex combination of the expression above with
+            // itself, and what keeps the library split — a property of the *reads* —
+            // untouched inside each branch.
+            out.push(match noise.site_noise() {
+                None => at(SiteClass::Clean),
+                Some(site) => {
+                    let noisy = site.noisy_fraction();
+                    ln_sum_of_two_exponentials(
+                        (1.0 - noisy).ln() + at(SiteClass::Clean),
+                        noisy.ln() + at(SiteClass::Noisy(site.noisy_error_rate().get())),
+                    )
+                }
             });
         }
     }
+}
+
+/// Which of a sample's two classes of site a score is being taken at.
+///
+/// **It exists so that every rate lookup in the expression says which class it is
+/// answering for.** The alternative — building a second [`SampleLibraryNoise`] with every
+/// rate replaced — allocates once per cell per rung, and would let a caller pass the noisy
+/// copy where the clean one belongs with nothing in the types to stop it.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum SiteClass {
+    /// Each library's own rate. The overwhelming majority of sites, and the only class a
+    /// sample without [`SiteNoise`] has.
+    Clean,
+    /// One rate shared by every library, replacing each library's own — the per-sample
+    /// choice recorded on [`SiteNoise`].
+    Noisy(f64),
+}
+
+impl SiteClass {
+    fn error_rate_of(self, library: &LibraryNoise) -> f64 {
+        match self {
+            Self::Clean => library.error_rate.get(),
+            Self::Noisy(shared) => shared,
+        }
+    }
+}
+
+/// `ln(e^a + e^b)`, without overflowing and without turning two impossible branches into
+/// `NaN`.
+///
+/// Both branches are `−∞` whenever a cell is impossible under a genotype at both site
+/// classes, and `−∞ − (−∞)` is `NaN` — which does not lose a scan, it simply never wins.
+fn ln_sum_of_two_exponentials(a: f64, b: f64) -> f64 {
+    let (larger, smaller) = if a >= b { (a, b) } else { (b, a) };
+    if larger == f64::NEG_INFINITY {
+        return f64::NEG_INFINITY;
+    }
+    larger + (smaller - larger).exp().ln_1p()
 }
 
 /// `p_j(ε)` — the chance **one read** shows something other than the reference base.
@@ -342,13 +449,14 @@ fn share_weighted_rates(
     noise: &SampleLibraryNoise,
     ploidy: Ploidy,
     alt_copies: u8,
+    class: SiteClass,
 ) -> ShareWeightedRates {
     let mut rates = ShareWeightedRates {
         alternative_allele: 0.0,
         reference_allele: 0.0,
     };
     for library in noise.libraries() {
-        let p = alternative_read_probability(alt_copies, ploidy, library.error_rate.get());
+        let p = alternative_read_probability(alt_copies, ploidy, class.error_rate_of(library));
         rates.alternative_allele += library.share_of_reads * p;
         rates.reference_allele += library.share_of_reads * (1.0 - p);
     }
@@ -376,8 +484,9 @@ fn ln_likelihood_pooled(
     noise: &SampleLibraryNoise,
     ploidy: Ploidy,
     alt_copies: u8,
+    class: SiteClass,
 ) -> f64 {
-    let rates = share_weighted_rates(noise, ploidy, alt_copies);
+    let rates = share_weighted_rates(noise, ploidy, alt_copies, class);
     ln_factorial_real(depth) - ln_factorial(alt_reads) - ln_factorial_real(reference_reads)
         + count_times_ln(f64::from(alt_reads), rates.alternative_allele)
         + count_times_ln(reference_reads, rates.reference_allele)
@@ -392,12 +501,13 @@ fn ln_likelihood_attributed(
     noise: &SampleLibraryNoise,
     ploidy: Ploidy,
     alt_copies: u8,
+    class: SiteClass,
 ) -> f64 {
-    let rates = share_weighted_rates(noise, ploidy, alt_copies);
+    let rates = share_weighted_rates(noise, ploidy, alt_copies, class);
     let mut total = ln_factorial_real(depth) - ln_factorial_real(reference_reads);
     for &(read_group, alt_from_group) in listing {
         let library = noise.library(read_group);
-        let p = alternative_read_probability(alt_copies, ploidy, library.error_rate.get());
+        let p = alternative_read_probability(alt_copies, ploidy, class.error_rate_of(library));
         total += -ln_factorial(u32::from(alt_from_group))
             + count_times_ln(f64::from(alt_from_group), library.share_of_reads * p);
     }
@@ -541,6 +651,250 @@ mod tests {
             }
         }
         out
+    }
+
+    // -----------------------------------------------------------------
+    // The second class of site (`research/noise_model_overdispersion_2026-08-10.md`).
+    // Every identity above is re-run here under the extension, because a convex
+    // combination of two correct rules is still a probability over the cell space and
+    // therefore none of them, on its own, can see the two branches being weighted
+    // wrongly or `ε_noisy` reaching the wrong one.
+    // -----------------------------------------------------------------
+
+    /// The same two libraries, plus a noisy class at the shape fitted on HG002 — about one
+    /// site in a hundred disagreeing at 5%.
+    fn two_libraries_and_noisy_sites(noisy_fraction: f64, noisy_rate: f64) -> SampleLibraryNoise {
+        SampleLibraryNoise::with_site_noise(
+            two_libraries().libraries().iter().copied(),
+            SiteNoise::try_new(noisy_fraction, rate(noisy_rate)).expect("a share and a rate"),
+        )
+    }
+
+    /// **Identity 1 under the extension: still a probability over the cell space.**
+    ///
+    /// Swept over the whole range of the new share, including both ends, because `ln 0` is
+    /// how a weight of zero enters the combination and an unguarded one turns the sum into
+    /// `NaN` — which does not lose a scan, it simply never wins.
+    #[test]
+    fn with_a_second_site_class_the_rule_still_sums_to_one() {
+        for &noisy_fraction in &[0.0, 1e-6, 0.0088, 0.25, 0.5, 1.0] {
+            let noise = two_libraries_and_noisy_sites(noisy_fraction, 5.29e-2);
+            for depth in [1_u32, 3, 5, 9] {
+                for copies in [2_u8, 4] {
+                    let cells = whole_cell_space(depth, 2, copies);
+                    for alt_copies in 0..=copies {
+                        let total: f64 = cells
+                            .iter()
+                            .map(|cell| score(cell, &noise)[usize::from(alt_copies)].exp())
+                            .sum();
+                        assert!(
+                            (total - 1.0).abs() < 1e-12,
+                            "noisy share {noisy_fraction}, depth {depth}, ploidy {copies}, \
+                             {alt_copies} alternative copies: the cell space sums to {total}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Identity 2 under the extension: no cell is charged a negative count of reference
+    /// reads.** The guard sits before the branch, so neither class can reach it — asserted
+    /// rather than assumed, since the branch was added after the guard was written.
+    #[test]
+    fn with_a_second_site_class_no_cell_is_charged_negative_reference_reads() {
+        let noise = two_libraries_and_noisy_sites(0.0088, 5.29e-2);
+        for depth in [1.0_f64, 2.5, 7.0, 124.0] {
+            for alt_reads in 0..=(depth as u32) {
+                let cell = pooled_cell_of(depth, alt_reads, 2);
+                for value in score(&cell, &noise) {
+                    assert!(
+                        !value.is_nan(),
+                        "depth {depth}, {alt_reads} alternative reads scored NaN"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Identity 3 under the extension: with every library's rate equal, the attributed
+    /// and pooled arms still agree** — the second class must not break the property that
+    /// says there is nothing to attribute when the libraries are alike.
+    #[test]
+    fn with_a_second_site_class_equal_rates_still_leave_nothing_to_attribute() {
+        let libraries = [
+            LibraryNoise {
+                read_group: group(0),
+                share_of_reads: 0.7,
+                error_rate: rate(2e-3),
+            },
+            LibraryNoise {
+                read_group: group(1),
+                share_of_reads: 0.3,
+                error_rate: rate(2e-3),
+            },
+        ];
+        let noise = SampleLibraryNoise::with_site_noise(
+            libraries,
+            SiteNoise::try_new(0.0088, rate(5.29e-2)).expect("a share and a rate"),
+        );
+        for depth in [4_u32, 8] {
+            let pooled_total: Vec<f64> = (0..=2u8)
+                .map(|alt_copies| {
+                    whole_cell_space(depth, 2, 2)
+                        .iter()
+                        .filter(|cell| matches!(cell.key.attribution(), Attribution::Pooled))
+                        .map(|cell| score(cell, &noise)[usize::from(alt_copies)].exp())
+                        .sum()
+                })
+                .collect();
+            let attributed_total: Vec<f64> = (0..=2u8)
+                .map(|alt_copies| {
+                    whole_cell_space(depth, 2, 2)
+                        .iter()
+                        .filter(|cell| !matches!(cell.key.attribution(), Attribution::Pooled))
+                        .map(|cell| score(cell, &noise)[usize::from(alt_copies)].exp())
+                        .sum()
+                })
+                .collect();
+            for alt_copies in 0..3 {
+                assert!(
+                    (pooled_total[alt_copies] + attributed_total[alt_copies] - 1.0).abs() < 1e-12,
+                    "depth {depth}, {alt_copies} copies: the two arms come to \
+                     {} and {}",
+                    pooled_total[alt_copies],
+                    attributed_total[alt_copies]
+                );
+            }
+        }
+    }
+
+    /// **The fifth identity: at `ε_noisy = ε_clean` the extended rule must reproduce the
+    /// one-class rule, at every share.**
+    ///
+    /// What it catches is a combination that is not convex — weights that do not sum to
+    /// one, a branch added rather than mixed, an error in the log-sum-exp — and the `ln 0`
+    /// at either end of the share.
+    ///
+    /// **What it cannot catch, and this is worth stating because the first version of this
+    /// comment claimed otherwise: a swap.** With the two rates equal both branches score
+    /// the same, so exchanging the weights, or sending each rate to the other branch,
+    /// leaves the answer untouched. Those are
+    /// [`a_site_in_the_tail_is_far_less_surprising_with_a_second_class`]'s to kill, and it
+    /// does so by pinning the mixture's magnitude rather than its direction.
+    ///
+    /// **A single-library sample is included** because that is the arm 1,550 of the 1,707
+    /// archive samples take.
+    #[test]
+    fn at_one_error_rate_the_two_classes_reproduce_the_one_class_rule() {
+        for (label, plain) in [
+            ("two libraries", two_libraries()),
+            (
+                "one library",
+                SampleLibraryNoise::single(group(0), rate(3e-3)),
+            ),
+        ] {
+            let shared = plain.libraries()[0].error_rate;
+            for &noisy_fraction in &[0.0, 1e-9, 0.0088, 0.5, 0.999, 1.0] {
+                // Every library at the same rate, so that giving the noisy branch that
+                // same rate genuinely makes the two branches identical.
+                let flattened: Vec<LibraryNoise> = plain
+                    .libraries()
+                    .iter()
+                    .map(|library| LibraryNoise {
+                        error_rate: shared,
+                        ..*library
+                    })
+                    .collect();
+                let one_class = SampleLibraryNoise::new(flattened.iter().copied());
+                let two_classes = SampleLibraryNoise::with_site_noise(
+                    flattened.iter().copied(),
+                    SiteNoise::try_new(noisy_fraction, shared).expect("a share and a rate"),
+                );
+                for depth in [1_u32, 4, 7] {
+                    for cell in whole_cell_space(depth, plain.libraries().len(), 2) {
+                        let before = score(&cell, &one_class);
+                        let after = score(&cell, &two_classes);
+                        for (alt_copies, (b, a)) in before.iter().zip(&after).enumerate() {
+                            assert!(
+                                (b - a).abs() < 1e-12 || (b.is_infinite() && a.is_infinite()),
+                                "{label}, noisy share {noisy_fraction}, depth {depth}, \
+                                 {alt_copies} copies: one class scores {b} and two score {a}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **A sample with no second class is scored by the expression that existed before the
+    /// extension, bit for bit.** `None` and a zero share are different objects on purpose,
+    /// and this is what that buys: no existing fit takes the new arithmetic.
+    #[test]
+    fn a_sample_with_no_second_class_is_scored_exactly_as_before() {
+        let plain = two_libraries();
+        let zero_share = SampleLibraryNoise::with_site_noise(
+            plain.libraries().iter().copied(),
+            SiteNoise::try_new(0.0, rate(5.29e-2)).expect("a share and a rate"),
+        );
+        assert!(plain.site_noise().is_none());
+        for depth in [1_u32, 5] {
+            for cell in whole_cell_space(depth, 2, 2) {
+                for (alt_copies, (b, a)) in score(&cell, &plain)
+                    .iter()
+                    .zip(&score(&cell, &zero_share))
+                    .enumerate()
+                {
+                    assert!(
+                        (b - a).abs() < 1e-12 || (b.is_infinite() && a.is_infinite()),
+                        "depth {depth}, {alt_copies} copies: {b} against {a}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The mixture's magnitude, worked by hand — this is the test that kills a swap.**
+    ///
+    /// A locus with three alternative reads out of thirty sits in the band where the
+    /// measured tail is fattest, and it is where the extension earns its keep. At the
+    /// shape fitted on HG002 — `w` = 0.0088, `ε_clean` = 1.895 × 10⁻³,
+    /// `ε_noisy` = 5.29 × 10⁻² — the homozygous-reference score of that cell is
+    ///
+    /// ```text
+    /// 0.9912 · Binom(3; 30, 1.895e-3)  +  0.0088 · Binom(3; 30, 5.29e-2)
+    ///   =  0.9912 · 2.624895e-5  +  0.0088 · 1.385417e-1  =  1.245185e-3
+    /// ```
+    ///
+    /// **47.44 times** the one-class score. Exchange the two weights, or send each rate to
+    /// the other branch, and the same cell comes back **5,231 times** the one-class score —
+    /// a hundred-fold apart, and neither swap is visible to any of the four identities
+    /// above or to the fifth, because all of them hold for any convex combination of two
+    /// probabilities over the same space.
+    #[test]
+    fn a_site_in_the_tail_is_far_less_surprising_with_a_second_class() {
+        let plain = SampleLibraryNoise::single(group(0), rate(1.895e-3));
+        let extended = SampleLibraryNoise::with_site_noise(
+            plain.libraries().iter().copied(),
+            SiteNoise::try_new(0.0088, rate(5.29e-2)).expect("a share and a rate"),
+        );
+        let tail = pooled_cell_of(30.0, 3, 2);
+        let (before, after) = (score(&tail, &plain)[0], score(&tail, &extended)[0]);
+        let times = (after - before).exp();
+        assert!(
+            (times - 47.4375).abs() < 0.01,
+            "the mixture at three alternative reads in thirty is {times:.4}x the one-class \
+             score, where the two classes weighted 0.9912 and 0.0088 give 47.4375x — a \
+             swap of either the weights or the rates gives 5,231x"
+        );
+        // And the classes must not have been swapped: a clean site — no alternative reads
+        // at all — is *more* surprising once some sites are noisy, not less.
+        let clean = pooled_cell_of(30.0, 0, 2);
+        assert!(
+            score(&clean, &extended)[0] < score(&clean, &plain)[0],
+            "with a noisy class present, an all-reference site cannot become more likely"
+        );
     }
 
     /// **Identity 1 of `spec/parameter_prepass_generic.md` §12.8: the rule is a

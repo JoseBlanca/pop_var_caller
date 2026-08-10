@@ -68,7 +68,7 @@ to revisit when a multi-library alignment exists**, in the type's own doc.
 *Tests:* the newtypes reject out-of-range; the marginal is computed once and agrees with a
 hand-worked example.
 
-### N2. The scoring rule.  ☐ **Own commit, do not bundle.**
+### N2. The scoring rule.  ✅ **Own commit, do not bundle.**
 
 `ln L(cell | θ)` becomes a convex combination of the existing rule evaluated at `ε_clean` and at
 `ε_noisy`. The multi-library closed form of spec §5.1 factors cleanly, because the site class is
