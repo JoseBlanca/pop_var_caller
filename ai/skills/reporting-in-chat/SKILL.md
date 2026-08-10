@@ -85,7 +85,10 @@ Three sources of names the reader does not have:
    floor run", "the gate". Each was invented in a tool call the reader never saw.
 3. **⚠ Terms the repository uses.** A word in a filename is **not** shared
    vocabulary. `ng_ssr_aligner_bakeoff.rs` exists, and "bake-off" was still
-   meaningless to the reader. Code names are not reader names.
+   meaningless to the reader. Code names are not reader names. **Type names are the
+   easiest of these to miss**, because they read as ordinary nouns: `World` became
+   *worlds* for a whole session before the owner stopped it, where the plain phrase —
+   *a simulated sample* — was shorter than the jargon.
 
 The repair is one clause, not a glossary:
 
@@ -185,6 +188,34 @@ produces something you can point at, or compares two texts.
 real before/after are what make a rule stick — this file's value grows by accretion,
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
+
+### 2026-08-10 — "worlds": a struct name used as if it were English
+
+`examples/ng_multilib_key_harness.rs` calls its simulated samples `World`. Replies across a
+whole session used *worlds* as the noun for them — "E2's 25 worlds", "a world that has a second
+class", "the worlds at the shares HG002 returned" — without ever defining it once.
+
+> ❌ "Three shapes are in the table: the worlds at the shares and rates HG002 and tomato
+> actually returned, each with one library and with two."
+>
+> Owner: *"stop using the word 'worlds' to talk about whatever the fuck you'll talking about"*
+
+> ✅ "Three shapes are in the table, each a **simulated sample** — a made-up sample with a
+> known error rate, heterozygosity and read depth, from which the exact data is computed — at
+> the shares and rates HG002 and tomato actually returned, sequenced once as one library and
+> once as two."
+
+Three failures:
+
+1. **The third instance of one rule**, after `H1`/`H3` (2026-08-04) and `arm E`/`sketch 4`
+   (2026-08-06). Each time the source was different — finding codes, then experiment arms, now
+   a **type name**. `World`, `Cell`, `Coarsening`, `Rule` are all in this category.
+2. **It was never introduced, not even once.** The earlier offenders at least got a defining
+   sentence when they first appeared; this one went straight into load-bearing use in the
+   first reply of the session and stayed for the whole of it.
+3. **The plain replacement was shorter than the coined one.** *A simulated sample.* When a
+   term from the code has a plain synonym the reader already owns, there is no argument left
+   for the coined one — it is not saving words, it is only saving the writer a translation.
 
 ### 2026-08-10 — a handoff note answered as if it were the owner's question
 
