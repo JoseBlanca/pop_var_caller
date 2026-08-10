@@ -450,6 +450,10 @@ pub struct GenericSampleParameters {
     /// The sample's second class of site, when its data asked for one — as
     /// [`CoupledFit::site_noise`], and already folded into `error_rate`.
     pub site_noise: Option<SiteNoise>,
+    /// **This sample wanted a second class of site outside the model's range and was refused**
+    /// — see [`CoupledFit::site_noise_off_the_ladder`]. `site_noise` is then `None` for a
+    /// reason a consumer should not read as *no second class was needed*.
+    pub site_noise_off_the_ladder: bool,
     /// How the coupled error-rate/frequency fit ended.
     pub coupled_fit: FitTermination,
 }
@@ -488,6 +492,24 @@ pub struct CoupledFit {
     ///
     /// [`error_rate`]: CoupledFit::error_rate
     pub site_noise: Option<SiteNoise>,
+    /// **The sample asked for a second class of site this model does not cover, and was
+    /// refused** — so [`site_noise`] is `None` for a reason quite unlike the ordinary one.
+    ///
+    /// The error-rate ladder runs Phred 10 to 50 because that is the range of *sequencing*
+    /// noise (`spec/parameter_prepass.md` §3). A best second class sitting on its coarsest
+    /// rung is the search asking to leave that range, and what such a sample holds is a
+    /// population of positions the model does not describe — duplications the reference does
+    /// not carry look like this, since about half the reads disagree where the copies differ,
+    /// five times that rung. Owner's call, 2026-08-10: refuse it and fit one rate, rather than
+    /// widen the model until it stops serving the samples that do meet its assumptions.
+    ///
+    /// **Without this bit the two cases are indistinguishable**, and they are not alike: an
+    /// ordinary `None` says the data did not ask for a second class, and this one says it
+    /// asked for something out of range. On the five real alignments run so far it is set on
+    /// two — tomato SRR7279482 and SRR7279483.
+    ///
+    /// [`site_noise`]: CoupledFit::site_noise
+    pub site_noise_off_the_ladder: bool,
     pub termination: FitTermination,
 }
 

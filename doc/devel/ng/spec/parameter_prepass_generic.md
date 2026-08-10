@@ -198,6 +198,26 @@ No data distinguishes a per-sample from a per-library share: every sample in bot
 library. **Contamination is the case that would break it first**, because it can lift one library's
 share while leaving its sibling's untouched. To revisit when a multi-library alignment exists.
 
+**A sample that wants a noisier class than the model covers is refused and fitted with one
+rate — it is an outlier, not a reason to widen the model** (owner, 2026-08-10). The error-rate
+ladder runs Phred 10 to 50 because that is the range of *sequencing* noise (§3); an argmax on
+its coarsest rung is the search asking to leave that range, and what such a sample holds is a
+population of positions this model does not describe. Two of five real alignments do it —
+tomato SRR7279482 and SRR7279483, at 0.42% and 0.49% of sites — and what they are asking for
+fits a duplication the reference does not carry, where about **half** the reads disagree, five
+times that rung.
+
+*Rejected: widen the ladder for the noisy class.* As the noisy rate approaches a half, a noisy
+site and a heterozygous site are the same distribution, so the class that exists to take mass
+**away** from heterozygosity would begin taking real heterozygotes with it. **A model flexible
+enough to absorb those two samples would serve every sample that does meet its assumptions
+worse, and that is a regression.** *Rejected: take the next rung down instead* — an answer just
+inside the range carrying none of the evidence that the sample is outside it.
+
+**The refusal is reported rather than silent.** `site_noise` is then `None` for a reason quite
+unlike the ordinary one, so `site_noise_off_the_ladder` says which happened. Such a sample gets
+the one-rate answer it would have had before this milestone, and the caller can see that it did.
+
 **What a sample emits stays one number: the share-weighted marginal** `(1 − w)·ε_clean + w·ε_noisy`
 — the probability a read disagrees with the reference at a site drawn at random. That is the
 quantity a model-free count measures, and measured against one it sits **3.1% high, half a rung of

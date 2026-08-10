@@ -1510,7 +1510,20 @@ Every row read before it was written.
   *cap* competes for bins, so a cap of 300 at sixteen bins is four times worse in
   `π_hom_alt` than a cap of 124 (§2.2); and the band a ladder can hurt is 10 to 30 reads a
   site, so any replacement checked only at tomato's 3 reads would pass whatever it did.
-- **ADDED 2026-08-10 — `OPEN:` the two deepest tomato samples want a noisy rate the ladder cannot
+- **ADDED AND CLOSED 2026-08-10 — the two deepest tomato samples want a noisy rate the ladder
+  cannot express, and are treated as outliers.** Owner's call: *"there will always be some things
+  that won't be well covered, and we'll have to live with that. What we don't want is to create a
+  model so flexible that it won't serve appropriately the libraries that follow the assumptions
+  the model does."* A best second class on the ladder's **coarsest rung is refused outright** and
+  the sample is fitted with one rate, with `site_noise_off_the_ladder` set so the refusal is not
+  mistaken for *no second class was needed* (§2.4). Measured: SRR7279482 falls back to 2.371 × 10⁻³
+  and heterozygosity 1.525 × 10⁻³ — its pre-milestone values — and reports itself; SRR7279481, which
+  asks for 6.3 × 10⁻², is untouched. **Rejected: widening the ladder for the noisy class**, because
+  as that rate approaches a half a noisy site and a heterozygous one are the same distribution, so
+  the class that exists to take mass away from heterozygosity would start taking real heterozygotes.
+  **Rejected: the next rung down**, an answer inside the range carrying none of the evidence that
+  the sample is outside it. The original wording follows.
+- **`OPEN:` (superseded) the two deepest tomato samples want a noisy rate the ladder cannot
   express.** The ladder runs Phred 10 to 50 — one base in ten down to one in a hundred thousand —
   because it was chosen for sequencing chemistry (spec
   [`parameter_prepass.md`](../spec/parameter_prepass.md) §3, DRAGstr's own range). On tomato

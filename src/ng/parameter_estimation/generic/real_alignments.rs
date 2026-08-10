@@ -988,10 +988,24 @@ fn report_the_second_class_of_site(
     finest: f64,
 ) {
     let Some(noise) = parameters.site_noise else {
-        eprintln!(
-            "end to end: {run_label} — no second class of site: the fit declined one, so every \
-             emitted rate is a single population of sites"
-        );
+        if parameters.site_noise_off_the_ladder {
+            // **An outlier, and reported as one rather than failed on** (owner, 2026-08-10).
+            // This sample asked for a class of site noisier than one base in ten, which is
+            // outside the range the error-rate ladder covers, so the fit refused it and fell
+            // back to one rate. Two of the five alignments this test is run on do it.
+            eprintln!(
+                "end to end: {run_label} — OUTLIER: the sample asked for a second class of \
+                 site noisier than the ladder's coarsest rung, so it was refused and one rate \
+                 fitted. That is a population of positions this model does not describe — a \
+                 duplication the reference does not carry shows about half its reads \
+                 disagreeing, five times that rung"
+            );
+        } else {
+            eprintln!(
+                "end to end: {run_label} — no second class of site: the fit declined one, so \
+                 every emitted rate is a single population of sites"
+            );
+        }
         return;
     };
 

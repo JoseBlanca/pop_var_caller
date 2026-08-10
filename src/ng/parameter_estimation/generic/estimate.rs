@@ -196,6 +196,7 @@ impl GenericAccumulators {
             inbreeding,
             runs_model,
             site_noise: coupled.site_noise,
+            site_noise_off_the_ladder: coupled.site_noise_off_the_ladder,
             coupled_fit: coupled.termination,
         })
     }

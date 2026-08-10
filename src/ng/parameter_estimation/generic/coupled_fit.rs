@@ -247,6 +247,39 @@ pub(crate) fn fit_coupled_from_tables(
         }
     }
 
+    // **A second class on the ladder's coarsest rung is refused outright, and the sample falls
+    // back to one rate** (owner's call, 2026-08-10). The ladder's ends are not an implementation
+    // limit that happens to bind — they are the range of noise rates this model claims to cover,
+    // Phred 10 to 50, chosen for sequencing chemistry (`spec/parameter_prepass.md` §3). An
+    // argmax sitting on the edge is the search asking to leave that range, which is a statement
+    // about the *sample*: it holds a population of positions this model does not describe.
+    // Measured, two of five real alignments do it — tomato SRR7279482 and SRR7279483, at 0.42%
+    // and 0.49% of sites — and what they are asking for is consistent with duplications the
+    // reference does not carry, where about **half** the reads disagree, five times the coarsest
+    // rung.
+    //
+    // **Why refuse rather than widen the ladder**, which was the alternative: a site where half
+    // the reads disagree is exactly what a heterozygous site looks like, so as the noisy rate
+    // approaches a half the second class stops being distinguishable from heterozygosity — and
+    // this class exists to take mass *away* from heterozygosity. A model flexible enough to
+    // absorb those two samples would be worse for every sample that does meet its assumptions.
+    // *"There will always be some things that won't be well covered, and we'll have to live with
+    // that. What we don't want is to create a model so flexible that it won't serve appropriately
+    // the libraries that follow the assumptions the model does."*
+    //
+    // **And taking the next rung down instead would be the worst of both**: an answer just
+    // inside the range, carrying none of the evidence that the sample is outside it.
+    let refused_off_the_ladder = best.as_ref().is_some_and(|(score, _, pair, _)| {
+        *score - one_class_score > MIN_SITE_NOISE_GAIN && pair.noisy_error_rate() == ladder[0]
+    });
+    if refused_off_the_ladder {
+        return Ok(CoupledFit {
+            site_noise: None,
+            site_noise_off_the_ladder: true,
+            ..one_class
+        });
+    }
+
     match best {
         Some((score, fit, pair, settled)) if score - one_class_score > MIN_SITE_NOISE_GAIN => {
             // **The winner's own settling is folded into what the fit reports.** A profile
@@ -261,12 +294,14 @@ pub(crate) fn fit_coupled_from_tables(
             };
             Ok(CoupledFit {
                 site_noise: Some(pair),
+                site_noise_off_the_ladder: false,
                 termination,
                 ..fit
             })
         }
         _ => Ok(CoupledFit {
             site_noise: None,
+            site_noise_off_the_ladder: false,
             ..one_class
         }),
     }
@@ -672,6 +707,9 @@ fn into_coupled_fit(
         error_rate,
         rates,
         site_noise: None,
+        // The alternation itself never refuses anything: the decision belongs to the profile
+        // that wraps it, which is the only place that knows what rate the sample asked for.
+        site_noise_off_the_ladder: false,
         termination,
     })
 }
