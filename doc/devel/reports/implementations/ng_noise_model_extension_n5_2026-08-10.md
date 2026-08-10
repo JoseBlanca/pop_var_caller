@@ -98,9 +98,9 @@ parameters. This fit does not return those parameters.
 ## The fixture that explains it
 
 `the_whole_fit_finds_both_classes_when_it_is_given_neither` (in `generic/coupled_fit.rs`)
-generates a world at the research note's own HG002 30x parameters — clean 1.8836 × 10⁻³, 0.88%
+generates a table at the research note's own HG002 30x parameters — clean 1.8836 × 10⁻³, 0.88%
 of sites noisy at 5.29 × 10⁻², over the measured depth distribution, at the benchmark genotype
-frequencies — as a **table**, and runs the whole coupled fit, which is handed neither rate.
+frequencies — and runs the whole coupled fit, which is handed neither rate.
 
 **It returns a clean rate of 2.2387 × 10⁻³: three rungs, 19%, above the generating value — the
 same rung it returns on the real alignment.** Scored on the same cells, the generating
@@ -112,7 +112,7 @@ because the fit does not reach the model's own maximum, and 351 nats is not a ro
 the whole second class was worth 425 nats over a beta-binomial, and the fit declines a class
 that gains less than 3.
 
-**Why the existing oracles do not see it.** N3b's two worlds hand `fit_site_noise` the *true*
+**Why the existing oracles do not see it.** N3b's two generated tables hand `fit_site_noise` the *true*
 clean rate and ask whether the second class is recovered given the first. The real path fits
 both, in this order: settle the rates with one class, fit the pair at those settled rates,
 re-settle the rates with the pair held. The first step's answer is the one-class rate, which

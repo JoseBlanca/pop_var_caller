@@ -16,8 +16,7 @@ table whose tail belongs to the other class.
 The consequence is not subtle and it is not a search problem: the scan returns the
 tail-inflated rate whatever pair sits beside it, so the outer loop's second half — *settle the
 rates again with the second class held fixed* — was re-deriving the number it already had. The
-clean rate came back on the one-class rung on **all five real alignments and on the synthetic
-world**, which is exactly what a block scoring under the wrong model looks like.
+clean rate came back on the one-class rung on **all five real alignments and on a generated table**, which is exactly what a block scoring under the wrong model looks like.
 
 **The first change is the argument.** `site_noise: Option<SiteNoise>` is now a parameter of
 that function, and each rung's noise is built with the pair when the sample has a second class.
@@ -25,7 +24,7 @@ That alone takes the fixture below from failing by 351 nats to passing.
 
 **The second change is the profile N5's report recommended, and deciding whether it was still
 needed took a measurement.** With the argument fixed, the fixture passes in 0.5 s with no
-profile at all, and so does a synthetic world shaped like a tomato sample — so every fixture
+profile at all, and so does a generated table shaped like a tomato sample — so every fixture
 available said the profile could be deleted, and it was. **Real tomato SRR7279481 said
 otherwise**: scored on its own cells, the argument alone reaches −1,504,289.10 and the profile
 reaches −1,504,079.98, **209 nats higher**, reporting 1.42% of sites noisy at 6.310 × 10⁻²
@@ -43,12 +42,15 @@ a second copy of that function's expectation-maximisation. The first draft bypas
 entirely, which left the function N3b built — and both of its oracles — testing code no caller
 ran.
 
-What it costs: 23 s → 37 s on the tomato run, and 0.5 s → 39.5 s on the fixture, which is 8 s
-of wall clock on the suite (81 s → 89 s) because tests run in parallel.
+What it costs: 23 s → 37 s on the tomato run, and 0.5 s → **17.2 s** on the fixture. What that
+costs the whole suite is inside its own run-to-run spread — thirteen runs of the same command
+ranged 79 to 90 seconds — so there is no number to quote. **An earlier draft of this report said
+39.5 s**, which timed the draft of the profile that did not route its share climb through
+`fit_site_noise`.
 
 ## What the fix recovers
 
-`the_whole_fit_finds_both_classes_when_it_is_given_neither` generates a world at the research
+`the_whole_fit_finds_both_classes_when_it_is_given_neither` generates a table at the research
 note's own HG002 30x parameters and runs the whole fit, which is handed neither rate. Before
 the fix it returned a clean rate 19% high and scored 351 nats below the generating parameters.
 After it, every rate is the generating rung, the share is within 10⁻³ of the generating 0.88%,
@@ -139,7 +141,7 @@ decision N5's report set out, and it is still open.
 `cargo test --lib --bins --tests --all-features` (3,234 passed, 0 failed, 9 ignored) and
 `cargo doc --no-deps --lib` at the 12-unresolved-link pre-existing baseline, none in this
 module. The suite's `#[ignore]` count is back to F3's nine: the fixture that recorded the
-defect now passes and runs by default, in 0.5 s.
+defect now passes and runs by default, in 17.2 s.
 
 Three of the five real-alignment arms pass all four tests; the two railed tomatoes fail the
 end-to-end one on the ladder-end check, which is the finding above and not a regression.
