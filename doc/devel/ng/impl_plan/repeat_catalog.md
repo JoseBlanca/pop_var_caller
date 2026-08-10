@@ -73,26 +73,26 @@ outside the folder: the `ReferenceBasesObserver` seam in `src/ng/reference_info.
 
 ### Milestone A — the types and the criteria-free arithmetic
 
-**A1. Module scaffold, dependency, types.**  ☐
+**A1. Module scaffold, dependency, types.**  ✅
 `pub mod repeat_catalog;` in `ng/mod.rs`; the folder of arch §*Module home*; `FoundRepeat`, `SpanBp`,
 `RepeatCatalogHeader`, and the `#[non_exhaustive]` `RepeatCatalogError` with every variant and its doc
 comment. Add `parquet` to `Cargo.toml` (no code using it yet). Nouns and errors only, no logic.
 *Source:* arch §1.2–§1.4.
 
-**A2. `StrRepeatCriteria` + `serves`.**  ☐
+**A2. `StrRepeatCriteria` + `serves`.**  ✅
 The wrapper over `SsrSegmentCriteria`, the named `pub const` defaults (`[5, 5, 4, 4, 4, 3]`, 15 bp,
 500 bp, periods 1..=6), `CriteriaRefusal`, and `serves`. Tests: equal criteria serve; a lower copy
 floor at one period refuses **naming that period and both numbers**; a lower flank refuses; a wider
 period range refuses; a different purity floor, score floor, satellite cap or bundle radius **serves**
 — the mirror case, which is what §4.2 turns on. *Depends:* A1. *Source:* arch §1.1, spec §4.1–§4.3.
 
-**A3. Lift trim, motif and purity out of `finish_locus`.**  ☐  **Own commit, do not bundle.**
+**A3. Lift trim, motif and purity out of `finish_locus`.**  ✅  **Own commit, do not bundle.**
 `pub(crate)` helpers in `segment_criteria.rs` for the whole-motif trim, the motif slice and the purity
 recomputation; `finish_locus` calls them and keeps its behaviour. **Silent** (a changed trim is a
 changed locus everywhere, not a panic): the existing `region_typing` test suite must be green before
 and after, unchanged. *Depends:* A1. *Source:* arch §5 (row *motif / trim / purity*), spec §3.2, §7.
 
-**A4. `FoundRepeat` from a `RepeatInterval`.**  ☐  **Own commit, do not bundle.**
+**A4. `FoundRepeat` from a `RepeatInterval`.**  ✅  **Own commit, do not bundle.**
 The conversion at the builder's edge: 0-based half-open → 1-based inclusive, the copy floor **on the
 detected span** as `prefilter` measures it, the trim (absent when there is no clean cut), motif,
 purity over the trimmed tract, and the 15 bp flank floor against the contig's length. **Silent** (an

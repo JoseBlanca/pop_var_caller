@@ -16,6 +16,7 @@
 //! filtering the file (spec §1, §4.1).
 
 pub mod criteria;
+pub mod row;
 
 use std::path::PathBuf;
 
@@ -24,6 +25,7 @@ use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::{ContigId, Motif, Position};
 
 pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
+pub use row::{RowRejection, row_for_interval};
 
 /// A tandem-repeat tract's span on one contig: **1-based inclusive**, ng's convention
 /// (`ng_step_interfaces.md` §1).
