@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
+use crate::ng::region_typing::TypedRegion;
 use crate::ng::region_typing::segment_criteria::SsrSegment;
-use crate::ng::region_typing::{RegionKind, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, row_from_batch};
-use crate::ng::repeat_catalog::segments::segments_of_contig;
+use crate::ng::repeat_catalog::segments::{loci_of_contig, segments_of_contig};
 use crate::ng::repeat_catalog::strata::{StratumCounts, StratumSample, StratumSampler};
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, RepeatCatalogHeader};
 use crate::ng::tandem_repeat::ScanParams;
@@ -150,22 +150,24 @@ impl RepeatCatalog {
         contig: Option<ContigId>,
     ) -> Result<GenomeSegments<'_>, RepeatCatalogError> {
         self.check_serves(criteria)?;
+        Ok(GenomeSegments {
+            catalog: self,
+            criteria: criteria.clone(),
+            contigs: self.contig_walk(contig).into_iter(),
+            buffered: Vec::new().into_iter(),
+        })
+    }
 
-        let contigs: Vec<(ContigId, String, Bp)> = self
-            .header
+    /// The contigs a read covers — all of them, or the one asked for — with the names and
+    /// lengths the header carries.
+    fn contig_walk(&self, contig: Option<ContigId>) -> Vec<(ContigId, String, Bp)> {
+        self.header
             .contigs
             .iter()
             .enumerate()
             .map(|(i, info)| (ContigId(i as u32), info.name.clone(), Bp(info.length)))
             .filter(|(id, _, _)| contig.is_none_or(|wanted| *id == wanted))
-            .collect();
-
-        Ok(GenomeSegments {
-            catalog: self,
-            criteria: criteria.clone(),
-            contigs: contigs.into_iter(),
-            buffered: Vec::new().into_iter(),
-        })
+            .collect()
     }
 
     /// The surviving STR loci alone, without the generic stretches between them.
@@ -177,18 +179,14 @@ impl RepeatCatalog {
         &self,
         criteria: &StrRepeatCriteria,
         contig: Option<ContigId>,
-    ) -> Result<impl Iterator<Item = Result<SsrSegment, RepeatCatalogError>> + '_, RepeatCatalogError>
-    {
-        Ok(self
-            .genome_segments(criteria, contig)?
-            .filter_map(|region| match region {
-                Err(e) => Some(Err(e)),
-                Ok(TypedRegion {
-                    kind: RegionKind::SsrSegment(locus),
-                    ..
-                }) => Some(Ok(locus)),
-                Ok(_) => None,
-            }))
+    ) -> Result<StrLoci<'_>, RepeatCatalogError> {
+        self.check_serves(criteria)?;
+        Ok(StrLoci {
+            catalog: self,
+            criteria: criteria.clone(),
+            contigs: self.contig_walk(contig).into_iter(),
+            buffered: Vec::new().into_iter(),
+        })
     }
 
     /// How many loci the catalog holds in each `(period, repeat count)` stratum.
@@ -290,12 +288,11 @@ impl Iterator for GenomeSegments<'_> {
                 return Some(Ok(region));
             }
             let (contig, name, length) = self.contigs.next()?;
-            let rows: Result<Vec<FoundRepeat>, RepeatCatalogError> =
-                match self.catalog.repeats_in_region(Some(contig)) {
-                    Ok(iter) => iter.collect(),
-                    Err(e) => Err(e),
-                };
-            let rows = match rows {
+            // One contig's rows, whole, because that is what classification needs: bundling
+            // reads a tract's neighbours, the satellite cap reads their merged coverage, and
+            // the generic stretches are the gaps between the results. A row at a time would
+            // answer none of them — and a contig is the unit the file is grouped by anyway.
+            let rows = match rows_of_contig(self.catalog, contig) {
                 Ok(rows) => rows,
                 Err(e) => return Some(Err(e)),
             };
@@ -303,6 +300,45 @@ impl Iterator for GenomeSegments<'_> {
                 segments_of_contig(&name, contig, length, &rows, &self.criteria).into_iter();
         }
     }
+}
+
+/// The STR loci alone, one contig at a time.
+///
+/// The same contig walk as [`GenomeSegments`], stopping one step earlier: `loci_of_contig`
+/// resolves the repeat features and takes the loci, so the generic stretches between them —
+/// a whole contig's worth of spans a caller would discard — are never built (spec §5.3).
+pub struct StrLoci<'a> {
+    catalog: &'a RepeatCatalog,
+    criteria: StrRepeatCriteria,
+    contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
+    buffered: std::vec::IntoIter<SsrSegment>,
+}
+
+impl Iterator for StrLoci<'_> {
+    type Item = Result<SsrSegment, RepeatCatalogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(locus) = self.buffered.next() {
+                return Some(Ok(locus));
+            }
+            let (contig, name, length) = self.contigs.next()?;
+            let rows = match rows_of_contig(self.catalog, contig) {
+                Ok(rows) => rows,
+                Err(e) => return Some(Err(e)),
+            };
+            self.buffered =
+                loci_of_contig(&name, contig, length, &rows, &self.criteria).into_iter();
+        }
+    }
+}
+
+/// One contig's rows, in file order.
+fn rows_of_contig(
+    catalog: &RepeatCatalog,
+    contig: ContigId,
+) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
+    catalog.repeats_in_region(Some(contig))?.collect()
 }
 
 /// Which contig a row group holds, from its first row's `contig` column.

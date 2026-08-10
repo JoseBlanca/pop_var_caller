@@ -13,7 +13,7 @@ use crate::ng::region_typing::segment_criteria::{
     self, SsrSegment, SsrSegmentCriteria, is_compound, split_bundles,
 };
 use crate::ng::region_typing::{
-    TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps, resolve_features,
+    RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps, resolve_features,
 };
 use crate::ng::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, TractSpan};
@@ -38,6 +38,46 @@ pub fn segments_of_contig(
     if contig_len.get() == 0 {
         return Vec::new();
     }
+    let features = repeat_features_of_contig(chrom, contig, contig_len, rows, criteria);
+    fill_generic_gaps(features, contig, contig_len.get())
+}
+
+/// The **STR loci** of one contig, without the generic stretches between them.
+///
+/// The same admission [`segments_of_contig`] runs — a locus here is a locus there,
+/// satellite absorption included — but the generic spans a caller would immediately discard
+/// are never built (spec §5.3).
+pub fn loci_of_contig(
+    chrom: &str,
+    contig: ContigId,
+    contig_len: Bp,
+    rows: &[FoundRepeat],
+    criteria: &StrRepeatCriteria,
+) -> Vec<SsrSegment> {
+    if contig_len.get() == 0 {
+        return Vec::new();
+    }
+    repeat_features_of_contig(chrom, contig, contig_len, rows, criteria)
+        .into_iter()
+        .filter_map(|region| match region.kind {
+            RegionKind::SsrSegment(locus) => Some(locus),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Everything up to but not including the generic fill: the repeat features of one contig,
+/// coordinate-ordered.
+///
+/// **Absorption is why the loci cannot be taken before this point**: a satellite swallows a
+/// locus too close to it, so a locus is only a locus once the features are resolved.
+fn repeat_features_of_contig(
+    chrom: &str,
+    contig: ContigId,
+    contig_len: Bp,
+    rows: &[FoundRepeat],
+    criteria: &StrRepeatCriteria,
+) -> Vec<TypedRegion> {
     let class = &criteria.classification;
 
     // 1. The detected spans, back in the detector's own coordinates, because that is what
@@ -51,15 +91,14 @@ pub fn segments_of_contig(
     //    motif and purity instead of the bases (§5.1).
     let admitted = admit(chrom, rows, &cleaned, contig_len, class);
 
-    // 4-5. The satellite cap over the cleaned coverage, the features, then the gaps.
+    // 4-5. The satellite cap over the cleaned coverage, then the features.
     let runs = coverage_runs(&cleaned);
     let config = TypedRegionConfig {
         criteria: class.clone(),
         max_str_len: criteria.max_str_len_bp,
         ..TypedRegionConfig::default()
     };
-    let features = resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config);
-    fill_generic_gaps(features, contig, contig_len.get())
+    resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config)
 }
 
 /// Every segment of every contig the catalog holds, in reference order.
@@ -100,14 +139,14 @@ fn admit(
     contig_len: Bp,
     class: &SsrSegmentCriteria,
 ) -> Admitted {
-    // The pre-screen returns intervals, not rows; match them back by span and period so the
-    // stored cut travels with each survivor.
-    let mut survivors: Vec<&FoundRepeat> = Vec::with_capacity(cleaned.len());
-    for interval in cleaned {
-        if let Some(row) = rows.iter().find(|row| &detected_interval(row) == interval) {
-            survivors.push(row);
-        }
-    }
+    // The pre-screen and the bundler both hand back **intervals**, not rows, and what a
+    // locus needs — the whole-motif cut, the motif, the purity — lives on the row. So each
+    // survivor has to be matched back to the row it came from.
+    //
+    // **Both sequences are sorted the same way and the survivors are a subsequence**, since
+    // `prefilter` only drops, so one cursor walks them together. A lookup per survivor
+    // would scan a chromosome's rows once per survivor.
+    let survivors: Vec<&FoundRepeat> = pair_with_rows(rows, cleaned);
 
     // Scope, score and the compound-motif gate — `classify`'s step 2, over stored fields.
     let mut kept: Vec<&FoundRepeat> = Vec::with_capacity(survivors.len());
@@ -127,17 +166,60 @@ fn admit(
     let intervals: Vec<RepeatInterval> = kept.iter().map(|row| detected_interval(row)).collect();
     let (kept_intervals, bundled) = split_bundles(intervals, class.bundle_threshold);
 
-    let mut loci = Vec::with_capacity(kept_intervals.len());
-    for interval in &kept_intervals {
-        let Some(row) = kept.iter().find(|row| detected_interval(row) == *interval) else {
-            continue;
-        };
+    // The isolated intervals are a subsequence of what went in, and `kept` is in that same
+    // order, so the same cursor walk pairs them — the rows this time being `kept`, not the
+    // contig's, since the bundling was fed `kept`'s order.
+    let isolated_rows = pair_with_rows_by_ref(&kept, &kept_intervals);
+
+    let mut loci = Vec::with_capacity(isolated_rows.len());
+    for row in isolated_rows {
         if let Some(locus) = finish_from_row(chrom, row, contig_len, class) {
             loci.push(locus);
         }
     }
 
     Admitted { loci, bundled }
+}
+
+/// Pair each interval of `subsequence` with the row it came from, walking both once.
+///
+/// `subsequence` must be what it says: the same intervals `rows` describes, in the same
+/// order, with some dropped. An interval that does not appear is skipped rather than
+/// searched for — it cannot have come from these rows.
+fn pair_with_rows<'a>(
+    rows: &'a [FoundRepeat],
+    subsequence: &[RepeatInterval],
+) -> Vec<&'a FoundRepeat> {
+    let mut out = Vec::with_capacity(subsequence.len());
+    let mut cursor = rows.iter();
+    for interval in subsequence {
+        for row in cursor.by_ref() {
+            if detected_interval(row) == *interval {
+                out.push(row);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// [`pair_with_rows`] over rows already borrowed — the second walk, whose left-hand side is
+/// the survivors of the first rather than the contig's rows.
+fn pair_with_rows_by_ref<'a>(
+    rows: &[&'a FoundRepeat],
+    subsequence: &[RepeatInterval],
+) -> Vec<&'a FoundRepeat> {
+    let mut out = Vec::with_capacity(subsequence.len());
+    let mut cursor = rows.iter();
+    for interval in subsequence {
+        for row in cursor.by_ref() {
+            if detected_interval(row) == *interval {
+                out.push(*row);
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// `finish_locus` with the trim, the motif and the purity already known.
