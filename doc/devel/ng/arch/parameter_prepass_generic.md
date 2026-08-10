@@ -697,6 +697,13 @@ pub struct GenericSampleParameters {
     /// One per read group — chemistry belongs to the library, not the individual, and
     /// does not vary with ploidy, so there is one of these however many ploidies the
     /// genome holds.
+    ///
+    /// **AMENDED 2026-08-10: this is the share-weighted marginal over the two classes of
+    /// site** (spec §2.1) — `(1 − w)·ε_clean + w·ε_noisy`, the rate a read disagrees at a
+    /// site drawn at random. It stays one number, and every consumer of it is unchanged.
+    /// **`CoupledFit::error_rate` is the *clean* rate**, not this one; the two differ by
+    /// 15% on a sample like HG002, and the fold happens where these parameters are
+    /// assembled and nowhere earlier — the runs model of §5.3 is handed the pair.
     pub error_rate: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
     /// The genotype frequencies, **one set per ploidy present**. A genome with a haploid
     /// sex chromosome has two entries; today's runs have one. Heterozygosity and the
@@ -708,8 +715,23 @@ pub struct GenericSampleParameters {
     pub inbreeding: Option<Estimate<InbreedingF>>,
     /// What the runs model fitted alongside `F`, when it ran (§5.3).
     pub runs_model: Option<RunsModelFit>,
+    /// **ADDED 2026-08-10 — the sample's second class of site** (spec §2.1), when its data
+    /// asked for one: how often a site is drawn from the noisy class and how often a read
+    /// disagrees there. One pair per sample, where `error_rate` is one per read group.
+    ///
+    /// A diagnostic rather than something a consumer must read — `error_rate` already
+    /// folds it in. It is here for a consumer that wants to score a read against its own
+    /// site's class rather than the sample's average, and for a reader who wants to know
+    /// whether this sample had a badly-behaved population of sites at all.
+    pub site_noise: Option<SiteNoise>,
     /// How the coupled error-rate/frequency fit ended (§5.2). One iteration and converged
     /// on a single-library sample, where the alternation is exact.
+    ///
+    /// **AMENDED 2026-08-10:** `converged` is now the *conjunction* of the alternation
+    /// settling and the winning point of the noisy-rate profile settling. Reporting only
+    /// the first said "converged" for a fit whose noisy share was still moving — and on
+    /// HG002 the winning point settles on its sixth pass, one past what the search then
+    /// allowed.
     pub coupled_fit: FitTermination,
 }
 ```
@@ -1011,6 +1033,25 @@ ln L(cell | θ)  =  ln  Σ  π_j  ────────────── · 
 
 A `Pooled` cell is the same expression with the `G` alternative categories collapsed into one, which
 leaves a binomial at the share-weighted rate `Σ_g w_g·p_j(ε_g)`.
+
+**AMENDED 2026-08-10 — the scan takes the sample's second class of site, and every rung is scored
+with it** (spec §2.1). The expression above is evaluated at the libraries' own rates and again at
+`ε_noisy`, and averaged by the share:
+
+```text
+ln L(cell | θ, w, ε_noisy)  =  ln [ (1 − w)·L(cell | θ) + w·L(cell | ε_noisy everywhere) ]
+```
+
+**The multi-library closed form needs no rewriting**, and the reason is worth stating: a site's
+class is a property of the **site** while the library split is a property of the **reads**, so the
+sum over which library produced each alternative read happens inside each branch. At a noisy site
+every library reads at `ε_noisy` — one rate for the sample, where `ε` is one per read group.
+
+**`site_noise` is a parameter of `fit_read_group_error_rates` and not an afterthought.** Omitting it
+was a defect: a candidate rate scored under the one-class rule must explain a table whose tail
+belongs to the other class, so the scan returns the tail-inflated rate whatever pair sits beside it,
+and this scan is the only place the step's rate comes from. Measured, the rate came back three rungs
+high on a table generated at HG002's own parameters.
 
 **Never invent a per-library depth.** The cell has forgotten how the depth split between libraries,
 and the tempting repair — give each library `n̂_g = w_g·n` — makes the score stop being a
@@ -1469,6 +1510,26 @@ Every row read before it was written.
   *cap* competes for bins, so a cap of 300 at sixteen bins is four times worse in
   `π_hom_alt` than a cap of 124 (§2.2); and the band a ladder can hurt is 10 to 30 reads a
   site, so any replacement checked only at tomato's 3 reads would pass whatever it did.
+- **ADDED 2026-08-10 — `OPEN:` the two deepest tomato samples want a noisy rate the ladder cannot
+  express.** The ladder runs Phred 10 to 50 — one base in ten down to one in a hundred thousand —
+  because it was chosen for sequencing chemistry (spec
+  [`parameter_prepass.md`](../spec/parameter_prepass.md) §3, DRAGstr's own range). On tomato
+  SRR7279482 and SRR7279483 the second class of site (spec §2.1) is **clamped at 0.1**, the
+  coarsest rung, holding 0.42% and 0.49% of sites. A clamped argmax is the edge of the search and
+  not a maximum inside it, so what those two samples are asking for is a class *worse than one base
+  in ten*, and a duplication the reference does not carry shows about **half** its reads
+  non-reference — five times that rung. **The decision is not obviously to widen the ladder**: as
+  the noisy rate approaches a half, a noisy site and a heterozygous one become the same
+  distribution, and the class that exists to take mass *away* from heterozygosity could start
+  taking real heterozygotes with it. **Settled by:** deciding between a wider ceiling for the noisy
+  class alone, a refusal above some rate, and keeping the clamp while carrying the
+  `noisy_rate_at_ladder_end` bit out to the caller so a run can say what happened. The last of
+  those is the one this milestone recommends, and it needs the item below.
+- **ADDED 2026-08-10 — `OPEN:` `argmax_at_ladder_end` is still dropped between the fit and
+  `GenericSampleParameters`,** so no consumer can read the bit §9 calls one of the two ways this
+  estimator returns a confident wrong number. It now matters more than when it was recorded: the
+  clamp above is exactly the case it would announce, and it happens on two of the five real
+  alignments this step has been run on. Carrying it changes a public type.
 - `OPEN:` **what a site deeper than the cap costs.** §2.2 specifies subsampling it down by a
   hypergeometric draw, and no harness implements one — the worlds measured above all sit
   below the cap, so the subsampling rule is the one depth mechanism with no measurement

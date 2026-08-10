@@ -182,17 +182,26 @@ separated, the fit converging.
 
 ---
 
-## What the owner still owns
+## The design documents — ✅ AMENDED 2026-08-10, on the owner's instruction
 
-The spec and architecture describe the one-rate model and this plan does not edit them:
+Recorded first and edited afterwards, once the owner asked for it rather than for a list:
 
-- `spec/parameter_prepass_generic.md` **§2** — *"a per-base substitution rate and nothing
-  else"* is what this milestone changes.
-- `spec/parameter_prepass_generic.md` **§5.1** and `arch/parameter_prepass_generic.md`
-  **§5.1** — the multi-library closed form gains its convex combination.
-- `arch/parameter_prepass_generic.md` **§2.4** — `GenericSampleParameters` gains a field.
-- `arch/parameter_prepass_generic.md` **§8** — the reference-bias `OPEN:` item is adjacent to
-  this and may be subsumed by it; worth re-reading once N3 lands, because a noisy site class
-  and a reference-bias term compete to explain some of the same reads.
+- `spec/parameter_prepass_generic.md` **§2** — its opening no longer says *a per-base
+  substitution rate and nothing else*, and a new **§2.1** states the second class of site: what
+  it is, what it is fitted at on real alignments, the three causes the owner named, why the pair
+  is per sample and what would break that, and why a sample still emits one number.
+- `spec/parameter_prepass_generic.md` **§5.1** — the alternation is unchanged and the pair is
+  fitted around it; the `ε` scan is scored *with* the pair, and why omitting it was a defect;
+  the ordering constraint that identifies the two classes; and the 25 worlds re-fitted.
+- `arch/parameter_prepass_generic.md` **§2.4** — `GenericSampleParameters` gains `site_noise`,
+  `error_rate` is documented as the marginal, and `coupled_fit.converged` now includes the
+  profile's own settling.
+- `arch/parameter_prepass_generic.md` **§5.1** — the scoring rule's convex combination, and why
+  the multi-library closed form needs no rewriting.
+- `arch/parameter_prepass_generic.md` **§8** — two new `OPEN:` items: the noisy rate clamped at
+  the ladder's coarsest rung on two tomato samples, and `argmax_at_ladder_end` still dropped
+  before a consumer can read it.
 
-Recorded here rather than edited, per the project rule.
+**Not touched, and it should be re-read rather than assumed stale:** §8's reference-bias item.
+A noisy site class and a reference-bias term compete to explain some of the same reads, but
+nothing measured here separates them.
