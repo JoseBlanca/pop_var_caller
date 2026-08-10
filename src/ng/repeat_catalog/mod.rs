@@ -21,6 +21,7 @@ pub mod parquet_file;
 pub mod reader;
 pub mod row;
 pub mod segments;
+pub mod strata;
 
 use std::path::PathBuf;
 
@@ -33,6 +34,7 @@ pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
 pub use parquet_file::RepeatCatalogWriter;
 pub use reader::RepeatCatalog;
 pub use row::{RowRejection, row_for_interval};
+pub use strata::{StratumCounts, StratumSample};
 
 /// How many rows a build wrote, per period — what `repeat-catalog` prints when it finishes
 /// (spec §2.6), and the measurement open question 1 asks for.

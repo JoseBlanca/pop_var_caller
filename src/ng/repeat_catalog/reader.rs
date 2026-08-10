@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
-use crate::ng::region_typing::TypedRegion;
+use crate::ng::region_typing::segment_criteria::SsrSegment;
+use crate::ng::region_typing::{RegionKind, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, row_from_batch};
 use crate::ng::repeat_catalog::segments::segments_of_contig;
+use crate::ng::repeat_catalog::strata::{StratumCounts, StratumSample, StratumSampler};
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, RepeatCatalogHeader};
 use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::Bp;
@@ -164,6 +166,70 @@ impl RepeatCatalog {
             contigs: contigs.into_iter(),
             buffered: Vec::new().into_iter(),
         })
+    }
+
+    /// The surviving STR loci alone, without the generic stretches between them.
+    ///
+    /// The same admission `genome_segments` runs — a locus here is a locus there — but the
+    /// spans a caller would immediately discard are never built (spec §5.3). Streams one
+    /// contig at a time, and refuses eagerly.
+    pub fn str_loci(
+        &self,
+        criteria: &StrRepeatCriteria,
+        contig: Option<ContigId>,
+    ) -> Result<impl Iterator<Item = Result<SsrSegment, RepeatCatalogError>> + '_, RepeatCatalogError>
+    {
+        Ok(self
+            .genome_segments(criteria, contig)?
+            .filter_map(|region| match region {
+                Err(e) => Some(Err(e)),
+                Ok(TypedRegion {
+                    kind: RegionKind::SsrSegment(locus),
+                    ..
+                }) => Some(Ok(locus)),
+                Ok(_) => None,
+            }))
+    }
+
+    /// How many loci the catalog holds in each `(period, repeat count)` stratum.
+    ///
+    /// The count is on the **trimmed** span — the count `classify` applies its copy floor to
+    /// and the one a stratum is keyed by (spec §3.1). This is what the sampling consumer
+    /// reweights by, so a short count here propagates into a diversity estimate rather than
+    /// into a crash (spec §10.3).
+    pub fn count_loci_per_stratum(
+        &self,
+        criteria: &StrRepeatCriteria,
+        contig: Option<ContigId>,
+    ) -> Result<StratumCounts, RepeatCatalogError> {
+        let (counts, _) = self.sample_loci_per_stratum(criteria, contig, 0, 0)?;
+        Ok(counts)
+    }
+
+    /// Up to `cap` loci from each stratum — the ones whose `hash(contig, start, seed)` is
+    /// lowest — **and the counts from the same pass**.
+    ///
+    /// The pre-pass wants both, and the tally is a counter beside the heaps rather than a
+    /// second traversal (spec §5.3). One forward pass, bounded state, and a result that does
+    /// not depend on the order loci arrive in.
+    ///
+    /// The seed is the caller's: two runs at the same seed must keep the identical loci, and
+    /// that is a property of the run rather than of the file.
+    pub fn sample_loci_per_stratum(
+        &self,
+        criteria: &StrRepeatCriteria,
+        contig: Option<ContigId>,
+        cap: usize,
+        seed: u64,
+    ) -> Result<(StratumCounts, StratumSample), RepeatCatalogError> {
+        let mut sampler = StratumSampler::new(cap, seed);
+        for locus in self.str_loci(criteria, contig)? {
+            let locus = locus?;
+            let period = locus.motif().period() as u8;
+            let repeat_count = (locus.end() - locus.start() + 1) / u64::from(period);
+            sampler.offer(period, repeat_count, locus);
+        }
+        Ok(sampler.finish())
     }
 
     /// Whether this catalog can answer a reader asking with `criteria`, and whether it was

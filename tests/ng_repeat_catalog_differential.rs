@@ -366,6 +366,110 @@ fn the_fixture_drives_the_purity_gate_and_the_satellite_cap() {
     );
 }
 
+/// The per-stratum tally read from the file equals one taken by scanning the reference
+/// directly (spec §10.3). This is the number the pre-pass reweights by, so an error here
+/// propagates into a diversity estimate rather than into a crash.
+#[test]
+fn the_strata_tally_matches_a_direct_count() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = fixture();
+    let (catalog_path, reference, _) = build_catalog(dir.path(), &contigs);
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&catalog_path, &reference).expect("opens");
+    let criteria = StrRepeatCriteria::default();
+
+    // Counted by scanning, exactly as a caller without a catalog would have to.
+    let mut scanned_counts: std::collections::BTreeMap<(u8, u64), u64> = Default::default();
+    for (index, (name, seq)) in contigs.iter().enumerate() {
+        for region in scanned(seq, name, ContigId(index as u32), &criteria) {
+            if let RegionKind::SsrSegment(locus) = &region.kind {
+                let period = locus.motif().period() as u8;
+                let copies = (locus.end() - locus.start() + 1) / u64::from(period);
+                *scanned_counts.entry((period, copies)).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Counted from the file.
+    let from_file = catalog
+        .count_loci_per_stratum(&criteria, None)
+        .expect("servable");
+
+    // The one difference the file admits to: loci within the flank floor of a contig's end.
+    // Count those separately and require the rest to agree exactly.
+    let mut edge_loci = 0u64;
+    for (index, (name, seq)) in contigs.iter().enumerate() {
+        let len = seq.len() as u64;
+        let flank = criteria.min_flank_bp.get();
+        for region in scanned(seq, name, ContigId(index as u32), &criteria) {
+            if matches!(region.kind, RegionKind::SsrSegment(_))
+                && (region.region.start.get() <= flank || region.region.end.get() + flank > len)
+            {
+                edge_loci += 1;
+            }
+        }
+    }
+
+    let scanned_total: u64 = scanned_counts.values().sum();
+    assert!(
+        scanned_total > 0,
+        "the fixture must produce loci for this comparison to mean anything"
+    );
+    assert_eq!(
+        from_file.total() + edge_loci,
+        scanned_total,
+        "from the file: {:?}\nfrom a scan: {scanned_counts:?}\nat contig edges: {edge_loci}",
+        from_file.iter_sorted()
+    );
+
+    // And stratum by stratum, away from the edges.
+    for ((period, copies), count) in from_file.iter_sorted() {
+        let scanned_here = scanned_counts.get(&(period, copies)).copied().unwrap_or(0);
+        assert!(
+            count <= scanned_here,
+            "period {period}, {copies} copies: the file holds {count}, a scan finds {scanned_here}"
+        );
+    }
+}
+
+/// A sample drawn from the file is stable under its seed and never larger than the cap, and
+/// the counts beside it see every locus (spec §5.3).
+#[test]
+fn the_sample_is_capped_stable_and_counted_in_full() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = fixture();
+    let (catalog_path, reference, _) = build_catalog(dir.path(), &contigs);
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&catalog_path, &reference).expect("opens");
+    let criteria = StrRepeatCriteria::default();
+
+    let (counts, sample) = catalog
+        .sample_loci_per_stratum(&criteria, None, 1, 42)
+        .expect("servable");
+    let (counts_again, sample_again) = catalog
+        .sample_loci_per_stratum(&criteria, None, 1, 42)
+        .expect("servable");
+
+    assert_eq!(counts, counts_again);
+    assert_eq!(
+        sample.iter_sorted(),
+        sample_again.iter_sorted(),
+        "the same seed keeps the identical loci"
+    );
+    for ((period, copies), loci) in sample.iter_sorted() {
+        assert!(
+            loci.len() <= 1,
+            "period {period}, {copies} copies: over cap"
+        );
+        assert!(counts.get(period, copies) >= loci.len() as u64);
+    }
+    assert_eq!(
+        counts.total(),
+        catalog.str_loci(&criteria, None).expect("servable").count() as u64,
+        "the counts see every locus, sampled or not"
+    );
+}
+
 /// A reader more permissive than the file is refused **before any row is read**, naming the
 /// axis and both values (spec §4.3, §10.2).
 #[test]
