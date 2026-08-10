@@ -428,6 +428,9 @@ pub struct GenericSampleParameters {
     pub inbreeding: Option<Estimate<InbreedingF>>,
     /// What the runs model fitted alongside `F`, when it ran.
     pub runs_model: Option<RunsModelFit>,
+    /// The sample's second class of site, when its data asked for one — as
+    /// [`CoupledFit::site_noise`], and already folded into `error_rate`.
+    pub site_noise: Option<SiteNoise>,
     /// How the coupled error-rate/frequency fit ended.
     pub coupled_fit: FitTermination,
 }
@@ -441,8 +444,19 @@ pub struct GenericSampleParameters {
 /// because a haploid region has two genotype classes and a diploid three.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CoupledFit {
+    /// **The rate a read disagrees at a site drawn at random**, per read group — the
+    /// share-weighted marginal of the two site classes where there are two, and the fitted
+    /// rate itself where there is one. See [`SiteNoise::marginal_error_rate`] for why one
+    /// number and why this one.
     pub error_rate: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
     pub rates: BTreeMap<Ploidy, Estimate<SampleRates>>,
+    /// The sample's second class of site, when its data asked for one.
+    ///
+    /// **A diagnostic, not something a consumer must read.** `error_rate` already folds it
+    /// in. What it is here for is a consumer that wants to score a read against its own
+    /// site's class rather than against the sample's average, and a reader who wants to
+    /// know whether this sample had a badly-behaved population of sites at all.
+    pub site_noise: Option<SiteNoise>,
     pub termination: FitTermination,
 }
 

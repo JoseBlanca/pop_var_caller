@@ -203,7 +203,7 @@ pub(crate) fn fit_coupled_from_tables(
         )
         .map(|(fit, _)| fit)?;
     }
-    Ok(fit)
+    Ok(CoupledFit { site_noise, ..fit })
 }
 
 /// How many times the rates may be settled again after the second class of site moved.
@@ -458,6 +458,7 @@ fn into_coupled_fit(
     Ok(CoupledFit {
         error_rate,
         rates,
+        site_noise: None,
         termination,
     })
 }

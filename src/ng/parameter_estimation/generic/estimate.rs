@@ -18,11 +18,13 @@ use crate::ng::parameter_estimation::generic::accumulators::{
 };
 use crate::ng::parameter_estimation::generic::coupled_fit::{fit_coupled, library_shares_over};
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-use crate::ng::parameter_estimation::generic::fallback::take_supplied_inbreeding;
+use crate::ng::parameter_estimation::generic::fallback::{
+    as_marginal_rates, take_supplied_inbreeding,
+};
 use crate::ng::parameter_estimation::generic::noise_model::{LibraryNoise, SampleLibraryNoise};
 use crate::ng::parameter_estimation::generic::runs::{RunsModelStarts, fit_inbreeding};
 use crate::ng::parameter_estimation::generic::{
-    GenericSampleParameters, SampleRates, error_rate_ladder,
+    GenericSampleParameters, SampleRates, SiteNoise, error_rate_ladder,
 };
 use crate::ng::parameter_estimation::{Estimate, ParameterEstimationError};
 use crate::ng::read::filtering::ReadFilterConfig;
@@ -173,16 +175,27 @@ impl GenericAccumulators {
                 take_supplied_inbreeding(config.inbreeding, self.covered_positions()),
                 None,
             ),
-            InbreedingMode::Fitted => {
-                self.fit_inbreeding_if_diploid(config, &coupled.rates, &coupled.error_rate)?
-            }
+            InbreedingMode::Fitted => self.fit_inbreeding_if_diploid(
+                config,
+                &coupled.rates,
+                &coupled.error_rate,
+                coupled.site_noise,
+            )?,
         };
 
         Ok(GenericSampleParameters {
-            error_rate: coupled.error_rate,
+            // **The marginal is applied here and nowhere earlier.** Everything inside the
+            // fit — the coupled alternation, and the runs model below — scores with the
+            // *clean* rates and the second class beside them, which is the pair the
+            // scoring rule takes. Folding them into one number is what a *consumer* needs,
+            // and doing it sooner would hand the runs model a single rate whose site
+            // classes had been averaged away, putting back inside it exactly the bias the
+            // second class exists to remove.
+            error_rate: as_marginal_rates(coupled.error_rate, coupled.site_noise),
             rates: coupled.rates,
             inbreeding,
             runs_model,
+            site_noise: coupled.site_noise,
             coupled_fit: coupled.termination,
         })
     }
@@ -199,6 +212,7 @@ impl GenericAccumulators {
         config: &GenericEstimationConfig,
         rates: &BTreeMap<Ploidy, Estimate<SampleRates>>,
         settled_rates: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+        site_noise: Option<SiteNoise>,
     ) -> Result<
         (
             Option<Estimate<crate::ng::types::InbreedingF>>,
@@ -211,7 +225,7 @@ impl GenericAccumulators {
             return Ok((None, None));
         };
 
-        let noise = self.library_noise(settled_rates, diploid);
+        let noise = self.library_noise(settled_rates, diploid, site_noise);
         let (estimate, fit) = fit_inbreeding(
             &config.sample_name,
             self.windowed_histograms(),
@@ -254,25 +268,33 @@ impl GenericAccumulators {
         &self,
         settled_rates: &BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
         at: Ploidy,
+        site_noise: Option<SiteNoise>,
     ) -> SampleLibraryNoise {
-        SampleLibraryNoise::new(
-            library_shares_over(self.read_group_histograms(), |ploidy| ploidy == at)
-                .into_iter()
-                .map(|(read_group, share_of_reads)| LibraryNoise {
-                    read_group,
-                    share_of_reads,
-                    error_rate: settled_rates
-                        .get(&read_group)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "read group {} produced {share_of_reads} of the sample's reads \
+        // **The runs model scores with the same pair the coupled fit did** — each library's
+        // clean rate and the sample's second class of site — and not with the marginal the
+        // emitted summary carries. A single averaged rate would put back inside the runs
+        // model the tail misspecification the second class exists to remove, and `F` is
+        // read off a contrast between windows that the tail moves.
+        let libraries = library_shares_over(self.read_group_histograms(), |ploidy| ploidy == at)
+            .into_iter()
+            .map(|(read_group, share_of_reads)| LibraryNoise {
+                read_group,
+                share_of_reads,
+                error_rate: settled_rates
+                    .get(&read_group)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "read group {} produced {share_of_reads} of the sample's reads \
                              and was given no error rate",
-                                read_group.get()
-                            )
-                        })
-                        .value,
-                }),
-        )
+                            read_group.get()
+                        )
+                    })
+                    .value,
+            });
+        match site_noise {
+            None => SampleLibraryNoise::new(libraries),
+            Some(site_noise) => SampleLibraryNoise::with_site_noise(libraries, site_noise),
+        }
     }
 }
 
@@ -640,5 +662,165 @@ mod tests {
             estimate_generic_parameters(loci.into_iter().map(Ok), &config).expect("fittable");
 
         assert_eq!(sharded, single);
+    }
+
+    /// **The runs model is handed the clean rates *and* the second class, not the
+    /// marginal** — and nothing else in the suite could see it if it were not.
+    ///
+    /// `F` is read off a contrast between windows, and the tail of the error distribution
+    /// is what moves that contrast; a single averaged rate would put back inside the runs
+    /// model the misspecification the second class exists to remove. The direct assertion
+    /// is here because the alternative is a fixture of three thousand windows carrying a
+    /// noisy site population, and this states the property the fixture would be built to
+    /// state. Measured: replacing the pair with a plain rate leaves all 329 tests green.
+    #[test]
+    fn the_runs_model_is_given_the_second_class_of_site_and_not_the_marginal() {
+        let group = ReadGroupId(1);
+        let config = config(supplied(0.0));
+        let mut accumulators = config.accumulators();
+        for locus in a_samples_loci(group) {
+            accumulators.add_locus(&locus);
+        }
+
+        let clean = ErrorRate::try_new(1.895e-3).expect("a probability");
+        let mut settled = BTreeMap::new();
+        settled.insert(
+            group,
+            Estimate {
+                value: clean,
+                provenance: Provenance::FittedHere,
+                observations: 1_000,
+            },
+        );
+        let site_noise =
+            SiteNoise::try_new(0.0088, ErrorRate::try_new(5.29e-2).expect("a probability"))
+                .expect("a share and a rate");
+        let diploid = Ploidy::try_new(2).expect("a positive copy number");
+
+        let with = accumulators.library_noise(&settled, diploid, Some(site_noise));
+        assert_eq!(
+            with.site_noise(),
+            Some(site_noise),
+            "the runs model was not given the sample's second class of site"
+        );
+        assert!(
+            (with.libraries()[0].error_rate.get() - clean.get()).abs() < 1e-15,
+            "the runs model was given {:e} rather than the clean rate {:e} — the marginal \
+             has been folded in a step too early",
+            with.libraries()[0].error_rate.get(),
+            clean.get()
+        );
+
+        let without = accumulators.library_noise(&settled, diploid, None);
+        assert_eq!(without.site_noise(), None);
+    }
+
+    /// One diploid site at `depth`, `alt_reads` of them showing an alternative base.
+    fn site_at_depth(
+        start: u64,
+        depth: u32,
+        alt_reads: u32,
+        group: ReadGroupId,
+    ) -> SampleLocusObservations {
+        let mut observations = Vec::new();
+        if alt_reads > 0 {
+            observations.push(observation(b"C", group, alt_reads));
+        }
+        if depth > alt_reads {
+            observations.push(observation(b"A", group, depth - alt_reads));
+        }
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(start),
+            },
+            reference_bases: b"A".as_slice().into(),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// A sample whose sites really do come in two populations: a clean body, a heterozygous
+    /// class, and **a tail of sites disagreeing with the reference far more than any single
+    /// per-base rate explains** — the shape measured on HG002 and the whole reason the
+    /// second class exists.
+    ///
+    /// **Two earlier versions of this fixture bought the second class nothing, and why is
+    /// worth keeping.** The first gave every noisy site exactly two alternative reads of
+    /// ten, leaving three occupied cells — fitted exactly by three genotype frequencies and
+    /// a free rate. The second spread them but left a *gap* at two alternative reads, and a
+    /// gap is **under**-dispersion: a mixture of binomials can only ever be more spread out
+    /// than a binomial, never less, so no second class could help and the fit correctly
+    /// declined one, gaining 0.044 nats against a floor of 3.
+    ///
+    /// Thirty reads a site, so a heterozygote sits near fifteen and the tail at three to six
+    /// cannot be mistaken for one. A rate explaining the 900 sites with one alternative read
+    /// predicts about two sites with three, against the 30 here.
+    fn loci_with_a_noisy_population(group: ReadGroupId) -> Vec<SampleLocusObservations> {
+        const DEPTH: u32 = 30;
+        let mut loci = Vec::new();
+        let mut at = 1u64;
+        for (count, alt_reads) in [
+            (9_000, 0),
+            (900, 1),
+            (60, 2),
+            (30, 3),
+            (15, 4),
+            (8, 5),
+            (100, 15),
+        ] {
+            for _ in 0..count {
+                loci.push(site_at_depth(at, DEPTH, alt_reads, group));
+                at += 1;
+            }
+        }
+        assert!(loci.len() as u64 > MIN_SITES_TO_FIT, "above the site floor");
+        loci
+    }
+
+    /// **End to end: a sample with two populations of site is fitted with two, and the rate
+    /// it emits is the marginal of them.**
+    ///
+    /// The discriminator is that **a marginal is not a rung**. Every rate the ladder can
+    /// fit is one of its 161 rungs; a share-weighted average of two rungs is not, except by
+    /// coincidence. So an emitted rate that lands exactly on a rung means the marginal was
+    /// never applied — or was applied somewhere else and the clean rate emitted in its
+    /// place, which is the swap this catches and which every other test in the module
+    /// leaves alive.
+    #[test]
+    fn a_sample_with_two_populations_of_site_emits_the_marginal_rate() {
+        let group = ReadGroupId(1);
+        let config = config(supplied(0.0));
+        let parameters = estimate_generic_parameters(
+            loci_with_a_noisy_population(group).into_iter().map(Ok),
+            &config,
+        )
+        .expect("a sample above the site floor is fittable");
+
+        let site_noise = parameters
+            .site_noise
+            .expect("a tail no single per-base rate can reach is a second class");
+        assert!(
+            site_noise.noisy_error_rate().get()
+                > site_noise
+                    .marginal_error_rate(ErrorRate::try_new(1e-4).expect("a probability"))
+                    .get(),
+            "the noisy class must be the worse-behaved of the two"
+        );
+
+        let emitted = parameters.error_rate[&group].value.get();
+        let ladder = error_rate_ladder();
+        let nearest = ladder
+            .iter()
+            .map(|rung| (rung.get() - emitted).abs())
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            nearest > 1e-12,
+            "the emitted rate {emitted:e} sits exactly on a ladder rung, so it is a fitted \
+             clean rate rather than the marginal of the sample's two classes of site"
+        );
     }
 }

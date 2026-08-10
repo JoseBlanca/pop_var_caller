@@ -126,6 +126,22 @@ embedded, with no sampling noise in either.
   and looked settled, so the test compares the score it reached against the score at the
   truth and fails if the truth is higher.
 
+### N3c. Carrying the pair out, and the one number a consumer reads.  ✅
+
+`CoupledFit` and `GenericSampleParameters` gain `site_noise`; the emitted `error_rate`
+becomes the share-weighted marginal, applied by `as_marginal_rates` at the emitted surface
+and **nowhere earlier**. Everything inside the fit — the alternation and the runs model —
+keeps the clean rate and the second class as the *pair* the scoring rule takes; folding them
+into one number sooner would put the tail misspecification back inside the runs model, which
+reads `F` off a contrast between windows that the tail moves.
+
+*Tests:* the marginal reaches fitted and borrowed rates and leaves supplied and defaulted
+ones alone; marginalising the mean of a group's siblings equals the mean of their marginals,
+which is the claim the borrowed rung rests on; the runs model is handed the pair rather than
+the marginal; and end to end, a sample with two populations of site emits a rate that is
+**not a ladder rung** — a marginal of two rungs is not one, which is what catches the rate
+and the pair being swapped between the fit and the summary.
+
 ### N4. The harnesses.  ☐
 
 `ng_multilib_key_harness.rs` and `ng_inbreeding_harness.rs` extended to the new model, and

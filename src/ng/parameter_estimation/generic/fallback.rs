@@ -23,9 +23,9 @@
 
 use std::collections::BTreeMap;
 
-use super::DEFAULT_ERROR_RATE;
 use super::accumulators::InbreedingMode;
 use super::read_group_error_rate::ReadGroupErrorRateFit;
+use super::{DEFAULT_ERROR_RATE, SiteNoise};
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{ErrorRate, InbreedingF, ReadGroupId};
 
@@ -186,6 +186,43 @@ pub fn take_supplied_inbreeding(
             observations: covered_positions,
         }),
     }
+}
+
+/// Fold the sample's second class of site into every rate **this fit** produced.
+///
+/// **Which rates, and why not all of them.** A rate a read group's own sites produced, and
+/// one borrowed from its siblings' — the mean of numbers this fit produced — both describe
+/// this sample's chemistry at a clean site, so both become the marginal. A **supplied**
+/// rate is what an operator stated about the reads as a whole, and a **defaulted** one is a
+/// constant no fit chose; marginalising either would move a number this fit did not make.
+///
+/// The transformation is affine in the clean rate at a shared share, so marginalising the
+/// mean of the siblings' clean rates and taking the mean of their marginals are the same
+/// number — a borrowed rate stays consistent with the ones it was borrowed from.
+///
+/// **Called once, at the emitted surface, and deliberately not earlier**: everything inside
+/// the fit scores with the clean rate and the second class as a *pair*, which is what the
+/// scoring rule takes. See `estimate.rs` for what folding them sooner would cost the runs
+/// model.
+pub(super) fn as_marginal_rates(
+    rates: BTreeMap<ReadGroupId, Estimate<ErrorRate>>,
+    site_noise: Option<SiteNoise>,
+) -> BTreeMap<ReadGroupId, Estimate<ErrorRate>> {
+    let Some(site_noise) = site_noise else {
+        return rates;
+    };
+    rates
+        .into_iter()
+        .map(|(group, estimate)| {
+            let value = match estimate.provenance {
+                Provenance::FittedHere | Provenance::Borrowed => {
+                    site_noise.marginal_error_rate(estimate.value)
+                }
+                Provenance::Supplied | Provenance::Defaulted => estimate.value,
+            };
+            (group, Estimate { value, ..estimate })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -381,5 +418,92 @@ mod tests {
         assert_eq!(supplied.provenance, Provenance::Supplied);
         assert_eq!(supplied.observations, 800_000_000);
         assert!(take_supplied_inbreeding(InbreedingMode::Fitted, 800_000_000).is_none());
+    }
+
+    fn estimate_of(value: f64, provenance: Provenance) -> Estimate<ErrorRate> {
+        Estimate {
+            value: ErrorRate::try_new(value).expect("a probability"),
+            provenance,
+            observations: 1_000,
+        }
+    }
+
+    fn a_second_class() -> SiteNoise {
+        SiteNoise::try_new(0.0088, ErrorRate::try_new(5.29e-2).expect("a probability"))
+            .expect("a share and a rate")
+    }
+
+    /// **A sample with no second class of site keeps every rate it had, bit for bit.**
+    #[test]
+    fn with_no_second_class_the_rates_are_untouched() {
+        let mut rates = BTreeMap::new();
+        rates.insert(ReadGroupId(1), estimate_of(1.9e-3, Provenance::FittedHere));
+        rates.insert(ReadGroupId(2), estimate_of(1.0e-3, Provenance::Supplied));
+        assert_eq!(as_marginal_rates(rates.clone(), None), rates);
+    }
+
+    /// **Only the rates this fit produced become the marginal.** A supplied rate is what an
+    /// operator stated about the reads as a whole and a defaulted one is a constant no fit
+    /// chose, so moving either would report a number this fit did not make.
+    #[test]
+    fn the_marginal_reaches_the_fitted_and_borrowed_rates_and_no_others() {
+        let clean = 1.895e-3;
+        let mut rates = BTreeMap::new();
+        for (group, provenance) in [
+            (1, Provenance::FittedHere),
+            (2, Provenance::Borrowed),
+            (3, Provenance::Supplied),
+            (4, Provenance::Defaulted),
+        ] {
+            rates.insert(ReadGroupId(group), estimate_of(clean, provenance));
+        }
+        let out = as_marginal_rates(rates, Some(a_second_class()));
+
+        // 0.9912 x 1.895e-3 + 0.0088 x 5.29e-2, worked in `SiteNoise`'s own test.
+        let marginal = 2.343_844e-3;
+        for group in [1, 2] {
+            let got = out[&ReadGroupId(group)].value.get();
+            assert!(
+                (got - marginal).abs() < 1e-9,
+                "read group {group} came back at {got:e}, not the marginal {marginal:e}"
+            );
+        }
+        for group in [3, 4] {
+            assert!(
+                (out[&ReadGroupId(group)].value.get() - clean).abs() < 1e-15,
+                "read group {group} was marginalised and should not have been"
+            );
+        }
+        // The warrant travels unchanged: this step restates a rate, it does not re-fit one.
+        assert!(out.values().all(|estimate| estimate.observations == 1_000));
+    }
+
+    /// **A borrowed rate stays consistent with the ones it was borrowed from.** The
+    /// marginal is affine in the clean rate at a shared share, so marginalising the mean of
+    /// the siblings and taking the mean of their marginals are the same number — the claim
+    /// `as_marginal_rates`' own doc makes, asserted rather than argued.
+    #[test]
+    fn marginalising_the_mean_is_the_mean_of_the_marginals() {
+        let site_noise = a_second_class();
+        let siblings = [1.5e-3, 2.5e-3, 4.0e-3];
+        let mean = siblings.iter().sum::<f64>() / siblings.len() as f64;
+
+        let of_the_mean = site_noise
+            .marginal_error_rate(ErrorRate::try_new(mean).expect("a probability"))
+            .get();
+        let mean_of_them: f64 = siblings
+            .iter()
+            .map(|&rate| {
+                site_noise
+                    .marginal_error_rate(ErrorRate::try_new(rate).expect("a probability"))
+                    .get()
+            })
+            .sum::<f64>()
+            / siblings.len() as f64;
+
+        assert!(
+            (of_the_mean - mean_of_them).abs() < 1e-15,
+            "{of_the_mean:e} against {mean_of_them:e}"
+        );
     }
 }
