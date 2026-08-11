@@ -600,13 +600,412 @@ that produced the table, at per-stratum grain rather than in three bands.
 No repeat-count threshold is hardcoded: thin strata already borrow under §4.3's rule, and a stratum
 whose fit is meaningless for this other reason is now visible rather than merely averaged in.
 
-**Where the boundary sits is region typing's call** ([`typed_regions.md`](typed_regions.md)). One
-thing whoever takes this evidence there needs to know: ng's copy floors are `[6, 4, 4, 3, 3, 3]` for
-periods 1–6
-([`segment_criteria.rs:368`](../../../../src/ng/region_typing/segment_criteria.rs)), and the
-mononucleotide floor of 6 was **chosen deliberately over ~9** — "the Illumina read-artifact onset,
-not the higher ~9-unit germline-slippage threshold" (`:362-367`), with every value marked "a starting
-value, soft and swept". Raising it means overturning that choice, not filling a gap.
+**These are also the strata §4.5 places two requirements on**, and the table above is what makes both
+necessary: at 0.091% the direction split and the fall-off have almost no reads behind them however
+many loci the stratum holds, and at 0.091% this path's noise model is close enough to the generic
+path's that their two substitution rates have to agree.
+
+### 5.1 What makes a locus an STR locus, and where the copy floors go
+
+**An STR locus, on this path, is not a locus that contains a short tandem repeat. It is a locus that
+is likely to stutter.** The repeat detector answers the first question and answers it from the
+reference; this section answers the second. They are different questions and they have different
+answers: a hexamer at three copies is unambiguously a tandem repeat and, by this definition, not an
+STR locus.
+
+**ng's code already says this and has never had the evidence for its numbers.** The copy floors are
+`[6, 4, 4, 3, 3, 3]` for periods 1–6
+([`segment_criteria.rs:415`](../../../../src/ng/region_typing/segment_criteria.rs)), documented as
+*"the copy number at which a repeat starts to stutter — below it, the generic SNP/indel caller
+handles the tract fine and only a stuttering one needs the STR route"* (`:403-414`), with every value
+marked *"a starting value, soft and swept"*. This section is the sweep.
+
+**Two things a floor has to clear, and the second is the one that bites.** There has to be enough
+stutter to be worth a stratum at all — §5's 0.091% below four repeats against 2.006% at six or more.
+But the sharper test is what *kind* of difference the reads show. Below four repeats **58.5% of the
+reads that differ from the allele differ by something that is not a whole number of copies**, which
+this noise model has no way to express. A thin stratum is recoverable: it borrows from a neighbour
+and the provenance records it (§4.3). **A mis-modelled stratum is not.** It returns a confident
+slippage rate that is mostly ordinary indel wearing the wrong model, and — worse than being wrong on
+its own loci — it enters the monotonicity walk of §4.3 and can drag a neighbour into a merge with
+it. So the floor goes where the guard share crosses §5's one-in-ten threshold.
+
+**Below the floor nothing is lost; it is re-described.** Those tracts go to the generic path, where
+an ordinary indel is exactly what the model expects. That is the argument for moving them rather
+than a cost of moving them.
+
+**Whether a locus stutters is a property of the library, not of the locus — and the reference cannot
+know it.** A PCR-amplified library stutters more than a PCR-free one, so a tract not worth the STR
+path in one is worth it in the other. The ideal routing is therefore per (locus × library) and
+region typing, which sees only the reference, cannot deliver it.
+
+**Settling for the reference approximation is not only a practical compromise — something else in
+this design depends on it.** Region typing's output being a pure function of the reference is what
+makes it *identical in every sample*, and that is what the STR census rests on:
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §3 selects its loci from
+that output precisely because "region typing delimits STR loci from the reference alone, never from
+the reads, so its output is identical for every sample". Route per library and two samples no longer
+share a locus set, so the census stops holding the same questions for everyone and the cohort
+comparisons it exists for become meaningless rather than merely noisier. **The reference
+approximation is load-bearing, not just convenient.**
+
+**What this step can still do about it, and it is not nothing: measure whether the floor was right
+for this library.** The guard-bucket share is fitted per (read group × stratum), so a library whose
+low-repeat strata come back above the threshold is a library whose floor should have been higher —
+and §4.4's summary already reports exactly that, per read group, with the worst stratum named. **So
+the floor is set from the reference and checked against the data**, and a mismatch is visible rather
+than silent. What a run cannot do is act on it; that would be a second pass.
+
+**Which decides how to choose the default, because the two errors are not symmetric.** A floor set
+**too low** sends tracts to the STR path that do not stutter in this library. They arrive as strata
+with a high guard share, and the per-read-group audit above names them — **the error announces
+itself**. A floor set **too high** sends tracts that *do* stutter to the generic path, where they
+are called as ordinary indels and nothing anywhere reports that a stuttering tract was mis-routed —
+**a silent error**, and silent errors are what this whole step exists to remove.
+
+**Decision: set the default from the most stuttering library available, and let the audit catch the
+over-inclusion.** That is the direction where being wrong is visible.
+
+**It also decides which of our two datasets sets the numbers, and it is not the one with the better
+truth set.** GIAB's HG002 is prepared with unusual care and sits at the *low*-stutter end, so floors
+derived from it would be too high for an ordinary library — the silent direction. The tomato
+accession is an ordinary short-read library (`@RG PL:ilumina LB:PRJDA59759_DRR000741`, no PCR-free
+marker) and stutters more: 1.97% of its differing reads are not whole-repeat against HG002's 1.37%,
+with 28 of 148 strata above the guard threshold against 10 of 132. **So the floors below are set
+from tomato and checked against HG002**, which inverts the usual order of preference between those
+two datasets and is deliberate.
+
+*The honest limit on both, and it is the one that matters rather than the species:* **each is a
+single library**, so neither varies the axis that actually drives stutter. What would settle the
+defaults properly is the same measurement across libraries of known preparation — PCR-amplified
+against PCR-free — which the tomato archive can supply and this document cannot.
+
+**Deferred, with a home:** per-library re-routing, as a *downstream refinement* rather than a change
+to region typing — a locus that region typing sent to the STR path can be handled by the generic
+model at calling time without disturbing the locus set the censuses share. **Home:** whichever spec
+takes on the calling step's marker routing.
+
+**The floors are a default, not a constant.** `MinCopies` is already a per-period knob
+([`segment_criteria.rs:355`](../../../../src/ng/region_typing/segment_criteria.rs)), so what follows
+changes a default rather than adding a mechanism. Someone cataloguing repeats rather than genotyping
+them wants a lower floor and should set one.
+
+**One thing the measurement has to check, because the current defaults appear to be keyed on the
+axis §4 rejected.** In copies the floors are `[6, 4, 4, 3, 3, 3]`; in **bases** they are
+`[6, 8, 12, 12, 15, 18]` — close to a constant tract length, and the comment's reasoning
+(*"shorter motifs stutter more, so periods 4–6 sit at 3"*) is a base-length argument. §4 measured
+that the copy axis is the one slippage varies on and the base-length axis is not: at 12–15 repeats
+three periods stutter within a factor of two of each other, while at 20–29 bp the same three are an
+order of magnitude apart. **If that holds at the low end too, the floors should be far closer to
+uniform in copies than they are** — which would raise periods 4–6 substantially. That is a
+prediction, and the per-period measurement below is what confirms or refutes it.
+
+**One thing the guard share cannot do, and it changes how it is read.** Its absolute level is not
+comparable *between* periods: a hexamer has five ways to differ from the reference by a non-whole
+number of copies and a mononucleotide has none, so **the guard share for period 1 is identically
+zero at every repeat count** — which is §2's "homopolymers are 100% by arithmetic … and are
+therefore no evidence either way", arriving from the other direction. So the guard share says where
+a period crosses **its own** curve, and monos need the other criterion: how often a read differs
+from the reference length at all.
+
+**The per-period evidence — measured 2026-08-07 over the tomato archive.** 2,457 libraries walked
+across chromosome 1 at copy floors one step under ng's, one setting throughout.
+
+**What the table below holds, in one sentence: of the reads whose tract came out a different length
+from the reference, how many differed by something that is *not* a whole number of motif copies.**
+That is the guard share of §4.1, and it is the sharp criterion because it asks whether the movement
+is **the kind this noise model can describe**. A dinucleotide read that came out 1 bp short did not
+lose a `CA`; it took an ordinary deletion, and a slippage rate fitted from such reads is
+mis-modelled indel however many of them there are. Counted out of every 100 reads that differ from
+the reference, so the one-in-ten threshold is the number 10:
+
+| period | at 3 repeats | 4 | 5 | 6 | 7 | floor |
+|---|---:|---:|---:|---:|---:|---:|
+| 2 — dinucleotide | 66 | 43 | 26 | **9** | 6 | **6** |
+| 3 — trinucleotide | 64 | 39 | 10 | 20 | **6** | **7** |
+| 4 — tetranucleotide | 76 | 32 | 27 | **5** | 2 | **6** |
+| 5 — pentanucleotide | 52 | 13 | **7** | 12 | — | **5** |
+| 6 — hexanucleotide | 12 | **4** | — | — | — | **4** |
+
+So a three-copy dinucleotide is a tract where two reads in three that move at all move in a way the
+STR path cannot express, and a six-copy one is a tract where fewer than one in ten do. The floor is
+where a period crosses ten and stays across.
+
+**Split into its two parts, the criterion says something sharper than the ratio does.** Per 100
+reads at a dinucleotide tract:
+
+| dinucleotide | 3 repeats | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|
+| moved by whole copies | 0.19 | 0.72 | 2.58 | **9.07** | 15.30 | 23.17 |
+| moved by something else | 0.38 | 0.54 | 0.90 | 0.90 | 0.95 | 0.39 |
+
+**The second line barely moves and the first climbs 122-fold.** Ordinary indel error is a property
+of the sequencer rather than of the tract, so it sits at roughly half a read in 100 at every repeat
+count — inside a factor of 2.5 across the whole range. Repeat slippage is a property of the tract
+and rises steeply with it. **So a period's floor is not where tracts stop taking indels; it is where
+whole-copy movement finally outruns a constant indel floor.** At four copies the two are comparable,
+0.72 against 0.54, so a slippage rate fitted there is fitting about as much indel as slippage even
+though the majority is nominally the right kind. At six copies it is ten to one.
+
+**One thing the whole-copy line is not: a slippage rate.** It counts reads differing from the
+**reference** by whole copies, and that is slippage *plus* reads that correctly measured an allele
+the sample genuinely carries. Nothing here separates the two, and nothing here needs to — telling
+them apart is what §4's fit does by summing over the genotype, and it is why the fit exists. The
+criterion above asks only which *kind* of movement a tract produces, which is answerable from the
+reference alone.
+
+*(Mononucleotides are absent because the quantity is vacuous for them — every integer is a multiple
+of one, so no read can differ by a non-whole number of copies and the share is always zero. They
+need the other criterion, how often a read differs from the reference length at all. The walk also
+censors every period below the floor it was swept to, so nothing here sees a period-1 tract under 5
+repeats.)*
+
+The evidence behind each cell is large: the dinucleotide 3-repeat entry pools 292 million loci and
+3.4 billion reads.
+
+**Measured floors: `[6, 6, 7, 6, 5, 4]` against ng's `[6, 4, 4, 3, 3, 3]`.** Every period except
+mononucleotides is currently set too low, periods 4 and 5 by three copies. **This confirms the
+prediction this section recorded**: keyed in copies rather than bases, the floors come out far
+closer to uniform than they are, and periods 4 to 6 rise substantially.
+
+**Period 1 is not moved by this survey.** Its only criterion is how often a read differs from the
+reference length at all, and both 5 and 6 repeats clear the one-in-a-hundred rate the survey uses
+(1.13% and 2.54%) — a rate that is chosen rather than derived. The floor of 6 keeps the reason it
+already had, the Illumina read-artifact onset, which this measurement neither supports nor
+contradicts.
+
+**Read the pooled curve, not the per-library one, and the reason is a bias worth recording.** The
+survey also reports a floor per library, and those sit systematically **below** the pooled crossing
+— pentanucleotides call 4 in three libraries out of four where the pooled curve says 5. A thin
+stratum in one library often observes *no* non-whole-repeat read at all, so its guard share is
+exactly zero and passes. The per-library floor is therefore optimistic wherever data is thin, which
+is precisely the low-repeat strata a floor is placed on. The pooled curve has no such problem.
+
+**Two of the crossings rest on a single stratum and should be read as softer than the others.**
+Trinucleotides pass at 5 repeats (0.098), fail at 6 (0.203) and pass again at 7; the floor of 7
+follows from requiring the crossing to hold, and a rule accepting the first crossing would say 5.
+Pentanucleotides pass at 5 and fail at 6 on 5,333 loci, which is thin. Dinucleotides, trinucleotides
+at the low end, and tetranucleotides are not in doubt.
+
+**How far the floor moves between libraries — the axis nothing had varied, and the reason for the
+survey.** It moves by two to four repeats. Dinucleotide floors run 5 to 8 across libraries with 7%,
+38%, 34% and 19% of them at each; tetranucleotides run 4 to 6. So a single number is a compromise
+across real variation rather than a constant of the species.
+
+**What that variation is has *not* been established, and the obvious reading is not available.**
+Grouping libraries by their project accounts for 45% of the variance in the dinucleotide floor — but
+a project is only a proxy for how a library was prepared, and a poor one in both directions:
+libraries within a project need not share a preparation, and a project also bundles the instrument,
+the submission batch and the **read length**. Read length is the confound this survey documents and
+cannot see, and it would produce exactly this pattern for purely geometric reasons, since a 100 bp
+library cannot span the tracts a 150 bp one spans. Separating preparation from read length needs the
+join to `rick_sample_manifest.sh` that the survey's own header calls for, and until that is done
+"PCR amplification stutters more" remains the motivating hypothesis rather than a finding.
+
+**What is ruled out is depth**, which is the alternative that would have made the whole axis an
+artifact. The median dinucleotide floor is flat — 6, 7, 7, 6, 7 — across depth quintiles spanning
+2,606 to 55.9 million reads a library, a twenty-thousand-fold range.
+
+**And 28 libraries produced nothing**, each because no read witnessed a locus on chromosome 1 while
+region typing found the same 644,194 as everywhere else. They are reported rather than counted as
+surveyed, which is the failure this section's instrument was rebuilt to make loud.
+
+**And the instrument built to supply it cannot reach below the floors — measured 2026-08-07, and
+this is why the table is still pending.** The obvious way to see under a floor is to lower it and
+re-type, which is what `examples/ng_str_stutter_by_library.rs` and
+`scripts/ng_str_library_survey.sh` were built to do. It does not work, and the reason is structural
+rather than a bug in either.
+
+**`MinCopies` decides two different things and only one of them is the floor.** It is read by
+`prefilter`, which runs **before** bundling
+([`segment_criteria.rs:648`](../../../../src/ng/region_typing/segment_criteria.rs)), and again by
+`classify` after it (`:820`). The first reading decides **what counts as a neighbouring repeat**;
+the second decides **what is admitted as a locus**. Folding them into one value was deliberate —
+the type's own note calls a swept floor moving both "the whole point" (`:346-353`) — and it is
+correct at the defaults, where the two questions have the same answer. Under a sweep they come
+apart, because two copies of a mononucleotide is any `AA` and occurs every few bases. Admit those
+and every real tract acquires a neighbour inside the bundle threshold, so no tract has clean flanks,
+so region typing emits `SsrBundle` — which names no locus at all.
+
+Over a 2 Mb slice of tomato SL4.0ch01, one library at 80×:
+
+| copy floors | STR loci typed | bundles | bundle bp |
+|---|---:|---:|---:|
+| `[6, 4, 4, 3, 3, 3]` — ng's defaults | 6,237 | 1,943 | 74,289 |
+| uniform 4 | 7,434 | 11,720 | 675,372 |
+| uniform 3 | 848 | 7,950 | 1,623,636 |
+| uniform 2 | **0** | 1 | 1,177,849 |
+| `[2, 4, 4, 3, 3, 3]` — period 1 alone | **0** | 18 | 1,599,157 |
+| `[6, 2, 4, 3, 3, 3]` — period 2 alone | 1,618 | 13,913 | 1,017,906 |
+
+At a uniform floor of two the whole 2 Mb span comes back as **one bundle covering 1.18 Mb** and
+zero loci. That is the failure the archive survey hit on 2,475 tomato CRAMs: every walk succeeded,
+and every walk measured nothing.
+
+**Lowering one period at a time does not rescue it, and that is the finding that closes this
+route.** The loss is not confined to the period that moved: dropping period 2 alone takes
+**period-1 tracts at six copies from 2,678 loci to 225** — 92% gone, at a period whose own floor
+never changed, and with the off-reference share moving with it (0.0263 to 0.0210 at six repeats).
+So two settings do not give two ends of one curve. They give two different populations of loci, and
+the second is a selected subset: the tracts that happened not to acquire a neighbour.
+
+**What follows for §5.1's table: one step down is usable, and the criterion this section places the
+floors on survives it.** A sweep of `[5, 3, 3, 3, 3, 3]` — one step under ng's defaults at the three
+periods that can move — still costs about half the loci of every stratum it shares with a default
+walk. But the two criteria are not equally damaged, and the sharper one holds:
+
+- **The guard share is essentially unmoved.** The same stratum, dinucleotides at 4 repeats, reads
+  0.345 in a default walk against 0.344 in a swept one; at a 20 bp radius, 0.431 against 0.408. So
+  the criterion that decides periods 2 to 6 can be read off a swept walk directly.
+- **The off-reference share is not**, coming back about 30% low, because the surviving tracts are
+  the isolated ones and isolated tracts sit in cleaner context. That is the only criterion
+  **mononucleotides** have (their guard share being zero by arithmetic, §2), so the period-1 floor
+  rests on softer evidence than the rest. The bias understates stutter, which pushes a floor *up* —
+  the direction this section's decision rule calls silent.
+
+**And the answer the section turns on is robust to all of it.** Dinucleotides at 3 repeats read a
+guard share of **63%** against the one-in-ten threshold, on 2,031 to 3,259 loci, unchanged across
+every bundle radius and both copy-floor settings tried. Trinucleotides at 3 repeats read 51%, and
+dinucleotides one repeat higher read **0%**. There is a clean step between 3 repeats and 4, and it
+is six-fold clear of the threshold, so no correction of the size measured above can reach it.
+**Periods 2 and 3 keep their floor of 4.**
+
+**What the 2 Mb slice cannot settle is periods 4, 5 and 6**, which hold 67, 20 and 7 loci at 3
+repeats. Those are locus-starved rather than biased, and the archive walk is what fixes them.
+
+**The separation of the two roles is therefore not needed** — a bundling floor held at ng's defaults
+while a classification floor moves. It remains the clean way to extend a curve below its floor if a
+period ever comes back near the threshold rather than far from it.
+
+**The direction of this section's decision survives intact.** A floor set too low announces itself
+through the guard-share audit; a floor set too high is silent. So the default still comes from the
+most stuttering library available, and the crossing per period per library — which the archive
+survey delivers — is what places it.
+
+### 5.1.1 The floors as set, 2026-08-10 — `[8, 6, 6, 6, 5, 4]`
+
+**Two measurements stand behind them, asking different questions, and where both can answer they
+agree.**
+
+- **Where the model applies** — the guard share, over 2,457 libraries (§5.1 above). Crossing one in
+  ten puts it at `[·, 6, 7, 6, 5, 4]`.
+- **Where stutter grows large enough to matter** — the per-read slippage rate, fitted by summing
+  over the genotype, over 181 libraries
+  ([`ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs)). The repeat count at
+  which the rate first reaches **5%**:
+
+| tract | libraries | earliest | median | latest |
+|---|---:|---:|---:|---:|
+| mononucleotide | 165 | 9 | 11 | 13 |
+| dinucleotide | 46 | 6 | 7 | 9 |
+
+**The floor tracks the earliest library, not the median**, and that follows from this section's
+asymmetry rather than from caution: a stuttering tract sent to the generic path is genotyped by a
+model that cannot express what it does, and nothing reports it; a quiet tract sent to the STR path
+is genotyped correctly, only more slowly. **So the library axis this survey exists to measure moves
+the answer by three to four repeats**, and the floor has to sit under all of it.
+
+**Mononucleotides at 8 rather than the measured 9**, for one repeat of margin: the most-stuttering
+library reaches 3.6% at 8 against 1.0% at 7 and 0.9% at 6, so 8 is where the margin stops being
+free.
+
+**Trinucleotides at 6 rather than the model-fit 7** — the one place the two criteria disagree, and
+the same asymmetry decides it. The worst library reaches 3.4% at 6 repeats and the rate climbs about
+2.5-fold per repeat, so 6 catches a library that 7 would miss. **This is a deliberate step below
+where the noise model describes the data well**, and it is not free: at 6 repeats about one in five
+of the reads that differ do so by a non-whole number of copies, so a slippage rate fitted there is
+part ordinary indel. The trade is taken knowingly — a mis-modelled rate on a tract that is genotyped
+beats a correct rate on a tract that is not.
+
+**Periods 4 to 6 have no 5% crossing in this data at all** — no library reached it at any repeat
+count holding enough loci to fit — so those floors are the guard share's alone. What the rate survey
+adds there is only a bound: the most-stuttering library reaches 1.1%, 0.55% and 2.4%.
+
+*What is thin, said plainly.* The dinucleotide range rests on 46 libraries against the
+mononucleotide's 165, and the trinucleotide extrapolation on 37 libraries at 6 repeats. The run was
+cut short at 181 of 1,400 libraries; more would tighten the tails, and nothing seen so far suggests
+the medians would move.
+
+**What adopting the measured floors would cost, because it is larger than "changing a default"
+suggests and is the reason the constant has not been moved here.** Against the loci ng emits today:
+
+| period | current | measured | STR loci today | kept | re-routed |
+|---|---:|---:|---:|---:|---:|
+| 1 | 6 | 6 | 272,444,044 | 272,444,044 | 0.0% |
+| 2 | 4 | 6 | 38,651,283 | 3,716,800 | 90.4% |
+| 3 | 4 | 7 | 5,168,746 | 355,932 | 93.1% |
+| 4 | 3 | 6 | 7,976,568 | 83,722 | 99.0% |
+| 5 | 3 | 5 | 1,338,183 | 25,771 | 98.1% |
+| 6 | 3 | 4 | 523,635 | 58,836 | 88.8% |
+
+**15.2% of ng's STR loci in total, and roughly nine in ten of every non-mononucleotide one.** The
+total is small only because mononucleotides are 84% of the loci and do not move. **Nothing is lost
+by this** — §5.1's own argument is that those tracts are re-described rather than dropped, and they
+go to the generic path where an ordinary indel is what the model expects, which is exactly what
+their 30% to 76% guard shares say they are producing. But it is a large change to what the STR path
+sees, so it is recorded here as measured and left to be taken deliberately rather than folded in as
+a default edit.
+
+**And the mononucleotide floor of 6 carries a reason that survives this framing rather than being
+overridden by it.** It was chosen deliberately over ~9 — "the Illumina read-artifact onset, not the
+higher ~9-unit germline-slippage threshold"
+([`segment_criteria.rs`](../../../../src/ng/region_typing/segment_criteria.rs)). Under the
+definition above that is right: the stutter model is a **noise** model, so a tract that stutters
+because of the instrument needs the STR route exactly as much as one that stutters in the germline.
+Raising that floor means overturning a considered choice, not filling a gap. What the survey adds is
+the other direction: mononucleotides at 5 repeats read 1.34% off-reference against the survey's 1%
+criterion, and the swept walk's bias understates that, so 5 is worth testing on the archive.
+
+### 5.2 The bundle radius, and why it moved to 15 bp
+
+**A tract is only nameable as a locus if it has clean sequence either side**, and how much is the
+bundle radius (`DEFAULT_BUNDLE_THRESHOLD`). It is a second lever on the same problem as the copy
+floors: narrowing it means fewer neighbours spoil a tract, so more tracts survive as loci. Measured
+on the same 2 Mb slice at ng's copy floors:
+
+| radius | loci | clusters | bases in clusters |
+|---:|---:|---:|---:|
+| 30 bp | 6,237 | 1,943 | 74,289 |
+| 20 bp | 7,245 | 1,582 | 47,623 |
+| **15 bp** | **7,820** | **1,334** | **36,053** |
+| 10 bp | 8,467 | 1,045 | 24,906 |
+
+**Decision: 15 bp, changed 2026-08-07 from 30.** The 30 was itself unmeasured, chosen as "more than
+enough unique sequence to anchor a short read".
+
+**What had to be checked first, because no real-data measurement can check it.** The radius caps
+`flank_bp`, the anchor the STR aligner places a read against, so narrowing it shortens every read's
+anchor. A mis-anchored read placed a whole repeat off lands in an offset bucket and reads as
+**slippage** — the very parameter this step fits — so a measurement with no truth to compare against
+would report the failure as a finding. The answer comes from the synthetic bake-off
+([`ng_ssr_synthetic_bakeoff.rs`](../../../../examples/ng_ssr_synthetic_bakeoff.rs)), which builds
+each read from a chosen allele and scores the recovered length against it. For the shipped delimiter
+across 166 scenarios — including flanks carrying a repeat of their own below every copy floor, which
+is what the radius permits and what a marginal locus looks like:
+
+| flank | exact on clean reads | exact on noisy | 1 bp flank indel | composite |
+|---:|---:|---:|---:|---:|
+| 25 bp | 1.000 | 0.999 | 1.000 | 0.9994 |
+| 20 bp | 1.000 | 0.999 | 1.000 | 0.9993 |
+| **15 bp** | **1.000** | **0.999** | **1.000** | **0.9992** |
+| 10 bp | 1.000 | 0.999 | 1.000 | 0.9984 |
+| 6 bp | 1.000 | 0.999 | 1.000 | 0.9985 |
+| 4 bp | 1.000 | 0.992 | **0.500** | 0.8699 |
+| 2 bp | 1.000 | 0.927 | **0.250** | 0.7854 |
+
+**Nothing moves until 6 bp, and it breaks between 6 and 4** — so 15 sits at two and a half times the
+width where the first number budges. What gives out first is tolerating a 1 bp indel *inside* the
+anchor, which four bases cannot absorb.
+
+**10 was defensible on the same evidence and not taken.** It buys 8% more loci, and more loci is the
+only thing narrowing buys, so it would spend a third of the margin on something that is not scarce.
+The dimension the harness holds favourable is base composition: its flanks are deliberately
+aperiodic, where real tomato flanks are AT-rich, and 10 bp of AT-rich anchor carries less than 10 bp
+of aperiodic anchor. At 15 that shortfall sits inside the margin.
+
+**The radius does not move this section's answer**, which is worth recording because it means the
+archive survey's floors do not have to be re-measured when it changes: dinucleotides at 3 repeats
+read a guard share of 63%, 62%, 65% and 64% at radii of 30, 25, 20 and 15.
 
 ---
 

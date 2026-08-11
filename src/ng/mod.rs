@@ -43,6 +43,7 @@ pub mod read;
 pub mod ref_seq;
 pub mod reference_info;
 pub mod region_typing;
+pub mod repeat_catalog;
 pub mod tandem_repeat;
 pub mod types;
 

@@ -8,13 +8,18 @@ use std::process;
 
 use clap::Parser;
 use pop_var_caller::error_render::format_error_chain;
-use pop_var_caller::pop_var_caller_exp::{Cli, PopVarCallerExpCommand, run_typed_regions};
+use pop_var_caller::pop_var_caller_exp::{
+    Cli, PopVarCallerExpCommand, run_repeat_catalog, run_typed_regions,
+};
 
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
         PopVarCallerExpCommand::TypeRegions(args) => {
             run_typed_regions(&args).map_err(|e| format_error_chain(&e))
+        }
+        PopVarCallerExpCommand::RepeatCatalog(args) => {
+            run_repeat_catalog(&args).map_err(|e| format_error_chain(&e))
         }
     };
     if let Err(msg) = result {
