@@ -18,7 +18,7 @@ use crate::ng::region_typing::{
 use crate::ng::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, TractSpan};
 use crate::ng::tandem_repeat::RepeatInterval;
-use crate::ng::types::{Bp, ContigId, Motif};
+use crate::ng::types::{Bp, ContigId, GenomeRegion, Motif, Position};
 
 /// One contig's rows, turned into the typed regions a live scan would have produced.
 ///
@@ -40,6 +40,63 @@ pub fn segments_of_contig(
     }
     let features = repeat_features_of_contig(chrom, contig, contig_len, rows, criteria);
     fill_generic_gaps(features, contig, contig_len.get())
+}
+
+/// The segments of one contig that overlap `wanted`, clipped to it.
+///
+/// **The whole contig is typed first, and only then clipped** — which is what step 3's walk
+/// does (`region_typing/mod.rs`, `SpanWalk::requested`), and it has to be: a tract outside
+/// the requested span still bundles with one inside it, and a satellite outside still
+/// swallows a locus inside. Classifying only the requested stretch would answer a different
+/// question and quietly answer it differently.
+///
+/// A locus is **not** clipped, only generic and satellite stretches are: an STR locus cut in
+/// half is not a locus, so one overlapping the edge comes out whole. That, too, is the
+/// walk's rule.
+pub fn segments_of_contig_in(
+    chrom: &str,
+    contig: ContigId,
+    contig_len: Bp,
+    rows: &[FoundRepeat],
+    criteria: &StrRepeatCriteria,
+    wanted: &[GenomeRegion],
+) -> Vec<TypedRegion> {
+    let all = segments_of_contig(chrom, contig, contig_len, rows, criteria);
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for region in all {
+        for span in wanted.iter().filter(|s| s.contig == contig) {
+            let start = region.region.start.get().max(span.start.get());
+            let end = region.region.end.get().min(span.end.get());
+            if start > end {
+                continue;
+            }
+            let whole = matches!(
+                region.kind,
+                RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. }
+            );
+            out.push(TypedRegion {
+                region: if whole {
+                    region.region
+                } else {
+                    GenomeRegion {
+                        contig,
+                        start: Position(start),
+                        end: Position(end),
+                    }
+                },
+                kind: region.kind.clone(),
+            });
+            if whole {
+                // Emitted whole once, however many requested spans it touches.
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// The **STR loci** of one contig, without the generic stretches between them.

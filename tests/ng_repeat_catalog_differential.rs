@@ -470,6 +470,95 @@ fn the_sample_is_capped_stable_and_counted_in_full() {
     );
 }
 
+/// **Wiring step 3 to the catalog needs a region subset**, since every consumer of the walk
+/// asks for one. What the walk emits for a set of spans and what the catalog emits for the
+/// same spans must be the same regions — including the rule that a locus overlapping an edge
+/// comes out whole while a generic stretch is clipped.
+#[test]
+fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
+    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
+    use pop_var_caller::ng::WindowedRefSeq;
+    use pop_var_caller::regions::ContigBounds;
+
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = fixture();
+    let fasta = write_fasta(dir.path(), &contigs);
+    let catalog_path = dir.path().join("ref.fa.repeats.parquet");
+    let mut builder = RepeatCatalogBuilder::create(
+        &catalog_path,
+        StrRepeatCriteria::default(),
+        ScanParams::default(),
+    )
+    .expect("builder");
+    let reference = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        },
+        &mut builder,
+    )
+    .expect("the pass runs");
+    builder.finish(&reference, "differential").expect("finish");
+
+    let criteria = StrRepeatCriteria::default();
+    let bounds: Vec<ContigBounds> = reference
+        .contigs
+        .iter()
+        .map(|c| ContigBounds {
+            name: &c.name,
+            length: c.length as u32,
+        })
+        .collect();
+
+    // Two spans on one contig, chosen to cut through the middle of the sequence rather than
+    // to land tidily between features. A BED on disk because that is the only way to build a
+    // region set — `GenomeRegions` has no in-memory constructor.
+    let clean_len = contigs[0].1.len() as u64;
+    let bed = dir.path().join("wanted.bed");
+    std::fs::write(
+        &bed,
+        format!(
+            "{name}\t149\t450\n{name}\t599\t{end}\n",
+            name = contigs[0].0,
+            end = clean_len - 50
+        ),
+    )
+    .expect("write bed");
+    let spans = GenomeRegions::from_bed_path(&bed, &bounds).expect("valid spans");
+
+    let walk_config = TypedRegionConfig {
+        criteria: criteria.classification.clone(),
+        max_str_len: criteria.max_str_len_bp,
+        ..TypedRegionConfig::default()
+    };
+    // The walk seeks by index, so it needs a `.fai`; the catalog path needs none.
+    pop_var_caller::ng::reference_info::write_fai(
+        &reference.contigs,
+        &pop_var_caller::ng::reference_info::sibling_fai_path(&fasta),
+    )
+    .expect("write fai");
+    let walked: Vec<TypedRegion> = TypedRegionIterator::over_regions(
+        WindowedRefSeq::new(fasta.clone(), reference.contig_list()),
+        spans.clone(),
+        walk_config,
+    )
+    .expect("the walk starts")
+    .map(|r| r.expect("a region"))
+    .collect();
+
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&catalog_path, &reference).expect("opens");
+    let from_file = catalog
+        .genome_segments_in(&criteria, &spans)
+        .expect("servable");
+
+    assert!(!walked.is_empty(), "the spans must contain something");
+    assert_eq!(
+        from_file, walked,
+        "the catalog's region subset and the walk's disagree\nfile: {from_file:#?}\nwalk: {walked:#?}"
+    );
+}
+
 /// A reader more permissive than the file is refused **before any row is read**, naming the
 /// axis and both values (spec §4.3, §10.2).
 #[test]

@@ -12,16 +12,18 @@ use std::path::{Path, PathBuf};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
-use crate::ng::region_typing::TypedRegion;
 use crate::ng::region_typing::segment_criteria::SsrSegment;
+use crate::ng::region_typing::{GenomeRegions, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, row_from_batch};
-use crate::ng::repeat_catalog::segments::{loci_of_contig, segments_of_contig};
+use crate::ng::repeat_catalog::segments::{
+    loci_of_contig, segments_of_contig, segments_of_contig_in,
+};
 use crate::ng::repeat_catalog::strata::{StratumCounts, StratumSample, StratumSampler};
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, RepeatCatalogHeader};
 use crate::ng::tandem_repeat::ScanParams;
-use crate::ng::types::Bp;
 use crate::ng::types::ContigId;
+use crate::ng::types::{Bp, GenomeRegion};
 
 /// An opened catalog: its header, already checked against this run's reference.
 ///
@@ -156,6 +158,35 @@ impl RepeatCatalog {
             contigs: self.contig_walk(contig).into_iter(),
             buffered: Vec::new().into_iter(),
         })
+    }
+
+    /// The genome's segments **inside a region set**, in coordinate order.
+    ///
+    /// The whole of each touched contig is typed and only then clipped, because a tract
+    /// outside the requested span still bundles with one inside it and a satellite outside
+    /// still swallows a locus inside — which is exactly what step 3's walk does with its
+    /// scan span and its requested span.
+    ///
+    /// Contigs the region set does not name are not read at all.
+    pub fn genome_segments_in(
+        &self,
+        criteria: &StrRepeatCriteria,
+        wanted: &GenomeRegions,
+    ) -> Result<Vec<TypedRegion>, RepeatCatalogError> {
+        self.check_serves(criteria)?;
+
+        let spans: Vec<GenomeRegion> = wanted.iter().collect();
+        let mut out = Vec::new();
+        for (contig, name, length) in self.contig_walk(None) {
+            if !spans.iter().any(|s| s.contig == contig) {
+                continue;
+            }
+            let rows = rows_of_contig(self, contig)?;
+            out.extend(segments_of_contig_in(
+                &name, contig, length, &rows, criteria, &spans,
+            ));
+        }
+        Ok(out)
     }
 
     /// The contigs a read covers — all of them, or the one asked for — with the names and
