@@ -215,6 +215,15 @@ coordinate; the target count is a number of loci and the denominator is how many
 analysed regions contain, not their total length. Everything else — the seed, the ban on selecting
 on the data, the independence of samples — carries over unchanged.
 
+> **Superseded for the STR set — equal per stratum, not proportional**
+> ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3). A uniform hash makes the
+> retained set a scale model of the genome's, which gives the fewest loci to the strata where
+> slippage is largest and least known — it varies twenty-two-fold across repeat counts. The
+> replacement is a per-stratum cap filled by an even spread over the analysed regions, which keeps
+> every property this section requires because a stratum is read off the reference tract. It has one
+> price: the STR set stops being a random sample of STR loci, so anything pooled **across** strata —
+> STR diversity — must be reweighted by each stratum's true locus count.
+
 ---
 
 ## 4. Binning
@@ -256,7 +265,15 @@ gather derive the identical list. What a sample stores is a **dense array in pos
 instead would cost about five bytes each, 10 MB before any data is recorded.
 
 **Each entry is one binned depth, which fits in four bits.** Sixteen bins is exactly what §4's scheme
-produces: integers 0–8, then seven geometric bins above. At three reads a site a sample's record is
+produces: integers 0–8, then seven geometric bins above.
+
+> **Superseded — five bits, twenty bins**
+> ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §2.2). Four bits was chosen
+> here for the encoding; [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4
+> subsequently measured the two ladders and found sixteen bins cost ten times the bias of twenty —
+> 0.55 rungs of the error-rate ladder against 0.054. Five bits also leaves room for the
+> never-walked state §7 requires, which four bits does not. The sizes below rise by a quarter, to
+> about 1.25 MB per read group. At three reads a site a sample's record is
 nearly always *"n reads, all matching the reference"*, and that is the whole of it. Per-allele detail
 is stored only where there is any, as a sparse list beside the array:
 
