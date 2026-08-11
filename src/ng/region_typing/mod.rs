@@ -252,12 +252,11 @@ impl Default for TypedRegionConfig {
 /// differential. Its module doc says which counter is missing and why.
 ///
 /// **"No silent caps"**: a base typed away from the STR path must be accounted
-/// for. This is the live-caller view of the catalog's measured ~35% STR coverage
-/// gap.
-///
+/// for. This is the caller's view of the catalog's measured ~35% STR coverage gap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypedRegionCounts {
-    /// Requested regions covered.
+    /// Requested spans on this contig — the regions the caller asked about, not the
+    /// regions that came back.
     pub spans: u64,
     pub ssr_loci: u64,
     pub ssr_bundles: u64,
@@ -277,9 +276,10 @@ pub struct TypedRegionCounts {
     /// locus and sheds 200 bp contributes nothing to a per-repeat counter (spec
     /// §3.1).
     ///
-    /// **Mid-walk this leads**: coverage is counted when a window is scanned, and the
-    /// loci that cancel it are subtracted as they are emitted, a block later. It is
-    /// exact once every region has been counted, which is what the type promises.
+    /// **Reached by subtraction**: the contig's whole cleaned repeat coverage inside the
+    /// request is charged first, and the loci that cancel it are subtracted one by one. The
+    /// catalog's reader charges and cancels the same way, which is what keeps the two
+    /// numbers one number.
     pub repeat_bp_with_no_locus: u64,
     /// [`Self::repeat_bp_with_no_locus`] **broken out by classification's reason** — because
     /// one total cannot separate a purity rejection from a copy-floor one, and that is
@@ -306,14 +306,10 @@ pub fn partition_resident(
     bases: &[u8],
     config: &TypedRegionConfig,
 ) -> Vec<TypedRegion> {
-    let contig_len = bases.len() as u64;
-    if contig_len == 0 {
-        return Vec::new();
-    }
     let whole = [GenomeRegion {
         contig,
         start: Position(1),
-        end: Position(contig_len),
+        end: Position(bases.len().max(1) as u64),
     }];
     partition_resident_in(chrom, contig, bases, config, &whole).0
 }
@@ -418,8 +414,16 @@ pub fn partition_resident_in(
     // repeats that overlap — so summing the spans directly would charge a shared base once
     // per tract covering it. The satellite cap in this same function merges before it
     // measures ([`coverage_runs`]), and so does the catalog's tally.
+    // Every field named, no `..default()` tail: a counter added later must break this line
+    // rather than start life silently at zero in the catalog's own comparison.
     let mut counts = TypedRegionCounts {
         spans: wanted.len() as u64,
+        ssr_loci: 0,
+        ssr_bundles: 0,
+        ssr_bundle_bp: 0,
+        generic: 0,
+        satellites: 0,
+        satellite_bp: 0,
         repeat_bp_with_no_locus: covered_bp(&clipped_to_requested(
             &cleaned
                 .iter()
@@ -428,7 +432,7 @@ pub fn partition_resident_in(
             contig,
             &wanted,
         )),
-        ..TypedRegionCounts::default()
+        rejected_by_reason: RejectionCounts::default(),
     };
     // **A rejection is charged where the repeat starts**, and only if the caller asked
     // about that base — so a repeat is charged once however many spans can see it, and
@@ -451,7 +455,7 @@ pub fn partition_resident_in(
         emit_into(&mut out, region, &wanted, &mut emitted_upto);
     }
     for region in &out {
-        tally(&mut counts, region, &wanted);
+        charge_region(&mut counts, region, &wanted);
     }
     (out, counts)
 }
@@ -529,7 +533,7 @@ fn emit_into(
 }
 
 /// Charge one emitted region to the running tally.
-fn tally(counts: &mut TypedRegionCounts, region: &TypedRegion, requested: &[GenomeRegion]) {
+fn charge_region(counts: &mut TypedRegionCounts, region: &TypedRegion, requested: &[GenomeRegion]) {
     let bp = region.region.len();
     match &region.kind {
         RegionKind::SsrSegment(_) => {
@@ -551,6 +555,10 @@ fn tally(counts: &mut TypedRegionCounts, region: &TypedRegion, requested: &[Geno
             .map(|(start, end)| end - start)
             .sum();
             debug_assert!(inside <= bp, "a clipped locus cannot grow");
+            debug_assert!(
+                inside <= counts.repeat_bp_with_no_locus,
+                "a locus cancels coverage that was charged for it, so this cannot underflow"
+            );
             counts.repeat_bp_with_no_locus -= inside;
         }
         RegionKind::SsrBundle { .. } => {

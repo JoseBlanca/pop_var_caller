@@ -235,11 +235,15 @@ fn on_contig(regions: &[TypedRegion], contig: ContigId) -> Vec<TypedRegion> {
 /// **`.cat` parity through the whole stack** — the anchor's headline.
 ///
 /// The file read at the golden catalog's settings must reproduce the golden catalog: every
-/// golden locus is present, **or** absent *and* inside a satellite run, **or** absent *and*
-/// within 15 bases of a contig's end, which is the one thing the file deliberately does not
-/// hold (`repeat_catalog.md` §4.1). A strict subset otherwise, and that shape is earned by
-/// the spec's ordering — the satellite cap applies to the *cleaned* coverage, after
-/// classification, so the difference can only go one way.
+/// golden locus is present, **or** absent *and* inside a satellite run. A strict subset, and
+/// that shape is earned by the spec's ordering — the satellite cap applies to the *cleaned*
+/// coverage, after classification, so the difference can only go one way.
+///
+/// **The file's own 15 bp flank floor costs this fixture nothing**, which is why there is no
+/// exemption for it here: all 16 of the golden catalog's loci sit clear of a contig end, and
+/// the file gives 17 loci over the same sequence. A golden locus lost to that floor would
+/// fail below, which is the right outcome — it would mean the fixture had grown a case the
+/// parity claim needs to talk about (`repeat_catalog.md` §4.1).
 ///
 /// The oracle is the committed **trf-mod-built** golden catalog: a different detector, a
 /// different code path, nothing ng touched. Overlap matching, inherited from
@@ -327,49 +331,30 @@ fn the_catalog_reproduces_the_golden_catalog_through_the_shipping_stack() {
         .collect();
     assert!(!ours.is_empty(), "the file must hold loci");
 
-    let length_of = |name: &str| {
-        contigs
-            .iter()
-            .find(|(contig, _)| contig == name)
-            .map(|(_, bases)| bases.len() as u64)
-            .expect("the golden catalog names contigs this reference has")
-    };
     // Production's `Locus` is 0-based half-open, ng's 1-based inclusive: `[s, e)` is
     // `[s + 1, e]` (`typed_regions.md` §4).
     let overlaps =
         |a: &(String, u64, u64), b: &(String, u64, u64)| a.0 == b.0 && a.1 <= b.2 && b.1 <= a.2;
-    let flank = built_criteria().min_flank_bp.get();
-    let (mut missed, mut at_an_edge) = (Vec::new(), 0u64);
+    let mut missed = Vec::new();
     for locus in &golden {
         let it = (
             locus.chrom().to_string(),
             u64::from(locus.start()) + 1,
             u64::from(locus.end()),
         );
-        if ours.iter().any(|one| overlaps(&it, one)) || satellites.iter().any(|s| overlaps(&it, s))
+        if !ours.iter().any(|one| overlaps(&it, one))
+            && !satellites.iter().any(|one| overlaps(&it, one))
         {
-            continue;
+            missed.push(format!("{}:{}-{}", it.0, it.1, it.2));
         }
-        if it.1 <= flank || it.2 + flank > length_of(&it.0) {
-            at_an_edge += 1;
-            continue;
-        }
-        missed.push(format!("{}:{}-{}", it.0, it.1, it.2));
     }
     assert!(
         missed.is_empty(),
-        "every golden locus must be present, or absent AND inside a satellite run, or \
-         absent AND within {flank} bases of a contig's end. At the golden catalog's \
-         settings, a locus missing for any other reason is a machinery bug. Missing: \
-         {missed:#?}"
-    );
-    // The edge exemption is stated so it stays visible: if it ever swallows most of the
-    // catalog, the parity claim above has stopped meaning anything.
-    assert!(
-        at_an_edge * 20 < golden.len() as u64,
-        "{at_an_edge} of the golden catalog's {} loci were excused for sitting within \
-         {flank} bases of a contig's end — that exemption is supposed to be a handful",
-        golden.len()
+        "every golden locus must be present, or absent AND inside a satellite run. At the \
+         golden catalog's settings, a locus missing for any other reason is a machinery bug \
+         — including one lost to the file's {} bp flank floor, which costs this fixture \
+         nothing today. Missing: {missed:#?}",
+        built_criteria().min_flank_bp.get()
     );
 }
 

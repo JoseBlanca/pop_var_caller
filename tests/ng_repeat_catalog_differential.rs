@@ -511,14 +511,9 @@ fn a_region_subset_from_the_file_equals_the_scan_over_the_same_spans() {
         ScanParams::default(),
     )
     .expect("builder");
-    let reference = read_reference_info_observing(
-        ReferenceSource::Fasta {
-            fasta: fasta.clone(),
-            fai: None,
-        },
-        &mut builder,
-    )
-    .expect("the pass runs");
+    let reference =
+        read_reference_info_observing(ReferenceSource::Fasta { fasta, fai: None }, &mut builder)
+            .expect("the pass runs");
     builder.finish(&reference).expect("finish");
 
     let criteria = StrRepeatCriteria::default();
@@ -563,7 +558,6 @@ fn a_region_subset_from_the_file_equals_the_scan_over_the_same_spans() {
         from_file, scanned_regions,
         "the catalog's region subset and a scan's disagree\nfile: {from_file:#?}\nscan: {scanned_regions:#?}"
     );
-    let _ = fasta;
 }
 
 /// **Classification is not local, and this is what proves the file's answer accounts for it.**
@@ -694,9 +688,10 @@ struct BothSides {
 }
 
 fn both_sides(dir: &Path, contigs: &[(&str, String)]) -> BothSides {
+    // The FASTA is written so the reference pass below can stream it into the builder. The
+    // scan side never opens it — it is handed the contigs' bases directly — so the path is
+    // not kept.
     let fasta = write_fasta(dir, contigs);
-    // Written and then only named: the catalog builder reads it through the reference pass
-    // below, and the scan side is handed the contigs' bases directly.
     let catalog_path = dir.join("ref.fa.repeats.parquet");
     let mut builder = RepeatCatalogBuilder::create(
         &catalog_path,
