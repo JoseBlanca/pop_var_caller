@@ -74,10 +74,25 @@
 //!     -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! **G2's sweep is this same test at seven depths** — `tmp/g2_coverage_sweep.sh` runs 5x, 10x,
-//! 15x, 20x, 30x, 50x and 300x over the identical BED and truth set, so every rung is bounded
-//! by the check below as well as plotted
-//! (`reports/implementations/ng_parameter_prepass_generic_g2_2026-08-11.md`).
+//! # G2's coverage sweep is this same test, seven times
+//!
+//! The same genome, the same confident regions and the same truth set at every depth, so the
+//! arms differ in depth and in nothing else — and every rung is bounded by the check below as
+//! well as plotted
+//! (`reports/implementations/ng_parameter_prepass_generic_g2_2026-08-11.md`). There is no
+//! separate program: it is this loop.
+//!
+//! ```text
+//! for d in 5 10 15 20 30 50; do
+//!   DEV_EXTRA_MOUNT=$BENCH ./scripts/dev.sh env \
+//!     PVC_PREPASS_FASTA=$HS PVC_PREPASS_BED=$BED PVC_TRUTH_VCF=$VCF \
+//!     PVC_PREPASS_READS=$BENCH/giab/per_sample/bam/${d}x/HG002.${d}x.seed42.bam \
+//!     cargo test --release --lib parameter_estimation::generic::truth_anchors \
+//!       -- --ignored --nocapture --test-threads=1
+//! done
+//! # and 300x, whose file is named differently:
+//! #   $BENCH/giab/per_sample/bam/300x/HG002_reads_selected_100_rg.cram
+//! ```
 //!
 //! **The whole-genome truth set**, not `benchmarks/ssr_hg002/`: that one is the tandem-repeat
 //! benchmark, every record inside a repeat tract, and region typing routes those tracts to the

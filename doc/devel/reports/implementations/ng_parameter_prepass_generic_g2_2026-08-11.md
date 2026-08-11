@@ -1,7 +1,8 @@
 # G2 — the coverage sweep, and the bias it makes visible as a curve
 
 **Step:** G2 of `impl_plan/parameter_prepass_generic.md`, Milestone G.
-**Date:** 2026-08-11. **Runner:** `tmp/g2_coverage_sweep.sh`, seven arms of G1's anchor.
+**Date:** 2026-08-11. **Runner:** seven arms of G1's anchor. There is no separate program — the loop is in
+`generic/truth_anchors.rs`'s own doc comment, beside the single-arm invocation it varies.
 
 ## What it is, and why it needed no new estimator code
 

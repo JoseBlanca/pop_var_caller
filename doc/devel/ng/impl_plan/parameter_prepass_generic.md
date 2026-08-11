@@ -467,8 +467,8 @@ because confident regions are the easy regions: a fitted error rate below the mo
 on easy regions is an unambiguous bug. *Depends:* F3. *Source:* arch §9.
 
 **G2. Invariance to coverage, which needs no truth at all.**  ✅ —
-[report](../../reports/implementations/ng_parameter_prepass_generic_g2_2026-08-11.md),
-`tmp/g2_coverage_sweep.sh`. **Seven rungs, not four**: the plan's 3× does not exist and the disk
+[report](../../reports/implementations/ng_parameter_prepass_generic_g2_2026-08-11.md).
+**Seven rungs, not four**: the plan's 3× does not exist and the disk
 holds 5×, 10×, 15×, 20×, 30×, 50× and 300×. It needed no new estimator code — it is G1's anchor
 at seven depths, so every rung is bounded as well as plotted. **The error rate is flat**, seven
 values within −0.9% to +0.6% of a model-free count across a sixty-fold range. **Heterozygosity is
