@@ -725,6 +725,35 @@ fn covered_bp(spans: &[(u64, u64)]) -> u64 {
     total
 }
 
+/// The parts of `spans` (0-based half-open, on `contig`) that fall inside `wanted`.
+///
+/// `wanted` is 1-based inclusive, ng's convention for a requested region, so each is
+/// `[start - 1, end)` in the detector's space.
+fn clipped_to_requested(
+    spans: &[(u64, u64)],
+    contig: ContigId,
+    wanted: &[GenomeRegion],
+) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for &(start, end) in spans {
+        for region in wanted.iter().filter(|r| r.contig == contig) {
+            let from = start.max(region.start.get() - 1);
+            let to = end.min(region.end.get());
+            if from < to {
+                out.push((from, to));
+            }
+        }
+    }
+    out
+}
+
+/// Whether `position` (0-based) lies inside one of `wanted` on `contig`.
+fn inside_requested(position: u64, contig: ContigId, wanted: &[GenomeRegion]) -> bool {
+    wanted
+        .iter()
+        .any(|r| r.contig == contig && position >= r.start.get() - 1 && position < r.end.get())
+}
+
 /// A merged run of repeat coverage, 1-based inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoverageRun {
@@ -733,6 +762,20 @@ pub(crate) struct CoverageRun {
 }
 
 impl CoverageRun {
+    /// The run's first base, 1-based inclusive.
+    ///
+    /// Shared with the catalog for the same reason [`Self::len`] is: a region-scoped tally
+    /// clips these runs to the spans the caller asked for, and both sides must clip the same
+    /// runs the same way.
+    pub(crate) fn start(self) -> u64 {
+        self.start
+    }
+
+    /// The run's last base, 1-based inclusive.
+    pub(crate) fn end(self) -> u64 {
+        self.end
+    }
+
     /// The run's length in bases, inclusive at both ends.
     ///
     /// **Shared with the catalog's derived segmentation**
@@ -879,6 +922,15 @@ pub struct TypedRegionIterator<R> {
     queue: std::collections::VecDeque<TypedRegion>,
     /// The window's bases, reused across windows (`typed_regions.md` §7).
     bases: Vec<u8>,
+    /// Every span the caller asked for, kept for the tally.
+    ///
+    /// **The counters describe what was asked for, not what was scanned**, and those are
+    /// different: the walk always scans a whole contig, however small the request, because
+    /// whether a repeat near an edge is a clean locus depends on its neighbour just past it.
+    /// Reporting the contig's repeat coverage to somebody who asked for a hundred kilobases
+    /// answers a question they did not ask — and the catalog, which reads only what it needs,
+    /// could not produce that number without reading the whole contig anyway.
+    requested: Vec<GenomeRegion>,
     counts: TypedRegionCounts,
     /// Latched by a fatal error or by exhaustion; the fused contract.
     done: bool,
@@ -986,6 +1038,7 @@ impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
             current: None,
             queue: std::collections::VecDeque::new(),
             bases: Vec::new(),
+            requested,
             counts: TypedRegionCounts::default(),
             done: false,
         })
@@ -1153,7 +1206,11 @@ impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
             // (`the_counts_are_the_regions_and_the_gap_is_the_coverage_minus_the_loci`); the
             // accumulator was the one place that did not, and it disagreed with both by a
             // base wherever two repeats intersect.
-            repeat_bp: covered_bp(&window.coverage_in_core(&cleaned)),
+            repeat_bp: covered_bp(&clipped_to_requested(
+                &window.coverage_in_core(&cleaned),
+                contig,
+                &state.requested,
+            )),
             rejected: RejectionCounts::default(),
         };
         // **Rejections are attributed to a core, exactly like everything else.** `classify`
@@ -1162,7 +1219,10 @@ impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
         // is a memory knob. The interval's own start decides whose it is.
         for (iv, reason) in &classified.rejected {
             let start = iv.start + bases_start;
-            if start >= plan.core.start && start < plan.core.end {
+            if start >= plan.core.start
+                && start < plan.core.end
+                && inside_requested(start, contig, &state.requested)
+            {
                 tally.rejected.add(*reason, iv.end - iv.start);
             }
         }
@@ -1196,10 +1256,23 @@ impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
             RegionKind::SsrSegment(_) => {
                 self.counts.ssr_loci += 1;
                 // This repeat coverage DID yield a locus, so it is not part of the gap.
-                // The locus's bases are a subset of the coverage counted when its window
-                // was scanned (a locus is a trimmed tract, and a tract is coverage), so
-                // this cannot underflow.
-                self.counts.repeat_bp_with_no_locus -= bp;
+                //
+                // **Only the part inside the request is cancelled**, because only that part
+                // was ever charged. A locus is emitted whole where it crosses a requested
+                // edge, so subtracting its whole length would take back bases that were
+                // never counted, and the counter would underflow at exactly the loci that
+                // straddle one. What is inside the request is a subset of the coverage
+                // charged for it, so this cannot.
+                let inside: u64 = clipped_to_requested(
+                    &[(region.region.start.get() - 1, region.region.end.get())],
+                    region.region.contig,
+                    &self.requested,
+                )
+                .into_iter()
+                .map(|(start, end)| end - start)
+                .sum();
+                debug_assert!(inside <= bp, "a clipped locus cannot grow");
+                self.counts.repeat_bp_with_no_locus -= inside;
             }
             RegionKind::SsrBundle { .. } => {
                 self.counts.ssr_bundles += 1;

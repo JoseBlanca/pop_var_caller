@@ -346,10 +346,26 @@ impl GenomeSegments<'_> {
         match &region.kind {
             RegionKind::SsrSegment(_) => {
                 self.counts.ssr_loci += 1;
-                // This repeat coverage DID yield a locus, so it is not part of the gap. A
-                // locus is a cut tract and a tract is coverage, so its bases are a subset of
-                // what the contig charged and this cannot underflow.
-                self.counts.repeat_bp_with_no_locus -= bp;
+                // This repeat coverage DID yield a locus, so it is not part of the gap.
+                //
+                // **Only the part inside the request is cancelled**, because only that part
+                // was ever charged: a locus is emitted whole where it crosses a requested
+                // edge, and taking back its whole length would remove bases that were never
+                // counted. What is inside the request is a subset of the coverage charged
+                // for it, so this cannot underflow. Same rule as the walk's.
+                let inside = match self.scope.spans_on(region.region.contig) {
+                    None => bp,
+                    Some(spans) => spans
+                        .iter()
+                        .map(|s| {
+                            let from = region.region.start.get().max(s.start.get());
+                            let to = region.region.end.get().min(s.end.get());
+                            if from > to { 0 } else { to - from + 1 }
+                        })
+                        .sum(),
+                };
+                debug_assert!(inside <= bp, "a clipped locus cannot grow");
+                self.counts.repeat_bp_with_no_locus -= inside;
             }
             RegionKind::SsrBundle { .. } => {
                 self.counts.ssr_bundles += 1;

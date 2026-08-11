@@ -13,7 +13,7 @@
 | ID | Title | Decision | Status |
 |---|---|---|---|
 | B1 | Tool version and scoring weights never compared | Apply (split) | **Applied with adaptation** |
-| B2 | Region-scoped tally is short | **Ask** | **Open — needs a decision** |
+| B2 | Region-scoped tally is short | Ask → Apply | **Applied** (owner, 2026-08-11) |
 | B3 | Satellite clipped at a requested edge | Apply | **Applied** |
 | M1 | Missing row-group statistics read as an empty contig | Apply | **Applied** |
 | M2 | Foreign schema panics | Apply | **Applied** |
@@ -65,6 +65,23 @@ The scoring-weights half is **disputed as a defect and fixed as a doc**. `check_
 
 **Minors applied:** the "seven columns" doc against a nine-column schema (twice); `ReadScope::Regions`' doc, which said an unknown contig is ignored.
 
+**B2 — answered and applied.** The owner's call: **both sides count what was asked for.** A
+live scan reads a whole contig whatever the request, because whether a repeat near an edge is
+a clean locus depends on its neighbour just past it — but what it *reports* is now clipped to
+the requested spans, and so is the file's. Three rules, identical on both sides: repeat
+coverage is intersected with the request; a rejected repeat is charged where it starts, and
+only if the caller asked about that base; and a locus emitted whole across an edge cancels
+only the part inside, which is also what stops the counter underflowing there.
+
+Held by two tests. `the_tally_over_part_of_a_contig_matches_the_walks` compares the two over
+two stretches of a 200 kb contig, and asserts first that the request genuinely leaves both
+coverage and rejected repeats out — otherwise it is the whole-contig test again. It catches
+the coverage rule. It cannot catch the rejection rule, and that is a real limit worth stating:
+the file's windowed read already excludes every row further from a requested span than the
+longest tract plus the bundle radius, so only a repeat inside that narrow band tells the two
+rules apart, and random sequence does not put one there. `the_tally_counts_only_the_stretches
+_asked_for` places the rows by hand instead, and fails when the rule is removed.
+
 ## Deferred, with the reason
 
 - **M6 (`trimmed`/`purity` co-dependent options).** The right fix is one `Option<TrimmedTract { span, purity }>`, and the review's sub-agent proved it compiles green. It changes `FoundRepeat`, which is the type every consumer of the catalog will destructure, and the consumer wiring starts next. Better in that commit than in this one.
@@ -75,7 +92,6 @@ The scoring-weights half is **disputed as a defect and fixed as a doc**. `check_
 
 ## Follow-ups this leaves
 
-1. **B2 needs the owner's answer** before anything can be applied (see the review's open question 1).
-2. A fixture that puts a feature genuinely outside a read window, to finish M8 and M11.
+1. A fixture that puts a feature genuinely outside a read window, to finish M8 and M11.
 3. The naming sweep, and M6 with the consumer wiring.
 4. `segment_criteria.rs`'s stale gate archaeology — out of scope for this module, recorded in the review's section 7.

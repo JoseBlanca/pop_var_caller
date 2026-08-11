@@ -827,6 +827,88 @@ fn both_tallies(
     (*walk.counts(), *from_file.counts(), walked)
 }
 
+/// **The tally counts what was asked for, not what was read** — over part of a contig, which
+/// is the case the two sides used to answer differently.
+///
+/// A live scan reads a whole contig whatever the request, because whether a repeat near an
+/// edge is a clean locus depends on its neighbour just past it; the file reads only the rows
+/// it needs. Both used to report what they had processed, so over half of a 200 kb contig one
+/// said 1,822 bases of repeat with no locus and the other said 187. Both now report what the
+/// caller asked about (owner, 2026-08-11), which is the only definition the two can share and
+/// the only one that answers the question asked.
+///
+/// The spans deliberately cut through the middle of the sequence rather than landing tidily
+/// between features, so loci and coverage straddle their edges.
+#[test]
+fn the_tally_over_part_of_a_contig_matches_the_walks() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = tally_fixture();
+    let sides = both_sides(dir.path(), &contigs);
+    let criteria = StrRepeatCriteria::default();
+
+    let random = sides
+        .reference
+        .contigs
+        .iter()
+        .position(|c| c.name == "chr_random")
+        .expect("the fixture has it");
+    let length = sides.reference.contigs[random].length;
+    let spans = vec![
+        GenomeRegion {
+            contig: ContigId(random as u32),
+            start: Position(1),
+            end: Position(length / 5),
+        },
+        GenomeRegion {
+            contig: ContigId(random as u32),
+            start: Position(length * 3 / 5),
+            end: Position(length * 4 / 5),
+        },
+    ];
+    let (walk, file, _) = both_tallies(&sides, &spans, &criteria);
+
+    // A partial request must actually leave something out, or this is the whole-contig test
+    // again under another name.
+    let (whole_walk, _, _) = both_tallies(
+        &sides,
+        &whole_contigs_named(&sides.reference, &["chr_random"]),
+        &criteria,
+    );
+    assert!(
+        walk.repeat_bp_with_no_locus < whole_walk.repeat_bp_with_no_locus,
+        "the spans must cover less than the contig: {} against {}",
+        walk.repeat_bp_with_no_locus,
+        whole_walk.repeat_bp_with_no_locus
+    );
+    assert!(
+        walk.rejected_by_reason.no_clean_trim > 0,
+        "a gate must fire inside the spans, or its comparison is zero against zero"
+    );
+    // And a gate must fire *outside* them too, or scoping the rejections changes nothing and
+    // comparing them proves nothing.
+    assert!(
+        walk.rejected_by_reason.total() < whole_walk.rejected_by_reason.total(),
+        "the spans must leave some rejected repeats out: {} against {}",
+        walk.rejected_by_reason.total(),
+        whole_walk.rejected_by_reason.total()
+    );
+
+    assert_eq!(walk.spans, file.spans);
+    assert_eq!(walk.ssr_loci, file.ssr_loci);
+    assert_eq!(
+        walk.repeat_bp_with_no_locus, file.repeat_bp_with_no_locus,
+        "repeat coverage inside the requested spans that yielded no locus"
+    );
+    assert_eq!(
+        walk.rejected_by_reason.copy_floor,
+        file.rejected_by_reason.copy_floor
+    );
+    assert_eq!(
+        walk.rejected_by_reason.no_clean_trim,
+        file.rejected_by_reason.no_clean_trim
+    );
+}
+
 /// **The tally a consumer keeps when it stops walking the reference.** Over contigs whose
 /// repeats all sit clear of the ends, every counter the catalog has holds the walk's number.
 ///

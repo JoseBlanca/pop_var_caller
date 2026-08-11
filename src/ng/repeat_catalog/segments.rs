@@ -42,7 +42,8 @@ pub fn segments_of_contig(
     if contig_len.get() == 0 {
         return (Vec::new(), ContigTally::default());
     }
-    let (features, tally) = repeat_features_of_contig(chrom, contig, contig_len, rows, criteria);
+    let (features, tally) =
+        repeat_features_of_contig(chrom, contig, contig_len, rows, criteria, None);
     (fill_generic_gaps(features, contig, contig_len.get()), tally)
 }
 
@@ -62,9 +63,10 @@ pub fn segments_of_contig(
 /// said here* stays true of any part of it. That is the walk's rule, stated in
 /// `region_typing/mod.rs`'s `clips_at_a_bed_edge`, and this is where the two must agree.
 ///
-/// **The tally is the whole contig's, not the requested stretches'**, because the whole
-/// contig is what was typed — the walk's own tally works the same way, since its scan span
-/// is always the whole contig whatever was asked for (`region_typing/mod.rs`, `scan_set`).
+/// **The tally describes `wanted`, not the contig.** The whole contig has to be *typed* —
+/// classification is not local — but reporting the contig's repeat coverage to a caller who
+/// asked for a hundred kilobases answers a question they did not ask (owner, 2026-08-11).
+/// The walk counts the same way, over the same spans.
 pub fn segments_of_contig_in(
     chrom: &str,
     contig: ContigId,
@@ -73,7 +75,9 @@ pub fn segments_of_contig_in(
     criteria: &StrRepeatCriteria,
     wanted: &[GenomeRegion],
 ) -> (Vec<TypedRegion>, ContigTally) {
-    let (all, tally) = segments_of_contig(chrom, contig, contig_len, rows, criteria);
+    let (features, tally) =
+        repeat_features_of_contig(chrom, contig, contig_len, rows, criteria, Some(wanted));
+    let all = fill_generic_gaps(features, contig, contig_len.get());
     if wanted.is_empty() {
         return (Vec::new(), tally);
     }
@@ -126,7 +130,7 @@ pub fn loci_of_contig(
     if contig_len.get() == 0 {
         return Vec::new();
     }
-    repeat_features_of_contig(chrom, contig, contig_len, rows, criteria)
+    repeat_features_of_contig(chrom, contig, contig_len, rows, criteria, None)
         .0
         .into_iter()
         .filter_map(|region| match region.kind {
@@ -164,12 +168,15 @@ pub fn loci_of_contig_in(
 ///
 /// **Absorption is why the loci cannot be taken before this point**: a satellite swallows a
 /// locus too close to it, so a locus is only a locus once the features are resolved.
+/// `wanted` is what the tally is measured over — `None` for the whole contig. It does not
+/// change the classification, which always sees the contig whole.
 fn repeat_features_of_contig(
     chrom: &str,
     contig: ContigId,
     contig_len: Bp,
     rows: &[FoundRepeat],
     criteria: &StrRepeatCriteria,
+    wanted: Option<&[GenomeRegion]>,
 ) -> (Vec<TypedRegion>, ContigTally) {
     let class = &criteria.classification;
 
@@ -182,7 +189,7 @@ fn repeat_features_of_contig(
 
     // 3. Admission, gate for gate as `classify` runs it — but reading the stored cut,
     //    motif and purity instead of the bases (§5.1).
-    let admitted = admit(chrom, rows, &cleaned, contig_len, class);
+    let admitted = admit(chrom, rows, &cleaned, contig_len, class, contig, wanted);
 
     // 4-5. The satellite cap over the cleaned coverage, then the features.
     let runs = coverage_runs(&cleaned);
@@ -190,7 +197,23 @@ fn repeat_features_of_contig(
     // intervals, so overlapping repeats count their bases once. The walk sums the same runs
     // window by window, clipped to each core; cores tile a contig, so the totals are the
     // same number reached two ways.
-    let repeat_bp = runs.iter().map(|run| run.len()).sum();
+    let repeat_bp = runs
+        .iter()
+        .map(|run| match wanted {
+            None => run.len(),
+            // Only the part of the run the caller asked about. The walk clips the same runs
+            // to the same spans, which is what keeps the two tallies one number.
+            Some(spans) => spans
+                .iter()
+                .filter(|s| s.contig == contig)
+                .map(|s| {
+                    let from = run.start().max(s.start.get());
+                    let to = run.end().min(s.end.get());
+                    if from > to { 0 } else { to - from + 1 }
+                })
+                .sum(),
+        })
+        .sum();
     // **Every field named, no `..default()` tail.** The walk's own construction carries the
     // same rule for the same reason: a field added to `TypedRegionConfig` later must break
     // this line rather than silently take the calling walk's value, and the differential
@@ -234,7 +257,21 @@ fn admit(
     cleaned: &[RepeatInterval],
     contig_len: Bp,
     class: &SsrSegmentCriteria,
+    contig: ContigId,
+    wanted: Option<&[GenomeRegion]>,
 ) -> Admitted {
+    // **A rejection is charged where the repeat starts, and only if the caller asked about
+    // that base.** The walk attributes each rejection to exactly one window core the same
+    // way — by the repeat's own start — so a repeat is charged once however many spans or
+    // windows can see it.
+    let charged = |row: &FoundRepeat| match wanted {
+        None => true,
+        Some(spans) => spans.iter().any(|s| {
+            s.contig == contig
+                && row.detected.start.get() >= s.start.get()
+                && row.detected.start.get() <= s.end.get()
+        }),
+    };
     // The pre-screen and the bundler both hand back **intervals**, not rows, and what a
     // locus needs — the whole-motif cut, the motif, the purity — lives on the row. So each
     // survivor has to be matched back to the row it came from.
@@ -259,7 +296,9 @@ fn admit(
             continue;
         }
         if is_compound(row.motif.as_bytes()) {
-            rejected.add(RejectionReason::Compound, row.detected.len_bp());
+            if charged(row) {
+                rejected.add(RejectionReason::Compound, row.detected.len_bp());
+            }
             continue;
         }
         kept.push(row);
@@ -281,7 +320,11 @@ fn admit(
             Ok(locus) => loci.push(locus),
             // The bases charged are the **detected** length, before any trim — what the walk
             // charges (`RejectionCounts`), and what makes the two tallies comparable.
-            Err(reason) => rejected.add(reason, row.detected.len_bp()),
+            Err(reason) => {
+                if charged(row) {
+                    rejected.add(reason, row.detected.len_bp());
+                }
+            }
         }
     }
 
@@ -448,7 +491,7 @@ mod tests {
 
     fn tally_of(rows: &[FoundRepeat], criteria: &StrRepeatCriteria) -> (usize, ContigTally) {
         let (features, tally) =
-            repeat_features_of_contig("chr1", ContigId(0), CONTIG_LEN, rows, criteria);
+            repeat_features_of_contig("chr1", ContigId(0), CONTIG_LEN, rows, criteria, None);
         let loci = features
             .iter()
             .filter(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
@@ -522,6 +565,80 @@ mod tests {
         // 1001..=1030 and 1030..=1059: sixty bases of tract over fifty-nine of contig.
         let (_, tally) = tally_of(&[row(1_001, 3, "CAG"), second], &criteria);
         assert_eq!(tally.repeat_bp, 59);
+    }
+
+    /// **The tally counts the stretches asked for, not the contig.** Everything on the
+    /// contig is still *classified* — a repeat outside the request bundles with one inside —
+    /// but a caller who asked about two kilobases is told about two kilobases (owner,
+    /// 2026-08-11).
+    ///
+    /// A live scan cannot be made to disagree with this on a fixture reference: the file's
+    /// windowed read already excludes rows further from a requested span than the longest
+    /// tract plus the bundle radius, so only a repeat inside that narrow band tells the two
+    /// rules apart. Here the rows are placed by hand so the band is where the test wants it.
+    #[test]
+    fn the_tally_counts_only_the_stretches_asked_for() {
+        let criteria = StrRepeatCriteria::default();
+
+        // Two tracts with no whole-motif cut, one inside the requested stretch and one far
+        // outside it, plus a clean locus inside.
+        let mut inside = row(1_001, 3, "CAG");
+        inside.trimmed = None;
+        inside.purity = None;
+        let mut outside = row(5_001, 3, "CAG");
+        outside.trimmed = None;
+        outside.purity = None;
+        let rows = vec![inside, row(1_101, 3, "CAG"), outside];
+
+        let wanted = [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(2_000),
+        }];
+        let (_, tally) = repeat_features_of_contig(
+            "chr1",
+            ContigId(0),
+            CONTIG_LEN,
+            &rows,
+            &criteria,
+            Some(&wanted),
+        );
+
+        assert_eq!(
+            tally.rejected.no_clean_trim, 30,
+            "only the tract inside the requested stretch is charged"
+        );
+        // 30 bases of the uncut tract plus 30 of the locus, both inside; the tract at 5,001
+        // is outside and contributes nothing.
+        assert_eq!(tally.repeat_bp, 60);
+
+        // And the whole contig, for contrast: both tracts charged, all three counted.
+        let (_, whole) =
+            repeat_features_of_contig("chr1", ContigId(0), CONTIG_LEN, &rows, &criteria, None);
+        assert_eq!(whole.rejected.no_clean_trim, 60);
+        assert_eq!(whole.repeat_bp, 90);
+    }
+
+    /// A stretch that cuts through a repeat charges the bases inside it and no more.
+    #[test]
+    fn coverage_is_charged_only_where_the_caller_asked() {
+        let criteria = StrRepeatCriteria::default();
+        // A 30-base tract at 1,001..=1,030, requested up to 1,010: eleven bases inside.
+        let rows = vec![row(1_001, 3, "CAG")];
+        let wanted = [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(1_010),
+        }];
+        let (_, tally) = repeat_features_of_contig(
+            "chr1",
+            ContigId(0),
+            CONTIG_LEN,
+            &rows,
+            &criteria,
+            Some(&wanted),
+        );
+        assert_eq!(tally.repeat_bp, 10);
     }
 
     /// A repeat outside the reader's period range or under its score floor is **not** a
