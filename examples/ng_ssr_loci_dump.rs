@@ -42,7 +42,8 @@ use pop_var_caller::ng::reference_info::{
     ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
+use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use pop_var_caller::ng::types::{Bp, ContigId};
 
 /// The side derivation, shared with the other two STR dumps so the three cannot drift apart
@@ -51,6 +52,8 @@ use pop_var_caller::ng::types::{Bp, ContigId};
 mod witness_side;
 use witness_side::{WitnessSide, witness_side};
 
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 /// The shared "should this run check the reference?" rule — see the module's own docs for
 /// why the default is to check even in a tool that is re-run constantly.
 #[path = "shared/reference_check.rs"]
@@ -206,6 +209,10 @@ fn run_dump<A: RepeatDelimiter>(
     let (info, verify) =
         read_reference_verifying_or_creating_fai(&cache, fasta.to_path_buf(), reference_check)?;
     let contigs = info.contig_list();
+    // **The typed regions come from the catalog beside the reference.** Opened before the
+    // reference is handed on, and checked against what the pass just reported; a reference
+    // with no catalog stops the run naming the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     // One reference for every file this run opens — and so one copy of the bases.
     let reference = OpenReference::new(info);
 
@@ -228,18 +235,17 @@ fn run_dump<A: RepeatDelimiter>(
         Bp(walk_config.criteria.bundle_threshold),
     )?;
 
+    let criteria = StrRepeatCriteria::from(&walk_config);
     let mut report = DumpReport::default();
     for (index, entry) in contigs.entries.iter().enumerate() {
         if contig_filter.is_some_and(|name| entry.name != name) {
             continue;
         }
-        // A fresh windowed reference per contig for the walk (it takes the reference by value).
-        let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-        let mut walk = TypedRegionIterator::over_contig(
-            walk_reference,
+        let this_contig = [catalog_regions::whole_contig(
             ContigId(index as u32),
-            walk_config.clone(),
-        )?;
+            entry.length,
+        )];
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&this_contig))?;
         for region in walk.by_ref() {
             let region = region?;
             if let RegionKind::SsrSegment(segment) = &region.kind {

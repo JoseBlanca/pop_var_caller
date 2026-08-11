@@ -75,12 +75,14 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
-use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionIterator,
-};
+use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::types::GenomeRegion;
 use pop_var_caller::ng::types::{Bp, ContigId};
 use pop_var_caller::regions::ContigBounds;
 
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 /// The side derivation, shared with the other two STR dumps so the three cannot drift apart
 /// again (D4). Each tool keeps its own strings — see `witness_label`.
 #[path = "shared/witness_side.rs"]
@@ -226,6 +228,9 @@ fn run_cohort(
         ReferenceCheck::VerifyAgainstIndex,
     )?;
     let contigs: ContigList = info.contig_list();
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run — the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     // **One reference for the whole cohort, and so one copy of its bases.** A
     // `fasta::Repository` memoises whole contigs and never evicts, so the
     // per-file repository this replaces cost ~752 MiB of resident tomato
@@ -386,37 +391,36 @@ fn run_cohort(
                 .is_some_and(|e| contig_filter.iter().any(|n| n == &e.name))
     };
 
-    let mut walks: Vec<(String, TypedRegionIterator<WindowedRefSeq>)> = Vec::new();
+    // What to ask the catalog for, labelled so a long run can be watched. The spans are
+    // collected first and the reader built per batch, because a reader borrows the catalog.
+    let mut batches: Vec<(String, Vec<GenomeRegion>)> = Vec::new();
     match bed_spans {
         Some(spans) => {
-            eprintln!("  {} BED spans", spans.iter().count());
-            let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-            walks.push((
-                "BED".to_string(),
-                TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
-            ));
+            let wanted: Vec<GenomeRegion> = spans.iter().collect();
+            eprintln!("  {} BED spans", wanted.len());
+            batches.push(("BED".to_string(), wanted));
         }
         None => {
             for (index, entry) in contigs.entries.iter().enumerate() {
                 if !wanted_contig(ContigId(index as u32)) {
                     continue;
                 }
-                let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-                walks.push((
+                batches.push((
                     entry.name.clone(),
-                    TypedRegionIterator::over_contig(
-                        walk_reference,
+                    vec![catalog_regions::whole_contig(
                         ContigId(index as u32),
-                        walk_config.clone(),
-                    )?,
+                        entry.length,
+                    )],
                 ));
             }
         }
     }
 
-    for (label, mut walk) in walks {
-        // A cohort walk runs for a long time; say what is in hand so it can be watched.
+    let criteria = StrRepeatCriteria::from(&walk_config);
+    for (label, spans) in batches {
+        // A cohort run takes a long time; say what is in hand so it can be watched.
         eprintln!("  walking {label}");
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&spans))?;
         for region in walk.by_ref() {
             let region = region?;
             let RegionKind::SsrSegment(segment) = &region.kind else {
