@@ -27,14 +27,89 @@ use std::path::PathBuf;
 
 use crate::ng::reference_info::ContigInfo;
 use crate::ng::tandem_repeat::ScanParams;
-use crate::ng::types::{ContigId, Motif, Position};
+use crate::ng::types::{ContigId, GenomeRegion, Motif, Position};
 
 pub use builder::{BuildTally, RepeatCatalogBuilder};
 pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
 pub use parquet_file::RepeatCatalogWriter;
-pub use reader::RepeatCatalog;
+pub use reader::{GenomeSegments, RepeatCatalog, StrLoci};
 pub use row::{RowRejection, row_for_interval};
 pub use strata::{StratumCounts, StratumSample};
+
+/// Which part of the reference a read covers.
+///
+/// **Every read method takes one of these**, and it is stated in regions rather than in
+/// contigs: a caller that wants two stretches of chromosome 1 says so in code, with
+/// [`GenomeRegion`]s it built itself. Asking by contig, or writing a BED file to disk to ask
+/// a question, were the two things this replaces.
+///
+/// `WholeReference` is a named case rather than an empty list, because an empty list of
+/// regions means *nothing*, and a caller that computed one by accident should get nothing
+/// rather than everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadScope<'a> {
+    /// Every contig the catalog holds.
+    WholeReference,
+    /// Only these stretches. Regions on contigs the catalog does not hold are ignored;
+    /// contigs no region names are never read.
+    Regions(&'a [GenomeRegion]),
+}
+
+impl<'a> ReadScope<'a> {
+    /// The regions this scope names on `contig`, or `None` when it covers the contig whole.
+    fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
+        match self {
+            ReadScope::WholeReference => None,
+            ReadScope::Regions(spans) => Some(
+                spans
+                    .iter()
+                    .filter(|s| s.contig == contig)
+                    .copied()
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Whether this scope reaches `contig` at all.
+    fn touches(&self, contig: ContigId) -> bool {
+        match self {
+            ReadScope::WholeReference => true,
+            ReadScope::Regions(spans) => spans.iter().any(|s| s.contig == contig),
+        }
+    }
+
+    /// The same scope, owning its regions — what a streaming read holds, since the iterator
+    /// outlives the call that made it.
+    fn owned(&self) -> OwnedScope {
+        match self {
+            ReadScope::WholeReference => OwnedScope::WholeReference,
+            ReadScope::Regions(spans) => OwnedScope::Regions(spans.to_vec()),
+        }
+    }
+}
+
+/// [`ReadScope`] with its regions owned, for an iterator to carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OwnedScope {
+    WholeReference,
+    Regions(Vec<GenomeRegion>),
+}
+
+impl OwnedScope {
+    /// The regions on `contig`, or `None` when the contig is covered whole.
+    pub(crate) fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
+        match self {
+            OwnedScope::WholeReference => None,
+            OwnedScope::Regions(spans) => Some(
+                spans
+                    .iter()
+                    .filter(|s| s.contig == contig)
+                    .copied()
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// How many rows a build wrote, per period — what `repeat-catalog` prints when it finishes
 /// (spec §2.6), and the measurement open question 1 asks for.

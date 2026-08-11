@@ -10,7 +10,8 @@ use std::time::Instant;
 
 use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info};
 use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind};
-use pop_var_caller::ng::repeat_catalog::{RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::types::{GenomeRegion, Position};
 use pop_var_caller::regions::ContigBounds;
 
 fn main() {
@@ -46,7 +47,14 @@ fn main() {
     let mut whole_regions = 0usize;
     let mut whole_loci = 0usize;
     for region in catalog
-        .genome_segments(&criteria, Some(contig))
+        .genome_segments(
+            &criteria,
+            ReadScope::Regions(&[GenomeRegion {
+                contig,
+                start: Position(1),
+                end: Position(u64::MAX),
+            }]),
+        )
         .expect("servable")
     {
         let region = region.expect("a region");
@@ -57,11 +65,12 @@ fn main() {
     }
     let whole_seconds = whole.elapsed().as_secs_f64();
 
+    let wanted: Vec<GenomeRegion> = spans.iter().collect();
     let windowed = Instant::now();
     let mut window_regions = 0usize;
     let mut window_loci = 0usize;
     for region in catalog
-        .genome_segments_in(&criteria, &spans)
+        .genome_segments(&criteria, ReadScope::Regions(&wanted))
         .expect("servable")
     {
         let region = region.expect("a region");

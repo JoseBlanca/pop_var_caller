@@ -123,6 +123,29 @@ pub fn loci_of_contig(
         .collect()
 }
 
+/// The STR loci of one contig that overlap `wanted`.
+///
+/// A locus is inside or it is not — there is no clipping, since half a locus is not one — so
+/// this is a filter, where [`segments_of_contig_in`] is a filter plus a cut for the stretches
+/// between loci.
+pub fn loci_of_contig_in(
+    chrom: &str,
+    contig: ContigId,
+    contig_len: Bp,
+    rows: &[FoundRepeat],
+    criteria: &StrRepeatCriteria,
+    wanted: &[GenomeRegion],
+) -> Vec<SsrSegment> {
+    loci_of_contig(chrom, contig, contig_len, rows, criteria)
+        .into_iter()
+        .filter(|locus| {
+            wanted.iter().any(|s| {
+                s.contig == contig && locus.start() <= s.end.get() && locus.end() >= s.start.get()
+            })
+        })
+        .collect()
+}
+
 /// Everything up to but not including the generic fill: the repeat features of one contig,
 /// coordinate-ordered.
 ///

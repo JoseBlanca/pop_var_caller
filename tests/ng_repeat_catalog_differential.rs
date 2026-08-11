@@ -24,9 +24,21 @@ use pop_var_caller::ng::region_typing::{
 use pop_var_caller::ng::repeat_catalog::criteria::{
     CATALOG_MIN_COPIES, CATALOG_MIN_COPIES_BEYOND_TABLE,
 };
-use pop_var_caller::ng::repeat_catalog::{RepeatCatalog, RepeatCatalogBuilder, StrRepeatCriteria};
+use pop_var_caller::ng::repeat_catalog::{
+    ReadScope, RepeatCatalog, RepeatCatalogBuilder, StrRepeatCriteria,
+};
 use pop_var_caller::ng::tandem_repeat::{PeriodRange, ScanParams};
-use pop_var_caller::ng::types::{Bp, ContigId};
+use pop_var_caller::ng::types::{Bp, ContigId, GenomeRegion, Position};
+
+/// A region covering one contig whole — what "just this chromosome" looks like now that the
+/// read surface speaks regions.
+fn whole(contig: ContigId) -> GenomeRegion {
+    GenomeRegion {
+        contig,
+        start: Position(1),
+        end: Position(u64::MAX),
+    }
+}
 
 /// Filler with no tandem structure of its own at periods 1..=6.
 fn filler(len: usize) -> String {
@@ -91,7 +103,7 @@ fn derived(
     let catalog =
         RepeatCatalog::open_checking_against_reference(catalog_path, reference).expect("opens");
     catalog
-        .genome_segments(criteria, Some(contig))
+        .genome_segments(criteria, ReadScope::Regions(&[whole(contig)]))
         .expect("the policy is servable")
         .map(|r| r.expect("a region"))
         .collect()
@@ -392,7 +404,7 @@ fn the_strata_tally_matches_a_direct_count() {
 
     // Counted from the file.
     let from_file = catalog
-        .count_loci_per_stratum(&criteria, None)
+        .count_loci_per_stratum(&criteria, ReadScope::WholeReference)
         .expect("servable");
 
     // The one difference the file admits to: loci within the flank floor of a contig's end.
@@ -444,10 +456,10 @@ fn the_sample_is_capped_stable_and_counted_in_full() {
     let criteria = StrRepeatCriteria::default();
 
     let (counts, sample) = catalog
-        .sample_loci_per_stratum(&criteria, None, 1, 42)
+        .sample_loci_per_stratum(&criteria, ReadScope::WholeReference, 1, 42)
         .expect("servable");
     let (counts_again, sample_again) = catalog
-        .sample_loci_per_stratum(&criteria, None, 1, 42)
+        .sample_loci_per_stratum(&criteria, ReadScope::WholeReference, 1, 42)
         .expect("servable");
 
     assert_eq!(counts, counts_again);
@@ -465,7 +477,10 @@ fn the_sample_is_capped_stable_and_counted_in_full() {
     }
     assert_eq!(
         counts.total(),
-        catalog.str_loci(&criteria, None).expect("servable").count() as u64,
+        catalog
+            .str_loci(&criteria, ReadScope::WholeReference)
+            .expect("servable")
+            .count() as u64,
         "the counts see every locus, sampled or not"
     );
 }
@@ -548,8 +563,9 @@ fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
 
     let catalog =
         RepeatCatalog::open_checking_against_reference(&catalog_path, &reference).expect("opens");
+    let wanted: Vec<GenomeRegion> = spans.iter().collect();
     let from_file: Vec<TypedRegion> = catalog
-        .genome_segments_in(&criteria, &spans)
+        .genome_segments(&criteria, ReadScope::Regions(&wanted))
         .expect("servable")
         .map(|r| r.expect("a region"))
         .collect();
@@ -581,7 +597,7 @@ fn a_more_permissive_reader_is_refused_eagerly() {
         ..base.clone()
     };
     let err = catalog
-        .genome_segments(&lower_floor, None)
+        .genome_segments(&lower_floor, ReadScope::WholeReference)
         .err()
         .expect("a lower copy floor is refused");
     let message = format!("{err}");
@@ -592,7 +608,11 @@ fn a_more_permissive_reader_is_refused_eagerly() {
         min_flank_bp: Bp(5),
         ..base.clone()
     };
-    assert!(catalog.genome_segments(&smaller_flank, None).is_err());
+    assert!(
+        catalog
+            .genome_segments(&smaller_flank, ReadScope::WholeReference)
+            .is_err()
+    );
 
     // And the mirror case: the unbounded axes are served, not refused.
     let permissive_elsewhere = StrRepeatCriteria {
@@ -604,5 +624,9 @@ fn a_more_permissive_reader_is_refused_eagerly() {
         max_str_len_bp: Bp(1_000_000),
         ..base
     };
-    assert!(catalog.genome_segments(&permissive_elsewhere, None).is_ok());
+    assert!(
+        catalog
+            .genome_segments(&permissive_elsewhere, ReadScope::WholeReference)
+            .is_ok()
+    );
 }

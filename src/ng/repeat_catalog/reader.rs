@@ -12,17 +12,17 @@ use std::path::{Path, PathBuf};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
+use crate::ng::region_typing::TypedRegion;
 use crate::ng::region_typing::segment_criteria::SsrSegment;
-use crate::ng::region_typing::{GenomeRegions, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
-use crate::ng::repeat_catalog::parquet_file::{
-    HEADER_KEY, decode_header, row_from_batch, rows_overlapping,
-};
+use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, rows_overlapping};
 use crate::ng::repeat_catalog::segments::{
-    loci_of_contig, segments_of_contig, segments_of_contig_in,
+    loci_of_contig, loci_of_contig_in, segments_of_contig, segments_of_contig_in,
 };
 use crate::ng::repeat_catalog::strata::{StratumCounts, StratumSample, StratumSampler};
-use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, RepeatCatalogHeader};
+use crate::ng::repeat_catalog::{
+    FoundRepeat, OwnedScope, ReadScope, RepeatCatalogError, RepeatCatalogHeader,
+};
 use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::ContigId;
 use crate::ng::types::{Bp, GenomeRegion};
@@ -76,67 +76,36 @@ impl RepeatCatalog {
         &self.header.contigs
     }
 
-    /// Every tandem repeat the file holds for `contig`, or for the whole reference when
-    /// `contig` is `None` — **exactly as stored, with no criteria applied**.
+    /// Every tandem repeat the file holds in `scope` — **exactly as stored, with no criteria
+    /// applied**.
     ///
     /// Rows arrive in the file's order: contigs in reference order, then by start, then by
-    /// period, then by end. The iterator streams a row group at a time, so peak memory is
-    /// one contig's row group and not the genome.
+    /// period, then by end. Regions read only the pages they touch; the whole reference
+    /// streams a row group at a time, so peak memory is one contig's rows and not the
+    /// genome.
     ///
-    /// Restricting to a contig reads only that contig's row group, which is what one row
-    /// group per contig buys (spec §3.5).
-    pub fn repeats_in_region(
-        &self,
-        contig: Option<ContigId>,
-    ) -> Result<
-        impl Iterator<Item = Result<FoundRepeat, RepeatCatalogError>> + use<>,
-        RepeatCatalogError,
-    > {
-        let file = File::open(&self.path).map_err(|source| RepeatCatalogError::Write {
-            path: self.path.clone(),
-            source,
-        })?;
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| self.unreadable(e))?;
-
-        // One row group per contig, in reference order, so a contig's rows are the row
-        // group whose rows carry its index. Groups with no rows are never written.
-        let wanted_groups: Vec<usize> = match contig {
-            None => (0..builder.metadata().num_row_groups()).collect(),
-            Some(id) => {
-                let mut groups = Vec::new();
-                for group in 0..builder.metadata().num_row_groups() {
-                    if row_group_contig(&builder, group) == Some(id) {
-                        groups.push(group);
-                    }
+    /// **No widening here**, unlike the classified reads: these are the file's rows, and a
+    /// row outside your regions is not one of them. The reach that a windowed *classification*
+    /// needs is about what a neighbour does to a locus, which is not a question about rows.
+    pub fn repeats(&self, scope: ReadScope<'_>) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
+        let mut out = Vec::new();
+        for (contig, _, _) in self.contig_walk(scope) {
+            match scope.spans_on(contig) {
+                None => out.extend(rows_of_contig(self, contig)?),
+                Some(spans) if spans.is_empty() => {}
+                Some(spans) => {
+                    let windows: Vec<(u64, u64)> =
+                        spans.iter().map(|s| (s.start.get(), s.end.get())).collect();
+                    out.extend(rows_overlapping(&self.path, contig, &windows).map_err(
+                        |source| RepeatCatalogError::Unreadable {
+                            path: self.path.clone(),
+                            source,
+                        },
+                    )?);
                 }
-                groups
             }
-        };
-
-        let reader = builder
-            .with_row_groups(wanted_groups)
-            .build()
-            .map_err(|e| self.unreadable(e))?;
-
-        let path = self.path.clone();
-        Ok(reader.flat_map(move |batch| {
-            let path = path.clone();
-            match batch {
-                Err(e) => vec![Err(RepeatCatalogError::Unreadable {
-                    path,
-                    source: Box::new(e),
-                })],
-                Ok(batch) => (0..batch.num_rows())
-                    .map(|i| {
-                        row_from_batch(&batch, i).ok_or_else(|| RepeatCatalogError::Unreadable {
-                            path: path.clone(),
-                            source: format!("row {i} does not match the catalog schema").into(),
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            }
-        }))
+        }
+        Ok(out)
     }
 
     /// The genome's segments in coordinate order — the STR segments and the generic
@@ -148,48 +117,67 @@ impl RepeatCatalog {
     ///
     /// The iterator then streams **one contig at a time**: a contig's rows and its segments
     /// are in memory, the genome's are not.
+    /// Asked for regions, only what those regions touch is read and the answers are clipped
+    /// to them — with one rule that is not clipping: **a locus is emitted whole**, because a
+    /// locus cut in half is not a locus. Asked for the whole reference, every contig is
+    /// typed end to end.
     pub fn genome_segments(
         &self,
         criteria: &StrRepeatCriteria,
-        contig: Option<ContigId>,
+        scope: ReadScope<'_>,
     ) -> Result<GenomeSegments<'_>, RepeatCatalogError> {
         self.check_serves(criteria)?;
         Ok(GenomeSegments {
             catalog: self,
             criteria: criteria.clone(),
-            contigs: self.contig_walk(contig).into_iter(),
+            scope: scope.owned(),
+            contigs: self.contig_walk(scope).into_iter(),
             buffered: Vec::new().into_iter(),
         })
     }
 
-    /// The genome's segments **inside a region set**, in coordinate order.
+    /// The rows of `contig` a scope needs.
     ///
-    /// The whole of each touched contig is typed and only then clipped, because a tract
-    /// outside the requested span still bundles with one inside it and a satellite outside
-    /// still swallows a locus inside — which is exactly what step 3's walk does with its
-    /// scan span and its requested span.
+    /// For the whole contig that is every row. For regions it is the rows overlapping them,
+    /// **widened by how far a row outside a region can reach into it**: a tract within the
+    /// bundle radius bundles with what is inside, and a long array overlapping it swallows a
+    /// locus inside. The longest tract in the contig plus the reader's bundle radius bounds
+    /// both, and the header stores that length per contig.
     ///
-    /// Contigs the region set does not name are not read at all.
-    pub fn genome_segments_in(
+    /// The widened windows become a filter over `detected_start` / `detected_end`, so with
+    /// the page index loaded the reader skips whole pages outside them — the file's own
+    /// index doing the work instead of a scan of the contig.
+    fn rows_for(
         &self,
+        contig: ContigId,
+        scope: &OwnedScope,
         criteria: &StrRepeatCriteria,
-        wanted: &GenomeRegions,
-    ) -> Result<RegionSegments<'_>, RepeatCatalogError> {
-        self.check_serves(criteria)?;
+    ) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
+        let Some(spans) = scope.spans_on(contig) else {
+            return rows_of_contig(self, contig);
+        };
+        if spans.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        let spans: Vec<GenomeRegion> = wanted.iter().collect();
-        let contigs: Vec<(ContigId, String, Bp)> = self
-            .contig_walk(None)
-            .into_iter()
-            .filter(|(id, _, _)| spans.iter().any(|s| s.contig == *id))
+        let reach = self
+            .header
+            .reach_into_window(contig, criteria.classification.bundle_threshold);
+        let windows: Vec<(u64, u64)> = spans
+            .iter()
+            .map(|s| {
+                (
+                    s.start.get().saturating_sub(reach),
+                    s.end.get().saturating_add(reach),
+                )
+            })
             .collect();
 
-        Ok(RegionSegments {
-            catalog: self,
-            criteria: criteria.clone(),
-            spans,
-            contigs: contigs.into_iter(),
-            buffered: Vec::new().into_iter(),
+        rows_overlapping(&self.path, contig, &windows).map_err(|source| {
+            RepeatCatalogError::Unreadable {
+                path: self.path.clone(),
+                source,
+            }
         })
     }
 
@@ -235,15 +223,15 @@ impl RepeatCatalog {
         })
     }
 
-    /// The contigs a read covers — all of them, or the one asked for — with the names and
-    /// lengths the header carries.
-    fn contig_walk(&self, contig: Option<ContigId>) -> Vec<(ContigId, String, Bp)> {
+    /// The contigs a scope reaches, with the names and lengths the header carries. A contig
+    /// no region names is never opened.
+    fn contig_walk(&self, scope: ReadScope<'_>) -> Vec<(ContigId, String, Bp)> {
         self.header
             .contigs
             .iter()
             .enumerate()
             .map(|(i, info)| (ContigId(i as u32), info.name.clone(), Bp(info.length)))
-            .filter(|(id, _, _)| contig.is_none_or(|wanted| *id == wanted))
+            .filter(|(id, _, _)| scope.touches(*id))
             .collect()
     }
 
@@ -255,13 +243,14 @@ impl RepeatCatalog {
     pub fn str_loci(
         &self,
         criteria: &StrRepeatCriteria,
-        contig: Option<ContigId>,
+        scope: ReadScope<'_>,
     ) -> Result<StrLoci<'_>, RepeatCatalogError> {
         self.check_serves(criteria)?;
         Ok(StrLoci {
             catalog: self,
             criteria: criteria.clone(),
-            contigs: self.contig_walk(contig).into_iter(),
+            scope: scope.owned(),
+            contigs: self.contig_walk(scope).into_iter(),
             buffered: Vec::new().into_iter(),
         })
     }
@@ -275,9 +264,9 @@ impl RepeatCatalog {
     pub fn count_loci_per_stratum(
         &self,
         criteria: &StrRepeatCriteria,
-        contig: Option<ContigId>,
+        scope: ReadScope<'_>,
     ) -> Result<StratumCounts, RepeatCatalogError> {
-        let (counts, _) = self.sample_loci_per_stratum(criteria, contig, 0, 0)?;
+        let (counts, _) = self.sample_loci_per_stratum(criteria, scope, 0, 0)?;
         Ok(counts)
     }
 
@@ -293,12 +282,12 @@ impl RepeatCatalog {
     pub fn sample_loci_per_stratum(
         &self,
         criteria: &StrRepeatCriteria,
-        contig: Option<ContigId>,
+        scope: ReadScope<'_>,
         cap: usize,
         seed: u64,
     ) -> Result<(StratumCounts, StratumSample), RepeatCatalogError> {
         let mut sampler = StratumSampler::new(cap, seed);
-        for locus in self.str_loci(criteria, contig)? {
+        for locus in self.str_loci(criteria, scope)? {
             let locus = locus?;
             let period = locus.motif().period() as u8;
             let repeat_count = (locus.end() - locus.start() + 1) / u64::from(period);
@@ -333,16 +322,6 @@ impl RepeatCatalog {
         }
         Ok(())
     }
-
-    fn unreadable(
-        &self,
-        source: impl std::error::Error + Send + Sync + 'static,
-    ) -> RepeatCatalogError {
-        RepeatCatalogError::Unreadable {
-            path: self.path.clone(),
-            source: Box::new(source),
-        }
-    }
 }
 
 /// The genome's segments, one contig at a time.
@@ -352,6 +331,7 @@ impl RepeatCatalog {
 pub struct GenomeSegments<'a> {
     catalog: &'a RepeatCatalog,
     criteria: StrRepeatCriteria,
+    scope: OwnedScope,
     contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
     buffered: std::vec::IntoIter<TypedRegion>,
 }
@@ -369,12 +349,17 @@ impl Iterator for GenomeSegments<'_> {
             // reads a tract's neighbours, the satellite cap reads their merged coverage, and
             // the generic stretches are the gaps between the results. A row at a time would
             // answer none of them — and a contig is the unit the file is grouped by anyway.
-            let rows = match rows_of_contig(self.catalog, contig) {
+            let rows = match self.catalog.rows_for(contig, &self.scope, &self.criteria) {
                 Ok(rows) => rows,
                 Err(e) => return Some(Err(e)),
             };
-            self.buffered =
-                segments_of_contig(&name, contig, length, &rows, &self.criteria).into_iter();
+            self.buffered = match self.scope.spans_on(contig) {
+                None => segments_of_contig(&name, contig, length, &rows, &self.criteria),
+                Some(spans) => {
+                    segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
+                }
+            }
+            .into_iter();
         }
     }
 }
@@ -423,6 +408,7 @@ impl Iterator for RegionSegments<'_> {
 pub struct StrLoci<'a> {
     catalog: &'a RepeatCatalog,
     criteria: StrRepeatCriteria,
+    scope: OwnedScope,
     contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
     buffered: std::vec::IntoIter<SsrSegment>,
 }
@@ -436,12 +422,17 @@ impl Iterator for StrLoci<'_> {
                 return Some(Ok(locus));
             }
             let (contig, name, length) = self.contigs.next()?;
-            let rows = match rows_of_contig(self.catalog, contig) {
+            let rows = match self.catalog.rows_for(contig, &self.scope, &self.criteria) {
                 Ok(rows) => rows,
                 Err(e) => return Some(Err(e)),
             };
-            self.buffered =
-                loci_of_contig(&name, contig, length, &rows, &self.criteria).into_iter();
+            self.buffered = match self.scope.spans_on(contig) {
+                None => loci_of_contig(&name, contig, length, &rows, &self.criteria),
+                Some(spans) => {
+                    loci_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
+                }
+            }
+            .into_iter();
         }
     }
 }
@@ -451,22 +442,13 @@ fn rows_of_contig(
     catalog: &RepeatCatalog,
     contig: ContigId,
 ) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
-    catalog.repeats_in_region(Some(contig))?.collect()
-}
-
-/// Which contig a row group holds, from its first row's `contig` column.
-fn row_group_contig(
-    builder: &ParquetRecordBatchReaderBuilder<File>,
-    group: usize,
-) -> Option<ContigId> {
-    use parquet::file::statistics::Statistics;
-
-    let column = builder.metadata().row_group(group).column(0);
-    match column.statistics()? {
-        Statistics::Int32(s) => s.min_opt().map(|v| ContigId(*v as u32)),
-        Statistics::Int64(s) => s.min_opt().map(|v| ContigId(*v as u32)),
-        _ => None,
-    }
+    // One window covering the contig: the same windowed read, with nothing to skip.
+    rows_overlapping(&catalog.path, contig, &[(0, u64::MAX)]).map_err(|source| {
+        RepeatCatalogError::Unreadable {
+            path: catalog.path.clone(),
+            source,
+        }
+    })
 }
 
 /// Read and decode the footer's header block.
@@ -642,11 +624,7 @@ mod tests {
         assert_eq!(catalog.contigs().len(), 2);
         assert_eq!(catalog.header().tool_version, "test-0.1");
 
-        let rows: Vec<FoundRepeat> = catalog
-            .repeats_in_region(None)
-            .expect("rows")
-            .map(|r| r.expect("a row"))
-            .collect();
+        let rows: Vec<FoundRepeat> = catalog.repeats(ReadScope::WholeReference).expect("rows");
         assert_eq!(rows, vec![row(0, 100, 3), row(0, 400, 3), row(1, 50, 3)]);
     }
 
@@ -661,10 +639,12 @@ mod tests {
         let catalog =
             RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
         let rows: Vec<FoundRepeat> = catalog
-            .repeats_in_region(Some(ContigId(1)))
-            .expect("rows")
-            .map(|r| r.expect("a row"))
-            .collect();
+            .repeats(ReadScope::Regions(&[GenomeRegion {
+                contig: ContigId(1),
+                start: crate::ng::types::Position(1),
+                end: crate::ng::types::Position(u64::MAX),
+            }]))
+            .expect("rows");
         assert_eq!(rows, vec![row(1, 50, 3)]);
     }
 

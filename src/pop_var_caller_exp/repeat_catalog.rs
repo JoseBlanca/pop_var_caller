@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn the_command_writes_a_catalog_that_opens_against_its_reference() {
         use crate::ng::reference_info::{ReferenceSource, read_reference_info};
-        use crate::ng::repeat_catalog::RepeatCatalog;
+        use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog};
         use std::io::Write;
 
         let dir = tempfile::tempdir().expect("tmp");
@@ -374,11 +374,11 @@ mod tests {
             "the header records what wrote it"
         );
         assert!(
-            catalog.repeats_in_region(None).expect("rows").any(|row| row
-                .expect("a row")
-                .motif
-                .as_bytes()
-                == b"CAG"),
+            catalog
+                .repeats(ReadScope::WholeReference)
+                .expect("rows")
+                .iter()
+                .any(|row| row.motif.as_bytes() == b"CAG"),
             "the planted tract is in the file"
         );
 

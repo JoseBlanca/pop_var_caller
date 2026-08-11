@@ -322,7 +322,8 @@ impl ReferenceBasesObserver for RepeatCatalogBuilder {
 mod tests {
     use super::*;
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalog;
+    use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog};
+    use crate::ng::types::GenomeRegion;
     use crate::ng::types::Position;
     use std::io::Write;
 
@@ -380,11 +381,7 @@ mod tests {
     fn rows_of(path: &Path, reference: &ReferenceInfo) -> Vec<FoundRepeat> {
         let catalog =
             RepeatCatalog::open_checking_against_reference(path, reference).expect("opens");
-        catalog
-            .repeats_in_region(None)
-            .expect("rows")
-            .map(|r| r.expect("a row"))
-            .collect()
+        catalog.repeats(ReadScope::WholeReference).expect("rows")
     }
 
     /// The end-to-end shape: a reference with one planted tract yields one row, in the
@@ -483,10 +480,12 @@ mod tests {
         let catalog =
             RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
         let only_chr2: Vec<FoundRepeat> = catalog
-            .repeats_in_region(Some(ContigId(1)))
-            .expect("rows")
-            .map(|r| r.expect("a row"))
-            .collect();
+            .repeats(ReadScope::Regions(&[GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(u64::MAX),
+            }]))
+            .expect("rows");
         assert!(!only_chr2.is_empty());
         assert!(only_chr2.iter().all(|r| r.contig == ContigId(1)));
     }
