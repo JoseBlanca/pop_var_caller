@@ -835,13 +835,14 @@ pub struct WindowPlan {
 ///
 /// # Why this is a separate type from [`scan_windowed`]
 ///
-/// Because its two consumers cannot share an iterator. `scan_windowed` yields windows it
-/// fetched through a *borrowed* byte source; [`crate::ng::region_typing::TypedRegionIterator`]
-/// **owns** its reference (it moves onto a producer thread, `typed_regions.md` §7) and so
-/// cannot hold an iterator borrowing it — that is a self-referential struct, which safe
-/// Rust does not have. A cursor it can step by hand is the shape that fits both, and
-/// `typed_regions.md` §6.1 is explicit that the thing not to do is duplicate this
-/// arithmetic ("a subtle invariant that can then drift").
+/// Because a consumer that **owns** its reference cannot share an iterator with one that
+/// borrows it: `scan_windowed` yields windows it fetched through a borrowed byte source,
+/// and a consumer holding an iterator that borrows a reference it also owns is a
+/// self-referential struct, which safe Rust does not have. A cursor such a consumer can
+/// step by hand is the shape that fits both, and `typed_regions.md` §6.1 is explicit that
+/// the thing not to do is duplicate this arithmetic ("a subtle invariant that can then
+/// drift"). Since the typed-region walk was removed, the only consumer left is
+/// [`scan_windowed`] itself — the cursor stays as the one copy of the geometry.
 ///
 /// # Cores tile `cores`; margins reach outside it
 ///

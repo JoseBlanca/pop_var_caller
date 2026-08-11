@@ -2179,7 +2179,7 @@ mod tests {
             GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
         );
         let typed = vec![
-            Ok::<_, crate::ng::region_typing::TypedRegionError>(TypedRegion {
+            Ok::<_, crate::ng::repeat_catalog::RepeatCatalogError>(TypedRegion {
                 region: region(0, 1, 50),
                 kind: RegionKind::Generic,
             }),
@@ -2242,7 +2242,7 @@ mod tests {
             )),
             GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
         );
-        let typed = vec![Ok::<_, crate::ng::region_typing::TypedRegionError>(
+        let typed = vec![Ok::<_, crate::ng::repeat_catalog::RepeatCatalogError>(
             TypedRegion {
                 region: region(0, 1, 100),
                 kind: RegionKind::Generic,

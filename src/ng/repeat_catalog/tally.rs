@@ -1,14 +1,14 @@
 //! What a segmentation derived from the catalog contained, and what admission turned down
 //! getting there.
 //!
-//! **This is the catalog's answer to the walk's own running tally**
+//! **This is the catalog's answer to a scan's own running tally**
 //! ([`crate::ng::region_typing::TypedRegionCounts`]): a consumer that stops scanning the
 //! reference and reads the file instead must not lose its report. Every counter there has a
 //! counterpart here and holds the same number, with **one deliberate omission**.
 //!
 //! ## The one question the file cannot answer
 //!
-//! The walk counts repeats it turned down for **touching a contig's very first or last
+//! A scan counts repeats it turns down for **touching a contig's very first or last
 //! base** — a tract with no sequence on one side has nothing for a read to anchor against,
 //! so it is not an STR (`RejectionReason::FlankClamped`).
 //!
@@ -21,7 +21,7 @@
 //!
 //! Two consequences a reader of these numbers has to know, and neither is large:
 //!
-//! - a repeat 1 to 14 bases from a contig's end is a **locus** to the walk and is absent
+//! - a repeat 1 to 14 bases from a contig's end is a **locus** to a scan and is absent
 //!   from the file altogether, so [`ssr_loci`](CatalogRegionCounts::ssr_loci) and
 //!   [`generic`](CatalogRegionCounts::generic) can differ there too. Measured over whole
 //!   genomes: 7 such tracts in tomato SL4.00 and 857 in GRCh38;
@@ -35,14 +35,14 @@ use crate::ng::region_typing::segment_criteria::RejectionReason;
 /// complete once the iterator is exhausted
 /// ([`GenomeSegments::counts`](crate::ng::repeat_catalog::GenomeSegments::counts)).
 ///
-/// Field for field the walk's [`TypedRegionCounts`](crate::ng::region_typing::TypedRegionCounts),
+/// Field for field a scan's [`TypedRegionCounts`](crate::ng::region_typing::TypedRegionCounts),
 /// minus the contig-end rejection the module doc explains.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CatalogRegionCounts {
     /// Regions the reader asked for. One per contig when the whole reference was asked for,
     /// a zero-length contig contributing none — which is what
     /// [`GenomeRegions::whole_contigs`](crate::ng::region_typing::GenomeRegions::whole_contigs)
-    /// hands the walk.
+    /// produces.
     pub spans: u64,
     /// STR loci emitted.
     pub ssr_loci: u64,
@@ -60,7 +60,7 @@ pub struct CatalogRegionCounts {
     /// coverage that did not come out as an STR locus — because it was bundled, capped as a
     /// satellite, or turned down by one of admission's gates.
     ///
-    /// In bases rather than per repeat, for the reason the walk gives: admission trims every
+    /// In bases rather than per repeat, for the reason a scan gives: admission trims every
     /// survivor, so a repeat that yields one locus and sheds 200 bases would contribute
     /// nothing to a per-repeat counter.
     ///
@@ -70,7 +70,7 @@ pub struct CatalogRegionCounts {
     pub repeat_bp_with_no_locus: u64,
     /// [`Self::repeat_bp_with_no_locus`] broken out by the gate that turned the repeat down.
     ///
-    /// **It does not partition the total**, for the same two reasons the walk's does not:
+    /// **It does not partition the total**, for the same two reasons a scan's does not:
     /// overlapping rejected repeats are both charged, and bases with no locus for a reason
     /// that is not a rejection (bundled, capped as a satellite, out of the period range) are
     /// in the total and under no reason here. A diagnosis of admission's gates, not an
@@ -90,11 +90,11 @@ impl CatalogRegionCounts {
     }
 }
 
-/// Repeat bases admission turned down, by reason — **four of the walk's five**, and the
+/// Repeat bases admission turned down, by reason — **four of a scan's five**, and the
 /// module doc says which is missing and why.
 ///
-/// The bases charged are the repeat's **detected** length, before any trim, exactly as the
-/// walk charges them.
+/// The bases charged are the repeat's **detected** length, before any trim, exactly as a
+/// scan charges them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CatalogRejectionCounts {
     /// Fewer whole motif copies in the cut tract than the reader's floor for that period.

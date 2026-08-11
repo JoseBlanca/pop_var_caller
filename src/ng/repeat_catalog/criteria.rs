@@ -199,14 +199,14 @@ pub enum CriteriaRefusal {
 
 /// What a caller holding step 3's own policy is asking the catalog for.
 ///
-/// **The bridge every consumer crosses when it stops scanning.** A walk states its policy as
+/// **The bridge every consumer crosses when it stops scanning.** A scan states its policy as
 /// a `TypedRegionConfig`; a reader states it as a [`StrRepeatCriteria`]. The two carry the
-/// same admission rules — the conversion moves them across and supplies the one field a walk
+/// same admission rules — the conversion moves them across and supplies the one field a scan
 /// has no concept of.
 ///
-/// **That field is the flank floor, and it is the catalog's own 15 bp.** A walk applies no
+/// **That field is the flank floor, and it is the catalog's own 15 bp.** A scan applies no
 /// flank floor at all: it keeps any tract with a non-zero flank, which is *less* permissive
-/// than nothing but *more* permissive than the file, so asking with a walk's own rule would
+/// than nothing but *more* permissive than the file, so asking with a scan's own rule would
 /// be refused. Fifteen is what the file was built at and what ng's STR locus generator
 /// fetches by default, so a caller at the default is served exactly. The consequence is the
 /// one stated difference between the two paths: a tract 1 to 14 bases from a contig's end is

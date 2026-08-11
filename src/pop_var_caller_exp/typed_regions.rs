@@ -29,8 +29,7 @@ use crate::ng::region_typing::segment_criteria::{
     DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies, SsrSegmentCriteria,
 };
 use crate::ng::region_typing::{
-    DEFAULT_MAX_STR_LEN, DEFAULT_WINDOW_BP, GenomeRegions, RegionKind, TypedRegion,
-    TypedRegionConfig, TypedRegionError,
+    DEFAULT_MAX_STR_LEN, GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig,
 };
 use crate::ng::repeat_catalog::{
     CatalogRegionCounts, CatalogRejectionCounts, ReadScope, RepeatCatalog, RepeatCatalogError,
@@ -116,10 +115,6 @@ pub struct TypedRegionsArgs {
     /// it, spec T3).
     #[arg(long, default_value_t = DEFAULT_MAX_STR_LEN, help_heading = "Advanced")]
     pub max_str_len: u64,
-
-    /// Window core (bp) — a memory knob only; it must not change the output.
-    #[arg(long, default_value_t = DEFAULT_WINDOW_BP, help_heading = "Advanced")]
-    pub window_bp: u64,
 
     /// Flank (bp) a locus needs each side, and the bundle radius (spec §2.4).
     ///
@@ -210,10 +205,18 @@ pub enum TypedRegionsCliError {
     #[error("--min-period and --max-period do not form a range")]
     PeriodRange(#[from] PeriodRangeError),
 
-    /// The walk's fallible setup or streaming failed — including the
-    /// `--max-str-len`/`--flank-bp` guard, which the walk carries (spec T3).
-    #[error("the typed-region walk failed")]
-    Walk(#[from] TypedRegionError),
+    /// `--max-str-len` is smaller than `--flank-bp`, so the satellite cap sits below the
+    /// bundle radius (spec T3).
+    ///
+    /// A cross-flag rule, like [`PeriodRange`](Self::PeriodRange), so clap cannot express
+    /// it. Both numbers are named because this is what a typo looks like, and a typo must
+    /// not panic.
+    #[error(
+        "--max-str-len ({max_str_len}) is the length at which a tandem array stops being a \
+         microsatellite, and must not be smaller than --flank-bp ({flank_bp}), the distance \
+         within which two repeats are bundled together rather than called separately"
+    )]
+    SatelliteCapBelowBundleRadius { max_str_len: u64, flank_bp: u64 },
 
     /// The catalog beside the reference is missing, does not describe it, or cannot answer
     /// the policy asked for.
@@ -273,16 +276,12 @@ fn format_min_copies(min_copies: &MinCopies) -> String {
 /// The device stops at the leaves: a new field on `MinCopies` or `PeriodRange`
 /// would not trip it.
 ///
-/// **No `date` and no `reference_md5`** (spec §3.4, §6). The walk is a pure
+/// **No `date` and no `reference_md5`** (spec §3.4, §6). The output is a pure
 /// function of reference + regions + config, so the same three inputs must give a
 /// byte-identical file: a timestamp would break that outright, and the digest is
-/// only known when the background FASTA verification joins — *after* the walk,
-/// whereas this header is written before it, so recording it would force the walk
-/// to block on the very pass that runs beside it (spec T1).
-///
-/// `window_bp` is recorded but is **not a comparison key**: it is a memory knob
-/// that must not change the output, so two files differing only in `window_bp`
-/// should be identical below the header.
+/// only known when the background FASTA verification joins — *after* the regions are
+/// read, whereas this header is written before them, so recording it would force the
+/// run to block on the very pass that runs beside it (spec T1).
 pub fn write_header<W: io::Write>(
     out: &mut W,
     reference: &Path,
@@ -292,7 +291,6 @@ pub fn write_header<W: io::Write>(
     let TypedRegionConfig {
         scan,
         max_str_len,
-        window_bp,
         criteria,
     } = config;
     let SsrSegmentCriteria {
@@ -316,7 +314,6 @@ pub fn write_header<W: io::Write>(
     writeln!(out, "## min_period: {}", periods.min())?;
     writeln!(out, "## max_period: {}", periods.max())?;
     writeln!(out, "## max_str_len: {}", max_str_len.get())?;
-    writeln!(out, "## window_bp: {}", window_bp.get())?;
     writeln!(out, "## flank_bp: {flank_bp}")?;
     writeln!(out, "## min_purity: {min_purity}")?;
     writeln!(out, "## min_score: {min_score}")?;
@@ -585,11 +582,10 @@ fn walk_config(args: &TypedRegionsArgs) -> Result<TypedRegionConfig, TypedRegion
     // satellite cap below the bundle radius is a typo rather than a policy. Refused with both
     // numbers named, as before.
     if args.max_str_len < args.flank_bp {
-        return Err(TypedRegionError::MarginNarrowerThanFlank {
+        return Err(TypedRegionsCliError::SatelliteCapBelowBundleRadius {
             max_str_len: args.max_str_len,
-            bundle_threshold: args.flank_bp,
-        }
-        .into());
+            flank_bp: args.flank_bp,
+        });
     }
     Ok(TypedRegionConfig {
         scan: ScanParams {
@@ -598,7 +594,6 @@ fn walk_config(args: &TypedRegionsArgs) -> Result<TypedRegionConfig, TypedRegion
             min_copies: args.scan_min_copies,
         },
         max_str_len: Bp(args.max_str_len),
-        window_bp: Bp(args.window_bp),
         criteria: SsrSegmentCriteria {
             periods: PeriodRange::new(args.min_period, args.max_period)?,
             min_purity: args.min_purity,
@@ -767,7 +762,6 @@ mod tests {
         assert_eq!(args.min_period, 1, "period-1 homopolymers classified");
         assert_eq!(args.max_period, 6);
         assert_eq!(args.max_str_len, 100, "short-read satellite cap");
-        assert_eq!(args.window_bp, 100_000);
         assert_eq!(args.flank_bp, 15, "short-read flank");
         assert_eq!(args.min_purity, 0.8);
         assert_eq!(args.min_score, 0);
@@ -807,8 +801,7 @@ mod tests {
 
     /// **Every knob appears, resolved** — a file at defaults must record the same
     /// keys as one that set them explicitly, or two files cannot be compared
-    /// (spec §3.4). `window_bp` is among them: recorded for reproducibility even
-    /// though it is a memory knob, not a comparison key.
+    /// (spec §3.4).
     #[test]
     fn the_header_carries_every_resolved_knob() {
         let header = header_of(&TypedRegionConfig::default());
@@ -819,7 +812,6 @@ mod tests {
             "min_period",
             "max_period",
             "max_str_len",
-            "window_bp",
             "flank_bp",
             "min_purity",
             "min_score",
@@ -849,7 +841,6 @@ mod tests {
             "## min_period: 1",
             "## max_period: 6",
             "## max_str_len: 100",
-            "## window_bp: 100000",
             "## flank_bp: 15",
             "## min_purity: 0.8",
             "## min_score: 0",
@@ -1918,7 +1909,7 @@ mod tests {
     /// **T3 — the flag pair is a CLI error, not a panic.** `--max-str-len` below
     /// `--flank-bp` is refused before any work, naming both numbers.
     #[test]
-    fn a_margin_narrower_than_the_flank_is_an_error_not_a_panic() {
+    fn a_satellite_cap_below_the_bundle_radius_is_an_error_not_a_panic() {
         let (dir, fasta) = e2e_reference();
         let output = dir.path().join("out.tsv");
         let mut args = args_for_output(&fasta, None, &output);
@@ -1926,18 +1917,18 @@ mod tests {
         args.flank_bp = 30;
 
         match run_typed_regions(&args) {
-            Err(TypedRegionsCliError::Walk(TypedRegionError::MarginNarrowerThanFlank {
+            Err(TypedRegionsCliError::SatelliteCapBelowBundleRadius {
                 max_str_len,
-                bundle_threshold: flank_bp,
-            })) => {
+                flank_bp,
+            }) => {
                 assert_eq!((max_str_len, flank_bp), (10, 30), "it names both numbers");
             }
-            Err(other) => panic!("expected the walk's flank-pair error, got {other:?}"),
-            Ok(()) => panic!("a margin narrower than the flank must be refused"),
+            Err(other) => panic!("expected the flag-pair error, got {other:?}"),
+            Ok(()) => panic!("a satellite cap below the bundle radius must be refused"),
         }
         assert!(
             !output.exists(),
-            "nothing is published when the walk refuses to start"
+            "nothing is published when the flags are refused"
         );
     }
 

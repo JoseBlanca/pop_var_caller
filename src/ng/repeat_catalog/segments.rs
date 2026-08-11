@@ -49,8 +49,8 @@ pub fn segments_of_contig(
 
 /// The segments of one contig that overlap `wanted`, clipped to it.
 ///
-/// **The whole contig is typed first, and only then clipped** — which is what step 3's walk
-/// does (`region_typing/mod.rs`, `SpanWalk::requested`), and it has to be: a tract outside
+/// **The whole contig is typed first, and only then clipped** — which is what a scan of the
+/// bases does (`region_typing::partition_resident_in`), and it has to be: a tract outside
 /// the requested span still bundles with one inside it, and a satellite outside still
 /// swallows a locus inside. Classifying only the requested stretch would answer a different
 /// question and quietly answer it differently.
@@ -60,13 +60,13 @@ pub fn segments_of_contig(
 /// half a locus is not a locus, a clipped bundle's members describe bases outside their own
 /// region, and a satellite clipped to 100 bases contradicts the very cap that made it one.
 /// A generic stretch is the only kind that is not a finding — *nothing more specific can be
-/// said here* stays true of any part of it. That is the walk's rule, stated in
+/// said here* stays true of any part of it. That is a scan's rule too, stated in
 /// `region_typing/mod.rs`'s `clips_at_a_bed_edge`, and this is where the two must agree.
 ///
 /// **The tally describes `wanted`, not the contig.** The whole contig has to be *typed* —
 /// classification is not local — but reporting the contig's repeat coverage to a caller who
 /// asked for a hundred kilobases answers a question they did not ask (owner, 2026-08-11).
-/// The walk counts the same way, over the same spans.
+/// A scan counts the same way, over the same spans.
 pub fn segments_of_contig_in(
     chrom: &str,
     contig: ContigId,
@@ -214,20 +214,17 @@ fn repeat_features_of_contig(
                 .sum(),
         })
         .sum();
-    // **Every field named, no `..default()` tail.** The walk's own construction carries the
-    // same rule for the same reason: a field added to `TypedRegionConfig` later must break
-    // this line rather than silently take the calling walk's value, and the differential
-    // cannot catch that because it would default on both sides at once. `scan` and
-    // `window_bp` are the two the catalog genuinely has no use for — there is no scan here
-    // and there are no windows — and each says so.
+    // **Every field named, no `..default()` tail.** The resident oracle's own construction
+    // carries the same rule for the same reason: a field added to `TypedRegionConfig` later
+    // must break this line rather than silently take the oracle's value, and the differential
+    // cannot catch that because it would default on both sides at once. `scan` is the one
+    // field the catalog genuinely has no use for, and it says so.
     let config = TypedRegionConfig {
         criteria: class.clone(),
         max_str_len: criteria.max_str_len_bp,
         // Nothing is scanned: the tracts came from the file. `resolve_features` reads the
         // weights not at all, so this value cannot reach an answer.
         scan: ScanParams::default(),
-        // A whole contig is resolved at once, so there is no window to size.
-        window_bp: Bp(crate::ng::region_typing::DEFAULT_WINDOW_BP),
     };
     (
         resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config),
@@ -318,7 +315,7 @@ fn admit(
     for row in isolated_rows {
         match finish_from_row(chrom, row, contig_len, class) {
             Ok(locus) => loci.push(locus),
-            // The bases charged are the **detected** length, before any trim — what the walk
+            // The bases charged are the **detected** length, before any trim — what a scan
             // charges (`RejectionCounts`), and what makes the two tallies comparable.
             Err(reason) => {
                 if charged(row) {
@@ -382,7 +379,7 @@ fn pair_with_rows_by_ref<'a>(
 /// must clear the copy floor, the purity must clear its floor, and the flank must not clamp
 /// to nothing at either contig end.
 ///
-/// **The refusal carries its reason**, and it is the walk's own
+/// **The refusal carries its reason**, and it is classification's own
 /// [`RejectionReason`] rather than a second vocabulary — the two tallies are compared
 /// against each other, so one name per gate is what makes that comparison mean anything.
 fn finish_from_row(

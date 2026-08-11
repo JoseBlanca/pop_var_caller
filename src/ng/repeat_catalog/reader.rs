@@ -344,7 +344,7 @@ pub struct GenomeSegments<'a> {
 impl GenomeSegments<'_> {
     /// The running tally — readable mid-read, complete once the iterator is exhausted.
     ///
-    /// **This is what a consumer that stops walking the reference keeps.** It is the walk's
+    /// **This is what a consumer that stops scanning the reference keeps.** It is a scan's
     /// own tally ([`TypedRegionCounts`](crate::ng::region_typing::TypedRegionCounts)) counter
     /// for counter, with one omission the type documents: the file cannot count repeats
     /// touching a contig's first or last base, because it does not hold them
@@ -415,8 +415,8 @@ impl Iterator for GenomeSegments<'_> {
             let (regions, tally) = match self.scope.spans_on(contig) {
                 None => {
                     // The whole reference is one span per non-empty contig — what
-                    // `GenomeRegions::whole_contigs` hands the walk, so the two `spans`
-                    // counts are the same number.
+                    // `GenomeRegions::whole_contigs` produces, so the two `spans` counts
+                    // are the same number.
                     if length.get() > 0 {
                         self.counts.spans += 1;
                     }
@@ -788,8 +788,8 @@ mod tests {
     }
 
     /// **The whole reference is one span per non-empty contig**, which is what
-    /// `GenomeRegions::whole_contigs` hands the walk — so a consumer that swaps the walk for
-    /// the file reads the same number back. A zero-length contig has no 1-based position to
+    /// `GenomeRegions::whole_contigs` produces — so a consumer that swaps a scan for the
+    /// file reads the same number back. A zero-length contig has no 1-based position to
     /// cover and contributes none, by the same rule.
     #[test]
     fn the_whole_reference_is_one_span_per_non_empty_contig() {

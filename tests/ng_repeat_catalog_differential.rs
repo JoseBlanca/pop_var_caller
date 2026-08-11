@@ -1,5 +1,5 @@
 //! The catalog's north-star test: **the segmentation derived from the file equals the one a
-//! live scan produces**, region for region, at several policies.
+//! live scan of the bases produces**, region for region, at several policies.
 //!
 //! This is what the whole design rests on (spec §5.1, §10.1). Every other test says a part
 //! behaves; this one says the parts compose into the same answer `partition_resident` gives
@@ -17,9 +17,11 @@ use std::path::{Path, PathBuf};
 use pop_var_caller::ng::reference_info::{
     ReferenceInfo, ReferenceSource, read_reference_info_observing,
 };
-use pop_var_caller::ng::region_typing::segment_criteria::{MinCopies, SsrSegmentCriteria};
+use pop_var_caller::ng::region_typing::segment_criteria::{
+    MinCopies, RejectionCounts, SsrSegmentCriteria,
+};
 use pop_var_caller::ng::region_typing::{
-    RegionKind, TypedRegion, TypedRegionConfig, partition_resident,
+    RegionKind, TypedRegion, TypedRegionConfig, partition_resident, partition_resident_in,
 };
 use pop_var_caller::ng::repeat_catalog::criteria::{
     CATALOG_MIN_COPIES, CATALOG_MIN_COPIES_BEYOND_TABLE,
@@ -498,11 +500,7 @@ fn the_sample_is_capped_stable_and_counted_in_full() {
 /// same spans must be the same regions — including the rule that a locus overlapping an edge
 /// comes out whole while a generic stretch is clipped.
 #[test]
-fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
-    use pop_var_caller::ng::WindowedRefSeq;
-    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
-    use pop_var_caller::regions::ContigBounds;
-
+fn a_region_subset_from_the_file_equals_the_scan_over_the_same_spans() {
     let dir = tempfile::tempdir().expect("tmp");
     let contigs = fixture();
     let fasta = write_fasta(dir.path(), &contigs);
@@ -524,65 +522,48 @@ fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
     builder.finish(&reference).expect("finish");
 
     let criteria = StrRepeatCriteria::default();
-    let bounds: Vec<ContigBounds> = reference
-        .contigs
-        .iter()
-        .map(|c| ContigBounds {
-            name: &c.name,
-            length: c.length as u32,
-        })
-        .collect();
 
     // Two spans on one contig, chosen to cut through the middle of the sequence rather than
-    // to land tidily between features. A BED on disk because that is the only way to build a
-    // region set — `GenomeRegions` has no in-memory constructor.
+    // to land tidily between features.
     let clean_len = contigs[0].1.len() as u64;
-    let bed = dir.path().join("wanted.bed");
-    std::fs::write(
-        &bed,
-        format!(
-            "{name}\t149\t450\n{name}\t599\t{end}\n",
-            name = contigs[0].0,
-            end = clean_len - 50
-        ),
-    )
-    .expect("write bed");
-    let spans = GenomeRegions::from_bed_path(&bed, &bounds).expect("valid spans");
+    let wanted = vec![
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(150),
+            end: Position(450),
+        },
+        GenomeRegion {
+            contig: ContigId(0),
+            start: Position(600),
+            end: Position(clean_len - 50),
+        },
+    ];
 
-    let walk_config = TypedRegionConfig {
-        criteria: criteria.classification.clone(),
-        max_str_len: criteria.max_str_len_bp,
-        ..TypedRegionConfig::default()
-    };
-    // The walk seeks by index, so it needs a `.fai`; the catalog path needs none.
-    pop_var_caller::ng::reference_info::write_fai(
-        &reference.contigs,
-        &pop_var_caller::ng::reference_info::sibling_fai_path(&fasta),
-    )
-    .expect("write fai");
-    let walked: Vec<TypedRegion> = TypedRegionIterator::over_regions(
-        WindowedRefSeq::new(fasta.clone(), reference.contig_list()),
-        spans.clone(),
-        walk_config,
-    )
-    .expect("the walk starts")
-    .map(|r| r.expect("a region"))
-    .collect();
+    let (scanned_regions, _) = partition_resident_in(
+        contigs[0].0,
+        ContigId(0),
+        contigs[0].1.as_bytes(),
+        &scan_config(&criteria),
+        &wanted,
+    );
 
     let catalog =
         RepeatCatalog::open_checking_against_reference(&catalog_path, &reference).expect("opens");
-    let wanted: Vec<GenomeRegion> = spans.iter().collect();
     let from_file: Vec<TypedRegion> = catalog
         .genome_segments(&criteria, ReadScope::Regions(&wanted))
         .expect("servable")
         .map(|r| r.expect("a region"))
         .collect();
 
-    assert!(!walked.is_empty(), "the spans must contain something");
-    assert_eq!(
-        from_file, walked,
-        "the catalog's region subset and the walk's disagree\nfile: {from_file:#?}\nwalk: {walked:#?}"
+    assert!(
+        !scanned_regions.is_empty(),
+        "the spans must contain something"
     );
+    assert_eq!(
+        from_file, scanned_regions,
+        "the catalog's region subset and a scan's disagree\nfile: {from_file:#?}\nscan: {scanned_regions:#?}"
+    );
+    let _ = fasta;
 }
 
 /// **Classification is not local, and this is what proves the file's answer accounts for it.**
@@ -705,16 +686,17 @@ fn tally_fixture() -> Vec<(&'static str, String)> {
 }
 
 /// Everything a consumer needs to run both sides of the tally comparison over one contig
-/// subset: the FASTA (which the walk reads), the catalog, and the reference the pass
-/// computed.
+/// subset: the catalog, and the reference the pass computed. The scan side takes the
+/// contigs' bases directly, so no path to the FASTA is needed once it is written.
 struct BothSides {
-    fasta: PathBuf,
     catalog_path: PathBuf,
     reference: ReferenceInfo,
 }
 
 fn both_sides(dir: &Path, contigs: &[(&str, String)]) -> BothSides {
     let fasta = write_fasta(dir, contigs);
+    // Written and then only named: the catalog builder reads it through the reference pass
+    // below, and the scan side is handed the contigs' bases directly.
     let catalog_path = dir.join("ref.fa.repeats.parquet");
     let mut builder = RepeatCatalogBuilder::create(
         &catalog_path,
@@ -731,14 +713,7 @@ fn both_sides(dir: &Path, contigs: &[(&str, String)]) -> BothSides {
     )
     .expect("the reference pass runs");
     builder.finish(&reference).expect("finish");
-    // The walk seeks by index, so it needs a `.fai`; the catalog path opens no reference.
-    pop_var_caller::ng::reference_info::write_fai(
-        &reference.contigs,
-        &pop_var_caller::ng::reference_info::sibling_fai_path(&fasta),
-    )
-    .expect("write fai");
     BothSides {
-        fasta,
         catalog_path,
         reference,
     }
@@ -759,9 +734,25 @@ fn whole_contigs_named(reference: &ReferenceInfo, names: &[&str]) -> Vec<GenomeR
         .collect()
 }
 
-/// What the walk tallies over `spans`, and what the catalog tallies over the same spans.
+/// The policy both sides run, as the scan takes it.
+fn scan_config(criteria: &StrRepeatCriteria) -> TypedRegionConfig {
+    TypedRegionConfig {
+        criteria: criteria.classification.clone(),
+        max_str_len: criteria.max_str_len_bp,
+        ..TypedRegionConfig::default()
+    }
+}
+
+/// What a scan of the bases tallies over `spans`, and what the catalog tallies over the
+/// same spans.
+///
+/// The scan answers one contig at a time — `partition_resident_in` is handed a contig's
+/// bases — so a request touching several contigs is run once per contig and the counters
+/// added. The catalog reader does the same internally, which is what makes the totals
+/// comparable.
 fn both_tallies(
     sides: &BothSides,
+    contigs: &[(&str, String)],
     spans: &[GenomeRegion],
     criteria: &StrRepeatCriteria,
 ) -> (
@@ -769,48 +760,18 @@ fn both_tallies(
     pop_var_caller::ng::repeat_catalog::CatalogRegionCounts,
     Vec<TypedRegion>,
 ) {
-    use pop_var_caller::ng::WindowedRefSeq;
-    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
-    use pop_var_caller::regions::ContigBounds;
-
-    let bounds: Vec<ContigBounds> = sides
-        .reference
-        .contigs
-        .iter()
-        .map(|c| ContigBounds {
-            name: &c.name,
-            length: c.length as u32,
-        })
-        .collect();
-    // The walk takes its spans through `GenomeRegions`, which is built from whole contigs or
-    // a BED and nothing else — so the subset goes to disk as a BED.
-    let bed = sides.fasta.with_extension("wanted.bed");
-    let lines: String = spans
-        .iter()
-        .map(|s| {
-            format!(
-                "{}\t{}\t{}\n",
-                bounds[s.contig.get() as usize].name,
-                s.start.get() - 1,
-                s.end.get()
-            )
-        })
-        .collect();
-    std::fs::write(&bed, lines).expect("write bed");
-    let regions = GenomeRegions::from_bed_path(&bed, &bounds).expect("valid spans");
-
-    let walk_config = TypedRegionConfig {
-        criteria: criteria.classification.clone(),
-        max_str_len: criteria.max_str_len_bp,
-        ..TypedRegionConfig::default()
-    };
-    let mut walk = TypedRegionIterator::over_regions(
-        WindowedRefSeq::new(sides.fasta.clone(), sides.reference.contig_list()),
-        regions,
-        walk_config,
-    )
-    .expect("the walk starts");
-    let walked: Vec<TypedRegion> = walk.by_ref().map(|r| r.expect("a region")).collect();
+    let config = scan_config(criteria);
+    let mut scanned = Vec::new();
+    let mut counts = pop_var_caller::ng::region_typing::TypedRegionCounts::default();
+    for (index, (name, bases)) in contigs.iter().enumerate() {
+        let contig = ContigId(index as u32);
+        if !spans.iter().any(|span| span.contig == contig) {
+            continue;
+        }
+        let (regions, one) = partition_resident_in(name, contig, bases.as_bytes(), &config, spans);
+        scanned.extend(regions);
+        add_counts(&mut counts, &one);
+    }
 
     let catalog =
         RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)
@@ -821,10 +782,51 @@ fn both_tallies(
     let derived: Vec<TypedRegion> = from_file.by_ref().map(|r| r.expect("a region")).collect();
 
     assert_eq!(
-        derived, walked,
+        derived, scanned,
         "the regions themselves must agree before their tallies mean anything"
     );
-    (*walk.counts(), *from_file.counts(), walked)
+    (counts, *from_file.counts(), scanned)
+}
+
+/// Add one contig's counters into a running total, field by field.
+///
+/// **Exhaustive on purpose**: a counter added to `TypedRegionCounts` later must break this
+/// line rather than be silently left at zero in every multi-contig comparison below.
+fn add_counts(
+    total: &mut pop_var_caller::ng::region_typing::TypedRegionCounts,
+    one: &pop_var_caller::ng::region_typing::TypedRegionCounts,
+) {
+    let pop_var_caller::ng::region_typing::TypedRegionCounts {
+        spans,
+        ssr_loci,
+        ssr_bundles,
+        ssr_bundle_bp,
+        generic,
+        satellites,
+        satellite_bp,
+        repeat_bp_with_no_locus,
+        rejected_by_reason,
+    } = one;
+    total.spans += spans;
+    total.ssr_loci += ssr_loci;
+    total.ssr_bundles += ssr_bundles;
+    total.ssr_bundle_bp += ssr_bundle_bp;
+    total.generic += generic;
+    total.satellites += satellites;
+    total.satellite_bp += satellite_bp;
+    total.repeat_bp_with_no_locus += repeat_bp_with_no_locus;
+    let RejectionCounts {
+        copy_floor,
+        purity,
+        compound,
+        no_clean_trim,
+        flank_clamped,
+    } = rejected_by_reason;
+    total.rejected_by_reason.copy_floor += copy_floor;
+    total.rejected_by_reason.purity += purity;
+    total.rejected_by_reason.compound += compound;
+    total.rejected_by_reason.no_clean_trim += no_clean_trim;
+    total.rejected_by_reason.flank_clamped += flank_clamped;
 }
 
 /// **The tally counts what was asked for, not what was read** — over part of a contig, which
@@ -840,7 +842,7 @@ fn both_tallies(
 /// The spans deliberately cut through the middle of the sequence rather than landing tidily
 /// between features, so loci and coverage straddle their edges.
 #[test]
-fn the_tally_over_part_of_a_contig_matches_the_walks() {
+fn the_tally_over_part_of_a_contig_matches_a_scans() {
     let dir = tempfile::tempdir().expect("tmp");
     let contigs = tally_fixture();
     let sides = both_sides(dir.path(), &contigs);
@@ -865,12 +867,13 @@ fn the_tally_over_part_of_a_contig_matches_the_walks() {
             end: Position(length * 4 / 5),
         },
     ];
-    let (walk, file, _) = both_tallies(&sides, &spans, &criteria);
+    let (walk, file, _) = both_tallies(&sides, &contigs, &spans, &criteria);
 
     // A partial request must actually leave something out, or this is the whole-contig test
     // again under another name.
     let (whole_walk, _, _) = both_tallies(
         &sides,
+        &contigs,
         &whole_contigs_named(&sides.reference, &["chr_random"]),
         &criteria,
     );
@@ -909,14 +912,14 @@ fn the_tally_over_part_of_a_contig_matches_the_walks() {
     );
 }
 
-/// **The tally a consumer keeps when it stops walking the reference.** Over contigs whose
-/// repeats all sit clear of the ends, every counter the catalog has holds the walk's number.
+/// **The tally a consumer keeps when it stops scanning the reference.** Over contigs whose
+/// repeats all sit clear of the ends, every counter the catalog has holds a scan's number.
 ///
 /// The five contigs excluded are the two carrying structure within 15 bases of a contig end;
 /// `the_tally_differs_only_at_the_contig_ends` is where those are accounted for, and it says
 /// by how much.
 #[test]
-fn the_tally_from_the_file_matches_the_walks() {
+fn the_tally_from_the_file_matches_a_scans() {
     let dir = tempfile::tempdir().expect("tmp");
     let contigs = tally_fixture();
     let sides = both_sides(dir.path(), &contigs);
@@ -933,7 +936,7 @@ fn the_tally_from_the_file_matches_the_walks() {
             "chr_random",
         ],
     );
-    let (walk, file, walked) = both_tallies(&sides, &spans, &criteria);
+    let (walk, file, walked) = both_tallies(&sides, &contigs, &spans, &criteria);
 
     // The fixture has to exercise what the comparison claims to compare.
     assert!(
@@ -997,47 +1000,16 @@ fn the_tally_differs_only_at_the_contig_ends() {
 
     // The regions themselves differ here, so `both_tallies`' region check would fire — run
     // the two sides directly instead.
-    use pop_var_caller::ng::WindowedRefSeq;
-    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
-    use pop_var_caller::regions::ContigBounds;
-
-    let bounds: Vec<ContigBounds> = sides
-        .reference
-        .contigs
-        .iter()
-        .map(|c| ContigBounds {
-            name: &c.name,
-            length: c.length as u32,
-        })
-        .collect();
-    let bed = dir.path().join("edges.bed");
-    let lines: String = spans
-        .iter()
-        .map(|s| {
-            format!(
-                "{}\t0\t{}\n",
-                bounds[s.contig.get() as usize].name,
-                s.end.get()
-            )
-        })
-        .collect();
-    std::fs::write(&bed, lines).expect("bed");
-    let regions = GenomeRegions::from_bed_path(&bed, &bounds).expect("spans");
-    let walk_config = TypedRegionConfig {
-        criteria: criteria.classification.clone(),
-        max_str_len: criteria.max_str_len_bp,
-        ..TypedRegionConfig::default()
-    };
-    let mut walk = TypedRegionIterator::over_regions(
-        WindowedRefSeq::new(sides.fasta.clone(), sides.reference.contig_list()),
-        regions,
-        walk_config,
-    )
-    .expect("walk");
-    for region in walk.by_ref() {
-        region.expect("a region");
+    let config = scan_config(&criteria);
+    let mut walk_counts = pop_var_caller::ng::region_typing::TypedRegionCounts::default();
+    for (index, (name, bases)) in contigs.iter().enumerate() {
+        let contig = ContigId(index as u32);
+        if !spans.iter().any(|span| span.contig == contig) {
+            continue;
+        }
+        let (_, one) = partition_resident_in(name, contig, bases.as_bytes(), &config, &spans);
+        add_counts(&mut walk_counts, &one);
     }
-    let walk_counts = *walk.counts();
 
     let catalog =
         RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)

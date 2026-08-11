@@ -927,6 +927,18 @@ mod tests {
         coverage: 10,
     };
 
+    /// A synthetic sample **with its repeat catalog beside it**.
+    ///
+    /// The probe reads its typed regions from the catalog and refuses to run without one, so
+    /// a fixture that only writes a FASTA fails at start-up. Built once per sample here
+    /// rather than inside the probe, because building it is the `repeat-catalog` command's
+    /// job and the probe is one of its consumers.
+    fn sample_with_catalog() -> SyntheticSample {
+        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        catalog_regions::build_catalog_beside(&sample.fasta);
+        sample
+    }
+
     /// One `Generic` region per contig — the bound, not a configuration anybody ships.
     fn probe_whole_contig(sample: &SyntheticSample, chunk_bp: Option<u64>) -> ProbeReport {
         probe_run(sample, None, whole_contig_run(chunk_bp))
@@ -1012,7 +1024,7 @@ mod tests {
     /// module while losing most of the loci — and prints a *faster* run while doing it.
     #[test]
     fn the_typed_walk_visits_every_region_the_stream_produced() {
-        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        let sample = sample_with_catalog();
         let report = probe_typed_regions(&sample, None);
 
         // The same stream, counted without the walk in the way.
@@ -1025,8 +1037,7 @@ mod tests {
         .expect("the fixture's reference reads");
         let contigs = Arc::new(info.contig_list());
         // The same regions the probe itself reads, from the same place: the catalog beside
-        // the fixture's reference, built here because a synthetic fixture has none.
-        catalog_regions::build_catalog_beside(&sample.fasta);
+        // the fixture's reference, written beside it by `sample_with_catalog`.
         let catalog = RepeatCatalog::open_beside_reference(&sample.fasta, &info)
             .expect("the catalog just built opens");
         let config = TypedRegionConfig::default();
@@ -1078,7 +1089,7 @@ mod tests {
     /// rather than as a smaller, faster run.
     #[test]
     fn the_walk_accounts_for_every_region_and_every_locus() {
-        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        let sample = sample_with_catalog();
 
         for report in [
             probe_whole_contig(&sample, None),
@@ -1119,7 +1130,7 @@ mod tests {
     /// number above `loci` meaningless.
     #[test]
     fn the_whole_contig_walk_yields_one_locus_per_reference_position() {
-        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        let sample = sample_with_catalog();
         let report = probe_whole_contig(&sample, None);
 
         assert_eq!(
@@ -1167,7 +1178,7 @@ mod tests {
     /// fixture has no 100 kb to give), but it fails fast and it fails in the suite.
     #[test]
     fn cutting_the_span_into_regions_does_not_change_what_the_walk_produces() {
-        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        let sample = sample_with_catalog();
         let whole = probe_whole_contig(&sample, None);
 
         for chunk_bp in [1_000u64, 400] {
@@ -1210,7 +1221,7 @@ mod tests {
     /// contigs they covered, making the two modes incomparable.
     #[test]
     fn the_contig_filter_reaches_both_region_sources() {
-        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        let sample = sample_with_catalog();
 
         for (label, run) in [
             ("whole-contig", whole_contig_run(None)),
@@ -1265,7 +1276,7 @@ mod tests {
     /// to stop *at* the count, not near it.
     #[test]
     fn the_locus_ceiling_stops_the_walk_exactly() {
-        let sample = SyntheticSample::build(TEST_GEOMETRY);
+        let sample = sample_with_catalog();
         let report = probe_run(
             &sample,
             None,
@@ -1584,6 +1595,7 @@ mod tests {
                 ..TEST_GEOMETRY
             };
             let sample = SyntheticSample::build(geometry);
+            catalog_regions::build_catalog_beside(&sample.fasta);
             let report = probe_whole_contig(&sample, None);
             assert_eq!(
                 report.loci, geometry.span,

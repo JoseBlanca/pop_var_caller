@@ -19,6 +19,9 @@
 // reached by path from outside this folder. Leaving the rest `pub mod` made all 74 items in
 // them crate-public, which is why `dead_code` never warned about the five items that turned
 // out to have no caller at all.
+/// The port anchor: the whole stack, on a real multi-contig FASTA (`anchor.rs`).
+#[cfg(test)]
+mod anchor;
 pub(crate) mod builder;
 pub mod criteria;
 pub(crate) mod parquet_file;
