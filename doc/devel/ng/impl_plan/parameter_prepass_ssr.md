@@ -232,7 +232,7 @@ was too small. *Depends:* A4. *Source:* arch §4.2.
 
 ### Milestone B — the table of locus shapes (storage, no loci)
 
-**B1. `LocusShape` and its invariant.**  ☐
+**B1. `LocusShape` and its invariant.**  ✅
 Nine bucket counts and a guard count, all `u8`, with `counts.iter().sum() + not_whole_repeat ==
 depth` holding always. Ordered and hashable, so it can key a table and so iteration order is fixed —
 which is the whole of the determinism requirement. **The depth is exact, not binned**, and that
@@ -240,7 +240,7 @@ follows from the cap rather than from a separate decision: `MAX_LOCUS_READS` bou
 values, so there is nothing for a ladder to save. Unit test: a shape whose counts exceed the cap
 cannot be built. *Depends:* A3. *Source:* arch §2.2.
 
-**B2. `StratumTable` — storage, `add_locus`, `shapes`, `loci`.**  ☐
+**B2. `StratumTable` — storage, `add_locus`, `shapes`, `loci`.**  ✅
 A `BTreeMap<LocusShape, u32>` and two `u64` composition counters. **Sparse and not dense, and that is
 forced rather than chosen**: an entry is a whole locus's split across ten buckets, so the possible
 space is 220 shapes at three reads a locus and 293,930 at twelve, of which only a small
@@ -250,7 +250,7 @@ floating-point sum over entries and floating-point addition is not associative. 
 loci with the same shape make one entry with a count of two; `shapes()` is stable in order across
 runs. *Depends:* B1. *Source:* arch §2.2.
 
-**B3. `merge`, `substitution_rate` and `not_whole_repeat_share`.**  ☐
+**B3. `merge`, `substitution_rate` and `not_whole_repeat_share`.**  ✅
 `merge` is element-wise integer addition, so it is associative and exact and shards merge to the table
 of the union. `substitution_rate` is mismatched over compared — **a division, not a search** (spec
 §4.1), and the closed form is the maximum rather than a moment estimate. `not_whole_repeat_share`'s

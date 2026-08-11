@@ -549,6 +549,29 @@ pub enum DomainError {
         /// The cap in force — `MAX_LOCUS_READS`.
         cap: u32,
     },
+
+    /// A locus offered more mismatched bases than bases compared
+    /// (`parameter_estimation::ssr::stratum_table::BaseComparison`).
+    ///
+    /// **Not a noisy locus — a swapped pair.** The two counts have the same type
+    /// and one is a subset of the other, so the failure this catches is a caller
+    /// handing them over the wrong way round. Left standing, what it does depends
+    /// on what the locus is pooled with, and the milder-looking outcome is the
+    /// dangerous one: alone it drives the stratum's rate above one, which
+    /// [`ErrorRate`] refuses, so the run dies where the rate is read; pooled with
+    /// well-formed loci it survives as a plausible wrong rate that nothing
+    /// downstream can question.
+    #[error(
+        "a locus counted {bases_mismatched} mismatched bases among only {bases_compared} \
+         compared — mismatched bases cannot outnumber compared ones, so the two counts are \
+         swapped or one was miscounted"
+    )]
+    SsrBaseComparison {
+        /// Bases of the locus's reads that were compared against the tract.
+        bases_compared: u32,
+        /// Of those, the ones the caller says differed.
+        bases_mismatched: u32,
+    },
 }
 
 // ---------------------------------------------------------------------
