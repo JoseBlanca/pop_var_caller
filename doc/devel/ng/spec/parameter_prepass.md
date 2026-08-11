@@ -6,12 +6,12 @@ step's central mechanism**: no rough caller, no confident-genotype gate, so `Sam
 fed sufficient statistics rather than calls. `CohortEstimator` survives unchanged. §2.3 says what
 that means for the two documents that assume otherwise.*
 
-*ng step 4 is specified in **five documents**, and the split is about **length and modularity, not
-about passes**. One document holding all of it would be unreadable; and there is a lot of code here,
-which — although every piece of it reads the same data — divides cleanly. Each document below covers
-**one accumulator and everything fitted from it**, so each maps to a module with its own interface.
-Splitting the prose splits neither the traversal nor the data. **This one says what the step produces
-and carries the machinery the others share**, and is the one to read first.*
+*ng step 4 is specified in **eight documents**, and the split is about **modularity, not about
+passes**: there is a lot of code here, which — although every piece of it reads the same data —
+divides cleanly, so each document maps to a module someone can build on its own. Each of the first
+five covers **one accumulator and everything fitted from it**. Splitting the prose splits neither the
+traversal nor the data. **This one says what the step produces and carries the machinery the others
+share**, and is the one to read first.*
 
 | document | what it settles |
 |---|---|
@@ -20,10 +20,17 @@ and carries the machinery the others share**, and is the one to read first.*
 | [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) | the STR path, end to end: its noise model, what stutter actually looks like, its accumulator and how the strata are cut |
 | [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) | the two **censuses** — small sets of loci, one over ordinary sites and one over STR tracts, kept raw and identical in every sample so that answers can be compared across them |
 | [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) | the gather: diversity, frequency spectrum, contamination, relatedness, sample grouping — run later, inside cohort variant calling |
+| [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) | **the second route to every parameter above**, and the one to read first of the three: nothing fitted per sample, everything fitted once over every sample at the same loci, each locus weighted by its own allele frequency in the cohort. It is §4.1's census arm, built out |
+| [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) | which loci that route keeps evidence at — uniform for ordinary sites, **equal per repeat-count stratum** for STR loci |
+| [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) | what is recorded at each of those loci, and how it is encoded |
 
 *The first four all describe that **one** walk over the reads — four accumulators filled in a single
-traversal, not four passes. The fifth is the exception and the only one: the cohort gather runs
-later, reads the summaries the walk produced, and never opens an alignment file (§1.3).*
+traversal, not four passes. The rest run later, read what the walk produced, and never open an
+alignment file (§1.3).*
+
+*The last three are a **rival to the first three, not an addition to them**. Both routes are built and
+both run, on the same data, and §4.1 is the comparison. Nothing in the first five is deleted before it
+is made.*
 
 *Grounded in the research note*
 [`rough_caller_alternatives_2026-07-23.md`](../../reports/research/rough_caller_alternatives_2026-07-23.md)
@@ -686,6 +693,12 @@ in [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §7.
 
 ### 4.1 Histograms or census sites — build both and measure
 
+**The census arm of this comparison is now a design rather than a proposal**, and it is
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md): every parameter fitted once, over
+every sample's census evidence, with each locus weighted by its own allele frequency in the cohort.
+That document settles how it is fitted, what it cannot reach, and what the two routes' numbers mean
+when they disagree; this section stays as the statement of the question.
+
 **The two objects differ in what they can reach, not only in shape.**
 
 - **The whole-genome histogram** pools every analysed site within one sample. Its advantage is
@@ -831,6 +844,12 @@ has to be supplied *while the prior is being fitted*. This step supplies one poo
 instead lets each locus supply its own, fitting that locus's allele frequencies in the same loop
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §1.3). **Both produce a pooled parameter at
 the end**; they differ in what the sum inside was weighted by.
+
+**Both arms of this question are now specified.** The pooled one is the per-sample route of
+[`parameter_prepass_generic.md`](parameter_prepass_generic.md) and
+[`parameter_prepass_ssr.md`](parameter_prepass_ssr.md); the per-locus one is
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md), which takes it on both paths at
+once. What follows is the statement of the question and the reason it can be asked at all.
 
 **Which data object is in hand decides whether the question can be asked at all.** A histogram has
 forgotten which site each observation came from, so there is no locus to take a weighting from and

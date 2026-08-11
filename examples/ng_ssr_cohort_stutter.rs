@@ -1,13 +1,11 @@
 //! **Per-sample STR stutter dump** — walk region typing once and delimit every sample's reads at
 //! the *same* microsatellite tracts, emitting one tidy row per (sample, locus, observation).
 //!
-//! **⚠ Since 2026-07-28 a row is one `(bases, read_witness, read_group)` CELL, not one allele.**
-//! `SequenceObservation` gained the read group as part of its identity, so on a sample declaring
-//! several `@RG`s one allele becomes several rows — and **this dump has no read-group column**, so
-//! those rows are indistinguishable in the output and the per-row counters below count cells
-//! rather than alleles. Single-read-group samples are unaffected, which is every fixture here so
-//! far. Adding the column is an open question at Checkpoint B: it would change an artifact the
-//! marimo dashboards parse, so it is not done silently.
+//! A row is one `(bases, read_witness, read_group)` **cell**, not one allele:
+//! `SequenceObservation` carries the read group as part of its identity, so on a sample declaring
+//! several `@RG`s one allele becomes several rows. The `read_group` column below is what keeps
+//! those rows distinguishable — without it they would be indistinguishable in the output and the
+//! per-row counters would silently count cells while reading as alleles.
 //!
 //! ```text
 //! ng_ssr_cohort_stutter [--contigs a,b] [--regions r.bed] <reference.fa> <sample.cram> [sample ...]
@@ -34,11 +32,21 @@
 //! Rows stream to stdout as they are produced rather than accumulating — a 50-sample cohort emits
 //! millions of rows, and buffering them all would cost gigabytes for no benefit.
 //!
-//! Output: a `#`-prefixed run-level line per sample, a bare TSV column line, then the rows. Each
-//! covered locus contributes, per sample, one row per distinct observed sequence (tagged
-//! `complete` / `partial:left` / `partial:right`) plus, when non-zero, a synthetic `no_border` row
-//! (reads that reached the aligner and anchored nothing) and a `capped` row (reads the depth cap
-//! discarded). A locus no read of that sample reaches emits nothing for that sample.
+//! Output: the run's **read-group table** as `#rg` lines, a bare TSV column line, then the rows.
+//! Each covered locus contributes, per sample, one row per distinct (sequence, witness, read
+//! group) — the witness tagged `complete` / `partial:left` / `partial:right` — plus, when non-zero,
+//! a synthetic `no_border` row (reads that reached the aligner and anchored nothing) and a `capped`
+//! row (reads the depth cap discarded). A locus no read of that sample reaches emits nothing for
+//! that sample.
+//!
+//! **The read group is on every observation row**, because that is the grain chemistry actually
+//! varies at. An allele seen from two groups is two rows, so a per-group model gets the allele ×
+//! group cross *with its quality moments* rather than a count that has already been merged. Rows
+//! carry only the numeric id; the `#rg` table maps it to sample, library, experiment, platform and
+//! file, so a consumer picks its own grain — read group, library, experiment or sample — instead of
+//! this step guessing one. That matters here: one BioSample can hold several libraries (and in this
+//! archive one holds sixteen), so folding to the sample would destroy exactly the contrast a
+//! chemistry question is asking about.
 //!
 //! The dashboard derives period = `len(motif)`, tract length = `len(ref_tract)`, and two stutter
 //! measures: `obs_len − ref_len` (off-reference, comparable across samples but confounded by
@@ -60,19 +68,21 @@ use pop_var_caller::ng::locus_generation::{
 };
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
-use pop_var_caller::ng::read::input::read_groups::build_read_groups;
+use pop_var_caller::ng::read::input::read_groups::{NameOrigin, build_read_groups};
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
-use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionIterator,
-};
+use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::types::GenomeRegion;
 use pop_var_caller::ng::types::{Bp, ContigId};
 use pop_var_caller::regions::ContigBounds;
 
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 /// The side derivation, shared with the other two STR dumps so the three cannot drift apart
 /// again (D4). Each tool keeps its own strings — see `witness_label`.
 #[path = "shared/witness_side.rs"]
@@ -125,11 +135,24 @@ fn write_locus<W: Write>(
     let ref_tract = String::from_utf8_lossy(&locus.reference_bases);
     let motif_str = String::from_utf8_lossy(&motif);
 
-    let row = |out: &mut W, coverage: &str, observed: &str, reads: u32| {
+    // `read_group` is the numeric id from the run's table, not a name: the names live once in the
+    // `#rg` header rather than repeated across millions of rows. Empty for the synthetic
+    // `no_border` / `capped` tallies, which are per-locus counters and belong to no one group.
+    let row = |out: &mut W, rg: &str, coverage: &str, observed: &str, reads: u32| {
         writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            counts.name, chrom, start, end, motif_str, ref_tract, depth, coverage, observed, reads,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            counts.name,
+            rg,
+            chrom,
+            start,
+            end,
+            motif_str,
+            ref_tract,
+            depth,
+            coverage,
+            observed,
+            reads,
         )
     };
 
@@ -147,6 +170,7 @@ fn write_locus<W: Write>(
         }
         row(
             out,
+            &obs.read_group.get().to_string(),
             label,
             &String::from_utf8_lossy(&obs.bases),
             obs.num_obs,
@@ -154,13 +178,22 @@ fn write_locus<W: Write>(
     }
     if locus.reads_without_observation > 0 {
         counts.reads_no_border += u64::from(locus.reads_without_observation);
-        row(out, "no_border", "", locus.reads_without_observation)?;
+        row(out, "", "no_border", "", locus.reads_without_observation)?;
     }
     if locus.reads_discarded_by_cap > 0 {
         counts.reads_capped += u64::from(locus.reads_discarded_by_cap);
-        row(out, "capped", "", locus.reads_discarded_by_cap)?;
+        row(out, "", "capped", "", locus.reads_discarded_by_cap)?;
     }
     Ok(())
+}
+
+/// Whether a grouping name is the file's own or one this run invented — the reader has to be able
+/// to tell, because a synthesized library is a guess and a declared one is evidence.
+fn origin_label(origin: NameOrigin) -> &'static str {
+    match origin {
+        NameOrigin::Declared => "declared",
+        NameOrigin::Synthesized => "synthesized",
+    }
 }
 
 /// The tag a witness carries in the `coverage` column.
@@ -195,6 +228,9 @@ fn run_cohort(
         ReferenceCheck::VerifyAgainstIndex,
     )?;
     let contigs: ContigList = info.contig_list();
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run — the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     // **One reference for the whole cohort, and so one copy of its bases.** A
     // `fasta::Repository` memoises whole contigs and never evicts, so the
     // per-file repository this replaces cost ~752 MiB of resident tomato
@@ -292,9 +328,38 @@ fn run_cohort(
 
     let stdout = std::io::stdout();
     let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
+
+    // The read-group table, once, as `#`-prefixed lines above the data. The rows carry only the
+    // numeric id, so this is what makes them resolvable — and it is what lets a consumer fold to
+    // whatever grain it wants. `library` and `experiment` each carry the origin of their name,
+    // because a grouping this module synthesized and one the file declared are not equally
+    // trustworthy and a chemistry report has to be able to say which it used.
+    for (id, group) in read_groups.iter() {
+        writeln!(
+            out,
+            "#rg\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            id.get(),
+            group.id,
+            group.sample,
+            group.library.value,
+            origin_label(group.library.origin),
+            group.experiment.value,
+            origin_label(group.experiment.origin),
+            group.platform.as_deref().unwrap_or(""),
+            group.file.display(),
+        )?;
+    }
+    // `read_group` is minted per run and means nothing across runs; `(file, rg_id)` is the stable
+    // identity, because the SAM specification makes `@RG ID` unique within its file. Anything that
+    // merges the output of two runs — a batched cohort, say — has to renumber on that pair.
     writeln!(
         out,
-        "sample\tcontig\tstart\tend\tmotif\tref_tract\tdepth\tcoverage\tobserved\treads"
+        "#rg_columns\tread_group\trg_id\tsample\tlibrary\tlibrary_origin\texperiment\t\
+         experiment_origin\tplatform\tfile"
+    )?;
+    writeln!(
+        out,
+        "sample\tread_group\tcontig\tstart\tend\tmotif\tref_tract\tdepth\tcoverage\tobserved\treads"
     )?;
 
     // The BED path walks only the targeted spans; without one, every contig end to end. Both feed
@@ -326,37 +391,36 @@ fn run_cohort(
                 .is_some_and(|e| contig_filter.iter().any(|n| n == &e.name))
     };
 
-    let mut walks: Vec<(String, TypedRegionIterator<WindowedRefSeq>)> = Vec::new();
+    // What to ask the catalog for, labelled so a long run can be watched. The spans are
+    // collected first and the reader built per batch, because a reader borrows the catalog.
+    let mut batches: Vec<(String, Vec<GenomeRegion>)> = Vec::new();
     match bed_spans {
         Some(spans) => {
-            eprintln!("  {} BED spans", spans.iter().count());
-            let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-            walks.push((
-                "BED".to_string(),
-                TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
-            ));
+            let wanted: Vec<GenomeRegion> = spans.iter().collect();
+            eprintln!("  {} BED spans", wanted.len());
+            batches.push(("BED".to_string(), wanted));
         }
         None => {
             for (index, entry) in contigs.entries.iter().enumerate() {
                 if !wanted_contig(ContigId(index as u32)) {
                     continue;
                 }
-                let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-                walks.push((
+                batches.push((
                     entry.name.clone(),
-                    TypedRegionIterator::over_contig(
-                        walk_reference,
+                    vec![catalog_regions::whole_contig(
                         ContigId(index as u32),
-                        walk_config.clone(),
-                    )?,
+                        entry.length,
+                    )],
                 ));
             }
         }
     }
 
-    for (label, mut walk) in walks {
-        // A cohort walk runs for a long time; say what is in hand so it can be watched.
+    let criteria = StrRepeatCriteria::from(&walk_config);
+    for (label, spans) in batches {
+        // A cohort run takes a long time; say what is in hand so it can be watched.
         eprintln!("  walking {label}");
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&spans))?;
         for region in walk.by_ref() {
             let region = region?;
             let RegionKind::SsrSegment(segment) = &region.kind else {

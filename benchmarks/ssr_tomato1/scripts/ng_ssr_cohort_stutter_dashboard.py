@@ -135,9 +135,30 @@ def _(Path, mo, os, pd):
     # sequences are needed only to measure them. So the strings are turned into lengths and then
     # dropped, and the repeated identifiers are held as categories; without this the frame is
     # several gigabytes of text that is never read again.
+    # The `#rg` header is the run's read-group table: the rows carry only a numeric id, and this is
+    # what resolves it to sample / library / experiment. Reading it first also means the dump can
+    # gain read groups without the loader below caring.
+    _rg_rows = []
+    with open(tsv_path) as _fh:
+        for _line in _fh:
+            if not _line.startswith("#"):
+                break
+            if _line.startswith("#rg\t"):
+                _rg_rows.append(_line.rstrip("\n").split("\t")[1:])
+    rg_table = pd.DataFrame(
+        _rg_rows,
+        columns=[
+            "read_group", "rg_id", "sample", "library", "library_origin",
+            "experiment", "experiment_origin", "platform", "file",
+        ],
+    )
+    if not rg_table.empty:
+        rg_table["read_group"] = rg_table["read_group"].astype("int32")
+
     raw = pd.read_csv(
         tsv_path,
         sep="\t",
+        comment="#",
         dtype={
             "observed": str,
             "motif": str,
@@ -158,19 +179,62 @@ def _(Path, mo, os, pd):
         if meta_path.is_file()
         else pd.DataFrame(columns=["sample", "run", "project", "reads", "duplicates", "dup_pct"])
     )
-    return meta, meta_path, raw, tsv_path
+    return meta, meta_path, raw, rg_table, tsv_path
 
 
 @app.cell
-def _(MIN_LOCUS_DEPTH, np, pd, raw):
+def _(mo, rg_table):
+    # The grain to analyse at. Chemistry is a property of the library preparation, so the sample is
+    # the wrong default whenever one sample holds several libraries — and in this archive one holds
+    # sixteen. The dump stores the finest grain (the read group) precisely so this stays a choice.
+    _choices = {
+        "library — one preparation (recommended)": "library",
+        "experiment — preparation + sequencing config": "experiment",
+        "read group — one @RG, usually a lane": "read_group",
+        "sample — the individual (merges libraries)": "sample",
+    }
+    unit_sel = mo.ui.radio(
+        _choices, value="library — one preparation (recommended)", label="Analysis unit"
+    )
+    _have_rg = not rg_table.empty
+    mo.vstack(
+        [
+            mo.md(
+                "Chemistry belongs to the **library**, not to the individual. Where a sample holds "
+                "more than one library, folding to the sample averages across preparations — which "
+                "is the very thing a stutter comparison is trying to separate. Pick the grain:"
+                if _have_rg
+                else "*This dump predates the read-group table, so only the sample grain is "
+                "available. Regenerate it with the current `ng_ssr_cohort_stutter` to fold by "
+                "library or experiment.*"
+            ),
+            unit_sel if _have_rg else mo.md(""),
+        ]
+    )
+    return (unit_sel,)
+
+
+@app.cell
+def _(MIN_LOCUS_DEPTH, np, pd, raw, rg_table, unit_sel):
     # The one derived frame everything below shares: complete reads only, each tagged with its
-    # sample's modal length at that locus, and with both stutter measures.
+    # unit's modal length at that locus, and with both stutter measures.
     #
     # Only complete reads carry a length at all — a partial is a censored lower bound and cannot
     # enter a spread. Loci with fewer than MIN_LOCUS_DEPTH complete reads are dropped because their
     # "mode" would be a single read, against which every other read scores as stutter.
     comp = raw[raw["coverage"] == "complete"].copy()
-    _locus = ["sample", "contig", "start", "end"]
+
+    # `unit` is the analysis grain. It is resolved per row from the read-group table, so the modal
+    # length, the depth filter and every statistic below are computed within one chemistry rather
+    # than across a mixture of them.
+    if rg_table.empty or unit_sel.value == "sample":
+        comp["unit"] = comp["sample"].astype(str)
+    else:
+        _map = rg_table.set_index("read_group")[unit_sel.value]
+        comp["unit"] = comp["read_group"].map(_map).astype(str)
+    comp["unit"] = comp["unit"].astype("category")
+
+    _locus = ["unit", "contig", "start", "end"]
 
     _depth = comp.groupby(_locus, observed=True)["reads"].transform("sum")
     comp = comp[_depth >= MIN_LOCUS_DEPTH].copy()
@@ -244,15 +308,63 @@ def _(MIN_LOCUS_DEPTH, np, pd, raw):
     comp["len_band"] = pd.cut(
         comp["ref_len"], bins=LEN_EDGES, labels=LEN_LABELS, right=False, ordered=True
     )
+    # The same tract measured in repeat UNITS rather than bases. Slippage is a per-unit process, so
+    # copy number is the axis the mechanism would predict, while base length is the axis the read
+    # geometry cares about — and the two orderings differ, because 20 bp is ten dinucleotide copies
+    # but only three hexamer ones. Which of them stutter actually tracks is the question.
+    comp["ref_copies"] = comp["ref_len"] / comp["period"]
+    COPY_EDGES = [3, 4, 5, 6, 7, 9, 12, 16, 25, 10**9]
+    COPY_LABELS = ["3", "4", "5", "6", "7-8", "9-11", "12-15", "16-24", "25+"]
+    comp["copy_band"] = pd.cut(
+        comp["ref_copies"], bins=COPY_EDGES, labels=COPY_LABELS, right=False, ordered=True
+    )
     PERIOD_NAME = {1: "mono", 2: "di", 3: "tri", 4: "tetra", 5: "penta", 6: "hexa"}
-    return LEN_LABELS, PERIOD_NAME, comp
+    PERIODS = [1, 2, 3, 4, 5, 6]
+    return COPY_LABELS, LEN_LABELS, PERIOD_NAME, PERIODS, comp
+
+
+@app.cell
+def _(LEN_LABELS, PERIODS, np, plt):
+    # A period × tract-length grid, the axis this whole question lives on. Shared with the human
+    # bake-off dashboard deliberately: the same two dimensions, read the same way, so a number seen
+    # in one is comparable with a number seen in the other.
+    def empty_grid(cols=None):
+        return np.full((len(PERIODS), len(cols if cols is not None else LEN_LABELS)), np.nan)
+
+    def annotate_grid(ax, grid, cmap, norm, fmt, ncnt=None):
+        """Write each finite cell's value, picking white or dark text by the cell's luminance so
+        the number stays legible on pale and saturated fills alike."""
+        for i in range(grid.shape[0]):
+            for j in range(grid.shape[1]):
+                v = grid[i, j]
+                if not np.isfinite(v):
+                    continue
+                r, g, b, _ = cmap(norm(v))
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                txt = fmt.format(v)
+                if ncnt is not None and np.isfinite(ncnt[i, j]):
+                    txt = f"{txt}\nn={int(ncnt[i, j]):,}"
+                ax.text(
+                    j, i, txt, ha="center", va="center", fontsize=6.2,
+                    color="white" if lum < 0.5 else "#222",
+                )
+
+    def grid_axes(ax, period_label, labels=None, xlabel="reference tract length (bp)"):
+        labels = labels if labels is not None else LEN_LABELS
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7.5)
+        ax.set_yticks(range(len(PERIODS)))
+        ax.set_yticklabels([period_label(p) for p in PERIODS], fontsize=8)
+        ax.set_xlabel(xlabel)
+
+    return annotate_grid, empty_grid, grid_axes
 
 
 @app.cell
 def _(MIN_LOCUS_DEPTH, comp, meta, mo, pd, raw):
-    # Per-sample headline: how much data each sample contributes and how much it stutters overall.
+    # Per-unit headline: how much data each unit contributes and how much it stutters overall.
     def _per_sample():
-        g = comp.groupby("sample", observed=True)
+        g = comp.groupby("unit", observed=True)
         out = pd.DataFrame(
             {
                 "loci": g.apply(
@@ -280,6 +392,11 @@ def _(MIN_LOCUS_DEPTH, comp, meta, mo, pd, raw):
                 ),
             }
         ).reset_index()
+        # The duplicate-rate metadata is keyed by sample. A unit belongs to exactly one sample
+        # (a library is prepared from one individual), so carrying that sample across is a lookup,
+        # never an aggregation.
+        owner = comp.groupby("unit", observed=True)["sample"].first().astype(str)
+        out["sample"] = out["unit"].map(owner)
         if not meta.empty:
             out = out.merge(meta[["sample", "run", "dup_pct"]], on="sample", how="left")
         return out.sort_values("off_mode", ascending=False)
@@ -337,7 +454,7 @@ def _(ACCENT, GREY, INK, mo, np, per_sample, plt):
             label="off-reference (stutter + real alleles)",
         )
         ax.set_yticks(y)
-        ax.set_yticklabels(d["sample"], fontsize=6)
+        ax.set_yticklabels(d["unit"], fontsize=6)
         ax.set_xlabel("fraction of complete reads away from the sample's modal length")
         ax.xaxis.set_major_formatter(lambda v, _p: f"{v:.0%}")
         ax.grid(True, axis="x", alpha=0.25)
@@ -373,7 +490,7 @@ def _(comp, mo, np, pd):
     # its own — with a few thousand reads per sample the extremes move a long way on noise alone.
     # This is the test that separates "samples differ" from "small n".
     def overdispersion(sub):
-        g = sub.groupby("sample", observed=True)
+        g = sub.groupby("unit", observed=True)
         tab = pd.DataFrame(
             {
                 "n": g["reads"].sum(),
@@ -426,6 +543,104 @@ def _(comp, mo, np, pd):
 
 @app.cell
 def _(
+    COPY_LABELS,
+    LEN_LABELS,
+    MIN_CELL_READS,
+    Normalize,
+    PERIODS,
+    PERIOD_NAME,
+    annotate_grid,
+    comp,
+    empty_grid,
+    grid_axes,
+    mo,
+    np,
+    plt,
+):
+    # SECTION 2 — the onset, as a period × size grid, drawn on both size axes. This is the shape of
+    # the answer: a single number per cell, cohort-pooled, read straight off two axes. The
+    # per-sample curves that follow answer a different question (do samples agree?) and are much
+    # harder to read for this one.
+    #
+    # Both axes share this one implementation, and — this is the point of drawing both — share one
+    # colour scale, so a cell's shade means the same thing in each and the two fronts are directly
+    # comparable rather than each normalised to its own maximum.
+    def onset_grid_figure(column, labels, xlabel, title, norm=None):
+        off = empty_grid(labels)
+        n = empty_grid(labels)
+        for i, period in enumerate(PERIODS):
+            for j, band in enumerate(labels):
+                g = comp[(comp["period"] == period) & (comp[column] == band)]
+                tot = g["reads"].sum()
+                if tot < MIN_CELL_READS:
+                    continue
+                n[i, j] = tot
+                off[i, j] = g.loc[g["off_mode"] != 0, "reads"].sum() / tot
+
+        fig, ax = plt.subplots(figsize=(max(9.5, 1.15 * len(labels)), 4.2))
+        cmap = plt.get_cmap("Blues")
+        if norm is None:
+            # Capped at the 95th percentile so one saturated cell does not flatten the gradient the
+            # onset is read from; the annotations carry the true value regardless.
+            finite = off[np.isfinite(off)]
+            vmax = max(float(np.nanpercentile(finite, 95)) if finite.size else 0.2, 0.05)
+            norm = Normalize(vmin=0, vmax=vmax)
+        im = ax.imshow(np.clip(off, 0, norm.vmax), cmap=cmap, norm=norm, aspect="auto")
+        fig.colorbar(im, ax=ax, fraction=0.035, pad=0.02).set_label(
+            "off-mode read fraction", fontsize=8.5
+        )
+        annotate_grid(ax, off, cmap, norm, "{:.1%}", ncnt=n)
+        grid_axes(ax, lambda p: f"{PERIOD_NAME.get(p, p)} ({p})", labels=labels, xlabel=xlabel)
+        ax.set_title(title, fontweight="bold", fontsize=11)
+        fig.tight_layout()
+        return fig, norm
+
+    _len_fig, _shared_norm = onset_grid_figure(
+        "len_band",
+        LEN_LABELS,
+        "reference tract length (bp)",
+        "Stutter by period × tract LENGTH — cohort-pooled off-mode fraction",
+    )
+    _copy_fig, _ = onset_grid_figure(
+        "copy_band",
+        COPY_LABELS,
+        "reference tract length (repeat units)",
+        "Stutter by period × REPEAT COUNT — same reads, same colour scale",
+        norm=_shared_norm,
+    )
+
+    mo.vstack(
+        [
+            mo.md(
+                "## 2 · From what size does stuttering start to matter\n"
+                "One cell per (period, size), pooled over the cohort: the fraction of complete "
+                "reads sitting away from their own unit's modal length. Read the **onset** as the "
+                "column where a row stops being pale. Cells with fewer than "
+                f"**{MIN_CELL_READS}** complete reads are left blank.\n\n"
+                "**Two size axes, because they are different claims about the mechanism.** "
+                "Base length is what the *read* cares about — a tract competes with the read for "
+                "room to be spanned. Repeat count is what the *polymerase* cares about — slippage "
+                "happens per unit, so a run of ten copies offers ten chances to slip whether the "
+                "unit is 2 bp or 6 bp. If stutter tracked base length the front would fall in the "
+                "same column for every period; if it tracks copy number it should straighten out "
+                "on the second grid."
+            ),
+            _len_fig,
+            _copy_fig,
+            mo.md(
+                "*The two grids hold the same reads and share one colour scale, so shades are "
+                "comparable between them. The empty lower-left of the copy grid is not missing "
+                "data: the catalog's per-period copy floors (6 for mono, 4 for di and tri, 3 "
+                "above) mean short-copy tracts of some periods are never admitted in the first "
+                "place.*"
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
+def _(
     DUP_CMAP,
     GREY,
     LEN_LABELS,
@@ -439,9 +654,9 @@ def _(
     per_sample,
     plt,
 ):
-    # SECTION 2 — the onset. Off-mode fraction against tract length, one line per sample, faceted
-    # by period. Lines are coloured by duplicate rate so the PCR question is answered by looking:
-    # if amplification drives stutter, the dark lines separate upward.
+    # SECTION 2b — the same axis, one line per sample. Lines are coloured by duplicate rate so the
+    # PCR question is answered by looking: if amplification drives stutter, the dark lines separate
+    # upward.
     def onset_curves_figure():
         dup = (
             meta.set_index("sample")["dup_pct"].to_dict() if not meta.empty else {}
@@ -453,7 +668,7 @@ def _(
         fig, axes = plt.subplots(2, 3, figsize=(13, 6.4), sharey=True, sharex=True)
         for ax, period in zip(axes.flat, periods):
             sub = comp[comp["period"] == period]
-            for sample, g in sub.groupby("sample", observed=True):
+            for sample, g in sub.groupby("unit", observed=True):
                 xs, ys = [], []
                 for j, band in enumerate(LEN_LABELS):
                     cell = g[g["len_band"] == band]
@@ -488,10 +703,11 @@ def _(
     mo.vstack(
         [
             mo.md(
-                "## 2 · From what length does stuttering start to matter\n"
-                "One line per sample, faceted by motif period, coloured by duplicate rate. Read "
-                "the **onset** as the length band where a period's lines lift off the floor — it "
-                f"differs by period, which is why this is not one curve. Cells with fewer than "
+                "### 2b · The same thing per sample\n"
+                "One line per sample, faceted by motif period, coloured by duplicate rate. The grid "
+                "above answers *where* stutter starts; this answers *whether samples agree about "
+                "it*. Fifty-one lines is a thicket by design — what to read is whether the dark "
+                f"(high-duplicate) lines sit above the pale ones. Cells with fewer than "
                 f"**{MIN_CELL_READS}** complete reads are skipped."
             ),
             onset_curves_figure(),
@@ -507,7 +723,7 @@ def _(LEN_LABELS, MIN_CELL_READS, PERIOD_NAME, comp, mo, np, pd, plt):
     # because the whole question is whether samples differ.
     def onset_table(threshold):
         rows = []
-        for (sample, period), g in comp.groupby(["sample", "period"], observed=True):
+        for (sample, period), g in comp.groupby(["unit", "period"], observed=True):
             onset = None
             for band in LEN_LABELS:
                 cell = g[g["len_band"] == band]
@@ -651,11 +867,158 @@ def _(DUP_CMAP, INK, Normalize, meta, mo, np, per_sample, plt):
 
 
 @app.cell
+def _(GREY, INK, PERIOD_NAME, comp, mo, np, plt):
+    # SECTION 5 — the shape of the stutter, which is what a read model actually needs. Two claims
+    # the STR model rests on are testable here: that slippage moves the tract by WHOLE motif units,
+    # and that the step distribution falls away from ±1.
+    #
+    # The **0 bar is included**, so each panel is the whole distribution of where reads land rather
+    # than the off-allele part alone: how much stutter there IS is then read off the same picture as
+    # what shape it has. That forces a log axis — agreement is ~99% and the far steps are near
+    # 1-in-10,000, four orders of magnitude a linear axis would flatten to a single spike and a row
+    # of nothing.
+    def shape_figure():
+        # Denominator: reads that either match the allele or sit a whole number of units from it.
+        # Reads at a non-unit offset are excluded because they are not slippage at all — they are
+        # the residue the panel above measures, and mixing them in would make this neither a
+        # slippage distribution nor a complete one.
+        d = comp.copy()
+        d["whole_unit"] = (d["off_mode"] == 0) | (d["off_mode"] % d["period"] == 0)
+        d = d[d["whole_unit"]].copy()
+        d["units"] = (d["off_mode"] // d["period"]).astype(int)
+
+        periods = [p for p in sorted(d["period"].unique()) if p <= 6]
+        fig, axes = plt.subplots(2, 3, figsize=(13, 6.4), sharex=True, sharey=True)
+        steps = list(range(-4, 5))
+        for ax, period in zip(axes.flat, periods):
+            g = d[d["period"] == period]
+            tot = g["reads"].sum()
+            if tot <= 0:
+                ax.axis("off")
+                continue
+            frac = [g.loc[g["units"] == u, "reads"].sum() / tot for u in steps]
+            # Grey for "matches the allele", blue for contractions, orange for expansions — the same
+            # sign convention the rest of this work uses, so a reader never re-learns which is which.
+            colours = [GREY if u == 0 else ("#2a78d6" if u < 0 else "#eb6834") for u in steps]
+            ax.bar(range(len(steps)), frac, color=colours, width=0.74)
+            on_allele = frac[steps.index(0)]
+            ax.set_title(
+                f"{PERIOD_NAME.get(period, period)} ({period} bp) — "
+                f"{1 - on_allele:.2%} of reads stutter",
+                fontsize=9.5,
+            )
+            ax.set_xticks(range(len(steps)))
+            ax.set_xticklabels([("0" if u == 0 else f"{u:+d}") for u in steps], fontsize=8)
+            ax.grid(True, axis="y", alpha=0.25)
+            ax.set_axisbelow(True)
+            # Top-left: the far-contraction bars are ~1e-4 while the axis runs to 2, so that corner
+            # is empty, whereas the bottom-left is exactly where those bars sit.
+            ax.text(
+                0.02, 0.95, f"n={int(tot):,}", transform=ax.transAxes, fontsize=7.5, color=INK,
+                va="top",
+            )
+        for ax in axes.flat[len(periods) :]:
+            ax.axis("off")
+        for ax in axes.flat[: len(periods)]:
+            ax.set_yscale("log")
+            ax.set_ylim(1e-5, 2.0)
+        for ax in axes[:, 0]:
+            ax.set_ylabel("fraction of reads\n(log scale)")
+        fig.supxlabel("read's distance from the allele, in whole motif units (− = shorter)", y=-0.01)
+        fig.suptitle(
+            "Where reads land relative to the allele — the 0 bar is agreement",
+            fontweight="bold",
+        )
+        fig.tight_layout()
+        return fig
+
+    # The headline of this section as its own chart rather than a percentage buried in six panel
+    # titles: whether slippage moves the tract by whole motif units is a claim the read model rests
+    # on, so it deserves to be readable at a glance.
+    def whole_unit_figure():
+        off = comp[comp["off_mode"] != 0].copy()
+        off["whole_unit"] = off["off_mode"] % off["period"] == 0
+        periods, fracs, counts = [], [], []
+        for period in sorted(off["period"].unique()):
+            if period > 6:
+                continue
+            g = off[off["period"] == period]
+            tot = g["reads"].sum()
+            if tot < 100:
+                continue
+            periods.append(period)
+            fracs.append(g.loc[g["whole_unit"], "reads"].sum() / tot)
+            counts.append(int(tot))
+
+        fig, ax = plt.subplots(figsize=(9, 3.4))
+        x = np.arange(len(periods))
+        # Period 1 is grey, not blue: it is 1.0 by construction and must not read as a measurement.
+        colours = [GREY if p == 1 else "#2a78d6" for p in periods]
+        ax.bar(x, fracs, color=colours, width=0.7)
+        for xi, (f, c, p) in enumerate(zip(fracs, counts, periods)):
+            label = f"{f:.0%}\nn={c:,}" + ("\nby construction" if p == 1 else "")
+            ax.text(xi, f + 0.02, label, ha="center", va="bottom", fontsize=7.5, color=INK)
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{PERIOD_NAME.get(p, p)}\n({p} bp)" for p in periods], fontsize=8.5)
+        ax.set_ylabel("of off-mode reads")
+        ax.set_ylim(0, 1.28)
+        ax.yaxis.set_major_formatter(lambda v, _p: f"{v:.0%}")
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+        ax.set_title(
+            "Stutter moves the tract by whole motif units", fontweight="bold", fontsize=11
+        )
+        fig.tight_layout()
+        return fig
+
+    mo.vstack(
+        [
+            mo.md(
+                "## 5 · Is stutter whole-unit, and what shape is it?\n"
+                "The read model prices slippage in **whole motif units**, and treats the chance of "
+                "slipping *k* units as falling off geometrically with *k*. Both are assumptions "
+                "worth testing rather than asserting. A read whose length difference is *not* a "
+                "multiple of the period is not slippage at all — it is an indel, an interruption, "
+                "or a mis-delimited tract. **Period 1 is 1.0 by construction** — every integer is "
+                "a multiple of one — so it is drawn in grey and carries no evidence either way."
+            ),
+            whole_unit_figure(),
+            mo.md(
+                "The model's premise holds where it can be tested: di and tri are 95–98% whole-unit "
+                "and hexa 93%. Tetra and penta fall short, and their non-unit residue sits at ±1 **bp** "
+                "— single-base indels rather than slippage, which is what the remainder *should* look "
+                "like if the model is right about the rest. Both cells are thin, so treat the shortfall "
+                "as a flag for the synthetic validation to settle, not as a measured rate.\n\n"
+                "Given whole-unit steps, this is where reads actually land:"
+            ),
+            shape_figure(),
+            mo.md(
+                "The **0 bar is the reads that agree with the allele**, so each panel carries both "
+                "halves of the question at once: how much stutter there is — the height of "
+                "everything that is *not* 0, quoted in each title — and what shape it takes. The "
+                "axis is logarithmic because those two live four orders of magnitude apart; on a "
+                "linear axis the 0 bar would be the only thing visible.\n\n"
+                "Three things to read off it. Agreement dominates: **over 99% of reads sit exactly "
+                "on the allele** at every period, so stutter is a small perturbation rather than a "
+                "pervasive one — but it is not small where it matters, since the grids above show "
+                "it concentrating in the long-tract cells this average hides. The fall-off from ±1 "
+                "is steep and roughly straight on a log axis, which is what a geometric looks like. "
+                "And it is **asymmetric**, contractions outnumbering expansions by more and more as "
+                "the period grows. That asymmetry is not an artefact of what we can see — a "
+                "censoring explanation (long alleles being harder to span) would make it *grow* "
+                "with tract length, and it does not: it is already there at the shortest tracts."
+            ),
+        ]
+    )
+    return
+
+
+@app.cell
 def _(comp, meta_path, mo, tsv_path):
     mo.md(
         f"""
         ---
-        *Source: `{tsv_path.name}` — {comp['sample'].nunique()} samples,
+        *Source: `{tsv_path.name}` — {comp['unit'].nunique()} units,
         {comp[['contig', 'start', 'end']].drop_duplicates().shape[0]:,} loci, ng's default STR
         delimiter, one region-typing walk (`examples/ng_ssr_cohort_stutter.rs`). Sample metadata:
         `{meta_path.name}`. Only complete reads carry a length, so partials — censored lower

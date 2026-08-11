@@ -55,6 +55,49 @@ by document kind:
   - [`locus_generation_ssr.md`](spec/locus_generation_ssr.md) — the first generator (STR): one
     tract segment → one locus, adapting production `src/ssr/pileup/` and carrying partial (censored)
     observations the old path dropped.
+  - **Step 4, the parameter pre-pass, in eight documents** — the noise rates and rates of variation
+    a caller runs on, estimated **without first calling genotypes**. Five describe the **per-sample
+    route** (walk each sample, fold its loci into histograms, fit from those); the last three
+    describe a **second, complete route to the same parameters** (keep raw evidence at the same loci
+    in every sample, fit everything once when they are all in). Both are built, and their estimates
+    compared:
+    [`parameter_prepass.md`](spec/parameter_prepass.md) (read first: what the step produces, why
+    production's numbers are biased, the estimator both paths share);
+    [`parameter_prepass_generic.md`](spec/parameter_prepass_generic.md) (the SNP/indel path: two
+    histograms, the per-base error rate, the sample's rates, the inbreeding coefficient);
+    [`parameter_prepass_ssr.md`](spec/parameter_prepass_ssr.md) (the STR path: what stutter
+    actually looks like, and the per-locus table its four numbers are fitted from);
+    [`parameter_prepass_census_sites.md`](spec/parameter_prepass_census_sites.md) (the two
+    censuses — the same loci in every sample, so answers can be compared); and
+    [`parameter_prepass_cohort.md`](spec/parameter_prepass_cohort.md) (the gather: diversity, the
+    frequency spectrum, contamination, relatedness).
+    Then the second route, in three documents that map to three modules:
+    [`parameter_prepass_joint_fit.md`](spec/parameter_prepass_joint_fit.md) (**read first** — what the
+    route is, what it produces, and the estimator: each locus weighted by its own allele frequency in
+    the cohort, so the fit runs once over every sample rather than per sample);
+    [`parameter_prepass_joint_loci.md`](spec/parameter_prepass_joint_loci.md) (which loci every sample
+    keeps evidence at — uniform for ordinary sites, **equal per repeat-count stratum** for STR loci);
+    and [`parameter_prepass_joint_records.md`](spec/parameter_prepass_joint_records.md) (what is
+    recorded at each, and how it is encoded).
+  - [`repeat_catalog.md`](spec/repeat_catalog.md) — **the reference's tandem-repeat catalog**, built
+    inside the pass that already streams the whole FASTA (`reference_info`), by a command whose only
+    job is that, so a genome is scanned once instead of once per sample. It exists because the
+    parameter pre-pass's **random sample of STR loci per repeat-count stratum** needs the genome
+    enumerated first. It records **repeats, not loci** — both spans, period, score, motif and purity —
+    so a reader derives the segmentation, and the STR loci under any copy floor it chooses, without
+    opening the FASTA. Independent work; step 3 is designed for as a future reader, not wired.
+    Companions: [`arch/repeat_catalog.md`](arch/repeat_catalog.md) (types & interfaces) and
+    [`impl_plan/repeat_catalog.md`](impl_plan/repeat_catalog.md) (the build order).
+  - [`synthetic_validation.md`](spec/synthetic_validation.md) — the generated data the calling
+    steps are graded against.
+- **`research/`** — measurements, kept apart from the designs they settled so a spec can point at
+  a number rather than repeat it.
+  - [`parameter_estimator_experiments_2026-08-06.md`](research/parameter_estimator_experiments_2026-08-06.md)
+    — what step 4's estimators actually do, from three harnesses in `examples/`. Bias computed
+    **exactly** rather than simulated, so "unbiased" is decided rather than estimated. It carries
+    the numbers behind the multi-library cell key, the inbreeding coefficient, depth binning, the
+    heterozygote `½`, and the STR stutter accumulator — and a list of the findings it overturned,
+    including several of its own.
 - **`arch/`** — architecture (the shared types and the interfaces implementations
   plug into).
   - [`ng_step_interfaces.md`](arch/ng_step_interfaces.md) — the common domain

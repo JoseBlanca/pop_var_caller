@@ -2179,7 +2179,7 @@ mod tests {
             GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
         );
         let typed = vec![
-            Ok(TypedRegion {
+            Ok::<_, crate::ng::repeat_catalog::RepeatCatalogError>(TypedRegion {
                 region: region(0, 1, 50),
                 kind: RegionKind::Generic,
             }),
@@ -2242,10 +2242,12 @@ mod tests {
             )),
             GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
         );
-        let typed = vec![Ok(TypedRegion {
-            region: region(0, 1, 100),
-            kind: RegionKind::Generic,
-        })];
+        let typed = vec![Ok::<_, crate::ng::repeat_catalog::RepeatCatalogError>(
+            TypedRegion {
+                region: region(0, 1, 100),
+                kind: RegionKind::Generic,
+            },
+        )];
 
         let mut stream = SampleLocusObservationsIterator::new(typed.into_iter(), reads, generators);
         let loci = (&mut stream)

@@ -56,6 +56,11 @@
 //! `#[ignore]`d and driven by environment, so one file serves both organisms — the
 //! convention `locus_generation/pileup/parity.rs` set.
 //!
+//! **Each reference needs its repeat catalog beside it**, written once by
+//! `pop_var_caller_exp repeat-catalog`; that file is where the typed regions come from and
+//! there is no scan to fall back on. A reference without one fails the test at start-up,
+//! naming the command that writes it.
+//!
 //! **`--release` here is only speed, unlike in `parity.rs`.** That file needs release
 //! because real paired-end data trips a reachable `debug_assert!` in *production's* walker,
 //! which it runs alongside ng's; nothing here runs production, and the debug build
@@ -120,9 +125,9 @@
 //! `--test-threads=1` because the four tests each walk the same alignment file and the
 //! useful output is the `--nocapture` lines, which interleave otherwise.
 //!
-//! A BED rather than a region string, and it is required: both cohorts ship one, the reads
-//! exist only inside it, and typing a whole tomato chromosome to reach 100 kb of alignment
-//! would spend the run's time in region typing.
+//! A BED rather than a region string, and it is required: both cohorts ship one and the
+//! reads exist only inside it, so a whole-chromosome region list would spend the run walking
+//! reference no read covers.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -151,10 +156,8 @@ use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, VerificationHandle,
     read_reference_verifying_or_creating_fai,
 };
-use crate::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig, TypedRegionError,
-    TypedRegionIterator,
-};
+use crate::ng::region_typing::{GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig};
+use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria};
 use crate::ng::types::{GenomeRegion, InbreedingF, Ploidy, Position};
 
 use noodles_fasta::fai;
@@ -201,7 +204,10 @@ pub(super) struct WalkInputs {
     index: Arc<fai::Index>,
     reference: OpenReference,
     /// The BED, resolved against this reference's contig table.
-    spans: GenomeRegions,
+    spans: Vec<GenomeRegion>,
+    /// The reference's repeat catalog, checked against the reference the pass just read.
+    /// Where the typed regions come from; nothing here scans the FASTA for repeats.
+    catalog: RepeatCatalog,
     read_groups: ReadGroups,
     sample: SampleReadGroups,
     /// The background check that the `.fai` describes this FASTA. **Joined at the end of
@@ -243,8 +249,15 @@ impl WalkInputs {
                 length: u32::try_from(entry.length).expect("a contig shorter than 4 Gb"),
             })
             .collect();
-        let spans = GenomeRegions::from_bed_path(&bed, &bounds)
-            .expect("the BED resolves against this reference's contigs");
+        let spans: Vec<GenomeRegion> = GenomeRegions::from_bed_path(&bed, &bounds)
+            .expect("the BED resolves against this reference's contigs")
+            .iter()
+            .collect();
+        // **The typed regions come from the catalog beside the reference**, checked against
+        // what the pass just reported. A reference with no catalog stops the test naming the
+        // command that writes one, rather than falling back to a scan.
+        let catalog = RepeatCatalog::open_beside_reference(&fasta, &info)
+            .expect("the reference has a repeat catalog beside it");
 
         let read_groups = build_read_groups(std::slice::from_ref(&reads))
             .expect("the alignment file's header declares its read groups");
@@ -264,6 +277,7 @@ impl WalkInputs {
             index,
             reference: OpenReference::new(info),
             spans,
+            catalog,
             read_groups,
             sample,
             verification,
@@ -290,26 +304,24 @@ impl WalkInputs {
         }
     }
 
-    /// The typed-region catalog over the BED, walked **once** and kept.
+    /// The BED's stretches cut into typed regions, read from the catalog **once** and kept.
     ///
     /// Both arms of the sharding identity are fed from this one list, so the only thing
-    /// they differ in is which accumulator each region's loci reach.
-    /// Re-typing per arm would put region typing inside the comparison, and a difference
-    /// there would read as a difference in the accumulator.
+    /// they differ in is which accumulator each region's loci reach. Re-reading per arm
+    /// would put the segmentation inside the comparison, and a difference there would read
+    /// as a difference in the accumulator.
+    ///
+    /// `pub(super)` because [`truth_anchors`](super::truth_anchors) reads the same
+    /// segmentation to count its model-free anchors over the identical regions.
     pub(super) fn typed_regions(&self) -> Vec<TypedRegion> {
         let mut typed = Vec::new();
-        let walk = TypedRegionIterator::over_regions(
-            WindowedRefSeq::with_shared_index(
-                self.fasta.clone(),
-                self.contigs.clone(),
-                self.index.clone(),
-            ),
-            self.spans.clone(),
-            TypedRegionConfig::default(),
-        )
-        .expect("the BED's spans name contigs this reference has");
-        for item in walk {
-            typed.push(item.expect("the reference reads through the whole typed-region walk"));
+        let criteria = StrRepeatCriteria::from(&TypedRegionConfig::default());
+        let segments = self
+            .catalog
+            .genome_segments(&criteria, ReadScope::Regions(&self.spans))
+            .expect("the BED's spans name contigs this catalog holds");
+        for item in segments {
+            typed.push(item.expect("the catalog reads through the whole of the BED"));
         }
         let generic = typed
             .iter()
@@ -371,7 +383,7 @@ impl WalkInputs {
             GeneratorSlot::Generator(Box::new(generator)),
             GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
         );
-        let regions: Vec<Result<TypedRegion, TypedRegionError>> =
+        let regions: Vec<Result<TypedRegion, RepeatCatalogError>> =
             regions.into_iter().map(Ok).collect();
         let mut stream =
             SampleLocusObservationsIterator::new(regions.into_iter(), sample, generators);
@@ -434,7 +446,7 @@ impl WalkInputs {
             GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
         );
 
-        let regions: Vec<Result<TypedRegion, TypedRegionError>> =
+        let regions: Vec<Result<TypedRegion, RepeatCatalogError>> =
             regions.into_iter().map(Ok).collect();
         let mut stream =
             SampleLocusObservationsIterator::new(regions.into_iter(), sample, generators);

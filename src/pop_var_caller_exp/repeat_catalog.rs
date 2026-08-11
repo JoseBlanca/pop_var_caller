@@ -21,17 +21,13 @@ use crate::ng::repeat_catalog::criteria::{
     CATALOG_MAX_PERIOD, CATALOG_MAX_STR_LEN_BP, CATALOG_MIN_FLANK_BP, CATALOG_MIN_PERIOD,
 };
 use crate::ng::repeat_catalog::{
-    BuildTally, RepeatCatalogBuilder, RepeatCatalogError, StrRepeatCriteria,
+    BuildTally, RepeatCatalogBuilder, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
 use crate::ng::tandem_repeat::{
     DEFAULT_MATCH_REWARD, DEFAULT_MISMATCH_PENALTY, PeriodRange, PeriodRangeError, ScanParams,
 };
 use crate::ng::types::Bp;
 use crate::pop_var_caller_exp::cli::parsers::parse_min_copies;
-
-/// What the file is called when `--output` is not given: a sibling of the reference, the
-/// way a `.fai` is, so a later run finds it without being told where it is.
-pub const CATALOG_SUFFIX: &str = ".repeats.parquet";
 
 /// The permissive floor handed to the scanner itself.
 ///
@@ -113,6 +109,27 @@ pub enum RepeatCatalogCliError {
         source: PeriodRangeError,
     },
 
+    /// `--max-period` is above the longest motif a row can hold.
+    #[error(
+        "--max-period {max} is above {limit}, the longest motif a catalog row can hold; the \
+         header would claim a range the file cannot contain, and a reader asking for a \
+         period above {limit} would get an empty answer instead of a refusal"
+    )]
+    PeriodCeiling {
+        /// What was asked for.
+        max: u8,
+        /// The longest motif a row can hold.
+        limit: u8,
+    },
+
+    /// `--min-flank-bp 0` would let a tract abut a contig's first or last base.
+    #[error(
+        "--min-flank-bp 0 would store tracts abutting a contig's first or last base, which \
+         have no sequence to anchor a read against; every reader of the catalog assumes \
+         they are absent, so at least 1 base of flank is required"
+    )]
+    NoFlankFloor,
+
     /// A catalog is already there and `--force` was not given.
     #[error(
         "a catalog already exists at {path}; pass --force to replace it \
@@ -152,11 +169,10 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         min_copies: SCANNER_MIN_COPIES,
     };
 
-    let output = args.output.clone().unwrap_or_else(|| {
-        let mut path = args.reference.clone().into_os_string();
-        path.push(CATALOG_SUFFIX);
-        PathBuf::from(path)
-    });
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| sibling_catalog_path(&args.reference));
     if output.exists() && !args.force {
         return Err(RepeatCatalogCliError::Exists { path: output });
     }
@@ -185,7 +201,7 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
     })?;
 
     let tally = builder
-        .finish(&reference, env!("CARGO_PKG_VERSION"))
+        .finish(&reference)
         .map_err(|source| RepeatCatalogCliError::Build { source })?;
 
     report(&tally, reference.contigs.len());
@@ -201,6 +217,22 @@ fn catalog_criteria(args: &RepeatCatalogArgs) -> Result<StrRepeatCriteria, Repea
             source,
         }
     })?;
+    // The scanner emits no motif longer than `MAX_MOTIF_LEN`, so a wider ceiling is a
+    // header that describes a file it cannot have: `serves` would say yes to a reader asking
+    // for period 8 and the answer would be silently empty.
+    if args.max_period as usize > MAX_MOTIF_LEN {
+        return Err(RepeatCatalogCliError::PeriodCeiling {
+            max: args.max_period,
+            limit: MAX_MOTIF_LEN as u8,
+        });
+    }
+    // A tract with no sequence beside it is one a live scan turns down for having no flank
+    // to anchor against, and the catalog's readers rely on the file holding none of them —
+    // `CatalogRejectionCounts` has no counter for that reason precisely because it cannot
+    // arise. One base is enough to keep that true; the default is 15.
+    if args.min_flank_bp == 0 {
+        return Err(RepeatCatalogCliError::NoFlankFloor);
+    }
 
     Ok(StrRepeatCriteria {
         classification: SsrSegmentCriteria {
@@ -300,7 +332,7 @@ mod tests {
         // The path the driver builds — kept in step with `run_repeat_catalog` by being the
         // same expression.
         let mut expected = args.reference.clone().into_os_string();
-        expected.push(CATALOG_SUFFIX);
+        expected.push(crate::ng::repeat_catalog::CATALOG_SUFFIX);
         assert_eq!(
             PathBuf::from(expected),
             PathBuf::from("/data/ref.fa.repeats.parquet")
@@ -330,7 +362,7 @@ mod tests {
     #[test]
     fn the_command_writes_a_catalog_that_opens_against_its_reference() {
         use crate::ng::reference_info::{ReferenceSource, read_reference_info};
-        use crate::ng::repeat_catalog::RepeatCatalog;
+        use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog};
         use std::io::Write;
 
         let dir = tempfile::tempdir().expect("tmp");
@@ -356,7 +388,7 @@ mod tests {
         run_repeat_catalog(&args).expect("the build succeeds");
 
         let mut catalog_path = fasta.clone().into_os_string();
-        catalog_path.push(CATALOG_SUFFIX);
+        catalog_path.push(crate::ng::repeat_catalog::CATALOG_SUFFIX);
         let catalog_path = PathBuf::from(catalog_path);
         assert!(catalog_path.exists(), "the catalog lands beside the FASTA");
 
@@ -374,11 +406,11 @@ mod tests {
             "the header records what wrote it"
         );
         assert!(
-            catalog.repeats_in_region(None).expect("rows").any(|row| row
-                .expect("a row")
-                .motif
-                .as_bytes()
-                == b"CAG"),
+            catalog
+                .repeats(ReadScope::WholeReference)
+                .expect("rows")
+                .iter()
+                .any(|row| row.motif.as_bytes() == b"CAG"),
             "the planted tract is in the file"
         );
 

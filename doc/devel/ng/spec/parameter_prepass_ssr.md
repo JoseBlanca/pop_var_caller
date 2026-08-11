@@ -1,7 +1,16 @@
 # ng — the parameter pre-pass: the STR path
 
 *Design spec, 2026-08-03. **Revised 2026-08-06 against measurement**, and the measurements changed
-the accumulator's key rather than only its constants:
+the accumulator's key rather than only its constants. **Revised again 2026-08-07**: §5.1 records
+that the copy floors cannot be swept downward far by re-typing. **Revised 2026-08-08**: the archive
+survey of 2,457 tomato libraries delivers the per-period floors table, and it is a measurement rather
+than a decision — §5.1 records what adopting it would cost. **Revised 2026-08-09**: §4.5 adds what
+has to hold where a stratum barely stutters — a second floor, on slipped reads rather than on loci,
+because the level and the two shares starve at rates 20,000-fold apart; and agreement with the
+generic path's substitution rate, which is obligatory there because the two noise models coincide
+when nothing slips.*
+
+*Source for the 2026-08-06 numbers:*
 [`../research/parameter_estimator_experiments_2026-08-06.md`](../research/parameter_estimator_experiments_2026-08-06.md)
 §6. **No code yet — this settles the design.** One of five documents covering ng step 4. The shared
 framing — why parameters are estimated without calling genotypes, and how the maximum-likelihood fit
@@ -87,6 +96,10 @@ constrained would quietly wear the difference.
 that the two numbers can be *compared*: if the error rate inside repeat tracts comes out higher than
 outside — which is plausible and, as far as these specs record, unmeasured — that is a finding.
 Tying them destroys the observation before it can be made.
+
+**And the comparison has a place where it is not merely interesting but obligatory.** Where a
+stratum barely slips, this path's noise model degenerates into the generic one, so the two rates have
+to meet or one of them is wrong. §4.5 makes that a requirement and fixes what "meet" means.
 
 *Naming:* both are written `ε` in their own formulas, because each is its model's error parameter and
 no formula contains both. In prose this document says **the STR path's substitution error** and
@@ -217,7 +230,7 @@ chance of it having slipped twice rather than once is taken to be the same eithe
 inside its own counting error, at 1.5, 0.9, 1.6 and 0.5 standard errors. But the gaining side decays
 faster in **all four** rows, and four consistent signs pool to roughly 2 SE. The finding is "no
 difference we can afford to fit", not "no difference". If the fall-off ever becomes a function of
-level (§8.1), revisit this with the pooled test rather than the per-row one.
+level (§8.2), revisit this with the pooled test rather than the per-row one.
 
 **The fall-off value does not transfer between datasets.** About 10 reads in 100 take a second step in
 human against about 7 in tomato. The structure is portable; the number has to be fitted.
@@ -251,22 +264,38 @@ something the data supports here and would misfire if the strata were keyed by l
 
 ### 4.1 What the walk accumulates
 
-**One table per `(read group, period, repeat count)`, and each entry is one locus.** That last clause
-is the revision: an earlier version of this section counted *reads*, pooling every read in the
-stratum into a handful of offset buckets, and that object cannot answer the question this path is
-asking.
+**Still a histogram, and still one that forgets which locus was which. What changed is what it
+counts: loci instead of reads.**
 
-Each locus contributes one entry, holding:
+One table per `(read group, period, repeat count)`. Each locus is reduced to its **shape** — how
+many of that locus's reads fell at each whole-repeat offset from the reference tract length — and
+the table counts *how many loci in this stratum had each shape*. **Two loci that looked alike
+collapse into one entry with a count of two**, exactly as the generic path's histogram counts sites
+that looked alike; which loci they were is never asked again, and neither their coordinates nor
+their sequence ever enters.
 
-- **how many of that locus's reads showed each whole-repeat offset from the reference tract length**,
-  over a bounded range with the end buckets saturating (below);
+Three loci at four reads each make the difference concrete. Two of them show all four reads at the
+reference length; the third shows three there and one a repeat short:
+
+| | what the table holds |
+|---|---|
+| **counting reads** — the earlier version | one row for the whole stratum: *11 reads at the reference length, 1 read one repeat short* |
+| **counting loci** — this version | two entries: *"all four reads at the reference length" — 2 loci*, and *"three at the reference, one a repeat short" — 1 locus* |
+
+The read row is equally consistent with two stories the fit has to tell apart: every locus is
+reference-length and one read slipped, or one locus's own allele is a repeat short and it happened
+to get one read. **Keeping a locus's reads together is what distinguishes them**, and the collapse
+is real rather than nominal — at HG002's 300× the table holds 0.43 entries per locus, so most loci
+share a shape with another ([research note](../research/parameter_estimator_experiments_2026-08-06.md)
+§6.8, and the memory paragraph at the end of this section).
+
+Each entry therefore holds:
+
+- **how many of that locus's reads showed each whole-repeat offset**, over a bounded range with the
+  end buckets saturating (below);
 - **how many showed something that is not a whole number of copies** — the guard bucket (below);
 - and, pooled across the stratum rather than per locus, **how many bases were compared and how many
   of them mismatched**. Two running counts, and they are what `ε` is fitted from.
-
-Entries with identical shapes are counted together, exactly as the generic path's histogram counts
-sites that looked alike: the table holds *how many loci in this stratum looked like this*, and which
-loci they were is never asked again.
 
 **Why the locus and not the read, and this is the finding that reopened the section.** A read carries
 no genotype: it drew one of the locus's two alleles and then slipped. Pool reads across loci and what
@@ -294,18 +323,17 @@ question — both become askable only once something upstream of the gather can 
 per read group because splitting one site between two entries lets each entry draw its own genotype
 independently. Pooling reads across loci is the same mistake with the site dissolved entirely.
 
-**One locus contributes one entry per read group that covered it, and that is not the mistake it
-looks like.** A locus's genotype is one thing, so splitting its reads between two entries lets each
-entry draw its own genotype independently — which is exactly what
-[`parameter_prepass_generic.md`](parameter_prepass_generic.md) §1 rejects for a windowed histogram
-keyed per read group. The difference is what is being counted. **Measured:** each read-group entry's
-own distribution is correctly specified — the genotype is still drawn once for the locus and still
-enters through the same mixture — so the product over a locus's entries is a *composite likelihood*,
-every factor a true marginal, and the estimator stays consistent. The generic path measured the same
-split costing precision and not correctness, in all 25 worlds tried
-([research note](../research/parameter_estimator_experiments_2026-08-06.md) §2.6). What must not be
-split is a *locus's reads within one read group*, which is what §4.1's finding is about, and 1,550
-of the 1,707 samples in the tomato archive survey carry one read group anyway.
+**A locus covered by two read groups still makes two entries, and that one is safe.** It looks like
+the same mistake — a locus has one genotype and its reads are being split — so it is worth saying
+exactly why it is not. **Measured:** each read-group entry's own distribution is correctly specified,
+because the genotype is drawn once for the locus and enters both entries through the same mixture.
+The product over them is what the literature calls a *composite likelihood*: every factor is a true
+marginal, so the estimator stays consistent and what the split throws away is the dependence between
+a locus's entries, which is precision. The generic path measured exactly that split — fitting
+everything from its read-group table alone — and found it unbiased in all 25 worlds tried
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §2.6). **What must not be
+split is a locus's reads within one read group**, which is the paragraph above; and 1,550 of the
+1,707 samples in the tomato archive survey carry one read group anyway.
 
 **Decision: the offsets are measured from the reference tract length.** This closes the `OPEN` that
 this section and §8 carried before this revision, and it closes it the other way from the leaning
@@ -326,10 +354,10 @@ because the genotype term is now being asked to explain a quantity that moved wi
 
 | how the accumulator was keyed / what the fit believed | slippage level | direction split | heterozygosity |
 |---|---:|---:|---:|
-| reference origin, scored as such | **0.0%** | **0.000** | **0.0%** |
-| modal origin, scored as a fixed origin — 3 reads a locus, 10 loci in 100 heterozygous | **+50%** | +0.166 | −62% |
-| modal origin, scored as a fixed origin — 3 reads a locus, 46 in 100 heterozygous | **+408%** | +0.311 | −75% |
-| modal origin, scored as a fixed origin — 12 reads a locus, 46 in 100 heterozygous | **+90%** | +0.225 | −12% |
+| reference origin, scored as such — at every depth and heterozygosity tried | **0.0%** | **0.000** | **0.0%** |
+| modal origin, scored as a fixed origin — 3.2 reads a locus, 10 loci in 100 heterozygous | **+50%** | +0.166 | −62% |
+| modal origin, scored as a fixed origin — 3.2 reads a locus, 46 in 100 heterozygous | **+408%** | +0.311 | −75% |
+| modal origin, scored as a fixed origin — 9.6 reads a locus, 46 in 100 heterozygous | **+90%** | +0.225 | −12% |
 
 **The direction split is the row to read twice.** The truth in every world is a split of 0.17 — a
 read is 4.9 times as likely to lose a repeat as gain one, which is exactly what §3 measures at tomato
@@ -339,18 +367,28 @@ dinucleotides. Centring on the mode and scoring it as a fixed origin returns 0.4
 3.4× on known-homozygous ones — reproduced exactly, from a keying choice rather than from
 thresholding, and it is the same size.
 
-*A fit that models the centring recovers most of it, and is still the worse design.* Scoring the
+**The bias shrinks with depth and does not go away**, because a heterozygous locus's mode is the
+wrong origin however many reads confirm it: still +90% at 9.6 reads a locus.
+
+*A fit that models the centring is unbiased, and still does not pay for itself.* Scoring the
 mode-centred table by summing over everything the centring forgot returns the level to within 1.1%
-and the direction split to within 0.004 — but leaves the fall-off 0.02 to 0.04 high against a truth
-of 0.087, and it costs an enumeration over every way a locus's reads could have landed. The reference
-origin needs none of that and is exactly unbiased. **There is no case left for the modal origin**, and
+and the direction split to within 0.004, and the fall-off is recoverable too — a residual that
+looked like bias turned out to be the measuring harness's own climb stopping short
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.3.1). What it costs
+is two things the reference origin does not. It needs an enumeration over every way a locus's reads
+could have landed, where the reference origin scores a locus directly. And **it makes the climb over
+the genotype frequencies converge a thousand times more slowly** — mode-centring leaves a locus's
+shape saying much less about which alleles it carries, and that overlap is exactly what sets an
+expectation-maximization scheme's rate. The reference-origin climb converges in under 200 passes on
+the same data; the mode-centred one has not converged in 200,000. That climb sits inside the inner
+loop of a search that runs once per stratum. **There is no case left for the modal origin**, and
 one further reason to be glad of it: the STR census already keys by the reference tract length
 ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §2.1), so the two objects
 now share an origin and §4.2 of [`parameter_prepass.md`](parameter_prepass.md)'s comparison between
 them is a comparison of the same quantity.
 
 **The offset range saturates at its ends, and the end buckets are scored by their marginal.** "At
-least three repeats short" is one bucket, and its probability is the sum over every offset it absorbs
+least four repeats short" is one bucket, and its probability is the sum over every offset it absorbs
 — never the probability of sitting exactly on the edge. **Measured:** the marginal is exactly
 unbiased at every range tried, ±1, ±2 and ±3, and costs a sum over a handful of kernel terms. Plugging
 in the edge instead fails the algebraic gate outright — the bucket probabilities sum to 0.9488 at ±1
@@ -359,15 +397,26 @@ rather than to one — and, rescaled so they do sum to one, costs **+33% of the 
 ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.4). That is the regime
 long tracts sit in, so the error is largest exactly where slippage matters most.
 
-**How wide the range must be is set by the alleles, not by the slippage** — and that is the one thing
-the reference origin costs. §3 measures that the slippage mass sits at ±1, which is what made a tight
-range safe under the modal origin. Against the reference, a read's offset is *its allele's distance
-from the reference length* plus the slip, so the range has to cover the allele spectrum too. **OPEN,
-and measurable now on data we hold:** the distribution of a sample's tract lengths against the
-reference length, per stratum, on the tomato cohort and HG002 — a measurement §2's and §3's tooling
-already produces, re-keyed. **A range of ±4 is the working value** until that lands, inherited from
-the earlier draft and now marked as what it is: a guess about the allele spectrum, not a measurement
-of the slippage.
+**Against the reference origin the end buckets absorb whole alleles, and the marginal rule survives
+that too.** A read's offset is now *its allele's distance from the reference length* plus the slip,
+so a narrow range folds alleles into its ends rather than only far slips — which looks like the one
+thing the reference origin costs. **Measured, and it does not cost it:** on a stratum whose alleles
+reach three repeats either side and where 30 loci in 100 carry one of them, a range of **±1** still
+returns the slippage level to within 0.05% and both shares to within 0.002
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.4). The same rows
+score a plug-in at **−52% of the level**, so this is where the scoring rule earns its keep rather
+than where the range does.
+
+**Two widths, and only one of them is load-bearing.** The *recorded offset range* can be narrow; the
+*allele lengths the fit is allowed to place mass on* must reach beyond it, because that is what lets
+the marginal rule attribute an end bucket to an allele rather than to a far slip. What a narrow
+recorded range costs is the heterozygosity that falls out of the fitted genotype frequencies — 1.5%
+at ±1, 0.7% at ±2 — and heterozygosity is a by-product here, not something this path emits.
+**A recorded range of ±4 is the working value**, chosen so that the ends absorb little on ordinary
+strata rather than because anything forces it. The fitted allele support is the other width, it is
+the load-bearing one, and §8.1 settles it at **±6** —
+[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) carries both as
+`OFFSET_HALF_RANGE` and `ALLELE_OFFSET_LIMIT`.
 
 **A locus's reads are capped, and the cap is a subsample.** The number of distinct entry shapes grows
 with a locus's depth, so a deep locus is entered from a random subsample of its reads down to the
@@ -376,9 +425,10 @@ thinning of the same multinomial, so the entry is distributed exactly as it woul
 depth. Seed the draw from the locus's position, so a region-sharded walk and a single-threaded one
 keep the same reads and merging stays exact — the same rule and the same reason as
 [`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §2.2. **The cap's
-value is `OPEN` (§8.8)**, bounded from below by what the fit needs and from above by the entry
-count; [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1 carries a working
-value and says what would settle it.
+value is not an open design question** (§8.8): both things that would have made it one are measured
+away below — the table's size and the scoring rule's depth limit — leaving a precision trade against
+the width of the entry's counters. [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md)
+§2.1 carries the working value.
 
 **The guard bucket factorises, which is why it can be a diagnostic rather than a parameter.** A read
 that differs from the allele by something that is not a whole number of copies is modelled as an
@@ -389,9 +439,23 @@ under the split, not the split itself:** if a non-whole-repeat outcome is more l
 lengths than at others, the factorisation stops being exact — which the harness can test by making
 the guard rate depend on the allele.
 
-**The guard bucket needs a threshold, and §5 now gives it one.** An earlier version said only that "a
-stratum where it is large is one this noise model cannot describe", which is a field nobody reads.
-§5 sets it.
+**And it needs a threshold, which an earlier version left as "a stratum where it is large" — a field
+nobody reads.** The threshold is **one non-whole-repeat read in ten of the reads that differ from the
+reference tract length**, and §5 is where that number comes from rather than being chosen for
+looking round.
+
+**Which reads the ten are counted out of is worth pinning, because the model and the diagnostic use
+two different denominators and only one of them is computable here.** The *model* statement above is
+about reads that differ from the **allele** — that is what a slip is. The *diagnostic* cannot be:
+the accumulator does not know the allele, only the reference tract length, so the share it reports
+is over reads differing from the **reference**. The two coincide at a locus whose alleles are the
+reference length and diverge otherwise, always in the same direction: a real non-reference allele
+contributes whole-repeat differences to the denominator and none to the numerator, so **the reported
+guard share is diluted relative to the model's**, never inflated. §5's table is measured on
+known-homozygous loci at the reference length, where the two are the same number, and the research
+note's real-data figures — 1.37% on HG002, 1.97% on tomato — are over the reference denominator
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.8). A stratum that
+crosses the threshold on the diluted number has crossed it on the model's too.
 
 **The composition channel is a division, not a search.** Each read is compared against the tract at
 **the length that read shows**, so a mismatch is a substitution and not a slip, and a read's mismatch
@@ -420,15 +484,33 @@ fraction at STR loci against elsewhere.
 ([`parameter_prepass.md`](parameter_prepass.md) §5), and by `(period, repeat count)` because §4 is
 the argument that this is the axis slippage varies on.
 
-**What it costs in memory, and this is the second thing the revision changed.** An earlier version
-priced this object at "kilobytes per read group, the same order as the generic path's", which was
-true of a per-read tally and is not true of a per-locus table. What the table now holds is one entry
-per *distinct locus shape*, so its size runs between two bounds: at tomato's 3 reads a locus, a
-capped 10-bucket entry has a few hundred possible shapes and the whole stratum collapses into them;
-at HG002's 300×, before the read cap fires, nearly every locus is its own shape. **The read cap is
-what keeps it near the first bound**, and it is why the cap exists at all rather than only to bound
-the fit. [`parameter_prepass.md`](parameter_prepass.md) §10.6 measures it rather than assuming it,
-and this object now belongs in that measurement's list beside the windowed histogram.
+**What it costs in memory: measured, and it is not the concern the revision first raised.** Making
+an entry a locus rather than a read takes the table's size with it — a tally of reads is a handful
+of buckets a stratum, while a table of locus shapes grows with how many *distinct* shapes the loci
+take — so this section first said the size ran between two bounds, with nearly every locus its own
+entry at 300×. **Measured on HG002 at 300× over the 50,000-interval GIAB tandem-repeat set, the
+uncapped table is 12,727 entries for 29,811 loci — 0.43 entries a locus, 0.36 MB**
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.8). Deep data
+deduplicates because most loci at a clean tract are "every read at the reference length", so what
+separates two entries is mostly their depth, and depths repeat. **Entries saturate rather than
+scaling with the genome**: a whole tomato genome's 1.73 million STR loci make 70,305 entries —
+2.01 MB — and a whole human genome extrapolates to about 120,000 entries, **3.5 MB**, beside a
+windowed histogram [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §9 prices at
+115 MB per human sample. **This object is not where step 4's memory goes**, and the read cap is not
+what keeps it from being.
+
+**Which leaves the read cap less to do than it was given.** It was introduced to hold the table
+down, which it does not need to do; and it looked like it also marked where the evidence for the
+scoring rule stopped, at 12 reads a locus. **It no longer does: the rule is exactly unbiased at
+every depth to 45 reads a locus** — 0.00% on the level, 0.0000 on both shares, four starting points
+agreeing to 1.00× ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.8).
+Reaching those depths cost only a narrower recorded range, which §4.1's saturation measurement had
+already shown loses nothing.
+
+**So the cap is a precision trade and a counter width, not a correctness limit.** An entry holds its
+bucket counts in single bytes, which a 300× locus overflows, so the cap and the counter width are
+one decision; and reads dropped above the cap are precision the fit does not get. Neither is a
+reason to keep it low, and a design that raises it is not stepping outside what has been measured.
 
 ### 4.2 How the four numbers are fitted
 
@@ -492,8 +574,8 @@ number in §4.1's tables comes from four starts spread over the level, the direc
 at once, and the spread across them is reported beside each fit.
 
 **How sharply the level is determined varies enormously with the data, and that is precision rather
-than bias.** At 3 reads a locus with 46 loci in 100 heterozygous the profile is nearly flat over a
-three-fold range of the level; at 8.5 reads with 10 in 100 heterozygous the same span costs eight
+than bias.** At 3.2 reads a locus with 46 loci in 100 heterozygous the profile is nearly flat over a
+three-fold range of the level; at 9.6 reads with 10 in 100 heterozygous the same span costs eight
 times as much score. The observation count emitted beside each fit
 ([`parameter_prepass.md`](parameter_prepass.md) §6) is what a consumer has to tell those apart.
 
@@ -502,7 +584,10 @@ times as much score. The observation count emitted beside each fit
 Two procedures copied from DRAGstr, both of which **change the estimate**:
 
 1. **A stratum too thin to fit takes its neighbours' value** — adjacent repeat counts at the same
-   period — rather than fitting noise.
+   period — rather than fitting noise. *"Too thin" is two tests and not one:* a floor on loci, which
+   is this rule; and a floor on the reads that actually slipped, which protects the direction split
+   and the fall-off and which a stratum can fail while clearing the first by four orders of
+   magnitude (§4.5). Where only the second fails, only those two parameters are borrowed.
 2. **The fitted levels are held monotonic along the repeat-count axis.** Slippage genuinely rises
    with repeat count (§4), so a fitted sequence that dips in the middle — tracts of 7 repeats coming
    out *less* slippery than tracts of 6 — is reporting the noise in one stratum, not a fact about
@@ -536,8 +621,12 @@ recorded.
 
 ### 4.4 What comes out beside the numbers, and why it has to be aggregated
 
-**This path runs one fit per (read group × stratum) — several hundred per sample, against the generic
-path's four.** The generic path emits four things beside each fit: whether the answer sat on the edge
+**This path runs one fit per (read group × stratum), against the generic path's four fits in total.**
+How many strata there are is bounded by arithmetic rather than guessed: six periods, each running
+from its copy floor (`[6, 4, 4, 3, 3, 3]`, §5.1) up to as many repeats as a read can span, which at
+150 bp reads is 150 for homopolymers and 25 for hexamers. That is 145 + 72 + 47 + 35 + 28 + 23 =
+**350 strata**, of which the ones holding loci are fewer. *(An earlier version said "about 370",
+which counts each period from one repeat rather than from its floor.)* The generic path emits four things beside each fit: whether the answer sat on the edge
 of its ladder, the starting points tried, the estimator's resolution, and how the fit terminated. At
 four fits those are readable records; at several hundred they are a file nobody opens, and
 [`parameter_prepass.md`](parameter_prepass.md) §3.1 already warns that a flag nobody reads is how a
@@ -548,9 +637,14 @@ each read group:
 
 - **how many strata were fitted in place, how many borrowed, how many merged**, and which — the
   merged sets by name, because a merge is a claim about two strata at once;
-- **how many fits disagreed across their starting points** by more than the level's own spacing, with
-  the worst offender named. This is the diagnostic §4.2's four starts exist to produce, and the one
-  that separates a fitted number from a stopped search;
+- **how many fits disagreed across their starting points**, with the worst offender named. This is
+  the diagnostic §4.2's four starts exist to produce, and the one that separates a fitted number
+  from a stopped search. *"Disagreed" needs a size, and this path has no ladder to read one off* —
+  it searches rather than scanning, so there are no rungs. The size is borrowed from the generic
+  path's ladder spacing, a quarter-Phred or 6%, which is that spec's argued estimate of the finest
+  difference a caller can feel ([`parameter_prepass.md`](parameter_prepass.md) §3);
+  [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) fixes it as
+  `START_AGREEMENT_LIMIT`;
 - **how many strata carry a large guard-bucket share** (§5's threshold), with the worst named;
 - **the observation count distribution across strata** — how many loci stood behind the thinnest fit
   and the thickest.
@@ -559,6 +653,98 @@ each read group:
 changes is that nothing downstream is expected to read it, and the summary above is what a person
 sees. **This is an architecture decision as much as a spec one**, and
 [`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) fixes the shape.
+
+### 4.5 What has to hold where there is almost no slippage
+
+**Nearly one locus in two arrives in a stratum where slippage barely happens, and the fit has to be
+as trustworthy there as it is at six repeats.** §5 measures it: tracts below four repeats are 19.9%
+of the loci and tracts of four to five another 28.2%, and their slippage levels are 0.091% and
+0.170% against 2.006% at six or more. So in half the loci this path sees, fewer than 2 reads in
+1,000 move at all. **Two requirements follow and they are different in kind** — the first is about
+which of the four numbers survives thin evidence, the second is about agreeing with the other half of
+step 4.
+
+**First: the level and the two shares starve at very different rates, so one floor cannot protect
+both.** §4.3's `MIN_LOCI_TO_FIT` counts loci, and loci are the wrong unit for the direction split and
+the fall-off: those are measured only by the reads that actually moved. Take a stratum of 100,000
+loci at 5 reads each — half a million reads — at the 0.091% level §5 measures below four repeats.
+**455 reads slipped. Of those about 77 gained a repeat rather than losing one (§3's split of 0.17),
+and about 5 of those 77 gained two (§3's fall-off of 0.065).** The locus count and the count that
+measures the fall-off's gaining arm differ by a factor of 20,000, and §3's own tables already show
+that arm resting on 3 to 13 reads above dinucleotides on real data.
+
+**The level is unharmed by the same thinness, which is what makes the split worth making.** It is a
+proportion over every read, not over the slipped ones: 455 out of 500,000 measures 0.091% to about
+5% of itself, inside the 6% of `START_AGREEMENT_LIMIT`. The fall-off, on 5 reads, is measured to
+about 45% of itself. **The same stratum measures one of its parameters well and another barely at
+all.**
+
+**So a second floor is needed and it counts slipped reads.** How large follows from the precision
+wanted rather than from a preference: at §3's measured values, holding the direction split to 6% of
+itself takes about **1,400** slipped reads and holding the fall-off to the same takes about
+**4,000** — so the floor is on the order of a few thousand, and
+[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) fixes the value. **That the
+fall-off is the parameter which starves first is a second reason for §3's decision to share one
+fall-off between the two directions**, arrived at from precision where §3 arrived at it from the
+thinness of the gaining arm.
+
+**Below that floor the fit is split rather than borrowed whole: the level is fitted in place, the
+direction split and the fall-off are borrowed from the nearest stratum at the same period that
+clears the floor.** Borrowing the level as well would cost 15 to 25% of it per repeat count (§4.3),
+and the level at the bottom of the range is exactly the number §5.1's copy-floor decision reads — so
+it is the one thing not to throw away. The provenance records the two halves separately, because a
+level fitted here with shares from two repeat counts up is a different claim from either a fit or a
+borrow.
+
+**At the bottom of the range the shares will mostly be borrowed, and that is the design working
+rather than failing.** At a level of 0.091%, reaching 4,000 slipped reads takes about **880,000 loci
+at 5 reads each** — against tomato's 1.73 million STR loci in total, no stratum below four repeats
+comes near it. The alternative is not a better-measured share; it is a share fitted on 5 reads and
+reported as though it were measured.
+
+**Second: where nothing slips, this path's noise model *is* the generic path's, so the two
+substitution rates must meet.** With the level at zero a read differs from its allele by substitution
+and nothing else, which is exactly the generic model of
+[`parameter_prepass_generic.md`](parameter_prepass_generic.md) §5.1. §1.1 fits the two rates
+separately and refuses to tie them, and **that decision stands** — but fitted separately is not the
+same as free to disagree. A stratum at 0.091% slippage is a place where the two models describe
+nearly the same thing, so **they must agree there or one of them is wrong**, and §1.1's "the two
+numbers can be *compared*" stops being an aspiration and becomes a test. It runs at step 4's own
+surface, which is where a sample's two halves meet.
+
+**The size is borrowed rather than derived: a quarter-Phred, 6% of the rate** — the generic path's
+ladder spacing, which that spec argues is the finest difference a caller can feel and which §4.4
+already borrows for `START_AGREEMENT_LIMIT`. **Soft, and honestly so:** nothing has yet measured how
+close the two actually come, so the first run of this comparison is what sets the number.
+
+**Three things move the two rates apart legitimately, and each is measurable rather than a tolerance
+to widen:**
+
+- **Tract impurity.** §4.1 counts a mismatch by comparing a read against the motif tiled to that
+  read's length, so an interruption inside the tract is charged to this path's substitution rate and
+  to nothing in the generic path's. `SsrSegment::purity_fraction()`
+  ([`segment_criteria.rs:209`](../../../../src/ng/region_typing/segment_criteria.rs)) measures it per
+  stratum, so the comparison runs on strata at full purity or states the offset it expects.
+- **Which reads survived admission.** §4.1 records that base quality is systematically worse inside
+  repeat tracts, so the two rates describe the same chemistry only if the same share of reads was
+  admitted in both places — which is the check §4.1 already asks read admission to carry.
+- **A real difference, which is the finding §1.1 exists to protect.** If the error rate inside tracts
+  genuinely is higher, this comparison is how it is seen. A gap that persists across strata and read
+  groups once the two above are accounted for is a result, not a failure — and the thing that must
+  not happen is it being absorbed by widening the limit.
+
+**What the exact-bias method cannot answer here, and at a low level it is the whole question.** The
+harness weights every entry by its exact probability under the truth, so what it reports is bias with
+no sampling noise in it — and near zero, sampling is precisely what is in doubt. The level is bounded
+below by zero, so a finite stratum's estimate piles up against that boundary and its spread is not
+symmetric about the truth: an estimator can be exactly unbiased in the harness's sense and still
+return zero from a large share of real strata. **Measurable now, and it needs draws rather than the
+exact method**, for the same reason §4.3's spurious-merge question does. **The experiment:** draw
+strata at §5's measured levels and at the locus counts real strata have, fit each, and report how
+often the level comes back at zero and how wide the spread is. **Leaning:** emit the slipped-read
+count beside the level, the way §4.4's summary already carries the locus count — a level of 0.0003
+standing on 4 slipped reads and one standing on 4,000 are different claims, and nothing downstream
+can currently tell them apart.
 
 ---
 
@@ -588,7 +774,8 @@ rate fitted there is mostly mis-modelled indel however much data stands behind i
 distinguishable from an ordinary thin stratum and should not be silently treated as one, so **the
 fitter reports the non-whole-repeat fraction per stratum alongside the fitted values**.
 
-**The threshold is one non-whole-repeat read in ten of the reads that differ from the allele**, and
+**The threshold is one non-whole-repeat read in ten of the reads that differ from the reference tract
+length** (§4.1 pins that denominator against the model's, which is the allele), and
 the table above is where it comes from rather than a round number chosen for looking like one: the
 strata this model describes well sit at 0.9%, the strata it describes badly at 33.8% and 58.5%, and
 there is nothing in between. Ten percent separates them by a factor of three either way, so a stratum
@@ -1105,13 +1292,28 @@ genotype long alleles" is a claim with no number attached to it.
 
 ## 8. Open questions
 
-1. **How far do a sample's tract lengths sit from the reference tract length, per stratum?** — OPEN,
-   and it is the one question §4.1's decision opened. The offsets are measured from the reference
-   (§4.1), so the recorded range has to cover the allele spectrum and not only the slippage, and §3's
-   measurement of where slippage mass sits does not answer it. **Measurable now**, on the tomato
-   cohort and HG002, from the same tooling that produced §2 and §3 re-keyed to the reference length.
-   *Working value:* ±4, inherited from the earlier draft and now marked as a guess about alleles
-   rather than a measurement of slippage.
+1. **How far should the fit be allowed to place an allele from the reference tract length?** — the
+   question §4.1's decision opened, and now **half measured**. The *recorded* offset range turns out
+   not to matter much — ±1 costs 0.05% of the level with the marginal rule (§4.1) — but the allele
+   lengths the fit may place mass on do, because that is what lets an end bucket be attributed to an
+   allele rather than to a far slip.
+   **The distribution is measured** ([research note](../research/parameter_estimator_experiments_2026-08-06.md)
+   §6.8): on HG002, **88.9 loci in 100 sit exactly at the reference length**, ±4 holds 99%, ±12
+   holds 99.9% and ±19 holds 99.99%; tomato is tighter, **95.7 in 100 at zero** and ±1 holding 99%,
+   which is what a within-species reference should give against a human sample carrying two
+   haplotypes' divergence from GRCh38. So a limit of about ±6 covers all but roughly one human locus
+   in 200. *(An earlier version of this paragraph wrote ±5 and ±18 for two of those rungs; the
+   research note's ±4 and ±19 are the measurement.)*
+   **CLOSED, and what the remaining loci cost turns out to be a threshold rather than a slope.**
+   A locus outside the support has its reads explained the only way left, as slippage. Measured
+   ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.4.1): leaving
+   **2.5% of loci** outside costs 0.1% of the slippage level, **7.9%** costs 2.5%, and **19.3%**
+   costs **+499% with the direction asymmetry destroyed** — 0.17 becoming 0.47, the same collapse
+   the modal origin produced. The cost is nothing and then everything, with the transition between
+   about 8% and 19%.
+   **Decision: ±6**, which leaves about 0.5% of HG002 loci outside — a fifth of the way to the row
+   that is already free. The limit is not a number to tune but a threshold to clear, and nothing in
+   the measured distribution comes near it.
 2. **Should the fall-off depend on the level?** — OPEN. Read groups that stutter more also decay more
    slowly: at tomato dinucleotides, level against the one-step share ran ρ = −0.69, and that survived
    removing real alleles. If real, the fall-off is a function of level rather than a free parameter,
@@ -1149,9 +1351,38 @@ genotype long alleles" is a claim with no number attached to it.
 7. **How often does the monotonicity constraint fire on a truly monotone sequence?** — OPEN and
    **measurable now**, but it needs draws rather than the exact method (§4.3): a spurious merge is
    triggered by sampling noise, and the exact method has none.
-8. **What does the per-locus entry cost at 300× before the read cap fires, and what should the cap
-   be?** — OPEN and **measurable now**: an entry count per stratum on HG002, swept over the cap.
-   §4.1 states the two bounds; nothing has measured where between them the real data sits.
+8. **What does the per-locus entry cost at 300×, and what should the read cap be?** — **CLOSED.**
+   The table is not where this step's memory goes: 0.43 entries a locus uncapped at 300×, 0.36 MB
+   over 29,811 loci. And the cap is not a correctness limit either: the scoring rule is exactly
+   unbiased at every depth to 45 reads a locus (§4.1). What is left is a precision trade and the
+   width of the entry's counters, which is an implementation choice
+   ([`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1) rather than a
+   question about the design.
+9. **Where do the per-period copy floors go?** — **MEASURED, and the change is not made** (§5.1).
+   The archive survey walked 2,457 tomato libraries and puts them at `[6, 6, 7, 6, 5, 4]` against
+   ng's `[6, 4, 4, 3, 3, 3]` — every period but mononucleotides too low, periods 4 and 5 by three
+   copies. Adopting them re-routes 15% of ng's STR loci to the generic path, and nine in ten of
+   every non-mononucleotide one, which is why it is recorded rather than folded in as a default
+   edit. **What remains open is the decision, not the number.**
+   *Two things that stay soft:* the trinucleotide and pentanucleotide crossings each rest on one
+   noisy stratum, and the two-to-four-repeat spread between libraries is **not** yet attributable to
+   preparation — grouping by project explains 45% of it, but a project bundles preparation with the
+   instrument, the batch and the read length, and read length alone would produce the same pattern
+   geometrically. Separating them needs the read-length join the survey's header calls for.
+10. **How does a fitted level behave when the truth is near zero?** — OPEN and **measurable now**,
+    and like §8.7 it needs draws rather than the exact method (§4.5): the level is bounded below by
+    zero, so a finite stratum's estimate piles against that boundary and the exact method — which
+    has no sampling noise — cannot see it. **The experiment:** draw strata at §5's measured levels
+    and at real locus counts, and report how often the level returns zero and how wide the spread
+    is. *Leaning:* none on the estimator; the reporting change §4.5 names — the slipped-read count
+    emitted beside the level — is worth making whatever the answer.
+11. **How closely do this path's substitution rate and the generic path's actually agree at a
+    low-slippage stratum?** — OPEN, and **the number that decides §4.5's limit**. That limit is
+    currently the generic path's ladder spacing borrowed for want of a measurement, so the first run
+    of the comparison sets it. **Blocked only on the generic half existing**, not on any design
+    question. *Leaning:* none, and deliberately — the interesting outcome is a persistent gap, which
+    is §1.1's unmeasured finding rather than a defect, and pre-committing to a number invites
+    reading it as one.
 
 ---
 
@@ -1185,13 +1416,35 @@ genotype long alleles" is a claim with no number attached to it.
    origin, generate and fit under the same key, and the bias must be **exactly zero** on all four
    numbers. It is: 0.000% on the level, 0.0000 on both shares, and the four starting points agree to
    1.000×. A number other than zero there is the harness's, not the estimator's.
-3. **It agrees with truth where truth exists.** On HG002, the stutter parameters fitted by the
-   marginal likelihood must match those measured directly on known-homozygous loci — the 2.0% at ≥6
-   repeats and the 3.4× direction split, within the fit's own error. **This is the test production's
-   estimator fails** ([`parameter_prepass.md`](parameter_prepass.md) §2.2), and the reason for the
-   whole design. **It is also the only check in this document that does not come from the model
-   itself**: every recovery test above generates its data from the model it then fits, so a shared
-   misspecification cancels and passes.
+3. **It agrees with truth where truth exists — run 2026-08-08, and it does.** On HG002, the stutter
+   parameters fitted by the marginal likelihood must match those measured directly on
+   known-homozygous loci. **This is the test production's estimator fails**
+   ([`parameter_prepass.md`](parameter_prepass.md) §2.2), and the reason for the whole design. **It
+   is also the only check in this document that does not come from the model itself**: every
+   recovery test above generates its data from the model it then fits, so a shared misspecification
+   cancels and passes.
+
+   Fitted by [`ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs) over the
+   50,000-interval tandem-repeat set at 30×, against the direct measurements in §3 and §5:
+
+   | | fitted, summing over the genotype | measured on known-homozygous loci |
+   |---|---:|---:|
+   | slippage at 6 or more repeats | **1.851%** | 2.006% |
+   | dinucleotide, share of slipped reads gaining | **0.250** | 0.229 |
+   | mononucleotide, the same | **0.280** | 0.351 |
+
+   **The direction split is the row that matters**, because it is the one that *inverts* under the
+   biased estimator: §2.2 of the shared spec records 0.9× measured over all loci against 3.4× over
+   known-homozygous ones — gains appearing more common than losses. The fit returns 3.0× **from all
+   loci, with no truth genotypes**, which is the design's central claim demonstrated on real reads
+   rather than on constructed worlds.
+
+   *One trap this run walked into first, worth recording because it is a property of the pooling and
+   not of the estimator.* A 500-locus floor on which strata are fitted returned 1.077% for the level
+   — half the target — because it dropped every stratum beyond 15 repeats, and those carry 14.5% of
+   the reads at a mean rate of 6.494%. **A summary pooled over "6 or more repeats" is dominated by
+   where its strata stop**, so the floor has to be low enough to keep the tail before the pooled
+   number means anything. The per-stratum rates were unaffected.
 4. **The non-whole-repeat fraction is reported per stratum** (§5), and a stratum above the
    one-in-ten threshold is distinguishable in the output from a stratum that merely had few loci.
 5. **Monotonicity holds on the copy axis and is not silently enforced where it fails.** §4.3's
@@ -1205,3 +1458,15 @@ genotype long alleles" is a claim with no number attached to it.
 7. **Sharded accumulation is exact.** The same sample walked in one region and in many must give
    identical tables, which integer entry counts make an equality rather than a tolerance. The read
    cap is seeded from the locus's position for exactly this reason (§4.1).
+8. **A barely-stuttering stratum is well behaved, and it is checked in three ways** (§4.5). *The
+   level survives thinness:* a stratum generated at 0.091% with the locus count §5's low-repeat
+   bands really have returns the level within its own sampling error, and does not return zero more
+   often than that error predicts. *The shares do not pretend to:* the same stratum reports its
+   direction split and fall-off as borrowed, with the strata they came from named, rather than
+   reporting the value its handful of slipped reads landed on. *And the two halves of step 4 agree
+   there:* on one real sample, this path's substitution rate at its lowest-slippage strata and the
+   generic path's for the same read group must sit within a quarter-Phred of each other, on strata
+   at full tract purity. **This is the second check in this document that does not generate its data
+   from the model it tests** — the other is §10.3's — because the two rates are fitted by different
+   models from different sites, so a misspecification shared with the harness cannot make them
+   agree.

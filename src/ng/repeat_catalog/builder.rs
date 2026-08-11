@@ -77,6 +77,14 @@ pub struct RepeatCatalogBuilder {
 
     tally: BuildTally,
     failure: Option<RepeatCatalogError>,
+    /// How many contigs the pass has handed over, complete. Counted rather than inferred
+    /// from [`longest_tract`](Self::longest_tract), which a contig holding no repeat at all
+    /// never extends — so the two are different questions and only this one answers "did
+    /// this builder see the reference `finish` is being given?".
+    contigs_seen: usize,
+    /// The longest tract written per contig, in contig order — the header carries it so a
+    /// later reader can window its reads exactly (`RepeatCatalogHeader::reach_into_window`).
+    longest_tract: Vec<u64>,
 }
 
 impl RepeatCatalogBuilder {
@@ -100,19 +108,22 @@ impl RepeatCatalogBuilder {
             threads: 1,
             tally: BuildTally::default(),
             failure: None,
+            contigs_seen: 0,
+            longest_tract: Vec::new(),
         })
     }
 
     /// Write the header and move the file into place.
     ///
     /// `reference` is what the pass this builder rode returned — its contig table and
-    /// digests are the header's (spec §3.4). Fails if any write during the pass did, or if
-    /// the pass saw contigs this builder did not.
-    pub fn finish(
-        mut self,
-        reference: &ReferenceInfo,
-        tool_version: &str,
-    ) -> Result<BuildTally, RepeatCatalogError> {
+    /// digests are the header's (spec §3.4). Fails if any write during the pass did, if the
+    /// reference was read without computing its digests, or if the pass saw more contigs
+    /// than this builder scanned.
+    ///
+    /// **The tool version is stamped here, not passed in.** A caller that could choose it
+    /// could stamp a catalog with a version that never wrote it, and the reader's refusal
+    /// (`check_written_by_this_build`) would then be checking a claim rather than a fact.
+    pub fn finish(mut self, reference: &ReferenceInfo) -> Result<BuildTally, RepeatCatalogError> {
         // Whatever is still held back is scanned and written before the footer, in
         // reference order like everything else.
         self.flush_pending();
@@ -123,6 +134,22 @@ impl RepeatCatalogBuilder {
             .writer
             .take()
             .expect("the writer is taken only here, and `failure` guards the other path");
+
+        // **The contig table and the rows must describe the same reference.** Rows address
+        // contigs by index into this table, so a builder that saw fewer contigs than the
+        // pass reports writes a file whose header promises contigs no row group holds — and
+        // every read of those contigs comes back empty and `Ok`. It happens when a builder
+        // is attached to one pass and finished with another pass's `ReferenceInfo`.
+        if self.contigs_seen != reference.contigs.len() {
+            return Err(RepeatCatalogError::ContigTableMismatch {
+                detail: format!(
+                    "the builder saw {} contigs and the reference reports {}; the catalog \
+                     would name contigs it holds no rows for",
+                    self.contigs_seen,
+                    reference.contigs.len()
+                ),
+            });
+        }
 
         let header = RepeatCatalogHeader {
             contigs: reference.contigs.clone(),
@@ -136,7 +163,19 @@ impl RepeatCatalogBuilder {
                 })?,
             built_under: self.criteria.clone(),
             scan: self.scan,
-            tool_version: tool_version.to_string(),
+            tool_version: crate::ng::repeat_catalog::reader::running_tool_version().to_string(),
+            // One number per contig, and it is what lets a reader ask for a stretch instead
+            // of a whole contig: no row outside a window can reach further into it than the
+            // longest tract there is (§*A windowed read*, `reach_into_window`).
+            longest_tract_bp: {
+                let mut per_contig = vec![0u64; reference.contigs.len()];
+                for (index, longest) in self.longest_tract.iter().enumerate() {
+                    if let Some(slot) = per_contig.get_mut(index) {
+                        *slot = *longest;
+                    }
+                }
+                per_contig
+            },
         };
 
         let rows = writer.finish(&header)?;
@@ -181,6 +220,18 @@ impl RepeatCatalogBuilder {
         };
 
         for result in scanned {
+            if let Some(contig) = result.rows.first().map(|row| row.contig.get() as usize) {
+                if self.longest_tract.len() <= contig {
+                    self.longest_tract.resize(contig + 1, 0);
+                }
+                let longest = result
+                    .rows
+                    .iter()
+                    .map(|row| row.detected.len_bp())
+                    .max()
+                    .unwrap_or(0);
+                self.longest_tract[contig] = self.longest_tract[contig].max(longest);
+            }
             for rejection in result.rejections {
                 self.tally.charge(rejection);
             }
@@ -276,6 +327,7 @@ impl ReferenceBasesObserver for RepeatCatalogBuilder {
             "the accumulated bases are the contig the pass just finished"
         );
         let Some(contig) = self.contig else { return };
+        self.contigs_seen += 1;
 
         self.pending.push(PendingContig {
             contig,
@@ -294,7 +346,8 @@ impl ReferenceBasesObserver for RepeatCatalogBuilder {
 mod tests {
     use super::*;
     use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
-    use crate::ng::repeat_catalog::RepeatCatalog;
+    use crate::ng::repeat_catalog::{ReadScope, RepeatCatalog};
+    use crate::ng::types::GenomeRegion;
     use crate::ng::types::Position;
     use std::io::Write;
 
@@ -345,18 +398,14 @@ mod tests {
             &mut builder,
         )
         .expect("the pass runs");
-        let tally = builder.finish(&reference, "test-0.1").expect("finish");
+        let tally = builder.finish(&reference).expect("finish");
         (catalog_path, reference, tally)
     }
 
     fn rows_of(path: &Path, reference: &ReferenceInfo) -> Vec<FoundRepeat> {
         let catalog =
             RepeatCatalog::open_checking_against_reference(path, reference).expect("opens");
-        catalog
-            .repeats_in_region(None)
-            .expect("rows")
-            .map(|r| r.expect("a row"))
-            .collect()
+        catalog.repeats(ReadScope::WholeReference).expect("rows")
     }
 
     /// The end-to-end shape: a reference with one planted tract yields one row, in the
@@ -455,10 +504,12 @@ mod tests {
         let catalog =
             RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
         let only_chr2: Vec<FoundRepeat> = catalog
-            .repeats_in_region(Some(ContigId(1)))
-            .expect("rows")
-            .map(|r| r.expect("a row"))
-            .collect();
+            .repeats(ReadScope::Regions(&[GenomeRegion {
+                contig: ContigId(1),
+                start: Position(1),
+                end: Position(u64::MAX),
+            }]))
+            .expect("rows");
         assert!(!only_chr2.is_empty());
         assert!(only_chr2.iter().all(|r| r.contig == ContigId(1)));
     }
@@ -557,7 +608,7 @@ mod tests {
             fasta_path: None,
         };
         assert!(matches!(
-            builder.finish(&digestless, "test-0.1"),
+            builder.finish(&digestless),
             Err(RepeatCatalogError::Unreadable { .. })
         ));
     }

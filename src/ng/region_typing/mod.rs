@@ -1,27 +1,34 @@
-//! ng step 3 — the typed-region generator: walk the reference and cut it into
-//! consecutive typed regions, each a span plus *what the sequence there is*.
+//! ng step 3 — what the sequence at a place in the reference *is*: the vocabulary of
+//! typed regions, the policy that decides between them, and one implementation that
+//! answers the question straight from a contig's bases.
 //! Design: `doc/devel/ng/spec/typed_regions.md` (spec) and
 //! `doc/devel/ng/arch/typed_regions.md` (types & interfaces).
 //!
-//! **Build status (incremental).** [`segment_criteria`] — ng's own copy of the STR
-//! classification policy (Milestone A) — plus the walk's types: [`TypedRegion`],
-//! [`RegionKind`], [`TypedRegionConfig`], [`TypedRegionCounts`],
-//! [`TypedRegionError`] (C2). `GenomeRegions` (C3) and `TypedRegionIterator` plus
-//! the walk itself (D–E) are still to come, so **nothing here has logic yet** —
-//! these are the shapes the walk will fill.
+//! **A run does not answer this question here.** Every consumer reads the reference's
+//! repeat catalog — the tandem repeats found once per reference and written beside the
+//! FASTA — and derives its regions from that file
+//! ([`crate::ng::repeat_catalog`], spec `repeat_catalog.md`). What this module still owns
+//! is everything after detection: the region vocabulary ([`TypedRegion`], [`RegionKind`]),
+//! the policy ([`TypedRegionConfig`], [`segment_criteria`]), the satellite cap, the
+//! bundling, the generic fill and the tally ([`TypedRegionCounts`]) — all of which the
+//! catalog's reader calls rather than copies.
+//!
+//! [`partition_resident`] is the one thing here that still opens with a scan, and it
+//! exists to be the catalog's yardstick: it derives the same segmentation from the bases,
+//! so the differential can say the file gives the same answer rather than a similar one.
 //!
 //! **A folder, not a file, and not because of a bake-off** (there is none —
 //! spec §6). The classification port is a second concern with its own dense test
-//! suite, so it gets its own module beside the walk.
+//! suite, so it gets its own module.
 //!
 //! ## Production is frozen; ng owns its copies
 //!
-//! Step 3 needs an STR classification policy that is windowed, 1-based/`u64`,
-//! driven by `RepeatInterval`s, all-knobs, and that hands bundle members back
-//! instead of dropping them. `ssr::catalog::postprocess::build_loci` is none of
-//! those things, and **reshaping it in place is not on the table** (spec
-//! Revision 2026-07-16, owner): production stays exactly as it is, so that it
-//! remains an *independent yardstick* for the experiments ng exists to run.
+//! Step 3 needs an STR classification policy that is 1-based/`u64`, driven by
+//! `RepeatInterval`s, all-knobs, and that hands bundle members back instead of dropping
+//! them. `ssr::catalog::postprocess::build_loci` is none of those things, and **reshaping
+//! it in place is not on the table** (spec Revision 2026-07-16, owner): production stays
+//! exactly as it is, so that it remains an *independent yardstick* for the experiments ng
+//! exists to run.
 //!
 //! So [`segment_criteria`] is a **port**: the logic transcribed unchanged, the shape
 //! ng's. What sharing one function used to guarantee for free, a test now pins
@@ -29,17 +36,9 @@
 
 pub mod segment_criteria;
 
-/// The E3 port anchor: the whole stack, on a real multi-contig FASTA (`anchor.rs`).
-#[cfg(test)]
-mod anchor;
-
 use std::path::Path;
 
-use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeqError};
-use crate::ng::tandem_repeat::{
-    RegionSpan, RepeatInterval, ScanParams, ScannedWindow, SegmentOptions, WindowCursor,
-    WindowPlan, find_tandem_repeats, scan_window,
-};
+use crate::ng::tandem_repeat::{RepeatInterval, ScanParams, find_tandem_repeats};
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 use crate::regions::{BedError, ContigBounds, RegionSet};
 use segment_criteria::{RejectionCounts, SsrSegment, SsrSegmentCriteria};
@@ -82,9 +81,9 @@ pub struct GenomeRegions {
 impl GenomeRegions {
     /// One full-length span per contig — **the default** (spec §2.5).
     ///
-    /// Zero-length contigs contribute no span, so they never reach the walk
+    /// Zero-length contigs contribute no span, so they never reach a consumer
     /// (`RegionSet`'s rule, and the reason spec §2.3 can say "zero-length contigs
-    /// never reach the walk" without a guard of its own).
+    /// are never asked about" without a guard of its own).
     pub fn whole_contigs(contigs: &[ContigBounds]) -> Self {
         Self {
             inner: RegionSet::whole_contigs(contigs),
@@ -95,10 +94,9 @@ impl GenomeRegions {
     ///
     /// Every failure mode — a short line, non-numeric coordinates, `end <= start`,
     /// an unknown contig name, a span past a contig's end — is `RegionSet`'s to
-    /// reject, **up front**. That is what lets `TypedRegionError` have exactly one
-    /// variant and `TypedRegionIterator::over_regions` be infallible (spec §8.2):
-    /// by the time the walk runs, the only thing left that can fail is reading the
-    /// reference.
+    /// reject, **up front** (spec §8.2). So a consumer holding one of these has
+    /// nothing left to validate: the spans name contigs the reference has and stay
+    /// inside them.
     pub fn from_bed_path(bed: &Path, contigs: &[ContigBounds]) -> Result<Self, BedError> {
         Ok(Self {
             inner: RegionSet::from_bed_path(bed, contigs)?,
@@ -116,22 +114,22 @@ impl GenomeRegions {
         })
     }
 
-    /// How many regions will be walked.
+    /// How many regions there are.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// Whether there is nothing to walk.
+    /// Whether there is nothing to ask about.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 }
 
 // ---------------------------------------------------------------------
-// The walk's output
+// What comes out
 // ---------------------------------------------------------------------
 
-/// A genome region plus **what the sequence there is** — the walk's output.
+/// A genome region plus **what the sequence there is**.
 ///
 /// `region` is a field, not a per-variant repeat: every typed region has one,
 /// *structurally*, and the partition invariant (spec §2.3) reads it off directly.
@@ -198,9 +196,9 @@ pub enum RegionKind {
 // Config and counts
 // ---------------------------------------------------------------------
 
-/// The walk's policy. Mirrors `ReadFilterConfig`'s shape (`read_filtering.md`
-/// §2.4): defaults as named consts, `Default` = what the lab runs, no dormant
-/// knobs.
+/// The policy that decides what the sequence at a place is. Mirrors
+/// `ReadFilterConfig`'s shape (`read_filtering.md` §2.4): defaults as named consts,
+/// `Default` = what the lab runs, no dormant knobs.
 ///
 /// `Default` is **the catalog's settings, for spec §8's comparability only** — not
 /// an endorsement of them (spec §5.2). The catalog is a yardstick, not an
@@ -215,101 +213,50 @@ pub struct TypedRegionConfig {
     /// aliases, so "detect" and "accept" needed separate ranges. The scanner honours
     /// its range now, so there is one.
     pub scan: ScanParams,
-    /// The satellite cap **and** the window's detection margin — one field,
-    /// because they must be the same number (spec §2.6): the margin exists to
-    /// capture whole any repeat that is not a satellite, so it is exactly the
-    /// length at which a repeat becomes one.
+    /// The satellite cap: a tract longer than this is a `Satellite`, not an STR.
     ///
-    /// **It is also constrained from below by [`SsrSegmentCriteria::bundle_threshold`]**, and
-    /// [`partition_windowed`] asserts it: the margin is what lets a window see a core
-    /// tract's *neighbours*, and the bundle flank test is a `bundle_threshold`-radius question.
-    /// A margin narrower than that radius would classify tracts as clean loci that a
-    /// whole-contig walk bundles — silently, and differently per `window_bp`.
+    /// **Also the detection margin of anything that scans in pieces** — the catalog's
+    /// builder scans whole contigs and so has none, but `RegionScanner` still does, and
+    /// the two must be the same number (spec §2.6): a margin exists to capture whole any
+    /// repeat that is not a satellite, so it is exactly the length at which a repeat
+    /// becomes one.
     pub max_str_len: Bp,
-    /// The walk's memory unit. **Must not change the output** (spec §2.3) — it is
-    /// a memory knob and nothing else, which is why window-invariance is an
-    /// acceptance test rather than a nicety.
-    pub window_bp: Bp,
     /// Admission's rules — all of them (spec §5).
     pub criteria: SsrSegmentCriteria,
 }
 
 /// The satellite cap and detection margin: **100 bp** (spec §2.3). This one
 /// field is both — a tract longer than the cap is a `Satellite`, not an STR,
-/// and the window fetches core ± this margin. With 150 bp reads a read spans a
-/// tract plus an anchor each side only up to ~`read_len − 2·bundle_threshold` ≈ 90 bp,
+/// and a scanner working in pieces fetches core ± this margin. With 150 bp reads a read
+/// spans a tract plus an anchor each side only up to ~`read_len − 2·bundle_threshold` ≈ 90 bp,
 /// so past ~100 bp the STR route has nothing to offer. A round number at that
 /// read-length limit, not a measured one — soft, and the point of the knob is
 /// to sweep it (spec §10).
 pub const DEFAULT_MAX_STR_LEN: u64 = 100;
-
-/// The walk's window core: **100 kb**. Memory only — it must never change the
-/// output.
-pub const DEFAULT_WINDOW_BP: u64 = 100_000;
-
-impl TypedRegionConfig {
-    /// The scanner's weights with its **emission floor raised to the weakest floor the
-    /// consumer applies** — the copy floor `prefilter` will impose anyway, hoisted into
-    /// the detector so the intervals that cannot survive it are never materialised.
-    ///
-    /// **⚠ This is safe only on the path that pre-filters, and it is deliberately not applied
-    /// anywhere else.** `ScannedWindow::detections` has a second reader:
-    /// [`RegionScanner`](crate::ng::tandem_repeat::RegionScanner) consumes the **raw**
-    /// detections with no copy floor at all, so raising the floor underneath *it* would drop
-    /// tracts from its output. Only [`TypedRegionIterator::advance`] calls this, and
-    /// `partition_resident` deliberately still scans un-raised — which is also what makes it
-    /// an independent oracle for the streaming path. **Do not "tidy" this by moving the raised
-    /// floor into `scan_window` or into `TypedRegionConfig::scan` itself**; that would silently
-    /// change what `RegionScanner` emits.
-    ///
-    /// **Output-neutral on this path, and provably so.** Here `prefilter` is the only reader
-    /// of the detections (`absorb` takes the *cleaned* set), so the question is only whether
-    /// removing a below-`F` interval `a` can change the *cleaned* set. Two ways it could, and
-    /// neither can:
-    ///
-    /// - it is itself dropped — `prefilter` drops it too, `F` being the minimum over the
-    ///   scanned period range;
-    /// - it stops **eliminating** some longer-period `iv` in the redundancy post-pass — but
-    ///   elimination needs `2·len(a) >= len(iv)` (`tandem_repeat.rs`, the `(a.end - a.start) *
-    ///   2 < iv_len` skip), and `copies(a) < F` gives `len(a) < F·q`, so `len(iv) < 2F·q`; the
-    ///   post-pass only considers **proper divisors** of `iv.period`, so `p >= 2q`, giving
-    ///   `copies(iv) = len(iv)/p < F` — and `prefilter` drops the survivor anyway.
-    ///
-    /// Pinned by `raising_the_scan_floor_cannot_change_the_prefiltered_set`.
-    fn effective_scan(&self) -> ScanParams {
-        let periods = self.criteria.periods;
-        let floor = (periods.min()..=periods.max())
-            .map(|p| self.criteria.min_copies.for_period(p))
-            .min()
-            .unwrap_or(0);
-        ScanParams {
-            min_copies: self.scan.min_copies.max(floor),
-            ..self.scan
-        }
-    }
-}
 
 impl Default for TypedRegionConfig {
     fn default() -> Self {
         Self {
             scan: ScanParams::default(),
             max_str_len: Bp(DEFAULT_MAX_STR_LEN),
-            window_bp: Bp(DEFAULT_WINDOW_BP),
             criteria: SsrSegmentCriteria::default(),
         }
     }
 }
 
-/// The walk's running tally — readable mid-walk, complete once exhausted
-/// ([`TypedRegionIterator::counts`]).
+/// What a segmentation contained, and what admission turned down getting there
+/// ([`partition_resident_in`]).
+///
+/// **The catalog's [`CatalogRegionCounts`](crate::ng::repeat_catalog::CatalogRegionCounts)
+/// is this type minus one counter**, and the two are compared field for field by the
+/// differential. Its module doc says which counter is missing and why.
 ///
 /// **"No silent caps"**: a base typed away from the STR path must be accounted
-/// for. This is the live-caller view of the catalog's measured ~35% STR coverage
-/// gap.
-///
+/// for. This is the caller's view of the catalog's measured ~35% STR coverage gap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypedRegionCounts {
-    /// Requested regions walked.
+    /// Requested spans on this contig — the regions the caller asked about, not the
+    /// regions that came back.
     pub spans: u64,
     pub ssr_loci: u64,
     pub ssr_bundles: u64,
@@ -321,7 +268,7 @@ pub struct TypedRegionCounts {
     pub satellites: u64,
     pub satellite_bp: u64,
     /// Repeat coverage that yielded **no locus**, in bp: every base of cleaned repeat
-    /// coverage the walk did not emit as an `SsrSegment` — because it was bundled,
+    /// coverage that did not come out as an `SsrSegment` — because it was bundled,
     /// capped as a satellite, or rejected by one of classification's gates.
     ///
     /// In bp, not per repeat, because a per-repeat count answers the wrong
@@ -329,9 +276,10 @@ pub struct TypedRegionCounts {
     /// locus and sheds 200 bp contributes nothing to a per-repeat counter (spec
     /// §3.1).
     ///
-    /// **Mid-walk this leads**: coverage is counted when a window is scanned, and the
-    /// loci that cancel it are subtracted as they are emitted, a block later. It is
-    /// exact once the walk is exhausted, which is what the type promises.
+    /// **Reached by subtraction**: the contig's whole cleaned repeat coverage inside the
+    /// request is charged first, and the loci that cancel it are subtracted one by one. The
+    /// catalog's reader charges and cancels the same way, which is what keeps the two
+    /// numbers one number.
     pub repeat_bp_with_no_locus: u64,
     /// [`Self::repeat_bp_with_no_locus`] **broken out by classification's reason** — because
     /// one total cannot separate a purity rejection from a copy-floor one, and that is
@@ -345,10 +293,28 @@ pub struct TypedRegionCounts {
 }
 
 // ---------------------------------------------------------------------
-// The walk — resident (D1)
+// The resident scan — the differential's oracle
 // ---------------------------------------------------------------------
 
 /// Cut one whole contig into typed regions, holding it entirely in memory.
+///
+/// The whole contig asked for, and the tally dropped —
+/// [`partition_resident_in`] is the same function with a region subset and a count.
+pub fn partition_resident(
+    chrom: &str,
+    contig: ContigId,
+    bases: &[u8],
+    config: &TypedRegionConfig,
+) -> Vec<TypedRegion> {
+    let whole = [GenomeRegion {
+        contig,
+        start: Position(1),
+        end: Position(bases.len().max(1) as u64),
+    }];
+    partition_resident_in(chrom, contig, bases, config, &whole).0
+}
+
+/// The typed regions of one contig that fall inside `wanted`, and what they contained.
 ///
 /// **The five steps** (spec §2.1), and the first three are ng's port of the
 /// catalog's implementation (spec §5):
@@ -361,14 +327,25 @@ pub struct TypedRegionCounts {
 /// 4. **Cap** — merge the cleaned intervals into coverage runs; a run over
 ///    `max_str_len` is a satellite. Classified loci inside one are dropped.
 /// 5. **Partition** — emit `SsrSegment` at each surviving tract, `Satellite` at each
-///    run, `Generic` across everything else.
+///    run, `Generic` across everything else, then narrow the result to `wanted`.
 ///
-/// # Why this exists when the windowed walk is what ships
+/// # Why this exists when nothing calls it outside a test
 ///
-/// It is **D3's oracle** (impl plan, Milestone D): the windowed walk is proven by
-/// *matching this*, which is exactly the window-invariance spec §2.3 demands.
-/// Simplest implementation first, as the next one's yardstick — so a windowing bug
-/// shows up as a disagreement with a version that has no windows to get wrong.
+/// **It is the catalog's oracle** (`tests/ng_repeat_catalog_differential.rs`). A caller
+/// that stops opening the reference and reads the repeat catalog instead is relying on
+/// one claim — *the file gives the same segmentation the bases do* — and that claim needs
+/// a second implementation to be checked against. This is that implementation: it detects
+/// the repeats from the bases, where the catalog reads them from a file, and everything
+/// after detection is deliberately the same code, so a disagreement points at the file
+/// rather than at the policy.
+///
+/// # The whole contig is always classified, whatever `wanted` says (spec §2.5)
+///
+/// Classification is not local: a repeat at 999 is bundled away by a neighbour at 1030, so
+/// a run that never looked past 1000 would call a locus the whole-contig run rejects —
+/// same reference, different answers, because of `--regions`. So the five steps run over
+/// the contig entire and `wanted` narrows only what comes out, which is
+/// [`emit_into`]'s job.
 ///
 /// # A rejected repeat is generic territory, not a hole (spec §2.2)
 ///
@@ -377,25 +354,31 @@ pub struct TypedRegionCounts {
 /// compound simply stays `Generic` — it is not a bundle, and it is certainly not a
 /// hole. Only the *flank test* makes a bundle: a repeat with another repeat within
 /// `bundle_threshold` of it, which is exactly the set [`segment_criteria::classify`] hands back.
-pub fn partition_resident(
+pub fn partition_resident_in(
     chrom: &str,
     contig: ContigId,
     bases: &[u8],
     config: &TypedRegionConfig,
-) -> Vec<TypedRegion> {
+    wanted: &[GenomeRegion],
+) -> (Vec<TypedRegion>, TypedRegionCounts) {
     let contig_len = bases.len() as u64;
     if contig_len == 0 {
         // A zero-length contig has no 1-based position to cover, so it has no
-        // regions. `GenomeRegions` drops these before the walk anyway (C3); this
+        // regions. `GenomeRegions` drops these before a caller gets here (C3); this
         // keeps the function total for a direct caller.
-        return Vec::new();
+        return (Vec::new(), TypedRegionCounts::default());
     }
+    let wanted: Vec<GenomeRegion> = wanted
+        .iter()
+        .filter(|span| span.contig == contig)
+        .copied()
+        .collect();
 
     // 1. Detect.
     let raw = find_tandem_repeats(bases, config.criteria.periods, &config.scan);
     // 2. Clean.
     let cleaned = segment_criteria::prefilter(&raw, &config.criteria);
-    // 3. Admit — whole-contig is the degenerate window (spec §5a).
+    // 3. Admit — the whole contig, for the reason the doc gives.
     let classified = segment_criteria::classify(
         cleaned.clone(),
         chrom,
@@ -423,11 +406,173 @@ pub fn partition_resident(
     //    loci under it), and no fixture produces that yet.
     let runs = coverage_runs(&cleaned);
 
+    // The tally's raw material, taken before the loci are consumed.
+    //
+    // **The repeat coverage is merged before it is measured**, because the count is of
+    // bases and not of tracts: the cleaned set still holds intersecting tracts — the
+    // pre-screen removes period-multiple re-detections of one tract, not two different
+    // repeats that overlap — so summing the spans directly would charge a shared base once
+    // per tract covering it. The satellite cap in this same function merges before it
+    // measures ([`coverage_runs`]), and so does the catalog's tally.
+    // Every field named, no `..default()` tail: a counter added later must break this line
+    // rather than start life silently at zero in the catalog's own comparison.
+    let mut counts = TypedRegionCounts {
+        spans: wanted.len() as u64,
+        ssr_loci: 0,
+        ssr_bundles: 0,
+        ssr_bundle_bp: 0,
+        generic: 0,
+        satellites: 0,
+        satellite_bp: 0,
+        repeat_bp_with_no_locus: covered_bp(&clipped_to_requested(
+            &cleaned
+                .iter()
+                .map(|interval| (interval.start, interval.end))
+                .collect::<Vec<_>>(),
+            contig,
+            &wanted,
+        )),
+        rejected_by_reason: RejectionCounts::default(),
+    };
+    // **A rejection is charged where the repeat starts**, and only if the caller asked
+    // about that base — so a repeat is charged once however many spans can see it, and
+    // the catalog charges the same way.
+    for (interval, reason) in &classified.rejected {
+        if inside_requested(interval.start, contig, &wanted) {
+            counts
+                .rejected_by_reason
+                .add(*reason, interval.end - interval.start);
+        }
+    }
+
     // 5. Partition — the whole contig as **one block** (below), then fill every gap
     //    with `Generic`.
     let features = resolve_features(&runs, classified.loci, &classified.bundled, contig, config);
 
-    fill_generic_gaps(features, contig, contig_len)
+    let mut out = Vec::new();
+    let mut emitted_upto = 0;
+    for region in fill_generic_gaps(features, contig, contig_len) {
+        emit_into(&mut out, region, &wanted, &mut emitted_upto);
+    }
+    for region in &out {
+        charge_region(&mut counts, region, &wanted);
+    }
+    (out, counts)
+}
+
+/// Whether a region emitted past the edge of a requested span is **cut back to it**.
+///
+/// Only `Generic` is. A locus, a bundle and a satellite are each a claim about their own
+/// extent, and half of one is a different claim: half a locus is not a locus, a clipped
+/// bundle's members describe bases outside their own region, and a satellite clipped to
+/// 100 bases contradicts the very cap that made it one. A generic stretch is the only kind
+/// that is not a finding — *nothing more specific can be said here* stays true of any part
+/// of it.
+fn clips_at_a_bed_edge(kind: &RegionKind) -> bool {
+    match kind {
+        RegionKind::Generic => true,
+        RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. } | RegionKind::Satellite => false,
+    }
+}
+
+/// Narrow one region to what the caller asked for, and keep what survives (spec §2.5).
+///
+/// - **Outside every requested span** → dropped. It was classified so that the regions
+///   inside would be *right*, not to be shown.
+/// - **A finding** — locus, bundle or satellite ([`clips_at_a_bed_edge`]) → emitted
+///   **whole**, even past the edge: the requested span grows to hold it, and that grown
+///   span — the *effective* region — is what the partition invariant is stated over.
+/// - **`Generic`** → **clipped** to each requested span it overlaps, which may be more
+///   than one: every span on a contig is cut from that contig's one classification, so a
+///   generic run across two of them must come back as two regions with the gap dropped,
+///   not one region covering ground the caller did not ask for.
+///
+/// `emitted_upto` keeps the output non-overlapping when a finding has just been emitted
+/// whole past an edge and the next requested span starts inside it.
+fn emit_into(
+    out: &mut Vec<TypedRegion>,
+    region: TypedRegion,
+    requested: &[GenomeRegion],
+    emitted_upto: &mut u64,
+) {
+    let overlaps = |r: &GenomeRegion| {
+        r.contig == region.region.contig
+            && r.start.get() <= region.region.end.get()
+            && region.region.start.get() <= r.end.get()
+    };
+
+    if !clips_at_a_bed_edge(&region.kind) {
+        if requested.iter().any(overlaps) {
+            *emitted_upto = region.region.end.get();
+            out.push(region);
+        }
+        return;
+    }
+
+    for r in requested.iter().filter(|r| overlaps(r)) {
+        let start = region
+            .region
+            .start
+            .get()
+            .max(r.start.get())
+            .max(*emitted_upto + 1);
+        let end = region.region.end.get().min(r.end.get());
+        if start > end {
+            continue;
+        }
+        *emitted_upto = end;
+        out.push(TypedRegion {
+            region: GenomeRegion {
+                contig: region.region.contig,
+                start: Position(start),
+                end: Position(end),
+            },
+            kind: region.kind.clone(),
+        });
+    }
+}
+
+/// Charge one emitted region to the running tally.
+fn charge_region(counts: &mut TypedRegionCounts, region: &TypedRegion, requested: &[GenomeRegion]) {
+    let bp = region.region.len();
+    match &region.kind {
+        RegionKind::SsrSegment(_) => {
+            counts.ssr_loci += 1;
+            // This repeat coverage DID yield a locus, so it is not part of the gap.
+            //
+            // **Only the part inside the request is cancelled**, because only that part
+            // was ever charged. A locus is emitted whole where it crosses a requested
+            // edge, so subtracting its whole length would take back bases that were never
+            // counted, and the counter would underflow at exactly the loci that straddle
+            // one. What is inside the request is a subset of the coverage charged for it,
+            // so this cannot.
+            let inside: u64 = clipped_to_requested(
+                &[(region.region.start.get() - 1, region.region.end.get())],
+                region.region.contig,
+                requested,
+            )
+            .into_iter()
+            .map(|(start, end)| end - start)
+            .sum();
+            debug_assert!(inside <= bp, "a clipped locus cannot grow");
+            debug_assert!(
+                inside <= counts.repeat_bp_with_no_locus,
+                "a locus cancels coverage that was charged for it, so this cannot underflow"
+            );
+            counts.repeat_bp_with_no_locus -= inside;
+        }
+        RegionKind::SsrBundle { .. } => {
+            counts.ssr_bundles += 1;
+            // **The number spec §10's bundle question needs and has never had** —
+            // production drops these uncounted.
+            counts.ssr_bundle_bp += bp;
+        }
+        RegionKind::Generic => counts.generic += 1,
+        RegionKind::Satellite => {
+            counts.satellites += 1;
+            counts.satellite_bp += bp;
+        }
+    }
 }
 
 /// Step 5 for one **block**: cap the runs, place the loci the surviving runs do not
@@ -435,24 +580,21 @@ pub fn partition_resident(
 /// Generic is not this function's business: it is whatever is left over, and only the
 /// caller knows how far "left over" reaches.
 ///
-/// # A block, and why the windowed walk can work one at a time
+/// # How far a decision here can reach
 ///
-/// A *block* is a stretch of repeat structure separated from the next by more than
-/// `bundle_threshold` of repeat-free sequence. Every rule here has a **radius**, and the block
-/// boundary is wider than all of them: runs merge only when they abut (radius 0),
-/// clustering chains members within `bundle_threshold` (that radius), and swallowing is
-/// containment (radius 0). So no input outside a block can change anything inside it,
-/// and the partition of a contig is the concatenation of its blocks' partitions.
+/// Every rule this function applies has a **radius**: runs merge only when they abut
+/// (radius 0), clustering chains members within `bundle_threshold` (that radius), and
+/// swallowing is containment (radius 0). So a stretch of repeat structure separated from
+/// the next by more than `bundle_threshold` of repeat-free sequence decides its own
+/// contents and nothing else's, whichever way the caller arrived at the intervals.
 ///
-/// That is the whole licence for [`partition_windowed`]: it resolves one block at a
-/// time and carries nothing else. [`partition_resident`] calls this once, with the
-/// contig as a single block — which is the degenerate case, and why it is the oracle.
+/// That is what lets the catalog's reader hand this function a contig's stored rows and
+/// get the answer a scan of the same contig gives.
 ///
-/// **This is shared, so window-invariance does not test it.** The windowed walk is
-/// proven by matching the resident one, and both bottom out here — a bug in this
-/// function is invisible to that comparison, by construction. It is covered instead by
-/// D1's own bar: the partition invariant and `.cat` parity. What the comparison *does*
-/// prove is what only windowing can get wrong: the carries and the attribution.
+/// **Both paths bottom out here, so the differential does not test it.** A bug in this
+/// function is invisible to a comparison that runs it twice, by construction. It is
+/// covered instead by the partition invariant and by `.cat` parity against the
+/// trf-mod-built golden catalog (`repeat_catalog/anchor.rs`).
 ///
 /// # Absorption: a satellite swallows what it touches (spec §2.4a)
 ///
@@ -526,8 +668,8 @@ pub(crate) fn resolve_features(
     // further than the run it came from, so it can absorb something the run could not.
     //
     // It terminates: each pass either absorbs at least one of a finite set of features
-    // or stops. And it cannot reach out of the block — absorption's reach is exactly
-    // `BlockWalk::block_barrier`, which is where the block ends.
+    // or stops. And it cannot reach out of the block — absorption's reach is the bundle
+    // radius, which is narrower than the repeat-free sequence that bounds a block.
     //
     // **Bundle members are absorbed one by one, BEFORE they are clustered, and that
     // ordering is load-bearing twice over:**
@@ -696,6 +838,64 @@ fn merge_runs(runs: &mut Vec<CoverageRun>) {
     *runs = merged;
 }
 
+/// How many **distinct** bases a set of half-open spans covers, a base shared by two spans
+/// counting once.
+///
+/// The spans arrive in the detector's order — period-major, not coordinate order — and may
+/// intersect, so they are sorted and unioned rather than summed.
+fn covered_bp(spans: &[(u64, u64)]) -> u64 {
+    let mut spans = spans.to_vec();
+    spans.sort_unstable();
+    let mut total = 0;
+    let mut open: Option<(u64, u64)> = None;
+    for (start, end) in spans {
+        match open {
+            // Sorted by start, so `start >= run_start` and the union is just the wider end.
+            Some((run_start, run_end)) if start <= run_end => {
+                open = Some((run_start, run_end.max(end)));
+            }
+            Some((run_start, run_end)) => {
+                total += run_end - run_start;
+                open = Some((start, end));
+            }
+            None => open = Some((start, end)),
+        }
+    }
+    if let Some((run_start, run_end)) = open {
+        total += run_end - run_start;
+    }
+    total
+}
+
+/// The parts of `spans` (0-based half-open, on `contig`) that fall inside `wanted`.
+///
+/// `wanted` is 1-based inclusive, ng's convention for a requested region, so each is
+/// `[start - 1, end)` in the detector's space.
+fn clipped_to_requested(
+    spans: &[(u64, u64)],
+    contig: ContigId,
+    wanted: &[GenomeRegion],
+) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    for &(start, end) in spans {
+        for region in wanted.iter().filter(|r| r.contig == contig) {
+            let from = start.max(region.start.get() - 1);
+            let to = end.min(region.end.get());
+            if from < to {
+                out.push((from, to));
+            }
+        }
+    }
+    out
+}
+
+/// Whether `position` (0-based) lies inside one of `wanted` on `contig`.
+fn inside_requested(position: u64, contig: ContigId, wanted: &[GenomeRegion]) -> bool {
+    wanted
+        .iter()
+        .any(|r| r.contig == contig && position >= r.start.get() - 1 && position < r.end.get())
+}
+
 /// A merged run of repeat coverage, 1-based inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoverageRun {
@@ -704,7 +904,27 @@ pub(crate) struct CoverageRun {
 }
 
 impl CoverageRun {
-    fn len(self) -> u64 {
+    /// The run's first base, 1-based inclusive.
+    ///
+    /// Shared with the catalog for the same reason [`Self::len`] is: a region-scoped tally
+    /// clips these runs to the spans the caller asked for, and both sides must clip the same
+    /// runs the same way.
+    pub(crate) fn start(self) -> u64 {
+        self.start
+    }
+
+    /// The run's last base, 1-based inclusive.
+    pub(crate) fn end(self) -> u64 {
+        self.end
+    }
+
+    /// The run's length in bases, inclusive at both ends.
+    ///
+    /// **Shared with the catalog's derived segmentation**
+    /// ([`crate::ng::repeat_catalog::segments`]), which sums it over a contig's runs to get
+    /// the repeat coverage charged to `repeat_bp_with_no_locus`. Same rule, same
+    /// arithmetic, so the two tallies cannot drift on it.
+    pub(crate) fn len(self) -> u64 {
         self.end - self.start + 1
     }
 }
@@ -729,910 +949,6 @@ pub(crate) fn coverage_runs(intervals: &[RepeatInterval]) -> Vec<CoverageRun> {
         .collect();
     merge_runs(&mut spans);
     spans
-}
-
-// ---------------------------------------------------------------------
-// The walk — windowed (D3)
-// ---------------------------------------------------------------------
-
-/// Cut one contig into typed regions **without ever holding it in memory** — the walk
-/// that ships (spec §2.3, §2.6).
-///
-/// Identical output to [`partition_resident`] at every `window_bp`: the window is a
-/// memory knob and nothing else, which is why window-invariance is an acceptance test
-/// (`windowed_matches_the_resident_oracle_*`) and not a nicety.
-///
-/// # How it can be windowed at all: blocks and three carries
-///
-/// [`resolve_features`] explains the licence — every rule the partition applies has a
-/// radius, and a *block* (repeat structure bounded by more than `bundle_threshold` of
-/// repeat-free sequence) is wider than all of them. So the walk holds **one open
-/// block**, resolves it the moment the next feature proves it closed, and carries:
-///
-/// - the **open coverage run** — a satellite is longer than any window by definition,
-///   so its verdict cannot be reached inside one (`CoverageRun`, extended window to
-///   window);
-/// - the **open bundle cluster** — its members chain across a boundary just as happily
-///   as inside one; and
-/// - the **open generic run** — one `u64`, [`BlockWalk::emitted_upto`]. This is what
-///   makes maximality affordable: a megabase of generic sequence is not accumulated,
-///   it is *not yet emitted*, and it costs one coordinate until the next feature ends
-///   it.
-///
-/// # Where each fact comes from
-///
-/// - **`contig_len` comes from the reference's contig table** ([`ContigTable`]), never
-///   from the window. This discharges spec §2.6's provenance obligation, outstanding
-///   since A3: `classify`'s guard classifies a caller passing the *window's own end* as
-///   `contig_len` — production's exact mistake, and arithmetically legal, so no
-///   signature can catch it. Only a caller holding both the reference and the window
-///   can, and this is that caller. Get it wrong and every locus within `bundle_threshold` of
-///   every window boundary silently vanishes, a different set for each `window_bp`.
-/// - **The window geometry comes from [`scan_windowed`]**, not from arithmetic here:
-///   one copy of the core/margin rules, per spec §6.1.
-/// - **The bases are raw** ([`RawRefSeq`]), because `SsrSegment` compares by value and
-///   canonical bytes would make every IUPAC-carrying locus unequal to the catalog's
-///   (spec §6).
-///
-/// # One fetch per window, and one margin
-///
-/// Admission runs over **the slice the scan already read**. It needs each tract's own
-/// bases (motif, purity), which are in that slice by construction — the interval came
-/// from scanning it — and it answers the flank question by arithmetic against
-/// `contig_len`, which no slice could answer anyway.
-///
-/// So there is one margin, spec §2.6's: `max_str_len`, what makes a repeat *segment*
-/// identically. Until 2026-07-17 there was a second — `bundle_threshold` on top of it — and a
-/// second fetch of every window to get it, because `SsrSegment` embedded `tract ± bundle_threshold`
-/// of bases and a tract at the slice's own edge could not supply them. Removing the
-/// payload removed the margin, the re-fetch, and the two panics that policed it.
-/// **Collected**, so it holds the contig's regions after all — this is the walk's shape
-/// for a test or a small job, and [`TypedRegionIterator`] is the one that ships. It is a
-/// wrapper over that iterator, not a second implementation: every window-invariance test
-/// below runs through this and therefore through it.
-pub fn partition_windowed<R>(
-    reference: R,
-    contig: ContigId,
-    config: &TypedRegionConfig,
-) -> Result<Vec<TypedRegion>, TypedRegionError>
-where
-    R: RawRefSeq + ContigTable + EvictableRefSeq,
-{
-    TypedRegionIterator::over_contig(reference, contig, config.clone())?.collect()
-}
-
-/// Walks the reference region by region, in genomic order, gap-free — **step 3's public
-/// surface** (arch §interface).
-///
-/// Holds one window plus one block, never a contig, let alone the genome (spec §2.6, §7).
-/// The regions it yields tile the requested spans exactly: contiguous, non-overlapping,
-/// complete, and maximal. Pure function of the reference, the spans, and the config;
-/// `window_bp` changes memory and never the output.
-///
-/// # It owns its inputs
-///
-/// `reference` and `spans` are taken **by value** so the whole iterator can be moved onto
-/// a producer thread (spec §7). That ownership is also what lets it evict: the walk slides
-/// forward and never looks back, so it releases the bases it has passed
-/// ([`EvictableRefSeq`]) — without which a windowed reference's buffer would grow to hold
-/// the contig and the memory bound would be a claim rather than a fact.
-///
-/// # Generic over the reference, and why that is not the arch's "concrete"
-///
-/// The arch doc specified a concrete `WindowedRefSeq`, reasoning that the walk needs raw
-/// bytes and eviction — "impl capabilities, not trait methods". They are trait methods
-/// now ([`RawRefSeq`], [`ContigTable`], [`EvictableRefSeq`]), each added where a capability
-/// had to be *required* rather than assumed. Being generic is what lets **the same walk**
-/// run over an `InMemoryRefSeq` in tests, which is what makes window-invariance against
-/// `partition_resident` testable at all — the strongest check step 3 has.
-///
-/// # Errors are in-stream and fatal
-///
-/// Every window reads the reference. `None` meaning both "done" and "a window failed"
-/// would silently un-call the rest of the genome, so a read failure is yielded once as
-/// `Some(Err(_))` and then the iterator is done — fused, and it says so
-/// ([`std::iter::FusedIterator`]) rather than leaving a caller to find out (spec §8.2).
-pub struct TypedRegionIterator<R> {
-    reference: R,
-    config: TypedRegionConfig,
-    /// The **scan** spans still to walk, each carrying the requested spans inside it,
-    /// **reversed** so the next one is a `pop` (spec §2.5).
-    remaining: Vec<ScanSpan>,
-    /// The span being walked, if any.
-    current: Option<SpanWalk>,
-    /// Regions resolved and waiting to be handed out — one block's worth at most.
-    queue: std::collections::VecDeque<TypedRegion>,
-    /// The window's bases, reused across windows (`typed_regions.md` §7).
-    bases: Vec<u8>,
-    counts: TypedRegionCounts,
-    /// Latched by a fatal error or by exhaustion; the fused contract.
-    done: bool,
-}
-
-/// One window's contribution to the running tally — the parts that cannot be read off the
-/// regions the walk emits, because they are about repeats that never became one.
-struct WindowTally {
-    /// Cleaned repeat coverage this window owns, in bp.
-    repeat_bp: u64,
-    /// Repeat bp this window's core owns that classification turned down, by reason.
-    rejected: RejectionCounts,
-}
-
-/// One span's walk in progress: where the windows are up to, and the block carries.
-struct SpanWalk {
-    contig: ContigId,
-    /// The contig's name — from the reference's table, and the name every `SsrSegment` gets.
-    chrom: String,
-    /// The contig's **true** length, from the reference's table (spec §2.6's provenance
-    /// obligation). Not the span's, and never a window's.
-    contig_len: u64,
-    cursor: WindowCursor,
-    walk: BlockWalk,
-    /// What the user asked for inside this scan span — the **emit** set (spec §2.5). The
-    /// walk types the whole scan span; only what overlaps these comes out, and territory
-    /// is clipped to them ([`emit_into`]).
-    requested: Vec<GenomeRegion>,
-    /// The last base **emitted**, for keeping the output non-overlapping when an object
-    /// is emitted whole past a requested edge. Distinct from `BlockWalk::emitted_upto`,
-    /// which tracks the walk's own generic carry across the *scan* span.
-    emitted_upto: u64,
-}
-
-impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
-    /// Walk `spans`. **Infallible in the arch doc, fallible here** — and the difference is
-    /// a real one the arch could not have known: `GenomeRegions` validated the spans
-    /// against a contig table, but nothing ties *that* table to the one this reference
-    /// carries, so a span naming a contig the reference does not have is still reachable.
-    /// Checking it up front, once, beats discovering it mid-walk (spec §8.2's whole
-    /// point).
-    pub fn over_regions(
-        reference: R,
-        spans: GenomeRegions,
-        config: TypedRegionConfig,
-    ) -> Result<Self, TypedRegionError> {
-        Self::over_spans(reference, spans.iter().collect(), config)
-    }
-
-    /// Walk one contig, end to end — the whole-contig case as a span like any other.
-    pub fn over_contig(
-        reference: R,
-        contig: ContigId,
-        config: TypedRegionConfig,
-    ) -> Result<Self, TypedRegionError> {
-        let len = contig_entry(&reference, contig)?.length;
-        // A zero-length contig has no 1-based position to cover, so it contributes no
-        // span — `RegionSet`'s rule (C3), restated here for a direct caller.
-        let spans = if len == 0 {
-            Vec::new()
-        } else {
-            vec![GenomeRegion {
-                contig,
-                start: Position(1),
-                end: Position(len),
-            }]
-        };
-        Self::over_spans(reference, spans, config)
-    }
-
-    fn over_spans(
-        reference: R,
-        requested: Vec<GenomeRegion>,
-        config: TypedRegionConfig,
-    ) -> Result<Self, TypedRegionError> {
-        // **A swept knob that would silently un-bundle** (spec §10 sweeps both of these).
-        // The scan's margin is `max_str_len`, so a window sees every repeat within
-        // `max_str_len` of its core. The bundle flank test needs to see every repeat
-        // within `bundle_threshold` of a core repeat. If the margin were the narrower of the two,
-        // a core tract's neighbour could fall outside the window, go unseen, and the tract
-        // would be classified as a clean locus instead of bundled — no error, and a
-        // different answer for every `window_bp`.
-        //
-        // **An error, not an `assert!`.** Both knobs are on the command line, so this is
-        // reachable from a typo — and user input must not panic. The reason it was an
-        // `assert!` still holds and is served better here: A2's rule is that a swept
-        // knob's guard must survive `--release`, and a `Result` does, unconditionally.
-        if config.max_str_len.get() < config.criteria.bundle_threshold {
-            return Err(TypedRegionError::MarginNarrowerThanFlank {
-                max_str_len: config.max_str_len.get(),
-                bundle_threshold: config.criteria.bundle_threshold,
-            });
-        }
-        // Fail now, not in the middle of chromosome 7 (above).
-        for span in &requested {
-            contig_entry(&reference, span.contig)?;
-        }
-        let mut scan = scan_set(&reference, &requested)?;
-        // Reversed so the next span is a `pop`.
-        scan.reverse();
-        Ok(Self {
-            reference,
-            config,
-            remaining: scan,
-            current: None,
-            queue: std::collections::VecDeque::new(),
-            bases: Vec::new(),
-            counts: TypedRegionCounts::default(),
-            done: false,
-        })
-    }
-
-    /// The running tally — readable mid-walk, complete once exhausted (spec §3.1).
-    pub fn counts(&self) -> &TypedRegionCounts {
-        &self.counts
-    }
-
-    /// Do one step of work: start a span, scan a window, or finish a span. `Ok(false)`
-    /// when there is nothing left at all.
-    fn advance(&mut self) -> Result<bool, TypedRegionError> {
-        if self.current.is_none() {
-            let Some(span) = self.remaining.pop() else {
-                return Ok(false);
-            };
-            let entry = contig_entry(&self.reference, span.scan.contig)?;
-            let contig_len = entry.length;
-            let chrom = entry.name.clone();
-            self.current = Some(SpanWalk {
-                contig: span.scan.contig,
-                chrom,
-                contig_len,
-                // Cores tile the **scan** span; margins come from the whole contig, which
-                // is not the same number once the span is a BED region (`WindowCursor`).
-                cursor: WindowCursor::new(
-                    RegionSpan {
-                        start: span.scan.start.get() - 1,
-                        end: span.scan.end.get(),
-                    },
-                    contig_len,
-                    &self.segment_options(),
-                ),
-                walk: BlockWalk::new(span.scan.contig, span.scan.end.get()),
-                // One span counted per span the **user asked for**, not per span walked:
-                // the scan set is this walk's business, and coalescing two requested
-                // regions into one scan is not the user losing a region.
-                requested: span.requested,
-                emitted_upto: 0,
-            });
-            self.counts.spans += self.current.as_ref().expect("just set").requested.len() as u64;
-            return Ok(true);
-        }
-
-        let state = self.current.as_mut().expect("just checked");
-        let span_done = match state.cursor.next_window() {
-            Some(plan) => {
-                let tally = Self::scan_and_absorb(
-                    &self.reference,
-                    &mut self.bases,
-                    state,
-                    &self.config,
-                    &plan,
-                )?;
-                // Every base of cleaned repeat coverage this window owns. Clipped to the
-                // core, and cores tile, so no base is counted twice. The loci that cancel
-                // it are subtracted as they are emitted (`tally`).
-                self.counts.repeat_bp_with_no_locus += tally.repeat_bp;
-                let r = &mut self.counts.rejected_by_reason;
-                r.copy_floor += tally.rejected.copy_floor;
-                r.purity += tally.rejected.purity;
-                r.compound += tally.rejected.compound;
-                r.no_clean_trim += tally.rejected.no_clean_trim;
-                r.flank_clamped += tally.rejected.flank_clamped;
-                // Release what the walk has passed — it never looks back. This is the
-                // difference between "holds one window" as a claim and as a fact.
-                self.reference.evict_before(plan.fetched.start + 1);
-                false
-            }
-            None => {
-                state.walk.finish(&self.config);
-                true
-            }
-        };
-
-        // Drain whatever the walk resolved through the emit policy (spec §2.5): the walk
-        // types the whole **scan** span, and only what the user asked for comes out.
-        // `&mut self.queue` and `self.current` are disjoint fields, which is why they are
-        // borrowed by name rather than through a method.
-        let queue = &mut self.queue;
-        let state = self.current.as_mut().expect("still walking");
-        while let Some(region) = state.walk.out.pop_front() {
-            emit_into(queue, region, &state.requested, &mut state.emitted_upto);
-        }
-        if span_done {
-            self.current = None;
-        }
-        Ok(true)
-    }
-
-    /// One window: detect (the cursor planned it), clean, classify, absorb.
-    ///
-    /// An associated function rather than a method, because it needs `&self.reference`
-    /// and `&mut self.current` at once — disjoint fields, which the borrow checker will
-    /// grant only when they are named separately.
-    ///
-    /// Returns this window's share of the tally ([`WindowTally`]).
-    fn scan_and_absorb(
-        reference: &R,
-        bases: &mut Vec<u8>,
-        state: &mut SpanWalk,
-        config: &TypedRegionConfig,
-        plan: &WindowPlan,
-    ) -> Result<WindowTally, TypedRegionError> {
-        let contig = state.contig;
-
-        // 1. Detect. The scanned slice is the cursor's to decide; this reads exactly it.
-        reference.fetch_raw_into(
-            contig,
-            plan.fetched.start + 1,
-            plan.fetched.end - plan.fetched.start,
-            bases,
-        )?;
-        let window = scan_window(
-            plan,
-            bases,
-            config.criteria.periods,
-            &config.effective_scan(),
-        );
-
-        // 2. Clean. **Over the whole fetched slice, margins included**, which is what
-        //    makes the verdict the resident one: redundancy elimination is a neighbour
-        //    rule, and a core interval's neighbours live in the margin.
-        let cleaned = segment_criteria::prefilter(&window.detections, &config.criteria);
-
-        // 3. Admit, over **the slice we already scanned** — no second fetch, no second
-        //    margin. Admission reads each tract's own bases (motif, purity) and answers
-        //    the flank question by arithmetic against `contig_len`, so the scan slice is
-        //    exactly what it needs. Until 2026-07-17 `SsrSegment` embedded tract ± bundle_threshold of
-        //    bases, which a tract at the slice's own edge could not supply; that cost a
-        //    wider re-fetch of every window, and the payload had no consumer.
-        let bases_start = plan.fetched.start;
-        let recs = cleaned
-            .iter()
-            .map(|iv| RepeatInterval {
-                start: iv.start - bases_start,
-                end: iv.end - bases_start,
-                ..*iv
-            })
-            .collect();
-        let classified = segment_criteria::classify(
-            recs,
-            &state.chrom,
-            bases,
-            Position(bases_start + 1),
-            // The contig's length, from the reference's table. Never `bases.len()`, never
-            // the window's end — spec §2.6's provenance obligation, and the mistake no
-            // signature can catch.
-            Bp(state.contig_len),
-            &config.criteria,
-        );
-
-        // The tally's raw material, taken before `absorb` consumes the window.
-        let mut tally = WindowTally {
-            // This window's own share of the repeat coverage — clipped to the core, so
-            // cores tile and nothing is double-counted.
-            repeat_bp: window
-                .coverage_in_core(&cleaned)
-                .into_iter()
-                .map(|(s, e)| e - s)
-                .sum(),
-            rejected: RejectionCounts::default(),
-        };
-        // **Rejections are attributed to a core, exactly like everything else.** `classify`
-        // ran over the whole fetched slice, so every window that can see a repeat rejects
-        // it again; counting them all would make the tally depend on `window_bp`, which
-        // is a memory knob. The interval's own start decides whose it is.
-        for (iv, reason) in &classified.rejected {
-            let start = iv.start + bases_start;
-            if start >= plan.core.start && start < plan.core.end {
-                tally.rejected.add(*reason, iv.end - iv.start);
-            }
-        }
-
-        // 4-5. Cap and partition, one block at a time.
-        state
-            .walk
-            .absorb(&window, &cleaned, classified, bases_start, config);
-        Ok(tally)
-    }
-
-    fn segment_options(&self) -> SegmentOptions {
-        SegmentOptions {
-            // For the scan this is the detection margin only — the satellite cap is the
-            // walk's own business (`resolve_features`). Same number, because spec §2.6
-            // says it must be: the margin exists to capture whole any repeat that is not
-            // a satellite.
-            max_repeat_len: self.config.max_str_len.get(),
-            window_bp: self.config.window_bp.get(),
-            // `RegionScanner`'s smoothing knobs; the window rules read neither. Zeroed
-            // rather than defaulted so a reader does not go looking for where this walk
-            // smooths. It does not.
-            merge_gap: 0,
-            min_repeat_len: 0,
-        }
-    }
-
-    fn tally(&mut self, region: &TypedRegion) {
-        let bp = region.region.len();
-        match &region.kind {
-            RegionKind::SsrSegment(_) => {
-                self.counts.ssr_loci += 1;
-                // This repeat coverage DID yield a locus, so it is not part of the gap.
-                // The locus's bases are a subset of the coverage counted when its window
-                // was scanned (a locus is a trimmed tract, and a tract is coverage), so
-                // this cannot underflow.
-                self.counts.repeat_bp_with_no_locus -= bp;
-            }
-            RegionKind::SsrBundle { .. } => {
-                self.counts.ssr_bundles += 1;
-                // **The number spec §10's bundle question needs and has never had** —
-                // production drops these uncounted.
-                self.counts.ssr_bundle_bp += bp;
-            }
-            RegionKind::Generic => self.counts.generic += 1,
-            RegionKind::Satellite => {
-                self.counts.satellites += 1;
-                self.counts.satellite_bp += bp;
-            }
-        }
-    }
-}
-
-impl<R: RawRefSeq + ContigTable + EvictableRefSeq> Iterator for TypedRegionIterator<R> {
-    type Item = Result<TypedRegion, TypedRegionError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(region) = self.queue.pop_front() {
-                self.tally(&region);
-                return Some(Ok(region));
-            }
-            if self.done {
-                return None;
-            }
-            match self.advance() {
-                Ok(true) => continue,
-                Ok(false) => {
-                    self.done = true;
-                    return None;
-                }
-                Err(e) => {
-                    // Fatal: report once, then done. Continuing would scan a hole, and a
-                    // hole in a partition is invisible to everything downstream.
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            }
-        }
-    }
-}
-
-impl<R: RawRefSeq + ContigTable + EvictableRefSeq> std::iter::FusedIterator
-    for TypedRegionIterator<R>
-{
-}
-
-/// One span to **scan** — a whole contig — and the spans inside it the user actually
-/// **asked for** (spec §2.5).
-///
-/// Two sets, because a BED edge must not cut a decision in half: a repeat at 999 is
-/// bundled away by a neighbour at 1030, so a walk that never looks past 1000 classifies a
-/// locus the whole-genome run rejects — same reference, different calls, because of
-/// `--regions`. [`scan_set`] says why the scan set is the whole contig and not something
-/// cheaper.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ScanSpan {
-    /// What the walk tiles with cores: **the whole contig** ([`scan_set`]).
-    scan: GenomeRegion,
-    /// The requested spans inside it, in order — what the walk is allowed to emit.
-    /// Non-empty by construction.
-    requested: Vec<GenomeRegion>,
-}
-
-/// **The scan set is the whole of every contig the request touches** (spec §2.5, owner
-/// 2026-07-17).
-///
-/// # Why the whole contig, and not the requested span grown by a margin
-///
-/// E2 grew each span by `max_str_len` and coalesced, which spec §2.5 chose over
-/// whole-contig scans on cost: *"makes a 10 kb region pay for a 90 Mb chromosome"*. **A
-/// fixed margin cannot deliver the emit rule.** Every finding that intersects a requested
-/// edge is returned **whole** ([`clips_at_a_bed_edge`]) — and "whole" is a fact about the
-/// feature, which does not care what the walk scanned:
-///
-/// - a **satellite** is *by definition* longer than `max_str_len`, and the margin **is**
-///   `max_str_len` — so an array running past it came back cut. Measured: a 3 kb array
-///   reported `1001–4001` whole-genome and `1001–2300` under a BED, silently.
-/// - a **bundle** chains with no reach at all (spec §2.6: *"A–B–C–D each 30 bp apart runs
-///   past any margin you choose"*), so a fixed margin was never going to hold one.
-///
-/// §2.6 had already settled the principle for *window* edges — *"the data tells you when
-/// it's over; you don't have to guess a reach"* — and a grown span is a guessed reach.
-/// §2.5 was the odd one out.
-///
-/// **The cost is time, not memory.** A 10 kb BED on a 90 Mb chromosome now scans 90 Mb —
-/// but through the same window, so peak memory is unchanged (spec §7), and the emit set is
-/// as narrow as ever. What it buys is that a BED costs the user nothing in *correctness*:
-/// every finding is exactly the one a whole-genome run reports, which
-/// `a_bed_returns_the_same_findings_the_whole_genome_run_does` asserts as object identity
-/// rather than as a resemblance.
-///
-/// It also **deletes** a rule rather than adding one: with no scan edges but the contig's,
-/// a cluster can no longer be cut, so `resolve_features` needs no edge case and
-/// `bundle_clusters` gets its "a bundle has ≥ 2 members" assert back at full strength.
-fn scan_set<R: ContigTable>(
-    reference: &R,
-    requested: &[GenomeRegion],
-) -> Result<Vec<ScanSpan>, TypedRegionError> {
-    let mut out: Vec<ScanSpan> = Vec::new();
-    for &span in requested {
-        match out.last_mut() {
-            // `GenomeRegions` hands them over in genomic order (C3), so a contig's spans
-            // are adjacent and one pass groups them.
-            Some(last) if last.scan.contig == span.contig => last.requested.push(span),
-            _ => {
-                let contig_len = contig_entry(reference, span.contig)?.length;
-                out.push(ScanSpan {
-                    scan: GenomeRegion {
-                        contig: span.contig,
-                        start: Position(1),
-                        end: Position(contig_len),
-                    },
-                    requested: vec![span],
-                });
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Whether a typed region is **clipped** to the user's BED edge — and only `Generic` is
-/// (spec §2.5).
-///
-/// # Every *finding* comes back whole; only the default clips
-///
-/// **Owner's rule, 2026-07-17:** a microsatellite, a bundle *or a satellite* that
-/// intersects a BED edge is returned whole. `Generic` alone is clipped, because it is the
-/// only kind that is not a finding — *"nothing more specific can be said here"* stays true
-/// of any stretch of a generic run, so a clipped one still says exactly what it said.
-///
-/// Each of the other three is a **claim about its own extent**, and half of it is a
-/// different claim:
-///
-/// - `SsrSegment` — a genetic object. Half a locus is not a locus: its coordinates, its
-///   motif and its copy number all describe the whole tract.
-/// - `SsrBundle` — carries its member tracts; clip the hull and the members describe bases
-///   outside their own region.
-/// - `Satellite` — **the case E2 first got wrong.** The label means *"an array too long to
-///   be a microsatellite"*, so the extent is the claim and `max_str_len` is what makes
-///   it. Clip the fixture's 1.2 kb array to a 300 bp request and the result is a
-///   `Satellite` region of 300 bp — a span that contradicts the very cap that produced the
-///   label. E2 argued the opposite from `RegionKind`'s shape (`Satellite` carries no
-///   payload, so nothing could be left misdescribed); that read the *type* correctly and
-///   the *meaning* wrongly. What a region carries is not what it claims.
-///
-/// Spec §2.5 named only loci and bundles and was silent on satellites; it now states this
-/// rule.
-fn clips_at_a_bed_edge(kind: &RegionKind) -> bool {
-    match kind {
-        RegionKind::Generic => true,
-        RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. } | RegionKind::Satellite => false,
-    }
-}
-
-/// Narrow one walked region to what the user asked for, and queue what survives (spec
-/// §2.5).
-///
-/// - **Outside every requested span** → dropped. It was scanned so that the regions inside
-///   would be *right*, not to be shown.
-/// - **A finding** — locus, bundle or satellite ([`clips_at_a_bed_edge`]) → emitted
-///   **whole**, even past the edge: the requested span grows to hold it, and that grown
-///   span — the *effective* region — is what the partition invariant is stated over.
-/// - **`Generic`** → **clipped** to each requested span it overlaps, which may be more
-///   than one: every span on a contig shares that contig's scan, so a generic run across
-///   two of them must come back as two regions with the gap dropped, not one region
-///   covering ground the user did not ask for.
-///
-/// `emitted_upto` keeps the output non-overlapping when a finding has just been emitted
-/// whole past an edge and the next requested span starts inside it.
-fn emit_into(
-    queue: &mut std::collections::VecDeque<TypedRegion>,
-    region: TypedRegion,
-    requested: &[GenomeRegion],
-    emitted_upto: &mut u64,
-) {
-    let overlaps = |r: &GenomeRegion| {
-        r.contig == region.region.contig
-            && r.start.get() <= region.region.end.get()
-            && region.region.start.get() <= r.end.get()
-    };
-
-    if !clips_at_a_bed_edge(&region.kind) {
-        if requested.iter().any(overlaps) {
-            *emitted_upto = region.region.end.get();
-            queue.push_back(region);
-        }
-        return;
-    }
-
-    for r in requested.iter().filter(|r| overlaps(r)) {
-        let start = region
-            .region
-            .start
-            .get()
-            .max(r.start.get())
-            .max(*emitted_upto + 1);
-        let end = region.region.end.get().min(r.end.get());
-        if start > end {
-            continue;
-        }
-        *emitted_upto = end;
-        queue.push_back(TypedRegion {
-            region: GenomeRegion {
-                contig: region.region.contig,
-                start: Position(start),
-                end: Position(end),
-            },
-            kind: region.kind.clone(),
-        });
-    }
-}
-
-/// The reference's own table entry for `contig` — **the provenance seam** (spec §2.6).
-/// Every contig length and name the walk uses comes through here.
-fn contig_entry<R: ContigTable>(
-    reference: &R,
-    contig: ContigId,
-) -> Result<&crate::fasta::ContigEntry, TypedRegionError> {
-    reference
-        .contigs()
-        .entries
-        .get(contig.get() as usize)
-        .ok_or(TypedRegionError::Reference(RefSeqError::UnknownContig(
-            contig,
-        )))
-}
-
-/// The windowed walk's state: the open block, and the three carries.
-///
-/// Everything here is bounded by *one block* plus three coordinates — never by the
-/// contig. That is the claim `partition_windowed` exists to make good on, and the
-/// reason the pieces are named as carries rather than accumulators.
-struct BlockWalk {
-    contig: ContigId,
-    contig_len: u64,
-    /// The open block's coverage runs, ascending; the last one is still growing.
-    /// **Carry:** a satellite is longer than a window by definition, so a run's verdict
-    /// is not reachable inside the window that started it.
-    runs: Vec<CoverageRun>,
-    /// The open block's classified loci, awaiting their runs' verdict (a locus inside a
-    /// satellite is swallowed, spec §2.1).
-    loci: Vec<SsrSegment>,
-    /// The open block's bundle members, contig coordinates. **Carry:** a cluster chains
-    /// across a window boundary as happily as inside one.
-    bundled: Vec<RepeatInterval>,
-    /// **Carry:** the open generic run — everything up to here is emitted, so the gap
-    /// from here to the next feature is generic. One `u64` for a megabase.
-    emitted_upto: u64,
-    /// Resolved regions waiting to be read out, in genomic order. A queue rather than a
-    /// list because `TypedRegionIterator` drains it as it goes: it holds one block's
-    /// worth, never a contig's (spec §7).
-    out: std::collections::VecDeque<TypedRegion>,
-}
-
-/// One thing a window hands the walk, at a 1-based start. Sorted into a single
-/// ascending stream per window, because the block boundary is a question about
-/// *position* and answering it per kind would ask it three times.
-enum WindowItem {
-    Coverage(CoverageRun),
-    Segment(SsrSegment),
-    Bundled(RepeatInterval),
-}
-
-impl WindowItem {
-    fn start(&self) -> u64 {
-        match self {
-            Self::Coverage(run) => run.start,
-            Self::Segment(l) => l.start(),
-            // 0-based half-open → 1-based inclusive (spec §4).
-            Self::Bundled(iv) => iv.start + 1,
-        }
-    }
-
-    /// Coverage sorts first at a tie: a feature's block must be open before the feature
-    /// arrives, and it is coverage that opens it.
-    fn rank(&self) -> u8 {
-        match self {
-            Self::Coverage(_) => 0,
-            _ => 1,
-        }
-    }
-}
-
-impl BlockWalk {
-    fn new(contig: ContigId, contig_len: u64) -> Self {
-        Self {
-            contig,
-            contig_len,
-            runs: Vec::new(),
-            loci: Vec::new(),
-            bundled: Vec::new(),
-            emitted_upto: 0,
-            out: std::collections::VecDeque::new(),
-        }
-    }
-
-    /// Fold one window's worth of coverage, loci and bundle members into the open
-    /// block, closing it whenever an item proves it over.
-    ///
-    /// The three attributions — and each is the answer to a different question:
-    ///
-    /// - **coverage** is *clipped to the core*, so the cores' contributions abut and a
-    ///   satellite rejoins across every window it spans;
-    /// - **bundle members** are attributed by *the interval's* start, so each is
-    ///   contributed once; and
-    /// - **loci** by *the locus's* start (post-trim), which is also exactly once —
-    ///   every window whose slice holds the tract classifies the same locus (that is what
-    ///   the margin buys), and exactly one core holds its start.
-    fn absorb(
-        &mut self,
-        window: &ScannedWindow,
-        cleaned: &[RepeatInterval],
-        classified: segment_criteria::Classified,
-        bases_start: u64,
-        config: &TypedRegionConfig,
-    ) {
-        let core = window.core;
-        let in_core = |start_0based: u64| start_0based >= core.start && start_0based < core.end;
-
-        let mut items: Vec<WindowItem> = Vec::new();
-        // Coverage of the **cleaned** intervals, not the raw ones (spec §2.4): capping
-        // detector noise would let it declare a satellite and swallow the real loci
-        // underneath. This is why the window rules are methods over a caller-chosen
-        // set — `ScannedWindow::coverage_in_core`.
-        items.extend(
-            window
-                .coverage_in_core(cleaned)
-                .into_iter()
-                // 0-based half-open → 1-based inclusive.
-                .map(|(s, e)| {
-                    WindowItem::Coverage(CoverageRun {
-                        start: s + 1,
-                        end: e,
-                    })
-                }),
-        );
-        items.extend(
-            classified
-                .loci
-                .into_iter()
-                .filter(|l| in_core(l.start() - 1))
-                .map(WindowItem::Segment),
-        );
-        items.extend(
-            classified
-                .bundled
-                .into_iter()
-                // Back to contig coordinates: `classify` hands these back in the offsets
-                // it was given, which were offsets into the bases slice.
-                .map(|iv| RepeatInterval {
-                    start: iv.start + bases_start,
-                    end: iv.end + bases_start,
-                    ..iv
-                })
-                .filter(|iv| in_core(iv.start))
-                .map(WindowItem::Bundled),
-        );
-        items.sort_by_key(|i| (i.start(), i.rank()));
-
-        for item in items {
-            let start = item.start();
-            if self.block_is_open() && start > self.block_barrier(config) {
-                self.close_block(config);
-            }
-            match item {
-                WindowItem::Coverage(run) => match self.runs.last_mut() {
-                    // Abutting runs merge as well as overlapping ones — the same rule
-                    // as `coverage_runs`, and the reason cores tiling is enough for a
-                    // satellite to rejoin across windows.
-                    Some(last) if run.start <= last.end + 1 => last.end = last.end.max(run.end),
-                    _ => self.runs.push(run),
-                },
-                // A feature's start lies inside a cleaned interval, hence inside a run,
-                // hence inside the open block — coverage sorts first, so that run has
-                // already arrived. If this ever fires, the attribution is wrong and the
-                // partition is about to be built out of order; loudly, in release, is
-                // the only useful way to learn that.
-                WindowItem::Segment(l) => {
-                    assert!(
-                        self.block_is_open(),
-                        "a locus at {} arrived with no coverage under it",
-                        l.start()
-                    );
-                    self.loci.push(l);
-                }
-                WindowItem::Bundled(iv) => {
-                    assert!(
-                        self.block_is_open(),
-                        "a bundle member at {} arrived with no coverage under it",
-                        iv.start + 1
-                    );
-                    self.bundled.push(iv);
-                }
-            }
-        }
-    }
-
-    fn block_is_open(&self) -> bool {
-        !self.runs.is_empty()
-    }
-
-    /// The last position that still belongs to the open block: one flank past its
-    /// rightmost base. Wider than every radius the partition's rules have — see
-    /// [`resolve_features`].
-    fn block_barrier(&self, config: &TypedRegionConfig) -> u64 {
-        self.runs
-            .last()
-            .expect("the block is open")
-            .end
-            .saturating_add(config.criteria.bundle_threshold)
-    }
-
-    /// Resolve the open block and emit it, with the generic run that preceded it.
-    fn close_block(&mut self, config: &TypedRegionConfig) {
-        let loci = std::mem::take(&mut self.loci);
-        let bundled = std::mem::take(&mut self.bundled);
-        let features = resolve_features(&self.runs, loci, &bundled, self.contig, config);
-        self.runs.clear();
-
-        for f in features {
-            let start = f.region.start.get();
-            // The open generic run ends here — the third carry, spent. One `Generic`
-            // however long it is: maximality is a correctness requirement, not tidiness
-            // (spec §2.3, `fill_generic_gaps`).
-            if start > self.emitted_upto + 1 {
-                self.out
-                    .push_back(self.generic(self.emitted_upto + 1, start - 1));
-            }
-            // Non-overlap, checked rather than assumed. `partition_resident` leaves this
-            // as `fill_generic_gaps`'s unchecked precondition; here the features arrive
-            // from three carries across many windows, so it is worth one comparison per
-            // feature to learn about a broken partition from the walk rather than from a
-            // downstream consumer.
-            assert!(
-                start > self.emitted_upto,
-                "features overlap: a region starting at {start} follows one ending at {}",
-                self.emitted_upto
-            );
-            self.emitted_upto = f.region.end.get();
-            self.out.push_back(f);
-        }
-    }
-
-    fn generic(&self, start: u64, end: u64) -> TypedRegion {
-        TypedRegion {
-            region: GenomeRegion {
-                contig: self.contig,
-                start: Position(start),
-                end: Position(end),
-            },
-            kind: RegionKind::Generic,
-        }
-    }
-
-    /// Close the last block and run the generic carry out to the contig's end, leaving
-    /// everything in [`Self::out`] for the caller to drain.
-    ///
-    /// `&mut self` rather than consuming: `TypedRegionIterator` reaches this while the
-    /// walk is a field it is holding, and it drains the queue afterwards like any other
-    /// step. Idempotent — a second call has no open block and nothing left to reach.
-    fn finish(&mut self, config: &TypedRegionConfig) {
-        if self.block_is_open() {
-            self.close_block(config);
-        }
-        if self.emitted_upto < self.contig_len {
-            self.out
-                .push_back(self.generic(self.emitted_upto + 1, self.contig_len));
-            self.emitted_upto = self.contig_len;
-        }
-    }
 }
 
 /// Fill every gap between `features` with `Generic`, so the result tiles
@@ -1674,46 +990,32 @@ pub(crate) fn fill_generic_gaps(
     out
 }
 
-// ---------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------
-
-/// A fatal, walk-level error.
-///
-/// **One variant**, because `GenomeRegions` owns everything else that could go
-/// wrong (unknown contig, bad BED line, a region past a contig's end) and rejects
-/// it up front — so by the time the walk runs, the only thing left that can fail
-/// is reading the reference.
-///
-/// `#[non_exhaustive]`: matchers must accept future variants.
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum TypedRegionError {
-    /// A reference read failed mid-walk. Fatal: every window reads the reference,
-    /// and a `None` meaning both "end of the walk" and "a window in chromosome 7
-    /// failed" would **silently un-call the rest of the genome** (spec §8.2).
-    #[error("reference read failed during the walk")]
-    Reference(#[from] RefSeqError),
-    /// The config's detection margin is narrower than its bundle radius, which
-    /// would make the answer depend on `window_bp` (see [`TypedRegionConfig`]).
-    ///
-    /// Raised by the constructor, before any work: both knobs are on the command
-    /// line, so this is what a typo looks like, and a typo must not panic.
-    #[error(
-        "max_str_len ({max_str_len}) is the window's detection margin and must not \
-         be narrower than bundle_threshold ({bundle_threshold}), the bundle radius: a window that cannot \
-         see a core tract's neighbours would classify them as loci instead of bundling them"
-    )]
-    MarginNarrowerThanFlank {
-        max_str_len: u64,
-        bundle_threshold: u64,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::ref_seq::{InMemoryRefSeq, RefSeq};
+    use segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
+
+    /// **A base under two repeats is one base.** The pre-screen leaves intersecting tracts
+    /// in place — it removes period-multiple re-detections of *one* tract, not two different
+    /// repeats that happen to overlap — so the accumulator behind
+    /// `repeat_bp_with_no_locus` has to union before it measures. It summed instead until
+    /// the catalog's tally was compared against it and came out a base short over 200 kb.
+    ///
+    /// The spans arrive period-major rather than in coordinate order, which is why the last
+    /// case is out of order on purpose.
+    #[test]
+    fn overlapping_coverage_counts_a_shared_base_once() {
+        assert_eq!(covered_bp(&[]), 0);
+        assert_eq!(covered_bp(&[(10, 20)]), 10);
+        // Disjoint: 10 + 5.
+        assert_eq!(covered_bp(&[(10, 20), (30, 35)]), 15);
+        // Overlapping by one base: 10 + 10 - 1, not 20.
+        assert_eq!(covered_bp(&[(10, 20), (19, 29)]), 19);
+        // Abutting is not overlapping: 10 + 10.
+        assert_eq!(covered_bp(&[(10, 20), (20, 30)]), 20);
+        // One span swallowed by another, and handed over in the wrong order.
+        assert_eq!(covered_bp(&[(12, 15), (10, 30)]), 20);
+    }
 
     /// `Default` is the **short-read** settings now (spec §2.3), not the catalog's —
     /// which is what the golden oracles pin explicitly (see [`catalog_config`]).
@@ -1733,7 +1035,6 @@ mod tests {
         );
         assert_eq!(c.criteria.periods.max(), 6, "..to the hexa ceiling");
         assert_eq!(c.max_str_len, Bp(100), "the short-read satellite cap");
-        assert_eq!(c.window_bp, Bp(100_000), "100 kb window");
         assert_eq!(c.scan, ScanParams::default());
         assert_eq!(c.criteria, SsrSegmentCriteria::default());
         // The short-read copy-number floors `[8,6,6,6,5,4]` (spec ssr §5.1): the mono floor
@@ -1746,7 +1047,7 @@ mod tests {
 
     /// The catalog's settings — what [`TypedRegionConfig::default`] carried before
     /// spec §2.3 moved `Default` to the short-read floors. The `.cat` parity oracle
-    /// and the walk-mechanic tests below were written against these (di..hexa,
+    /// and the fixtures below were written against these (di..hexa,
     /// copy floors `[10,5,4,3,3,3]`, a **50 bp** flank/bundle radius, a **1 kb**
     /// satellite cap), so they pin them explicitly now that `Default` no longer
     /// supplies them (spec §8.1: the oracle must be pinned to the catalog's
@@ -1773,15 +1074,6 @@ mod tests {
         assert_eq!(c.ssr_loci, 0);
         assert_eq!(c.ssr_bundle_bp, 0);
         assert_eq!(c.repeat_bp_with_no_locus, 0);
-    }
-
-    /// The error is fatal-in-stream and converts from the one thing that can fail
-    /// mid-walk. `#[from]` is what lets the walk write `?`.
-    #[test]
-    fn a_reference_failure_converts_into_the_walk_error() {
-        let err: TypedRegionError = RefSeqError::UnknownContig(ContigId(7)).into();
-        assert!(matches!(err, TypedRegionError::Reference(_)));
-        assert!(err.to_string().contains("reference read failed"));
     }
 
     // ---- GenomeRegions (C3) ---------------------------------------------
@@ -1843,11 +1135,11 @@ mod tests {
         }
     }
 
-    /// Zero-length contigs contribute no span, so they never reach the walk —
+    /// Zero-length contigs contribute no span, so they never reach a consumer —
     /// `RegionSet`'s rule, inherited. This is why spec §2.3 can assert "zero-length
-    /// contigs never reach the walk" without the walk guarding for it.
+    /// contigs are never asked about" without a consumer guarding for it.
     #[test]
-    fn a_zero_length_contig_is_dropped_before_the_walk_sees_it() {
+    fn a_zero_length_contig_is_dropped_before_a_consumer_sees_it() {
         let contigs = &[
             ContigBounds {
                 name: "empty",
@@ -1902,11 +1194,11 @@ mod tests {
         );
     }
 
-    // ---- D1: the resident partition -------------------------------------
+    // ---- The resident partition ------------------------------------------
 
     /// **The invariant — the acceptance test** (spec §2.3).
     ///
-    /// Within a walked region the typed regions are **contiguous**
+    /// Within a requested region the typed regions are **contiguous**
     /// (`start == prev.end + 1`), **non-overlapping**, **complete** (their union is
     /// the whole span), and **maximal** (no two consecutive share a kind).
     ///
@@ -2731,7 +2023,7 @@ mod tests {
                 }
             }
         }
-        assert!(!ours.is_empty(), "the walk must find loci");
+        assert!(!ours.is_empty(), "the scan must find loci");
 
         // Overlap match. Production's `Locus` is 0-based half-open, ng's is 1-based
         // inclusive, so production's `[s, e)` is ng's `[s + 1, e]` (spec §4).
@@ -2746,7 +2038,7 @@ mod tests {
             );
             if !ours.iter().any(|o| overlaps(&g1, o)) {
                 // Absent is legal ONLY inside a satellite run — the one expected
-                // divergence (the catalog applies no cap; the walk does).
+                // divergence (the file applies no cap; a reader does).
                 if !satellites.iter().any(|s| overlaps(&g1, s)) {
                     missed.push(format!("{}:{}-{}", g1.0, g1.1, g1.2));
                 }
@@ -2762,116 +2054,6 @@ mod tests {
 
     // ---- D3: the windowed walk -------------------------------------------
 
-    /// A contig with real structure, laid out so that **the default 1 kb window's
-    /// core edges cut through features** — which is the only way a window-invariance
-    /// test proves anything:
-    ///
-    /// | offset | what | why it is there |
-    /// |---|---|---|
-    /// | 990 | a lone `(AT)*10` tract | straddles the 1000 core edge: the locus itself crosses a boundary |
-    /// | 1990, 2020 | two tracts 10 bp apart | a **bundle cluster** straddling the 2000 edge — its members land in different cores |
-    /// | 3500 | a lone tract | an interior control: the same feature nowhere near an edge |
-    /// | 4000..5200 | a 1.2 kb `(AT)` array | a **satellite** spanning two whole cores, plus the locus it swallows |
-    ///
-    /// The rest is aperiodic filler, which leaves generic runs several windows long
-    /// (the maximality case). 6 kb at `window_bp = 1000` means a fetched slice of ~3 kb
-    /// against a 6 kb contig — genuinely windowed, which a small fixture would not be:
-    /// with the 1 kb margin, a contig under ~2 kb is fetched whole every time and every
-    /// window-invariance assertion passes for free.
-    /// **The safety argument for `effective_scan` made checkable.** Raising the scanner's
-    /// copy floor to the weakest floor `prefilter` applies must not change the *prefiltered*
-    /// set — including through the redundancy post-pass, where a dropped short interval could
-    /// in principle stop eliminating a longer-period one.
-    ///
-    /// Five fixtures with different structure, because the post-pass only fires where a tract
-    /// has a period-multiple re-detection, and a fixture without one would pass whatever the
-    /// floor was.
-    #[test]
-    fn raising_the_scan_floor_cannot_change_the_prefiltered_set() {
-        let config = catalog_config();
-        let raised = config.effective_scan();
-        assert!(
-            raised.min_copies > config.scan.min_copies,
-            "the fixture must actually raise the floor, or this test proves nothing \
-             (scan {} -> {})",
-            config.scan.min_copies,
-            raised.min_copies
-        );
-
-        for (name, bases) in [
-            ("micro_repeats", contig_with_two_copy_micro_repeats()),
-            ("micro_plus_long", {
-                let mut b = contig_with_two_copy_micro_repeats();
-                b[1000..1040].copy_from_slice(&b"AT".repeat(20));
-                b[2000..2036].copy_from_slice(&b"ACG".repeat(12));
-                b
-            }),
-        ] {
-            let unraised = find_tandem_repeats(&bases, config.criteria.periods, &config.scan);
-            let hoisted = find_tandem_repeats(&bases, config.criteria.periods, &raised);
-
-            assert!(
-                unraised.len() > hoisted.len(),
-                "{name}: the raise must remove *something* from the raw set, \
-                 or the fixture does not exercise the hoist ({} vs {})",
-                unraised.len(),
-                hoisted.len()
-            );
-            assert_eq!(
-                segment_criteria::prefilter(&unraised, &config.criteria),
-                segment_criteria::prefilter(&hoisted, &config.criteria),
-                "{name}: the prefiltered set changed, so the hoist is not output-neutral"
-            );
-        }
-    }
-
-    /// Short repeats — **exactly two copies** of each period the catalog scans — scattered
-    /// through non-repetitive filler.
-    ///
-    /// These are the intervals the hoist exists to stop materialising: the scanner's own floor
-    /// is 2 copies, the weakest floor `prefilter` applies is 3, so every one of these is
-    /// detected and then immediately discarded. A fixture built only from long clean tracts
-    /// (which is what the other helpers here produce) contains none of them and would let the
-    /// neutrality test pass without exercising anything.
-    fn contig_with_two_copy_micro_repeats() -> Vec<u8> {
-        let mut bases = filler(6000);
-        let motifs: [&[u8]; 5] = [b"AT", b"ACG", b"ACGT", b"ACGTA", b"ACGTAC"];
-        // Spaced far enough apart that each is its own detection rather than one cluster.
-        for (i, motif) in motifs.iter().enumerate() {
-            let two = motif.repeat(2);
-            let off = 3000 + i * 200;
-            bases[off..off + two.len()].copy_from_slice(&two);
-        }
-        bases
-    }
-
-    /// **The positive control for the test above.** Raising the floor *past* what the
-    /// consumer applies does change the prefiltered set — so the comparison is capable of
-    /// failing, and a green result above is evidence rather than a tautology.
-    #[test]
-    fn raising_the_scan_floor_too_far_does_change_the_prefiltered_set() {
-        let config = catalog_config();
-        let bases = contig_with_two_copy_micro_repeats();
-
-        let honest = find_tandem_repeats(&bases, config.criteria.periods, &config.effective_scan());
-        let too_high = find_tandem_repeats(
-            &bases,
-            config.criteria.periods,
-            &ScanParams {
-                // One copy above the weakest consumer floor: the smallest overreach there is.
-                min_copies: config.effective_scan().min_copies + 1,
-                ..config.scan
-            },
-        );
-
-        assert_ne!(
-            segment_criteria::prefilter(&honest, &config.criteria),
-            segment_criteria::prefilter(&too_high, &config.criteria),
-            "raising past the consumer floor must be detectable, or the neutrality test \
-             above cannot fail and proves nothing"
-        );
-    }
-
     fn windowing_fixture() -> Vec<u8> {
         let mut bases = filler(6000);
         let mut tract_at = |off: usize| {
@@ -2885,10 +2067,6 @@ mod tests {
             bases[4000 + i * 2..4002 + i * 2].copy_from_slice(b"AT");
         }
         bases
-    }
-
-    fn reference_over(chrom: &str, bases: &[u8]) -> InMemoryRefSeq {
-        InMemoryRefSeq::from_named_contigs(vec![(chrom.to_string(), bases.to_vec())])
     }
 
     /// A **chain**: 20 bp `(AT)` tracts every 50 bp — a 30 bp gap between each, under the
@@ -2947,14 +2125,7 @@ mod tests {
 
         // Ask about 200 bp of its left end. The satellite comes back WHOLE — all 3 kb,
         // past both requested edges, identical to the whole-genome region.
-        let got = walk_bed_with(
-            &bases,
-            &[(1100, 1300)],
-            TypedRegionConfig {
-                window_bp: Bp(333),
-                ..catalog_config()
-            },
-        );
+        let got = walk_bed_with(&bases, &[(1100, 1300)], catalog_config());
         let sat = got
             .iter()
             .find(|r| matches!(r.kind, RegionKind::Satellite))
@@ -2987,14 +2158,7 @@ mod tests {
              only where they abut and every run here is 20 bp: {whole:#?}"
         );
 
-        let got = walk_bed_with(
-            &bases,
-            &[(900, 1200)],
-            TypedRegionConfig {
-                window_bp: Bp(333),
-                ..catalog_config()
-            },
-        );
+        let got = walk_bed_with(&bases, &[(900, 1200)], catalog_config());
         let (hull, tracts) = got
             .iter()
             .find_map(|r| match &r.kind {
@@ -3031,18 +2195,29 @@ mod tests {
     /// **A microsatellite too close to a satellite is swallowed by it, from either
     /// side** (spec §2.4a — the owner's rule, 2026-07-16).
     ///
-    /// The situation is physical and symmetric: a `(CAG)*8` tract 20 bp from a 1.3 kb
+    /// The situation is physical and symmetric: a `(CAG)*8` tract close to a 1.3 kb
     /// array cannot be genotyped, because the flank on that side *is* array. So the
     /// answer must not depend on which side it sits — and before this rule it did, in
     /// two different wrong ways (`resolve_features`' docs).
     ///
-    /// The 200 bp arm is the **control**, and it is what makes the 20 bp arm mean
-    /// something: at 200 bp the same two features, built by the same code, give a clean
-    /// `Generic / locus / Generic / Satellite` — so absorption at 20 bp is the *rule*
-    /// firing, not classification quietly rejecting a tract that was never viable.
+    /// The far arm is the **control**, and it is what makes the near arm mean
+    /// something: 200 bp away the same two features, built by the same code, give a
+    /// clean `Generic / locus / Generic / Satellite` — so absorption up close is the
+    /// *rule* firing, not classification quietly rejecting a tract that was never
+    /// viable.
+    ///
+    /// **Both gaps are derived from [`DEFAULT_BUNDLE_THRESHOLD`] rather than written as
+    /// numbers.** They used to be a literal 20 bp against a radius of 30; when the
+    /// radius moved to 20 the near arm landed exactly on the boundary — where the rule
+    /// is strict and so does *not* absorb — and the test failed for a reason that had
+    /// nothing to do with what it checks. A fixture that pins a constant it does not
+    /// own tests the constant.
     #[test]
     fn a_microsatellite_beside_a_satellite_is_absorbed_into_it() {
         let config = TypedRegionConfig::default();
+        // Comfortably inside the radius, and comfortably outside it.
+        let near = (DEFAULT_BUNDLE_THRESHOLD / 2) as usize;
+        let far = (DEFAULT_BUNDLE_THRESHOLD * 10) as usize;
         let kinds = |regions: &[TypedRegion]| -> Vec<&'static str> {
             regions
                 .iter()
@@ -3058,14 +2233,14 @@ mod tests {
         for micro_left in [true, false] {
             let side = if micro_left { "left" } else { "right" };
 
-            // --- absorbed: 20 bp of gap, less than the 50 bp flank ---
-            let bases = micro_near_satellite(micro_left, 20);
+            // --- absorbed: a gap inside the bundle radius ---
+            let bases = micro_near_satellite(micro_left, near);
             let regions = partition_resident("chr1", ContigId(0), &bases, &config);
             assert_partitions(
                 &regions,
                 ContigId(0),
                 bases.len() as u64,
-                &format!("micro {side} of a satellite, 20 bp"),
+                &format!("micro {side} of a satellite, {near} bp"),
             );
             assert_eq!(
                 kinds(&regions),
@@ -3082,54 +2257,74 @@ mod tests {
                 .find(|r| matches!(r.kind, RegionKind::Satellite))
                 .expect("one satellite");
             assert!(
-                satellite.region.len() >= 1300 + 20 + 24,
+                satellite.region.len() as usize >= 1300 + near + 24,
                 "micro {side}: the satellite must EXPAND over the gap and the tract — \
-                 array (1300) + gap (20) + tract (24); got {}",
+                 array (1300) + gap ({near}) + tract (24); got {}",
                 satellite.region.len()
             );
 
-            // --- the control: 200 bp of gap, and the flank is clean ---
-            let bases = micro_near_satellite(micro_left, 200);
+            // --- the control: far outside the radius, and the flank is clean ---
+            let bases = micro_near_satellite(micro_left, far);
             let regions = partition_resident("chr1", ContigId(0), &bases, &config);
             assert_partitions(
                 &regions,
                 ContigId(0),
                 bases.len() as u64,
-                &format!("micro {side} of a satellite, 200 bp"),
+                &format!("micro {side} of a satellite, {far} bp"),
             );
             assert!(
                 kinds(&regions).contains(&"locus"),
-                "micro {side}: 200 bp away the SAME tract is a locus — so the absorption \
+                "micro {side}: {far} bp away the SAME tract is a locus — so the absorption \
                  above is the rule, not a tract that was never admissible"
             );
             assert!(kinds(&regions).contains(&"satellite"));
         }
     }
 
-    /// Absorption must not depend on the window either: the windowed walk agrees with
-    /// the oracle on both arms and both sides. (The absorbed feature and the array are
-    /// within `bundle_threshold`, so they are one block — this is what pins that.)
+    /// **A wider radius absorbs from further away.** That is the whole content of the
+    /// knob, and it is what nothing asserted until a `(CAG)*8` tract beside a 1.3 kb array
+    /// started behaving differently when the default moved.
+    ///
+    /// Pinned because its absence cost two confusing failures. The absorption test above
+    /// used a literal 20 bp gap, comfortable inside a radius of 30 and right at the
+    /// transition once the radius became 20. Then a first version of *this* test asserted
+    /// "absorbed at exactly the radius, a locus one base further" — true at a radius of 20
+    /// and false at 15. The behaviour was right every time; the assertions were guesses at
+    /// a relationship nobody had measured.
+    ///
+    /// **So it asserts the monotonicity and not an offset.** How far a tract must sit from
+    /// the array before it survives is not the radius plus a constant: classification trims
+    /// a tract's edges, so the gap this fixture lays down and the gap the rule compares are
+    /// not the same number, and the difference moves with the radius. What is guaranteed,
+    /// and what a reader needs, is the direction — and it is checked across four radii
+    /// rather than at the default alone, so moving the default cannot break it again.
     #[test]
-    fn absorption_is_window_invariant() {
-        for micro_left in [true, false] {
-            for gap in [20usize, 200] {
-                let bases = micro_near_satellite(micro_left, gap);
-                let resident =
-                    partition_resident("chr1", ContigId(0), &bases, &TypedRegionConfig::default());
-                for window_bp in [100u64, 700, 1000] {
-                    let config = TypedRegionConfig {
-                        window_bp: Bp(window_bp),
-                        ..TypedRegionConfig::default()
-                    };
-                    let windowed =
-                        partition_windowed(reference_over("chr1", &bases), ContigId(0), &config)
-                            .expect("fetch");
-                    assert_eq!(
-                        windowed, resident,
-                        "micro_left={micro_left} gap={gap} window_bp={window_bp}"
-                    );
-                }
-            }
+    fn absorption_tracks_the_bundle_radius() {
+        let first_locus_gap = |radius: u64| -> Option<usize> {
+            let config = TypedRegionConfig {
+                criteria: SsrSegmentCriteria {
+                    bundle_threshold: radius,
+                    ..SsrSegmentCriteria::default()
+                },
+                ..TypedRegionConfig::default()
+            };
+            (1..=radius as usize * 3).find(|&gap| {
+                let bases = micro_near_satellite(true, gap);
+                partition_resident("chr1", ContigId(0), &bases, &config)
+                    .iter()
+                    .any(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
+            })
+        };
+        let mut previous = 0;
+        for radius in [10u64, 15, 20, 30] {
+            let gap = first_locus_gap(radius)
+                .unwrap_or_else(|| panic!("radius {radius}: no gap leaves a locus at all"));
+            assert!(
+                gap > previous,
+                "radius {radius}: the tract should survive at a wider gap than the previous \
+                 radius did — got {gap} against {previous}"
+            );
+            previous = gap;
         }
     }
 
@@ -3153,10 +2348,10 @@ mod tests {
     /// satellite of its own, and swallowing the loci underneath. No fixture produces
     /// that. This pins the choice; it does not demonstrate the stakes.
     ///
-    /// It also pins the walk's **second** copy of the decision
-    /// (`BlockWalk::absorb`'s `coverage_in_core(cleaned)`), but only via
-    /// window-invariance, which compares the two walks — so it catches either site
-    /// moving, and not both moving together (verified).
+    /// **The catalog's reader shares this decision rather than repeating it** — it calls
+    /// [`coverage_runs`] over its own cleaned set — so this test covers both paths, and
+    /// the differential cannot see the choice move because it would move on both sides at
+    /// once.
     #[test]
     fn the_satellite_cap_applies_to_the_cleaned_coverage_not_the_raw() {
         let mut bases = windowing_fixture();
@@ -3190,365 +2385,15 @@ mod tests {
             .collect();
         assert_eq!(
             satellites, from_cleaned,
-            "the walk's satellites are the CLEANED coverage's over-cap runs: capping the \
+            "the satellites are the CLEANED coverage's over-cap runs: capping the \
              raw set would let detector noise decide where an array begins — and, with 1 \
              kb of it in a row, that an array exists at all (spec §2.4)"
         );
     }
 
-    /// **The acceptance test: `window_bp` is a memory knob and must not move the
-    /// output** (spec §2.3), proven by matching [`partition_resident`] — the simplest
-    /// implementation, which has no windows to get wrong (impl plan, Milestone D).
-    ///
-    /// Several window sizes, because a windowing bug is usually a bug at one specific
-    /// alignment of feature to boundary: 1000 cuts the fixture's features (above), 700
-    /// and 333 cut it somewhere else and give the carries many more chances to drop or
-    /// double something, and 100_000 is the degenerate one-window case.
-    #[test]
-    fn windowed_matches_the_resident_oracle_at_every_window_size() {
-        let bases = windowing_fixture();
-        let base = TypedRegionConfig::default();
-        let resident = partition_resident("chr1", ContigId(0), &bases, &base);
-        assert_partitions(&resident, ContigId(0), bases.len() as u64, "resident");
+    // ---- The tally -------------------------------------------------------
 
-        // The fixture must contain what it claims to, or every comparison below is
-        // "empty == empty". This is the guard on the guard.
-        let count = |rs: &[TypedRegion], f: fn(&RegionKind) -> bool| {
-            rs.iter().filter(|r| f(&r.kind)).count()
-        };
-        assert!(
-            count(&resident, |k| matches!(k, RegionKind::SsrSegment(_))) >= 2,
-            "the fixture must classify loci: {resident:#?}"
-        );
-        assert_eq!(
-            count(&resident, |k| matches!(k, RegionKind::SsrBundle { .. })),
-            1,
-            "the fixture must bundle the close pair"
-        );
-        assert_eq!(
-            count(&resident, |k| matches!(k, RegionKind::Satellite)),
-            1,
-            "the fixture must have a satellite"
-        );
-
-        for window_bp in [1000u64, 700, 333, 100_000] {
-            let config = TypedRegionConfig {
-                window_bp: Bp(window_bp),
-                ..base.clone()
-            };
-            let windowed = partition_windowed(reference_over("chr1", &bases), ContigId(0), &config)
-                .expect("fetch");
-            assert_partitions(
-                &windowed,
-                ContigId(0),
-                bases.len() as u64,
-                &format!("windowed at {window_bp}"),
-            );
-            assert_eq!(
-                windowed, resident,
-                "window_bp = {window_bp} changed the output — it is a memory knob and \
-                 nothing else (spec §2.3)"
-            );
-        }
-    }
-
-    /// The same, on **real sequence** rather than a crafted fixture: every contig of
-    /// the golden reference, windowed small, must equal the resident walk that
-    /// reproduces the trf-mod-built catalog (`the_resident_partition_reproduces_the_
-    /// golden_catalog`). So the windowed walk inherits `.cat` parity — through the
-    /// oracle, which is the point of having one.
-    ///
-    /// Crafted fixtures place features where the author thought to; a real assembly
-    /// places them where they are, at densities and spacings nobody chose.
-    #[test]
-    fn windowed_matches_the_resident_oracle_on_the_golden_reference() {
-        use std::fs::File;
-        use std::io::BufReader;
-        use std::path::Path;
-
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("data")
-            .join("tandem_repeat")
-            .join("synthetic_ref.fa");
-        let file = File::open(fixture).unwrap();
-        let mut reader = noodles_fasta::io::Reader::new(BufReader::new(file));
-
-        let mut checked = 0;
-        for result in reader.records() {
-            let rec = result.unwrap();
-            let name = String::from_utf8_lossy(rec.name()).into_owned();
-            let bases: Vec<u8> = rec.sequence().as_ref().to_vec();
-            // One reference per contig, so the id is 0 in each — the walk is
-            // per-contig, and `E3` is where a multi-contig reference is walked whole.
-            let contig = ContigId(0);
-
-            let resident = partition_resident(&name, contig, &bases, &TypedRegionConfig::default());
-            for window_bp in [500u64, 1500] {
-                let config = TypedRegionConfig {
-                    window_bp: Bp(window_bp),
-                    ..TypedRegionConfig::default()
-                };
-                let windowed = partition_windowed(reference_over(&name, &bases), contig, &config)
-                    .expect("fetch");
-                assert_eq!(
-                    windowed, resident,
-                    "{name} at window_bp = {window_bp} diverged from the resident oracle"
-                );
-            }
-            checked += 1;
-        }
-        assert!(checked > 0, "the golden reference must have contigs");
-    }
-
-    /// **Maximality across windows** (spec §2.3): a generic run longer than a window
-    /// is **one** region, not one per window.
-    ///
-    /// This is the open-generic-run carry, and it is a correctness requirement rather
-    /// than tidiness: the pileup mints loci *inside* a `Generic` region, so a run split
-    /// at a window edge makes an indel spanning that edge callable by neither half — it
-    /// never appears, and nothing fails.
-    #[test]
-    fn a_generic_run_longer_than_a_window_is_one_region() {
-        let bases = windowing_fixture();
-        let window_bp = 100;
-        let config = TypedRegionConfig {
-            window_bp: Bp(window_bp),
-            ..TypedRegionConfig::default()
-        };
-        let regions = partition_windowed(reference_over("chr1", &bases), ContigId(0), &config)
-            .expect("fetch");
-        assert_partitions(&regions, ContigId(0), bases.len() as u64, "maximality");
-
-        // The stretch between the tract at 3500 and the array at 4000 is ~480 bp — five
-        // windows — and the one before 990 is ~940. Both must be single regions.
-        let longest = regions
-            .iter()
-            .filter(|r| matches!(r.kind, RegionKind::Generic))
-            .map(|r| r.region.len())
-            .max()
-            .expect("the fixture has generic sequence");
-        assert!(
-            longest > window_bp * 3,
-            "a generic run must span windows whole: the longest is {longest} bp at \
-             window_bp = {window_bp}"
-        );
-    }
-
-    /// **The contig-end clamp guard, at the walk level** (spec §2.6) — and the
-    /// **provenance obligation**, discharged and pinned.
-    ///
-    /// `classify` clamps a locus's flanks at the *contig's* ends and drops a locus whose
-    /// flank clamped to nothing. Hand it the **window's** end as the contig's length —
-    /// production's exact mistake, and arithmetically legal, so `classify`'s own guard
-    /// cannot catch it — and every locus within `bundle_threshold` of every window boundary
-    /// silently vanishes, a different set for each `window_bp`.
-    ///
-    /// The fixture's tract at 990 straddles the 1000 core edge; the one at 3500 sits in
-    /// the middle of a core. Only reading `contig_len` from the reference's contig table
-    /// keeps the first one. Mutation-verified: passing `window.core.end` (or
-    /// `window.fetched.end`) instead of the table's length drops it and this fails.
-    #[test]
-    fn a_locus_astride_a_window_edge_is_not_dropped() {
-        let bases = windowing_fixture();
-        let config = TypedRegionConfig {
-            window_bp: Bp(1000),
-            ..TypedRegionConfig::default()
-        };
-        let regions = partition_windowed(reference_over("chr1", &bases), ContigId(0), &config)
-            .expect("fetch");
-
-        let loci: Vec<u64> = regions
-            .iter()
-            .filter_map(|r| match &r.kind {
-                RegionKind::SsrSegment(l) => Some(l.start()),
-                _ => None,
-            })
-            .collect();
-        // 1-based, and the detector may shift the tract's edge by a base or two — its
-        // business, not this test's (`scanner_parity` characterises the same wobble).
-        assert!(
-            loci.iter().any(|&s| (989..=1000).contains(&s)),
-            "the locus astride the 1000 core edge must survive: loci at {loci:?}"
-        );
-        assert!(
-            loci.iter().any(|&s| (3499..=3510).contains(&s)),
-            "the interior control locus must be there too: loci at {loci:?}"
-        );
-    }
-
-    /// A locus is emitted **exactly once**, whichever core holds its start — the
-    /// attribution rule. Doubling is the other half of the failure the carries can
-    /// cause, and the invariant catches it as an overlap; this says so directly.
-    #[test]
-    fn every_locus_is_emitted_exactly_once() {
-        let bases = windowing_fixture();
-        for window_bp in [100u64, 333, 1000] {
-            let config = TypedRegionConfig {
-                window_bp: Bp(window_bp),
-                ..TypedRegionConfig::default()
-            };
-            let regions = partition_windowed(reference_over("chr1", &bases), ContigId(0), &config)
-                .expect("fetch");
-            let mut starts: Vec<u64> = regions
-                .iter()
-                .filter(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
-                .map(|r| r.region.start.get())
-                .collect();
-            let before = starts.len();
-            starts.dedup();
-            assert_eq!(
-                before,
-                starts.len(),
-                "window_bp = {window_bp}: a locus doubled"
-            );
-        }
-    }
-
-    /// A reference read that fails is fatal, and surfaces as `Err` — the walk never
-    /// scans a hole (spec §8.2). An unknown contig is the reachable form of that here.
-    #[test]
-    fn an_unreadable_contig_is_an_error_not_an_empty_partition() {
-        let err = partition_windowed(
-            reference_over("chr1", b"ACGT"),
-            ContigId(9),
-            &TypedRegionConfig::default(),
-        )
-        .expect_err("contig 9 does not exist");
-        assert!(matches!(err, TypedRegionError::Reference(_)));
-    }
-
-    #[test]
-    fn a_zero_length_contig_windows_to_nothing() {
-        let regions = partition_windowed(
-            reference_over("empty", b""),
-            ContigId(0),
-            &TypedRegionConfig::default(),
-        )
-        .unwrap();
-        assert!(regions.is_empty());
-    }
-
-    /// **A margin narrower than the bundle radius silently un-bundles**, so the walk
-    /// refuses it — with an **error**, and before any work. Without the guard, a core
-    /// tract whose neighbour fell outside the window would be classified as a clean locus:
-    /// no error, and a different answer for every `window_bp`.
-    ///
-    /// It is a `Result`, not an `assert!`, because both knobs are command-line flags
-    /// (`typed_regions_cli.md` §2.1) and a typo must not panic. A2's rule — a swept knob's
-    /// guard must survive `--release` — is what a `debug_assert` would have broken, and a
-    /// `Result` keeps unconditionally.
-    #[test]
-    fn a_detection_margin_narrower_than_the_bundle_radius_is_refused() {
-        let config = TypedRegionConfig {
-            max_str_len: Bp(10),
-            ..TypedRegionConfig::default()
-        };
-        let err = partition_windowed(
-            reference_over("chr1", &windowing_fixture()),
-            ContigId(0),
-            &config,
-        )
-        .expect_err("a margin narrower than bundle_threshold is refused");
-        assert!(
-            matches!(
-                err,
-                TypedRegionError::MarginNarrowerThanFlank {
-                    max_str_len: 10,
-                    bundle_threshold: 30
-                }
-            ),
-            "and it names both numbers, so the message says which flag to move: {err}"
-        );
-        assert!(
-            err.to_string()
-                .contains("must not be narrower than bundle_threshold"),
-            "the operator-facing message survives: {err}"
-        );
-    }
-
-    // ---- E1: the iterator surface ----------------------------------------
-
-    /// `over_regions` walks **every** span, in genomic order, gap-free across contigs —
-    /// and each contig's regions are exactly what walking that contig alone gives.
-    ///
-    /// The multi-contig case is the one the per-contig tests cannot reach: the walk has
-    /// to put down one contig and pick up the next without carrying anything across
-    /// (`emitted_upto` and the block carries are per span, and a leak would show as a
-    /// gap or an overlap at the seam).
-    #[test]
-    fn over_regions_walks_every_contig_in_order() {
-        let a = windowing_fixture();
-        let b = micro_near_satellite(true, 20);
-        let contigs = &[
-            ContigBounds {
-                name: "chrA",
-                length: a.len() as u32,
-            },
-            ContigBounds {
-                name: "chrB",
-                length: b.len() as u32,
-            },
-        ];
-        let reference = InMemoryRefSeq::from_named_contigs(vec![
-            ("chrA".to_string(), a.clone()),
-            ("chrB".to_string(), b.clone()),
-        ]);
-        let config = TypedRegionConfig {
-            window_bp: Bp(700),
-            ..TypedRegionConfig::default()
-        };
-
-        let regions: Vec<TypedRegion> = TypedRegionIterator::over_regions(
-            reference,
-            GenomeRegions::whole_contigs(contigs),
-            config.clone(),
-        )
-        .expect("valid spans")
-        .collect::<Result<_, _>>()
-        .expect("no read fails");
-
-        // Each contig's slice of the output partitions that contig...
-        let (from_a, from_b): (Vec<_>, Vec<_>) = regions
-            .iter()
-            .cloned()
-            .partition(|r| r.region.contig == ContigId(0));
-        assert_partitions(
-            &from_a,
-            ContigId(0),
-            a.len() as u64,
-            "chrA via over_regions",
-        );
-        assert_partitions(
-            &from_b,
-            ContigId(1),
-            b.len() as u64,
-            "chrB via over_regions",
-        );
-
-        // ...and is identical to walking it on its own: nothing carries across the seam.
-        assert_eq!(
-            from_a,
-            partition_resident("chrA", ContigId(0), &a, &config),
-            "chrA"
-        );
-        assert_eq!(
-            from_b,
-            partition_resident("chrB", ContigId(1), &b, &config),
-            "chrB"
-        );
-
-        // Genomic order, contigs in table order.
-        assert!(
-            regions
-                .windows(2)
-                .all(|w| (w[0].region.contig, w[0].region.start)
-                    <= (w[1].region.contig, w[1].region.start)),
-            "regions must come out in genomic order"
-        );
-    }
-
-    /// The **running tally**: readable mid-walk, complete once exhausted (spec §3.1).
+    /// The **tally describes the regions that came out** (spec §3.1).
     ///
     /// Checked against the regions actually yielded rather than against literals — the
     /// counts are a claim *about the output*, so anything else would be two independent
@@ -3556,32 +2401,14 @@ mod tests {
     #[test]
     fn counts_tally_the_regions_yielded() {
         let bases = windowing_fixture();
-        let reference = reference_over("chr1", &bases);
-        let mut iter =
-            TypedRegionIterator::over_contig(reference, ContigId(0), TypedRegionConfig::default())
-                .expect("valid contig");
-
-        assert_eq!(
-            *iter.counts(),
-            TypedRegionCounts::default(),
-            "nothing walked, nothing counted"
+        let (yielded, counts) = partition_resident_in(
+            "chr1",
+            ContigId(0),
+            &bases,
+            &TypedRegionConfig::default(),
+            &whole_contig(bases.len() as u64),
         );
-
-        let mut yielded: Vec<TypedRegion> = Vec::new();
-        // Mid-walk the tally must already describe what has come out so far.
-        for r in iter.by_ref().take(3) {
-            yielded.push(r.expect("no read fails"));
-        }
-        assert_eq!(
-            iter.counts().ssr_loci + iter.counts().generic + iter.counts().satellites,
-            3,
-            "the tally counts what has been HANDED OUT, not what has been scanned"
-        );
-
-        for r in iter.by_ref() {
-            yielded.push(r.expect("no read fails"));
-        }
-        let counts = iter.counts();
+        let counts = &counts;
         let kind_count =
             |f: fn(&RegionKind) -> bool| yielded.iter().filter(|r| f(&r.kind)).count() as u64;
         assert_eq!(counts.spans, 1);
@@ -3646,267 +2473,31 @@ mod tests {
         );
     }
 
-    /// Walk a fixture and hand back the finished tally.
-    fn counts_over(bases: &[u8], window_bp: u64) -> TypedRegionCounts {
-        counts_over_with(
-            bases,
-            TypedRegionConfig {
-                window_bp: Bp(window_bp),
-                ..TypedRegionConfig::default()
-            },
-        )
+    /// One contig, end to end, as the region list [`partition_resident_in`] is asked with.
+    fn whole_contig(len: u64) -> [GenomeRegion; 1] {
+        [GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(len),
+        }]
     }
 
-    /// Tally the walk's counters at an explicit config. `counts_over` is this at
-    /// `Default`.
+    /// The finished tally over a whole contig, at an explicit config.
     fn counts_over_with(bases: &[u8], config: TypedRegionConfig) -> TypedRegionCounts {
-        let mut iter =
-            TypedRegionIterator::over_contig(reference_over("chr1", bases), ContigId(0), config)
-                .expect("valid contig");
-        for r in iter.by_ref() {
-            r.expect("no read fails");
-        }
-        *iter.counts()
+        partition_resident_in(
+            "chr1",
+            ContigId(0),
+            bases,
+            &config,
+            &whole_contig(bases.len() as u64),
+        )
+        .1
     }
 
-    /// **The rejection breakdown must not depend on `window_bp`** (E1e).
-    ///
-    /// This is the whole reason `classify` hands rejections back **per record** instead of
-    /// tallying them itself. It runs over a window's entire fetched slice, margins and
-    /// all, so every window that can see a repeat rejects it again; a tally taken inside
-    /// would count one repeat once per window and the number would move with a **memory
-    /// knob**. Attributing each record to the core holding its start is what makes the
-    /// count a fact about the genome instead of about the walk.
-    ///
-    /// The whole tally is compared, not just the breakdown: every count here is a claim
-    /// about the reference, and `window_bp` may not touch any of them (spec §2.3).
-    #[test]
-    fn the_tally_does_not_depend_on_the_window() {
-        // The windowing fixture, plus a tract abutting base 1 — which classification turns
-        // down for having no left flank (spec §2.6). That rejection is what gives the
-        // breakdown something to count: of classification's five gates, the pre-filter makes
-        // three unreachable from the walk and this is the reachable one that a fixture
-        // can be sure of (`segment_criteria::the_pre_filter_makes_three_of_classifications_gates_
-        // unreachable_from_the_walk`).
-        let mut bases = windowing_fixture();
-        bases[0..20].copy_from_slice(b"ATATATATATATATATATAT");
-        let baseline = counts_over(&bases, 100_000);
+    // ---- Asking for part of a contig -------------------------------------
 
-        // Or this compares zeroes — and it would, without the tract above.
-        assert!(
-            baseline.rejected_by_reason.total() > 0,
-            "the fixture must reach a gate: {:?}",
-            baseline.rejected_by_reason
-        );
-        assert!(baseline.ssr_loci > 0 && baseline.satellites > 0);
-
-        for window_bp in [100u64, 333, 700, 1000] {
-            assert_eq!(
-                counts_over(&bases, window_bp),
-                baseline,
-                "window_bp = {window_bp} moved the tally — `window_bp` is a memory knob \
-                 (spec §2.3). A rejection counted once per window that could SEE it is \
-                 exactly how that happens: at window_bp = 100 the tract at base 1 is in \
-                 the fetched slice of the first ten windows, and `classify` turns it down in \
-                 every one of them"
-            );
-        }
-    }
-
-    /// A reference-read failure mid-walk is **fatal and in-stream**: `Some(Err(_))` once,
-    /// then `None` forever (spec §8.2). `None` meaning both "done" and "chromosome 7
-    /// failed" would silently un-call the rest of the genome.
-    ///
-    /// The failure is injected by a reference that reads a prefix and then refuses, so
-    /// the error lands **mid-walk** — a constructor-time failure would prove nothing
-    /// about the stream.
-    #[test]
-    fn a_read_failure_mid_walk_is_yielded_once_and_then_the_iterator_is_done() {
-        /// Fails every read starting past `fail_from` (1-based).
-        struct FailsLate {
-            inner: InMemoryRefSeq,
-            fail_from: u64,
-        }
-        impl RefSeq for FailsLate {
-            fn fetch_into(
-                &self,
-                contig: ContigId,
-                start: u64,
-                len: u64,
-                dst: &mut Vec<u8>,
-            ) -> Result<(), RefSeqError> {
-                self.inner.fetch_into(contig, start, len, dst)
-            }
-        }
-        impl RawRefSeq for FailsLate {
-            fn fetch_raw_into(
-                &self,
-                contig: ContigId,
-                start: u64,
-                len: u64,
-                dst: &mut Vec<u8>,
-            ) -> Result<(), RefSeqError> {
-                if start > self.fail_from {
-                    return Err(RefSeqError::InvalidStart);
-                }
-                self.inner.fetch_raw_into(contig, start, len, dst)
-            }
-        }
-        impl ContigTable for FailsLate {
-            fn contigs(&self) -> &crate::fasta::ContigList {
-                self.inner.contigs()
-            }
-        }
-        impl EvictableRefSeq for FailsLate {
-            fn evict_before(&self, _pos: u64) {}
-        }
-
-        let bases = windowing_fixture();
-        let reference = FailsLate {
-            inner: reference_over("chr1", &bases),
-            fail_from: 2000,
-        };
-        let config = TypedRegionConfig {
-            window_bp: Bp(500),
-            ..TypedRegionConfig::default()
-        };
-        let mut iter = TypedRegionIterator::over_contig(reference, ContigId(0), config)
-            .expect("the contig table is readable; only the BASES fail");
-
-        let mut errors = 0;
-        let mut items = 0;
-        for r in iter.by_ref() {
-            match r {
-                Ok(_) => items += 1,
-                Err(e) => {
-                    assert!(matches!(e, TypedRegionError::Reference(_)));
-                    errors += 1;
-                }
-            }
-        }
-        assert_eq!(errors, 1, "the failure is reported exactly once");
-        assert!(items > 0, "the windows before the failure still yielded");
-
-        // Fused: done means done. A caller polling on is not handed a partial walk that
-        // looks complete.
-        assert!(iter.next().is_none(), "fused: nothing after the error");
-        assert!(iter.next().is_none());
-    }
-
-    /// **The walk releases the bases it has passed** — the difference between "holds one
-    /// window, never a contig" (spec §7) as a claim and as a fact.
-    ///
-    /// Nothing else can catch this. The reference impls the other tests use hold their
-    /// bytes outright, so their eviction is an honest no-op and a walk that never evicted
-    /// would pass every test in this file — while a real `WindowedRefSeq`'s buffer grew to
-    /// the whole contig, silently, which is exactly the memory profile the windowed walk
-    /// exists to avoid. So the reference here records the asks.
-    #[test]
-    fn the_walk_evicts_the_bases_it_has_passed() {
-        struct EvictionSpy {
-            inner: InMemoryRefSeq,
-            evictions: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
-        }
-        impl RefSeq for EvictionSpy {
-            fn fetch_into(
-                &self,
-                contig: ContigId,
-                start: u64,
-                len: u64,
-                dst: &mut Vec<u8>,
-            ) -> Result<(), RefSeqError> {
-                self.inner.fetch_into(contig, start, len, dst)
-            }
-        }
-        impl RawRefSeq for EvictionSpy {
-            fn fetch_raw_into(
-                &self,
-                contig: ContigId,
-                start: u64,
-                len: u64,
-                dst: &mut Vec<u8>,
-            ) -> Result<(), RefSeqError> {
-                self.inner.fetch_raw_into(contig, start, len, dst)
-            }
-        }
-        impl ContigTable for EvictionSpy {
-            fn contigs(&self) -> &crate::fasta::ContigList {
-                self.inner.contigs()
-            }
-        }
-        impl EvictableRefSeq for EvictionSpy {
-            fn evict_before(&self, pos: u64) {
-                self.evictions.borrow_mut().push(pos);
-            }
-        }
-
-        let bases = windowing_fixture();
-        let evictions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let reference = EvictionSpy {
-            inner: reference_over("chr1", &bases),
-            evictions: std::rc::Rc::clone(&evictions),
-        };
-        let config = TypedRegionConfig {
-            window_bp: Bp(1000),
-            ..TypedRegionConfig::default()
-        };
-        let regions: Vec<TypedRegion> =
-            TypedRegionIterator::over_contig(reference, ContigId(0), config)
-                .expect("valid contig")
-                .collect::<Result<_, _>>()
-                .expect("no read fails");
-        assert!(!regions.is_empty());
-
-        let evictions = evictions.borrow();
-        assert_eq!(
-            evictions.len(),
-            6,
-            "one per window: a 6 kb contig at window_bp = 1000. Evicting once at the end \
-             would bound nothing"
-        );
-        assert!(
-            evictions.windows(2).all(|w| w[0] <= w[1]),
-            "eviction only ever moves forward — the walk never looks back: {evictions:?}"
-        );
-        assert!(
-            *evictions.last().unwrap() > 4000,
-            "and it follows the walk to the end of the contig: {evictions:?}"
-        );
-    }
-
-    /// A span naming a contig the reference does not have fails **at construction**, not
-    /// mid-walk. The arch doc expected this constructor to be infallible because
-    /// `GenomeRegions` validates; it validates against *a* contig table, and nothing ties
-    /// that one to the reference's.
-    #[test]
-    fn a_span_the_reference_does_not_have_is_rejected_up_front() {
-        let contigs = &[
-            ContigBounds {
-                name: "chr1",
-                length: 100,
-            },
-            ContigBounds {
-                name: "chr2",
-                length: 100,
-            },
-        ];
-        // The spans know two contigs; the reference has one.
-        let reference = reference_over("chr1", &filler(100));
-        let result = TypedRegionIterator::over_regions(
-            reference,
-            GenomeRegions::whole_contigs(contigs),
-            TypedRegionConfig::default(),
-        );
-        assert!(
-            matches!(result, Err(TypedRegionError::Reference(_))),
-            "chr2 is not in this reference, and that must be caught before any walk"
-        );
-    }
-
-    // ---- E2: scan wider than you emit ------------------------------------
-
-    /// Walk `bases` restricted to the 1-based inclusive spans `want`.
-    /// Walk a BED at an explicit config. `walk_bed` is this at `Default`.
+    /// The regions of `bases` that fall inside the 1-based inclusive spans `want`, at an
+    /// explicit config. `walk_bed` is this at `Default`.
     fn walk_bed_with(
         bases: &[u8],
         want: &[(u64, u64)],
@@ -3920,21 +2511,11 @@ mod tests {
                 end: Position(e),
             })
             .collect();
-        TypedRegionIterator::over_spans(reference_over("chr1", bases), requested, config)
-            .expect("valid spans")
-            .collect::<Result<_, _>>()
-            .expect("no read fails")
+        partition_resident_in("chr1", ContigId(0), bases, &config, &requested).0
     }
 
-    fn walk_bed(bases: &[u8], want: &[(u64, u64)], window_bp: u64) -> Vec<TypedRegion> {
-        walk_bed_with(
-            bases,
-            want,
-            TypedRegionConfig {
-                window_bp: Bp(window_bp),
-                ..TypedRegionConfig::default()
-            },
-        )
+    fn walk_bed(bases: &[u8], want: &[(u64, u64)]) -> Vec<TypedRegion> {
+        walk_bed_with(bases, want, TypedRegionConfig::default())
     }
 
     /// **BED-invariance — the acceptance test** (spec §2.5): *"whether a base is STR /
@@ -3963,48 +2544,46 @@ mod tests {
             (3000, 3600),
             (1, 6000),
         ] {
-            for window_bp in [333u64, 1000] {
-                let got = walk_bed(&bases, &[want], window_bp);
+            let got = walk_bed(&bases, &[want]);
 
-                // What the whole-genome run says about those same bases.
-                for r in &got {
-                    for pos in [r.region.start.get(), r.region.end.get()] {
-                        // Only ask about bases the user actually requested: an object
-                        // emitted whole reaches past the edge, which is the point.
-                        if pos < want.0 || pos > want.1 {
-                            continue;
-                        }
-                        let truth = whole
-                            .iter()
-                            .find(|w| w.region.contains(Position(pos)))
-                            .unwrap_or_else(|| panic!("the whole-genome run covers {pos}"));
-                        assert_eq!(
-                            std::mem::discriminant(&r.kind),
-                            std::mem::discriminant(&truth.kind),
-                            "BED {want:?} at window_bp = {window_bp}: base {pos} is {:?} \
+            // What the whole-genome run says about those same bases.
+            for r in &got {
+                for pos in [r.region.start.get(), r.region.end.get()] {
+                    // Only ask about bases the user actually requested: an object
+                    // emitted whole reaches past the edge, which is the point.
+                    if pos < want.0 || pos > want.1 {
+                        continue;
+                    }
+                    let truth = whole
+                        .iter()
+                        .find(|w| w.region.contains(Position(pos)))
+                        .unwrap_or_else(|| panic!("the whole-genome run covers {pos}"));
+                    assert_eq!(
+                        std::mem::discriminant(&r.kind),
+                        std::mem::discriminant(&truth.kind),
+                        "BED {want:?}: base {pos} is {:?} \
                              with the BED and {:?} without it — the BED changed what a \
                              base IS (spec §2.5)",
-                            r.kind,
-                            truth.kind
-                        );
-                    }
+                        r.kind,
+                        truth.kind
+                    );
                 }
-
-                // And the loci are the same objects, not merely the same kind.
-                let loci_in = |rs: &[TypedRegion]| -> Vec<(u64, u64)> {
-                    rs.iter()
-                        .filter(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
-                        .map(|r| (r.region.start.get(), r.region.end.get()))
-                        .filter(|(s, _)| *s >= want.0 && *s <= want.1)
-                        .collect()
-                };
-                assert_eq!(
-                    loci_in(&got),
-                    loci_in(&whole),
-                    "BED {want:?} at window_bp = {window_bp}: the loci starting inside the \
-                     span must be exactly the whole-genome run's"
-                );
             }
+
+            // And the loci are the same objects, not merely the same kind.
+            let loci_in = |rs: &[TypedRegion]| -> Vec<(u64, u64)> {
+                rs.iter()
+                    .filter(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
+                    .map(|r| (r.region.start.get(), r.region.end.get()))
+                    .filter(|(s, _)| *s >= want.0 && *s <= want.1)
+                    .collect()
+            };
+            assert_eq!(
+                loci_in(&got),
+                loci_in(&whole),
+                "BED {want:?}: the loci starting inside the \
+                     span must be exactly the whole-genome run's"
+            );
         }
     }
 
@@ -4015,7 +2594,7 @@ mod tests {
     fn a_bed_span_is_tiled_by_what_comes_back() {
         let bases = windowing_fixture();
         for want in [(900u64, 1100u64), (1995, 2100), (3000, 3600)] {
-            let got = walk_bed(&bases, &[want], 333);
+            let got = walk_bed(&bases, &[want]);
             assert!(!got.is_empty());
 
             // Contiguous and non-overlapping, and covering every requested base. The
@@ -4048,7 +2627,7 @@ mod tests {
 
         // A span whose edges fall in plain generic sequence: nothing straddles, so the
         // partition starts and ends exactly where the user asked.
-        let got = walk_bed(&bases, &[(3000, 3600)], 333);
+        let got = walk_bed(&bases, &[(3000, 3600)]);
         assert_eq!(
             got[0].region.start,
             Position(3000),
@@ -4065,7 +2644,7 @@ mod tests {
         // is the claim: "an array too long to be a microsatellite". That is what E2 got
         // wrong by reasoning from the type (`Satellite` carries no payload, so nothing
         // could be left misdescribed) instead of from the meaning.
-        let got = walk_bed(&bases, &[(4500, 4800)], 333);
+        let got = walk_bed(&bases, &[(4500, 4800)]);
         assert_eq!(got.len(), 1, "the whole span is inside the array: {got:#?}");
         assert!(matches!(got[0].kind, RegionKind::Satellite));
         assert!(
@@ -4090,7 +2669,7 @@ mod tests {
         // A span cutting into the bundle's cluster: the bundle carries its member tracts,
         // so clipping it would leave them outside their own region. It comes back whole,
         // and the effective region grows to hold it.
-        let got = walk_bed(&bases, &[(1995, 2100)], 333);
+        let got = walk_bed(&bases, &[(1995, 2100)]);
         let bundle = got
             .iter()
             .find(|r| matches!(r.kind, RegionKind::SsrBundle { .. }))
@@ -4119,7 +2698,7 @@ mod tests {
     fn a_locus_straddling_the_bed_edge_is_emitted_whole() {
         let bases = windowing_fixture();
         // The tract at 990..1010 (1-based 991..1010); ask for a span ending inside it.
-        let got = walk_bed(&bases, &[(900, 1000)], 333);
+        let got = walk_bed(&bases, &[(900, 1000)]);
         let locus = got
             .iter()
             .find_map(|r| match &r.kind {
@@ -4144,9 +2723,9 @@ mod tests {
         assert_eq!(locus, truth, "and it is the SAME locus, not a clipped one");
     }
 
-    /// **Two requested spans on one contig share its scan**: the walk scans the contig
-    /// once, and the ground between them — which the user did not ask for — must not come
-    /// back (spec §2.5).
+    /// **Two requested spans on one contig share its classification**: the contig is
+    /// classified once, and the ground between them — which the caller did not ask for —
+    /// must not come back (spec §2.5).
     ///
     /// This is the case that makes `Generic` clip against *each* requested span rather than
     /// against the scan span: one generic run covers both, and it has to come back as two
@@ -4156,7 +2735,7 @@ mod tests {
     #[test]
     fn two_spans_sharing_a_scan_span_do_not_leak_the_gap_between_them() {
         let bases = windowing_fixture();
-        let got = walk_bed(&bases, &[(3000, 3200), (3400, 3600)], 333);
+        let got = walk_bed(&bases, &[(3000, 3200), (3400, 3600)]);
 
         assert!(
             got.iter()
@@ -4173,11 +2752,10 @@ mod tests {
         );
     }
 
-    /// Every BED failure is `RegionSet`'s to reject **up front** — which is what
-    /// lets `TypedRegionError` have one variant and the walk's constructor be
-    /// infallible (spec §8.2).
+    /// Every BED failure is `RegionSet`'s to reject **up front**, so a consumer holding
+    /// a [`GenomeRegions`] has nothing left to validate (spec §8.2).
     #[test]
-    fn a_bad_bed_is_rejected_before_any_walk_exists() {
+    fn a_bad_bed_is_rejected_before_any_region_is_typed() {
         use std::io::Write;
         std::fs::create_dir_all("tmp").unwrap();
         let dir = tempfile::tempdir_in("tmp").unwrap();

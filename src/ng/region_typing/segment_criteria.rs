@@ -245,11 +245,58 @@ pub const DEFAULT_MIN_PURITY: f32 = 0.8;
 pub const DEFAULT_MIN_SCORE: i32 = 0;
 
 /// Bundle radius (bp) — the clean sequence a tract needs either side to be a
-/// locus rather than a bundle member. The short-read default (spec §2.3): 30 bp
-/// is more than enough unique sequence to anchor a short read to a locus, where
-/// the catalog's inherited 50 was unmeasured. Lowering it also loosens what
-/// counts as a bundle (spec §2.4). Soft, and swept (spec §10).
-pub const DEFAULT_BUNDLE_THRESHOLD: u64 = 30;
+/// locus rather than a bundle member. Lowering it also loosens what counts as a
+/// bundle (spec §2.4), and it sets the aligner's anchor too:
+/// [`SsrGeneratorConfig::flank_bp`](crate::ng::locus_generation::ssr::SsrGeneratorConfig)
+/// defaults to this and may not exceed it. Soft, and swept (spec §10).
+///
+/// **15 bp since 2026-08-07, down from 30.** The radius is what decides how many
+/// tracts can be named as loci at all: a tract with any other repeat inside it has
+/// no clean flank and becomes a bundle member instead. Narrowing it recovers loci,
+/// measured over a 2 Mb slice of tomato SL4.0ch01 at ng's copy floors:
+///
+/// | radius | loci | clusters | bases in clusters |
+/// |---:|---:|---:|---:|
+/// | 30 bp | 6,237 | 1,943 | 74,289 |
+/// | 20 bp | 7,245 | 1,582 | 47,623 |
+/// | **15 bp** | **7,820** | **1,334** | **36,053** |
+/// | 10 bp | 8,467 | 1,045 | 24,906 |
+///
+/// The 30 was itself unmeasured, chosen as "more than enough unique sequence to
+/// anchor a short read", against the catalog's inherited 50.
+///
+/// **The anchor was checked against injected truth before this moved, because the
+/// real-data check could not settle it.** Narrowing the radius shortens every read's
+/// anchor, and a mis-anchored read placed a whole repeat off would land in an offset
+/// bucket and read as *slippage* — invisible to any measurement that has no truth to
+/// compare against. So the answer comes from
+/// [`ng_ssr_synthetic_bakeoff.rs`](../../../../examples/ng_ssr_synthetic_bakeoff.rs),
+/// which builds each read from a chosen allele and scores the recovered length against
+/// it. For the shipped delimiter (`SsrUnitRobustAligner`) across 166 scenarios —
+/// including flanks carrying a repeat of their own **below every copy floor**, which is
+/// what the guarantee permits and what a marginal locus looks like:
+///
+/// | flank | exact on clean reads | exact on noisy | 1 bp flank indel | composite |
+/// |---:|---:|---:|---:|---:|
+/// | 25 bp | 1.000 | 0.999 | 1.000 | 0.9994 |
+/// | 20 bp | 1.000 | 0.999 | 1.000 | 0.9993 |
+/// | **15 bp** | **1.000** | **0.999** | **1.000** | **0.9992** |
+/// | 10 bp | 1.000 | 0.999 | 1.000 | 0.9984 |
+/// | 6 bp | 1.000 | 0.999 | 1.000 | 0.9985 |
+/// | 4 bp | 1.000 | 0.992 | **0.500** | 0.8699 |
+/// | 2 bp | 1.000 | 0.927 | **0.250** | 0.7854 |
+///
+/// **Nothing moves until 6 bp and it breaks between 6 and 4**, so 15 sits at two and a
+/// half times the width where the first number budges. What gives out first is tolerating
+/// a 1 bp indel *inside* the anchor — which four bases of anchor cannot absorb.
+///
+/// **10 is defensible on the same evidence and was not taken.** It buys 8% more loci, and
+/// more loci is the only thing narrowing buys — so it would spend a third of the margin on
+/// something that is not scarce. The dimension this harness holds favourable is base
+/// composition: its flanks are deliberately aperiodic, where real tomato flanks are
+/// AT-rich, and 10 bp of AT-rich anchor carries less than 10 bp of aperiodic anchor. At 15
+/// that shortfall sits inside the margin. Going below 15 wants it measured first.
+pub const DEFAULT_BUNDLE_THRESHOLD: u64 = 15;
 
 /// The narrowest period classified by default: **1**, so a qualifying
 /// homopolymer is a period-1 STR locus (spec §2.3). Mononucleotides stutter

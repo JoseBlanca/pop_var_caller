@@ -35,7 +35,29 @@ elif command -v container >/dev/null 2>&1; then
         exit 1
     fi
 else
-    echo "Error: neither 'podman' nor 'container' (Apple) found on PATH." >&2
+    # **Not every machine that runs this project has a container runtime**, and rick — the Linux
+    # box the archive walks run on — is one of them. Say what to do instead rather than only what
+    # is missing, and do not quietly fall through to running the command on the host: the whole
+    # point of this wrapper is that a build cannot write outside the project tree, and a silent
+    # fallback would remove that guarantee exactly when nobody is looking for it.
+    cat >&2 <<'NO_RUNTIME'
+Error: no container runtime on PATH — looked for 'podman' and Apple's 'container'.
+
+This wrapper exists to keep builds from writing outside the project tree, so it will not
+run your command on the host for you. On a machine with no runtime, run cargo directly:
+
+    cargo build --release --example <name>
+
+Two differences to expect when you do:
+
+  * the binary lands in  target/release/...  and not  target-container/release/...
+    (the container build sets CARGO_TARGET_DIR to the second). Scripts that look for a
+    built binary check both and take the newer.
+  * cargo will write to ~/.cargo and ~/.rustup as usual, which the container run does not.
+
+To get the sandbox back, install podman (Linux) or Apple's container CLI (macOS):
+https://github.com/apple/container
+NO_RUNTIME
     exit 1
 fi
 

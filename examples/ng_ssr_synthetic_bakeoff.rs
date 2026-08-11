@@ -37,6 +37,40 @@ use pop_var_caller::ng::types::{Bp, Motif};
 const BODY_L: &[u8] = b"GATCTTGCAAGCTGGAATCCGTTAC";
 const BODY_R: &[u8] = b"CAGTTCACGATCCTAAGGCTTGACG";
 
+/// How many bases of flank each scenario lays down either side of the tract — **the
+/// aligner's anchor**, and settable so the bake-off can answer how short it may be.
+///
+/// It matters because `flank_bp` is capped by the bundle radius
+/// (`SsrGeneratorConfig::check_flank_within`), so narrowing the radius to keep more tracts
+/// nameable as loci also shortens every read's anchor. ng's default moved 30 → 20 on
+/// 2026-08-07 and this is the instrument that says whether that costs recovery: the tract
+/// length is *injected*, so a recovered length can be scored against truth — which the
+/// real-data survey cannot do, and which is why its "no degradation" reading could not
+/// carry the decision on its own.
+///
+/// Bounded above by the bodies' own 25 bases. The truncation keeps the **junction** end of
+/// each body, since that is the base the scenario overwrites to break or continue the motif.
+static FLANK_LEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(BODY_L.len());
+
+fn flank_len() -> usize {
+    FLANK_LEN
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .min(BODY_L.len())
+}
+
+/// The left body, truncated to [`flank_len`] — keeping its **last** bases, so the junction
+/// base the caller overwrites stays at the end.
+fn body_left() -> Vec<u8> {
+    BODY_L[BODY_L.len() - flank_len()..].to_vec()
+}
+
+/// The right body, truncated to [`flank_len`] — keeping its **first** bases, so the junction
+/// base stays at the start.
+fn body_right() -> Vec<u8> {
+    BODY_R[..flank_len()].to_vec()
+}
+
 /// Primitive motifs, one per period 1..=6.
 fn motif_for(period: usize) -> &'static [u8] {
     match period {
@@ -58,15 +92,45 @@ fn break_base(avoid: &[u8]) -> u8 {
 
 /// Left flank whose last base does not extend the motif leftward.
 fn clean_left(motif: &[u8]) -> Vec<u8> {
-    let mut f = BODY_L.to_vec();
+    let mut f = body_left();
     *f.last_mut().unwrap() = break_base(&[motif[0], motif[motif.len() - 1]]);
     f
 }
 
 /// Right flank whose first base does not extend the motif rightward.
 fn clean_right(motif: &[u8]) -> Vec<u8> {
-    let mut f = BODY_R.to_vec();
+    let mut f = body_right();
     f[0] = break_base(&[motif[0], motif[motif.len() - 1]]);
+    f
+}
+
+/// Right flank carrying a **short repeat of its own, just past the junction** — three copies of a
+/// dinucleotide unrelated to the tract's motif.
+///
+/// **This is what the flank guarantee actually permits, and the other flanks here are cleaner than
+/// it.** The bundle radius promises no *admitted* repeat inside the flank, and admission needs
+/// `MinCopies` — six copies for a mononucleotide, four for a dinucleotide. A three-copy tract is
+/// below every floor, so it is invisible to region typing and may sit directly against the
+/// boundary. It eats anchor: at a 15 bp flank these six bases leave eight aperiodic ones to place
+/// the tract's edge against, where a 25 bp flank leaves eighteen.
+///
+/// It is also the flank a *marginal* locus has. Narrowing the radius admits tracts that were
+/// clustered before, and those are by construction the ones with the most repetitive
+/// surroundings — so shortening the anchor and admitting dirtier flanks are the same change, and a
+/// scenario set built only from aperiodic flanks cannot see the interaction.
+fn repetitive_right(motif: &[u8]) -> Vec<u8> {
+    let mut f = clean_right(motif);
+    // A dinucleotide unrelated to the tract's motif, so the detector cannot join the two.
+    let filler_motif: &[u8] = if motif.contains(&b'G') || motif.contains(&b'T') {
+        b"CA"
+    } else {
+        b"GT"
+    };
+    for i in 0..6 {
+        if i + 1 < f.len() {
+            f[i + 1] = filler_motif[i % 2];
+        }
+    }
     f
 }
 
@@ -392,6 +456,25 @@ fn scenarios() -> Vec<Scenario> {
             ));
         }
 
+        // DIRTY_FLANK — the same in-frame alleles, but the right flank carries a sub-floor repeat
+        // against the boundary. The case that decides how short the anchor may be, because it is
+        // what the flank guarantee permits and what a marginal locus looks like.
+        let dirty_r = repetitive_right(&motif);
+        for d in [-2i64, -1, 0, 1, 2] {
+            let su = ref_units as i64 + d;
+            if su < 2 {
+                continue;
+            }
+            out.push(complete(
+                "DIRTY_FLANK",
+                period,
+                ref_units,
+                tract(&motif, su as usize),
+                dirty_r.clone(),
+                format!("{d:+}u"),
+            ));
+        }
+
         // HOMO_EXP — bigger expansions at low period, where flat_gap is prone to collapse to ref.
         if period <= 2 {
             for d in [3i64, 4, 6] {
@@ -591,6 +674,24 @@ fn evaluate<A: RepeatDelimiter>(
 }
 
 fn main() -> ExitCode {
+    // `--flank N` shortens the anchor either side of every tract, so the same scenarios can
+    // be scored at each candidate `flank_bp`. Capped at the flank bodies' own 25 bases.
+    let mut rest = std::env::args().skip(1);
+    while let Some(arg) = rest.next() {
+        if arg == "--flank" {
+            match rest.next().and_then(|v| v.parse::<usize>().ok()) {
+                Some(bases) if (1..=BODY_L.len()).contains(&bases) => {
+                    FLANK_LEN.store(bases, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {
+                    eprintln!("error: --flank needs 1..={} bases", BODY_L.len());
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    }
+    eprintln!("flank: {} bp either side of the tract", flank_len());
+
     let flat = SsrFlatGapAligner::new(PerQualityEmission::new());
     let unit = SsrUnitSlipAligner::new(PerQualityEmission::new());
     let stutter = StutterModel::hipstr_shipped();

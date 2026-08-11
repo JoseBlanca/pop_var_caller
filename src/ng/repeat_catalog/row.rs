@@ -87,11 +87,7 @@ pub fn row_for_interval(
         end: Position(interval.end),
     };
 
-    let copy_floor = criteria
-        .classification
-        .min_copies
-        .for_period(interval.period);
-    if detected.repeat_count(interval.period) < u64::from(copy_floor) {
+    if !clears_detected_copy_floor(interval, &criteria.classification) {
         return Err(RowRejection::CopyFloor);
     }
 
@@ -129,14 +125,21 @@ pub fn row_for_interval(
 /// The catalog's own copy floor, applied to a **detected** span, exactly as
 /// [`crate::ng::region_typing::segment_criteria::prefilter`] applies a policy's.
 ///
-/// Exposed so the builder can pre-screen intervals before it pays for the trim, and so the
-/// property that keeps bundling identical has a name a test can pin.
+/// **The catalog's only copy-floor test**, called by [`row_for_interval`] so that the floor
+/// the builder applies and the property a test pins cannot be two pieces of arithmetic.
+///
+/// A named function rather than an inline comparison because the property it carries — the
+/// floor is measured where `prefilter` measures it, on the detected span — is what keeps a
+/// reader's bundling identical to a live scan's, and a property with no name has nothing to
+/// hold it.
 #[inline]
-pub fn clears_detected_copy_floor(
+pub(crate) fn clears_detected_copy_floor(
     interval: &RepeatInterval,
     criteria: &SsrSegmentCriteria,
 ) -> bool {
-    let copies = (interval.end - interval.start) / u64::from(interval.period);
+    debug_assert!(interval.period >= 1, "period 0 has no copy count");
+    debug_assert!(interval.end >= interval.start, "reversed interval");
+    let copies = interval.end.saturating_sub(interval.start) / u64::from(interval.period.max(1));
     copies >= u64::from(criteria.min_copies.for_period(interval.period))
 }
 

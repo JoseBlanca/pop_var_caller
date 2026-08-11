@@ -281,16 +281,16 @@ impl World {
         probs
     }
 
-    /// The share of loci the depth truncation drops — printed so the truncation is never
-    /// silent.
-    #[expect(dead_code, reason = "kept for ad-hoc runs that report the truncation")]
-    fn depth_mass_lost(&self, max_depth: u32) -> f64 {
-        let lambda = self.mean_depth;
-        let kept: f64 = (1..=max_depth)
-            .map(|n| (-lambda + f64::from(n) * lambda.ln() - ln_factorial(n)).exp())
-            .sum();
-        let alive = 1.0 - (-lambda).exp();
-        1.0 - kept / alive
+    /// The mean depth the truncated distribution actually realises. **The truncated
+    /// Poisson is the world**, not an approximation of an untruncated one, so this is what
+    /// a report should label a row with — the nominal `mean_depth` is only how the world
+    /// was specified.
+    fn realised_mean_depth(&self, max_depth: u32) -> f64 {
+        self.depth_probs(max_depth)
+            .iter()
+            .enumerate()
+            .map(|(n, p)| n as f64 * p)
+            .sum()
     }
 }
 
@@ -310,9 +310,9 @@ fn read_bucket_probs(slip: &Slip, allele_offset: i32, keying: &Keying) -> Vec<f6
         EdgeScoring::PlugAtEdge | EdgeScoring::PlugAtEdgeRenormalised => {
             // Every bucket is scored at one offset — its own — so the mass the end buckets
             // absorb is simply not counted.
-            for (bucket, p) in out.iter_mut().enumerate() {
+            for (bucket, slot) in out.iter_mut().enumerate() {
                 let offset = bucket as i32 - keying.half_range;
-                *p = slip.p(offset - allele_offset);
+                *slot = slip.p(offset - allele_offset);
             }
             if keying.edges == EdgeScoring::PlugAtEdgeRenormalised {
                 let total: f64 = out.iter().sum();
@@ -515,9 +515,28 @@ fn climb_genotype_frequencies(
     weights: &[f64],
     genotypes: usize,
 ) -> Vec<f64> {
+    climb_genotype_frequencies_for(component, weights, genotypes, CLIMB_ITERATIONS.get())
+}
+
+thread_local! {
+    /// How many expectation-maximization passes the inner climb takes. **A knob because it
+    /// turned out to matter**: the climb converges at a rate set by how much the genotypes
+    /// overlap, so a keying that makes a locus's shape less informative about its genotype
+    /// makes it slow — and a climb that stops short leaves the outer search a tilted
+    /// objective, which is indistinguishable from bias unless it is checked.
+    /// `question_convergence` is that check.
+    static CLIMB_ITERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(200) };
+}
+
+fn climb_genotype_frequencies_for(
+    component: &[Vec<f64>],
+    weights: &[f64],
+    genotypes: usize,
+    iterations: usize,
+) -> Vec<f64> {
     let total: f64 = weights.iter().sum();
     let mut freqs = vec![1.0 / genotypes as f64; genotypes];
-    for _ in 0..200 {
+    for _ in 0..iterations {
         let mut next = vec![0.0; genotypes];
         for (row, &weight) in component.iter().zip(weights) {
             if weight == 0.0 {
@@ -556,14 +575,39 @@ struct FitInputs<'a> {
     /// reference-centred is the naive implementation, and the gap is what this measures.
     model_keying: Keying,
     depth_probs: &'a [f64],
+    /// **The allele lengths the fit is allowed to place mass on**, which need not be the
+    /// ones the world used. Wider than the recorded offset range is the ordinary case, and
+    /// *narrower than the world's alleles* is the case `question_allele_support` measures:
+    /// a locus whose allele the fit cannot represent has its reads explained the only way
+    /// left, which is slippage. `None` means "the same alleles the world has", the
+    /// well-specified default every other question uses.
+    model_alleles: Option<&'a [i32]>,
+}
+
+impl FitInputs<'_> {
+    fn model_alleles(&self) -> &[i32] {
+        self.model_alleles.unwrap_or(&self.world.allele_offsets)
+    }
+}
+
+/// Unordered pairs of allele indices — one genotype each.
+fn genotype_pairs(alleles: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for i in 0..alleles {
+        for j in i..alleles {
+            out.push((i, j));
+        }
+    }
+    out
 }
 
 /// The objective at one candidate slippage: climb the genotype frequencies, then score.
 fn score_slip(inputs: &FitInputs, slip: &Slip) -> (f64, Vec<f64>) {
-    let genotypes = inputs.world.genotypes();
+    let alleles = inputs.model_alleles();
+    let genotypes = genotype_pairs(alleles.len());
     let model = build_cells(
         slip,
-        &inputs.world.allele_offsets,
+        alleles,
         &genotypes,
         inputs.depth_probs,
         &inputs.model_keying,
@@ -600,9 +644,11 @@ struct Fitted {
 }
 
 impl Fitted {
-    fn heterozygosity(&self, world: &World) -> f64 {
-        world
-            .genotypes()
+    /// How often the fitted frequencies say a locus carries two different alleles. Read off
+    /// the **fit's** genotype list, which is the model's allele support and not necessarily
+    /// the world's.
+    fn heterozygosity(&self, alleles: usize) -> f64 {
+        genotype_pairs(alleles)
             .into_iter()
             .zip(&self.genotype_freqs)
             .filter(|((i, j), _)| i != j)
@@ -633,7 +679,8 @@ fn maximise_slip(score: impl Fn(&Slip) -> f64, start: Slip) -> (Slip, f64) {
 
     for _sweep in 0..8 {
         let mut moved: f64 = 0.0;
-        for (axis, &(mut lo, mut hi)) in axes.iter().enumerate() {
+        for (axis, &(low, high)) in axes.iter().enumerate() {
+            let (mut lo, mut hi) = (low, high);
             let mut c = hi - inverse_phi * (hi - lo);
             let mut d = lo + inverse_phi * (hi - lo);
             let evaluate = |x: f64, base: &Slip| {
@@ -726,7 +773,12 @@ fn starting_points(truth: &Slip) -> Vec<Slip> {
 struct Spread {
     /// The ratio between the highest and lowest slippage level returned.
     level: f64,
-    /// The range of fall-offs returned, on the fall-off's own scale.
+    /// The range of fall-offs returned, on the fall-off's own scale. **Kept and not
+    /// reported, deliberately**: it read exactly zero on a fit whose fall-off was 0.02 out,
+    /// because a deterministic search returns the same point from every start wherever the
+    /// objective is nearly flat. `question_convergence`'s score-at-the-truth is the
+    /// diagnostic that works; this one is here so nobody adds it back as if it did.
+    #[allow(dead_code)]
     falloff: f64,
 }
 
@@ -948,6 +1000,7 @@ fn question_gates(report: &mut String) {
         truth_weights: &weights,
         model_keying: keying,
         depth_probs: &depth_probs,
+        model_alleles: None,
     };
     let (best, spread) = fit_from_spread(&inputs);
     let _ = writeln!(
@@ -957,7 +1010,7 @@ fn question_gates(report: &mut String) {
         100.0 * (best.slip.level / truth.level - 1.0),
         best.slip.up_share - truth.up_share,
         best.slip.falloff - truth.falloff,
-        100.0 * (best.heterozygosity(&probe) / probe.heterozygosity() - 1.0),
+        100.0 * (best.heterozygosity(probe.allele_offsets.len()) / probe.heterozygosity() - 1.0),
         spread.level
     );
 }
@@ -1154,11 +1207,7 @@ fn question_origin(report: &mut String) {
             let w = world("origin", truth, spread, 0.0, depth);
             let depth_probs = w.depth_probs(12);
             let genotypes = w.genotypes();
-            let realised: f64 = depth_probs
-                .iter()
-                .enumerate()
-                .map(|(n, p)| n as f64 * p)
-                .sum();
+            let realised = w.realised_mean_depth(12);
             let _ = writeln!(
                 report,
                 "\n### {realised:.1} reads a locus, {:.0} loci in 100 heterozygous",
@@ -1166,14 +1215,14 @@ fn question_origin(report: &mut String) {
             );
             let _ = writeln!(
                 report,
-                "{:<44} {:>11} {:>11} {:>11} {:>10} {:>9} {:>10}",
+                "{:<44} {:>11} {:>11} {:>11} {:>10} {:>9} {:>12}",
                 "accumulator keyed / model scores it as",
                 "level",
                 "up-share",
                 "fall-off",
                 "hets",
                 "level ×",
-                "fall-off ±"
+                "beats truth"
             );
             let arms: [(&str, Keying, Keying); 4] = [
                 ("reference origin / reference", reference, reference),
@@ -1200,21 +1249,307 @@ fn question_origin(report: &mut String) {
                     truth_weights: &weights,
                     model_keying,
                     depth_probs: &depth_probs,
+                    model_alleles: None,
                 };
                 let (best, spread) = fit_from_spread(&inputs);
+                // **How much better than the truth the fitted answer scores**, in nats per
+                // locus. A correctly specified model cannot beat the truth, so a value at
+                // zero beside a non-zero bias means the objective is *flat* in that
+                // direction — the answer is not identified rather than displaced. The
+                // spread across starts cannot say so on its own: golden-section search is
+                // deterministic, so on an exactly flat direction every start returns the
+                // same point and the spread reads zero.
+                let beats_truth = best.score - score_slip(&inputs, &truth).0;
                 let _ = writeln!(
                     report,
-                    "{:<44} {:>+10.1}% {:>+11.4} {:>+11.4} {:>+9.1}% {:>8.2}× {:>10.4}",
+                    "{:<44} {:>+10.1}% {:>+11.4} {:>+11.4} {:>+9.1}% {:>8.2}× {:>12.2e}",
                     label,
                     100.0 * (best.slip.level / truth.level - 1.0),
                     best.slip.up_share - truth.up_share,
                     best.slip.falloff - truth.falloff,
-                    100.0 * (best.heterozygosity(&w) / w.heterozygosity() - 1.0),
+                    100.0
+                        * (best.heterozygosity(w.allele_offsets.len()) / w.heterozygosity() - 1.0),
                     spread.level,
-                    spread.falloff
+                    beats_truth
                 );
             }
         }
+    }
+}
+
+/// **Is the mode-centred fit's residual a flat direction, or a climb that stopped short?**
+///
+/// The mode-centred table scored by summing over its own centring returns the slippage
+/// level and the direction split right, and the fall-off 0.02 to 0.04 high. A correctly
+/// specified model cannot be biased, so one of two things is happening: the objective is
+/// flat along the fall-off, or the inner climb over the genotype frequencies has not
+/// converged and the outer search is walking a tilted surface.
+///
+/// **The spread across starting points cannot tell them apart** — golden-section search is
+/// deterministic, so on a flat direction every start returns the same point and the spread
+/// reads zero either way. What tells them apart is the score at the truth, and how it moves
+/// as the climb is given more iterations.
+fn question_convergence(report: &mut String) {
+    let _ = writeln!(
+        report,
+        "\n## The mode-centred residual: flat direction, or a climb that stopped short?\n"
+    );
+    let _ = writeln!(
+        report,
+        "One world, one arm — the accumulator keyed on each locus's modal length and the fit\n\
+         scoring it by summing over the centring, which is the arm that returns the level right\n\
+         and the fall-off high. `beats truth` is how much better the fitted answer scores than\n\
+         the truth, in nats per locus: **a correctly specified model cannot exceed zero**, so a\n\
+         positive value is the climb's, and it should fall as the climb is given more passes.\n"
+    );
+    let _ = writeln!(
+        report,
+        "{:<12} {:>14} {:>16} {:>16} {:>14}",
+        "origin", "climb passes", "score at truth", "score at fitted", "fitted − truth"
+    );
+
+    let truth = measured_slip();
+    // The fitted fall-off that came back at 200 passes on this world, and the point whose
+    // score is being compared against the truth's.
+    let fitted = Slip {
+        falloff: truth.falloff + 0.0231,
+        ..truth
+    };
+    let w = world("converge", truth, 0.30, 0.0, 3.0);
+    let depth_probs = w.depth_probs(12);
+    let genotypes = w.genotypes();
+
+    for (label, keying) in [
+        (
+            "modal",
+            Keying {
+                half_range: 2,
+                origin: Origin::LocusMode(TieRule::Shortest),
+                edges: EdgeScoring::Marginal,
+            },
+        ),
+        (
+            "reference",
+            Keying {
+                half_range: 2,
+                origin: Origin::Reference,
+                edges: EdgeScoring::Marginal,
+            },
+        ),
+    ] {
+        let table = build_cells(&truth, &w.allele_offsets, &genotypes, &depth_probs, &keying);
+        let weights = truth_mass(&table, &w.genotype_probs());
+        let inputs = FitInputs {
+            world: &w,
+            truth_cells: &table.cells,
+            truth_weights: &weights,
+            model_keying: keying,
+            depth_probs: &depth_probs,
+            model_alleles: None,
+        };
+        for passes in [200usize, 2_000, 20_000, 200_000] {
+            CLIMB_ITERATIONS.with(|c| c.set(passes));
+            let at_truth = score_slip(&inputs, &truth).0;
+            let at_fitted = score_slip(&inputs, &fitted).0;
+            let _ = writeln!(
+                report,
+                "{label:<12} {passes:>14} {at_truth:>16.10} {at_fitted:>16.10} {:>14.2e}",
+                at_fitted - at_truth
+            );
+        }
+    }
+    CLIMB_ITERATIONS.with(|c| c.set(200));
+    let _ = writeln!(
+        report,
+        "\nTwo scores per row, not a fit: the objective at the truth and at the point the\n\
+         200-pass search returned, with only the number of expectation-maximization passes\n\
+         changing. **A correctly specified model puts its maximum at the truth**, so the last\n\
+         column must be at or below zero once the climb has converged. The reference-origin\n\
+         rows are the control — there the climb converges at 200 passes and the column is\n\
+         already negative."
+    );
+}
+
+/// **What a locus whose allele the fit cannot represent costs.**
+///
+/// The fit places mass on a bounded list of allele lengths. Real tract lengths have a long tail:
+/// on HG002 at 300×, 88.9 loci in 100 sit exactly at the reference length but about one in 200
+/// sits further than six repeats away (research note §6.8). A locus outside the list has its reads
+/// explained the only way left — as slippage — so the question is what that costs the three
+/// parameters, and it is a different question from the saturating end buckets, which measured
+/// alleles outside the *recorded range* while still inside the fitted support.
+///
+/// The world's alleles reach ±4 here and the fit's support is narrowed a step at a time. The row
+/// where the support covers the world is the control and must read exactly zero.
+fn question_allele_support(report: &mut String) {
+    let _ = writeln!(report, "\n## Alleles the fit is not allowed to place\n");
+    let truth = measured_slip();
+    let _ = writeln!(
+        report,
+        "Loci carry alleles out to ±4 repeats from the reference. `support` is how far the fit may\n\
+         place one; `outside` is the share of **loci** whose allele it therefore cannot represent.\n\
+         Truth: {:.1}% of reads slip, direction split {:.2}, fall-off {:.3}. The last row is the\n\
+         control — a support covering every allele the world has must read exactly zero.\n",
+        100.0 * truth.level,
+        truth.up_share,
+        truth.falloff
+    );
+    let _ = writeln!(
+        report,
+        "{:<10} {:>10} {:>12} {:>12} {:>12} {:>10}",
+        "support", "outside", "level", "up-share", "fall-off", "spread"
+    );
+
+    // A spectrum with a tail: most loci at the reference, and a geometric fall away from it, which
+    // is the shape the real distribution has (research note §6.8).
+    let offsets: Vec<i32> = (-4..=4).collect();
+    let probs: Vec<f64> = {
+        let mut raw: Vec<f64> = offsets
+            .iter()
+            .map(|&a| {
+                if a == 0 {
+                    1.0
+                } else {
+                    0.09 * 0.45f64.powi(a.abs() - 1)
+                }
+            })
+            .collect();
+        let total: f64 = raw.iter().sum();
+        for p in &mut raw {
+            *p /= total;
+        }
+        raw
+    };
+    let world = World {
+        name: "allele support".to_string(),
+        slip: truth,
+        allele_offsets: offsets.clone(),
+        allele_probs: probs.clone(),
+        inbreeding: 0.0,
+        mean_depth: 6.0,
+    };
+    let depth_probs = world.depth_probs(8);
+    let genotypes = world.genotypes();
+    // **Recorded at ±2 while the alleles reach ±4**, deliberately: nine allele lengths against nine
+    // offset buckets makes the cell space forty-five genotypes over ninety thousand cells, which is
+    // hours a fit. §6.4 already measured that a range narrower than the alleles costs nothing under
+    // the marginal rule, so folding them into the end buckets isolates the question this asks
+    // rather than confounding it — and the control row is what confirms that.
+    let keying = Keying {
+        half_range: 2,
+        origin: Origin::Reference,
+        edges: EdgeScoring::Marginal,
+    };
+    let table = build_cells(
+        &truth,
+        &world.allele_offsets,
+        &genotypes,
+        &depth_probs,
+        &keying,
+    );
+    let weights = truth_mass(&table, &world.genotype_probs());
+
+    for limit in [0i32, 1, 2, 3, 4] {
+        let model_alleles: Vec<i32> = (-limit..=limit).collect();
+        // How much of the locus population carries an allele the fit cannot place. A locus is
+        // outside if **either** copy is.
+        let inside: f64 = world
+            .genotypes()
+            .into_iter()
+            .zip(world.genotype_probs())
+            .filter(|((i, j), _)| offsets[*i].abs() <= limit && offsets[*j].abs() <= limit)
+            .map(|(_, p)| p)
+            .sum();
+        let inputs = FitInputs {
+            world: &world,
+            truth_cells: &table.cells,
+            truth_weights: &weights,
+            model_keying: keying,
+            depth_probs: &depth_probs,
+            model_alleles: Some(&model_alleles),
+        };
+        let (best, spread) = fit_from_spread(&inputs);
+        let _ = writeln!(
+            report,
+            "±{:<9} {:>9.2}% {:>+11.1}% {:>+12.4} {:>+12.4} {:>9.2}×",
+            limit,
+            100.0 * (1.0 - inside),
+            100.0 * (best.slip.level / truth.level - 1.0),
+            best.slip.up_share - truth.up_share,
+            best.slip.falloff - truth.falloff,
+            spread.level
+        );
+    }
+}
+
+/// **Does the scoring rule stay unbiased above twelve reads a locus?**
+///
+/// Every other question here stops at a cap of twelve, because a locus's cell space is every way
+/// its reads split across the buckets and that grows as the depth to the power of the bucket count.
+/// That left `MAX_LOCUS_READS` justified by where the evidence stopped rather than by anything
+/// about the data — an unsatisfying reason for a constant that decides how many reads are thrown
+/// away at a deep locus.
+///
+/// **Narrowing the recorded range is what buys the depth**, and it is free to do: three buckets
+/// instead of nine takes the cell space at 60 reads from eight million to 39,710, and the
+/// saturating-bucket measurement already showed a range of ±1 scored by its marginal is exactly
+/// unbiased. So the rule can be checked at real depths, on a key that is narrower but not weaker.
+fn question_depth(report: &mut String) {
+    let _ = writeln!(report, "\n## Whether the scoring rule survives depth\n");
+    let truth = measured_slip();
+    let _ = writeln!(
+        report,
+        "Loci keyed by locus, offsets recorded over **±1** with the ends scored by their marginal —\n\
+         narrow on purpose, because that is what keeps the cell space affordable to 60 reads a\n\
+         locus. `beats truth` is how much better the fitted answer scores than the truth, which a\n\
+         correctly specified model cannot make positive; a value that grows with depth is the\n\
+         inner climb slowing down, not the estimator failing.\n"
+    );
+    let _ = writeln!(
+        report,
+        "{:>12} {:>8} {:>11} {:>12} {:>12} {:>9} {:>12}",
+        "reads/locus", "cells", "level", "up-share", "fall-off", "spread", "beats truth"
+    );
+
+    let keying = Keying {
+        half_range: 1,
+        origin: Origin::Reference,
+        edges: EdgeScoring::Marginal,
+    };
+    for &(mean_depth, cap) in &[
+        (3.0f64, 12u32),
+        (6.0, 20),
+        (12.0, 30),
+        (20.0, 40),
+        (30.0, 55),
+        (45.0, 75),
+    ] {
+        let w = world("depth", truth, 0.10, 0.0, mean_depth);
+        let depth_probs = w.depth_probs(cap);
+        let genotypes = w.genotypes();
+        let table = build_cells(&truth, &w.allele_offsets, &genotypes, &depth_probs, &keying);
+        let weights = truth_mass(&table, &w.genotype_probs());
+        let inputs = FitInputs {
+            world: &w,
+            truth_cells: &table.cells,
+            truth_weights: &weights,
+            model_keying: keying,
+            depth_probs: &depth_probs,
+            model_alleles: None,
+        };
+        let (best, spread) = fit_from_spread(&inputs);
+        let beats_truth = best.score - score_slip(&inputs, &truth).0;
+        let _ = writeln!(
+            report,
+            "{:>12.1} {:>8} {:>+10.2}% {:>+12.4} {:>+12.4} {:>8.2}× {:>12.2e}",
+            w.realised_mean_depth(cap),
+            table.cells.len(),
+            100.0 * (best.slip.level / truth.level - 1.0),
+            best.slip.up_share - truth.up_share,
+            best.slip.falloff - truth.falloff,
+            spread.level,
+            beats_truth
+        );
     }
 }
 
@@ -1268,14 +1603,21 @@ fn question_saturation(report: &mut String) {
             "{:<10} {:<26} {:>11} {:>11} {:>11} {:>10}",
             "range", "edge scoring", "level", "up-share", "fall-off", "hets"
         );
-        for half_range in [1, 2, 3] {
+        // The wide-allele world enumerates 28 genotypes against seven allele lengths, so it
+        // is run shallower and at the two ranges the question is about — a range wider than
+        // the alleles is not the case in doubt.
+        let wide = allele_offsets.len() > 3;
+        let ranges: &[i32] = if wide { &[1, 2] } else { &[1, 2, 3] };
+        let mean_depth = if wide { 3.0 } else { 6.0 };
+        let depth_cap = if wide { 8 } else { 10 };
+        for &half_range in ranges {
             for edges in [
                 EdgeScoring::Marginal,
                 EdgeScoring::PlugAtEdge,
                 EdgeScoring::PlugAtEdgeRenormalised,
             ] {
-                let mut w = world("saturation", slip, 0.10, 0.0, 6.0);
-                if allele_offsets.len() > 3 {
+                let mut w = world("saturation", slip, 0.10, 0.0, mean_depth);
+                if wide {
                     let spread = 0.30;
                     w.allele_offsets = allele_offsets.clone();
                     w.allele_probs = allele_offsets
@@ -1289,7 +1631,7 @@ fn question_saturation(report: &mut String) {
                         })
                         .collect();
                 }
-                let depth_probs = w.depth_probs(10);
+                let depth_probs = w.depth_probs(depth_cap);
                 let genotypes = w.genotypes();
                 let truth_keying = Keying {
                     half_range,
@@ -1315,6 +1657,7 @@ fn question_saturation(report: &mut String) {
                     truth_weights: &weights,
                     model_keying,
                     depth_probs: &depth_probs,
+                    model_alleles: None,
                 };
                 let (best, _) = fit_from_spread(&inputs);
                 let _ = writeln!(
@@ -1325,7 +1668,8 @@ fn question_saturation(report: &mut String) {
                     100.0 * (best.slip.level / slip.level - 1.0),
                     best.slip.up_share - slip.up_share,
                     best.slip.falloff - slip.falloff,
-                    100.0 * (best.heterozygosity(&w) / w.heterozygosity() - 1.0),
+                    100.0
+                        * (best.heterozygosity(w.allele_offsets.len()) / w.heterozygosity() - 1.0),
                 );
             }
         }
@@ -1369,6 +1713,7 @@ fn question_shape(report: &mut String) {
             truth_weights: &weights,
             model_keying: keying,
             depth_probs: &depth_probs,
+            model_alleles: None,
         };
 
         // A ladder in the level, with the other two axes maximised at each rung.
@@ -1529,6 +1874,7 @@ fn question_strata(report: &mut String) {
                 truth_weights: &weights,
                 model_keying: keying,
                 depth_probs: &depth_probs,
+                model_alleles: None,
             };
             let (best, _) = fit_from_spread(&inputs);
             let worst = ((best.slip.level / low.level - 1.0).abs())
@@ -1669,6 +2015,15 @@ fn main() {
     }
     if wanted("origin") {
         question_origin(&mut report);
+    }
+    if wanted("converge") {
+        question_convergence(&mut report);
+    }
+    if wanted("support") {
+        question_allele_support(&mut report);
+    }
+    if wanted("depth") {
+        question_depth(&mut report);
     }
     if wanted("saturation") {
         question_saturation(&mut report);

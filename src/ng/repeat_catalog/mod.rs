@@ -15,26 +15,125 @@
 //! sit below every floor a caller routes on, so every routing question stays answerable by
 //! filtering the file (spec §1, §4.1).
 
-pub mod builder;
+// **The facade below is the module's API; the submodules are not.** Only `criteria` is
+// reached by path from outside this folder. Leaving the rest `pub mod` made all 74 items in
+// them crate-public, which is why `dead_code` never warned about the five items that turned
+// out to have no caller at all.
+/// The port anchor: the whole stack, on a real multi-contig FASTA (`anchor.rs`).
+#[cfg(test)]
+mod anchor;
+pub(crate) mod builder;
 pub mod criteria;
-pub mod parquet_file;
-pub mod reader;
-pub mod row;
-pub mod segments;
-pub mod strata;
+pub(crate) mod parquet_file;
+pub(crate) mod reader;
+pub(crate) mod row;
+pub(crate) mod segments;
+pub(crate) mod strata;
+pub(crate) mod tally;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ng::reference_info::ContigInfo;
 use crate::ng::tandem_repeat::ScanParams;
-use crate::ng::types::{ContigId, Motif, Position};
+use crate::ng::types::{ContigId, GenomeRegion, Motif, Position};
 
 pub use builder::{BuildTally, RepeatCatalogBuilder};
 pub use criteria::{CriteriaRefusal, StrRepeatCriteria};
 pub use parquet_file::RepeatCatalogWriter;
-pub use reader::RepeatCatalog;
+pub use reader::{GenomeSegments, RepeatCatalog, StrLoci};
 pub use row::{RowRejection, row_for_interval};
 pub use strata::{StratumCounts, StratumSample};
+pub use tally::{CatalogRegionCounts, CatalogRejectionCounts};
+
+/// What a catalog is called when it sits beside its reference — the shape a `.fai` uses, so
+/// a run finds the file without being told where it is.
+pub const CATALOG_SUFFIX: &str = ".repeats.parquet";
+
+/// Where the catalog for `reference` lives by default.
+///
+/// The same rule the reference pass uses for a `.fai`
+/// ([`sibling_fai_path`](crate::ng::reference_info::sibling_fai_path)): append, never
+/// replace, so `ref.fa` and `ref.fasta` cannot collide on one catalog.
+pub fn sibling_catalog_path(reference: &Path) -> PathBuf {
+    let mut name = reference.as_os_str().to_os_string();
+    name.push(CATALOG_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Which part of the reference a read covers.
+///
+/// **Every read method takes one of these**, and it is stated in regions rather than in
+/// contigs: a caller that wants two stretches of chromosome 1 says so in code, with
+/// [`GenomeRegion`]s it built itself. Asking by contig, or writing a BED file to disk to ask
+/// a question, were the two things this replaces.
+///
+/// `WholeReference` is a named case rather than an empty list, because an empty list of
+/// regions means *nothing*, and a caller that computed one by accident should get nothing
+/// rather than everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadScope<'a> {
+    /// Every contig the catalog holds.
+    WholeReference,
+    /// Only these stretches. A region naming a contig the catalog does not hold is a
+    /// refusal, not a silent skip; a contig no region names is never read.
+    Regions(&'a [GenomeRegion]),
+}
+
+impl<'a> ReadScope<'a> {
+    /// The regions this scope names on `contig`, or `None` when it covers the contig whole.
+    fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
+        match self {
+            ReadScope::WholeReference => None,
+            ReadScope::Regions(spans) => Some(
+                spans
+                    .iter()
+                    .filter(|s| s.contig == contig)
+                    .copied()
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Whether this scope reaches `contig` at all.
+    fn touches(&self, contig: ContigId) -> bool {
+        match self {
+            ReadScope::WholeReference => true,
+            ReadScope::Regions(spans) => spans.iter().any(|s| s.contig == contig),
+        }
+    }
+
+    /// The same scope, owning its regions — what a streaming read holds, since the iterator
+    /// outlives the call that made it.
+    fn owned(&self) -> OwnedScope {
+        match self {
+            ReadScope::WholeReference => OwnedScope::WholeReference,
+            ReadScope::Regions(spans) => OwnedScope::Regions(spans.to_vec()),
+        }
+    }
+}
+
+/// [`ReadScope`] with its regions owned, for an iterator to carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OwnedScope {
+    WholeReference,
+    Regions(Vec<GenomeRegion>),
+}
+
+impl OwnedScope {
+    /// The regions on `contig`, or `None` when the contig is covered whole.
+    pub(crate) fn spans_on(&self, contig: ContigId) -> Option<Vec<GenomeRegion>> {
+        match self {
+            OwnedScope::WholeReference => None,
+            OwnedScope::Regions(spans) => Some(
+                spans
+                    .iter()
+                    .filter(|s| s.contig == contig)
+                    .copied()
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// How many rows a build wrote, per period — what `repeat-catalog` prints when it finishes
 /// (spec §2.6), and the measurement open question 1 asks for.
@@ -200,6 +299,39 @@ pub struct RepeatCatalogHeader {
     /// The crate version that wrote the file, so a change in the detector invalidates it
     /// even when every setting matches.
     pub tool_version: String,
+    /// The longest tract stored, per contig, in the header's contig order — 0 where a
+    /// contig holds no repeats.
+    ///
+    /// **This is what makes a windowed read exact.** Classification is not local: a repeat
+    /// outside the stretch you asked for still bundles with one inside it, and a long array
+    /// outside still swallows a locus inside. So a reader that wants a stretch must also
+    /// read every row that could reach into it, and the reach of the longest row is the
+    /// bound. Guessing it would be a silent wrong answer near long arrays; the builder
+    /// knows it exactly and it costs one number per contig.
+    pub longest_tract_bp: Vec<u64>,
+}
+
+impl RepeatCatalogHeader {
+    /// How far outside a requested stretch a row can sit and still change the answer inside
+    /// it: the contig's longest tract, plus the bundle radius the reader is asking with.
+    ///
+    /// A read window padded by this holds every row that can affect the answer, and no
+    /// policy the file serves can need more — a wider bundle radius is the reader's to pass
+    /// in, and a longer tract than the longest one stored does not exist in that contig.
+    pub fn reach_into_window(&self, contig: ContigId, bundle_threshold: u64) -> u64 {
+        let longest = self
+            .longest_tract_bp
+            .get(contig.get() as usize)
+            .copied()
+            .unwrap_or(0);
+        // **Saturating, because both terms come from outside.** `longest_tract_bp` is read
+        // from a file this build did not necessarily write, and `bundle_threshold` is an
+        // axis a reader sets freely; a plain `+` panics in debug on a large value and, worse,
+        // wraps in release to a *narrow* reach, which is a classification taken from an
+        // incomplete row set with nothing to show for it. Both call sites already widen with
+        // `saturating_sub`/`saturating_add` for the same reason.
+        longest.saturating_add(bundle_threshold)
+    }
 }
 
 /// Everything that can stop a catalog being built or read.
