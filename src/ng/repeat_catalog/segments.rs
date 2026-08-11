@@ -10,12 +10,13 @@
 //! reader now inherits.
 
 use crate::ng::region_typing::segment_criteria::{
-    self, SsrSegment, SsrSegmentCriteria, is_compound, split_bundles,
+    self, RejectionReason, SsrSegment, SsrSegmentCriteria, is_compound, split_bundles,
 };
 use crate::ng::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps, resolve_features,
 };
 use crate::ng::repeat_catalog::criteria::StrRepeatCriteria;
+use crate::ng::repeat_catalog::tally::{CatalogRejectionCounts, ContigTally};
 use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, TractSpan};
 use crate::ng::tandem_repeat::RepeatInterval;
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Motif, Position};
@@ -28,18 +29,21 @@ use crate::ng::types::{Bp, ContigId, GenomeRegion, Motif, Position};
 /// The output covers `1..=contig_len` with no gap and no overlap, exactly as
 /// [`crate::ng::region_typing::partition_resident`] does — the generic stretches are the
 /// spaces between the repeat features (spec §5.1).
+///
+/// The [`ContigTally`] beside the regions is what cannot be read off them: this contig's
+/// repeat coverage, and what admission turned down here.
 pub fn segments_of_contig(
     chrom: &str,
     contig: ContigId,
     contig_len: Bp,
     rows: &[FoundRepeat],
     criteria: &StrRepeatCriteria,
-) -> Vec<TypedRegion> {
+) -> (Vec<TypedRegion>, ContigTally) {
     if contig_len.get() == 0 {
-        return Vec::new();
+        return (Vec::new(), ContigTally::default());
     }
-    let features = repeat_features_of_contig(chrom, contig, contig_len, rows, criteria);
-    fill_generic_gaps(features, contig, contig_len.get())
+    let (features, tally) = repeat_features_of_contig(chrom, contig, contig_len, rows, criteria);
+    (fill_generic_gaps(features, contig, contig_len.get()), tally)
 }
 
 /// The segments of one contig that overlap `wanted`, clipped to it.
@@ -53,6 +57,10 @@ pub fn segments_of_contig(
 /// A locus is **not** clipped, only generic and satellite stretches are: an STR locus cut in
 /// half is not a locus, so one overlapping the edge comes out whole. That, too, is the
 /// walk's rule.
+///
+/// **The tally is the whole contig's, not the requested stretches'**, because the whole
+/// contig is what was typed — the walk's own tally works the same way, since its scan span
+/// is always the whole contig whatever was asked for (`region_typing/mod.rs`, `scan_set`).
 pub fn segments_of_contig_in(
     chrom: &str,
     contig: ContigId,
@@ -60,10 +68,10 @@ pub fn segments_of_contig_in(
     rows: &[FoundRepeat],
     criteria: &StrRepeatCriteria,
     wanted: &[GenomeRegion],
-) -> Vec<TypedRegion> {
-    let all = segments_of_contig(chrom, contig, contig_len, rows, criteria);
+) -> (Vec<TypedRegion>, ContigTally) {
+    let (all, tally) = segments_of_contig(chrom, contig, contig_len, rows, criteria);
     if wanted.is_empty() {
-        return Vec::new();
+        return (Vec::new(), tally);
     }
 
     let mut out = Vec::new();
@@ -96,7 +104,7 @@ pub fn segments_of_contig_in(
             }
         }
     }
-    out
+    (out, tally)
 }
 
 /// The **STR loci** of one contig, without the generic stretches between them.
@@ -115,6 +123,7 @@ pub fn loci_of_contig(
         return Vec::new();
     }
     repeat_features_of_contig(chrom, contig, contig_len, rows, criteria)
+        .0
         .into_iter()
         .filter_map(|region| match region.kind {
             RegionKind::SsrSegment(locus) => Some(locus),
@@ -157,7 +166,7 @@ fn repeat_features_of_contig(
     contig_len: Bp,
     rows: &[FoundRepeat],
     criteria: &StrRepeatCriteria,
-) -> Vec<TypedRegion> {
+) -> (Vec<TypedRegion>, ContigTally) {
     let class = &criteria.classification;
 
     // 1. The detected spans, back in the detector's own coordinates, because that is what
@@ -173,12 +182,23 @@ fn repeat_features_of_contig(
 
     // 4-5. The satellite cap over the cleaned coverage, then the features.
     let runs = coverage_runs(&cleaned);
+    // The coverage the walk charges to `repeat_bp_with_no_locus`: the merged cleaned
+    // intervals, so overlapping repeats count their bases once. The walk sums the same runs
+    // window by window, clipped to each core; cores tile a contig, so the totals are the
+    // same number reached two ways.
+    let repeat_bp = runs.iter().map(|run| run.len()).sum();
     let config = TypedRegionConfig {
         criteria: class.clone(),
         max_str_len: criteria.max_str_len_bp,
         ..TypedRegionConfig::default()
     };
-    resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config)
+    (
+        resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config),
+        ContigTally {
+            repeat_bp,
+            rejected: admitted.rejected,
+        },
+    )
 }
 
 /// Every segment of every contig the catalog holds, in reference order.
@@ -194,17 +214,17 @@ where
 {
     let mut out = Vec::new();
     for (chrom, contig, contig_len, rows) in rows_by_contig {
-        out.extend(segments_of_contig(
-            &chrom, contig, contig_len, &rows, criteria,
-        ));
+        out.extend(segments_of_contig(&chrom, contig, contig_len, &rows, criteria).0);
     }
     Ok(out)
 }
 
-/// What admission produced: the loci, and the bundle members it set aside.
+/// What admission produced: the loci, the bundle members it set aside, and the repeats it
+/// turned down.
 struct Admitted {
     loci: Vec<SsrSegment>,
     bundled: Vec<RepeatInterval>,
+    rejected: CatalogRejectionCounts,
 }
 
 /// `classify`'s gates, in `classify`'s order, over stored fields.
@@ -229,13 +249,21 @@ fn admit(
     let survivors: Vec<&FoundRepeat> = pair_with_rows(rows, cleaned);
 
     // Scope, score and the compound-motif gate — `classify`'s step 2, over stored fields.
+    //
+    // **Only the compound gate is charged**, exactly as `classify` charges it: a repeat
+    // outside the period range or under the score floor is out of the question being asked,
+    // not turned down by it, so neither is a rejection in either implementation.
+    let mut rejected = CatalogRejectionCounts::default();
     let mut kept: Vec<&FoundRepeat> = Vec::with_capacity(survivors.len());
     for row in survivors {
         if row.period < class.periods.min()
             || row.period > class.periods.max()
             || row.score < class.min_score
-            || is_compound(row.motif.as_bytes())
         {
+            continue;
+        }
+        if is_compound(row.motif.as_bytes()) {
+            rejected.add(RejectionReason::Compound, row.detected.len_bp());
             continue;
         }
         kept.push(row);
@@ -253,12 +281,19 @@ fn admit(
 
     let mut loci = Vec::with_capacity(isolated_rows.len());
     for row in isolated_rows {
-        if let Some(locus) = finish_from_row(chrom, row, contig_len, class) {
-            loci.push(locus);
+        match finish_from_row(chrom, row, contig_len, class) {
+            Ok(locus) => loci.push(locus),
+            // The bases charged are the **detected** length, before any trim — what the walk
+            // charges (`RejectionCounts`), and what makes the two tallies comparable.
+            Err(reason) => rejected.add(reason, row.detected.len_bp()),
         }
     }
 
-    Admitted { loci, bundled }
+    Admitted {
+        loci,
+        bundled,
+        rejected,
+    }
 }
 
 /// Pair each interval of `subsequence` with the row it came from, walking both once.
@@ -307,19 +342,26 @@ fn pair_with_rows_by_ref<'a>(
 /// The gates and their order are that function's: the cut must exist, the **trimmed** tract
 /// must clear the copy floor, the purity must clear its floor, and the flank must not clamp
 /// to nothing at either contig end.
+///
+/// **The refusal carries its reason**, and it is the walk's own
+/// [`RejectionReason`] rather than a second vocabulary — the two tallies are compared
+/// against each other, so one name per gate is what makes that comparison mean anything.
 fn finish_from_row(
     chrom: &str,
     row: &FoundRepeat,
     contig_len: Bp,
     class: &SsrSegmentCriteria,
-) -> Option<SsrSegment> {
-    let trimmed = row.trimmed?;
+) -> Result<SsrSegment, RejectionReason> {
+    let trimmed = row.trimmed.ok_or(RejectionReason::NoCleanTrim)?;
     if trimmed.repeat_count(row.period) < u64::from(class.min_copies.for_period(row.period)) {
-        return None;
+        return Err(RejectionReason::CopyFloor);
     }
-    let purity = row.purity?;
+    // `purity` is `Some` exactly when `trimmed` is, so this cannot be the arm that fires
+    // once the cut is known to exist; it is here because the type says it can be, and
+    // `NoCleanTrim` is what a missing purity would mean.
+    let purity = row.purity.ok_or(RejectionReason::NoCleanTrim)?;
     if purity < class.min_purity {
-        return None;
+        return Err(RejectionReason::Purity);
     }
 
     // The flank test, and it is the contig's ends that answer it — never a window's.
@@ -334,17 +376,34 @@ fn finish_from_row(
     let ref_start = tract_start.saturating_sub(class.bundle_threshold).max(1);
     let ref_end = (tract_end + class.bundle_threshold).min(contig_len.get());
     if ref_start == tract_start || ref_end == tract_end {
-        return None;
+        return Err(RejectionReason::FlankClamped);
     }
 
+    // Unreachable, both of them: the motif was checked when the row was written, and every
+    // gate above guarantees `SsrSegment`'s invariants. They are charged to `NoCleanTrim` for
+    // the reason `finish_locus` gives — of the reasons available it is the one that means
+    // "this tract did not turn out to be a well-formed repeat" — and the `debug_assert` is
+    // the part that matters, since a count here would be a count of arithmetic bugs.
+    let motif = Motif::new(row.motif.as_bytes()).map_err(|e| {
+        debug_assert!(false, "a stored motif is not a valid motif: {e}");
+        RejectionReason::NoCleanTrim
+    })?;
     SsrSegment::new(
         chrom.to_string().into_boxed_str(),
         tract_start,
         tract_end,
-        Motif::new(row.motif.as_bytes()).ok()?,
+        motif,
         purity,
     )
-    .ok()
+    .map_err(|e| {
+        debug_assert!(
+            false,
+            "the catalog built an invalid locus, so the arithmetic is wrong: {e} \
+             (tract [{tract_start}, {tract_end}], contig is {} long)",
+            contig_len.get()
+        );
+        RejectionReason::NoCleanTrim
+    })
 }
 
 /// A row's detected span, back in the detector's 0-based half-open coordinates.
@@ -364,4 +423,131 @@ fn detected_interval(row: &FoundRepeat) -> RepeatInterval {
 #[inline]
 pub fn locus_span(row: &FoundRepeat) -> Option<TractSpan> {
     row.trimmed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ng::repeat_catalog::tally::CatalogRejectionCounts;
+    use crate::ng::types::Position;
+
+    const CONTIG_LEN: Bp = Bp(10_000);
+
+    fn span(start: u64, end: u64) -> TractSpan {
+        TractSpan {
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    /// A row that clears the pre-screen: ten whole copies, far from either contig end and
+    /// far enough from its neighbours not to bundle.
+    fn row(start: u64, period: u8, motif: &str) -> FoundRepeat {
+        let end = start + u64::from(period) * 10 - 1;
+        FoundRepeat {
+            contig: ContigId(0),
+            detected: span(start, end),
+            trimmed: Some(span(start, end)),
+            period,
+            score: 100,
+            motif: Motif::new(motif.as_bytes()).expect("a valid motif"),
+            purity: Some(1.0),
+        }
+    }
+
+    fn tally_of(rows: &[FoundRepeat], criteria: &StrRepeatCriteria) -> (usize, ContigTally) {
+        let (features, tally) =
+            repeat_features_of_contig("chr1", ContigId(0), CONTIG_LEN, rows, criteria);
+        let loci = features
+            .iter()
+            .filter(|r| matches!(r.kind, RegionKind::SsrSegment(_)))
+            .count();
+        (loci, tally)
+    }
+
+    /// **Each gate charges its own counter, and charges the detected length.** Two of these
+    /// four a live scan never reaches — the detector emits only primitive motifs, and it
+    /// emits the purest sub-segment of an impure tract — so a fixture reference cannot drive
+    /// them and the rows are handed to admission directly, the same way
+    /// `segment_criteria`'s own compound-motif test does.
+    #[test]
+    fn every_gate_charges_its_own_counter() {
+        let criteria = StrRepeatCriteria::default();
+
+        // No whole-motif boundaries to cut back to.
+        let mut no_trim = row(1_001, 3, "CAG");
+        no_trim.trimmed = None;
+        no_trim.purity = None;
+
+        // Ten detected copies, three surviving the cut — under the period-3 floor of 4.
+        let mut short_after_trim = row(2_001, 3, "CAG");
+        short_after_trim.trimmed = Some(span(2_001, 2_009));
+
+        // Half the bases match a perfect tiling, against a floor of 0.8.
+        let mut impure = row(3_001, 3, "CAG");
+        impure.purity = Some(0.5);
+
+        // `ATAT` is `AT` twice, so the period is a lie.
+        let compound = row(4_001, 4, "ATAT");
+
+        let rows = vec![no_trim, short_after_trim, impure, compound];
+        let (loci, tally) = tally_of(&rows, &criteria);
+
+        assert_eq!(loci, 0, "every row here is turned down");
+        assert_eq!(
+            tally.rejected,
+            CatalogRejectionCounts {
+                no_clean_trim: 30,
+                copy_floor: 30,
+                purity: 30,
+                compound: 40,
+            },
+            "the bases charged are each row's detected length, before any cut"
+        );
+    }
+
+    /// The mirror case: a row that clears every gate is a locus and charges nothing, so the
+    /// counters above are not simply charging everything they see.
+    #[test]
+    fn a_row_that_clears_every_gate_charges_nothing() {
+        let criteria = StrRepeatCriteria::default();
+        let (loci, tally) = tally_of(&[row(1_001, 3, "CAG")], &criteria);
+
+        assert_eq!(loci, 1);
+        assert_eq!(tally.rejected, CatalogRejectionCounts::default());
+        assert_eq!(
+            tally.repeat_bp, 30,
+            "the contig's repeat coverage is the one tract"
+        );
+    }
+
+    /// Repeat coverage is bases, not tracts: two tracts sharing a base cover it once.
+    #[test]
+    fn overlapping_rows_charge_a_shared_base_once() {
+        let criteria = StrRepeatCriteria::default();
+        let mut second = row(1_030, 3, "CAG");
+        second.trimmed = Some(span(1_030, 1_059));
+
+        // 1001..=1030 and 1030..=1059: sixty bases of tract over fifty-nine of contig.
+        let (_, tally) = tally_of(&[row(1_001, 3, "CAG"), second], &criteria);
+        assert_eq!(tally.repeat_bp, 59);
+    }
+
+    /// A repeat outside the reader's period range or under its score floor is **not** a
+    /// rejection — it is out of the question being asked, exactly as `classify` treats it.
+    #[test]
+    fn out_of_scope_is_not_a_rejection() {
+        let base = StrRepeatCriteria::default();
+        let narrow = StrRepeatCriteria {
+            classification: SsrSegmentCriteria {
+                periods: crate::ng::tandem_repeat::PeriodRange::new(4, 6).expect("valid"),
+                ..base.classification.clone()
+            },
+            ..base.clone()
+        };
+        let (loci, tally) = tally_of(&[row(1_001, 3, "CAG")], &narrow);
+
+        assert_eq!(loci, 0, "period 3 is outside the range asked for");
+        assert_eq!(tally.rejected, CatalogRejectionCounts::default());
+    }
 }

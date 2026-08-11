@@ -12,14 +12,15 @@ use std::path::{Path, PathBuf};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
-use crate::ng::region_typing::TypedRegion;
 use crate::ng::region_typing::segment_criteria::SsrSegment;
+use crate::ng::region_typing::{RegionKind, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
 use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, rows_overlapping};
 use crate::ng::repeat_catalog::segments::{
     loci_of_contig, loci_of_contig_in, segments_of_contig, segments_of_contig_in,
 };
 use crate::ng::repeat_catalog::strata::{StratumCounts, StratumSample, StratumSampler};
+use crate::ng::repeat_catalog::tally::CatalogRegionCounts;
 use crate::ng::repeat_catalog::{
     FoundRepeat, OwnedScope, ReadScope, RepeatCatalogError, RepeatCatalogHeader,
 };
@@ -133,6 +134,7 @@ impl RepeatCatalog {
             scope: scope.owned(),
             contigs: self.contig_walk(scope).into_iter(),
             buffered: Vec::new().into_iter(),
+            counts: CatalogRegionCounts::default(),
         })
     }
 
@@ -334,6 +336,44 @@ pub struct GenomeSegments<'a> {
     scope: OwnedScope,
     contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
     buffered: std::vec::IntoIter<TypedRegion>,
+    counts: CatalogRegionCounts,
+}
+
+impl GenomeSegments<'_> {
+    /// The running tally — readable mid-read, complete once the iterator is exhausted.
+    ///
+    /// **This is what a consumer that stops walking the reference keeps.** It is the walk's
+    /// own tally ([`TypedRegionCounts`](crate::ng::region_typing::TypedRegionCounts)) counter
+    /// for counter, with one omission the type documents: the file cannot count repeats
+    /// touching a contig's first or last base, because it does not hold them
+    /// ([`CatalogRegionCounts`]).
+    pub fn counts(&self) -> &CatalogRegionCounts {
+        &self.counts
+    }
+
+    /// Count one region as it is handed out — the walk's own `tally`, over the same four
+    /// kinds.
+    fn tally(&mut self, region: &TypedRegion) {
+        let bp = region.region.len();
+        match &region.kind {
+            RegionKind::SsrSegment(_) => {
+                self.counts.ssr_loci += 1;
+                // This repeat coverage DID yield a locus, so it is not part of the gap. A
+                // locus is a cut tract and a tract is coverage, so its bases are a subset of
+                // what the contig charged and this cannot underflow.
+                self.counts.repeat_bp_with_no_locus -= bp;
+            }
+            RegionKind::SsrBundle { .. } => {
+                self.counts.ssr_bundles += 1;
+                self.counts.ssr_bundle_bp += bp;
+            }
+            RegionKind::Generic => self.counts.generic += 1,
+            RegionKind::Satellite => {
+                self.counts.satellites += 1;
+                self.counts.satellite_bp += bp;
+            }
+        }
+    }
 }
 
 impl Iterator for GenomeSegments<'_> {
@@ -342,6 +382,7 @@ impl Iterator for GenomeSegments<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(region) = self.buffered.next() {
+                self.tally(&region);
                 return Some(Ok(region));
             }
             let (contig, name, length) = self.contigs.next()?;
@@ -353,13 +394,23 @@ impl Iterator for GenomeSegments<'_> {
                 Ok(rows) => rows,
                 Err(e) => return Some(Err(e)),
             };
-            self.buffered = match self.scope.spans_on(contig) {
-                None => segments_of_contig(&name, contig, length, &rows, &self.criteria),
+            let (regions, tally) = match self.scope.spans_on(contig) {
+                None => {
+                    // The whole reference is one span per non-empty contig — what
+                    // `GenomeRegions::whole_contigs` hands the walk, so the two `spans`
+                    // counts are the same number.
+                    if length.get() > 0 {
+                        self.counts.spans += 1;
+                    }
+                    segments_of_contig(&name, contig, length, &rows, &self.criteria)
+                }
                 Some(spans) => {
+                    self.counts.spans += spans.len() as u64;
                     segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &spans)
                 }
-            }
-            .into_iter();
+            };
+            self.counts.add_contig(&tally);
+            self.buffered = regions.into_iter();
         }
     }
 }
@@ -395,6 +446,7 @@ impl Iterator for RegionSegments<'_> {
             };
             self.buffered =
                 segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &self.spans)
+                    .0
                     .into_iter();
         }
     }
@@ -646,6 +698,48 @@ mod tests {
             }]))
             .expect("rows");
         assert_eq!(rows, vec![row(1, 50, 3)]);
+    }
+
+    /// **The whole reference is one span per non-empty contig**, which is what
+    /// `GenomeRegions::whole_contigs` hands the walk — so a consumer that swaps the walk for
+    /// the file reads the same number back. A zero-length contig has no 1-based position to
+    /// cover and contributes none, by the same rule.
+    #[test]
+    fn the_whole_reference_is_one_span_per_non_empty_contig() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+
+        let with_an_empty_contig = ReferenceInfo {
+            md5: Some([42u8; 16]),
+            contigs: vec![
+                contig("chr1", 1_000, 7),
+                contig("chr2", 500, 9),
+                contig("chr_empty", 0, 11),
+            ],
+            fasta_path: None,
+        };
+        let mut writer = RepeatCatalogWriter::create(&path).expect("writer");
+        writer.write_contig(&[row(0, 100, 3)]).expect("chr1");
+        writer.write_contig(&[row(1, 50, 3)]).expect("chr2");
+        writer.write_contig(&[]).expect("chr_empty");
+        let mut header = header_for(&with_an_empty_contig);
+        header.longest_tract_bp = vec![0; 3];
+        writer.finish(&header).expect("footer");
+
+        let catalog = RepeatCatalog::open_checking_against_reference(&path, &with_an_empty_contig)
+            .expect("opens");
+        let criteria = StrRepeatCriteria::default();
+        let mut segments = catalog
+            .genome_segments(&criteria, ReadScope::WholeReference)
+            .expect("servable");
+        for region in segments.by_ref() {
+            region.expect("a region");
+        }
+        assert_eq!(
+            segments.counts().spans,
+            2,
+            "two contigs have bases; the empty one contributes no span"
+        );
     }
 
     /// The two failures a caller reacts to differently must not be the same error.

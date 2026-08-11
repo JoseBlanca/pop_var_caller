@@ -22,6 +22,7 @@ pub mod reader;
 pub mod row;
 pub mod segments;
 pub mod strata;
+pub mod tally;
 
 use std::path::PathBuf;
 
@@ -35,6 +36,7 @@ pub use parquet_file::RepeatCatalogWriter;
 pub use reader::{GenomeSegments, RepeatCatalog, StrLoci};
 pub use row::{RowRejection, row_for_interval};
 pub use strata::{StratumCounts, StratumSample};
+pub use tally::{CatalogRegionCounts, CatalogRejectionCounts};
 
 /// Which part of the reference a read covers.
 ///

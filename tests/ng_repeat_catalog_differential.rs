@@ -223,6 +223,13 @@ fn fixture() -> Vec<(&'static str, String)> {
     // Tracts hard against both contig ends — the stated exception's own fixture.
     let edges = format!("{}{}{}", "CAG".repeat(10), filler(400), "CAG".repeat(10));
 
+    // A tract 5 bases from the contig's end: **a locus to a live scan and absent from the
+    // file**, because the catalog stores nothing with less than 15 bases beside it. Distinct
+    // from `chr_edges`, whose tracts abut the very first and last base and so are rejected by
+    // a live scan too. This is the contig that makes the difference measurable instead of
+    // hypothetical (`the_tally_from_the_file_matches_the_walks`).
+    let near_edge = format!("{}{}{}", filler(400), "CAG".repeat(10), filler(5));
+
     // 180 bases: a locus under the catalog's 500 bp satellite cap and a satellite under the
     // calling one of 100, which is what makes the cap a knob this fixture can move.
     let mid_array = format!("{}{}{}", filler(200), "AT".repeat(90), filler(200));
@@ -234,6 +241,7 @@ fn fixture() -> Vec<(&'static str, String)> {
         ("chr_mid_array", mid_array),
         ("chr_impure", impure),
         ("chr_edges", edges),
+        ("chr_near_edge", near_edge),
     ]
 }
 
@@ -574,6 +582,351 @@ fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
     assert_eq!(
         from_file, walked,
         "the catalog's region subset and the walk's disagree\nfile: {from_file:#?}\nwalk: {walked:#?}"
+    );
+}
+
+/// Sequence with no structure of its own, from a fixed seed — the same bases every run.
+fn pseudorandom(len: usize, seed: u64) -> String {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            b"ACGT"[((state >> 33) % 4) as usize] as char
+        })
+        .collect()
+}
+
+/// [`fixture`] plus 200 kb of sequence with no designed structure.
+///
+/// **The hand-built contigs drive no rejection at all**, which would make the tally
+/// comparison assert four zeroes against four zeroes. Two of admission's gates need a
+/// haystack rather than a planted tract: over 200 kb of random bases the detector emits a few
+/// dozen tracts that lose a copy to the whole-motif cut (the copy floor) and a few dozen with
+/// no whole-motif boundaries to cut back to at all. The other two gates — an impure tract and
+/// a compound motif — a scan does not reach even over 2 Mb, and they are pinned instead by
+/// `segments.rs`'s own tests, which hand admission the rows directly.
+fn tally_fixture() -> Vec<(&'static str, String)> {
+    let mut contigs = fixture();
+    contigs.push(("chr_random", pseudorandom(200_000, 5)));
+    contigs
+}
+
+/// Everything a consumer needs to run both sides of the tally comparison over one contig
+/// subset: the FASTA (which the walk reads), the catalog, and the reference the pass
+/// computed.
+struct BothSides {
+    fasta: PathBuf,
+    catalog_path: PathBuf,
+    reference: ReferenceInfo,
+}
+
+fn both_sides(dir: &Path, contigs: &[(&str, String)]) -> BothSides {
+    let fasta = write_fasta(dir, contigs);
+    let catalog_path = dir.join("ref.fa.repeats.parquet");
+    let mut builder = RepeatCatalogBuilder::create(
+        &catalog_path,
+        StrRepeatCriteria::default(),
+        ScanParams::default(),
+    )
+    .expect("builder");
+    let reference = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: fasta.clone(),
+            fai: None,
+        },
+        &mut builder,
+    )
+    .expect("the reference pass runs");
+    builder.finish(&reference, "differential").expect("finish");
+    // The walk seeks by index, so it needs a `.fai`; the catalog path opens no reference.
+    pop_var_caller::ng::reference_info::write_fai(
+        &reference.contigs,
+        &pop_var_caller::ng::reference_info::sibling_fai_path(&fasta),
+    )
+    .expect("write fai");
+    BothSides {
+        fasta,
+        catalog_path,
+        reference,
+    }
+}
+
+/// The named contigs, whole, as the region list both sides are asked with.
+fn whole_contigs_named(reference: &ReferenceInfo, names: &[&str]) -> Vec<GenomeRegion> {
+    reference
+        .contigs
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| names.contains(&info.name.as_str()))
+        .map(|(index, info)| GenomeRegion {
+            contig: ContigId(index as u32),
+            start: Position(1),
+            end: Position(info.length),
+        })
+        .collect()
+}
+
+/// What the walk tallies over `spans`, and what the catalog tallies over the same spans.
+fn both_tallies(
+    sides: &BothSides,
+    spans: &[GenomeRegion],
+    criteria: &StrRepeatCriteria,
+) -> (
+    pop_var_caller::ng::region_typing::TypedRegionCounts,
+    pop_var_caller::ng::repeat_catalog::CatalogRegionCounts,
+    Vec<TypedRegion>,
+) {
+    use pop_var_caller::ng::WindowedRefSeq;
+    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
+    use pop_var_caller::regions::ContigBounds;
+
+    let bounds: Vec<ContigBounds> = sides
+        .reference
+        .contigs
+        .iter()
+        .map(|c| ContigBounds {
+            name: &c.name,
+            length: c.length as u32,
+        })
+        .collect();
+    // The walk takes its spans through `GenomeRegions`, which is built from whole contigs or
+    // a BED and nothing else — so the subset goes to disk as a BED.
+    let bed = sides.fasta.with_extension("wanted.bed");
+    let lines: String = spans
+        .iter()
+        .map(|s| {
+            format!(
+                "{}\t{}\t{}\n",
+                bounds[s.contig.get() as usize].name,
+                s.start.get() - 1,
+                s.end.get()
+            )
+        })
+        .collect();
+    std::fs::write(&bed, lines).expect("write bed");
+    let regions = GenomeRegions::from_bed_path(&bed, &bounds).expect("valid spans");
+
+    let walk_config = TypedRegionConfig {
+        criteria: criteria.classification.clone(),
+        max_str_len: criteria.max_str_len_bp,
+        ..TypedRegionConfig::default()
+    };
+    let mut walk = TypedRegionIterator::over_regions(
+        WindowedRefSeq::new(sides.fasta.clone(), sides.reference.contig_list()),
+        regions,
+        walk_config,
+    )
+    .expect("the walk starts");
+    let walked: Vec<TypedRegion> = walk.by_ref().map(|r| r.expect("a region")).collect();
+
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)
+            .expect("opens");
+    let mut from_file = catalog
+        .genome_segments(criteria, ReadScope::Regions(spans))
+        .expect("servable");
+    let derived: Vec<TypedRegion> = from_file.by_ref().map(|r| r.expect("a region")).collect();
+
+    assert_eq!(
+        derived, walked,
+        "the regions themselves must agree before their tallies mean anything"
+    );
+    (*walk.counts(), *from_file.counts(), walked)
+}
+
+/// **The tally a consumer keeps when it stops walking the reference.** Over contigs whose
+/// repeats all sit clear of the ends, every counter the catalog has holds the walk's number.
+///
+/// The five contigs excluded are the two carrying structure within 15 bases of a contig end;
+/// `the_tally_differs_only_at_the_contig_ends` is where those are accounted for, and it says
+/// by how much.
+#[test]
+fn the_tally_from_the_file_matches_the_walks() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = tally_fixture();
+    let sides = both_sides(dir.path(), &contigs);
+    let criteria = StrRepeatCriteria::default();
+
+    let spans = whole_contigs_named(
+        &sides.reference,
+        &[
+            "chr_clean",
+            "chr_bundled",
+            "chr_array",
+            "chr_mid_array",
+            "chr_impure",
+            "chr_random",
+        ],
+    );
+    let (walk, file, walked) = both_tallies(&sides, &spans, &criteria);
+
+    // The fixture has to exercise what the comparison claims to compare.
+    assert!(
+        walk.ssr_loci > 0 && walk.ssr_bundles > 0 && walk.satellites > 0 && walk.generic > 0,
+        "these contigs must produce all four kinds of region, or the comparison proves \
+         little: {walk:?}"
+    );
+    assert!(
+        walk.rejected_by_reason.copy_floor > 0 && walk.rejected_by_reason.no_clean_trim > 0,
+        "two of admission's gates must actually fire, or comparing them compares zero \
+         against zero: {:?}",
+        walk.rejected_by_reason
+    );
+    assert_eq!(
+        walk.rejected_by_reason.flank_clamped, 0,
+        "these contigs were chosen for having nothing at a contig end; if that stops being \
+         true the exact comparison below is no longer the right test"
+    );
+
+    assert_eq!(walk.spans, file.spans);
+    assert_eq!(walk.ssr_loci, file.ssr_loci);
+    assert_eq!(walk.ssr_bundles, file.ssr_bundles);
+    assert_eq!(walk.ssr_bundle_bp, file.ssr_bundle_bp);
+    assert_eq!(walk.generic, file.generic);
+    assert_eq!(walk.satellites, file.satellites);
+    assert_eq!(walk.satellite_bp, file.satellite_bp);
+    assert_eq!(
+        walk.repeat_bp_with_no_locus, file.repeat_bp_with_no_locus,
+        "repeat coverage that yielded no locus"
+    );
+
+    let reasons = walk.rejected_by_reason;
+    assert_eq!(reasons.copy_floor, file.rejected_by_reason.copy_floor);
+    assert_eq!(reasons.purity, file.rejected_by_reason.purity);
+    assert_eq!(reasons.compound, file.rejected_by_reason.compound);
+    assert_eq!(reasons.no_clean_trim, file.rejected_by_reason.no_clean_trim);
+
+    // And the regions counted are the regions emitted, on both sides.
+    assert_eq!(
+        walk.generic + walk.ssr_loci + walk.ssr_bundles + walk.satellites,
+        walked.len() as u64
+    );
+}
+
+/// **The two differences, named and measured** — the file is not short by accident, and this
+/// is where it says by how much.
+///
+/// `chr_edges` carries a 30-base tract hard against each contig end: a live scan sees both,
+/// finds no sequence to anchor them against, and charges them to the contig-end rejection.
+/// `chr_near_edge` carries one 5 bases from the end: a live scan makes it a **locus**. The
+/// catalog holds neither, because the file stores nothing with less than 15 bases beside it.
+#[test]
+fn the_tally_differs_only_at_the_contig_ends() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = fixture();
+    let sides = both_sides(dir.path(), &contigs);
+
+    let criteria = StrRepeatCriteria::default();
+
+    let spans = whole_contigs_named(&sides.reference, &["chr_edges", "chr_near_edge"]);
+
+    // The regions themselves differ here, so `both_tallies`' region check would fire — run
+    // the two sides directly instead.
+    use pop_var_caller::ng::WindowedRefSeq;
+    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
+    use pop_var_caller::regions::ContigBounds;
+
+    let bounds: Vec<ContigBounds> = sides
+        .reference
+        .contigs
+        .iter()
+        .map(|c| ContigBounds {
+            name: &c.name,
+            length: c.length as u32,
+        })
+        .collect();
+    let bed = dir.path().join("edges.bed");
+    let lines: String = spans
+        .iter()
+        .map(|s| {
+            format!(
+                "{}\t0\t{}\n",
+                bounds[s.contig.get() as usize].name,
+                s.end.get()
+            )
+        })
+        .collect();
+    std::fs::write(&bed, lines).expect("bed");
+    let regions = GenomeRegions::from_bed_path(&bed, &bounds).expect("spans");
+    let walk_config = TypedRegionConfig {
+        criteria: criteria.classification.clone(),
+        max_str_len: criteria.max_str_len_bp,
+        ..TypedRegionConfig::default()
+    };
+    let mut walk = TypedRegionIterator::over_regions(
+        WindowedRefSeq::new(sides.fasta.clone(), sides.reference.contig_list()),
+        regions,
+        walk_config,
+    )
+    .expect("walk");
+    for region in walk.by_ref() {
+        region.expect("a region");
+    }
+    let walk_counts = *walk.counts();
+
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)
+            .expect("opens");
+    let mut segments = catalog
+        .genome_segments(&criteria, ReadScope::Regions(&spans))
+        .expect("servable");
+    for region in segments.by_ref() {
+        region.expect("a region");
+    }
+    let file_counts = *segments.counts();
+
+    // 1. Two 30-base tracts abut a contig end. The walk charges 60 bases to the contig-end
+    //    rejection; the catalog has no counter for them at all, which is the point — a `0`
+    //    here would say "this genome has none", and it has two.
+    assert_eq!(
+        walk_counts.rejected_by_reason.flank_clamped, 60,
+        "chr_edges' two 30-base tracts, one at each end"
+    );
+
+    // 2. Those same 60 bases are repeat coverage that yielded no locus on the walk's side and
+    //    coverage the file never saw on the catalog's, so the totals differ by exactly them.
+    assert_eq!(
+        walk_counts.repeat_bp_with_no_locus - file_counts.repeat_bp_with_no_locus,
+        60,
+        "walk {} vs file {}",
+        walk_counts.repeat_bp_with_no_locus,
+        file_counts.repeat_bp_with_no_locus
+    );
+
+    // 3. `chr_near_edge`'s tract is a locus to the walk and absent from the file — the one
+    //    place the file holds fewer loci, and it is 5 bases from a contig end.
+    assert_eq!(
+        walk_counts.ssr_loci - file_counts.ssr_loci,
+        1,
+        "walk {} loci vs file {}",
+        walk_counts.ssr_loci,
+        file_counts.ssr_loci
+    );
+    // And the locus splits a generic stretch in two on the walk's side — generic, locus,
+    // generic — where the file has one uninterrupted stretch.
+    assert_eq!(walk_counts.generic - file_counts.generic, 1);
+
+    // Everything that is not at a contig end still agrees.
+    assert_eq!(walk_counts.spans, file_counts.spans);
+    assert_eq!(walk_counts.ssr_bundles, file_counts.ssr_bundles);
+    assert_eq!(walk_counts.satellites, file_counts.satellites);
+    assert_eq!(
+        walk_counts.rejected_by_reason.copy_floor,
+        file_counts.rejected_by_reason.copy_floor
+    );
+    assert_eq!(
+        walk_counts.rejected_by_reason.purity,
+        file_counts.rejected_by_reason.purity
+    );
+    assert_eq!(
+        walk_counts.rejected_by_reason.compound,
+        file_counts.rejected_by_reason.compound
+    );
+    assert_eq!(
+        walk_counts.rejected_by_reason.no_clean_trim,
+        file_counts.rejected_by_reason.no_clean_trim
     );
 }
 
