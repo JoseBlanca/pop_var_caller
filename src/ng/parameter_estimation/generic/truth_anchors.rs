@@ -74,6 +74,11 @@
 //!     -- --ignored --nocapture --test-threads=1
 //! ```
 //!
+//! **G2's sweep is this same test at seven depths** — `tmp/g2_coverage_sweep.sh` runs 5x, 10x,
+//! 15x, 20x, 30x, 50x and 300x over the identical BED and truth set, so every rung is bounded
+//! by the check below as well as plotted
+//! (`reports/implementations/ng_parameter_prepass_generic_g2_2026-08-11.md`).
+//!
 //! **The whole-genome truth set**, not `benchmarks/ssr_hg002/`: that one is the tandem-repeat
 //! benchmark, every record inside a repeat tract, and region typing routes those tracts to the
 //! STR path (`arch` §9).
@@ -233,6 +238,11 @@ impl TruthCalls {
         found
     }
 }
+
+/// One step of the error-rate ladder, as a ratio: a quarter of a Phred, `10^0.025`, about
+/// 5.9% in probability. The anchor's tolerance is expressed in these because the fitted rate
+/// is a rung and cannot be anything else.
+const RUNG_RATIO: f64 = 1.059_253_725_177_289_4;
 
 /// One sample's genotype, reduced to the three classes the fit reports.
 ///
@@ -414,15 +424,33 @@ fn the_fit_is_bounded_by_what_the_benchmark_counts() {
             counts.error_rate(),
             100.0 * (rate.value.get() / counts.error_rate() - 1.0)
         );
-        // **The one assertion, and its failure has a single explanation.** The confident
-        // regions are the easy regions, so a rate counted there is a floor for a rate fitted
-        // over the same loci: the fit sees every read this count saw and cannot see fewer
-        // disagreements than were there. A fitted rate below it is not a tolerance question.
+        // **The one assertion: the two agree to within half a rung of the error-rate ladder.**
+        //
+        // **It used to demand the fitted rate be no *lower* than the counted one, and that was
+        // wrong twice over.** `arch` §9 argues the count is a floor because the confident
+        // regions are the easy ones — a fit that saw the whole genome, hard parts included,
+        // should land above a count taken only from the easy parts. **This anchor removed that
+        // premise without noticing**: it counts and fits over exactly the same loci, all of
+        // them inside the confident regions, so there is no easy-against-hard asymmetry left
+        // and no reason for either number to sit above the other.
+        //
+        // And the fitted rate cannot land wherever it likes. It is a **rung**, and the ladder
+        // steps by a quarter of a Phred — a factor of 10^0.025, about 5.9%. Asking a quantised
+        // number to stay reliably on one side of a continuous one, when one step is 5.9%,
+        // is asking the ladder for a resolution it does not have.
+        //
+        // **Measured across the seven depths of G2's sweep, the spread is −0.9% to +0.6%** —
+        // every rung inside a fifth of one step. Half a step is therefore three times the
+        // worst observation, and it still catches everything the inequality caught: the wrong
+        // sample's benchmark misses by 1.1 rungs, reading `POS` as 0-based by about 5, and a
+        // classifier that returns nothing by about 6.
+        let rungs_apart = (rate.value.get() / counts.error_rate()).ln() / RUNG_RATIO.ln();
         assert!(
-            rate.value.get() >= counts.error_rate(),
-            "{}: {group:?}'s fitted error rate {:e} is BELOW the model-free count {:e} over \
-             the same loci — the confident regions are the easy ones, so this direction has \
-             no benign reading (arch §9)",
+            rungs_apart.abs() < 0.5,
+            "{}: {group:?}'s fitted error rate {:e} is {rungs_apart:.2} rungs from the \
+             model-free count {:e} over the same loci. Half a rung is the resolution the \
+             ladder itself has; anything wider is the fit and the reads disagreeing about \
+             the same population of sites (arch §9)",
             inputs.run_label,
             rate.value.get(),
             counts.error_rate()

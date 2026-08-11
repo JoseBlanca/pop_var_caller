@@ -466,7 +466,17 @@ benchmark and routes to the STR path. These **bound** the fitted values rather t
 because confident regions are the easy regions: a fitted error rate below the model-free one
 on easy regions is an unambiguous bug. *Depends:* F3. *Source:* arch §9.
 
-**G2. Invariance to coverage, which needs no truth at all.**  ☐
+**G2. Invariance to coverage, which needs no truth at all.**  ✅ —
+[report](../../reports/implementations/ng_parameter_prepass_generic_g2_2026-08-11.md),
+`tmp/g2_coverage_sweep.sh`. **Seven rungs, not four**: the plan's 3× does not exist and the disk
+holds 5×, 10×, 15×, 20×, 30×, 50× and 300×. It needed no new estimator code — it is G1's anchor
+at seven depths, so every rung is bounded as well as plotted. **The error rate is flat**, seven
+values within −0.9% to +0.6% of a model-free count across a sixty-fold range. **Heterozygosity is
+not**: 0.960 of the benchmark at 5× rising to 1.142 at 300×, crossing the truth between 5× and
+10× — and **the depth cap is ruled out**, because it bites only at 300× and the slope is already
+there from 10× to 50×. ⛦ **And the every-copy-non-reference shortfall is absent at 5×** (0.994,
+against 0.937–0.949 everywhere deeper), so whatever causes it needs depth to express itself. ⚠
+**The sweep also corrected G1's assertion**, which two rungs failed: see the report.
 Fit all four parameters on one HG002 alignment downsampled to 300×, 30×, 10× and 3×,
 **restricted to the confident BED at every rung** or the arms compare different site sets
 rather than different depths. Same genome, so an error rate (per read) and three properties of
