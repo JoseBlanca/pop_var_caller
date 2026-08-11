@@ -157,7 +157,7 @@ pub struct TypedRegionsArgs {
     #[arg(
         long,
         value_parser = crate::pop_var_caller_exp::cli::parsers::parse_min_copies,
-        default_value = "6,4,4,3,3,3",
+        default_value = "8,6,6,6,5,4",
         help_heading = "Advanced"
     )]
     pub min_copies: MinCopies,
@@ -720,7 +720,9 @@ mod tests {
             "regions.tsv",
         ])
         .unwrap();
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd;
+        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+            panic!("the parsed command is not type-regions");
+        };
         assert_eq!(args.reference, PathBuf::from("r.fa"));
         assert_eq!(args.output, PathBuf::from("regions.tsv"));
         assert_eq!(args.regions, None);
@@ -742,7 +744,7 @@ mod tests {
         // sweep (spec §10) that moves one without the other fails here rather than
         // silently applying two different defaults.
         let floors: Vec<u32> = (1..=6).map(|p| args.min_copies.for_period(p)).collect();
-        assert_eq!(floors, vec![6, 4, 4, 3, 3, 3], "the short-read floors");
+        assert_eq!(floors, vec![8, 6, 6, 6, 5, 4], "the short-read floors");
         assert_eq!(
             args.min_copies,
             MinCopies::default(),
@@ -815,7 +817,7 @@ mod tests {
             "## flank_bp: 30",
             "## min_purity: 0.8",
             "## min_score: 0",
-            "## min_copies: 6,4,4,3,3,3",
+            "## min_copies: 8,6,6,6,5,4",
             "## scan_match_reward: 2",
             "## scan_mismatch_penalty: 7",
             "## scan_min_copies: 2",
@@ -1338,7 +1340,9 @@ mod tests {
             argv.push(bed.display().to_string());
         }
         let cli = Cli::try_parse_from(argv).expect("the args parse");
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd;
+        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+            panic!("the parsed command is not type-regions");
+        };
         args
     }
 
@@ -1958,7 +1962,9 @@ mod tests {
             "9,5,4,3,3,3",
         ])
         .expect("six values parse");
-        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd;
+        let PopVarCallerExpCommand::TypeRegions(args) = cli.cmd else {
+            panic!("the parsed command is not type-regions");
+        };
         assert_eq!(args.min_copies.for_period(1), 9);
         assert_eq!(args.min_copies.for_period(2), 5);
     }

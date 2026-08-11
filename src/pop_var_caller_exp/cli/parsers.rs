@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn the_default_string_parses_to_the_library_default() {
         assert_eq!(
-            parse_min_copies("6,4,4,3,3,3").expect("the flag's default parses"),
+            parse_min_copies("8,6,6,6,5,4").expect("the flag's default parses"),
             MinCopies::default(),
             "--min-copies' default_value string has drifted from MinCopies::default()"
         );

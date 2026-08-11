@@ -92,6 +92,14 @@ overflow-checks = true
 [dependencies]
 ahash = "0.8.12"
 anyhow = "1.0.102"
+# `arrow-array` / `arrow-schema`: the in-memory column batches ng's repeat
+# catalog is written from and read into (doc/devel/ng/spec/repeat_catalog.md
+# §3.5). Promoted from transitive (via `parquet`'s `arrow` feature) to
+# explicit because ng names their types directly, and a transitive
+# re-export surface can shrink at any minor bump. Same version as
+# `parquet`: the arrow-rs crates release together.
+arrow-array = "59.2"
+arrow-schema = "59.2"
 # bytemuck: zero-copy `cast_slice` in PSP's `encode_list_column_csr`
 # fast path (src/psp/block.rs). Avoids user-side `unsafe`; single
 # dependent call site.
@@ -121,6 +129,13 @@ noodles-csi = "0.56.0"
 noodles-fasta = "0.61.0"
 noodles-sam = "0.85.0"
 noodles-vcf = "0.88.0"
+# `parquet`: the wire format of ng's reference repeat catalog
+# (doc/devel/ng/spec/repeat_catalog.md §3.5). Only the Arrow writer/reader
+# API and zstd framing are used — the other codecs and `simdutf8` would be
+# dead weight, so default features are off. The catalog's two heaviest
+# readers touch three of its seven columns, which is what a column store
+# buys and a row format cannot.
+parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 smallvec = "1.13"

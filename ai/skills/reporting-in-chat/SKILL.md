@@ -337,6 +337,36 @@ Four failures, and the first is the one that made the rest unreadable:
    it read. **Rule for the next reader: load this file when the task begins, not when a
    reply is being drafted** — by the time a result exists, the working that made it opaque
    has already happened.
+### 2026-08-10 — a decision asked for in the code's own words
+
+A checkpoint summary ended by handing the owner a "decision" written entirely in names
+from the implementation:
+
+> ❌ "`admit` matches pre-screened intervals back to their rows with a linear search per
+> interval, so it is quadratic in a contig's row count. Correct, and invisible on the
+> fixtures, but it is not the shape for a 90 Mb chromosome with millions of rows. A sorted
+> merge is the fix; I would rather let E2's measurement on tomato say whether it matters
+> than optimise blind."
+>
+> Owner: *"your lousy writting is extremely trying. If you want a decission from me I need
+> to understand what you're saying to me."*
+
+Four names doing load-bearing work, none of them the reader's: `admit`, *pre-screened
+intervals*, *rows*, *a sorted merge*. The repair is to say what the machine does:
+
+> ✅ "For each contig, the code takes the list of repeats the file holds, filters it, and
+> then — for every survivor — searches the *whole original list again* to find that
+> repeat's stored details. On a chromosome with a million repeats that is a million
+> searches through a million entries."
+
+**And it was never the owner's decision.** Nothing about it changes the design: it is an
+implementation choice inside the coder's own latitude, and the only reason it looked like a
+question was that the alternative ("measure first") had been dressed up as a trade-off. The
+rule the reply broke is the D-test: *a paragraph asking for a decision must be answerable
+without the reader asking you anything first* — and before that, it must be a decision that
+is actually theirs. **Two checks, in this order:** is this mine to decide? If yes, decide it
+and say so in one line. If no, describe the thing in the reader's language, not in the
+identifiers.
 
 ### 2026-08-04 — the rules existed and were never loaded
 

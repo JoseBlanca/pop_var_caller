@@ -353,19 +353,48 @@ impl MinCopies {
 }
 
 impl Default for MinCopies {
-    /// The short-read copy-number floors (spec §2.3), one per period 1..6: the
-    /// copy number at which a repeat starts to **stutter** — below it, the
-    /// generic SNP/indel caller handles the tract fine and only a stuttering one
-    /// needs the STR route. The mononucleotide floor is **6** (the Illumina
-    /// read-artifact onset, not the higher ~9-unit germline-slippage threshold);
-    /// shorter motifs stutter more, so periods 4–6 sit at 3. Every number is a
-    /// starting value, soft and swept (spec §10). This deliberately diverges from
-    /// the catalog's `[10,5,4,3,3,3]` — the trf-mod parity oracle pins the
-    /// catalog's values explicitly (spec §2.3), so the divergence costs it
-    /// nothing.
+    /// The copy number at which a repeat starts to **stutter**, one per period 1..6 —
+    /// below it the generic SNP/indel caller handles the tract and only a
+    /// stuttering one needs the STR route
+    /// ([`parameter_prepass_ssr.md`](../../../../doc/devel/ng/spec/parameter_prepass_ssr.md)
+    /// §5.1).
+    ///
+    /// **`[8, 6, 6, 6, 5, 4]` since 2026-08-10, measured, replacing an unmeasured
+    /// `[6, 4, 4, 3, 3, 3]`.** Two surveys of the tomato archive stand behind it:
+    ///
+    /// - **Where the stutter model applies at all** — 2,457 libraries, from the share
+    ///   of differing reads that differ by something other than a whole number of
+    ///   copies. Crossing the one-in-ten threshold puts that at `[·, 6, 7, 6, 5, 4]`.
+    /// - **Where stutter grows large enough to matter** — 181 libraries, from the
+    ///   per-read slippage rate fitted by summing over the genotype
+    ///   ([`ng_str_stutter_rate.rs`](../../../../examples/ng_str_stutter_rate.rs)).
+    ///   The repeat count at which the rate first reaches 5% runs 9 to 13 across
+    ///   libraries for mononucleotides and 6 to 9 for dinucleotides.
+    ///
+    /// **The floor tracks the most-stuttering library, not the median**, because the
+    /// two errors are not symmetric: a stuttering tract sent to the generic path is
+    /// genotyped by a model that cannot express what it does, and nothing reports it;
+    /// a quiet tract sent to the STR path is genotyped correctly and more slowly.
+    ///
+    /// Mononucleotides sit at **8** rather than the measured 9, for that margin: the
+    /// most-stuttering library reaches 3.6% at 8 repeats, against 1.0% at 7 and 0.9%
+    /// at 6. Trinucleotides sit at **6** rather than the model-fit floor of 7, the one
+    /// place the two criteria disagree and the same asymmetry decides it — the worst
+    /// library reaches 3.4% at 6 repeats and the rate climbs about 2.5-fold per
+    /// repeat, so 6 catches a library that 7 would miss. It is a deliberate step below
+    /// where the noise model describes the data well, taken on the owner's rule.
+    ///
+    /// Periods 4 to 6 have **no 5% crossing in the data** — no library reached it at
+    /// any repeat count with enough loci to fit — so their floors are the first
+    /// survey's. What the second one adds there is only that nothing stutters near 5%:
+    /// the worst library reaches 1.1%, 0.55% and 2.4%.
+    ///
+    /// Still a default a user overrides, not a constant of nature. This diverges from
+    /// the catalog's `[10,5,4,3,3,3]`; the trf-mod parity oracle pins the catalog's
+    /// values explicitly (spec §2.3), so the divergence costs it nothing.
     fn default() -> Self {
         //         period:  1  2  3  4  5  6
-        Self::new([6, 4, 4, 3, 3, 3], 3)
+        Self::new([8, 6, 6, 6, 5, 4], 3)
     }
 }
 
@@ -1094,7 +1123,12 @@ fn finish_locus(
 }
 
 /// ASCII upper-case copy of `bytes`.
-fn upper(bytes: &[u8]) -> Vec<u8> {
+///
+/// **Shared with the repeat catalog's builder** ([`crate::ng::repeat_catalog`]), which
+/// records a tract's motif and purity at build time so that a reader never has to open the
+/// FASTA to recompute them (`repeat_catalog.md` spec §3.2). The builder must produce the
+/// bytes [`classify`] would, so it calls this rather than upper-casing its own way.
+pub(crate) fn upper(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().map(|b| b.to_ascii_uppercase()).collect()
 }
 
@@ -1119,7 +1153,7 @@ fn count_motif(repeat: &[u8], motif: &[u8]) -> usize {
 /// `true` if `motif` is itself internally periodic — a non-fundamental period
 /// such as `ATAT = (AT)²` (GangSTR `is_compound`, threshold 0.8). A motif whose
 /// shorter prefix `sub` tiles more than 80% of it is compound.
-fn is_compound(motif: &[u8]) -> bool {
+pub(crate) fn is_compound(motif: &[u8]) -> bool {
     let l = motif.len();
     const THRESHOLD: f64 = 0.8;
     for i in 1..=(l / 2) {
@@ -1138,7 +1172,14 @@ fn is_compound(motif: &[u8]) -> bool {
 /// motif boundary within `min(3·|motif|, |rep|/2)` of each end.
 ///
 /// Offsets, not coordinates — no rebase applies.
-fn minimal_trim(rep: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
+///
+/// **It reads only the tract and its motif, never the criteria**, which is what lets the
+/// repeat catalog store the cut at build time and every reader inherit it: a different copy
+/// floor or purity floor changes which tracts survive, never where this cut falls
+/// (`repeat_catalog.md` spec §3.2). Shared with that builder for the same reason
+/// [`upper`] is — one implementation, so the stored trim is the trim [`classify`] would
+/// make.
+pub(crate) fn minimal_trim(rep: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
     let m = motif.len();
     let ll = m * 2;
     let max_trim_len = (m * 3).min(rep.len() / 2);
@@ -1182,7 +1223,12 @@ fn minimal_trim(rep: &[u8], motif: &[u8]) -> Option<(usize, usize)> {
 /// Fraction of `tract` matching a perfect tiling of `motif` from phase 0. With
 /// `motif == tract[..period]`, the first repeat always matches, so a perfect
 /// tract scores 1.0 and interruptions lower it proportionally.
-fn recompute_purity(tract: &[u8], motif: &[u8]) -> f32 {
+///
+/// **Measured over the trimmed tract**, which is what [`finish_locus`] passes and what the
+/// repeat catalog stores; a purity taken over the untrimmed span would count the ragged
+/// ends the locus does not have. Criteria-free like [`minimal_trim`], so the stored value
+/// is the value any policy would compute (`repeat_catalog.md` spec §3.2).
+pub(crate) fn recompute_purity(tract: &[u8], motif: &[u8]) -> f32 {
     if tract.is_empty() || motif.is_empty() {
         return 0.0;
     }
@@ -1316,7 +1362,7 @@ pub fn bundle_clusters(
 /// No source comment of GangSTR's says why bundles are dropped at all (spec §10);
 /// keeping selection and disposal separable is what lets that question be asked
 /// later, with the evidence in hand.
-fn split_bundles(
+pub(crate) fn split_bundles(
     recs: Vec<RepeatInterval>,
     thresh: u64,
 ) -> (Vec<RepeatInterval>, Vec<RepeatInterval>) {
