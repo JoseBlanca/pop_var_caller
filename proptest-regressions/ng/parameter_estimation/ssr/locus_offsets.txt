@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 32645bed868a60d838059421a43dc2f4f63cc029fc47d4f1770f61f8cc2f7508 # shrinks to period = 3, tract_bases = 50
 cc 7646f6ed66db5e880827bc6b0334c0407dfbe23ffc4fc1d57c731352f37b7cf6 # shrinks to period = 3, tract_bases = 47
+cc c5b8d88937b6df5a765f0e5553c1c06a36a8db4ee180f42beda320923e2ceff6 # shrinks to period_bases = 1, reference_copies = 0, reads = [(4, 1, 1, true), (4, 1, 1, true)]

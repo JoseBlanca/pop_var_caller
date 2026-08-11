@@ -274,7 +274,7 @@ number of copies is **counted and skipped, not rounded**. Unit tests over hand-b
 non-`Ssr` locus returns `None`; a 13-base tract at period 3 is counted and skipped.
 *Depends:* B1. *Source:* arch §2.3.
 
-**C2. `shape_of` — complete witnesses only.**  ☐ **Own commit, do not bundle.**
+**C2. `shape_of` — complete witnesses only.**  ✅ **Own commit, do not bundle.**
 A read's offset is `(observation.bases.len() − reference_bases.len()) / period`, whole only when that
 difference divides by the period; otherwise the read goes to the guard bucket. **The silent failure
 this isolates:** a partial witness saw only part of the tract, so its length is a **lower bound** —
