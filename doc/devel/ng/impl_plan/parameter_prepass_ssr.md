@@ -266,7 +266,7 @@ order; the substitution rate of a table with no bases compared is `None` rather 
 
 ### Milestone C — one locus → one entry (data shaping)
 
-**C1. `stratum_of`.**  ☐
+**C1. `stratum_of`.**  ✅
 The reference tract's period and repeat count, from `reference_bases.len() / motif.period()` — both
 of which the locus carries. **A pure function of the reference**, which is what makes every sample
 stratify identically so a cohort can compare strata. A tract whose reference length is not a whole
