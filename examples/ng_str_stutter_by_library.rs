@@ -125,13 +125,18 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::{MAX_MOTIF_LEN, MinCopies};
-use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionCounts, TypedRegionIterator,
+use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{
+    CatalogRegionCounts, ReadScope, RepeatCatalog, StrRepeatCriteria,
 };
+use pop_var_caller::ng::types::GenomeRegion;
 use pop_var_caller::ng::types::{Bp, ContigId, ReadGroupId};
 use pop_var_caller::regions::ContigBounds;
 
 use std::collections::BTreeMap;
+
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 
 /// Offsets are recorded over `±OFFSET_HALF_RANGE`, the ends saturating (arch §2.1).
 const OFFSET_HALF_RANGE: i64 = 4;
@@ -322,9 +327,13 @@ fn parse_min_copies(value: &str) -> Option<MinCopies> {
     }
 }
 
-/// Add one walk's typing tally into the run's. Field by field, because the walks are one per contig
+/// Add one read's typing tally into the run's. Field by field, because the reads are one per contig
 /// or one per BED and the survey's question is about the whole run.
-fn add_typing_counts(total: &mut TypedRegionCounts, walk: &TypedRegionCounts) {
+///
+/// **There is no contig-end rejection to add.** A live scan counted repeats it turned down for
+/// touching a contig's very first or last base; the catalog holds no such repeat, so the counter
+/// does not exist rather than reporting a zero that would read as "this genome has none".
+fn add_typing_counts(total: &mut CatalogRegionCounts, walk: &CatalogRegionCounts) {
     total.spans += walk.spans;
     total.ssr_loci += walk.ssr_loci;
     total.ssr_bundles += walk.ssr_bundles;
@@ -337,7 +346,6 @@ fn add_typing_counts(total: &mut TypedRegionCounts, walk: &TypedRegionCounts) {
     total.rejected_by_reason.purity += walk.rejected_by_reason.purity;
     total.rejected_by_reason.compound += walk.rejected_by_reason.compound;
     total.rejected_by_reason.no_clean_trim += walk.rejected_by_reason.no_clean_trim;
-    total.rejected_by_reason.flank_clamped += walk.rejected_by_reason.flank_clamped;
 }
 
 /// **A walk that typed nothing this survey can measure.** It is an error and not an empty table:
@@ -352,7 +360,7 @@ fn add_typing_counts(total: &mut TypedRegionCounts, walk: &TypedRegionCounts) {
 #[derive(Debug)]
 struct EmptySurvey {
     min_copies: Option<MinCopies>,
-    typing: TypedRegionCounts,
+    typing: CatalogRegionCounts,
 }
 
 impl std::fmt::Display for EmptySurvey {
@@ -364,7 +372,7 @@ impl std::fmt::Display for EmptySurvey {
              {spans} span(s) emitted {loci} STR locus/loci, {bundles} bundle(s) covering \
              {bundle_bp} bp, {satellites} satellite(s) and {generic} generic region(s); \
              {no_locus} bp of repeat yielded no locus (copy floor {floor}, purity {purity}, \
-             compound {compound}, no clean trim {trim}, flank clamped {clamped}).",
+             compound {compound}, no clean trim {trim}).",
             spans = counts.spans,
             loci = counts.ssr_loci,
             bundles = counts.ssr_bundles,
@@ -376,7 +384,6 @@ impl std::fmt::Display for EmptySurvey {
             purity = counts.rejected_by_reason.purity,
             compound = counts.rejected_by_reason.compound,
             trim = counts.rejected_by_reason.no_clean_trim,
-            clamped = counts.rejected_by_reason.flank_clamped,
         )?;
         if counts.ssr_loci == 0 && counts.ssr_bundles > 0 {
             write!(
@@ -432,6 +439,9 @@ fn run(
         ReferenceCheck::VerifyAgainstIndex,
     )?;
     let contigs: ContigList = info.contig_list();
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run: the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     // One reference for the whole cohort, and so one copy of its bases — the per-file repository
     // this replaces cost ~752 MiB of resident tomato genome per open CRAM (ng_ssr_cohort_stutter).
     let reference = OpenReference::new(info);
@@ -540,13 +550,14 @@ fn run(
                 .is_some_and(|e| contig_filter.iter().any(|n| n == &e.name))
     };
 
-    let mut walks: Vec<(String, TypedRegionIterator<WindowedRefSeq>)> = Vec::new();
+    // The stretches to ask the catalog for, labelled. The spans are collected rather than the
+    // readers, because a reader borrows the catalog.
+    let mut walks: Vec<(String, Vec<GenomeRegion>)> = Vec::new();
     match bed_spans {
         Some(spans) => {
-            let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
             walks.push((
                 "BED".to_string(),
-                TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
+                spans.iter().collect::<Vec<GenomeRegion>>(),
             ));
         }
         None => {
@@ -554,14 +565,12 @@ fn run(
                 if !wanted_contig(ContigId(index as u32)) {
                     continue;
                 }
-                let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
                 walks.push((
                     entry.name.clone(),
-                    TypedRegionIterator::over_contig(
-                        walk_reference,
+                    vec![catalog_regions::whole_contig(
                         ContigId(index as u32),
-                        walk_config.clone(),
-                    )?,
+                        entry.length,
+                    )],
                 ));
             }
         }
@@ -572,9 +581,11 @@ fn run(
     // a locus, so a walk that types everything as `SsrBundle` yields zero strata and looks exactly
     // like a walk over a genome with no repeats in it. Keeping the tally is what lets the failure
     // below say *which* it was.
-    let mut typing = TypedRegionCounts::default();
-    for (label, mut walk) in walks {
+    let mut typing = CatalogRegionCounts::default();
+    let criteria = StrRepeatCriteria::from(&walk_config);
+    for (label, spans) in walks {
         eprintln!("  walking {label}");
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&spans))?;
         for region in walk.by_ref() {
             let region = region?;
             let RegionKind::SsrSegment(segment) = &region.kind else {

@@ -51,11 +51,14 @@ use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionIterator,
-};
+use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::types::GenomeRegion;
 use pop_var_caller::ng::types::{Bp, ContigId, ReadGroupId};
 use pop_var_caller::regions::ContigBounds;
+
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 
 // ---------------------------------------------------------------------------
 // The types the architecture doc specifies, as far as this measurement needs them
@@ -350,6 +353,9 @@ fn run(
         ReferenceCheck::VerifyAgainstIndex,
     )?;
     let contigs: ContigList = info.contig_list();
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run: the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     let reference = OpenReference::new(info);
 
     let inputs = [alignments.to_path_buf()];
@@ -418,14 +424,15 @@ fn run(
                 .is_some_and(|e| contig_filter.iter().any(|n| n == &e.name))
     };
 
-    let mut walks: Vec<(String, TypedRegionIterator<WindowedRefSeq>)> = Vec::new();
+    // The stretches to ask the catalog for, labelled. The spans are collected rather than the
+    // readers, because a reader borrows the catalog.
+    let mut walks: Vec<(String, Vec<GenomeRegion>)> = Vec::new();
     match bed_spans {
         Some(spans) => {
             eprintln!("  {} BED spans", spans.iter().count());
-            let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
             walks.push((
                 "BED".to_string(),
-                TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
+                spans.iter().collect::<Vec<GenomeRegion>>(),
             ));
         }
         None => {
@@ -433,21 +440,21 @@ fn run(
                 if !wanted_contig(ContigId(index as u32)) {
                     continue;
                 }
-                let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
                 walks.push((
                     entry.name.clone(),
-                    TypedRegionIterator::over_contig(
-                        walk_reference,
+                    vec![catalog_regions::whole_contig(
                         ContigId(index as u32),
-                        walk_config.clone(),
-                    )?,
+                        entry.length,
+                    )],
                 ));
             }
         }
     }
 
-    for (label, mut walk) in walks {
+    let criteria = StrRepeatCriteria::from(&walk_config);
+    for (label, spans) in walks {
         eprintln!("  walking {label}");
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&spans))?;
         for region in walk.by_ref() {
             let region = region?;
             let RegionKind::SsrSegment(segment) = &region.kind else {

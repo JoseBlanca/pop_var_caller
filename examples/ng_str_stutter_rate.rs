@@ -85,9 +85,9 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
-use pop_var_caller::ng::region_typing::{
-    GenomeRegions, RegionKind, TypedRegionConfig, TypedRegionIterator,
-};
+use pop_var_caller::ng::region_typing::{GenomeRegions, RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
+use pop_var_caller::ng::types::GenomeRegion;
 use pop_var_caller::ng::types::{Bp, ContigId, ReadGroupId};
 use pop_var_caller::regions::ContigBounds;
 
@@ -95,6 +95,9 @@ use pop_var_caller::regions::ContigBounds;
 mod stutter_table;
 
 use stutter_table::*;
+
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 
 /// Offsets are recorded over `±this`, the end buckets absorbing everything beyond. Measured to
 /// matter far less than it looks: with the ends scored by their marginal, a range of ±1 against
@@ -721,6 +724,9 @@ fn run(
         ReferenceCheck::VerifyAgainstIndex,
     )?;
     let contigs: ContigList = info.contig_list();
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run: the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     let reference = OpenReference::new(info);
     let read_groups = build_read_groups(alignments)?;
     let samples: Vec<SampleReads> = read_groups
@@ -743,6 +749,7 @@ fn run(
     );
 
     let walk_config = TypedRegionConfig::default();
+    let criteria = StrRepeatCriteria::from(&walk_config);
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
     #[expect(
         clippy::arc_with_non_send_sync,
@@ -789,14 +796,15 @@ fn run(
     // **Built on demand rather than once, because the region walk is made twice**: a
     // reference-only pass to count each stratum's segments, then the real pass that fetches reads.
     // A `TypedRegionIterator` is consumed by walking it, so the second pass needs its own.
-    let build_walks = || -> Result<Vec<(String, TypedRegionIterator<WindowedRefSeq>)>, Box<dyn std::error::Error>> {
+    // The stretches to ask the catalog for, labelled. Built once and reused by both passes:
+    // a reader borrows the catalog, so what is collected is the spans, not the readers.
+    let batches: Vec<(String, Vec<GenomeRegion>)> = {
         let mut walks = Vec::new();
         match bed_spans.clone() {
             Some(spans) => {
-                let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
                 walks.push((
                     "BED".to_string(),
-                    TypedRegionIterator::over_regions(walk_reference, spans, walk_config.clone())?,
+                    spans.iter().collect::<Vec<GenomeRegion>>(),
                 ));
             }
             None => {
@@ -804,19 +812,17 @@ fn run(
                     if !wanted_contig(ContigId(index as u32)) {
                         continue;
                     }
-                    let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
                     walks.push((
                         entry.name.clone(),
-                        TypedRegionIterator::over_contig(
-                            walk_reference,
+                        vec![catalog_regions::whole_contig(
                             ContigId(index as u32),
-                            walk_config.clone(),
-                        )?,
+                            entry.length,
+                        )],
                     ));
                 }
             }
         }
-        Ok(walks)
+        walks
     };
 
     // **A reference-only pre-pass, so the sample can be spread instead of truncated.**
@@ -828,8 +834,9 @@ fn run(
     // quarter (see the skip below).
     let mut segments_by_stratum: BTreeMap<Stratum, u64> = BTreeMap::new();
     if max_loci_per_stratum < u64::MAX {
-        for (label, mut walk) in build_walks()? {
+        for (label, spans) in &batches {
             eprintln!("  counting strata over {label} (reference only)");
+            let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(spans))?;
             for region in walk.by_ref() {
                 let region = region?;
                 let RegionKind::SsrSegment(segment) = &region.kind else {
@@ -853,8 +860,9 @@ fn run(
     // once — they all walk the same reference.
     let mut walked_by_stratum: BTreeMap<Stratum, u64> = BTreeMap::new();
     let mut skipped_by_stratum: BTreeMap<Stratum, u64> = BTreeMap::new();
-    for (label, mut walk) in build_walks()? {
+    for (label, spans) in &batches {
         eprintln!("  walking {label}");
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(spans))?;
         for region in walk.by_ref() {
             let region = region?;
             let RegionKind::SsrSegment(segment) = &region.kind else {
