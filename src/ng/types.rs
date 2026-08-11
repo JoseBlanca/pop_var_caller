@@ -205,6 +205,18 @@ impl ReadGroupId {
     }
 }
 
+/// Just the index — `3`, not `ReadGroupId(3)`. A message naming a read group supplies its
+/// own word for it ("read group {read_group}"), so the type renders the number alone.
+///
+/// **It renders an index into the run's read-group table, not a library name.** A caller
+/// holding that table can print the `@RG ID` and should; this is what an error message can
+/// say without one.
+impl fmt::Display for ReadGroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A probability held as its natural logarithm — the number stored is `ln(p)`, not
 /// `p` itself.
 ///

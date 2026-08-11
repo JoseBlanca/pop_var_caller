@@ -206,7 +206,7 @@ holds all three. Extend `DomainError` with their three variants — its doc alre
 constrained types add their own ([`types.rs:268`](../../../../src/ng/types.rs)). Unit tests:
 boundaries accepted, out-of-range rejected. *Depends:* A2. *Source:* arch §2.1, §2.4.
 
-**A5. The output types.**  ☐
+**A5. The output types.**  ✅
 `StratumFit`, `SlippageStart`, `SsrSampleParameters`, `StratumFitSummary`, `SsrAccumulationCounts`.
 Types only. `StratumFit` carries **two** provenance lists and not one — `fitted_over` for the level,
 `shares_fitted_over` for the direction split and the fall-off — because those starve at rates 20,000
@@ -215,7 +215,7 @@ apart and a stratum routinely measures the first well while borrowing the second
 from one standing on 4,000. A borrowed or merged value is a different claim from one fitted in place
 and a consumer must be able to tell. *Depends:* A4. *Source:* arch §2.4, §4.3.
 
-**A6. `SsrEstimationError`.**  ☐
+**A6. `SsrEstimationError`.**  ✅
 `NoFittableStratumAtPeriod`, `SlippageNotIdentified`, `Domain`, with `MIN_LOCI_TO_FIT = 1_000`,
 `MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000` and `START_AGREEMENT_LIMIT = 1.06`. **The second floor's
 doc comment must carry its derivation**, because it looks arbitrary and is not: at §3's measured
