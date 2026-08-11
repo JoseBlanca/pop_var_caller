@@ -1,6 +1,6 @@
 ---
 name: spec-authoring
-description: Use this skill when writing or revising a design spec — a "what to build and why" document under doc/devel/**/spec/ (a proposal, a design spec for a module/step/feature, or a decision record). A spec has two readers, the coder who will build it and the manager checking the right thing gets built, and answers their five questions and nothing else: what are we building, how does it relate to the rest of the project, what will bite the coder, what is decided vs open, and how do we know it works. The discipline: record facts instead of manufacturing rationale, ground every claim about code in the code, defer nothing silently, and treat length as a correctness property — an unread spec has failed. Trigger on "write a spec", "draft the design for X", "spec out this feature/module/step", or when settling a design before any code. Prose mechanics defer to the clear-technical-writing skill; the next doc downstream is architecture-authoring.
+description: Use this skill when writing or revising a design spec — a "what to build and why" document under doc/devel/**/spec/ (a proposal, a design spec for a module/step/feature, or a decision record). A spec has two readers, the coder who will build it and the manager checking the right thing gets built, and answers their five questions and nothing else: what are we building, how does it relate to the rest of the project, what will bite the coder, what is decided vs open, and how do we know it works. The discipline: record facts instead of manufacturing rationale, ground every claim about code in the code, defer nothing silently, and give the reader the context and the goal before the detail — an unread spec has failed, and when one is too big to build in one go the fix is to split it into independently codeable modules, not to shorten it. Trigger on "write a spec", "draft the design for X", "spec out this feature/module/step", or when settling a design before any code. Prose mechanics defer to the clear-technical-writing skill; the next doc downstream is architecture-authoring.
 ---
 
 # Design-spec authoring
@@ -155,25 +155,58 @@ recording for later. **Skip it when the solution is obvious and low-trade-off** 
 reads as an implementation manual with no alternatives weighed is a sign the work should have
 gone straight to an arch doc or to code.
 
-### Length is a correctness property, not a matter of taste
+### An unread spec has failed — but length is not the metric
 
-An unread spec has failed regardless of what is in it. This is not a style preference — it is the
-difference between the document doing its job and not.
+**Do not count lines, and do not trim to hit a number.** An earlier version of this section made line
+count the test and named two exemplars as a ceiling. The owner's correction, 2026-08-10:
 
-**The anchor is the exemplars: `ref_seq.md` is 342 lines, `read_filtering.md` is 594.** Those are
-foundational modules. If you are past ~600 for a step that mostly orchestrates existing code, you
-are not being thorough — **you are arguing**, and every manufactured justification costs five to ten
-lines (see *Facts, not arguments*). One draft in this repo reached 2,043 lines and the owner's
-verdict was *"I haven't read it. I'd rather write the code myself."* That is the failure mode, and
-it is total.
+> "I'm not worried at all about number of lines as a metric. […] What we'd like to take into account:
+> are we giving the context a reader needs to understand what the document is discussing? Is the
+> document clear? Is it exposing in a clear way what are we trying to accomplish and the general
+> ideas about how?"
 
-Two traps on the way there:
+**Those two questions are the test.** A short document that uses a term before giving it, or that
+never says plainly what is being built, is unreadable at any length. A long one that hands the reader
+the context and states the goal and the shape of the approach up front can be read as far as the
+reader needs and put down.
+
+- **Context before use, every time.** The most common reason a spec goes unread is not its size — it
+  is a paragraph that needs three things the reader has not been given. `clear-technical-writing`
+  Rules 1 and 2 are the mechanics.
+- **Say what we are trying to accomplish, and roughly how, before the detail.** A reader who can
+  state the goal and the approach after the first page will follow the rest. One who cannot will stop
+  on page two whether there are five more or fifty.
+
+**Length is a symptom worth investigating, never a target.** When a document feels bloated the cause
+is almost always that you are justifying rather than recording (*Facts, not arguments*) — cut *that*
+and it shortens on its own. Cutting to hit a number removes the traps and the measurements, which are
+the part that earns the document its keep.
 
 - **Thoroughness is not quality.** Alternatives-considered, supersession records, decision tables —
   each defensible alone, collectively a document nobody opens. Do not optimise the proxy.
-- **Length is a symptom; treat the cause.** When told a doc is too long, the reflex is to trim a
-  section. The cause is almost always that you are justifying rather than recording — cut *that*
-  and the length follows.
+
+### When a spec is genuinely too big, split it — do not shorten it
+
+A spec that has grown large is usually telling you something about the **work**, not about the prose:
+it describes more than one person can hold, and therefore more than one person can code in one go.
+**The fix is to split it into documents that each map to a module someone could build
+independently**, not to compress the same undivided scope into fewer words.
+
+Good split lines, in the order they usually appear:
+
+- **choosing the inputs** (which loci, which reads, which regions) — a pure function of the run's
+  inputs, testable with no data;
+- **the record and its encoding** — what is stored, how it is written and read back;
+- **the mathematics on it** — the estimator, which should know nothing about how the data was shaped.
+
+That last division is one the repo already makes in code as well as in prose. This project's step 4
+is six documents for exactly this reason, each covering one accumulator and everything fitted from
+it, so each maps to a module with its own interface.
+
+**One draft here reached 2,043 lines and the owner's verdict was *"I haven't read it. I'd rather write
+the code myself."*** The diagnosis to carry forward is not "it was long": it argued instead of
+recording, and it was one undivided block where it should have been three documents against three
+modules. Trimming the same undivided scope to 600 lines would not have fixed either fault.
 
 ## Structure (adapt to the subject; keep the spine)
 
@@ -226,7 +259,10 @@ Not every spec needs every section; keep the ones that carry weight for the subj
    cannot ground; an alternative nobody proposed; a trade-off you staged; a heading that announces
    what you are about to explain instead of explaining it; a paragraph proving that a definition is a
    definition; a supersession record for a decision nothing was built on.
-2. **Check the length against the exemplars** (342 / 594). Over it? You are arguing — go back to 1.
+2. **Read it as someone who has not been in your head.** After one pass, can they say what is being
+   built and roughly how? Does every term get given before it does work? If not, **add the context —
+   do not cut**. And if the document describes more work than one person could build in one go, split
+   it into documents that map to independently codeable modules rather than shortening it.
 3. **Check every claim about code.** `file:line`, or you looked. If neither, cut it.
 4. Run the **clear-technical-writing revision pass** (names, jargon, section openings, mechanics,
    the reader test).
@@ -254,7 +290,7 @@ an adversary in the room instead of two colleagues. The trap list earns its keep
 defending a name never did.
 
 A good self-check: **which lines here would I have found only by opening a file?** If the answer is
-"few", the spec is mostly opinion, and its length is mostly noise.
+"few", the spec is mostly opinion, whatever its size.
 
 ## When a spec fails, fix this skill
 
@@ -262,6 +298,14 @@ Every concrete rule above — the manufactured rationale, the append-only trail 
 the 2,043-line doc, the goal that abandoned its own experiment — is here because a real spec in this
 repo failed that way and the owner said so. That is why they bite: they are not imported best
 practice, they are this project's own scar tissue.
+
+**And a rule in here can itself be the failure.** The line-count ceiling was one: it took a real
+diagnosis — a document nobody read — and turned it into a proxy that would have had the author delete
+traps and measurements to hit a number. The owner removed it on 2026-08-10 and replaced it with the
+two questions that actually decide whether a document gets read (does the reader have the context;
+is the goal and the shape of the approach clear), plus the instruction to **split rather than
+shorten** when a spec describes more work than one person can build. Watch for the same shape
+elsewhere: a countable stand-in for a judgement.
 
 So the rule is standing: **when a spec gets sent back, the spec is only half the fix.** Ask what in
 this file permitted it — usually there is something, and usually it is a good instruction applied
