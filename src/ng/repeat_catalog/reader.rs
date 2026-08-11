@@ -23,6 +23,7 @@ use crate::ng::repeat_catalog::strata::{StratumCounts, StratumSample, StratumSam
 use crate::ng::repeat_catalog::tally::CatalogRegionCounts;
 use crate::ng::repeat_catalog::{
     FoundRepeat, OwnedScope, ReadScope, RepeatCatalogError, RepeatCatalogHeader,
+    sibling_catalog_path,
 };
 use crate::ng::tandem_repeat::ScanParams;
 use crate::ng::types::Bp;
@@ -65,6 +66,19 @@ impl RepeatCatalog {
             path: path.to_path_buf(),
             header,
         })
+    }
+
+    /// Open the catalog that sits beside `reference_fasta`, and check it against `reference`.
+    ///
+    /// **What a consumer calls.** The file's name is derived from the reference's the way a
+    /// `.fai`'s is ([`sibling_catalog_path`]), so a run finds it without being told where it
+    /// is — and when there is none, the error names the command that writes one, which is the
+    /// one failure here a person can act on.
+    pub fn open_beside_reference(
+        reference_fasta: &Path,
+        reference: &ReferenceInfo,
+    ) -> Result<Self, RepeatCatalogError> {
+        Self::open_checking_against_reference(&sibling_catalog_path(reference_fasta), reference)
     }
 
     /// What the file says about itself: the contig table, the criteria it was built under,

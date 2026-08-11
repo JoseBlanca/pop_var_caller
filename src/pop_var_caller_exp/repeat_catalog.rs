@@ -21,17 +21,13 @@ use crate::ng::repeat_catalog::criteria::{
     CATALOG_MAX_PERIOD, CATALOG_MAX_STR_LEN_BP, CATALOG_MIN_FLANK_BP, CATALOG_MIN_PERIOD,
 };
 use crate::ng::repeat_catalog::{
-    BuildTally, RepeatCatalogBuilder, RepeatCatalogError, StrRepeatCriteria,
+    BuildTally, RepeatCatalogBuilder, RepeatCatalogError, StrRepeatCriteria, sibling_catalog_path,
 };
 use crate::ng::tandem_repeat::{
     DEFAULT_MATCH_REWARD, DEFAULT_MISMATCH_PENALTY, PeriodRange, PeriodRangeError, ScanParams,
 };
 use crate::ng::types::Bp;
 use crate::pop_var_caller_exp::cli::parsers::parse_min_copies;
-
-/// What the file is called when `--output` is not given: a sibling of the reference, the
-/// way a `.fai` is, so a later run finds it without being told where it is.
-pub const CATALOG_SUFFIX: &str = ".repeats.parquet";
 
 /// The permissive floor handed to the scanner itself.
 ///
@@ -173,11 +169,10 @@ pub fn run_repeat_catalog(args: &RepeatCatalogArgs) -> Result<(), RepeatCatalogC
         min_copies: SCANNER_MIN_COPIES,
     };
 
-    let output = args.output.clone().unwrap_or_else(|| {
-        let mut path = args.reference.clone().into_os_string();
-        path.push(CATALOG_SUFFIX);
-        PathBuf::from(path)
-    });
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| sibling_catalog_path(&args.reference));
     if output.exists() && !args.force {
         return Err(RepeatCatalogCliError::Exists { path: output });
     }
@@ -337,7 +332,7 @@ mod tests {
         // The path the driver builds — kept in step with `run_repeat_catalog` by being the
         // same expression.
         let mut expected = args.reference.clone().into_os_string();
-        expected.push(CATALOG_SUFFIX);
+        expected.push(crate::ng::repeat_catalog::CATALOG_SUFFIX);
         assert_eq!(
             PathBuf::from(expected),
             PathBuf::from("/data/ref.fa.repeats.parquet")
@@ -393,7 +388,7 @@ mod tests {
         run_repeat_catalog(&args).expect("the build succeeds");
 
         let mut catalog_path = fasta.clone().into_os_string();
-        catalog_path.push(CATALOG_SUFFIX);
+        catalog_path.push(crate::ng::repeat_catalog::CATALOG_SUFFIX);
         let catalog_path = PathBuf::from(catalog_path);
         assert!(catalog_path.exists(), "the catalog lands beside the FASTA");
 

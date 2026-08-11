@@ -20,18 +20,21 @@ use clap::Args;
 use thiserror::Error;
 
 use crate::fasta::ContigList;
-use crate::ng::WindowedRefSeq;
 use crate::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, ReferenceInfoError, VerificationHandle,
     read_reference_verifying_or_creating_fai,
 };
 use crate::ng::region_typing::segment_criteria::{
     DEFAULT_BUNDLE_THRESHOLD, DEFAULT_MAX_PERIOD, DEFAULT_MIN_PERIOD, DEFAULT_MIN_PURITY,
-    DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies, RejectionCounts, SsrSegmentCriteria,
+    DEFAULT_MIN_SCORE, MAX_MOTIF_LEN, MinCopies, SsrSegmentCriteria,
 };
 use crate::ng::region_typing::{
     DEFAULT_MAX_STR_LEN, DEFAULT_WINDOW_BP, GenomeRegions, RegionKind, TypedRegion,
-    TypedRegionConfig, TypedRegionCounts, TypedRegionError, TypedRegionIterator,
+    TypedRegionConfig, TypedRegionError,
+};
+use crate::ng::repeat_catalog::{
+    CatalogRegionCounts, CatalogRejectionCounts, ReadScope, RepeatCatalog, RepeatCatalogError,
+    StrRepeatCriteria,
 };
 use crate::ng::tandem_repeat::{
     DEFAULT_MATCH_REWARD, DEFAULT_MIN_COPIES, DEFAULT_MISMATCH_PENALTY, PeriodRange,
@@ -211,6 +214,16 @@ pub enum TypedRegionsCliError {
     /// `--max-str-len`/`--flank-bp` guard, which the walk carries (spec T3).
     #[error("the typed-region walk failed")]
     Walk(#[from] TypedRegionError),
+
+    /// The catalog beside the reference is missing, does not describe it, or cannot answer
+    /// the policy asked for.
+    ///
+    /// **Not recovered from here, on purpose.** Falling back to a live scan would answer the
+    /// question a different way without saying so, and rebuilding a catalog under a name a
+    /// concurrent run may be reading is the failure `repeat-catalog --force` exists to make
+    /// loud. When there is simply no catalog, the message names the command that writes one.
+    #[error("the reference's repeat catalog")]
+    Catalog(#[from] RepeatCatalogError),
 
     /// Writing the output file, or renaming the temp file into place, failed.
     #[error("could not write the output file")]
@@ -458,6 +471,11 @@ pub fn write_row<W: io::Write>(
 pub struct WalkInputs {
     /// The reference's contig table — the one table, used twice.
     pub contigs: ContigList,
+    /// What the reference pass reported, which is what the catalog's header is checked
+    /// against. **The FASTA is the source of truth for every digest**, so the check is only
+    /// as strong as this value: a `.fai` read carries no digests, and then names, lengths and
+    /// order are all that can disagree.
+    pub info: Arc<crate::ng::reference_info::ReferenceInfo>,
     /// What to emit. A BED chooses what is emitted, never what is scanned
     /// (spec T10).
     pub regions: GenomeRegions,
@@ -546,6 +564,7 @@ pub fn prepare_walk_inputs(
 
     Ok(WalkInputs {
         contigs,
+        info,
         regions,
         verify,
     })
@@ -558,6 +577,20 @@ pub fn prepare_walk_inputs(
 /// express, so it surfaces here as an error rather than the panic
 /// `PeriodRange::new`'s caller would otherwise take (spec §6).
 fn walk_config(args: &TypedRegionsArgs) -> Result<TypedRegionConfig, TypedRegionsCliError> {
+    // **The knob pair is checked here now.** It used to be the walk's, where a detection
+    // margin narrower than the bundle radius would let a core tract's neighbour fall outside
+    // the window and be classified as a clean locus instead of bundled — silently, and
+    // differently per window size. Reading the catalog there are no windows and that failure
+    // cannot happen; what remains is that the two flags still mean what they meant, and a
+    // satellite cap below the bundle radius is a typo rather than a policy. Refused with both
+    // numbers named, as before.
+    if args.max_str_len < args.flank_bp {
+        return Err(TypedRegionError::MarginNarrowerThanFlank {
+            max_str_len: args.max_str_len,
+            bundle_threshold: args.flank_bp,
+        }
+        .into());
+    }
     Ok(TypedRegionConfig {
         scan: ScanParams {
             match_reward: args.scan_match_reward,
@@ -584,19 +617,23 @@ fn tmp_path_for(output: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Report what the walk tallied, to stderr (spec §6, T9).
+/// Report what the run tallied, to stderr (spec §6, T9).
 ///
-/// **All five rejection counters, labelled, with none of them hard-coded away.**
-/// Four are structurally zero today, but *which* four moves whenever an upstream
-/// stage changes, so the summary states them flatly rather than explaining any
-/// one of them — a hidden zero is worse than an explained one, and prose about
-/// "no impure tracts in this genome" would be a wrong answer wearing a
-/// measurement's clothes. The destructuring is exhaustive so a counter added
-/// later cannot go unreported.
-fn report_counts(counts: &TypedRegionCounts) {
+/// **Every counter, labelled, with none hard-coded away.** Which of them come out zero moves
+/// whenever an upstream stage changes, so the summary states them flatly rather than
+/// explaining any one — a hidden zero is worse than an explained one, and prose about "no
+/// impure tracts in this genome" would be a wrong answer wearing a measurement's clothes. The
+/// destructuring is exhaustive so a counter added later cannot go unreported.
+///
+/// **One counter the walk used to print is gone, and it is not a zero.** A live scan also
+/// counted repeats it turned down for touching a contig's very first or last base. The
+/// catalog holds no such repeat — the file requires sequence on both sides of every tract —
+/// so it cannot count them, and printing `0` would say "this genome has none" rather than
+/// "this file cannot see them" (`CatalogRegionCounts`).
+fn report_counts(counts: &CatalogRegionCounts) {
     // Exhaustive on BOTH structs (no `..`), so a counter added to either cannot
     // go unreported — the same device `write_header` uses for the config.
-    let TypedRegionCounts {
+    let CatalogRegionCounts {
         spans,
         ssr_loci,
         ssr_bundles,
@@ -607,12 +644,11 @@ fn report_counts(counts: &TypedRegionCounts) {
         repeat_bp_with_no_locus,
         rejected_by_reason,
     } = counts;
-    let RejectionCounts {
+    let CatalogRejectionCounts {
         copy_floor,
         purity,
         compound,
         no_clean_trim,
-        flank_clamped,
     } = rejected_by_reason;
 
     eprintln!(
@@ -626,8 +662,7 @@ fn report_counts(counts: &TypedRegionCounts) {
     // the total but under no reason here).
     eprintln!(
         "rejected_bp (does not partition repeat_bp_with_no_locus): copy_floor={copy_floor} \
-         purity={purity} compound={compound} no_clean_trim={no_clean_trim} \
-         flank_clamped={flank_clamped}"
+         purity={purity} compound={compound} no_clean_trim={no_clean_trim}"
     );
 }
 
@@ -654,6 +689,7 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
     let cache = Arc::new(ReferenceInfoCache::new());
     let WalkInputs {
         contigs,
+        info,
         regions,
         verify,
     } = prepare_walk_inputs(args, &cache)?;
@@ -667,25 +703,25 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
         args.output.display(),
     );
 
-    // The reference and the row namer take the same contig table (T8) — the walk
-    // needs it by value, so it is cloned from the one `contig_list()` D1 read.
-    // A clone of one value cannot disagree with itself, which is the property T8
-    // is protecting.
-    let reference = WindowedRefSeq::new(args.reference.clone(), contigs.clone());
-    // Fallible setup: the contig cross-check and the `--max-str-len`/`--flank-bp`
-    // pair both surface here as errors, before any work (spec T3).
-    let mut walk = TypedRegionIterator::over_regions(reference, regions, config.clone())?;
+    // **The typed regions come from the catalog beside the reference, not from a scan.**
+    // Nothing here reads a base: the whole-motif cut, the motif and the purity were computed
+    // once when the file was built, and every gate below them is arithmetic over stored
+    // coordinates. A missing catalog stops the run naming the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(&args.reference, &info)?;
+    let criteria = StrRepeatCriteria::from(&config);
+    let wanted: Vec<GenomeRegion> = regions.iter().collect();
+    let mut segments = catalog.genome_segments(&criteria, ReadScope::Regions(&wanted))?;
 
     let tmp_path = tmp_path_for(&args.output);
     let file = File::create(&tmp_path)?;
     let mut out = BufWriter::with_capacity(DEFAULT_BUFFERED_IO_CAPACITY, file);
 
     write_header(&mut out, &args.reference, &config)?;
-    for region in walk.by_ref() {
+    for region in segments.by_ref() {
         write_row(&mut out, &region?, &contigs)?;
     }
 
-    // The commit point. The background FASTA check overlapped the whole walk, so
+    // The commit point. The background FASTA check overlapped the whole read, so
     // this costs almost nothing — and a stale `.fai` aborts here with the
     // partition still under its temp name, never published.
     if let Some(handle) = verify {
@@ -696,7 +732,7 @@ pub fn run_typed_regions(args: &TypedRegionsArgs) -> Result<(), TypedRegionsCliE
     file.sync_all()?;
     std::fs::rename(&tmp_path, &args.output)?;
 
-    report_counts(walk.counts());
+    report_counts(segments.counts());
     Ok(())
 }
 
@@ -1592,7 +1628,33 @@ mod tests {
         let fasta = dir.path().join("ref.fa");
         let mut file = std::fs::File::create(&fasta).expect("create the FASTA");
         writeln!(file, ">ctg1\n{ctg1}\n>ctg2\n{ctg2}").expect("write");
+        build_catalog_beside(&fasta);
         (dir, fasta)
+    }
+
+    /// Build the reference's catalog, which `type-regions` now reads instead of scanning.
+    ///
+    /// The command refuses to run without one, so every end-to-end fixture needs this — and
+    /// that refusal is itself the subject of `a_run_without_a_catalog_names_the_command`.
+    fn build_catalog_beside(fasta: &Path) {
+        use crate::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+        use crate::ng::repeat_catalog::{RepeatCatalogBuilder, sibling_catalog_path};
+
+        let mut builder = RepeatCatalogBuilder::create(
+            &sibling_catalog_path(fasta),
+            StrRepeatCriteria::default(),
+            ScanParams::default(),
+        )
+        .expect("a builder");
+        let info = read_reference_info_observing(
+            ReferenceSource::Fasta {
+                fasta: fasta.to_path_buf(),
+                fai: None,
+            },
+            &mut builder,
+        )
+        .expect("the reference pass runs");
+        builder.finish(&info).expect("the catalog is written");
     }
 
     /// The rows of a written partition, header lines skipped.
@@ -1605,15 +1667,20 @@ mod tests {
             .collect()
     }
 
-    /// Drive the walk directly, for the round-trip's other side.
-    fn walk_directly(args: &TypedRegionsArgs) -> (ContigList, Vec<TypedRegion>) {
+    /// Read the typed regions directly, for the round-trip's other side.
+    fn regions_directly(args: &TypedRegionsArgs) -> (ContigList, Vec<TypedRegion>) {
         let cache = Arc::new(ReferenceInfoCache::new());
         let inputs = prepare_walk_inputs(args, &cache).expect("setup");
         let config = walk_config(args).expect("config");
-        let reference = WindowedRefSeq::new(args.reference.clone(), inputs.contigs.clone());
-        let walk = TypedRegionIterator::over_regions(reference, inputs.regions, config)
-            .expect("the walk starts");
-        let regions = walk.map(|r| r.expect("no read fails")).collect();
+        let catalog = RepeatCatalog::open_beside_reference(&args.reference, &inputs.info)
+            .expect("the fixture built one");
+        let criteria = StrRepeatCriteria::from(&config);
+        let wanted: Vec<GenomeRegion> = inputs.regions.iter().collect();
+        let regions = catalog
+            .genome_segments(&criteria, ReadScope::Regions(&wanted))
+            .expect("the policy is servable")
+            .map(|r| r.expect("no read fails"))
+            .collect();
         if let Some(handle) = inputs.verify {
             handle.join().expect("the fixture's .fai is fresh");
         }
@@ -1635,7 +1702,7 @@ mod tests {
 
         run_typed_regions(&args).expect("the run succeeds");
         let rows = read_rows(&output);
-        let (contigs, regions) = walk_directly(&args);
+        let (contigs, regions) = regions_directly(&args);
 
         assert_eq!(rows.len(), regions.len(), "one row per emitted region");
         assert!(!regions.is_empty(), "the fixture produces regions");
@@ -1683,7 +1750,7 @@ mod tests {
         let args = args_for_output(&fasta, None, &output);
         run_typed_regions(&args).expect("the run succeeds");
 
-        let (contigs, _) = walk_directly(&args);
+        let (contigs, _) = regions_directly(&args);
         let rows = read_rows(&output);
 
         for entry in &contigs.entries {
@@ -1849,9 +1916,7 @@ mod tests {
     }
 
     /// **T3 — the flag pair is a CLI error, not a panic.** `--max-str-len` below
-    /// `--flank-bp` is refused by the walk before any work, and the CLI just
-    /// propagates it: a second check here would be a second place for the rule to
-    /// drift, and the walk's message already carries both numbers.
+    /// `--flank-bp` is refused before any work, naming both numbers.
     #[test]
     fn a_margin_narrower_than_the_flank_is_an_error_not_a_panic() {
         let (dir, fasta) = e2e_reference();
@@ -1920,13 +1985,14 @@ mod tests {
         );
     }
 
-    /// A reference that has *shrunk* under its index also aborts before
-    /// publishing, but through the walk's own read (`UnexpectedEof`) rather than
-    /// the verification barrier.
+    /// A reference that has *shrunk* under its index also aborts before publishing.
     ///
-    /// Recorded as its own case so the barrier test above cannot be credited
-    /// with catching it: the two failures travel different paths, and only the
-    /// extended-reference case actually exercises the join.
+    /// **It used to travel a different path and now travels the same one**, which is worth
+    /// recording rather than deleting the test over: the walk read the FASTA, so a short
+    /// reference failed its own read; reading the catalog nothing opens the FASTA at all, so
+    /// the background verification is the only thing that can notice. Both cases now abort at
+    /// the join barrier, and the barrier is still before the rename — which is the property
+    /// either test exists to hold.
     #[test]
     fn a_truncated_reference_also_aborts_before_publishing() {
         use std::io::Write as _;
@@ -1942,10 +2008,54 @@ mod tests {
         let err = run_typed_regions(&args_for_output(&fasta, None, &output))
             .expect_err("a reference shorter than its index must abort");
         assert!(
-            matches!(err, TypedRegionsCliError::Walk(_)),
-            "the walk's own read catches this one: {err:?}"
+            matches!(err, TypedRegionsCliError::Reference(_)),
+            "the verification barrier catches this one now that nothing else reads the \
+             FASTA: {err:?}"
         );
         assert!(!output.exists(), "and still nothing is published");
+    }
+
+    /// **A run with no catalog stops and names the command that writes one.**
+    ///
+    /// This is the one failure here a person can act on, so it is kept apart from every other
+    /// way a catalog can be wrong. It is also the new precondition of the whole command:
+    /// `type-regions` no longer scans, so without the file it has nothing to type.
+    #[test]
+    fn a_run_without_a_catalog_names_the_command() {
+        let (dir, fasta) = e2e_reference();
+        std::fs::remove_file(crate::ng::repeat_catalog::sibling_catalog_path(&fasta))
+            .expect("the fixture built one");
+
+        let output = dir.path().join("out.tsv");
+        let err = run_typed_regions(&args_for_output(&fasta, None, &output))
+            .expect_err("no catalog, no run");
+        assert!(
+            matches!(
+                err,
+                TypedRegionsCliError::Catalog(RepeatCatalogError::NotFound { .. })
+            ),
+            "expected a missing catalog, got {err:?}"
+        );
+        assert!(
+            format!("{}", ErrorChain(&err)).contains("repeat-catalog"),
+            "the message must say how to make one: {}",
+            ErrorChain(&err)
+        );
+        assert!(!output.exists(), "and nothing is published");
+    }
+
+    /// An error and every cause under it, for asserting on a message a `#[source]` carries.
+    struct ErrorChain<'a>(&'a TypedRegionsCliError);
+
+    impl std::fmt::Display for ErrorChain<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let mut current: Option<&dyn std::error::Error> = Some(self.0);
+            while let Some(e) = current {
+                write!(f, "{e}: ")?;
+                current = e.source();
+            }
+            Ok(())
+        }
     }
 
     /// `--min-copies` is accepted when it carries exactly six values.

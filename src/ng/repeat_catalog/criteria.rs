@@ -197,6 +197,30 @@ pub enum CriteriaRefusal {
     },
 }
 
+/// What a caller holding step 3's own policy is asking the catalog for.
+///
+/// **The bridge every consumer crosses when it stops scanning.** A walk states its policy as
+/// a `TypedRegionConfig`; a reader states it as a [`StrRepeatCriteria`]. The two carry the
+/// same admission rules — the conversion moves them across and supplies the one field a walk
+/// has no concept of.
+///
+/// **That field is the flank floor, and it is the catalog's own 15 bp.** A walk applies no
+/// flank floor at all: it keeps any tract with a non-zero flank, which is *less* permissive
+/// than nothing but *more* permissive than the file, so asking with a walk's own rule would
+/// be refused. Fifteen is what the file was built at and what ng's STR locus generator
+/// fetches by default, so a caller at the default is served exactly. The consequence is the
+/// one stated difference between the two paths: a tract 1 to 14 bases from a contig's end is
+/// a locus to a scan and is not in the file.
+impl From<&crate::ng::region_typing::TypedRegionConfig> for StrRepeatCriteria {
+    fn from(config: &crate::ng::region_typing::TypedRegionConfig) -> Self {
+        Self {
+            classification: config.criteria.clone(),
+            min_flank_bp: Bp(CATALOG_MIN_FLANK_BP),
+            max_str_len_bp: config.max_str_len,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -28,7 +28,7 @@ pub(crate) mod segments;
 pub(crate) mod strata;
 pub(crate) mod tally;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ng::reference_info::ContigInfo;
 use crate::ng::tandem_repeat::ScanParams;
@@ -41,6 +41,21 @@ pub use reader::{GenomeSegments, RepeatCatalog, StrLoci};
 pub use row::{RowRejection, row_for_interval};
 pub use strata::{StratumCounts, StratumSample};
 pub use tally::{CatalogRegionCounts, CatalogRejectionCounts};
+
+/// What a catalog is called when it sits beside its reference — the shape a `.fai` uses, so
+/// a run finds the file without being told where it is.
+pub const CATALOG_SUFFIX: &str = ".repeats.parquet";
+
+/// Where the catalog for `reference` lives by default.
+///
+/// The same rule the reference pass uses for a `.fai`
+/// ([`sibling_fai_path`](crate::ng::reference_info::sibling_fai_path)): append, never
+/// replace, so `ref.fa` and `ref.fasta` cannot collide on one catalog.
+pub fn sibling_catalog_path(reference: &Path) -> PathBuf {
+    let mut name = reference.as_os_str().to_os_string();
+    name.push(CATALOG_SUFFIX);
+    PathBuf::from(name)
+}
 
 /// Which part of the reference a read covers.
 ///
