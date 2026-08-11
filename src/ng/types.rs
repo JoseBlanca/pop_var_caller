@@ -521,6 +521,34 @@ pub enum DomainError {
     /// moved a first, is not a probability in `[0, 1]`.
     #[error("slip step decay {0} is not a finite probability in [0, 1]")]
     SlipStepDecay(f64),
+
+    /// A locus's reads were laid out across the offset buckets in a number a
+    /// locus shape cannot record: none at all, or more than the read cap
+    /// (`parameter_estimation::ssr::stratum_table::LocusShape`).
+    ///
+    /// **Carries `u64` where the shape stores `u8`**, for the reason
+    /// [`Self::SsrPeriod`] carries a `usize`: the value the message must name is
+    /// the one the *caller* offered, and a caller counting a deep locus's reads
+    /// holds a wide integer. A variant as narrow as the storage is what makes
+    /// `try_new(counts as u8)` the natural call, under which 260 reads arrive as
+    /// 4 and validate.
+    ///
+    /// **The cap travels in the error rather than being named in the message
+    /// text.** Two reasons, and the first alone would not settle it: this file is
+    /// the shared vocabulary and the cap is the STR path's own constant, so a
+    /// `{MAX_LOCUS_READS}` here would point the wrong way up the module tree.
+    /// The second is that the cap is a value the design expects to move —
+    /// `arch/parameter_prepass_ssr.md` §7 leaves it as an impl-time confirmation
+    /// against the precision it costs — so an error that carries the number in
+    /// force says what a run rejected against rather than what this file was
+    /// compiled believing.
+    #[error("a locus shape holds {reads} reads, outside the 1..={cap} one can record")]
+    SsrLocusShapeReads {
+        /// How many reads the caller offered, over all buckets and the guard.
+        reads: u64,
+        /// The cap in force — `MAX_LOCUS_READS`.
+        cap: u32,
+    },
 }
 
 // ---------------------------------------------------------------------
