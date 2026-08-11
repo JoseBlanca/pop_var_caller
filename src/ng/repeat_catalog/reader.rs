@@ -25,8 +25,8 @@ use crate::ng::repeat_catalog::{
     FoundRepeat, OwnedScope, ReadScope, RepeatCatalogError, RepeatCatalogHeader,
 };
 use crate::ng::tandem_repeat::ScanParams;
+use crate::ng::types::Bp;
 use crate::ng::types::ContigId;
-use crate::ng::types::{Bp, GenomeRegion};
 
 /// An opened catalog: its header, already checked against this run's reference.
 ///
@@ -59,6 +59,7 @@ impl RepeatCatalog {
             });
         }
         let header = read_header(path)?;
+        check_written_by_this_build(&header)?;
         check_against_reference(&header, reference)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -89,6 +90,7 @@ impl RepeatCatalog {
     /// row outside your regions is not one of them. The reach that a windowed *classification*
     /// needs is about what a neighbour does to a locus, which is not a question about rows.
     pub fn repeats(&self, scope: ReadScope<'_>) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
+        self.check_scope(scope)?;
         let mut out = Vec::new();
         for (contig, _, _) in self.contig_walk(scope) {
             match scope.spans_on(contig) {
@@ -128,6 +130,7 @@ impl RepeatCatalog {
         scope: ReadScope<'_>,
     ) -> Result<GenomeSegments<'_>, RepeatCatalogError> {
         self.check_serves(criteria)?;
+        self.check_scope(scope)?;
         Ok(GenomeSegments {
             catalog: self,
             criteria: criteria.clone(),
@@ -183,48 +186,6 @@ impl RepeatCatalog {
         })
     }
 
-    /// The rows of `contig` that can affect the answer inside `spans` — the rows overlapping
-    /// each span, widened by how far a row outside one can reach into it.
-    ///
-    /// **The widening is what makes this exact rather than approximate.** A tract within the
-    /// bundle radius of a requested stretch bundles with what is inside it, and a long array
-    /// overlapping it swallows a locus inside; the longest tract in the contig plus the
-    /// reader's bundle radius bounds both, and the header stores that length per contig.
-    ///
-    /// Rows are selected with a filter over `detected_start` and `detected_end`, so with the
-    /// page index loaded the reader skips whole pages whose coordinate range lies outside
-    /// every window — the file's own index doing the work rather than a scan of the contig.
-    fn rows_of_contig_in(
-        &self,
-        contig: ContigId,
-        spans: &[GenomeRegion],
-        criteria: &StrRepeatCriteria,
-    ) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
-        let reach = self
-            .header
-            .reach_into_window(contig, criteria.classification.bundle_threshold);
-        let windows: Vec<(u64, u64)> = spans
-            .iter()
-            .filter(|s| s.contig == contig)
-            .map(|s| {
-                (
-                    s.start.get().saturating_sub(reach),
-                    s.end.get().saturating_add(reach),
-                )
-            })
-            .collect();
-        if windows.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        rows_overlapping(&self.path, contig, &windows).map_err(|source| {
-            RepeatCatalogError::Unreadable {
-                path: self.path.clone(),
-                source,
-            }
-        })
-    }
-
     /// The contigs a scope reaches, with the names and lengths the header carries. A contig
     /// no region names is never opened.
     fn contig_walk(&self, scope: ReadScope<'_>) -> Vec<(ContigId, String, Bp)> {
@@ -248,6 +209,7 @@ impl RepeatCatalog {
         scope: ReadScope<'_>,
     ) -> Result<StrLoci<'_>, RepeatCatalogError> {
         self.check_serves(criteria)?;
+        self.check_scope(scope)?;
         Ok(StrLoci {
             catalog: self,
             criteria: criteria.clone(),
@@ -298,19 +260,45 @@ impl RepeatCatalog {
         Ok(sampler.finish())
     }
 
-    /// Whether this catalog can answer a reader asking with `criteria`, and whether it was
-    /// scored the same way (spec §4.1, §4.2).
+    /// Whether this catalog can answer a reader asking with `criteria` (spec §4.1).
     ///
-    /// The weights are checked for **equality**, not permissiveness: a different match
-    /// reward or mismatch penalty is a different set of tracts, not a subset of this one,
-    /// and no filter over the file reproduces it.
+    /// **The floors only.** The scoring weights are a separate question with a separate
+    /// answer, because a reader that only reads has no weights to offer — it is not scanning
+    /// anything. A caller that scans as well as reads asks [`check_scored_with`] itself.
     fn check_serves(&self, criteria: &StrRepeatCriteria) -> Result<(), RepeatCatalogError> {
         self.header.built_under.serves(criteria)?;
         Ok(())
     }
 
-    /// The scoring weights the file was built with, for a caller that scans as well as
-    /// reads and must not mix the two.
+    /// Refuse a scope that names a contig this catalog does not hold.
+    ///
+    /// **Silently skipping it is the failure mode this whole module exists to avoid**: a
+    /// genome-wide count over a contig name that does not resolve comes back `Ok` with zero,
+    /// which reads as "this region holds no STR loci" rather than "you asked about a contig
+    /// that is not in this reference".
+    fn check_scope(&self, scope: ReadScope<'_>) -> Result<(), RepeatCatalogError> {
+        let ReadScope::Regions(spans) = scope else {
+            return Ok(());
+        };
+        let held = self.header.contigs.len() as u32;
+        if let Some(missing) = spans.iter().find(|s| s.contig.get() >= held) {
+            return Err(RepeatCatalogError::ContigTableMismatch {
+                detail: format!(
+                    "a region names contig {}, and the catalog holds {held}",
+                    missing.contig.get()
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuse unless this catalog was scored with `scan`'s weights — **for a caller that
+    /// scans as well as reads**, and must not mix tracts from two weightings.
+    ///
+    /// The weights are checked for **equality**, not permissiveness: a different match
+    /// reward or mismatch penalty is a different set of tracts, not a subset of this one,
+    /// and no filter over the file reproduces it (spec §4.2). A reader that only reads has
+    /// nothing to compare and never calls this.
     pub fn check_scored_with(&self, scan: &ScanParams) -> Result<(), RepeatCatalogError> {
         if self.header.scan.match_reward != scan.match_reward
             || self.header.scan.mismatch_penalty != scan.mismatch_penalty
@@ -415,43 +403,6 @@ impl Iterator for GenomeSegments<'_> {
     }
 }
 
-/// The segments inside a region set, one contig at a time.
-///
-/// **Only the rows that can affect the answer are read**, not the contig: each requested
-/// stretch is widened by how far a row outside it can reach in, and the file's page index
-/// skips the pages outside those windows (`rows_overlapping`).
-pub struct RegionSegments<'a> {
-    catalog: &'a RepeatCatalog,
-    criteria: StrRepeatCriteria,
-    spans: Vec<GenomeRegion>,
-    contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
-    buffered: std::vec::IntoIter<TypedRegion>,
-}
-
-impl Iterator for RegionSegments<'_> {
-    type Item = Result<TypedRegion, RepeatCatalogError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(region) = self.buffered.next() {
-                return Some(Ok(region));
-            }
-            let (contig, name, length) = self.contigs.next()?;
-            let rows = match self
-                .catalog
-                .rows_of_contig_in(contig, &self.spans, &self.criteria)
-            {
-                Ok(rows) => rows,
-                Err(e) => return Some(Err(e)),
-            };
-            self.buffered =
-                segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &self.spans)
-                    .0
-                    .into_iter();
-        }
-    }
-}
-
 /// The STR loci alone, one contig at a time.
 ///
 /// The same contig walk as [`GenomeSegments`], stopping one step earlier: `loci_of_contig`
@@ -523,6 +474,31 @@ fn read_header(path: &Path) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
         .ok_or_else(|| unreadable("not a repeat catalog: no header in the footer".into()))?;
 
     decode_header(&text, path)
+}
+
+/// The version of this crate, which is what a catalog's header is stamped with.
+///
+/// A separate function so the builder and the reader cannot disagree about what "this build"
+/// means.
+pub fn running_tool_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Refuse a catalog written by a different build of the detector.
+///
+/// **A change in the detector invalidates the file even when every setting matches** (spec
+/// §3.4): the header records the settings that were asked for, not the code that acted on
+/// them, so two builds at identical criteria can hold different tracts. There is no way to
+/// tell from the rows, which is why the version is compared rather than the contents.
+fn check_written_by_this_build(header: &RepeatCatalogHeader) -> Result<(), RepeatCatalogError> {
+    let running = running_tool_version();
+    if header.tool_version != running {
+        return Err(RepeatCatalogError::ToolVersionDiffers {
+            built: header.tool_version.clone(),
+            running: running.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Compare the header's contig table against the digests this run computed from the FASTA.
@@ -602,6 +578,7 @@ mod tests {
     use crate::ng::repeat_catalog::parquet_file::{RepeatCatalogWriter, temp_path_for};
     use crate::ng::repeat_catalog::{StrRepeatCriteria, TractSpan};
     use crate::ng::tandem_repeat::ScanParams;
+    use crate::ng::types::GenomeRegion;
     use crate::ng::types::{Motif, Position};
 
     fn contig(name: &str, length: u64, md5: u8) -> ContigInfo {
@@ -629,7 +606,8 @@ mod tests {
             reference_md5: reference.md5.expect("a digest"),
             built_under: StrRepeatCriteria::default(),
             scan: ScanParams::default(),
-            tool_version: "test-0.1".to_string(),
+            // Stamped with the running build, because the reader refuses anything else.
+            tool_version: running_tool_version().to_string(),
             longest_tract_bp: vec![0; 2],
         }
     }
@@ -674,10 +652,89 @@ mod tests {
         let catalog =
             RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
         assert_eq!(catalog.contigs().len(), 2);
-        assert_eq!(catalog.header().tool_version, "test-0.1");
+        assert_eq!(catalog.header().tool_version, running_tool_version());
 
         let rows: Vec<FoundRepeat> = catalog.repeats(ReadScope::WholeReference).expect("rows");
         assert_eq!(rows, vec![row(0, 100, 3), row(0, 400, 3), row(1, 50, 3)]);
+    }
+
+    /// **A catalog written by another build of the detector is refused.** The header records
+    /// the settings that were asked for, not the code that acted on them, so two builds at
+    /// identical criteria can hold different tracts and no comparison of the rows would say
+    /// so (spec §3.4).
+    #[test]
+    fn a_catalog_from_another_tool_version_is_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+        let reference = reference();
+
+        let mut writer = RepeatCatalogWriter::create(&path).expect("writer");
+        writer.write_contig(&[row(0, 100, 3)]).expect("chr1");
+        writer.write_contig(&[row(1, 50, 3)]).expect("chr2");
+        let stale = RepeatCatalogHeader {
+            tool_version: "ancient-0.0.1".to_string(),
+            ..header_for(&reference)
+        };
+        writer.finish(&stale).expect("footer");
+
+        let err = RepeatCatalog::open_checking_against_reference(&path, &reference)
+            .expect_err("another version");
+        match &err {
+            RepeatCatalogError::ToolVersionDiffers { built, running } => {
+                assert_eq!(built, "ancient-0.0.1");
+                assert_eq!(running, running_tool_version());
+            }
+            other => panic!("expected a tool-version refusal, got {other}"),
+        }
+    }
+
+    /// **A region naming a contig the catalog does not hold is refused, not skipped.** Zero
+    /// loci in a region that does not exist reads as "no STR loci here", which is the class
+    /// of silent wrong answer this module refuses everywhere else.
+    #[test]
+    fn a_region_on_a_contig_the_catalog_does_not_hold_is_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("catalog.parquet");
+        let reference = reference();
+        write_catalog(&path, &reference);
+        let catalog =
+            RepeatCatalog::open_checking_against_reference(&path, &reference).expect("opens");
+
+        let absent = [GenomeRegion {
+            contig: ContigId(7),
+            start: Position(1),
+            end: Position(100),
+        }];
+        let criteria = StrRepeatCriteria::default();
+        assert!(matches!(
+            catalog.repeats(ReadScope::Regions(&absent)),
+            Err(RepeatCatalogError::ContigTableMismatch { .. })
+        ));
+        assert!(matches!(
+            catalog.genome_segments(&criteria, ReadScope::Regions(&absent)),
+            Err(RepeatCatalogError::ContigTableMismatch { .. })
+        ));
+        assert!(matches!(
+            catalog.count_loci_per_stratum(&criteria, ReadScope::Regions(&absent)),
+            Err(RepeatCatalogError::ContigTableMismatch { .. })
+        ));
+    }
+
+    /// A digest field that is present and will not decode is a broken file, not a file
+    /// without a digest — otherwise the corruption skips the very check it damaged.
+    #[test]
+    fn a_malformed_contig_digest_is_unreadable_not_absent() {
+        use crate::ng::repeat_catalog::parquet_file::{decode_header, encode_header};
+
+        let reference = reference();
+        let text = encode_header(&header_for(&reference));
+        let damaged = text.replace(&hex(&[7u8; 16]), "not-a-digest-at-all");
+        assert_ne!(damaged, text, "the fixture must actually damage a digest");
+
+        assert!(matches!(
+            decode_header(&damaged, Path::new("catalog.parquet")),
+            Err(RepeatCatalogError::Unreadable { .. })
+        ));
     }
 
     /// One row group per contig means a contig's rows are read without touching the others.

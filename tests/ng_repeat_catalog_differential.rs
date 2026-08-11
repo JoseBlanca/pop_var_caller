@@ -73,7 +73,7 @@ fn build_catalog(dir: &Path, contigs: &[(&str, String)]) -> (PathBuf, ReferenceI
     let reference =
         read_reference_info_observing(ReferenceSource::Fasta { fasta, fai: None }, &mut builder)
             .expect("the reference pass runs");
-    builder.finish(&reference, "differential").expect("finish");
+    builder.finish(&reference).expect("finish");
     let names = reference.contigs.iter().map(|c| c.name.clone()).collect();
     (catalog_path, reference, names)
 }
@@ -521,7 +521,7 @@ fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
         &mut builder,
     )
     .expect("the pass runs");
-    builder.finish(&reference, "differential").expect("finish");
+    builder.finish(&reference).expect("finish");
 
     let criteria = StrRepeatCriteria::default();
     let bounds: Vec<ContigBounds> = reference
@@ -585,6 +585,97 @@ fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
     );
 }
 
+/// **Classification is not local, and this is what proves the file's answer accounts for it.**
+///
+/// A read that wants a stretch must also read every row that can reach *into* that stretch: a
+/// tract just outside it bundles with one inside, and a long array overlapping it swallows a
+/// locus inside. The catalog widens each requested span by the contig's longest stored tract
+/// plus the reader's bundle radius, which is what `longest_tract_bp` is in the header for.
+///
+/// Nothing held either half of that until now. Deleting the widening, or dropping the
+/// longest-tract term from it, each left the whole suite green while turning a bundle into a
+/// locus and a satellite into a locus — which is the difference between skipping an array and
+/// calling it.
+///
+/// Both windows here start *after* the feature they must still see, so the widening is the
+/// only thing that can bring it in.
+#[test]
+fn a_feature_outside_the_window_still_decides_what_is_inside_it() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let contigs = fixture();
+    let sides = both_sides(dir.path(), &contigs);
+    let criteria = StrRepeatCriteria::default();
+    let catalog =
+        RepeatCatalog::open_checking_against_reference(&sides.catalog_path, &sides.reference)
+            .expect("opens");
+
+    let index_of = |name: &str| {
+        sides
+            .reference
+            .contigs
+            .iter()
+            .position(|c| c.name == name)
+            .expect("the fixture has this contig") as u32
+    };
+
+    // `chr_bundled` carries two tracts 10 bases apart. A window over the second alone must
+    // still bundle them, because the first is within the bundle radius of it.
+    let inside_the_second_tract = [GenomeRegion {
+        contig: ContigId(index_of("chr_bundled")),
+        start: Position(245),
+        end: Position(260),
+    }];
+    let kinds: Vec<&'static str> = catalog
+        .genome_segments(&criteria, ReadScope::Regions(&inside_the_second_tract))
+        .expect("servable")
+        .map(|r| match r.expect("a region").kind {
+            RegionKind::SsrBundle { .. } => "bundle",
+            RegionKind::SsrSegment(_) => "locus",
+            RegionKind::Satellite => "satellite",
+            RegionKind::Generic => "generic",
+        })
+        .collect();
+    assert!(
+        kinds.contains(&"bundle"),
+        "a window over one member of a bundle must still see the other: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&"locus"),
+        "the bundled tracts must not come back as clean loci: {kinds:?}"
+    );
+
+    // `chr_array` carries a 1.2 kb array running from base 201. A window over its last few
+    // bases must call the whole thing a satellite and hand it back **whole**: a satellite's
+    // extent is its claim, and 60 bases of "array too long to be a microsatellite"
+    // contradicts the cap that produced the label.
+    let inside_the_array = [GenomeRegion {
+        contig: ContigId(index_of("chr_array")),
+        start: Position(1_390),
+        end: Position(1_450),
+    }];
+    let regions: Vec<TypedRegion> = catalog
+        .genome_segments(&criteria, ReadScope::Regions(&inside_the_array))
+        .expect("servable")
+        .map(|r| r.expect("a region"))
+        .collect();
+    let satellite = regions
+        .iter()
+        .find(|r| matches!(r.kind, RegionKind::Satellite))
+        .unwrap_or_else(|| {
+            panic!("a window inside a 1.2 kb array must be satellite: {regions:#?}")
+        });
+
+    // **And it comes out whole, not clipped to the window.** A satellite's extent is its
+    // claim — a 50-base "array too long to be a microsatellite" contradicts the cap that
+    // produced the label — so only generic stretches clip at a requested edge, which is the
+    // walk's own rule.
+    assert!(
+        satellite.region.start.get() < 1_390,
+        "the satellite must be emitted whole, not cut to the window: {:?}",
+        satellite.region
+    );
+}
+
 /// Sequence with no structure of its own, from a fixed seed — the same bases every run.
 fn pseudorandom(len: usize, seed: u64) -> String {
     let mut state = seed;
@@ -639,7 +730,7 @@ fn both_sides(dir: &Path, contigs: &[(&str, String)]) -> BothSides {
         &mut builder,
     )
     .expect("the reference pass runs");
-    builder.finish(&reference, "differential").expect("finish");
+    builder.finish(&reference).expect("finish");
     // The walk seeks by index, so it needs a `.fai`; the catalog path opens no reference.
     pop_var_caller::ng::reference_info::write_fai(
         &reference.contigs,

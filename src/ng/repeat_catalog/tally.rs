@@ -110,11 +110,14 @@ pub struct CatalogRejectionCounts {
 impl CatalogRejectionCounts {
     /// Charge `bp` to `reason`.
     ///
-    /// [`RejectionReason::FlankClamped`] is **not chargeable and cannot arrive**: the file's
-    /// own 15 bp flank floor puts every stored tract at least 15 bases from either contig
-    /// end, so no row can clamp. A row that did would be a builder bug rather than a policy
-    /// rejection, which is why it trips a `debug_assert` instead of quietly landing in a
-    /// counter that would then mean two different things.
+    /// [`RejectionReason::FlankClamped`] is **not chargeable and cannot arrive.** The clamp
+    /// fires only for a tract that abuts a contig's very first or last base, and the builder
+    /// stores no tract with less than its flank floor beside it — which the command refuses
+    /// to set below 1 for exactly this reason (`repeat-catalog`'s `NoFlankFloor`). So one
+    /// base of flank is what the property needs; the default of 15 is far above it. A row
+    /// that did clamp would be a builder bug rather than a policy rejection, which is why it
+    /// trips a `debug_assert` instead of quietly landing in a counter that would then mean
+    /// two different things.
     pub(crate) fn add(&mut self, reason: RejectionReason, bp: u64) {
         let slot = match reason {
             RejectionReason::CopyFloor => &mut self.copy_floor,

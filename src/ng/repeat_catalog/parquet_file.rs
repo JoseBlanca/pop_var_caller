@@ -2,7 +2,7 @@
 //! header in the footer's key-value metadata.
 //!
 //! Why a column store rather than a compressed TSV is spec §3.5; what it buys here is that
-//! the two heaviest readers touch three or four of the seven columns, every column encodes
+//! the two heaviest readers touch three or four of the nine columns, every column encodes
 //! to almost nothing (coordinates ascend within a row group, motifs are drawn from at most
 //! 5,460 values), row groups replace a per-contig byte-offset table, and a build that dies
 //! mid-write leaves a file with no footer — unreadable rather than short-but-valid.
@@ -44,13 +44,17 @@ pub(crate) const HEADER_FORMAT_VERSION: u32 = 2;
 /// **Fixed by us on purpose.** The default carries the parquet crate's version, so two
 /// builds of the same reference would differ in bytes after a routine dependency bump —
 /// and spec §6 asks for a byte-identical file. What wrote the catalog is the header's
-/// `tool_version`, which is checked on read.
+/// `tool_version`, which `RepeatCatalog::open_checking_against_reference` compares against
+/// the running build.
 pub(crate) const CREATED_BY: &str = "ng repeat-catalog";
 
 /// The compression level, fixed for the same reason as [`CREATED_BY`].
 const ZSTD_LEVEL: i32 = 3;
 
-/// The seven columns of a catalog row (spec §3.1).
+/// The nine columns of a catalog row (spec §3.1).
+///
+/// Nine and not the spec's seven, because each of the two spans is a pair: the span the
+/// scanner reported and the same tract cut back to whole motif copies.
 ///
 /// `contig` is the header's contig index rather than a name: rows address contigs by
 /// index, the names are in the header, and inside a row group — one contig — the column is
@@ -277,7 +281,10 @@ pub(crate) fn encode_header(header: &RepeatCatalogHeader) -> String {
 
 /// The inverse of [`encode_header`]. Every failure is a malformed header, which is a
 /// malformed file.
-pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
+pub(crate) fn decode_header(
+    text: &str,
+    path: &Path,
+) -> Result<RepeatCatalogHeader, RepeatCatalogError> {
     let malformed = |what: &str| RepeatCatalogError::Unreadable {
         path: path.to_path_buf(),
         source: format!("catalog header: {what}").into(),
@@ -290,10 +297,24 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
     let mut contigs = Vec::new();
     let mut longest_tract_bp = Vec::new();
 
+    // **Every line's field count is checked exactly, never `>=`.** A `>=` guard accepts a
+    // longer line and silently drops the extra fields, so a header written by a build that
+    // added a tenth `criteria` field would decode as if that field did not exist — the
+    // round-trip test cannot see it, because it round-trips today's writer. The count is in
+    // the message so the mismatch names itself.
+    let field_count = |kind: &str, found: usize, want: usize| {
+        malformed(&format!(
+            "`{kind}` line has {found} fields, this build reads {want}"
+        ))
+    };
+
     for line in text.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();
         match f[0] {
             "format" => {
+                if f.len() != 2 {
+                    return Err(field_count("format", f.len(), 2));
+                }
                 let version: u32 = f
                     .get(1)
                     .and_then(|v| v.parse().ok())
@@ -304,11 +325,27 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
                     )));
                 }
             }
-            "tool_version" => tool_version = f.get(1).map(|v| (*v).to_string()),
-            "reference_md5" => {
-                reference_md5 = f.get(1).and_then(|v| unhex(v));
+            "tool_version" => {
+                if f.len() != 2 {
+                    return Err(field_count("tool_version", f.len(), 2));
+                }
+                tool_version = Some(f[1].to_string());
             }
-            "scan" if f.len() >= 4 => {
+            "reference_md5" => {
+                if f.len() != 2 {
+                    return Err(field_count("reference_md5", f.len(), 2));
+                }
+                // A digest that is present and unreadable is a broken file, not a file
+                // without a digest: `None` means "this reference was read from a `.fai`, so
+                // nothing computed one", and letting a corrupted field decode to `None`
+                // would skip the very check it is stored for.
+                reference_md5 =
+                    Some(unhex(f[1]).ok_or_else(|| malformed("unreadable reference digest"))?);
+            }
+            "scan" => {
+                if f.len() != 4 {
+                    return Err(field_count("scan", f.len(), 4));
+                }
                 scan = Some(ScanParams {
                     match_reward: f[1].parse().map_err(|_| malformed("scan match reward"))?,
                     mismatch_penalty: f[2]
@@ -317,7 +354,10 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
                     min_copies: f[3].parse().map_err(|_| malformed("scan min copies"))?,
                 });
             }
-            "criteria" if f.len() >= 10 => {
+            "criteria" => {
+                if f.len() != 10 {
+                    return Err(field_count("criteria", f.len(), 10));
+                }
                 let period_min: u8 = f[1].parse().map_err(|_| malformed("period floor"))?;
                 let period_max: u8 = f[2].parse().map_err(|_| malformed("period ceiling"))?;
                 let mut by_period = [0u32; crate::ng::types::MAX_MOTIF_LEN];
@@ -343,11 +383,24 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
                     max_str_len_bp: Bp(f[9].parse().map_err(|_| malformed("satellite cap"))?),
                 });
             }
-            "contig" if f.len() >= 8 => {
+            "contig" => {
+                if f.len() != 8 {
+                    return Err(field_count("contig", f.len(), 8));
+                }
                 contigs.push(crate::ng::reference_info::ContigInfo {
                     name: f[1].to_string(),
                     length: f[2].parse().map_err(|_| malformed("contig length"))?,
-                    md5: if f[3] == "-" { None } else { unhex(f[3]) },
+                    // `-` is "no digest was computed for this contig" (a `.fai`-only read);
+                    // anything else that will not decode is a broken file. Letting it become
+                    // `None` skipped the per-contig comparison for exactly the contig whose
+                    // record was damaged.
+                    md5: if f[3] == "-" {
+                        None
+                    } else {
+                        Some(unhex(f[3]).ok_or_else(|| {
+                            malformed(&format!("unreadable digest for contig {}", f[1]))
+                        })?)
+                    },
                     offset: f[4].parse().map_err(|_| malformed("contig offset"))?,
                     line_bases: f[5].parse().map_err(|_| malformed("contig line bases"))?,
                     line_width: f[6].parse().map_err(|_| malformed("contig line width"))?,
@@ -393,9 +446,9 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
 /// megabase touches, not the chromosome.
 ///
 /// `windows` are 1-based inclusive and already widened by the caller (see
-/// `RepeatCatalog::rows_of_contig_in`) — this function does no widening of its own, because
+/// `RepeatCatalog::rows_for`) — this function does no widening of its own, because
 /// how far a row can reach is a question about classification, not about the file.
-pub fn rows_overlapping(
+pub(crate) fn rows_overlapping(
     path: &Path,
     contig: ContigId,
     windows: &[(u64, u64)],
@@ -411,17 +464,53 @@ pub fn rows_overlapping(
     // scan would turn a wrong file into a slow answer.
     let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
     let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?;
+    // **The schema is checked before any column is addressed by position.** Everything below
+    // reads columns 0, 1 and 2 and downcasts them to fixed Arrow types; a parquet file that
+    // carries the catalog's header key but somebody else's columns would panic inside
+    // `ProjectionMask::roots` instead of coming back as an unreadable file.
+    let stored = builder.schema();
+    let ours = catalog_schema();
+    if stored.fields().len() != ours.fields().len()
+        || stored
+            .fields()
+            .iter()
+            .zip(ours.fields())
+            .any(|(a, b)| a.name() != b.name() || a.data_type() != b.data_type())
+    {
+        return Err(format!(
+            "not a repeat catalog: its columns are {:?}, a catalog's are {:?}",
+            stored.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            ours.fields().iter().map(|f| f.name()).collect::<Vec<_>>(),
+        )
+        .into());
+    }
 
     // The contig's own row group, found from the row-group statistics rather than by
     // reading rows.
-    let groups: Vec<usize> = (0..builder.metadata().num_row_groups())
-        .filter(|group| {
-            matches!(
-                builder.metadata().row_group(*group).column(0).statistics(),
-                Some(stats) if statistics_min_u32(stats) == Some(contig.get())
+    //
+    // **A row group with no usable statistics is a broken file, not an empty contig.** Our
+    // writer always emits them; without the distinction, a catalog written with statistics
+    // disabled reads back as "every contig is empty" and succeeds.
+    let mut groups = Vec::new();
+    for group in 0..builder.metadata().num_row_groups() {
+        let column = builder.metadata().row_group(group).column(0);
+        let Some(stats) = column.statistics() else {
+            return Err(format!(
+                "row group {group} carries no statistics for the contig column, so this file \
+                 cannot be read by contig"
             )
-        })
-        .collect();
+            .into());
+        };
+        let Some(min) = statistics_min_u32(stats) else {
+            return Err(format!(
+                "row group {group}'s contig-column statistics are not a u32 minimum"
+            )
+            .into());
+        };
+        if min == contig.get() {
+            groups.push(group);
+        }
+    }
     if groups.is_empty() {
         return Ok(Vec::new());
     }
@@ -484,7 +573,7 @@ fn statistics_min_u32(stats: &parquet::file::statistics::Statistics) -> Option<u
 }
 
 /// Rebuild one row from the column batch's `i`-th entry. Shared with the reader (B2).
-pub fn row_from_batch(batch: &RecordBatch, i: usize) -> Option<FoundRepeat> {
+fn row_from_batch(batch: &RecordBatch, i: usize) -> Option<FoundRepeat> {
     use arrow_array::{
         Float32Array, Int32Array, StringArray, UInt8Array, UInt32Array, UInt64Array,
     };

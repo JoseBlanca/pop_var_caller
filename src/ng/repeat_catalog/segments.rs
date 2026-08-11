@@ -15,10 +15,10 @@ use crate::ng::region_typing::segment_criteria::{
 use crate::ng::region_typing::{
     RegionKind, TypedRegion, TypedRegionConfig, coverage_runs, fill_generic_gaps, resolve_features,
 };
+use crate::ng::repeat_catalog::FoundRepeat;
 use crate::ng::repeat_catalog::criteria::StrRepeatCriteria;
 use crate::ng::repeat_catalog::tally::{CatalogRejectionCounts, ContigTally};
-use crate::ng::repeat_catalog::{FoundRepeat, RepeatCatalogError, TractSpan};
-use crate::ng::tandem_repeat::RepeatInterval;
+use crate::ng::tandem_repeat::{RepeatInterval, ScanParams};
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Motif, Position};
 
 /// One contig's rows, turned into the typed regions a live scan would have produced.
@@ -54,9 +54,13 @@ pub fn segments_of_contig(
 /// swallows a locus inside. Classifying only the requested stretch would answer a different
 /// question and quietly answer it differently.
 ///
-/// A locus is **not** clipped, only generic and satellite stretches are: an STR locus cut in
-/// half is not a locus, so one overlapping the edge comes out whole. That, too, is the
-/// walk's rule.
+/// **Only a generic stretch is clipped.** A locus, a bundle and a satellite each come out
+/// whole, because each is a claim about its own extent and half of it is a different claim:
+/// half a locus is not a locus, a clipped bundle's members describe bases outside their own
+/// region, and a satellite clipped to 100 bases contradicts the very cap that made it one.
+/// A generic stretch is the only kind that is not a finding — *nothing more specific can be
+/// said here* stays true of any part of it. That is the walk's rule, stated in
+/// `region_typing/mod.rs`'s `clips_at_a_bed_edge`, and this is where the two must agree.
 ///
 /// **The tally is the whole contig's, not the requested stretches'**, because the whole
 /// contig is what was typed — the walk's own tally works the same way, since its scan span
@@ -84,7 +88,7 @@ pub fn segments_of_contig_in(
             }
             let whole = matches!(
                 region.kind,
-                RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. }
+                RegionKind::SsrSegment(_) | RegionKind::SsrBundle { .. } | RegionKind::Satellite
             );
             out.push(TypedRegion {
                 region: if whole {
@@ -187,10 +191,20 @@ fn repeat_features_of_contig(
     // window by window, clipped to each core; cores tile a contig, so the totals are the
     // same number reached two ways.
     let repeat_bp = runs.iter().map(|run| run.len()).sum();
+    // **Every field named, no `..default()` tail.** The walk's own construction carries the
+    // same rule for the same reason: a field added to `TypedRegionConfig` later must break
+    // this line rather than silently take the calling walk's value, and the differential
+    // cannot catch that because it would default on both sides at once. `scan` and
+    // `window_bp` are the two the catalog genuinely has no use for — there is no scan here
+    // and there are no windows — and each says so.
     let config = TypedRegionConfig {
         criteria: class.clone(),
         max_str_len: criteria.max_str_len_bp,
-        ..TypedRegionConfig::default()
+        // Nothing is scanned: the tracts came from the file. `resolve_features` reads the
+        // weights not at all, so this value cannot reach an answer.
+        scan: ScanParams::default(),
+        // A whole contig is resolved at once, so there is no window to size.
+        window_bp: Bp(crate::ng::region_typing::DEFAULT_WINDOW_BP),
     };
     (
         resolve_features(&runs, admitted.loci, &admitted.bundled, contig, &config),
@@ -199,24 +213,6 @@ fn repeat_features_of_contig(
             rejected: admitted.rejected,
         },
     )
-}
-
-/// Every segment of every contig the catalog holds, in reference order.
-///
-/// `contigs` are the header's, so their order is the file's and their lengths are the
-/// reference's.
-pub fn segments_of_rows<I>(
-    rows_by_contig: I,
-    criteria: &StrRepeatCriteria,
-) -> Result<Vec<TypedRegion>, RepeatCatalogError>
-where
-    I: IntoIterator<Item = (String, ContigId, Bp, Vec<FoundRepeat>)>,
-{
-    let mut out = Vec::new();
-    for (chrom, contig, contig_len, rows) in rows_by_contig {
-        out.extend(segments_of_contig(&chrom, contig, contig_len, &rows, criteria).0);
-    }
-    Ok(out)
 }
 
 /// What admission produced: the loci, the bundle members it set aside, and the repeats it
@@ -419,15 +415,10 @@ fn detected_interval(row: &FoundRepeat) -> RepeatInterval {
     }
 }
 
-/// The trimmed span of a row, for callers that want the locus rather than the detection.
-#[inline]
-pub fn locus_span(row: &FoundRepeat) -> Option<TractSpan> {
-    row.trimmed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ng::repeat_catalog::TractSpan;
     use crate::ng::repeat_catalog::tally::CatalogRejectionCounts;
     use crate::ng::types::Position;
 

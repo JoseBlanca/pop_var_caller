@@ -15,14 +15,18 @@
 //! sit below every floor a caller routes on, so every routing question stays answerable by
 //! filtering the file (spec §1, §4.1).
 
-pub mod builder;
+// **The facade below is the module's API; the submodules are not.** Only `criteria` is
+// reached by path from outside this folder. Leaving the rest `pub mod` made all 74 items in
+// them crate-public, which is why `dead_code` never warned about the five items that turned
+// out to have no caller at all.
+pub(crate) mod builder;
 pub mod criteria;
-pub mod parquet_file;
-pub mod reader;
-pub mod row;
-pub mod segments;
-pub mod strata;
-pub mod tally;
+pub(crate) mod parquet_file;
+pub(crate) mod reader;
+pub(crate) mod row;
+pub(crate) mod segments;
+pub(crate) mod strata;
+pub(crate) mod tally;
 
 use std::path::PathBuf;
 
@@ -52,8 +56,8 @@ pub use tally::{CatalogRegionCounts, CatalogRejectionCounts};
 pub enum ReadScope<'a> {
     /// Every contig the catalog holds.
     WholeReference,
-    /// Only these stretches. Regions on contigs the catalog does not hold are ignored;
-    /// contigs no region names are never read.
+    /// Only these stretches. A region naming a contig the catalog does not hold is a
+    /// refusal, not a silent skip; a contig no region names is never read.
     Regions(&'a [GenomeRegion]),
 }
 
@@ -302,7 +306,13 @@ impl RepeatCatalogHeader {
             .get(contig.get() as usize)
             .copied()
             .unwrap_or(0);
-        longest + bundle_threshold
+        // **Saturating, because both terms come from outside.** `longest_tract_bp` is read
+        // from a file this build did not necessarily write, and `bundle_threshold` is an
+        // axis a reader sets freely; a plain `+` panics in debug on a large value and, worse,
+        // wraps in release to a *narrow* reach, which is a classification taken from an
+        // incomplete row set with nothing to show for it. Both call sites already widen with
+        // `saturating_sub`/`saturating_add` for the same reason.
+        longest.saturating_add(bundle_threshold)
     }
 }
 
