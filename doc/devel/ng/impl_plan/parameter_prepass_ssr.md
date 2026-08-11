@@ -197,7 +197,7 @@ reaches only −4. Unit tests: `bucket_of` is total and monotone over the offset
 both ends; the allele support at repeat count 3, 6 and 20 has 10, 13 and 13 lengths.
 *Depends:* A2. *Source:* arch §2.1.
 
-**A4. The three slippage rates and the model that holds them.**  ☐
+**A4. The three slippage rates and the model that holds them.**  ✅
 `SlipRate`, `SlipGainShare`, `SlipStepDecay` — three types and not one shared `Probability`, because
 they are all fractions in `[0, 1]` and one type would let a direction split be handed to something
 expecting a slippage rate and compile. Each copies `MismatchFraction`'s shape

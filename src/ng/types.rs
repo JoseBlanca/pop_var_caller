@@ -289,11 +289,21 @@ impl MismatchFraction {
 ///
 /// **One predicate, written once.** `NaN`, `+∞` and `-∞` all fail it without any
 /// help from `is_finite`: `contains` is `0.0 <= x && x <= 1.0`, no comparison with
-/// `NaN` is true, `+∞` is not `<= 1` and `-∞` is not `>= 0`. Three constructors
+/// `NaN` is true, `+∞` is not `<= 1` and `-∞` is not `>= 0`. Constructors
 /// spelling the same range test separately is how one of them ends up written
 /// `0.0..1.0` and rejecting a genotype frequency of exactly one — a real answer for
 /// a fully homozygous sample.
-fn checked_probability(x: f64, reject: fn(f64) -> DomainError) -> Result<f64, DomainError> {
+///
+/// `pub(crate)` for that same reason rather than for convenience: the STR path's three
+/// slippage rates are constrained the same way
+/// (`parameter_estimation::ssr::slippage`), so **six** constructors now share this
+/// predicate. It is not hypothetical drift — `SiteNoise::try_new`
+/// (`parameter_estimation::generic`) already spells the range test by hand, which is the
+/// seventh probability in the crate and the one this predicate did not reach.
+pub(crate) fn checked_probability(
+    x: f64,
+    reject: fn(f64) -> DomainError,
+) -> Result<f64, DomainError> {
     if (0.0..=1.0).contains(&x) {
         Ok(x)
     } else {
@@ -475,6 +485,30 @@ pub enum DomainError {
     /// validates as a dinucleotide.
     #[error("repeat period {0} is outside the STR period range 1..={MAX_MOTIF_LEN}")]
     SsrPeriod(usize),
+
+    /// A slippage rate — how often a read at a repeat tract shows a length
+    /// other than its allele's — is not a probability in `[0, 1]`.
+    #[error("slippage rate {0} is not a finite probability in [0, 1]")]
+    SlipRate(f64),
+
+    /// The share of slipped reads that **gained** repeats rather than losing
+    /// them is not a probability in `[0, 1]`.
+    ///
+    /// Its own variant beside [`Self::SlipRate`] and [`Self::SlipStepDecay`],
+    /// for the reason the four scalars above have four: all three are fractions
+    /// in `[0, 1]`, and a message naming the wrong one sends a reader to the
+    /// wrong parameter of the same fit.
+    ///
+    /// **The message says what the share is of**, because the two readings
+    /// differ by a factor of the slippage rate — about fiftyfold at a level of
+    /// 0.02 — and a bare "gain share" reads either way.
+    #[error("gain share of slipped reads {0} is not a finite probability in [0, 1]")]
+    SlipGainShare(f64),
+
+    /// The chance that a slipped read moved a second repeat, given that it
+    /// moved a first, is not a probability in `[0, 1]`.
+    #[error("slip step decay {0} is not a finite probability in [0, 1]")]
+    SlipStepDecay(f64),
 }
 
 // ---------------------------------------------------------------------
