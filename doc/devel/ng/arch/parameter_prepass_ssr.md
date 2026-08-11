@@ -2,7 +2,10 @@
 
 *Status: architecture draft (2026-08-06, revised 2026-08-09 for spec §4.5 — the second floor on
 slipped reads, the split provenance it forces on `StratumFit`, and the substitution rate emitted for
-comparison against the generic path's), companion to the spec
+comparison against the generic path's; **revised 2026-08-11** for spec §5.3 and §4.6 — the loci now
+reach this unit from a repeat catalog built once per reference rather than from a scan run during
+the walk, which adds one field to the config and several rows to §6 and changes no type that carries
+a number; and one open item for the locus class spec §4.6 asks about), companion to the spec
 [`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) (the design and its
 rationale) and to its shared framing [`../spec/parameter_prepass.md`](../spec/parameter_prepass.md).
 The sibling path's architecture, [`parameter_prepass_generic.md`](parameter_prepass_generic.md),
@@ -50,9 +53,15 @@ drives it.
 
 **Input:** the same locus stream the generic path reads,
 `Iterator<Item = Result<SampleLocusObservations, LocusGenerationError>>`
-([`locus_generation/mod.rs:701`](../../../../src/ng/locus_generation/mod.rs)). This unit **borrows
+([`locus_generation/mod.rs:706`](../../../../src/ng/locus_generation/mod.rs)). This unit **borrows
 each item and passes it on untouched**, and **ignores every locus whose `kind` is not
-`LocusKind::Ssr`** ([`locus_generation/mod.rs:217`](../../../../src/ng/locus_generation/mod.rs)).
+`LocusKind::Ssr`** ([`locus_generation/mod.rs:213`](../../../../src/ng/locus_generation/mod.rs)).
+
+**Where that stream's loci come from is not this unit's business and is worth one sentence anyway**,
+because it changed on 2026-08-11: the regions it walks are read from a repeat catalog built once per
+reference, not found by scanning the reference as the sample is read (spec §5.3). The iterator is
+generic over the region source's error, bounded by `Into<LocusGenerationError>`, so this unit's
+signature is unchanged and its driver's is not — **a driver of this step now opens a catalog**.
 
 **Output:** four numbers per `(read group, stratum)` — a slippage rate, a direction split, a
 distance decay and a substitution rate — each carrying where it came from and how many loci stood
@@ -70,6 +79,18 @@ pub struct SsrEstimationConfig {
     /// The read-admission policy the loci were produced under, recorded so that every
     /// emitted rate says what population of reads it describes (spec §4.1).
     pub read_admission: ReadFilterConfig,
+    /// Which tracts counted as STR loci — the copy floors, the period range, the purity
+    /// and score floors, the satellite cap and the bundle radius the catalog was read
+    /// with (`repeat_catalog::criteria::StrRepeatCriteria`).
+    ///
+    /// **Recorded for the same reason `read_admission` is**, one level up: that field says
+    /// which *reads* an emitted rate describes, and this says which *loci*. It is not
+    /// decoration — the copy floors decide which strata exist at all, so two runs at
+    /// different floors emit parameters for different populations of tracts under the same
+    /// stratum names, and nothing else in the output would say so. The floors moved once
+    /// already, on 2026-08-10, taking nine in ten non-mononucleotide loci with them
+    /// (spec §5.1.1).
+    pub locus_selection: StrRepeatCriteria,
 }
 
 /// Walk a sample's loci and return its STR parameters. The whole unit in one call, for a
@@ -440,7 +461,47 @@ pub struct StratumFit {
     /// order to tell a level of 0.0003 standing on 4 slipped reads from one standing on
     /// 4,000 — which nothing downstream could otherwise do (spec §4.5).
     pub slipped_reads: u64,
+    /// The share of this stratum's loci whose shape the **fitted** model calls very
+    /// unlikely — those whose log-likelihood **per read** falls below
+    /// `UNEXPLAINED_SHAPE_LN_LIMIT`.
+    ///
+    /// **Per read, and not per locus, or the statistic measures depth.** A shape's
+    /// likelihood is a product over its reads, so a locus at twelve reads scores about
+    /// four times lower than one at three whatever the model thinks of either, and a fixed
+    /// floor on the total would flag the deep loci of every stratum by arithmetic. Dividing
+    /// by the scored depth removes that to first order; whether it removes enough is one of
+    /// the things the measurement below has to check, and it is why the limit is not
+    /// settled here.
+    ///
+    /// **The diagnostic for loci that are not the tract the stratum thinks they are**
+    /// (spec §4.6): a duplication the reference does not carry, a mismapped minority, a
+    /// somatically unstable tract. It is **not** the guard share, which counts *reads*
+    /// moving by a non-whole number of copies pooled over the stratum — an aberrant locus
+    /// can move every read by whole copies and still be unexplainable, and one locus in a
+    /// thousand behaving strangely is invisible in a stratum-wide ratio.
+    ///
+    /// **Free to compute and it changes nothing.** Every candidate already evaluates each
+    /// entry, and an entry is one locus's shape, so this is a second pass over numbers the
+    /// last search step held. No coordinate is kept and the entry key does not move.
+    ///
+    /// **Reported, never acted on.** Dropping the loci that score badly is
+    /// threshold-then-count — the bias this whole step exists to remove — and it would take
+    /// real long alleles before it took artefacts, since both sit where the model has least
+    /// mass. If the measurement says the fit needs protecting, the protection is a class
+    /// the model carries (spec §4.6, §8.12).
+    pub unexplained_locus_share: f64,
 }
+
+/// Below this log-likelihood **per read** under the fitted model, a locus counts towards
+/// [`StratumFit::unexplained_locus_share`].
+///
+/// **Soft, and to be set by measurement rather than by argument.** No run has yet asked
+/// where real loci sit on this scale, so the value here is a placeholder that flags a tail
+/// rather than a body, and the experiment that answers spec §8.12 — contaminating a stratum
+/// with loci from another process — is what fixes it, by showing where the two populations
+/// separate. A diagnostic that fires on every stratum is as useless as one that fires on
+/// none, which is the standard `GUARD_SHARE_LIMIT` is held to.
+pub const UNEXPLAINED_SHAPE_LN_LIMIT: f64 = -3.0;
 
 pub struct SlippageStart { pub start: SlippageModel, pub reached: SlippageModel, pub log_likelihood: f64 }
 
@@ -731,6 +792,11 @@ pub struct StratumFitSummary {
     /// Strata above `GUARD_SHARE_LIMIT` — the ones this noise model does not describe.
     pub strata_above_guard_limit: u32,
     pub worst_guard_share: Option<(Stratum, f64)>,
+    /// The stratum holding the largest share of loci its own fitted model cannot explain,
+    /// and that share (spec §4.6). **A different question from the guard share beside it**:
+    /// that one asks whether this model is right for these tracts, this one asks whether
+    /// these are all the tracts the model was told they were.
+    pub worst_unexplained_locus_share: Option<(Stratum, f64)>,
     /// How many loci stood behind the thinnest and the thickest fit.
     pub loci_behind_fits: (u64, u64),
 }
@@ -776,6 +842,12 @@ pub struct StratumFitSummary {
   apart by a factor of 20,000 at the bottom of the repeat range, so one floor would either throw
   away a level that was well measured or report shares standing on 5 reads. This is why `StratumFit`
   carries two provenance lists rather than one.
+- **A locus whose shape the fitted model cannot explain is reported and never dropped — decided**
+  (spec §4.6). Whether such loci move the four numbers is unmeasured and this unit takes no view;
+  what it refuses in advance is the fix that suggests itself, since scoring loci against the fitted
+  model and discarding the worst is threshold-then-count — the bias the whole step exists to remove
+  — and it would take real long alleles before it took artefacts. Any protection is a class the
+  model carries.
 - **This path's substitution rate is checked against the generic path's, and only where slippage is
   small — decided** (spec §4.5). Not a tie: §1.1's decision to fit them separately stands, and the
   interesting outcome is a persistent gap. This unit emits `low_slippage_substitution` and makes no
@@ -787,20 +859,25 @@ Every row read before it was written.
 
 | this doc | existing code | action |
 |---|---|---|
-| the input stream | `SampleLocusObservationsIterator` ([locus_generation/mod.rs:701](../../../../src/ng/locus_generation/mod.rs)) | consume by reference; unchanged |
+| the input stream | `SampleLocusObservationsIterator` ([locus_generation/mod.rs:706](../../../../src/ng/locus_generation/mod.rs)) | consume by reference; unchanged. Generic over the region source's error since 2026-08-11, which this unit never names |
+| where its regions come from | `RepeatCatalog::str_loci` ([repeat_catalog/reader.rs:220](../../../../src/ng/repeat_catalog/reader.rs)) | **not called here** — a driver opens the catalog and feeds the stream (spec §5.3). This unit sees loci, not tracts |
+| what a run may ask the catalog for | `StrRepeatCriteria::serves` ([repeat_catalog/criteria.rs](../../../../src/ng/repeat_catalog/criteria.rs)), floors `CATALOG_MIN_COPIES = [5, 5, 4, 4, 4, 3]` `:16` | recorded, not applied: a request under the built floors is refused by the reader, naming the axis and both numbers |
+| which tracts become STR loci | `MinCopies::default` = `[8, 6, 6, 6, 5, 4]` ([segment_criteria.rs:444](../../../../src/ng/region_typing/segment_criteria.rs)) | decides which strata exist at all; travels into `SsrEstimationConfig::locus_selection` and out with the parameters (§1) |
+| how many loci a stratum holds genome-wide | `count_loci_per_stratum` ([repeat_catalog/reader.rs:242](../../../../src/ng/repeat_catalog/reader.rs)) | **not an input to any fit** — the floors of §4.1 count the loci this sample observed. Available as a denominator for a diagnostic (spec §5.3) |
+| the live tandem-repeat scan | `TypedRegionIterator`, `partition_windowed`, `BlockWalk` | **deleted 2026-08-11** — nothing to reconcile; `partition_resident` survives only as the catalog's differential oracle |
 | the locus | `SampleLocusObservations` ([locus_generation/mod.rs:40](../../../../src/ng/locus_generation/mod.rs)) | reuse as-is |
-| routing to this path | `LocusKind::Ssr(SsrDetail)` ([locus_generation/mod.rs:217, 229](../../../../src/ng/locus_generation/mod.rs)) | match on it; `SsrDetail::motif` is the period source |
+| routing to this path | `LocusKind::Ssr(SsrDetail)` ([locus_generation/mod.rs:213, 229](../../../../src/ng/locus_generation/mod.rs)) | match on it; `SsrDetail::motif` is the period source |
 | the reference tract | `SampleLocusObservations::reference_bases` ([locus_generation/mod.rs:46](../../../../src/ng/locus_generation/mod.rs)) | the origin and the stratum's repeat count both derive from its length |
 | a read's observed tract | `SequenceObservation::bases` ([locus_generation/mod.rs:159](../../../../src/ng/locus_generation/mod.rs)) — "allele content, in **read** coordinates" | the offset is `(bases.len() − reference_bases.len()) / period` |
 | the scorable subset | `complete_observations()` ([locus_generation/mod.rs:134](../../../../src/ng/locus_generation/mod.rs)) | call directly — §2.3's guard, and on this path a partial reads as a lost repeat |
 | per-read-group support | `SequenceObservation::read_group` ([locus_generation/mod.rs:178](../../../../src/ng/locus_generation/mod.rs)) — already part of the identity, and its doc names this path as the near-term consumer | reuse as-is |
 | read support | `SequenceObservation::num_obs` ([locus_generation/mod.rs:181](../../../../src/ng/locus_generation/mod.rs)) — "the whole support on the STR path" | the bucket increment |
 | the upstream cap | `reads_discarded_by_cap` ([locus_generation/mod.rs:56](../../../../src/ng/locus_generation/mod.rs)), set by `DEFAULT_SSR_MAX_READS_PER_LOCUS` ([locus_generation/ssr.rs:125](../../../../src/ng/locus_generation/ssr.rs)) | count it; do not skip the locus |
-| the motif | `Motif` ([types.rs:338](../../../../src/ng/types.rs)), `period()` ([types.rs:369](../../../../src/ng/types.rs)) returning `usize` | reuse; add `SsrPeriod` beside it rather than changing the accessor's type under its callers |
+| the motif | `Motif` ([types.rs:520](../../../../src/ng/types.rs)), `period()` ([types.rs:551](../../../../src/ng/types.rs)) returning `usize` | reuse; add `SsrPeriod` beside it rather than changing the accessor's type under its callers |
 | the tract's coordinates and purity | `SsrSegment` ([region_typing/segment_criteria.rs:141](../../../../src/ng/region_typing/segment_criteria.rs)), `period()` `:215`, `tract_len()` `:223`, `purity_fraction()` `:209` | **not consumed by this unit** — the locus carries what is needed. `purity_fraction` is what would make §2.3's `ε`-absorbs-impurity caveat measurable |
 | `ReadGroupId` | [types.rs:199](../../../../src/ng/types.rs) | reuse as-is |
 | the read-admission policy | `ReadFilterConfig` ([read/filtering.rs:63](../../../../src/ng/read/filtering.rs)) | carried into `SsrEstimationConfig` and emitted with the parameters, for the reason generic spec §2 gives — an `ε` describes the reads that survived admission |
-| `DomainError` | [types.rs:268](../../../../src/ng/types.rs) — `#[non_exhaustive]`, doc already says later constrained types add their own variants | extend with the three slippage newtypes' variants |
+| `DomainError` | [types.rs:425](../../../../src/ng/types.rs) — `#[non_exhaustive]`, doc already says later constrained types add their own variants | extend with `SsrPeriod`'s and the three slippage newtypes' variants |
 | the checked-newtype shape | `MismatchFraction` ([types.rs:243](../../../../src/ng/types.rs)) | copy: private field, `try_new`, `.get()` |
 | `ErrorRate`, `Estimate<T>`, `Provenance`, `Ploidy`, `PloidyMap` | [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1, §2.4, §3 — new there, not yet in code | consume; this unit adds no second copy |
 | `NoiseModel` | [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4.2 | implement — this is its second implementation and the reason it is a trait |
@@ -824,6 +901,16 @@ Every row read before it was written.
   disagreed" is judged.
 - **A change this unit forces on the shared module**, and it is not optional: `fit_mixture_weights`
   returns `SmallVec<[f64; 3]>`, which cannot hold a stratum's genotype count (§3).
+- `OPEN:` **whether the slippage model needs a second class of locus**, for tracts that are not the
+  tract their stratum thinks they are — a duplication the reference does not carry, a mismapped
+  minority, a somatically unstable tract (spec §4.6, §8.12). **Nothing is designed for it here and
+  nothing should be until it is measured**; what this document commits to is the diagnostic
+  (`unexplained_locus_share`) and the shape any fix would take. If one is needed it is one further
+  parameter on `SlippageModel` and touches nothing shared, because `NoiseParams` is an associated
+  type — which is exactly how the generic path added its second site class without disturbing this
+  one. **Settled by:** the exact-bias harness, contaminating a stratum with loci from another
+  process and reading the bias against the contaminated share.
+- **Impl-time, not open: `UNEXPLAINED_SHAPE_LN_LIMIT`** (§2.4), which the same experiment sets.
 
 ## 8. Test & bench shape
 
@@ -838,7 +925,7 @@ first** — the rule sums to one over the entry space, no bucket is charged a ne
 reads, and a silent kernel puts every locus's reads on its own alleles. Each is one line and each
 rejects a broken rule without fitting anything.
 
-Five anchors:
+Seven anchors:
 
 - **The control, and it must read exactly zero.** Key by locus with the reference origin, generate
   and fit under the same key: 0.000% on the rate, 0.0000 on both shares, four starts agreeing to
@@ -846,12 +933,20 @@ Five anchors:
 - **Agreement with truth where truth exists.** On HG002, the fitted parameters against those
   measured directly on known-homozygous loci — 2.0% at six or more repeats and a 3.4× direction
   split (spec §10.3). This is the only check in the design that does not generate its data from the
-  model it then fits, and it is the test production's estimator fails.
+  model it then fits, and it is the test production's estimator fails. **Both numbers were measured
+  before the copy floors moved on 2026-08-10**, over strata this walk no longer visits, so what the
+  anchor holds is the agreement and the direction — the fit must not invert the split, which is what
+  production's does — and the current pair is recorded when this runs.
 - **Sharded accumulation is exact** — one sample walked in one region and in many gives identical
   tables. Integer entry counts make it an equality rather than a tolerance, which is why the read
   cap is seeded from the locus's position (§2.1).
 - **`adjustments().loci_without_whole_repeat_reference` is near zero** on both real cohorts. A large
-  count is a bug report against region typing.
+  count is a bug report against whatever produced the loci — the catalog reader's classification,
+  since 2026-08-11 — and not something this unit absorbs.
+- **A minority of loci from another process does not move the four numbers**, or the size by which
+  it does is recorded and the parameter that absorbed it named (spec §4.6, §10.9). This one has no
+  pass mark yet, deliberately: nobody has measured what such loci cost, and the experiment is what
+  sets both the threshold above and whether a second locus class is needed at all.
 - **The summary is what fails, not a per-stratum record.** Feed a deliberately unfittable stratum —
   loci generated with the slippage rate at zero and the alleles spread — and assert it appears in
   `StratumFitSummary`. A record only a debugger would open does not satisfy this (spec §10.6).
@@ -864,7 +959,9 @@ Five anchors:
   only place that holds both.
 
 No `bench/`: this unit has no competing implementations, and its cost claims are measured rather
-than open — [`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs) drives the real
-region-typing walk and STR locus generator over real alignments and prices the table on them
-(research note §6.8). **Re-run it when the entry key changes**, which is the one change that could
-move the numbers.
+than open — [`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs) drives the STR
+locus generator over real alignments and prices the table on them (research note §6.8). It reads its
+regions from the repeat catalog now rather than scanning as it goes, so **it takes a catalog beside
+the reference and the alignments**. **Re-run it when the entry key changes** — and its recorded
+numbers (12,727 entries over 29,811 HG002 loci; 70,305 over 1.73 million tomato loci) were taken
+under the old copy floors, so they are what the object cost then rather than a size to assert now.
