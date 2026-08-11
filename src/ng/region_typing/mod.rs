@@ -696,6 +696,35 @@ fn merge_runs(runs: &mut Vec<CoverageRun>) {
     *runs = merged;
 }
 
+/// How many **distinct** bases a set of half-open spans covers, a base shared by two spans
+/// counting once.
+///
+/// The spans arrive in the detector's order — period-major, not coordinate order — and may
+/// intersect, so they are sorted and unioned rather than summed.
+fn covered_bp(spans: &[(u64, u64)]) -> u64 {
+    let mut spans = spans.to_vec();
+    spans.sort_unstable();
+    let mut total = 0;
+    let mut open: Option<(u64, u64)> = None;
+    for (start, end) in spans {
+        match open {
+            // Sorted by start, so `start >= run_start` and the union is just the wider end.
+            Some((run_start, run_end)) if start <= run_end => {
+                open = Some((run_start, run_end.max(end)));
+            }
+            Some((run_start, run_end)) => {
+                total += run_end - run_start;
+                open = Some((start, end));
+            }
+            None => open = Some((start, end)),
+        }
+    }
+    if let Some((run_start, run_end)) = open {
+        total += run_end - run_start;
+    }
+    total
+}
+
 /// A merged run of repeat coverage, 1-based inclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CoverageRun {
@@ -704,7 +733,13 @@ pub(crate) struct CoverageRun {
 }
 
 impl CoverageRun {
-    fn len(self) -> u64 {
+    /// The run's length in bases, inclusive at both ends.
+    ///
+    /// **Shared with the catalog's derived segmentation**
+    /// ([`crate::ng::repeat_catalog::segments`]), which sums it over a contig's runs to get
+    /// the repeat coverage the walk charges to `repeat_bp_with_no_locus`. Same rule, same
+    /// arithmetic, so the two tallies cannot drift on it.
+    pub(crate) fn len(self) -> u64 {
         self.end - self.start + 1
     }
 }
@@ -1107,12 +1142,18 @@ impl<R: RawRefSeq + ContigTable + EvictableRefSeq> TypedRegionIterator<R> {
         // The tally's raw material, taken before `absorb` consumes the window.
         let mut tally = WindowTally {
             // This window's own share of the repeat coverage — clipped to the core, so
-            // cores tile and nothing is double-counted.
-            repeat_bp: window
-                .coverage_in_core(&cleaned)
-                .into_iter()
-                .map(|(s, e)| e - s)
-                .sum(),
+            // cores tile and no base is charged to two windows.
+            //
+            // **Merged, because the count is of bases and not of tracts.** The cleaned set
+            // still holds intersecting tracts — the pre-screen removes period-multiple
+            // re-detections, not two different repeats that overlap — so summing the clipped
+            // spans directly charges a shared base once per tract covering it. The satellite
+            // cap in this same walk already merges before it measures (`coverage_runs`), and
+            // so does the test that pins this number
+            // (`the_counts_are_the_regions_and_the_gap_is_the_coverage_minus_the_loci`); the
+            // accumulator was the one place that did not, and it disagreed with both by a
+            // base wherever two repeats intersect.
+            repeat_bp: covered_bp(&window.coverage_in_core(&cleaned)),
             rejected: RejectionCounts::default(),
         };
         // **Rejections are attributed to a core, exactly like everything else.** `classify`
@@ -1715,6 +1756,28 @@ mod tests {
     use super::*;
     use crate::ng::ref_seq::{InMemoryRefSeq, RefSeq};
     use segment_criteria::DEFAULT_BUNDLE_THRESHOLD;
+
+    /// **A base under two repeats is one base.** The pre-screen leaves intersecting tracts
+    /// in place — it removes period-multiple re-detections of *one* tract, not two different
+    /// repeats that happen to overlap — so the accumulator behind
+    /// `repeat_bp_with_no_locus` has to union before it measures. It summed instead until
+    /// the catalog's tally was compared against it and came out a base short over 200 kb.
+    ///
+    /// The spans arrive period-major rather than in coordinate order, which is why the last
+    /// case is out of order on purpose.
+    #[test]
+    fn overlapping_coverage_counts_a_shared_base_once() {
+        assert_eq!(covered_bp(&[]), 0);
+        assert_eq!(covered_bp(&[(10, 20)]), 10);
+        // Disjoint: 10 + 5.
+        assert_eq!(covered_bp(&[(10, 20), (30, 35)]), 15);
+        // Overlapping by one base: 10 + 10 - 1, not 20.
+        assert_eq!(covered_bp(&[(10, 20), (19, 29)]), 19);
+        // Abutting is not overlapping: 10 + 10.
+        assert_eq!(covered_bp(&[(10, 20), (20, 30)]), 20);
+        // One span swallowed by another, and handed over in the wrong order.
+        assert_eq!(covered_bp(&[(12, 15), (10, 30)]), 20);
+    }
 
     /// `Default` is the **short-read** settings now (spec §2.3), not the catalog's —
     /// which is what the golden oracles pin explicitly (see [`catalog_config`]).
