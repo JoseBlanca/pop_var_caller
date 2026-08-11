@@ -105,9 +105,14 @@ mod chain_id_allocator;
 mod cigar_cursor;
 mod decompose;
 mod errors;
+mod fast_column;
 mod generator;
 mod genome_walk;
 mod open_record;
+/// **ng's, not a copy** — the deterministic per-read number both depth caps select on,
+/// so which reads survive a cap is a fact about the reads and not about the container
+/// that happens to hold them.
+mod read_sampling;
 mod witnessed_ref;
 
 /// Production's own end-to-end suite, copied verbatim and run against the copy —
@@ -185,6 +190,60 @@ pub use generator::{
     PileupGeneratorCounts,
 };
 
+/// **Measurement scaffolding, not part of the walk.** Process-global tallies of how many
+/// columns the walk saw and how many of them were the *ordinary* column — one covered base,
+/// every contributor showing a plain reference-anchored match, nothing to reconcile. Read by
+/// `ng_generic_walk_probe`; incremented from
+/// [`genome_walk`](crate::ng::locus_generation::pileup) only when `PVC_COLUMN_CENSUS=1`.
+pub mod column_census {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    macro_rules! counters {
+        ($($name:ident),* $(,)?) => {
+            $(pub static $name: AtomicU64 = AtomicU64::new(0);)*
+            /// Every counter's current value, in declaration order, with its name.
+            pub fn snapshot() -> Vec<(&'static str, u64)> {
+                vec![$((stringify!($name), $name.load(Ordering::Relaxed))),*]
+            }
+        };
+    }
+
+    /// **Always counted, unlike everything below** — how many columns the ordinary-column
+    /// path answered. A fast lane that never fires and one that works look identical in a
+    /// timing, so this one is not behind the env gate. One relaxed increment per ordinary
+    /// column, against the ~90 reads that column would otherwise fold.
+    pub static FAST_COLUMNS: AtomicU64 = AtomicU64::new(0);
+
+    counters! {
+        COLUMNS,
+        COLUMNS_ORDINARY,
+        CONTRIBUTORS,
+        CONTRIBUTORS_ORDINARY,
+        REJECT_RECORD_ALREADY_OPEN,
+        REJECT_INDEL_EVENT,
+        REJECT_READ_HAS_DELETION,
+        REJECT_MATE_OVERLAP,
+        REJECT_DEPTH_CAP,
+        REJECT_MULTI_READ_GROUP,
+        REJECT_READ_HAS_INDEL,
+        COLUMNS_SIMPLE,
+        CONTRIBUTORS_SIMPLE,
+        COLUMNS_SIMPLE_WITH_MATE,
+        CONTRIBUTORS_SIMPLE_WITH_MATE,
+    }
+
+    /// Whether the census is armed for this process. Read once; the walk pays a relaxed
+    /// atomic load per column when it is off.
+    pub fn enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("PVC_COLUMN_CENSUS").is_some_and(|v| v == "1"))
+    }
+
+    pub(super) fn add(counter: &AtomicU64, n: u64) {
+        counter.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
 // **Not `pub`: no consumer outside this module, and it is production's name.** Kept in
 // scope rather than deleted because `generator.rs` reaches it as
 // `super::DEFAULT_MAX_ACTIVE_READS` and this module's own doc links it — an intra-doc
@@ -215,19 +274,31 @@ use genome_walk::{RunSummary, run};
 mod walker_vocabulary_tests {
     use super::*;
 
-    /// The one `DEFAULT_*` the copy had to bring with it, pinned against production's.
+    /// The one `DEFAULT_*` the copy had to bring with it — **and the first one ng has
+    /// deliberately moved.**
     ///
     /// `DEFAULT_MAX_ACTIVE_READS` is declared *inside* `chain_id_allocator.rs`, so the
-    /// verbatim copy forked it — where the other constants are reached from production
-    /// by name and cannot drift. Production's value is the baseline the stage-1
-    /// differential runs against, so a retune on either side must fail here rather than
-    /// silently in the walk.
+    /// verbatim copy forked it, where the other constants are reached from production by
+    /// name and cannot drift. This test used to pin the two equal, and its own doc said
+    /// what to do when they were allowed to differ: *"when they are deliberately allowed
+    /// to differ, that test is what says so."* This is that.
+    ///
+    /// ng holds **eight times** as many reads as production. Production's 4,096 was
+    /// refusing 19,725 reads of 113,629,764 on one ~130× tomato chromosome, and a read
+    /// refused at the door contributes at no position — so positions ended up with less
+    /// coverage than the input had for them (owner, 2026-08-05). Both numbers are
+    /// asserted, so a retune on either side lands here as a decision rather than as
+    /// drift.
     #[test]
     fn the_copied_active_reads_cap_is_still_productions() {
         assert_eq!(
-            DEFAULT_MAX_ACTIVE_READS,
+            DEFAULT_MAX_ACTIVE_READS, 32_768,
+            "ng's ceiling on reads held open at once"
+        );
+        assert_eq!(
             crate::pileup::walker::DEFAULT_MAX_ACTIVE_READS,
-            "ng's copied chain_id_allocator has drifted from production's cap"
+            4096,
+            "production's, which ng no longer follows"
         );
     }
 }

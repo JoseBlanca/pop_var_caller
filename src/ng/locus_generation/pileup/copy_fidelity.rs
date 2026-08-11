@@ -25,6 +25,25 @@
 //! | A0 | `driver.rs` → `genome_walk.rs`, `open_record.rs`, `errors.rs` | the reference is reached through ng's `RefSeq`, not production's `MultiChromRefFetcher` |
 //! | B2 | `tests.rs` | the walk emits ng's `SampleLocusObservations`, so the inherited suite is adapted to it (spec §12) |
 //! | D2 | `active_read_set.rs` | a per-read "ever contributed" flag, so `reads_silent_over_footprint` can be counted — the read spec §13's accounting cannot otherwise place (spec §6) |
+//! | perf 2026-08-05 | `cigar_cursor.rs` | the cursor states when its two queries coincide, so the fold can reuse the events it already has (−5.8 % of the walk at ~130×, −4.0 % at 30×) |
+//! | depth cap 2026-08-05 | `chain_id_allocator.rs` | the two ceilings that made the walk refuse reads on ordinary data — 4,096 held reads and 10,000 pending mates — plus the counter that says how much headroom the second one has |
+//!
+//! # The pin is lifted, and this file's job is now narrower
+//!
+//! The owner released the last constraint on 2026-08-05: *"You might copy any file from
+//! production and then change it. ng is destined to replace production in the near
+//! future."* So there is no file this test may not lose. What it still does, for as long
+//! as one entry remains, is say **which** files are untouched — and `decompose.rs` is the
+//! last of the eight. When it goes, this test goes with it rather than becoming a
+//! zero-length array that asserts nothing.
+//!
+//! **The bar for releasing a file is now a measured gain, not a plan step** (owner,
+//! 2026-08-05: *"You can copy the files from production into ng and modify them there.
+//! No problem with ng diverging more and more with production."*). Two other edits to
+//! this same file were measured in the same session and **reverted** rather than
+//! released — a smaller returned-event buffer (−0.21 % at 130×, nothing at 30×) and a
+//! narrower event type (nothing at either) — because a permanent divergence is not worth
+//! a change that cannot be seen.
 //!
 //! Everything still listed in `PAIRS` is byte-for-byte production's, modulo the
 //! sanctioned additions below.
@@ -99,23 +118,11 @@ fn the_remaining_copies_are_still_productions() {
     // **A released file is deleted from this array, not commented out**, so a `git log`
     // on it shows the whole set that was ever guarded and the array itself shows only
     // what is guarded *now*. The release table in this module's header is the record.
-    let pairs: [(&str, &str, &str); 3] = [
-        (
-            "cigar_cursor.rs",
-            include_str!("../../../pileup/walker/cigar_cursor.rs"),
-            include_str!("cigar_cursor.rs"),
-        ),
-        (
-            "decompose.rs",
-            include_str!("../../../pileup/walker/decompose.rs"),
-            include_str!("decompose.rs"),
-        ),
-        (
-            "chain_id_allocator.rs",
-            include_str!("../../../pileup/walker/chain_id_allocator.rs"),
-            include_str!("chain_id_allocator.rs"),
-        ),
-    ];
+    let pairs: [(&str, &str, &str); 1] = [(
+        "decompose.rs",
+        include_str!("../../../pileup/walker/decompose.rs"),
+        include_str!("decompose.rs"),
+    )];
 
     for (label, production, ours) in pairs {
         // The module doc note. ng may only **append** to production's header, never

@@ -1,0 +1,1032 @@
+diff --git a/examples/sketch3_calling_input.rs b/examples/sketch3_calling_input.rs
+new file mode 100644
+index 0000000..175efa4
+--- /dev/null
++++ b/examples/sketch3_calling_input.rs
+@@ -0,0 +1,953 @@
++//! **Sketch 3 — throwaway.** Does the *shape of the input* to the SNP
++//! calling step (the expectation-maximisation work) matter?
++//!
++//! Two arms over the **same real merged evidence** and the **same real
++//! EM body** (`var_calling::posterior_engine::run_em_columnar`):
++//!
++//! - `record`  — one owned `MergedRecord` is materialised per locus out
++//!               of a block, handed to the EM, and dropped. This is
++//!               `run_em_for_record`'s body minus the output join.
++//! - `column`  — per-locus slices into a block the caller owns and
++//!               reuses are handed to the EM. Nothing is materialised.
++//!
++//! Both arms end at `EmOutputs`, so the only difference between them is
++//! how the inputs arrived. `PosteriorRecord` construction and
++//! `prune_unsupported_alleles` are downstream of the boundary under test
++//! and identical for both, so they are excluded (see `--mode record-full`
++//! for what including them costs).
++//!
++//! Ablation modes materialise the input and skip the EM call, so
++//! `record` − `record-nomath` is arithmetic and `record-nomath` − `floor`
++//! is data movement.
++//!
++//! The fixture is real: per-sample `.psp` files → per-position merge →
++//! DUST → variant grouping → per-group merge → `MergedRecord`s, which are
++//! then packed into the block and the record vector dropped. Every mode
++//! builds the identical fixture, so `--mode floor` subtracts it.
++//!
++//! ```text
++//! cargo build --release --example sketch3_calling_input
++//! ./target/release/examples/sketch3_calling_input \
++//!     --psp-dir benchmarks/tomato1/results/ours/cohort/psp \
++//!     --n-samples 50 --reference $HOME/genomes/.../S_lycopersicum_chromosomes.4.00.fa \
++//!     --chrom SL4.0ch01 --start 1 --end 4000000 --mode record --repeats 20
++//! ```
++
++#[cfg(feature = "dhat-heap")]
++#[global_allocator]
++static ALLOC: dhat::Alloc = dhat::Alloc;
++
++use std::fs::File;
++use std::io::BufReader;
++use std::path::PathBuf;
++use std::sync::Arc;
++use std::time::Instant;
++
++use clap::Parser;
++
++use pop_var_caller::fasta::StreamingChromRefFetcher;
++use pop_var_caller::pileup_record::{AlleleSupportStats, PileupRecord};
++use pop_var_caller::psp::PspReader;
++use pop_var_caller::var_calling::dust_filter::{
++    DEFAULT_DUST_THRESHOLD, DEFAULT_DUST_WINDOW, DustFilter, DustFilterConfig,
++};
++use pop_var_caller::var_calling::per_group_merger::{
++    MergedAllele, MergedRecord, PerGroupMerger, PerGroupMergerConfig, SharedRefFetcher,
++};
++use pop_var_caller::var_calling::per_position_merger::PerPositionMerger;
++use pop_var_caller::var_calling::posterior_engine::backends::InterpUnivariateSimdMath;
++use pop_var_caller::var_calling::posterior_engine::{
++    AllelesView, EmInputs, EmOutputs, MergedAllelesView, PosteriorEngineConfig, PosteriorRecord,
++    RecordLocus, RecordScratch, run_em_columnar,
++};
++use pop_var_caller::var_calling::variant_grouping::{GrouperConfig, VariantGrouper};
++
++// ---------------------------------------------------------------------
++// CLI
++// ---------------------------------------------------------------------
++
++#[derive(Parser, Debug)]
++#[command(about = "Sketch 3: does the calling step's input shape matter?")]
++struct Cli {
++    /// Directory of per-sample `.psp` files (sorted; first N taken).
++    #[arg(long)]
++    psp_dir: PathBuf,
++    #[arg(long, default_value_t = 50)]
++    n_samples: usize,
++    /// Reference FASTA (needs a `.fai`).
++    #[arg(long)]
++    reference: PathBuf,
++    /// Contig name as it appears in the `.psp` chromosome table.
++    #[arg(long)]
++    chrom: String,
++    #[arg(long, default_value_t = 1)]
++    start: u32,
++    #[arg(long, default_value_t = 4_000_000)]
++    end: u32,
++    /// floor | record | column | record-nomath | column-nomath | verify
++    #[arg(long, default_value = "floor")]
++    mode: String,
++    /// How many times to sweep the whole block through the arm.
++    #[arg(long, default_value_t = 20)]
++    repeats: usize,
++    /// Turn the contamination mixture pre-pass on (makes the EM read the
++    /// `scalars` column as well as `log_likelihoods`).
++    #[arg(long, default_value_t = false)]
++    contamination: bool,
++    /// Keep only loci with at most this many alleles. `2` gives a
++    /// biallelic-only fixture — the cheapest EM there is, and so the
++    /// hardest case for "the arithmetic dominates".
++    #[arg(long, default_value_t = 64)]
++    max_alleles: usize,
++}
++
++// ---------------------------------------------------------------------
++// The block: one array per field, shared across many loci.
++// ---------------------------------------------------------------------
++
++/// Column layout for a run of loci. Ragged fields are a flat buffer plus
++/// a per-locus offsets array. Owned once by the caller and reused.
++#[derive(Default)]
++struct LocusBlock {
++    n_loci: usize,
++    chrom_id: Vec<u32>,
++    start: Vec<u32>,
++    end: Vec<u32>,
++    ploidy: Vec<u8>,
++    n_samples: Vec<u32>,
++    n_alleles: Vec<u32>,
++    n_genotypes: Vec<u32>,
++
++    /// `allele_off[i]..allele_off[i+1]` indexes `allele_seq_len` /
++    /// `allele_is_compound` / `allele_bytes_off` for locus `i`.
++    allele_off: Vec<u32>,
++    allele_seq_len: Vec<u32>,
++    allele_is_compound: Vec<bool>,
++    /// Concatenated allele bytes; `allele_bytes_off` has one extra entry.
++    allele_bytes: Vec<u8>,
++    allele_bytes_off: Vec<u32>,
++
++    /// Per (sample, allele): `sa_off[i]..sa_off[i+1]`.
++    sa_off: Vec<u32>,
++    scalars: Vec<AlleleSupportStats>,
++    chain_anchor_flags: Vec<bool>,
++
++    /// Per (sample, genotype): `sg_off[i]..sg_off[i+1]`.
++    sg_off: Vec<u32>,
++    log_likelihoods: Vec<f64>,
++
++    /// Per sample: `s_off[i]..s_off[i+1]`.
++    s_off: Vec<u32>,
++    other_scalars: Vec<AlleleSupportStats>,
++}
++
++impl LocusBlock {
++    fn push(&mut self, r: &MergedRecord) {
++        self.n_loci += 1;
++        self.chrom_id.push(r.chrom_id);
++        self.start.push(r.start);
++        self.end.push(r.end);
++        self.ploidy.push(r.ploidy);
++        self.n_samples.push(r.n_samples as u32);
++        self.n_alleles.push(r.alleles.len() as u32);
++        self.n_genotypes.push(r.n_genotypes as u32);
++
++        for a in &r.alleles {
++            self.allele_seq_len.push(a.seq.len() as u32);
++            self.allele_is_compound.push(a.is_compound);
++            self.allele_bytes_off.push(self.allele_bytes.len() as u32);
++            self.allele_bytes.extend_from_slice(&a.seq);
++        }
++        self.allele_off.push(self.allele_seq_len.len() as u32);
++
++        self.scalars.extend_from_slice(&r.scalars);
++        self.chain_anchor_flags
++            .extend_from_slice(&r.chain_anchor_flags);
++        self.sa_off.push(self.scalars.len() as u32);
++
++        self.log_likelihoods.extend_from_slice(&r.log_likelihoods);
++        self.sg_off.push(self.log_likelihoods.len() as u32);
++
++        self.other_scalars.extend_from_slice(&r.other_scalars);
++        self.s_off.push(self.other_scalars.len() as u32);
++    }
++
++    fn finish(&mut self) {
++        // Sentinel for the last locus's allele-bytes range.
++        self.allele_bytes_off.push(self.allele_bytes.len() as u32);
++    }
++
++    fn new() -> Self {
++        let mut b = Self::default();
++        // Offsets arrays open with a zero so `off[i]..off[i+1]` works
++        // for locus 0 — the arithmetic every consumer has to re-derive.
++        b.allele_off.push(0);
++        b.sa_off.push(0);
++        b.sg_off.push(0);
++        b.s_off.push(0);
++        b
++    }
++
++    fn heap_bytes(&self) -> usize {
++        use std::mem::size_of;
++        self.chrom_id.len() * 4 * 3
++            + self.ploidy.len()
++            + self.n_samples.len() * 4 * 3
++            + self.allele_off.len() * 4
++            + self.allele_seq_len.len() * 4
++            + self.allele_is_compound.len()
++            + self.allele_bytes.len()
++            + self.allele_bytes_off.len() * 4
++            + self.sa_off.len() * 4
++            + self.scalars.len() * size_of::<AlleleSupportStats>()
++            + self.chain_anchor_flags.len()
++            + self.sg_off.len() * 4
++            + self.log_likelihoods.len() * 8
++            + self.s_off.len() * 4
++            + self.other_scalars.len() * size_of::<AlleleSupportStats>()
++    }
++}
++
++/// `AllelesView` straight over the block's per-allele columns. This is
++/// the whole of what the EM asks the allele set for.
++struct ColumnAllelesView<'a> {
++    seq_len: &'a [u32],
++    is_compound: &'a [bool],
++}
++
++impl AllelesView for ColumnAllelesView<'_> {
++    fn len(&self) -> usize {
++        self.seq_len.len()
++    }
++    fn ref_len(&self) -> usize {
++        self.seq_len.first().map_or(0, |&n| n as usize)
++    }
++    fn seq_len(&self, i: usize) -> usize {
++        self.seq_len[i] as usize
++    }
++    fn is_compound(&self, i: usize) -> bool {
++        self.is_compound[i]
++    }
++}
++
++// ---------------------------------------------------------------------
++// Arm B — per-locus slices over the block.
++// ---------------------------------------------------------------------
++
++/// Borrow locus `i`'s inputs out of the block. No allocation, no copy.
++fn slice_inputs(block: &LocusBlock, i: usize) -> (ColumnAllelesView<'_>, EmInputsParts<'_>) {
++    let (a0, a1) = (
++        block.allele_off[i] as usize,
++        block.allele_off[i + 1] as usize,
++    );
++    let (p0, p1) = (block.sa_off[i] as usize, block.sa_off[i + 1] as usize);
++    let (g0, g1) = (block.sg_off[i] as usize, block.sg_off[i + 1] as usize);
++    let view = ColumnAllelesView {
++        seq_len: &block.allele_seq_len[a0..a1],
++        is_compound: &block.allele_is_compound[a0..a1],
++    };
++    let parts = EmInputsParts {
++        locus: RecordLocus {
++            chrom_id: block.chrom_id[i],
++            start: block.start[i],
++            end: block.end[i],
++        },
++        ploidy: block.ploidy[i],
++        n_samples: block.n_samples[i] as usize,
++        n_genotypes: block.n_genotypes[i] as usize,
++        scalars: &block.scalars[p0..p1],
++        log_likelihoods: &block.log_likelihoods[g0..g1],
++        chain_anchor_flags: &block.chain_anchor_flags[p0..p1],
++    };
++    (view, parts)
++}
++
++/// Everything `EmInputs` needs except the `&dyn AllelesView`, which has
++/// to outlive the borrow and so is returned separately.
++struct EmInputsParts<'a> {
++    locus: RecordLocus,
++    ploidy: u8,
++    n_samples: usize,
++    n_genotypes: usize,
++    scalars: &'a [AlleleSupportStats],
++    log_likelihoods: &'a [f64],
++    chain_anchor_flags: &'a [bool],
++}
++
++fn run_column_arm(
++    block: &LocusBlock,
++    config: &PosteriorEngineConfig,
++    scratch: &mut RecordScratch,
++    do_math: bool,
++    sink: &mut Sink,
++) {
++    let math = InterpUnivariateSimdMath;
++    for i in 0..block.n_loci {
++        let (view, p) = slice_inputs(block, i);
++        if !do_math {
++            std::hint::black_box(&view);
++            std::hint::black_box(p.log_likelihoods);
++            std::hint::black_box(p.scalars);
++            continue;
++        }
++        let inputs = EmInputs {
++            locus: p.locus,
++            ploidy: p.ploidy,
++            n_samples: p.n_samples,
++            n_genotypes: p.n_genotypes,
++            alleles: &view,
++            scalars: p.scalars,
++            log_likelihoods: p.log_likelihoods,
++            chain_anchor_flags_for_validation: p.chain_anchor_flags,
++        };
++        let out = run_em_columnar(inputs, config, &math, scratch).expect("EM failed");
++        sink.absorb(&out);
++    }
++}
++
++// ---------------------------------------------------------------------
++// Arm A — one owned record per locus.
++// ---------------------------------------------------------------------
++
++/// Materialise locus `i` as an owned `MergedRecord` — what the record
++/// shape costs at this boundary: one `Vec<u8>` per allele, one
++/// `Vec<MergedAllele>`, and four more `Vec`s.
++fn materialise(block: &LocusBlock, i: usize) -> MergedRecord {
++    let (a0, a1) = (
++        block.allele_off[i] as usize,
++        block.allele_off[i + 1] as usize,
++    );
++    let (p0, p1) = (block.sa_off[i] as usize, block.sa_off[i + 1] as usize);
++    let (g0, g1) = (block.sg_off[i] as usize, block.sg_off[i + 1] as usize);
++    let (s0, s1) = (block.s_off[i] as usize, block.s_off[i + 1] as usize);
++
++    let mut alleles = Vec::with_capacity(a1 - a0);
++    for a in a0..a1 {
++        let b0 = block.allele_bytes_off[a] as usize;
++        let b1 = block.allele_bytes_off[a + 1] as usize;
++        alleles.push(MergedAllele {
++            seq: block.allele_bytes[b0..b1].to_vec(),
++            is_compound: block.allele_is_compound[a],
++            // Compound constituents are not reconstructed: the EM never
++            // reads them (see `AllelesView`'s doc comment). Arm A is
++            // therefore given a *discount* here — see the report.
++            constituents: Vec::new(),
++        });
++    }
++    MergedRecord {
++        chrom_id: block.chrom_id[i],
++        start: block.start[i],
++        end: block.end[i],
++        alleles,
++        ploidy: block.ploidy[i],
++        n_samples: block.n_samples[i] as usize,
++        n_genotypes: block.n_genotypes[i] as usize,
++        scalars: block.scalars[p0..p1].to_vec(),
++        other_scalars: block.other_scalars[s0..s1].to_vec(),
++        chain_anchor_flags: block.chain_anchor_flags[p0..p1].to_vec(),
++        log_likelihoods: block.log_likelihoods[g0..g1].to_vec(),
++    }
++}
++
++/// `run_em_for_record`'s body, minus the `PosteriorRecord` join. Takes
++/// the record **by value** — the record shape's whole point is that the
++/// stage owns its input.
++fn run_em_row(
++    record: MergedRecord,
++    config: &PosteriorEngineConfig,
++    scratch: &mut RecordScratch,
++) -> EmOutputs {
++    let MergedRecord {
++        chrom_id,
++        start,
++        end,
++        alleles,
++        ploidy,
++        n_samples,
++        n_genotypes,
++        scalars,
++        other_scalars: _,
++        chain_anchor_flags,
++        log_likelihoods,
++    } = record;
++    let view = MergedAllelesView::new(&alleles);
++    let inputs = EmInputs {
++        locus: RecordLocus {
++            chrom_id,
++            start,
++            end,
++        },
++        ploidy,
++        n_samples,
++        n_genotypes,
++        alleles: &view,
++        scalars: &scalars,
++        log_likelihoods: &log_likelihoods,
++        chain_anchor_flags_for_validation: &chain_anchor_flags,
++    };
++    run_em_columnar(inputs, config, &InterpUnivariateSimdMath, scratch).expect("EM failed")
++}
++
++fn run_record_arm(
++    block: &LocusBlock,
++    config: &PosteriorEngineConfig,
++    scratch: &mut RecordScratch,
++    do_math: bool,
++    sink: &mut Sink,
++) {
++    for i in 0..block.n_loci {
++        let record = materialise(block, i);
++        // Force the materialisation to actually happen.
++        std::hint::black_box(&record);
++        if !do_math {
++            drop(record);
++            continue;
++        }
++        let out = run_em_row(record, config, scratch);
++        sink.absorb(&out);
++    }
++}
++
++// ---------------------------------------------------------------------
++// The "-full" arms: the realistic stage, which must hand the VCF writer
++// a `PosteriorRecord` and must run `prune_unsupported_alleles`.
++// ---------------------------------------------------------------------
++
++fn join_posterior_record(
++    locus: RecordLocus,
++    alleles: Vec<MergedAllele>,
++    ploidy: u8,
++    n_samples: usize,
++    scalars: Vec<AlleleSupportStats>,
++    other_scalars: Vec<AlleleSupportStats>,
++    chain_anchor_flags: Vec<bool>,
++    em: EmOutputs,
++    max_gq_phred: f64,
++) -> PosteriorRecord {
++    let mut r = PosteriorRecord {
++        locus,
++        alleles,
++        ploidy,
++        n_samples,
++        n_genotypes: em.n_genotypes,
++        allele_frequencies: em.allele_frequencies,
++        compound_frequencies: em.compound_frequencies,
++        posteriors: em.posteriors,
++        best_genotype: em.best_genotype,
++        gq_phred: em.gq_phred,
++        qual_phred: em.qual_phred,
++        scalars,
++        other_scalars,
++        chain_anchor_flags,
++        diagnostics: em.diagnostics,
++        paralog_posterior: None,
++    };
++    r.prune_unsupported_alleles(max_gq_phred);
++    r
++}
++
++fn run_record_arm_full(
++    block: &LocusBlock,
++    config: &PosteriorEngineConfig,
++    scratch: &mut RecordScratch,
++    sink: &mut Sink,
++) {
++    for i in 0..block.n_loci {
++        let record = materialise(block, i);
++        std::hint::black_box(&record);
++        let MergedRecord {
++            chrom_id,
++            start,
++            end,
++            alleles,
++            ploidy,
++            n_samples,
++            n_genotypes,
++            scalars,
++            other_scalars,
++            chain_anchor_flags,
++            log_likelihoods,
++        } = record;
++        let locus = RecordLocus {
++            chrom_id,
++            start,
++            end,
++        };
++        let view = MergedAllelesView::new(&alleles);
++        let em = run_em_columnar(
++            EmInputs {
++                locus,
++                ploidy,
++                n_samples,
++                n_genotypes,
++                alleles: &view,
++                scalars: &scalars,
++                log_likelihoods: &log_likelihoods,
++                chain_anchor_flags_for_validation: &chain_anchor_flags,
++            },
++            config,
++            &InterpUnivariateSimdMath,
++            scratch,
++        )
++        .expect("EM failed");
++        drop(view);
++        let out = join_posterior_record(
++            locus,
++            alleles,
++            ploidy,
++            n_samples,
++            scalars,
++            other_scalars,
++            chain_anchor_flags,
++            em,
++            config.max_gq_phred,
++        );
++        sink.absorb_posterior(&out);
++    }
++}
++
++/// Columnar in, record out — because step 6 (the VCF writer) is
++/// record-shaped by nature, so the passthrough columns have to be
++/// copied out of the block here rather than moved out of an input
++/// record.
++fn run_column_arm_full(
++    block: &LocusBlock,
++    config: &PosteriorEngineConfig,
++    scratch: &mut RecordScratch,
++    sink: &mut Sink,
++) {
++    for i in 0..block.n_loci {
++        let (view, p) = slice_inputs(block, i);
++        let em = run_em_columnar(
++            EmInputs {
++                locus: p.locus,
++                ploidy: p.ploidy,
++                n_samples: p.n_samples,
++                n_genotypes: p.n_genotypes,
++                alleles: &view,
++                scalars: p.scalars,
++                log_likelihoods: p.log_likelihoods,
++                chain_anchor_flags_for_validation: p.chain_anchor_flags,
++            },
++            config,
++            &InterpUnivariateSimdMath,
++            scratch,
++        )
++        .expect("EM failed");
++        // The passthrough materialisation the columnar arm cannot avoid.
++        let (a0, a1) = (
++            block.allele_off[i] as usize,
++            block.allele_off[i + 1] as usize,
++        );
++        let (s0, s1) = (block.s_off[i] as usize, block.s_off[i + 1] as usize);
++        let mut alleles = Vec::with_capacity(a1 - a0);
++        for a in a0..a1 {
++            let b0 = block.allele_bytes_off[a] as usize;
++            let b1 = block.allele_bytes_off[a + 1] as usize;
++            alleles.push(MergedAllele {
++                seq: block.allele_bytes[b0..b1].to_vec(),
++                is_compound: block.allele_is_compound[a],
++                constituents: Vec::new(),
++            });
++        }
++        let out = join_posterior_record(
++            p.locus,
++            alleles,
++            p.ploidy,
++            p.n_samples,
++            p.scalars.to_vec(),
++            block.other_scalars[s0..s1].to_vec(),
++            p.chain_anchor_flags.to_vec(),
++            em,
++            config.max_gq_phred,
++        );
++        sink.absorb_posterior(&out);
++    }
++}
++
++// ---------------------------------------------------------------------
++// Output sink — identical for both arms, so it cancels in the diff.
++// ---------------------------------------------------------------------
++
++#[derive(Default)]
++struct Sink {
++    n: u64,
++    gt_sum: u64,
++    gq_bits: u64,
++    qual_bits: u64,
++    af_bits: u64,
++}
++
++impl Sink {
++    fn absorb(&mut self, out: &EmOutputs) {
++        self.n += 1;
++        for &g in &out.best_genotype {
++            self.gt_sum = self.gt_sum.wrapping_mul(31).wrapping_add(g as u64);
++        }
++        for &q in &out.gq_phred {
++            self.gq_bits ^= q.to_bits();
++        }
++        self.qual_bits ^= out.qual_phred.to_bits();
++        for &p in &out.allele_frequencies {
++            self.af_bits ^= p.to_bits();
++        }
++    }
++
++    fn absorb_posterior(&mut self, out: &PosteriorRecord) {
++        self.n += 1;
++        for &g in &out.best_genotype {
++            self.gt_sum = self.gt_sum.wrapping_mul(31).wrapping_add(g as u64);
++        }
++        for &q in &out.gq_phred {
++            self.gq_bits ^= q.to_bits();
++        }
++        self.qual_bits ^= out.qual_phred.to_bits();
++        for &p in &out.allele_frequencies {
++            self.af_bits ^= p.to_bits();
++        }
++        for a in &out.alleles {
++            for &b in &a.seq {
++                self.af_bits = self.af_bits.rotate_left(1) ^ u64::from(b);
++            }
++        }
++    }
++}
++
++// ---------------------------------------------------------------------
++// Fixture: real .psp files -> real MergedRecords -> block.
++// ---------------------------------------------------------------------
++
++/// Production's pre-EM `min_alt_obs_per_sample` gate, restated here
++/// because `variant_caller` is `pub(crate)`. Same rule: keep the record
++/// iff some sample has `>= min_obs` observations of some ALT.
++fn passes_min_alt_obs(
++    scalars: &[AlleleSupportStats],
++    n_samples: usize,
++    n_alleles: usize,
++    min_obs: u32,
++) -> bool {
++    if min_obs <= 1 || n_alleles <= 1 {
++        return true;
++    }
++    for s in 0..n_samples {
++        let base = s * n_alleles;
++        for a in 1..n_alleles {
++            if scalars[base + a].num_obs >= min_obs {
++                return true;
++            }
++        }
++    }
++    false
++}
++
++fn build_block(cli: &Cli) -> (LocusBlock, FixtureStats) {
++    let t0 = Instant::now();
++    let mut paths: Vec<PathBuf> = std::fs::read_dir(&cli.psp_dir)
++        .expect("read psp dir")
++        .filter_map(|e| e.ok().map(|e| e.path()))
++        .filter(|p| p.extension().is_some_and(|x| x == "psp"))
++        .collect();
++    paths.sort();
++    paths.truncate(cli.n_samples);
++    assert!(!paths.is_empty(), "no .psp files found");
++
++    let mut per_sample: Vec<Vec<PileupRecord>> = Vec::with_capacity(paths.len());
++    let mut names: Vec<String> = Vec::with_capacity(paths.len());
++    let mut chroms = Vec::new();
++    let mut chrom_id: Option<u32> = None;
++
++    for p in &paths {
++        let f = File::open(p).expect("open psp");
++        let mut reader = PspReader::new(BufReader::with_capacity(1 << 20, f)).expect("psp header");
++        names.push(reader.header().sample.clone());
++        if chroms.is_empty() {
++            chroms = reader.header().chromosomes.clone();
++            chrom_id = Some(
++                chroms
++                    .iter()
++                    .position(|c| c.name == cli.chrom)
++                    .unwrap_or_else(|| panic!("contig {} not in psp header", cli.chrom))
++                    as u32,
++            );
++        }
++        let cid = chrom_id.expect("chrom id resolved");
++        let recs: Vec<PileupRecord> = reader
++            .region_records(cid, cli.start, cli.end)
++            .collect::<Result<_, _>>()
++            .expect("psp region read");
++        per_sample.push(recs);
++    }
++    let cid = chrom_id.expect("chrom id resolved");
++    let n_psp_records: usize = per_sample.iter().map(|v| v.len()).sum();
++
++    // Two independent fetchers: DUST sweeps the contig for its mask,
++    // the merger fetches per-group windows. `StreamingChromRefFetcher`
++    // enforces monotonic-forward access, so they cannot share one.
++    let dust_fetcher = StreamingChromRefFetcher::for_contig(&cli.reference, &cli.chrom)
++        .expect("dust fetcher for contig");
++    let merge_fetcher = StreamingChromRefFetcher::for_contig(&cli.reference, &cli.chrom)
++        .expect("merge fetcher for contig");
++    #[allow(clippy::arc_with_non_send_sync)]
++    let merge_fetcher: SharedRefFetcher = Arc::new(merge_fetcher);
++
++    let readers: Vec<_> = per_sample
++        .into_iter()
++        .map(|v| v.into_iter().map(Ok))
++        .collect();
++    let merger = PerPositionMerger::new(readers, names, chroms).expect("per-position merger");
++    let dust = DustFilter::new(
++        merger,
++        dust_fetcher,
++        cid,
++        DustFilterConfig::new(DEFAULT_DUST_WINDOW, DEFAULT_DUST_THRESHOLD).expect("dust config"),
++    );
++    let grouper = VariantGrouper::with_config(dust, GrouperConfig::default());
++    let group_merger =
++        PerGroupMerger::with_config(grouper, merge_fetcher, PerGroupMergerConfig::default());
++
++    let mut block = LocusBlock::new();
++    let mut n_merged = 0usize;
++    let mut n_dropped_low_alt = 0usize;
++    let mut record_heap_bytes = 0usize;
++    let mut record_allocs = 0usize;
++    let mut n_multiallelic = 0usize;
++    for item in group_merger {
++        let r = item.expect("per-group merge failed");
++        n_merged += 1;
++        if !passes_min_alt_obs(
++            &r.scalars,
++            r.n_samples,
++            r.alleles.len(),
++            pop_var_caller::var_calling::DEFAULT_MIN_ALT_OBS_PER_SAMPLE,
++        ) {
++            n_dropped_low_alt += 1;
++            continue;
++        }
++        if r.alleles.len() > cli.max_alleles {
++            continue;
++        }
++        if r.alleles.len() > 2 {
++            n_multiallelic += 1;
++        }
++        record_allocs += r.alleles.len() + 5;
++        record_heap_bytes += r.alleles.iter().map(|a| a.seq.len()).sum::<usize>()
++            + r.alleles.len() * std::mem::size_of::<MergedAllele>()
++            + r.scalars.len() * std::mem::size_of::<AlleleSupportStats>()
++            + r.other_scalars.len() * std::mem::size_of::<AlleleSupportStats>()
++            + r.chain_anchor_flags.len()
++            + r.log_likelihoods.len() * 8;
++        block.push(&r);
++    }
++    block.finish();
++
++    let stats = FixtureStats {
++        n_psp_records,
++        n_merged,
++        n_dropped_low_alt,
++        n_called_loci: block.n_loci,
++        n_multiallelic,
++        block_heap_bytes: block.heap_bytes(),
++        record_heap_bytes,
++        record_allocs,
++        build_secs: t0.elapsed().as_secs_f64(),
++    };
++    (block, stats)
++}
++
++struct FixtureStats {
++    n_psp_records: usize,
++    n_merged: usize,
++    n_dropped_low_alt: usize,
++    n_called_loci: usize,
++    n_multiallelic: usize,
++    block_heap_bytes: usize,
++    record_heap_bytes: usize,
++    record_allocs: usize,
++    build_secs: f64,
++}
++
++fn representative_contamination(
++    n_samples: usize,
++) -> pop_var_caller::var_calling::contamination_estimation::ContaminationEstimates {
++    pop_var_caller::var_calling::contamination_estimation::ContaminationEstimates::
++        from_user_supplied(
++            vec![Some(0.03_f64); n_samples],
++            vec![[0.6_f64, 0.3, 0.1]],
++            vec![0_usize; n_samples],
++        )
++        .expect("contamination inputs valid")
++}
++
++fn main() {
++    #[cfg(feature = "dhat-heap")]
++    let _profiler = dhat::Profiler::new_heap();
++
++    let cli = Cli::parse();
++    let (block, stats) = build_block(&cli);
++
++    eprintln!(
++        "fixture: {} psp records -> {} merged groups ({} dropped by min_alt_obs) -> {} loci fed to the EM ({} multiallelic); block {:.1} MB vs {:.1} MB if every locus were a live record ({} allocations); built in {:.1}s",
++        stats.n_psp_records,
++        stats.n_merged,
++        stats.n_dropped_low_alt,
++        stats.n_called_loci,
++        stats.n_multiallelic,
++        stats.block_heap_bytes as f64 / 1e6,
++        stats.record_heap_bytes as f64 / 1e6,
++        stats.record_allocs,
++        stats.build_secs,
++    );
++
++    let n_samples = block.n_samples.first().copied().unwrap_or(0) as usize;
++    let mut config = PosteriorEngineConfig::with_project_defaults();
++    if cli.contamination {
++        config = config
++            .with_contamination(Some(representative_contamination(n_samples)))
++            .expect("with_contamination");
++    }
++
++    if cli.mode == "verify" {
++        let mut sa = Sink::default();
++        let mut sb = Sink::default();
++        let mut scratch_a = RecordScratch::empty();
++        let mut scratch_b = RecordScratch::empty();
++        run_record_arm(&block, &config, &mut scratch_a, true, &mut sa);
++        run_column_arm(&block, &config, &mut scratch_b, true, &mut sb);
++        let ok = sa.n == sb.n
++            && sa.gt_sum == sb.gt_sum
++            && sa.gq_bits == sb.gq_bits
++            && sa.qual_bits == sb.qual_bits
++            && sa.af_bits == sb.af_bits;
++        println!(
++            "verify: loci={} genotypes={} gq_bits={} qual_bits={} af_bits={} -> {}",
++            sa.n == sb.n,
++            sa.gt_sum == sb.gt_sum,
++            sa.gq_bits == sb.gq_bits,
++            sa.qual_bits == sb.qual_bits,
++            sa.af_bits == sb.af_bits,
++            if ok { "BIT-IDENTICAL" } else { "DIVERGED" }
++        );
++        // Also verify locus by locus so a divergence names its locus.
++        let mut scratch_a = RecordScratch::empty();
++        let mut scratch_b = RecordScratch::empty();
++        let math = InterpUnivariateSimdMath;
++        let mut n_diff = 0usize;
++        for i in 0..block.n_loci {
++            let a = run_em_row(materialise(&block, i), &config, &mut scratch_a);
++            let (view, p) = slice_inputs(&block, i);
++            let b = run_em_columnar(
++                EmInputs {
++                    locus: p.locus,
++                    ploidy: p.ploidy,
++                    n_samples: p.n_samples,
++                    n_genotypes: p.n_genotypes,
++                    alleles: &view,
++                    scalars: p.scalars,
++                    log_likelihoods: p.log_likelihoods,
++                    chain_anchor_flags_for_validation: p.chain_anchor_flags,
++                },
++                &config,
++                &math,
++                &mut scratch_b,
++            )
++            .expect("EM failed");
++            let same = a.best_genotype == b.best_genotype
++                && a.n_genotypes == b.n_genotypes
++                && a.gq_phred.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
++                    == b.gq_phred.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
++                && a.qual_phred.to_bits() == b.qual_phred.to_bits()
++                && a.allele_frequencies
++                    .iter()
++                    .map(|v| v.to_bits())
++                    .collect::<Vec<_>>()
++                    == b.allele_frequencies
++                        .iter()
++                        .map(|v| v.to_bits())
++                        .collect::<Vec<_>>()
++                && a.posteriors.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
++                    == b.posteriors.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
++            if !same {
++                n_diff += 1;
++                if n_diff <= 5 {
++                    println!("  locus {i} diverged");
++                }
++            }
++        }
++        println!("per-locus: {n_diff} of {} diverged", block.n_loci);
++
++        // Shape of the work, so the instruction counts can be read.
++        let mut scratch = RecordScratch::empty();
++        let (mut it_sum, mut it_max, mut n_conv) = (0u64, 0u32, 0u64);
++        let (mut al_sum, mut gt_sum) = (0u64, 0u64);
++        for i in 0..block.n_loci {
++            let out = run_em_row(materialise(&block, i), &config, &mut scratch);
++            it_sum += u64::from(out.diagnostics.iterations);
++            it_max = it_max.max(out.diagnostics.iterations);
++            n_conv += u64::from(out.diagnostics.converged);
++            al_sum += u64::from(block.n_alleles[i]);
++            gt_sum += u64::from(block.n_genotypes[i]);
++        }
++        let n = block.n_loci as f64;
++        println!(
++            "work shape: mean_alleles={:.2} mean_genotypes={:.2} mean_em_iterations={:.2} max={} converged={}/{}",
++            al_sum as f64 / n,
++            gt_sum as f64 / n,
++            it_sum as f64 / n,
++            it_max,
++            n_conv,
++            block.n_loci
++        );
++
++        // Same check for the realistic arms (PosteriorRecord + prune).
++        let mut fa = Sink::default();
++        let mut fb = Sink::default();
++        let mut sfa = RecordScratch::empty();
++        let mut sfb = RecordScratch::empty();
++        run_record_arm_full(&block, &config, &mut sfa, &mut fa);
++        run_column_arm_full(&block, &config, &mut sfb, &mut fb);
++        println!(
++            "verify-full: loci={} genotypes={} gq_bits={} qual_bits={} af+alleles_bits={} -> {}",
++            fa.n == fb.n,
++            fa.gt_sum == fb.gt_sum,
++            fa.gq_bits == fb.gq_bits,
++            fa.qual_bits == fb.qual_bits,
++            fa.af_bits == fb.af_bits,
++            if fa.n == fb.n
++                && fa.gt_sum == fb.gt_sum
++                && fa.gq_bits == fb.gq_bits
++                && fa.qual_bits == fb.qual_bits
++                && fa.af_bits == fb.af_bits
++            {
++                "BIT-IDENTICAL"
++            } else {
++                "DIVERGED"
++            }
++        );
++        return;
++    }
++
++    let mut sink = Sink::default();
++    let mut scratch = RecordScratch::empty();
++    let t = Instant::now();
++    for _ in 0..cli.repeats {
++        match cli.mode.as_str() {
++            "floor" => {}
++            "record" => run_record_arm(&block, &config, &mut scratch, true, &mut sink),
++            "column" => run_column_arm(&block, &config, &mut scratch, true, &mut sink),
++            "record-nomath" => run_record_arm(&block, &config, &mut scratch, false, &mut sink),
++            "column-nomath" => run_column_arm(&block, &config, &mut scratch, false, &mut sink),
++            "record-full" => run_record_arm_full(&block, &config, &mut scratch, &mut sink),
++            "column-full" => run_column_arm_full(&block, &config, &mut scratch, &mut sink),
++            other => {
++                eprintln!("unknown --mode {other}");
++                std::process::exit(2);
++            }
++        }
++    }
++    let elapsed = t.elapsed();
++    std::hint::black_box(&sink);
++    eprintln!(
++        "mode={} repeats={} loci_per_repeat={} em_calls={} elapsed={:?} (wall time is NOT the instrument)",
++        cli.mode, cli.repeats, block.n_loci, sink.n, elapsed
++    );
++}
+diff --git a/src/var_calling/posterior_engine.rs b/src/var_calling/posterior_engine.rs
+index 1737684..6096d17 100644
+--- a/src/var_calling/posterior_engine.rs
++++ b/src/var_calling/posterior_engine.rs
+@@ -1142,7 +1142,7 @@ pub struct EmDiagnostics {
+ /// The EM never asks for per-allele bytes or compound constituents —
+ /// those live on `PosteriorRecord` for the VCF writer's `ALT` /
+ /// compound-emit path, downstream of the EM.
+-pub(crate) trait AllelesView {
++pub trait AllelesView { // SKETCH3: was pub(crate)
+     fn len(&self) -> usize;
+     fn ref_len(&self) -> usize;
+     fn seq_len(&self, allele_idx: usize) -> usize;
+@@ -1151,12 +1151,12 @@ pub(crate) trait AllelesView {
+ 
+ /// Row-shape [`AllelesView`] over a `&[MergedAllele]` slice. Used by
+ /// the [`run_em_for_record`] row-shape shim.
+-pub(crate) struct MergedAllelesView<'a> {
++pub struct MergedAllelesView<'a> {
+     alleles: &'a [MergedAllele],
+ }
+ 
+ impl<'a> MergedAllelesView<'a> {
+-    pub(crate) fn new(alleles: &'a [MergedAllele]) -> Self {
++    pub fn new(alleles: &'a [MergedAllele]) -> Self {
+         Self { alleles }
+     }
+ }
+@@ -1191,7 +1191,7 @@ impl AllelesView for MergedAllelesView<'_> {
+ /// - `chain_anchor_flags_for_validation` — only [`validate_record_shape`]
+ ///   reads this, as a length check. The bool table itself never feeds
+ ///   any math; it is forwarded to `PosteriorRecord` by the caller.
+-pub(crate) struct EmInputs<'a> {
++pub struct EmInputs<'a> {
+     pub locus: RecordLocus,
+     pub ploidy: u8,
+     pub n_samples: usize,
+@@ -1206,7 +1206,7 @@ pub(crate) struct EmInputs<'a> {
+ /// these with the per-record allele bytes + row-shape
+ /// `scalars` / `other_scalars` / `chain_anchor_flags` to form the
+ /// emitted [`PosteriorRecord`].
+-pub(crate) struct EmOutputs {
++pub struct EmOutputs {
+     pub n_genotypes: usize,
+     pub allele_frequencies: Vec<f64>,
+     pub compound_frequencies: Vec<Option<f64>>,
+@@ -1886,7 +1886,7 @@ struct EmContext<'a> {
+ /// into the scratch removes the alloc entirely from the EM
+ /// iteration loop (`m_step_*_p_hat` no longer collects a fresh `Vec`
+ /// every EM iter).
+-pub(crate) struct RecordScratch {
++pub struct RecordScratch {
+     // ===== EM working set (previously EmScratch). =====
+     /// The IBD marginal allele log-frequency `log(α_a / Σα)` per allele — what the
+     /// Wright-`F` mixture's homozygote term consumes as the genotype prior's
+@@ -2035,7 +2035,7 @@ pub(crate) struct RecordScratch {
+ 
+ impl RecordScratch {
+     /// All Vecs empty; capacity grows on first `resize_to` call.
+-    pub(crate) fn empty() -> Self {
++    pub fn empty() -> Self {
+         Self {
+             log_p_effective: Vec::new(),
+             alpha: Vec::new(),
+@@ -2225,7 +2225,7 @@ fn run_em_for_record<M: MathBackend>(
+ /// joins these with the per-record allele bytes + row-shape
+ /// `scalars` / `other_scalars` / `chain_anchor_flags` to form the
+ /// emitted [`PosteriorRecord`].
+-pub(crate) fn run_em_columnar<M: MathBackend>(
++pub fn run_em_columnar<M: MathBackend>(
+     inputs: EmInputs<'_>,
+     config: &PosteriorEngineConfig,
+     math: &M,

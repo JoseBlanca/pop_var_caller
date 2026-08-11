@@ -94,7 +94,40 @@ pub struct PileupGeneratorConfig {
     /// How far a first mate stays available for pairing. Defaults to
     /// [`DEFAULT_MATE_LOOKUP_WINDOW`](crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW).
     pub mate_lookup_window: u32,
-    /// Active-read ceiling. Defaults to [`DEFAULT_MAX_ACTIVE_READS`].
+    /// Active-read ceiling: how many reads the walk will hold open at once. Defaults
+    /// to [`DEFAULT_MAX_ACTIVE_READS`], **32,768 since 2026-08-05** (it was 4,096).
+    ///
+    /// **A cap, not a limit that fails.** Reaching it makes the walk give up a read —
+    /// either the arriving one (`reads_shed_at_admission`) or the held read furthest
+    /// from being kept (`reads_evicted_at_ceiling`) — and carry on; production's walker
+    /// aborts instead. This is the only place a cap can bound what the walk *holds*,
+    /// which is what bounds its memory: the per-column caps below act after the reads
+    /// are already open.
+    ///
+    /// **What the ceiling is for, stated so it is not confused with the caps below.** It
+    /// exists to keep a pathological pile-up from exhausting memory, and for nothing
+    /// else. It is *not* a way to sample a deep position — that is
+    /// `max_snp_column_depth`'s job, and a ceiling low enough to do it leaves positions
+    /// covered by fewer reads than the input had for them, which is what 4,096 was doing
+    /// (19,725 reads refused on one ~130× tomato chromosome). The number to check is
+    /// `positions_short_of_cap`: zero means the ceiling shaped no position's evidence.
+    ///
+    /// **Where 32,768 comes from.** The deepest column measured on real data is 12,792
+    /// reads (~130× tomato `SL4.0ch01` near 33,037,565, against a local typical of
+    /// 86–133); the ceiling sits above the *active set*, which is larger than any one
+    /// column, and the measured peaks are in `depth_cap.md`. The cost is bounded and
+    /// linear: a held read is its sequence, its base qualities, its CIGAR and its cursor,
+    /// so the ceiling's worst case is what a run must be able to afford.
+    ///
+    /// **The pending-mate ceiling was raised with it.** Every open read whose mate lies
+    /// further along occupies an entry in the allocator's pending-mate map, whose own
+    /// defensive cap was 10,000 — unreachable while the walk held 4,096 reads, and a hard
+    /// `PendingMatesExhausted` as soon as it held more. That constant is now 1,000,000,
+    /// and `pending_mates_high_water` reports how close a run came.
+    ///
+    /// **It no longer subsumes `max_snp_column_depth`.** At 4,096 a position could not
+    /// gather 8,000 contributors, so the SNP cap could never fire; at 32,768 it can, and
+    /// on the deepest real position it does.
     pub max_active_reads: u32,
 }
 
@@ -252,6 +285,48 @@ pub struct PileupGeneratorCounts {
     /// Columns where the contributor list was truncated by the applicable
     /// per-column depth cap.
     pub column_depth_truncations: u64,
+    /// Reads the walk refused at admission because `max_active_reads` were already
+    /// open — a depth cap acting on what the walk *holds*, where
+    /// `column_depth_truncations` above counts positions where a cap acted on what
+    /// it *uses*.
+    ///
+    /// Non-zero says the reads at some locus are a subsample of what the input
+    /// offered. It cannot say *which* locus: a refused read has no `read_id` and its
+    /// alignment is never decomposed, so nothing knows where it would have landed.
+    /// The region is findable from `active_reads_high_water` sitting at the cap.
+    pub reads_shed_at_admission: u64,
+    /// Reads the ceiling gave back **after** admitting them, to make room for a read
+    /// with a smaller sampling key. Beside `reads_shed_at_admission` above, the two are
+    /// every read the ceiling removed from the evidence; the split says which rule
+    /// removed it.
+    pub reads_evicted_at_ceiling: u64,
+    /// **The number that says whether the walk is throwing coverage away.** Positions the
+    /// walk folded fewer reads than the per-position cap allows, while reads covering
+    /// that position had been given up by the hold ceiling.
+    ///
+    /// A zero is the claim "no position in this run is short of the cap while reads
+    /// covering it exist". It can only ever hold *up to the ceiling*: raise the coverage
+    /// past what the walk holds and this starts counting again, which is the honest
+    /// statement of a bounded-memory walk.
+    pub positions_short_of_cap: u64,
+    /// The reads missing from those positions, summed. `positions_short_of_cap` says how
+    /// often; this says how much.
+    pub short_of_cap_deficit: u64,
+    /// The deepest column the walk assembled, before the per-position cap and after the
+    /// mate-overlap collapse. A **max**, like `active_reads_high_water`.
+    pub column_depth_high_water: u32,
+    /// The largest the allocator's first-mates-awaiting-a-partner map ever got — the
+    /// headroom under `MAX_PENDING_MATES`, measured. A **max**.
+    pub pending_mates_high_water: u32,
+    /// **Whether a capped position's evidence is a fair sample of the reads over it.**
+    /// The reads seen at every position the cap acted on, and the reads it kept, each
+    /// counted altogether and again for the reads that began left of the position. Two
+    /// fractions to compare: equal means the cap sampled, a larger kept fraction means it
+    /// preferred reads reaching the position from the left. See `RunSummary`'s copies.
+    pub capped_column_reads_seen: u64,
+    pub capped_column_reads_seen_placed_left: u64,
+    pub capped_column_reads_kept: u64,
+    pub capped_column_reads_kept_placed_left: u64,
     /// Reads silent over a whole record footprint — every base `N` or
     /// adaptor-masked, so never a contributor at any position and invisible to
     /// the per-locus `reads_without_observation` tally (spec §6).
@@ -338,9 +413,19 @@ impl PileupGeneratorCounts {
             active_reads_high_water,
             mate_lookup_evictions,
             column_depth_truncations,
+            reads_shed_at_admission,
             reads_silent_over_footprint,
             reads_with_holed_witness,
             hole_positions,
+            reads_evicted_at_ceiling,
+            positions_short_of_cap,
+            short_of_cap_deficit,
+            column_depth_high_water,
+            pending_mates_high_water,
+            capped_column_reads_seen,
+            capped_column_reads_seen_placed_left,
+            capped_column_reads_kept,
+            capped_column_reads_kept_placed_left,
         } = *summary;
         debug_assert!(
             chain_allocations >= chain_ids_at_open.chain_allocations
@@ -359,6 +444,10 @@ impl PileupGeneratorCounts {
         self.mate_lookup_evictions +=
             mate_lookup_evictions.saturating_sub(chain_ids_at_open.mate_lookup_evictions);
         self.column_depth_truncations += column_depth_truncations;
+        // A plain sum, for the plainest of the reasons on this page: the walk increments
+        // this itself, and `begin_region` zeroes the whole summary — so each region
+        // reports its own refusals and nothing is carried forward to be re-added.
+        self.reads_shed_at_admission += reads_shed_at_admission;
         // A plain sum — and **the reason it is safe changed at D1**, so do not read the
         // fold without reading this. It used to be that each region's walk owned its own
         // active set. It does not: one walker, and so one `ActiveReads`, now lives for a
@@ -372,6 +461,22 @@ impl PileupGeneratorCounts {
         // holed read is counted by exactly the walk whose record it folded into.
         self.reads_with_holed_witness += reads_with_holed_witness;
         self.hole_positions += hole_positions;
+        // Plain sums for the same reason as `reads_shed_at_admission` above: the walk
+        // increments them itself and `begin_region` zeroes the whole summary.
+        self.reads_evicted_at_ceiling += reads_evicted_at_ceiling;
+        self.positions_short_of_cap += positions_short_of_cap;
+        self.short_of_cap_deficit += short_of_cap_deficit;
+        // Maxes, like `active_reads_high_water` — a peak over regions is the largest
+        // single region's peak, not their sum. `pending_mates_high_water` comes off the
+        // allocator, which the walker keeps for a whole chromosome, so a *delta* would be
+        // meaningless for it where it is right for the two counters above it.
+        self.column_depth_high_water = self.column_depth_high_water.max(column_depth_high_water);
+        self.pending_mates_high_water = self.pending_mates_high_water.max(pending_mates_high_water);
+        // Plain sums: each region's walk counts the columns it capped.
+        self.capped_column_reads_seen += capped_column_reads_seen;
+        self.capped_column_reads_seen_placed_left += capped_column_reads_seen_placed_left;
+        self.capped_column_reads_kept += capped_column_reads_kept;
+        self.capped_column_reads_kept_placed_left += capped_column_reads_kept_placed_left;
     }
 }
 
@@ -1517,12 +1622,19 @@ mod tests {
             .build()
     }
 
-    /// **The defaults are production's, read from production's own constants.**
+    /// **Four of the five defaults are production's, read from production's own
+    /// constants.**
     ///
     /// Asserted against the `pub const`s rather than against literals: a literal
     /// here would let production retune a knob and ng silently keep the old
     /// value, which is the drift the "by name, not by literal" rule exists to
     /// prevent (arch §1.1).
+    ///
+    /// **The fifth is ng's own from 2026-08-05**, and the assertion says so rather than
+    /// being deleted: `max_active_reads` is 32,768 where production's constant is 4,096,
+    /// because production's value was refusing reads at the door on ordinary
+    /// whole-genome data. A test that merely stopped checking the knob would let ng drift
+    /// back without anybody noticing; this one fails if either number moves.
     #[test]
     fn the_default_knobs_are_productions_five_constants() {
         let config = PileupGeneratorConfig::default();
@@ -1543,8 +1655,14 @@ mod tests {
             crate::pileup::walker::DEFAULT_MATE_LOOKUP_WINDOW
         );
         assert_eq!(
-            config.max_active_reads,
-            crate::pileup::walker::DEFAULT_MAX_ACTIVE_READS
+            config.max_active_reads, 32_768,
+            "ng's own, not production's"
+        );
+        assert_eq!(
+            crate::pileup::walker::DEFAULT_MAX_ACTIVE_READS,
+            4096,
+            "production's, unchanged — ng is frozen out of editing it, and this states \
+             what ng diverged *from*"
         );
     }
 
@@ -2837,6 +2955,7 @@ mod tests {
             chain_allocations: 10,
             active_reads_high_water: 7,
             mate_lookup_evictions: 4,
+            pending_mates_high_water: 3,
         };
         let summary = RunSummary {
             reads_admitted: 3,
@@ -2849,11 +2968,26 @@ mod tests {
             active_reads_high_water: 5,
             mate_lookup_evictions: 6,
             column_depth_truncations: 8,
+            // ng's, and a plain sum for the same reason as the line below: the walk
+            // increments it and `begin_region` zeroes the summary it lives on.
+            reads_shed_at_admission: 9,
             // ng's, and a plain sum — each region's walk owns its own active set (D2).
             reads_silent_over_footprint: 2,
             // Not folded by this test's subject; named so the destructure stays exhaustive.
             reads_with_holed_witness: 0,
             hole_positions: 0,
+            // ng's, and plain sums for the same reason as `reads_shed_at_admission`.
+            reads_evicted_at_ceiling: 4,
+            positions_short_of_cap: 7,
+            short_of_cap_deficit: 11,
+            // Maxes, like `active_reads_high_water` beside them.
+            column_depth_high_water: 12,
+            pending_mates_high_water: 3,
+            // Plain sums; named so the destructure stays exhaustive.
+            capped_column_reads_seen: 0,
+            capped_column_reads_seen_placed_left: 0,
+            capped_column_reads_kept: 0,
+            capped_column_reads_kept_placed_left: 0,
         };
 
         counts.fold_region_walk(&summary, baseline);
@@ -2863,12 +2997,15 @@ mod tests {
                 chain_allocations: 20,
                 active_reads_high_water: 9,
                 mate_lookup_evictions: 9,
+                column_depth_high_water: 6,
+                pending_mates_high_water: 8,
                 ..summary
             },
             ChainIdAllocatorCounters {
                 chain_allocations: 14,
                 active_reads_high_water: 5,
                 mate_lookup_evictions: 6,
+                pending_mates_high_water: 3,
             },
         );
 
@@ -2889,9 +3026,25 @@ mod tests {
         assert_eq!(counts.reads_admitted, 6, "per-walk counters add");
         assert_eq!(counts.column_depth_truncations, 16);
         assert_eq!(
+            counts.reads_shed_at_admission, 18,
+            "refusals add per walk, like every other counter the walk owns itself"
+        );
+        assert_eq!(
             counts.reads_silent_over_footprint, 4,
             "each walk owns its active set, so the silent exits add like the walker's own \
              counters and not like the shared allocator's"
+        );
+        assert_eq!(counts.reads_evicted_at_ceiling, 8, "evictions add per walk");
+        assert_eq!(counts.positions_short_of_cap, 14, "positions add per walk");
+        assert_eq!(counts.short_of_cap_deficit, 22, "the deficit adds per walk");
+        assert_eq!(
+            counts.column_depth_high_water, 12,
+            "the deepest column is a peak: 12 in the first walk, 6 in the second"
+        );
+        assert_eq!(
+            counts.pending_mates_high_water, 8,
+            "the pending-mate peak is a peak too — and it comes off the shared allocator, \
+             so a *delta* would be the wrong fold for it"
         );
     }
 

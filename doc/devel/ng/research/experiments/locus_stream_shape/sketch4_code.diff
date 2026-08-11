@@ -1,0 +1,3890 @@
+diff --git a/examples/sketch2_ng_merge.rs b/examples/sketch2_ng_merge.rs
+new file mode 100644
+index 0000000..1662082
+--- /dev/null
++++ b/examples/sketch2_ng_merge.rs
+@@ -0,0 +1,757 @@
++//! **Sketch 2, second configuration — the k-way merge fed by ng's generator.**
++//!
++//! Throwaway experiment for `doc/devel/ng/impl_plan/locus_stream_shape_experiments.md`
++//! §4 "Sketch 2". Deleted after the decision; commits no interface.
++//!
++//! The `.psp`-fed configuration (`sketch2_merge_shape`) answers "does the merge
++//! want columns **when the producer is a columnar file**". This one answers the
++//! question the plan actually asks: does it still want them **when the producer
++//! is ng's generic locus generator and persistence is skipped**.
++//!
++//! ## Three modes
++//!
++//! - **`walk`** — every sample's generator is driven to exhaustion and each
++//!   locus is dropped. No merge at all. This is the producer floor: the share of
++//!   the whole path that no merge shape can change.
++//! - **`records`** — one owned `SampleLocusObservations` of lookahead per
++//!   sample, an O(N) scan over the heads at each output position.
++//! - **`fold`** — each sample's loci are pulled into a per-sample **owned**
++//!   buffer, a light column (position + summed non-reference observations) is
++//!   derived from them, folded across samples over the watermark window, and
++//!   only the variable positions are materialised.
++//!
++//! ## Why `fold` looks different here
++//!
++//! In the `.psp` configuration the fold reads a decoded block it can borrow
++//! from. Here there is no block: `PileupGenerator::next_locus` returns one fully
++//! owned record and there is **no API that yields any per-locus summary without
++//! building it** — the generator's only emitter is the whole record. So the
++//! buffer arm B holds is not a view over someone else's storage, it is a queue
++//! of records arm B owns. That is the honest shape of "a per-sample owned buffer
++//! the view borrows from" when the producer emits records.
++//!
++//! ## Usage
++//!
++//! ```text
++//! sketch2_ng_merge <walk|records|fold> <full|digest> <ref.fa> <regions.bed> \
++//!                  <n_regions> <a.cram> ...
++//! ```
++
++#[cfg(feature = "dhat-heap")]
++#[global_allocator]
++static ALLOC: dhat::Alloc = dhat::Alloc;
++
++use std::fs::File;
++use std::io::{BufRead, BufReader};
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use pop_var_caller::ng::locus_generation::SampleLocusObservations;
++use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
++use pop_var_caller::ng::read::ReadFilterConfig;
++use pop_var_caller::ng::read::input::SampleReads;
++use pop_var_caller::ng::read::input::reference::OpenReference;
++use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
++use pop_var_caller::ng::ref_seq::WindowedRefSeq;
++use pop_var_caller::ng::reference_info::{
++    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
++};
++use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
++
++const MIN_ALT_OBS: u32 = 2;
++const MAX_ALLELES: usize = 4;
++const EM_ITERS: usize = 5;
++/// Loci arm `fold` pulls into each sample's owned buffer per round.
++const FOLD_BATCH: usize = 4096;
++
++type Gen = PileupGenerator<WindowedRefSeq, LeftAlignPreparer<WindowedRefSeq>>;
++
++// =====================================================================
++// Merged evidence (same shape as the `.psp` configuration)
++// =====================================================================
++
++#[derive(Default)]
++struct AlleleEvidence {
++    seq: Vec<u8>,
++    chain_ids: Vec<u64>,
++    obs: u32,
++    q_sum: f64,
++    fwd: u32,
++    placed_left: u32,
++    mapq_sum: u32,
++    mapq_sum_sq: u64,
++}
++
++#[derive(Default)]
++struct SampleEvidence {
++    sample: u32,
++    alleles: Vec<AlleleEvidence>,
++    n_alleles: usize,
++}
++
++#[derive(Default)]
++struct MergedPosition {
++    key: u64,
++    samples: Vec<SampleEvidence>,
++    n: usize,
++}
++
++impl MergedPosition {
++    fn begin(&mut self, key: u64) {
++        self.key = key;
++        self.n = 0;
++    }
++    fn open_sample(&mut self, sample: u32) -> &mut SampleEvidence {
++        if self.n == self.samples.len() {
++            self.samples.push(SampleEvidence::default());
++        }
++        let se = &mut self.samples[self.n];
++        self.n += 1;
++        se.sample = sample;
++        se.n_alleles = 0;
++        se
++    }
++}
++
++impl SampleEvidence {
++    fn open_allele(&mut self) -> &mut AlleleEvidence {
++        if self.n_alleles == self.alleles.len() {
++            self.alleles.push(AlleleEvidence::default());
++        }
++        let a = &mut self.alleles[self.n_alleles];
++        self.n_alleles += 1;
++        a
++    }
++}
++
++/// Copy one locus's observations into the merged evidence. Returns bytes copied.
++fn copy_locus(mp: &mut MergedPosition, sample: u32, locus: &SampleLocusObservations) -> u64 {
++    let se = mp.open_sample(sample);
++    let mut bytes = 0u64;
++    for o in &locus.observations {
++        let dst = se.open_allele();
++        dst.seq.clear();
++        dst.seq.extend_from_slice(&o.bases);
++        dst.chain_ids.clear();
++        dst.chain_ids.extend_from_slice(&o.chain_ids);
++        dst.obs = o.num_obs;
++        dst.q_sum = o.q_sum;
++        dst.fwd = o.num_fwd;
++        dst.placed_left = o.placed_left;
++        dst.mapq_sum = o.mapq_sum;
++        dst.mapq_sum_sq = o.mapq_sum_sq;
++        bytes += dst.seq.len() as u64 + (dst.chain_ids.len() as u64) * 8 + 32;
++    }
++    bytes
++}
++
++/// The light column ng does not provide: summed observations whose bases differ
++/// from the locus's reference bases. Costs a byte comparison per observation —
++/// the record shape's price for not carrying a REF-first allele order.
++#[inline]
++fn nonref_obs_of(locus: &SampleLocusObservations) -> u32 {
++    let mut s = 0u32;
++    for o in &locus.observations {
++        if o.bases.as_ref() != locus.reference_bases.as_ref() {
++            s = s.saturating_add(o.num_obs);
++        }
++    }
++    s
++}
++
++#[inline]
++fn key_of(locus: &SampleLocusObservations) -> u64 {
++    (u64::from(locus.region.contig.0) << 32) | locus.region.start.0
++}
++
++// =====================================================================
++// Counters + sink
++// =====================================================================
++
++#[derive(Default, Debug)]
++struct Counters {
++    loci_produced: u64,
++    positions_seen: u64,
++    positions_kept: u64,
++    merge_objects: u64,
++    merge_bytes: u64,
++    /// Bytes the producer owns in the records it built (heap payload only).
++    producer_bytes: u64,
++}
++
++fn locus_owned_bytes(l: &SampleLocusObservations) -> u64 {
++    let mut b = l.reference_bases.len() as u64;
++    b += l.observations.len() as u64 * 96;
++    for o in &l.observations {
++        b += o.bases.len() as u64 + (o.chain_ids.len() as u64) * 8;
++    }
++    b
++}
++
++#[derive(Clone, Copy, PartialEq)]
++enum Consumer {
++    Digest,
++    Full,
++}
++
++struct Sink {
++    consumer: Consumer,
++    digest: u64,
++    table: Vec<Vec<u8>>,
++    table_len: usize,
++    counts: Vec<u32>,
++    errs: Vec<f64>,
++    gl: Vec<f64>,
++    post: Vec<f64>,
++    freqs: Vec<f64>,
++    loglik_acc: f64,
++}
++
++#[inline]
++fn fnv(h: &mut u64, bytes: &[u8]) {
++    for &b in bytes {
++        *h ^= u64::from(b);
++        *h = h.wrapping_mul(0x100_0000_01b3);
++    }
++}
++
++impl Sink {
++    fn new(consumer: Consumer) -> Self {
++        Self {
++            consumer,
++            digest: 0xcbf2_9ce4_8422_2325,
++            table: Vec::new(),
++            table_len: 0,
++            counts: Vec::new(),
++            errs: Vec::new(),
++            gl: Vec::new(),
++            post: Vec::new(),
++            freqs: Vec::new(),
++            loglik_acc: 0.0,
++        }
++    }
++
++    fn accept(&mut self, mp: &MergedPosition) {
++        let mut h = self.digest;
++        fnv(&mut h, &mp.key.to_le_bytes());
++        fnv(&mut h, &(mp.n as u32).to_le_bytes());
++        for se in &mp.samples[..mp.n] {
++            fnv(&mut h, &se.sample.to_le_bytes());
++            fnv(&mut h, &(se.n_alleles as u32).to_le_bytes());
++            for a in &se.alleles[..se.n_alleles] {
++                fnv(&mut h, &a.seq);
++                fnv(&mut h, &a.obs.to_le_bytes());
++                fnv(&mut h, &a.q_sum.to_bits().to_le_bytes());
++                fnv(&mut h, &a.fwd.to_le_bytes());
++                fnv(&mut h, &a.placed_left.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum_sq.to_le_bytes());
++                for &c in &a.chain_ids {
++                    fnv(&mut h, &c.to_le_bytes());
++                }
++            }
++        }
++        self.digest = h;
++        if self.consumer == Consumer::Full {
++            let ll = self.call(mp);
++            self.loglik_acc += ll;
++            let mut h = self.digest;
++            fnv(&mut h, &ll.to_bits().to_le_bytes());
++            self.digest = h;
++        }
++    }
++
++    fn call(&mut self, mp: &MergedPosition) -> f64 {
++        self.table_len = 0;
++        for se in &mp.samples[..mp.n] {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let known = self.table[..self.table_len]
++                    .iter()
++                    .any(|t| t.as_slice() == a.seq.as_slice());
++                if !known && self.table_len < MAX_ALLELES {
++                    if self.table_len == self.table.len() {
++                        self.table.push(Vec::new());
++                    }
++                    let slot = &mut self.table[self.table_len];
++                    slot.clear();
++                    slot.extend_from_slice(&a.seq);
++                    self.table_len += 1;
++                }
++            }
++        }
++        let k = self.table_len.max(1);
++        let n_gt = k * (k + 1) / 2;
++        let s_n = mp.n;
++
++        self.counts.clear();
++        self.counts.resize(s_n * k, 0);
++        self.errs.clear();
++        self.errs.resize(s_n * k, 0.0);
++        for (si, se) in mp.samples[..s_n].iter().enumerate() {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let Some(idx) = self.table[..self.table_len]
++                    .iter()
++                    .position(|t| t.as_slice() == a.seq.as_slice())
++                else {
++                    continue;
++                };
++                self.counts[si * k + idx] += a.obs;
++                self.errs[si * k + idx] = (a.q_sum / f64::from(a.obs)).exp().clamp(1e-9, 0.5);
++            }
++        }
++
++        self.gl.clear();
++        self.gl.resize(s_n * n_gt, 0.0);
++        for si in 0..s_n {
++            let mut g = 0usize;
++            for i in 0..k {
++                for j in i..k {
++                    let mut ll = 0.0f64;
++                    for a in 0..k {
++                        let n = self.counts[si * k + a];
++                        if n == 0 {
++                            continue;
++                        }
++                        let e = self.errs[si * k + a];
++                        let dose = f64::from(u8::from(a == i)) + f64::from(u8::from(a == j));
++                        let p = (dose / 2.0) * (1.0 - e) + (1.0 - dose / 2.0) * (e / 3.0);
++                        ll += f64::from(n) * p.max(1e-300).ln();
++                    }
++                    self.gl[si * n_gt + g] = ll;
++                    g += 1;
++                }
++            }
++        }
++
++        self.freqs.clear();
++        self.freqs.resize(k, 1.0 / k as f64);
++        self.post.clear();
++        self.post.resize(n_gt, 0.0);
++        let mut loglik = 0.0f64;
++        for _ in 0..EM_ITERS {
++            let mut new_f = [0.0f64; MAX_ALLELES];
++            loglik = 0.0;
++            for si in 0..s_n {
++                let mut norm = 0.0f64;
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let prior = if i == j {
++                            self.freqs[i] * self.freqs[i]
++                        } else {
++                            2.0 * self.freqs[i] * self.freqs[j]
++                        };
++                        let w = prior * self.gl[si * n_gt + g].exp();
++                        self.post[g] = w;
++                        norm += w;
++                        g += 1;
++                    }
++                }
++                if norm <= 0.0 {
++                    continue;
++                }
++                loglik += norm.ln();
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let p = self.post[g] / norm;
++                        new_f[i] += p;
++                        new_f[j] += p;
++                        g += 1;
++                    }
++                }
++            }
++            let tot: f64 = new_f[..k].iter().sum();
++            if tot > 0.0 {
++                for i in 0..k {
++                    self.freqs[i] = new_f[i] / tot;
++                }
++            }
++        }
++        loglik
++    }
++}
++
++// =====================================================================
++// Per-sample generator
++// =====================================================================
++
++struct NgSample {
++    generator: Gen,
++    reads: SampleReads,
++    head: Option<SampleLocusObservations>,
++}
++
++impl NgSample {
++    fn pull(&mut self, c: &mut Counters) -> Result<(), Box<dyn std::error::Error>> {
++        self.head = self.generator.next_locus(&self.reads)?;
++        if let Some(l) = &self.head {
++            c.loci_produced += 1;
++            c.producer_bytes += locus_owned_bytes(l);
++        }
++        Ok(())
++    }
++
++    #[inline]
++    fn key(&self) -> u64 {
++        self.head.as_ref().map_or(u64::MAX, key_of)
++    }
++}
++
++// =====================================================================
++// Modes
++// =====================================================================
++
++fn mode_walk(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            while let Some(l) = s.generator.next_locus(&s.reads)? {
++                c.loci_produced += 1;
++                c.producer_bytes += locus_owned_bytes(&l);
++                drop(l);
++            }
++        }
++    }
++    Ok(())
++}
++
++fn mode_records(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut mp = MergedPosition::default();
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            s.head = None;
++        }
++        for si in 0..n {
++            samples[si].pull(c)?;
++        }
++        loop {
++            // Pass 1 — O(N) scan for the minimum head key.
++            let mut min_key = u64::MAX;
++            for s in samples.iter() {
++                min_key = min_key.min(s.key());
++            }
++            if min_key == u64::MAX {
++                break;
++            }
++            c.positions_seen += 1;
++
++            // Pass 2 — O(N) scan applying the cohort keep rule.
++            let mut max_nonref = 0u32;
++            for s in samples.iter() {
++                if s.key() == min_key {
++                    max_nonref = max_nonref.max(nonref_obs_of(s.head.as_ref().unwrap()));
++                }
++            }
++            let kept = max_nonref >= MIN_ALT_OBS;
++            if kept {
++                c.positions_kept += 1;
++                mp.begin(min_key);
++            }
++
++            // Pass 3 — copy the kept evidence, then advance the tied heads.
++            for si in 0..n {
++                if samples[si].key() != min_key {
++                    continue;
++                }
++                if kept {
++                    let locus = samples[si].head.as_ref().unwrap();
++                    c.merge_bytes += copy_locus(&mut mp, si as u32, locus);
++                    c.merge_objects += 1;
++                }
++                samples[si].pull(c)?;
++            }
++            if kept {
++                sink.accept(&mp);
++            }
++        }
++    }
++    Ok(())
++}
++
++fn mode_fold(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    // Per-sample owned buffers — the only shape available when the producer
++    // hands over owned records and nothing can be borrowed from it.
++    let mut buf: Vec<Vec<SampleLocusObservations>> = (0..n).map(|_| Vec::new()).collect();
++    let mut light_key: Vec<Vec<u64>> = (0..n).map(|_| Vec::new()).collect();
++    let mut light_nonref: Vec<Vec<u32>> = (0..n).map(|_| Vec::new()).collect();
++    let mut cursor = vec![0usize; n];
++    let mut exhausted = vec![false; n];
++    let mut mat_cursor = vec![0usize; n];
++    let mut window_key: Vec<u64> = Vec::new();
++    let mut window_nonref: Vec<u32> = Vec::new();
++    let mut mp = MergedPosition::default();
++
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++        }
++        for s in 0..n {
++            buf[s].clear();
++            light_key[s].clear();
++            light_nonref[s].clear();
++            cursor[s] = 0;
++            exhausted[s] = false;
++        }
++        loop {
++            // Refill each sample's buffer to the batch size, deriving the light
++            // column as the records arrive.
++            for s in 0..n {
++                while !exhausted[s] && buf[s].len() - cursor[s] < FOLD_BATCH {
++                    match samples[s].generator.next_locus(&samples[s].reads)? {
++                        Some(l) => {
++                            c.loci_produced += 1;
++                            c.producer_bytes += locus_owned_bytes(&l);
++                            light_key[s].push(key_of(&l));
++                            light_nonref[s].push(nonref_obs_of(&l));
++                            buf[s].push(l);
++                        }
++                        None => exhausted[s] = true,
++                    }
++                }
++            }
++
++            // Watermark: the lowest buffered end among unexhausted samples.
++            let mut watermark = u64::MAX;
++            let mut any = false;
++            for s in 0..n {
++                if cursor[s] < buf[s].len() {
++                    any = true;
++                }
++                if !exhausted[s] {
++                    if let Some(&k) = light_key[s].last() {
++                        watermark = watermark.min(k);
++                    } else {
++                        watermark = 0;
++                    }
++                }
++            }
++            if !any {
++                break;
++            }
++            if watermark == u64::MAX {
++                watermark = light_key
++                    .iter()
++                    .filter_map(|v| v.last().copied())
++                    .max()
++                    .unwrap_or(0);
++            }
++
++            // Fold the light columns of every sample over the window. Loci are
++            // one per covered reference base, so a dense array indexed by
++            // (key - win_lo) is enough — the same shape the `.psp` arm uses, and
++            // cheaper than the sorted k-way merge production folds over its
++            // sparser row set.
++            let win_lo = (0..n)
++                .filter(|&s| cursor[s] < light_key[s].len())
++                .map(|s| light_key[s][cursor[s]])
++                .min()
++                .unwrap_or(watermark);
++            let win_len = (watermark.saturating_sub(win_lo) + 1) as usize;
++            window_nonref.clear();
++            window_nonref.resize(win_len, u32::MAX); // MAX = "no sample here"
++            for s in 0..n {
++                let mut i = cursor[s];
++                while i < light_key[s].len() && light_key[s][i] <= watermark {
++                    let off = (light_key[s][i] - win_lo) as usize;
++                    let v = light_nonref[s][i];
++                    let slot = &mut window_nonref[off];
++                    *slot = if *slot == u32::MAX { v } else { (*slot).max(v) };
++                    i += 1;
++                }
++            }
++            window_key.clear();
++            for (off, &v) in window_nonref.iter().enumerate() {
++                if v != u32::MAX {
++                    window_key.push(win_lo + off as u64);
++                }
++            }
++            c.positions_seen += window_key.len() as u64;
++
++            // Materialise only the variable positions.
++            for s in 0..n {
++                mat_cursor[s] = cursor[s];
++            }
++            for &key in &window_key {
++                if window_nonref[(key - win_lo) as usize] < MIN_ALT_OBS {
++                    continue;
++                }
++                c.positions_kept += 1;
++                mp.begin(key);
++                for s in 0..n {
++                    let mut i = mat_cursor[s];
++                    while i < light_key[s].len() && light_key[s][i] < key {
++                        i += 1;
++                    }
++                    mat_cursor[s] = i;
++                    if i >= light_key[s].len() || light_key[s][i] != key {
++                        continue;
++                    }
++                    c.merge_bytes += copy_locus(&mut mp, s as u32, &buf[s][i]);
++                    c.merge_objects += 1;
++                }
++                sink.accept(&mp);
++            }
++
++            // Retire the consumed prefix of every buffer.
++            for s in 0..n {
++                let mut i = cursor[s];
++                while i < light_key[s].len() && light_key[s][i] <= watermark {
++                    i += 1;
++                }
++                buf[s].drain(..i);
++                light_key[s].drain(..i);
++                light_nonref[s].drain(..i);
++                cursor[s] = 0;
++            }
++        }
++    }
++    Ok(())
++}
++
++// =====================================================================
++// Driver
++// =====================================================================
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    #[cfg(feature = "dhat-heap")]
++    let _profiler = dhat::Profiler::new_heap();
++
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    if args.len() < 6 {
++        eprintln!(
++            "usage: sketch2_ng_merge <walk|records|fold> <full|digest> <ref.fa> <regions.bed> <n_regions> <a.cram> ..."
++        );
++        std::process::exit(2);
++    }
++    let mode = args[0].clone();
++    let consumer = match args[1].as_str() {
++        "full" => Consumer::Full,
++        "digest" => Consumer::Digest,
++        other => panic!("unknown consumer {other}"),
++    };
++    let fasta = PathBuf::from(&args[2]);
++    let bed = PathBuf::from(&args[3]);
++    let n_regions: usize = args[4].parse()?;
++    let crams: Vec<PathBuf> = args[5..].iter().map(PathBuf::from).collect();
++
++    let cache = Arc::new(ReferenceInfoCache::new());
++    let (info, verify) = read_reference_verifying_or_creating_fai(
++        &cache,
++        fasta.clone(),
++        ReferenceCheck::TrustIndexWithoutChecking,
++    )?;
++    let contigs = Arc::new(info.contig_list());
++    let index = WindowedRefSeq::read_index(&fasta)?;
++    if let Some(v) = verify {
++        v.join().expect("reference verification thread");
++    }
++
++    // Regions: the BED that defines where these benchmark CRAMs carry reads.
++    // BED is 0-based half-open; `GenomeRegion` is 1-based inclusive.
++    let mut regions: Vec<GenomeRegion> = Vec::new();
++    for line in BufReader::new(File::open(&bed)?).lines() {
++        let line = line?;
++        let mut f = line.split('\t');
++        let (Some(name), Some(s), Some(e)) = (f.next(), f.next(), f.next()) else {
++            continue;
++        };
++        let Some(cid) = contigs.entries.iter().position(|c| c.name == name) else {
++            continue;
++        };
++        regions.push(GenomeRegion {
++            contig: ContigId(cid as u32),
++            start: Position(s.parse::<u64>()? + 1),
++            end: Position(e.parse::<u64>()?),
++        });
++        if regions.len() >= n_regions {
++            break;
++        }
++    }
++
++    let reference = OpenReference::new(info);
++    let mut samples: Vec<NgSample> = Vec::with_capacity(crams.len());
++    for cram in &crams {
++        let reads = SampleReads::open_only_sample(
++            std::slice::from_ref(cram),
++            &reference,
++            ReadFilterConfig::default(),
++            true,
++        )?;
++        let preparer = LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::with_shared_index(
++            fasta.clone(),
++            contigs.clone(),
++            index.clone(),
++        ));
++        #[allow(
++            clippy::arc_with_non_send_sync,
++            reason = "the file-backed accessor is single-threaded here, as in benches/ng_generic_pileup_perf.rs"
++        )]
++        let refseq = Arc::new(WindowedRefSeq::with_shared_index(
++            fasta.clone(),
++            contigs.clone(),
++            index.clone(),
++        ));
++        let make_reference = {
++            let fasta = fasta.clone();
++            let contigs = contigs.clone();
++            let index = index.clone();
++            move || WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
++        };
++        let generator = PileupGenerator::new(
++            refseq,
++            make_reference,
++            preparer,
++            PileupGeneratorConfig::default(),
++        )?;
++        samples.push(NgSample {
++            generator,
++            reads,
++            head: None,
++        });
++    }
++
++    let mut sink = Sink::new(consumer);
++    let mut c = Counters::default();
++    match mode.as_str() {
++        "walk" => mode_walk(&mut samples, &regions, &mut c)?,
++        "records" => mode_records(&mut samples, &regions, &mut sink, &mut c)?,
++        "fold" => mode_fold(&mut samples, &regions, &mut sink, &mut c)?,
++        other => panic!("unknown mode {other}"),
++    }
++
++    println!("mode={mode} consumer={}", args[1]);
++    println!("samples={} regions={}", crams.len(), regions.len());
++    println!("digest=0x{:016x}", sink.digest);
++    println!("loglik_acc={:.6}", sink.loglik_acc);
++    println!("loci_produced={}", c.loci_produced);
++    println!("positions_seen={}", c.positions_seen);
++    println!("positions_kept={}", c.positions_kept);
++    println!("producer_bytes={}", c.producer_bytes);
++    println!("merge_objects={}", c.merge_objects);
++    println!("merge_bytes={}", c.merge_bytes);
++    Ok(())
++}
+diff --git a/examples/sketch4_producer_merge.rs b/examples/sketch4_producer_merge.rs
+new file mode 100644
+index 0000000..9daa62f
+--- /dev/null
++++ b/examples/sketch4_producer_merge.rs
+@@ -0,0 +1,1418 @@
++//! **Sketch 4 — a block-filling generator on one side of the cohort merge.**
++//!
++//! Throwaway experiment for `doc/devel/ng/impl_plan/locus_stream_shape_experiments.md`.
++//! Deleted after the decision; commits no interface.
++//!
++//! Sketch 2 measured the merge two ways. Reading `.psp` files, folding one cheap column
++//! across samples before materialising anything was 2.00× fewer instructions. Reading ng's
++//! generator directly it was worth nothing — because the generator's only emitter returns a
++//! fully owned record, so the fold's light column had to be derived from records that were
++//! already built. Sketch 1 then taught the walk to fill blocks. Nobody put the two
++//! together. This does.
++//!
++//! ## The four states, and the two floors that separate the merge from the producer
++//!
++//! | mode | producer | merge |
++//! |---|---|---|
++//! | `rec-drop` | records (shipped) | none — every locus dropped. Floor for A and B. |
++//! | `rec-records` (**A**) | records | one owned record of lookahead per sample, O(N) head scan |
++//! | `rec-fold` (**B**) | records | per-sample owned queues, light column derived per record, folded |
++//! | `blk-drop` | blocks, no summary column | none. Floor for C. |
++//! | `blk-drop-sum` | blocks, summary column on | none. Floor for D, and `blk-drop-sum − blk-drop` prices the column. |
++//! | `blk-records` (**C**) | blocks, no summary | each locus refilled into a per-sample scratch record, then the same O(N) head scan |
++//! | `blk-fold` (**D**) | blocks, summary on | the block's own summary column folded across samples; only variable positions ever read the heavy arrays |
++//!
++//! A and B are re-measurements of sketch 2's ng-fed arms, not citations: different
++//! worktree, different binaries, and the two producers have to be compared inside one
++//! experiment.
++//!
++//! ## Usage
++//!
++//! ```text
++//! sketch4_producer_merge <mode> <full|digest> <ref.fa> <regions.bed> <n_regions> <a.cram> ...
++//! ```
++
++#[cfg(feature = "dhat-heap")]
++#[global_allocator]
++static ALLOC: dhat::Alloc = dhat::Alloc;
++
++use std::fs::File;
++use std::io::{BufRead, BufReader};
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use pop_var_caller::ng::locus_generation::SampleLocusObservations;
++use pop_var_caller::ng::locus_generation::block::{LocusBlock, LocusSink};
++use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
++use pop_var_caller::ng::read::ReadFilterConfig;
++use pop_var_caller::ng::read::input::SampleReads;
++use pop_var_caller::ng::read::input::reference::OpenReference;
++use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
++use pop_var_caller::ng::ref_seq::WindowedRefSeq;
++use pop_var_caller::ng::reference_info::{
++    ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
++};
++use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
++
++const MIN_ALT_OBS: u32 = 2;
++const MAX_ALLELES: usize = 4;
++const EM_ITERS: usize = 5;
++/// Loci arm B pulls into each sample's owned buffer per round. Sketch 2's value.
++const FOLD_BATCH: usize = 4096;
++/// The block budget. Sketch 1 measured instructions flat from 4 KiB to 16 MiB and peak
++/// resident memory growing by about twice the budget, so this is the middle of a free range.
++const BLOCK_BYTES_DEFAULT: usize = 256 * 1024;
++/// Ceiling on the fold's dense window, in positions. The position key packs the contig id
++/// into its high 32 bits, so an unguarded window would ask for terabytes at a contig change.
++const WINDOW_CAP: u64 = 1 << 22;
++
++type Gen = PileupGenerator<WindowedRefSeq, LeftAlignPreparer<WindowedRefSeq>>;
++
++// =====================================================================
++// Merged evidence — sketch 2's shape, unchanged, so the digests connect
++// =====================================================================
++
++#[derive(Default)]
++struct AlleleEvidence {
++    seq: Vec<u8>,
++    chain_ids: Vec<u64>,
++    obs: u32,
++    q_sum: f64,
++    fwd: u32,
++    placed_left: u32,
++    mapq_sum: u32,
++    mapq_sum_sq: u64,
++}
++
++#[derive(Default)]
++struct SampleEvidence {
++    sample: u32,
++    alleles: Vec<AlleleEvidence>,
++    n_alleles: usize,
++}
++
++#[derive(Default)]
++struct MergedPosition {
++    key: u64,
++    samples: Vec<SampleEvidence>,
++    n: usize,
++}
++
++impl MergedPosition {
++    fn begin(&mut self, key: u64) {
++        self.key = key;
++        self.n = 0;
++    }
++    fn open_sample(&mut self, sample: u32) -> &mut SampleEvidence {
++        if self.n == self.samples.len() {
++            self.samples.push(SampleEvidence::default());
++        }
++        let se = &mut self.samples[self.n];
++        self.n += 1;
++        se.sample = sample;
++        se.n_alleles = 0;
++        se
++    }
++}
++
++impl SampleEvidence {
++    fn open_allele(&mut self) -> &mut AlleleEvidence {
++        if self.n_alleles == self.alleles.len() {
++            self.alleles.push(AlleleEvidence::default());
++        }
++        let a = &mut self.alleles[self.n_alleles];
++        self.n_alleles += 1;
++        a
++    }
++}
++
++/// Copy one owned locus's observations into the merged evidence. Returns bytes copied.
++fn copy_locus(mp: &mut MergedPosition, sample: u32, locus: &SampleLocusObservations) -> u64 {
++    let se = mp.open_sample(sample);
++    let mut bytes = 0u64;
++    for o in &locus.observations {
++        let dst = se.open_allele();
++        dst.seq.clear();
++        dst.seq.extend_from_slice(&o.bases);
++        dst.chain_ids.clear();
++        dst.chain_ids.extend_from_slice(&o.chain_ids);
++        dst.obs = o.num_obs;
++        dst.q_sum = o.q_sum;
++        dst.fwd = o.num_fwd;
++        dst.placed_left = o.placed_left;
++        dst.mapq_sum = o.mapq_sum;
++        dst.mapq_sum_sq = o.mapq_sum_sq;
++        bytes += dst.seq.len() as u64 + (dst.chain_ids.len() as u64) * 8 + 32;
++    }
++    bytes
++}
++
++/// The same, straight out of a block's columns — no record in between.
++fn copy_locus_from_block(
++    mp: &mut MergedPosition,
++    sample: u32,
++    block: &LocusBlock,
++    i: usize,
++) -> u64 {
++    let se = mp.open_sample(sample);
++    let mut bytes = 0u64;
++    for j in block.observations_of(i) {
++        let dst = se.open_allele();
++        dst.seq.clear();
++        dst.seq.extend_from_slice(block.bases_of(j));
++        dst.chain_ids.clear();
++        dst.chain_ids.extend_from_slice(block.chain_ids_of(j));
++        dst.obs = block.obs_num_obs[j];
++        dst.q_sum = block.obs_q_sum[j];
++        dst.fwd = block.obs_num_fwd[j];
++        dst.placed_left = block.obs_placed_left[j];
++        dst.mapq_sum = block.obs_mapq_sum[j];
++        dst.mapq_sum_sq = block.obs_mapq_sum_sq[j];
++        bytes += dst.seq.len() as u64 + (dst.chain_ids.len() as u64) * 8 + 32;
++    }
++    bytes
++}
++
++/// The same, out of a scratch record the consumer refilled.
++fn copy_locus_from_scratch(mp: &mut MergedPosition, sample: u32, s: &LocusScratch) -> u64 {
++    let se = mp.open_sample(sample);
++    let mut bytes = 0u64;
++    for o in &s.observations[..s.used] {
++        let dst = se.open_allele();
++        dst.seq.clear();
++        dst.seq.extend_from_slice(&o.bases);
++        dst.chain_ids.clear();
++        dst.chain_ids.extend_from_slice(&o.chain_ids);
++        dst.obs = o.num_obs;
++        dst.q_sum = o.q_sum;
++        dst.fwd = o.num_fwd;
++        dst.placed_left = o.placed_left;
++        dst.mapq_sum = o.mapq_sum;
++        dst.mapq_sum_sq = o.mapq_sum_sq;
++        bytes += dst.seq.len() as u64 + (dst.chain_ids.len() as u64) * 8 + 32;
++    }
++    bytes
++}
++
++/// The light column ng's record path does not provide: summed observations whose bases
++/// differ from the locus's reference bases. Costs a byte comparison per observation, paid
++/// by the consumer because the producer handed over a record and nothing else.
++#[inline]
++fn nonref_obs_of(locus: &SampleLocusObservations) -> u32 {
++    let mut s = 0u32;
++    for o in &locus.observations {
++        if o.bases.as_ref() != locus.reference_bases.as_ref() {
++            s = s.saturating_add(o.num_obs);
++        }
++    }
++    s
++}
++
++#[inline]
++fn nonref_obs_of_scratch(s: &LocusScratch) -> u32 {
++    let mut t = 0u32;
++    for o in &s.observations[..s.used] {
++        if o.bases.as_slice() != s.reference_bases.as_slice() {
++            t = t.saturating_add(o.num_obs);
++        }
++    }
++    t
++}
++
++#[inline]
++fn key_of(locus: &SampleLocusObservations) -> u64 {
++    (u64::from(locus.region.contig.0) << 32) | locus.region.start.0
++}
++
++#[inline]
++fn key_in_block(block: &LocusBlock, i: usize) -> u64 {
++    (u64::from(block.contig[i]) << 32) | u64::from(block.start[i])
++}
++
++// =====================================================================
++// The consumer's own record buffer — sketch 1's arm C, one per sample
++// =====================================================================
++
++#[derive(Default)]
++struct ScratchObservation {
++    bases: Vec<u8>,
++    complete: bool,
++    runs: Vec<(u16, u16)>,
++    read_group: u32,
++    num_obs: u32,
++    num_fwd: u32,
++    q_sum: f64,
++    mapq_sum: u32,
++    mapq_sum_sq: u64,
++    placed_left: u32,
++    chain_ids: Vec<u64>,
++}
++
++/// One locus, record-shaped, in storage the consumer owns and refills. This is the shape
++/// that survived in production, rather than the borrow into the block that did not.
++#[derive(Default)]
++struct LocusScratch {
++    contig: u32,
++    start: u32,
++    end: u32,
++    reference_bases: Vec<u8>,
++    reads_without_observation: u32,
++    reads_discarded_by_cap: u32,
++    observations: Vec<ScratchObservation>,
++    used: usize,
++    bytes_copied: u64,
++}
++
++impl LocusScratch {
++    /// Refill from locus `i` of `block`. Everything is copied; nothing borrows the block.
++    fn refill_from(&mut self, block: &LocusBlock, i: usize) {
++        self.contig = block.contig[i];
++        self.start = block.start[i];
++        self.end = block.end[i];
++        self.reads_without_observation = block.reads_without_observation[i];
++        self.reads_discarded_by_cap = block.reads_discarded_by_cap[i];
++        self.reference_bases.clear();
++        self.reference_bases
++            .extend_from_slice(block.reference_bases_of(i));
++        let mut copied = block.reference_bases_of(i).len();
++        self.used = 0;
++        for j in block.observations_of(i) {
++            if self.used == self.observations.len() {
++                self.observations.push(ScratchObservation::default());
++            }
++            let slot = &mut self.observations[self.used];
++            slot.bases.clear();
++            slot.bases.extend_from_slice(block.bases_of(j));
++            slot.complete = block.obs_witness_kind[j] == 0;
++            slot.runs.clear();
++            slot.runs.extend_from_slice(block.runs_of(j));
++            slot.read_group = block.obs_read_group[j];
++            slot.num_obs = block.obs_num_obs[j];
++            slot.num_fwd = block.obs_num_fwd[j];
++            slot.q_sum = block.obs_q_sum[j];
++            slot.mapq_sum = block.obs_mapq_sum[j];
++            slot.mapq_sum_sq = block.obs_mapq_sum_sq[j];
++            slot.placed_left = block.obs_placed_left[j];
++            slot.chain_ids.clear();
++            slot.chain_ids.extend_from_slice(block.chain_ids_of(j));
++            copied += slot.bases.len() + slot.runs.len() * 4 + slot.chain_ids.len() * 8 + 41;
++            self.used += 1;
++        }
++        self.bytes_copied += copied as u64;
++    }
++
++    #[inline]
++    fn key(&self) -> u64 {
++        (u64::from(self.contig) << 32) | u64::from(self.start)
++    }
++}
++
++// =====================================================================
++// Counters + sink
++// =====================================================================
++
++#[derive(Default, Debug)]
++struct Counters {
++    loci_produced: u64,
++    positions_seen: u64,
++    positions_kept: u64,
++    merge_objects: u64,
++    merge_bytes: u64,
++    /// Bytes the producer owns in the records it built (heap payload only) — record path.
++    producer_bytes: u64,
++    /// Bytes the producer wrote into blocks — block path.
++    block_bytes: u64,
++    /// Loci ever materialised as a record-shaped object by anyone.
++    loci_materialised: u64,
++    /// Blocks handed over.
++    blocks: u64,
++    block_payload_high_water: u64,
++    /// Bytes arm C copied out of blocks into its own record-shaped buffers.
++    scratch_bytes: u64,
++    /// Emitted observations, over every locus — what the summary column's byte comparison
++    /// is charged per.
++    observations: u64,
++    /// Reads at a position, `Σ num_obs`. Divided by loci this is the fixture's depth.
++    visits: u64,
++}
++
++fn locus_owned_bytes(l: &SampleLocusObservations) -> u64 {
++    let mut b = l.reference_bases.len() as u64;
++    b += l.observations.len() as u64 * 96;
++    for o in &l.observations {
++        b += o.bases.len() as u64 + (o.chain_ids.len() as u64) * 8;
++    }
++    b
++}
++
++#[derive(Clone, Copy, PartialEq)]
++enum Consumer {
++    Digest,
++    Full,
++}
++
++struct Sink {
++    consumer: Consumer,
++    digest: u64,
++    table: Vec<Vec<u8>>,
++    table_len: usize,
++    counts: Vec<u32>,
++    errs: Vec<f64>,
++    gl: Vec<f64>,
++    post: Vec<f64>,
++    freqs: Vec<f64>,
++    loglik_acc: f64,
++}
++
++#[inline]
++fn fnv(h: &mut u64, bytes: &[u8]) {
++    for &b in bytes {
++        *h ^= u64::from(b);
++        *h = h.wrapping_mul(0x100_0000_01b3);
++    }
++}
++
++impl Sink {
++    fn new(consumer: Consumer) -> Self {
++        Self {
++            consumer,
++            digest: 0xcbf2_9ce4_8422_2325,
++            table: Vec::new(),
++            table_len: 0,
++            counts: Vec::new(),
++            errs: Vec::new(),
++            gl: Vec::new(),
++            post: Vec::new(),
++            freqs: Vec::new(),
++            loglik_acc: 0.0,
++        }
++    }
++
++    fn accept(&mut self, mp: &MergedPosition) {
++        let mut h = self.digest;
++        fnv(&mut h, &mp.key.to_le_bytes());
++        fnv(&mut h, &(mp.n as u32).to_le_bytes());
++        for se in &mp.samples[..mp.n] {
++            fnv(&mut h, &se.sample.to_le_bytes());
++            fnv(&mut h, &(se.n_alleles as u32).to_le_bytes());
++            for a in &se.alleles[..se.n_alleles] {
++                fnv(&mut h, &a.seq);
++                fnv(&mut h, &a.obs.to_le_bytes());
++                fnv(&mut h, &a.q_sum.to_bits().to_le_bytes());
++                fnv(&mut h, &a.fwd.to_le_bytes());
++                fnv(&mut h, &a.placed_left.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum.to_le_bytes());
++                fnv(&mut h, &a.mapq_sum_sq.to_le_bytes());
++                for &c in &a.chain_ids {
++                    fnv(&mut h, &c.to_le_bytes());
++                }
++            }
++        }
++        self.digest = h;
++        if self.consumer == Consumer::Full {
++            let ll = self.call(mp);
++            self.loglik_acc += ll;
++            let mut h = self.digest;
++            fnv(&mut h, &ll.to_bits().to_le_bytes());
++            self.digest = h;
++        }
++    }
++
++    fn call(&mut self, mp: &MergedPosition) -> f64 {
++        self.table_len = 0;
++        for se in &mp.samples[..mp.n] {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let known = self.table[..self.table_len]
++                    .iter()
++                    .any(|t| t.as_slice() == a.seq.as_slice());
++                if !known && self.table_len < MAX_ALLELES {
++                    if self.table_len == self.table.len() {
++                        self.table.push(Vec::new());
++                    }
++                    let slot = &mut self.table[self.table_len];
++                    slot.clear();
++                    slot.extend_from_slice(&a.seq);
++                    self.table_len += 1;
++                }
++            }
++        }
++        let k = self.table_len.max(1);
++        let n_gt = k * (k + 1) / 2;
++        let s_n = mp.n;
++
++        self.counts.clear();
++        self.counts.resize(s_n * k, 0);
++        self.errs.clear();
++        self.errs.resize(s_n * k, 0.0);
++        for (si, se) in mp.samples[..s_n].iter().enumerate() {
++            for a in &se.alleles[..se.n_alleles] {
++                if a.obs == 0 {
++                    continue;
++                }
++                let Some(idx) = self.table[..self.table_len]
++                    .iter()
++                    .position(|t| t.as_slice() == a.seq.as_slice())
++                else {
++                    continue;
++                };
++                self.counts[si * k + idx] += a.obs;
++                self.errs[si * k + idx] = (a.q_sum / f64::from(a.obs)).exp().clamp(1e-9, 0.5);
++            }
++        }
++
++        self.gl.clear();
++        self.gl.resize(s_n * n_gt, 0.0);
++        for si in 0..s_n {
++            let mut g = 0usize;
++            for i in 0..k {
++                for j in i..k {
++                    let mut ll = 0.0f64;
++                    for a in 0..k {
++                        let n = self.counts[si * k + a];
++                        if n == 0 {
++                            continue;
++                        }
++                        let e = self.errs[si * k + a];
++                        let dose = f64::from(u8::from(a == i)) + f64::from(u8::from(a == j));
++                        let p = (dose / 2.0) * (1.0 - e) + (1.0 - dose / 2.0) * (e / 3.0);
++                        ll += f64::from(n) * p.max(1e-300).ln();
++                    }
++                    self.gl[si * n_gt + g] = ll;
++                    g += 1;
++                }
++            }
++        }
++
++        self.freqs.clear();
++        self.freqs.resize(k, 1.0 / k as f64);
++        self.post.clear();
++        self.post.resize(n_gt, 0.0);
++        let mut loglik = 0.0f64;
++        for _ in 0..EM_ITERS {
++            let mut new_f = [0.0f64; MAX_ALLELES];
++            loglik = 0.0;
++            for si in 0..s_n {
++                let mut norm = 0.0f64;
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let prior = if i == j {
++                            self.freqs[i] * self.freqs[i]
++                        } else {
++                            2.0 * self.freqs[i] * self.freqs[j]
++                        };
++                        let w = prior * self.gl[si * n_gt + g].exp();
++                        self.post[g] = w;
++                        norm += w;
++                        g += 1;
++                    }
++                }
++                if norm <= 0.0 {
++                    continue;
++                }
++                loglik += norm.ln();
++                let mut g = 0usize;
++                for i in 0..k {
++                    for j in i..k {
++                        let p = self.post[g] / norm;
++                        new_f[i] += p;
++                        new_f[j] += p;
++                        g += 1;
++                    }
++                }
++            }
++            let tot: f64 = new_f[..k].iter().sum();
++            if tot > 0.0 {
++                for i in 0..k {
++                    self.freqs[i] = new_f[i] / tot;
++                }
++            }
++        }
++        loglik
++    }
++}
++
++// =====================================================================
++// Per-sample generator
++// =====================================================================
++
++struct NgSample {
++    generator: Gen,
++    reads: SampleReads,
++    head: Option<SampleLocusObservations>,
++}
++
++impl NgSample {
++    fn pull(&mut self, c: &mut Counters) -> Result<(), Box<dyn std::error::Error>> {
++        self.head = self.generator.next_locus(&self.reads)?;
++        if let Some(l) = &self.head {
++            c.loci_produced += 1;
++            c.loci_materialised += 1;
++            c.producer_bytes += locus_owned_bytes(l);
++        }
++        Ok(())
++    }
++
++    #[inline]
++    fn key(&self) -> u64 {
++        self.head.as_ref().map_or(u64::MAX, key_of)
++    }
++}
++
++/// Where a sample is inside the block its generator most recently filled.
++#[derive(Default)]
++struct BlockCursor {
++    at: usize,
++    exhausted: bool,
++    /// Only arm C uses this; arm D reads the block's columns directly.
++    has_head: bool,
++}
++
++// =====================================================================
++// The record producer's three modes — A, B, and their floor
++// =====================================================================
++
++fn mode_rec_drop(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            while let Some(l) = s.generator.next_locus(&s.reads)? {
++                c.loci_produced += 1;
++                c.loci_materialised += 1;
++                c.producer_bytes += locus_owned_bytes(&l);
++                drop(l);
++            }
++        }
++    }
++    Ok(())
++}
++
++/// Not a timed mode. It walks with the record producer and counts what the fixture is made
++/// of, so the report can state the depth rather than infer it. Kept out of every timed
++/// path so no timed binary carries its counting.
++fn mode_stats(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            while let Some(l) = s.generator.next_locus(&s.reads)? {
++                c.loci_produced += 1;
++                c.observations += l.observations.len() as u64;
++                for o in &l.observations {
++                    c.visits += u64::from(o.num_obs);
++                }
++            }
++        }
++    }
++    Ok(())
++}
++
++fn mode_rec_records(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut mp = MergedPosition::default();
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            s.head = None;
++        }
++        for si in 0..n {
++            samples[si].pull(c)?;
++        }
++        loop {
++            let mut min_key = u64::MAX;
++            for s in samples.iter() {
++                min_key = min_key.min(s.key());
++            }
++            if min_key == u64::MAX {
++                break;
++            }
++            c.positions_seen += 1;
++
++            let mut max_nonref = 0u32;
++            for s in samples.iter() {
++                if s.key() == min_key {
++                    // PANIC-FREE: a finite key means the head is present.
++                    max_nonref = max_nonref.max(nonref_obs_of(
++                        s.head.as_ref().expect("a finite key means a present head"),
++                    ));
++                }
++            }
++            let kept = max_nonref >= MIN_ALT_OBS;
++            if kept {
++                c.positions_kept += 1;
++                mp.begin(min_key);
++            }
++
++            for si in 0..n {
++                if samples[si].key() != min_key {
++                    continue;
++                }
++                if kept {
++                    // PANIC-FREE: as above.
++                    let locus = samples[si]
++                        .head
++                        .as_ref()
++                        .expect("a finite key means a present head");
++                    c.merge_bytes += copy_locus(&mut mp, si as u32, locus);
++                    c.merge_objects += 1;
++                }
++                samples[si].pull(c)?;
++            }
++            if kept {
++                sink.accept(&mp);
++            }
++        }
++    }
++    Ok(())
++}
++
++fn mode_rec_fold(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut buf: Vec<Vec<SampleLocusObservations>> = (0..n).map(|_| Vec::new()).collect();
++    let mut light_key: Vec<Vec<u64>> = (0..n).map(|_| Vec::new()).collect();
++    let mut light_nonref: Vec<Vec<u32>> = (0..n).map(|_| Vec::new()).collect();
++    let mut cursor = vec![0usize; n];
++    let mut exhausted = vec![false; n];
++    let mut mat_cursor = vec![0usize; n];
++    let mut window_key: Vec<u64> = Vec::new();
++    let mut window_nonref: Vec<u32> = Vec::new();
++    let mut mp = MergedPosition::default();
++
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++        }
++        for s in 0..n {
++            buf[s].clear();
++            light_key[s].clear();
++            light_nonref[s].clear();
++            cursor[s] = 0;
++            exhausted[s] = false;
++        }
++        loop {
++            for s in 0..n {
++                while !exhausted[s] && buf[s].len() - cursor[s] < FOLD_BATCH {
++                    match samples[s].generator.next_locus(&samples[s].reads)? {
++                        Some(l) => {
++                            c.loci_produced += 1;
++                            c.loci_materialised += 1;
++                            c.producer_bytes += locus_owned_bytes(&l);
++                            light_key[s].push(key_of(&l));
++                            light_nonref[s].push(nonref_obs_of(&l));
++                            buf[s].push(l);
++                        }
++                        None => exhausted[s] = true,
++                    }
++                }
++            }
++
++            let mut watermark = u64::MAX;
++            let mut any = false;
++            for s in 0..n {
++                if cursor[s] < buf[s].len() {
++                    any = true;
++                }
++                if !exhausted[s] {
++                    if let Some(&k) = light_key[s].last() {
++                        watermark = watermark.min(k);
++                    } else {
++                        watermark = 0;
++                    }
++                }
++            }
++            if !any {
++                break;
++            }
++            if watermark == u64::MAX {
++                watermark = light_key
++                    .iter()
++                    .filter_map(|v| v.last().copied())
++                    .max()
++                    .unwrap_or(0);
++            }
++
++            let win_lo = (0..n)
++                .filter(|&s| cursor[s] < light_key[s].len())
++                .map(|s| light_key[s][cursor[s]])
++                .min()
++                .unwrap_or(watermark);
++            let win_len = (watermark.saturating_sub(win_lo) + 1).min(WINDOW_CAP) as usize;
++            let watermark = win_lo + win_len as u64 - 1;
++            window_nonref.clear();
++            window_nonref.resize(win_len, u32::MAX); // MAX = "no sample here"
++            for s in 0..n {
++                let mut i = cursor[s];
++                while i < light_key[s].len() && light_key[s][i] <= watermark {
++                    let off = (light_key[s][i] - win_lo) as usize;
++                    let v = light_nonref[s][i];
++                    let slot = &mut window_nonref[off];
++                    *slot = if *slot == u32::MAX { v } else { (*slot).max(v) };
++                    i += 1;
++                }
++            }
++            window_key.clear();
++            for (off, &v) in window_nonref.iter().enumerate() {
++                if v != u32::MAX {
++                    window_key.push(win_lo + off as u64);
++                }
++            }
++            c.positions_seen += window_key.len() as u64;
++
++            for s in 0..n {
++                mat_cursor[s] = cursor[s];
++            }
++            for &key in &window_key {
++                if window_nonref[(key - win_lo) as usize] < MIN_ALT_OBS {
++                    continue;
++                }
++                c.positions_kept += 1;
++                mp.begin(key);
++                for s in 0..n {
++                    let mut i = mat_cursor[s];
++                    while i < light_key[s].len() && light_key[s][i] < key {
++                        i += 1;
++                    }
++                    mat_cursor[s] = i;
++                    if i >= light_key[s].len() || light_key[s][i] != key {
++                        continue;
++                    }
++                    c.merge_bytes += copy_locus(&mut mp, s as u32, &buf[s][i]);
++                    c.merge_objects += 1;
++                }
++                sink.accept(&mp);
++            }
++
++            for s in 0..n {
++                let mut i = cursor[s];
++                while i < light_key[s].len() && light_key[s][i] <= watermark {
++                    i += 1;
++                }
++                buf[s].drain(..i);
++                light_key[s].drain(..i);
++                light_nonref[s].drain(..i);
++                cursor[s] = 0;
++            }
++        }
++    }
++    Ok(())
++}
++
++// =====================================================================
++// The block producer's three modes — C, D, and their floors
++// =====================================================================
++
++/// Tally a filled block into the counters. Called once per handover, before it is read.
++fn account_block(block: &LocusBlock, c: &mut Counters) {
++    c.blocks += 1;
++    c.loci_produced += block.len() as u64;
++    c.block_bytes += block.payload_bytes() as u64;
++    c.block_payload_high_water = c.block_payload_high_water.max(block.payload_bytes() as u64);
++}
++
++fn mode_blk_drop(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    for region in regions {
++        for s in samples.iter_mut() {
++            s.generator.begin_segment(*region);
++            loop {
++                let more = s.generator.next_block(&s.reads)?;
++                // PANIC-FREE: the sink is installed for every block mode.
++                let sink = s
++                    .generator
++                    .block_sink_mut()
++                    .expect("a block mode installs the sink");
++                account_block(sink.block(), c);
++                sink.block_mut().clear();
++                if !more {
++                    break;
++                }
++            }
++        }
++    }
++    Ok(())
++}
++
++/// Advance sample `s` to its next locus, refilling the block when the cursor runs off its
++/// end. The scratch buffer lives outside `samples`, so the block can be borrowed while it
++/// is written.
++fn blk_pull_scratch(
++    sample: &mut NgSample,
++    cursor: &mut BlockCursor,
++    scratch: &mut LocusScratch,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    loop {
++        // PANIC-FREE: the sink is installed for every block mode.
++        let sink = sample
++            .generator
++            .block_sink_mut()
++            .expect("a block mode installs the sink");
++        if cursor.at < sink.block().len() {
++            scratch.refill_from(sink.block(), cursor.at);
++            cursor.at += 1;
++            cursor.has_head = true;
++            c.loci_materialised += 1;
++            return Ok(());
++        }
++        if cursor.exhausted {
++            cursor.has_head = false;
++            return Ok(());
++        }
++        sink.block_mut().clear();
++        let more = sample.generator.next_block(&sample.reads)?;
++        // PANIC-FREE: as above.
++        let sink = sample
++            .generator
++            .block_sink_mut()
++            .expect("a block mode installs the sink");
++        account_block(sink.block(), c);
++        cursor.at = 0;
++        cursor.exhausted = !more;
++    }
++}
++
++fn mode_blk_records(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut cursors: Vec<BlockCursor> = (0..n).map(|_| BlockCursor::default()).collect();
++    let mut scratch: Vec<LocusScratch> = (0..n).map(|_| LocusScratch::default()).collect();
++    let mut mp = MergedPosition::default();
++
++    for region in regions {
++        for (si, s) in samples.iter_mut().enumerate() {
++            s.generator.begin_segment(*region);
++            // PANIC-FREE: the sink is installed for every block mode.
++            s.generator
++                .block_sink_mut()
++                .expect("a block mode installs the sink")
++                .block_mut()
++                .clear();
++            cursors[si] = BlockCursor::default();
++        }
++        for si in 0..n {
++            blk_pull_scratch(&mut samples[si], &mut cursors[si], &mut scratch[si], c)?;
++        }
++        loop {
++            let mut min_key = u64::MAX;
++            for si in 0..n {
++                if cursors[si].has_head {
++                    min_key = min_key.min(scratch[si].key());
++                }
++            }
++            if min_key == u64::MAX {
++                break;
++            }
++            c.positions_seen += 1;
++
++            let mut max_nonref = 0u32;
++            for si in 0..n {
++                if cursors[si].has_head && scratch[si].key() == min_key {
++                    max_nonref = max_nonref.max(nonref_obs_of_scratch(&scratch[si]));
++                }
++            }
++            let kept = max_nonref >= MIN_ALT_OBS;
++            if kept {
++                c.positions_kept += 1;
++                mp.begin(min_key);
++            }
++
++            for si in 0..n {
++                if !cursors[si].has_head || scratch[si].key() != min_key {
++                    continue;
++                }
++                if kept {
++                    c.merge_bytes += copy_locus_from_scratch(&mut mp, si as u32, &scratch[si]);
++                    c.merge_objects += 1;
++                }
++                blk_pull_scratch(&mut samples[si], &mut cursors[si], &mut scratch[si], c)?;
++            }
++            if kept {
++                sink.accept(&mp);
++            }
++        }
++    }
++    c.scratch_bytes = scratch.iter().map(|s| s.bytes_copied).sum();
++    Ok(())
++}
++
++/// **Arm E.** The record-shaped merge again, but allowed to read the block's summary
++/// column for its keep rule, so a locus is only refilled into a scratch record when the
++/// cohort has decided to keep its position.
++///
++/// It exists to separate two things arm D confounds: *folding a cheap column across
++/// samples* and *the block carrying a cheap column at all*. If E lands on D, the fold's
++/// dense window buys nothing and what pays is the summary column.
++///
++/// It also needs no round structure. It borrows one sample's block at a time, so no
++/// moment exists where every sample's block must be held at once.
++fn mode_blk_records_sum(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut cursors: Vec<BlockCursor> = (0..n).map(|_| BlockCursor::default()).collect();
++    let mut scratch: Vec<LocusScratch> = (0..n).map(|_| LocusScratch::default()).collect();
++    let mut head_key = vec![u64::MAX; n];
++    let mut head_nonref = vec![0u32; n];
++    let mut mp = MergedPosition::default();
++
++    for region in regions {
++        for (si, s) in samples.iter_mut().enumerate() {
++            s.generator.begin_segment(*region);
++            // PANIC-FREE: the sink is installed for every block mode.
++            s.generator
++                .block_sink_mut()
++                .expect("a block mode installs the sink")
++                .block_mut()
++                .clear();
++            cursors[si] = BlockCursor::default();
++        }
++        for si in 0..n {
++            blk_seat_head(
++                &mut samples[si],
++                &mut cursors[si],
++                &mut head_key[si],
++                &mut head_nonref[si],
++                c,
++            )?;
++        }
++        loop {
++            let mut min_key = u64::MAX;
++            for &k in head_key.iter() {
++                min_key = min_key.min(k);
++            }
++            if min_key == u64::MAX {
++                break;
++            }
++            c.positions_seen += 1;
++
++            let mut max_nonref = 0u32;
++            for si in 0..n {
++                if head_key[si] == min_key {
++                    max_nonref = max_nonref.max(head_nonref[si]);
++                }
++            }
++            let kept = max_nonref >= MIN_ALT_OBS;
++            if kept {
++                c.positions_kept += 1;
++                mp.begin(min_key);
++            }
++
++            for si in 0..n {
++                if head_key[si] != min_key {
++                    continue;
++                }
++                if kept {
++                    // Only now does a record exist.
++                    let block = samples[si]
++                        .generator
++                        .block_sink()
++                        .expect("a block mode installs the sink")
++                        .block();
++                    scratch[si].refill_from(block, cursors[si].at);
++                    c.loci_materialised += 1;
++                    c.merge_bytes += copy_locus_from_scratch(&mut mp, si as u32, &scratch[si]);
++                    c.merge_objects += 1;
++                }
++                cursors[si].at += 1;
++                blk_seat_head(
++                    &mut samples[si],
++                    &mut cursors[si],
++                    &mut head_key[si],
++                    &mut head_nonref[si],
++                    c,
++                )?;
++            }
++            if kept {
++                sink.accept(&mp);
++            }
++        }
++    }
++    c.scratch_bytes = scratch.iter().map(|s| s.bytes_copied).sum();
++    Ok(())
++}
++
++/// Seat arm E's head on the locus at the cursor, refilling the block if the cursor ran off
++/// its end. Reads three per-locus arrays and nothing ragged.
++fn blk_seat_head(
++    sample: &mut NgSample,
++    cursor: &mut BlockCursor,
++    key: &mut u64,
++    nonref: &mut u32,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    loop {
++        // PANIC-FREE: the sink is installed for every block mode.
++        let sink = sample
++            .generator
++            .block_sink_mut()
++            .expect("a block mode installs the sink");
++        if cursor.at < sink.block().len() {
++            *key = key_in_block(sink.block(), cursor.at);
++            *nonref = sink.block().nonref_obs_of(cursor.at);
++            cursor.has_head = true;
++            return Ok(());
++        }
++        if cursor.exhausted {
++            *key = u64::MAX;
++            cursor.has_head = false;
++            return Ok(());
++        }
++        sink.block_mut().clear();
++        let more = sample.generator.next_block(&sample.reads)?;
++        // PANIC-FREE: as above.
++        let sink = sample
++            .generator
++            .block_sink_mut()
++            .expect("a block mode installs the sink");
++        account_block(sink.block(), c);
++        cursor.at = 0;
++        cursor.exhausted = !more;
++    }
++}
++
++fn mode_blk_fold(
++    samples: &mut [NgSample],
++    regions: &[GenomeRegion],
++    sink: &mut Sink,
++    c: &mut Counters,
++) -> Result<(), Box<dyn std::error::Error>> {
++    let n = samples.len();
++    let mut cursors: Vec<BlockCursor> = (0..n).map(|_| BlockCursor::default()).collect();
++    let mut window_nonref: Vec<u32> = Vec::new();
++    let mut window_key: Vec<u64> = Vec::new();
++    let mut mat_cursor = vec![0usize; n];
++    let mut mp = MergedPosition::default();
++
++    for region in regions {
++        for (si, s) in samples.iter_mut().enumerate() {
++            s.generator.begin_segment(*region);
++            // PANIC-FREE: the sink is installed for every block mode.
++            s.generator
++                .block_sink_mut()
++                .expect("a block mode installs the sink")
++                .block_mut()
++                .clear();
++            cursors[si] = BlockCursor::default();
++        }
++        loop {
++            // ---- mutable phase: every sample that has run off its block gets a new one.
++            for si in 0..n {
++                loop {
++                    // PANIC-FREE: the sink is installed for every block mode.
++                    let sink_ref = samples[si]
++                        .generator
++                        .block_sink_mut()
++                        .expect("a block mode installs the sink");
++                    if cursors[si].exhausted || cursors[si].at < sink_ref.block().len() {
++                        break;
++                    }
++                    sink_ref.block_mut().clear();
++                    let more = samples[si].generator.next_block(&samples[si].reads)?;
++                    // PANIC-FREE: as above.
++                    let sink_ref = samples[si]
++                        .generator
++                        .block_sink_mut()
++                        .expect("a block mode installs the sink");
++                    account_block(sink_ref.block(), c);
++                    cursors[si].at = 0;
++                    cursors[si].exhausted = !more;
++                }
++            }
++
++            // ---- shared phase: every sample's block is borrowed at once. N distinct
++            // owners can all be borrowed shared, which is why no reference count and no
++            // per-sample owned copy is needed. Nothing may advance until the views drop.
++            let blocks: Vec<&LocusBlock> = samples
++                .iter()
++                .map(|s| {
++                    // PANIC-FREE: the sink is installed for every block mode.
++                    s.generator
++                        .block_sink()
++                        .expect("a block mode installs the sink")
++                        .block()
++                })
++                .collect();
++
++            let mut any = false;
++            let mut watermark = u64::MAX;
++            for si in 0..n {
++                let len = blocks[si].len();
++                if cursors[si].at < len {
++                    any = true;
++                }
++                if !cursors[si].exhausted && len > 0 {
++                    watermark = watermark.min(key_in_block(blocks[si], len - 1));
++                }
++            }
++            if !any {
++                break;
++            }
++            if watermark == u64::MAX {
++                watermark = (0..n)
++                    .filter(|&si| blocks[si].len() > 0)
++                    .map(|si| key_in_block(blocks[si], blocks[si].len() - 1))
++                    .max()
++                    .unwrap_or(0);
++            }
++
++            let win_lo = (0..n)
++                .filter(|&si| cursors[si].at < blocks[si].len())
++                .map(|si| key_in_block(blocks[si], cursors[si].at))
++                .min()
++                .unwrap_or(watermark);
++            let win_len = (watermark.saturating_sub(win_lo) + 1).min(WINDOW_CAP) as usize;
++            let watermark = win_lo + win_len as u64 - 1;
++
++            // The fold itself: three arrays per sample — contig, start, and the block's own
++            // summary column. `obs_bases` is not touched, and neither is anything ragged.
++            window_nonref.clear();
++            window_nonref.resize(win_len, u32::MAX); // MAX = "no sample here"
++            for si in 0..n {
++                let block = blocks[si];
++                let mut i = cursors[si].at;
++                while i < block.len() {
++                    let key = key_in_block(block, i);
++                    if key > watermark {
++                        break;
++                    }
++                    let off = (key - win_lo) as usize;
++                    let v = block.nonref_obs_of(i);
++                    let slot = &mut window_nonref[off];
++                    *slot = if *slot == u32::MAX { v } else { (*slot).max(v) };
++                    i += 1;
++                }
++            }
++            window_key.clear();
++            for (off, &v) in window_nonref.iter().enumerate() {
++                if v != u32::MAX {
++                    window_key.push(win_lo + off as u64);
++                }
++            }
++            c.positions_seen += window_key.len() as u64;
++
++            // Only the variable positions ever read the heavy arrays.
++            for si in 0..n {
++                mat_cursor[si] = cursors[si].at;
++            }
++            for &key in &window_key {
++                if window_nonref[(key - win_lo) as usize] < MIN_ALT_OBS {
++                    continue;
++                }
++                c.positions_kept += 1;
++                mp.begin(key);
++                for si in 0..n {
++                    let block = blocks[si];
++                    let mut i = mat_cursor[si];
++                    while i < block.len() && key_in_block(block, i) < key {
++                        i += 1;
++                    }
++                    mat_cursor[si] = i;
++                    if i >= block.len() || key_in_block(block, i) != key {
++                        continue;
++                    }
++                    c.merge_bytes += copy_locus_from_block(&mut mp, si as u32, block, i);
++                    c.merge_objects += 1;
++                }
++                sink.accept(&mp);
++            }
++
++            // Advance the cursors past the window, then let the views drop.
++            for si in 0..n {
++                let block = blocks[si];
++                let mut i = cursors[si].at;
++                while i < block.len() && key_in_block(block, i) <= watermark {
++                    i += 1;
++                }
++                cursors[si].at = i;
++            }
++            drop(blocks);
++        }
++    }
++    Ok(())
++}
++
++// =====================================================================
++// Driver
++// =====================================================================
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    #[cfg(feature = "dhat-heap")]
++    let _profiler = dhat::Profiler::new_heap();
++
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    if args.len() < 6 {
++        eprintln!(
++            "usage: sketch4_producer_merge \
++             <rec-drop|rec-records|rec-fold|blk-drop|blk-drop-sum|blk-records|blk-fold> \
++             <full|digest> <ref.fa> <regions.bed> <n_regions> <a.cram> ..."
++        );
++        std::process::exit(2);
++    }
++    let mode = args[0].clone();
++    let consumer = match args[1].as_str() {
++        "full" => Consumer::Full,
++        "digest" => Consumer::Digest,
++        other => panic!("unknown consumer {other}"),
++    };
++    let fasta = PathBuf::from(&args[2]);
++    let bed = PathBuf::from(&args[3]);
++    let n_regions: usize = args[4].parse()?;
++    let crams: Vec<PathBuf> = args[5..].iter().map(PathBuf::from).collect();
++    let block_bytes: usize = std::env::var("PVC_SKETCH4_BLOCK_KB")
++        .ok()
++        .and_then(|v| v.parse::<usize>().ok())
++        .map_or(BLOCK_BYTES_DEFAULT, |kb| kb * 1024);
++
++    let uses_block = mode.starts_with("blk-");
++    let wants_summary = matches!(
++        mode.as_str(),
++        "blk-drop-sum" | "blk-fold" | "blk-records-sum"
++    );
++
++    let cache = Arc::new(ReferenceInfoCache::new());
++    let (info, verify) = read_reference_verifying_or_creating_fai(
++        &cache,
++        fasta.clone(),
++        ReferenceCheck::TrustIndexWithoutChecking,
++    )?;
++    let contigs = Arc::new(info.contig_list());
++    let index = WindowedRefSeq::read_index(&fasta)?;
++    if let Some(v) = verify {
++        v.join().expect("reference verification thread");
++    }
++
++    let mut regions: Vec<GenomeRegion> = Vec::new();
++    for line in BufReader::new(File::open(&bed)?).lines() {
++        let line = line?;
++        let mut f = line.split('\t');
++        let (Some(name), Some(s), Some(e)) = (f.next(), f.next(), f.next()) else {
++            continue;
++        };
++        let Some(cid) = contigs.entries.iter().position(|c| c.name == name) else {
++            continue;
++        };
++        regions.push(GenomeRegion {
++            contig: ContigId(cid as u32),
++            start: Position(s.parse::<u64>()? + 1),
++            end: Position(e.parse::<u64>()?),
++        });
++        if regions.len() >= n_regions {
++            break;
++        }
++    }
++
++    let reference = OpenReference::new(info);
++    let mut samples: Vec<NgSample> = Vec::with_capacity(crams.len());
++    for cram in &crams {
++        let reads = SampleReads::open_only_sample(
++            std::slice::from_ref(cram),
++            &reference,
++            ReadFilterConfig::default(),
++            true,
++        )?;
++        let preparer = LeftAlignPreparer::with_default_normalizer(WindowedRefSeq::with_shared_index(
++            fasta.clone(),
++            contigs.clone(),
++            index.clone(),
++        ));
++        #[allow(
++            clippy::arc_with_non_send_sync,
++            reason = "the file-backed accessor is single-threaded here, as in benches/ng_generic_pileup_perf.rs"
++        )]
++        let refseq = Arc::new(WindowedRefSeq::with_shared_index(
++            fasta.clone(),
++            contigs.clone(),
++            index.clone(),
++        ));
++        let make_reference = {
++            let fasta = fasta.clone();
++            let contigs = contigs.clone();
++            let index = index.clone();
++            move || WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
++        };
++        let mut generator = PileupGenerator::new(
++            refseq,
++            make_reference,
++            preparer,
++            PileupGeneratorConfig::default(),
++        )?;
++        if uses_block {
++            generator.install_block_sink(LocusSink::columns_with_summary(
++                block_bytes,
++                wants_summary,
++            ));
++        }
++        samples.push(NgSample {
++            generator,
++            reads,
++            head: None,
++        });
++    }
++
++    let mut sink = Sink::new(consumer);
++    let mut c = Counters::default();
++    match mode.as_str() {
++        "stats" => mode_stats(&mut samples, &regions, &mut c)?,
++        "rec-drop" => mode_rec_drop(&mut samples, &regions, &mut c)?,
++        "rec-records" => mode_rec_records(&mut samples, &regions, &mut sink, &mut c)?,
++        "rec-fold" => mode_rec_fold(&mut samples, &regions, &mut sink, &mut c)?,
++        "blk-drop" | "blk-drop-sum" => mode_blk_drop(&mut samples, &regions, &mut c)?,
++        "blk-records" => mode_blk_records(&mut samples, &regions, &mut sink, &mut c)?,
++        "blk-records-sum" => mode_blk_records_sum(&mut samples, &regions, &mut sink, &mut c)?,
++        "blk-fold" => mode_blk_fold(&mut samples, &regions, &mut sink, &mut c)?,
++        other => panic!("unknown mode {other}"),
++    }
++
++    println!("mode={mode} consumer={}", args[1]);
++    println!("samples={} regions={}", crams.len(), regions.len());
++    println!("block_bytes={block_bytes} summary={wants_summary}");
++    println!("digest=0x{:016x}", sink.digest);
++    println!("loglik_acc={:.6}", sink.loglik_acc);
++    println!("loci_produced={}", c.loci_produced);
++    println!("loci_materialised={}", c.loci_materialised);
++    println!("positions_seen={}", c.positions_seen);
++    println!("positions_kept={}", c.positions_kept);
++    println!("producer_bytes={}", c.producer_bytes);
++    println!("block_bytes_written={}", c.block_bytes);
++    println!("scratch_bytes={}", c.scratch_bytes);
++    println!("observations={}", c.observations);
++    println!("visits={}", c.visits);
++    println!("blocks={}", c.blocks);
++    println!(
++        "block_payload_high_water={}",
++        c.block_payload_high_water
++    );
++    println!("merge_objects={}", c.merge_objects);
++    println!("merge_bytes={}", c.merge_bytes);
++    Ok(())
++}
+diff --git a/src/ng/locus_generation/block.rs b/src/ng/locus_generation/block.rs
+new file mode 100644
+index 0000000..bef7d8f
+--- /dev/null
++++ b/src/ng/locus_generation/block.rs
+@@ -0,0 +1,547 @@
++//! **SKETCH — throwaway.** The columnar alternative to one owned locus per covered base.
++//!
++//! Built for `doc/devel/ng/impl_plan/locus_stream_shape_experiments.md` sketch 1 and
++//! deleted after the decision. Nothing here commits an interface.
++//!
++//! A [`LocusBlock`] is many loci with each field held as one array shared across the
++//! block: flat byte buffers plus offset arrays for the ragged fields, and an index
++//! saying where each locus's observations begin. A [`LocusSink`] is what the walk
++//! emits into — either today's `VecDeque` of owned records (arm A) or a block
++//! (arms B and C).
++
++use std::collections::VecDeque;
++
++use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations};
++use crate::ng::types::ReadGroupId;
++use crate::pileup_record::ChainId;
++
++/// A run of positions a partial witness covered, in locus coordinates.
++pub type WitnessRun = (u16, u16);
++
++/// Many loci, each field one array.
++///
++/// Every ragged field is a flat buffer plus an offsets array carrying `n + 1` entries,
++/// the first of which is zero — so locus `i`'s slice is `off[i]..off[i + 1]` and no
++/// length is stored twice.
++#[derive(Debug, Default)]
++pub struct LocusBlock {
++    // ---- per locus ----
++    pub contig: Vec<u32>,
++    /// 1-based inclusive, as `GenomeRegion` is.
++    pub start: Vec<u32>,
++    pub end: Vec<u32>,
++    pub reads_without_observation: Vec<u32>,
++    pub reads_discarded_by_cap: Vec<u32>,
++    /// `n + 1` entries into `ref_bases`.
++    pub ref_bases_off: Vec<u32>,
++    pub ref_bases: Vec<u8>,
++    /// `n + 1` entries into the per-observation arrays.
++    pub obs_off: Vec<u32>,
++    /// **SKETCH 4.** The cheap per-locus summary the cohort merge folds: summed
++    /// `num_obs` over the observations whose bases differ from this locus's reference
++    /// bases. Empty unless the block was built with `summary` on.
++    ///
++    /// It exists because nothing else in the block answers "is this locus worth
++    /// materialising" without touching `obs_bases` — the heaviest array here. Sketch 2's
++    /// `.psp` fold read the equivalent straight out of the file, which stores its alleles
++    /// reference-first; ng's observations carry raw bases and no reference marker, so the
++    /// comparison has to happen somewhere, and the cheapest somewhere is at fill time,
++    /// when the reference bases are already in cache.
++    pub locus_nonref_obs: Vec<u32>,
++
++    // ---- per observation ----
++    /// `m + 1` entries into `obs_bases`.
++    pub obs_bases_off: Vec<u32>,
++    pub obs_bases: Vec<u8>,
++    /// `0` complete, `1` partial. A partial's runs are `obs_runs[obs_runs_off[j]..]`.
++    pub obs_witness_kind: Vec<u8>,
++    /// `m + 1` entries into `obs_runs`.
++    pub obs_runs_off: Vec<u32>,
++    pub obs_runs: Vec<WitnessRun>,
++    pub obs_read_group: Vec<u32>,
++    pub obs_num_obs: Vec<u32>,
++    pub obs_num_fwd: Vec<u32>,
++    pub obs_q_sum: Vec<f64>,
++    pub obs_mapq_sum: Vec<u32>,
++    pub obs_mapq_sum_sq: Vec<u64>,
++    pub obs_placed_left: Vec<u32>,
++    /// `m + 1` entries into `obs_chain_ids`.
++    pub obs_chain_off: Vec<u32>,
++    pub obs_chain_ids: Vec<ChainId>,
++
++    /// Running payload size, kept incrementally so the budget test is a compare.
++    bytes: usize,
++    /// The block is full at or above this many payload bytes. Zero means unbounded.
++    budget_bytes: usize,
++    /// **SKETCH 4.** Whether `locus_nonref_obs` is maintained. Constant for the life of a
++    /// run, so the branch it guards predicts perfectly — the same device as
++    /// `LocusSink::wants_records`.
++    summary: bool,
++    /// **SKETCH 4.** Where the open locus's reference bases start in `ref_bases`.
++    open_ref_lo: usize,
++}
++
++/// Bytes one observation adds to `bytes`, excluding its ragged parts.
++const OBSERVATION_FIXED_BYTES: usize = 4 + 1 + 4 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 4;
++/// Bytes one locus adds to `bytes`, excluding its ragged parts.
++const LOCUS_FIXED_BYTES: usize = 4 + 4 + 4 + 4 + 4 + 4 + 4;
++
++impl LocusBlock {
++    /// An empty block that reports itself full at `budget_bytes` of payload.
++    pub fn with_budget(budget_bytes: usize) -> Self {
++        Self::with_budget_and_summary(budget_bytes, false)
++    }
++
++    /// **SKETCH 4.** As [`with_budget`](Self::with_budget), maintaining the cheap
++    /// per-locus summary column when `summary` is set.
++    pub fn with_budget_and_summary(budget_bytes: usize, summary: bool) -> Self {
++        let mut block = Self {
++            budget_bytes,
++            summary,
++            ..Self::default()
++        };
++        block.clear();
++        block
++    }
++
++    /// Empty the block, keeping every allocation. The offset arrays keep their leading
++    /// zero, which is what makes `off[i]..off[i + 1]` total.
++    pub fn clear(&mut self) {
++        self.contig.clear();
++        self.start.clear();
++        self.end.clear();
++        self.reads_without_observation.clear();
++        self.reads_discarded_by_cap.clear();
++        self.ref_bases.clear();
++        self.obs_bases.clear();
++        self.obs_runs.clear();
++        self.obs_witness_kind.clear();
++        self.obs_read_group.clear();
++        self.obs_num_obs.clear();
++        self.obs_num_fwd.clear();
++        self.obs_q_sum.clear();
++        self.obs_mapq_sum.clear();
++        self.obs_mapq_sum_sq.clear();
++        self.obs_placed_left.clear();
++        self.obs_chain_ids.clear();
++        self.locus_nonref_obs.clear();
++        self.open_ref_lo = 0;
++        for offsets in [
++            &mut self.ref_bases_off,
++            &mut self.obs_off,
++            &mut self.obs_bases_off,
++            &mut self.obs_runs_off,
++            &mut self.obs_chain_off,
++        ] {
++            offsets.clear();
++            offsets.push(0);
++        }
++        self.bytes = 0;
++    }
++
++    /// How many loci the block holds.
++    pub fn len(&self) -> usize {
++        self.contig.len()
++    }
++
++    pub fn is_empty(&self) -> bool {
++        self.contig.is_empty()
++    }
++
++    /// How many observations the block holds, over all its loci.
++    pub fn observation_count(&self) -> usize {
++        self.obs_num_obs.len()
++    }
++
++    /// Payload bytes currently held — what the budget is judged against.
++    pub fn payload_bytes(&self) -> usize {
++        self.bytes
++    }
++
++    /// Bytes the block's arrays have reserved, whether used or not.
++    pub fn capacity_bytes(&self) -> usize {
++        self.contig.capacity() * 4
++            + self.start.capacity() * 4
++            + self.end.capacity() * 4
++            + self.reads_without_observation.capacity() * 4
++            + self.reads_discarded_by_cap.capacity() * 4
++            + self.ref_bases_off.capacity() * 4
++            + self.ref_bases.capacity()
++            + self.obs_off.capacity() * 4
++            + self.obs_bases_off.capacity() * 4
++            + self.obs_bases.capacity()
++            + self.obs_witness_kind.capacity()
++            + self.obs_runs_off.capacity() * 4
++            + self.obs_runs.capacity() * 4
++            + self.obs_read_group.capacity() * 4
++            + self.obs_num_obs.capacity() * 4
++            + self.obs_num_fwd.capacity() * 4
++            + self.obs_q_sum.capacity() * 8
++            + self.obs_mapq_sum.capacity() * 4
++            + self.obs_mapq_sum_sq.capacity() * 8
++            + self.obs_placed_left.capacity() * 4
++            + self.obs_chain_off.capacity() * 4
++            + self.obs_chain_ids.capacity() * 8
++            + self.locus_nonref_obs.capacity() * 4
++    }
++
++    /// **SKETCH 4.** Locus `i`'s summed non-reference observations — the cheap column the
++    /// cohort merge folds. Zero when the summary is off, which is why the fold arm asks
++    /// for it explicitly.
++    #[inline]
++    pub fn nonref_obs_of(&self, i: usize) -> u32 {
++        self.locus_nonref_obs[i]
++    }
++
++    /// Whether the block has reached its budget. Tested after each whole locus, never
++    /// inside one — a locus is never split across two blocks.
++    pub fn is_full(&self) -> bool {
++        self.budget_bytes != 0 && self.bytes >= self.budget_bytes
++    }
++
++    /// Start a locus. Every `begin_locus` must be closed by exactly one `end_locus`,
++    /// with its observations pushed between the two.
++    pub fn begin_locus(
++        &mut self,
++        contig: u32,
++        start: u32,
++        end: u32,
++        reference_bases: &[u8],
++        reads_without_observation: u32,
++        reads_discarded_by_cap: u32,
++    ) {
++        self.contig.push(contig);
++        self.start.push(start);
++        self.end.push(end);
++        self.reads_without_observation
++            .push(reads_without_observation);
++        self.reads_discarded_by_cap.push(reads_discarded_by_cap);
++        if self.summary {
++            self.open_ref_lo = self.ref_bases.len();
++            self.locus_nonref_obs.push(0);
++            self.bytes += 4;
++        }
++        self.ref_bases.extend_from_slice(reference_bases);
++        self.ref_bases_off.push(self.ref_bases.len() as u32);
++        self.bytes += LOCUS_FIXED_BYTES + reference_bases.len();
++    }
++
++    /// Append one observation to the locus opened by `begin_locus`.
++    #[allow(clippy::too_many_arguments)]
++    pub fn push_observation(
++        &mut self,
++        bases: &[u8],
++        witness_runs: Option<&[WitnessRun]>,
++        read_group: ReadGroupId,
++        num_obs: u32,
++        num_fwd: u32,
++        q_sum: f64,
++        mapq_sum: u32,
++        mapq_sum_sq: u64,
++        placed_left: u32,
++        chain_ids: &[ChainId],
++    ) {
++        if self.summary && bases != &self.ref_bases[self.open_ref_lo..] {
++            // PANIC-FREE: `begin_locus` pushed the entry this observation belongs to.
++            let slot = self
++                .locus_nonref_obs
++                .last_mut()
++                .expect("an observation is only pushed inside an open locus");
++            *slot = slot.saturating_add(num_obs);
++        }
++        self.obs_bases.extend_from_slice(bases);
++        self.obs_bases_off.push(self.obs_bases.len() as u32);
++        match witness_runs {
++            None => self.obs_witness_kind.push(0),
++            Some(runs) => {
++                self.obs_witness_kind.push(1);
++                self.obs_runs.extend_from_slice(runs);
++            }
++        }
++        self.obs_runs_off.push(self.obs_runs.len() as u32);
++        self.obs_read_group.push(read_group.0);
++        self.obs_num_obs.push(num_obs);
++        self.obs_num_fwd.push(num_fwd);
++        self.obs_q_sum.push(q_sum);
++        self.obs_mapq_sum.push(mapq_sum);
++        self.obs_mapq_sum_sq.push(mapq_sum_sq);
++        self.obs_placed_left.push(placed_left);
++        self.obs_chain_ids.extend_from_slice(chain_ids);
++        self.obs_chain_off.push(self.obs_chain_ids.len() as u32);
++        self.bytes += OBSERVATION_FIXED_BYTES
++            + bases.len()
++            + witness_runs.map_or(0, |runs| runs.len() * 4)
++            + chain_ids.len() * 8;
++    }
++
++    /// Close the locus opened by `begin_locus`.
++    pub fn end_locus(&mut self) {
++        self.obs_off.push(self.obs_num_obs.len() as u32);
++    }
++
++    /// Copy a whole owned record in — the path the general fold takes when it has not
++    /// been converted, and the path the SSR generator would take.
++    pub fn push_record(&mut self, locus: &SampleLocusObservations) {
++        self.begin_locus(
++            locus.region.contig.0,
++            locus.region.start.get() as u32,
++            locus.region.end.get() as u32,
++            &locus.reference_bases,
++            locus.reads_without_observation,
++            locus.reads_discarded_by_cap,
++        );
++        for observation in &locus.observations {
++            let runs: Option<&[WitnessRun]> = match &observation.read_witness {
++                ReadWitness::Complete => None,
++                ReadWitness::Partial { positions } => Some(positions.runs_slice()),
++            };
++            self.push_observation(
++                &observation.bases,
++                runs,
++                observation.read_group,
++                observation.num_obs,
++                observation.num_fwd,
++                observation.q_sum,
++                observation.mapq_sum,
++                observation.mapq_sum_sq,
++                observation.placed_left,
++                &observation.chain_ids,
++            );
++        }
++        self.end_locus();
++    }
++
++    /// The observation index range of locus `i`.
++    #[inline]
++    pub fn observations_of(&self, i: usize) -> std::ops::Range<usize> {
++        self.obs_off[i] as usize..self.obs_off[i + 1] as usize
++    }
++
++    /// Locus `i`'s reference bases.
++    #[inline]
++    pub fn reference_bases_of(&self, i: usize) -> &[u8] {
++        &self.ref_bases[self.ref_bases_off[i] as usize..self.ref_bases_off[i + 1] as usize]
++    }
++
++    /// Observation `j`'s bases.
++    #[inline]
++    pub fn bases_of(&self, j: usize) -> &[u8] {
++        &self.obs_bases[self.obs_bases_off[j] as usize..self.obs_bases_off[j + 1] as usize]
++    }
++
++    /// Observation `j`'s chain ids.
++    #[inline]
++    pub fn chain_ids_of(&self, j: usize) -> &[ChainId] {
++        &self.obs_chain_ids[self.obs_chain_off[j] as usize..self.obs_chain_off[j + 1] as usize]
++    }
++
++    /// Observation `j`'s witness runs, empty for a complete witness.
++    #[inline]
++    pub fn runs_of(&self, j: usize) -> &[WitnessRun] {
++        &self.obs_runs[self.obs_runs_off[j] as usize..self.obs_runs_off[j + 1] as usize]
++    }
++
++    /// Rebuild locus `i` as the owned record the record path would have emitted — what
++    /// the random-locus sampler does with a locus it keeps, since a view cannot outlive
++    /// its block. Returns the bytes copied, which the sketch reports.
++    pub fn copy_out(&self, i: usize) -> (SampleLocusObservations, usize) {
++        use crate::ng::locus_generation::{
++            LocusKind, SequenceObservation, WitnessedLocusPositions,
++        };
++        use crate::ng::types::{ContigId, GenomeRegion, Position};
++
++        let mut copied = self.reference_bases_of(i).len();
++        let mut observations = Vec::with_capacity(self.observations_of(i).len());
++        for j in self.observations_of(i) {
++            let runs = self.runs_of(j);
++            let read_witness = if self.obs_witness_kind[j] == 0 {
++                ReadWitness::Complete
++            } else {
++                ReadWitness::Partial {
++                    // The stored runs are already canonical, so this round-trips.
++                    positions: WitnessedLocusPositions::from_half_open_runs(
++                        runs.iter().copied(),
++                    )
++                    .expect("a stored partial witness is never empty"),
++                }
++            };
++            copied += self.bases_of(j).len() + runs.len() * 4 + self.chain_ids_of(j).len() * 8;
++            observations.push(SequenceObservation {
++                bases: self.bases_of(j).to_vec().into_boxed_slice(),
++                read_witness,
++                read_group: ReadGroupId(self.obs_read_group[j]),
++                num_obs: self.obs_num_obs[j],
++                num_fwd: self.obs_num_fwd[j],
++                q_sum: self.obs_q_sum[j],
++                mapq_sum: self.obs_mapq_sum[j],
++                mapq_sum_sq: self.obs_mapq_sum_sq[j],
++                placed_left: self.obs_placed_left[j],
++                chain_ids: self.chain_ids_of(j).to_vec(),
++            });
++        }
++        (
++            SampleLocusObservations {
++                region: GenomeRegion {
++                    contig: ContigId(self.contig[i]),
++                    start: Position(u64::from(self.start[i])),
++                    end: Position(u64::from(self.end[i])),
++                },
++                reference_bases: self.reference_bases_of(i).to_vec().into_boxed_slice(),
++                observations,
++                reads_without_observation: self.reads_without_observation[i],
++                reads_discarded_by_cap: self.reads_discarded_by_cap[i],
++                kind: LocusKind::Generic,
++            },
++            copied,
++        )
++    }
++}
++
++/// Where the walk puts what it produces: today's owned records, or a block.
++///
++/// One enum rather than a type parameter, deliberately. Making the walk generic over its
++/// sink would ripple a parameter through `PileupGenerator`, `GeneratorSlot`,
++/// `GeneratorSet` and `SampleLocusObservationsIterator` — including the STR generator,
++/// which this sketch does not touch. The cost is one predictable branch per locus, the
++/// same branch in every arm, against a per-locus cost measured in thousands of
++/// instructions.
++#[derive(Debug)]
++pub struct LocusSink {
++    records: VecDeque<SampleLocusObservations>,
++    block: LocusBlock,
++    columns: bool,
++    /// The region the generator clamps loci to. The record path applies this in
++    /// `PileupGenerator::next_locus`, after the walker has yielded; the columnar path has
++    /// no such moment, so it applies it here.
++    clamp: Option<(u32, u32)>,
++    /// Loci the clamp rejected — the columnar path's share of
++    /// `PileupGeneratorCounts::records_outside_region`.
++    pub records_outside_region: u64,
++}
++
++impl LocusSink {
++    /// A sink that collects owned records: the shipped behaviour.
++    pub fn records() -> Self {
++        Self {
++            records: VecDeque::new(),
++            block: LocusBlock::default(),
++            columns: false,
++            clamp: None,
++            records_outside_region: 0,
++        }
++    }
++
++    /// A sink that fills a block, full at `budget_bytes` of payload.
++    pub fn columns(budget_bytes: usize) -> Self {
++        Self::columns_with_summary(budget_bytes, false)
++    }
++
++    /// **SKETCH 4.** As [`columns`](Self::columns), with the cohort merge's cheap
++    /// per-locus summary column maintained.
++    pub fn columns_with_summary(budget_bytes: usize, summary: bool) -> Self {
++        Self {
++            records: VecDeque::new(),
++            block: LocusBlock::with_budget_and_summary(budget_bytes, summary),
++            columns: true,
++            clamp: None,
++            records_outside_region: 0,
++        }
++    }
++
++    /// Whether the emit sites should build owned records. Constant for the life of a run,
++    /// so the branch it guards predicts perfectly.
++    #[inline(always)]
++    pub fn wants_records(&self) -> bool {
++        !self.columns
++    }
++
++    /// Point the columnar path's clamp at `region`.
++    pub fn set_clamp(&mut self, start: u32, end: u32) {
++        self.clamp = Some((start, end));
++    }
++
++    /// Whether a locus anchored at `start` is inside the clamp. Loci outside are counted
++    /// and dropped, exactly as `PileupGenerator::next_locus` does on the record path.
++    #[inline]
++    pub fn accepts(&mut self, start: u32) -> bool {
++        match self.clamp {
++            None => true,
++            Some((from, to)) => {
++                let inside = start >= from && start <= to;
++                if !inside {
++                    self.records_outside_region += 1;
++                }
++                inside
++            }
++        }
++    }
++
++    /// Push an owned record — the record path, and the columnar path's fallback for
++    /// producers this sketch did not convert.
++    #[inline]
++    pub fn push_record(&mut self, locus: SampleLocusObservations) {
++        if self.columns {
++            if self.accepts(locus.region.start.get() as u32) {
++                self.block.push_record(&locus);
++            }
++        } else {
++            self.records.push_back(locus);
++        }
++    }
++
++    /// The block, for the columnar path's direct writes.
++    #[inline]
++    pub fn block_mut(&mut self) -> &mut LocusBlock {
++        &mut self.block
++    }
++
++    pub fn block(&self) -> &LocusBlock {
++        &self.block
++    }
++
++    /// The record queue, for the walk's own draining.
++    #[inline]
++    pub fn records_mut(&mut self) -> &mut VecDeque<SampleLocusObservations> {
++        &mut self.records
++    }
++
++    /// Whether anything is waiting — a record on the record path, a locus on the
++    /// columnar one.
++    #[inline]
++    pub fn has_output(&self) -> bool {
++        if self.columns {
++            !self.block.is_empty()
++        } else {
++            !self.records.is_empty()
++        }
++    }
++
++    /// Whether the walk should stop and hand the block over.
++    #[inline]
++    pub fn is_full(&self) -> bool {
++        self.columns && self.block.is_full()
++    }
++
++    /// Whether the walk's fill loop has produced enough to return.
++    ///
++    /// The record path returns as soon as one locus exists, because its consumer takes
++    /// them one at a time. The columnar path keeps walking until the block reaches its
++    /// budget — that is what the block *is*.
++    #[inline]
++    pub fn should_yield(&self) -> bool {
++        if self.columns {
++            self.block.is_full()
++        } else {
++            !self.records.is_empty()
++        }
++    }
++
++    #[inline]
++    pub fn pop_record(&mut self) -> Option<SampleLocusObservations> {
++        self.records.pop_front()
++    }
++
++    pub fn clear_records(&mut self) {
++        self.records.clear();
++    }
++}
+diff --git a/src/ng/locus_generation/mod.rs b/src/ng/locus_generation/mod.rs
+index 085fb42..5c42410 100644
+--- a/src/ng/locus_generation/mod.rs
++++ b/src/ng/locus_generation/mod.rs
+@@ -14,6 +14,7 @@
+ //! `ssr.rs` (STR), `pileup/` (generic). See `doc/devel/ng/spec/locus_generation.md`
+ //! (design) and `doc/devel/ng/arch/locus_generation.md` (types & interfaces).
+ 
++pub mod block;
+ pub mod pileup;
+ pub mod ssr;
+ mod witness;
+@@ -262,6 +263,26 @@ pub trait LocusGenerator<S> {
+         reads: &SampleReads,
+     ) -> Result<Option<SampleLocusObservations>, LocusGenerationError>;
+ 
++    /// **SKETCH (locus-stream shape experiment).** Take the sink the generator should fill
++    /// instead of building records. A generator that has no columnar path ignores it and
++    /// keeps emitting records, which is what the default does.
++    fn install_block_sink(&mut self, _sink: block::LocusSink) {}
++
++    /// **SKETCH.** Fill the installed block until it reaches its budget. `true` means more
++    /// of this segment is to come; `false` that it is drained.
++    fn next_block(
++        &mut self,
++        _segment: &S,
++        _reads: &SampleReads,
++    ) -> Result<bool, LocusGenerationError> {
++        Ok(false)
++    }
++
++    /// **SKETCH.** The installed sink, for a consumer to read the filled block from.
++    fn block_sink_mut(&mut self) -> Option<&mut block::LocusSink> {
++        None
++    }
++
+     /// What this generator has counted so far, beside the shared [`LocusCounts`] — or
+     /// `None` if it counts nothing of its own.
+     ///
+@@ -550,6 +571,28 @@ impl<S> GeneratorSlot<S> {
+         }
+     }
+ 
++    /// **SKETCH.** The block-shaped counterparts of [`begin`](Self::begin) and
++    /// [`next`](Self::next).
++    fn install_block_sink(&mut self, sink: block::LocusSink) {
++        if let GeneratorSlot::Generator(generator) = self {
++            generator.install_block_sink(sink);
++        }
++    }
++
++    fn next_block(&mut self, segment: &S, reads: &SampleReads) -> Result<bool, LocusGenerationError> {
++        match self {
++            GeneratorSlot::Generator(generator) => generator.next_block(segment, reads),
++            GeneratorSlot::Unfilled(_) => Ok(false),
++        }
++    }
++
++    fn block_sink_mut(&mut self) -> Option<&mut block::LocusSink> {
++        match self {
++            GeneratorSlot::Generator(generator) => generator.block_sink_mut(),
++            GeneratorSlot::Unfilled(_) => None,
++        }
++    }
++
+     /// What the generator in this slot has counted, or `None` — for an unfilled slot,
+     /// or a generator that counts nothing of its own.
+     fn counts(&self) -> Option<GeneratorCounts<'_>> {
+@@ -685,6 +728,42 @@ impl GeneratorSet {
+             None => Ok(None),
+         }
+     }
++
++    /// **SKETCH.** Give the generic slot a block sink; every other slot ignores it.
++    pub fn install_block_sink(&mut self, sink: block::LocusSink) {
++        self.generic.install_block_sink(sink);
++    }
++
++    /// **SKETCH.** [`next_locus`](Self::next_locus)'s block-shaped twin: fill the block
++    /// until it reaches its budget, or the region is drained. `loci_emitted` is folded
++    /// from the block's own growth, so the two paths count the same thing.
++    pub fn next_block(&mut self, reads: &SampleReads) -> Result<bool, LocusGenerationError> {
++        let Some(region) = self.current.take() else {
++            return Ok(false);
++        };
++        let before = self
++            .generic
++            .block_sink_mut()
++            .map_or(0, |sink| sink.block().len());
++        let more = match &region.kind {
++            RegionKind::Generic => self.generic.next_block(&(), reads),
++            _ => Ok(false),
++        }?;
++        let after = self
++            .generic
++            .block_sink_mut()
++            .map_or(0, |sink| sink.block().len());
++        self.counts.loci_emitted += (after - before) as u64;
++        if more {
++            self.current = Some(region);
++        }
++        Ok(more)
++    }
++
++    /// **SKETCH.** The generic slot's block sink.
++    pub fn block_sink_mut(&mut self) -> Option<&mut block::LocusSink> {
++        self.generic.block_sink_mut()
++    }
+ }
+ 
+ /// Lazily turns a typed-region stream into a sample's loci — the public surface of locus
+@@ -758,6 +837,16 @@ impl<T> SampleLocusObservationsIterator<T> {
+     pub fn generators(&self) -> &GeneratorSet {
+         &self.generators
+     }
++
++    /// **SKETCH.** Give the generic generator a block to fill.
++    pub fn install_block_sink(&mut self, sink: block::LocusSink) {
++        self.generators.install_block_sink(sink);
++    }
++
++    /// **SKETCH.** The block sink, for reading a filled block and clearing it.
++    pub fn block_sink_mut(&mut self) -> Option<&mut block::LocusSink> {
++        self.generators.block_sink_mut()
++    }
+ }
+ 
+ impl<T> Iterator for SampleLocusObservationsIterator<T>
+@@ -797,6 +886,53 @@ where
+     }
+ }
+ 
++impl<T> SampleLocusObservationsIterator<T>
++where
++    T: Iterator<Item = Result<TypedRegion, TypedRegionError>>,
++{
++    /// **SKETCH.** [`Iterator::next`]'s block-shaped twin: drive the current region until
++    /// the block reaches its budget, taking the next region when one is drained. `false`
++    /// means the stream is over; the block may still hold loci.
++    ///
++    /// The block is **not** cleared here — the consumer owns it and decides when.
++    pub fn fill_block(&mut self) -> Result<bool, LocusGenerationError> {
++        if self.done {
++            return Ok(false);
++        }
++        loop {
++            match self.generators.next_block(&self.reads) {
++                Ok(true) => return Ok(true),
++                Err(error) => {
++                    self.done = true;
++                    return Err(error);
++                }
++                // A region can drain with the block already at its budget. Handing the
++                // block over then rather than starting the next region is what keeps the
++                // budget a bound rather than a suggestion.
++                Ok(false)
++                    if self
++                        .generators
++                        .block_sink_mut()
++                        .is_some_and(|sink| sink.is_full()) =>
++                {
++                    return Ok(true);
++                }
++                Ok(false) => match self.regions.next() {
++                    None => {
++                        self.done = true;
++                        return Ok(false);
++                    }
++                    Some(Err(error)) => {
++                        self.done = true;
++                        return Err(error.into());
++                    }
++                    Some(Ok(region)) => self.generators.begin_region(region),
++                },
++            }
++        }
++    }
++}
++
+ impl<T> std::iter::FusedIterator for SampleLocusObservationsIterator<T> where
+     T: Iterator<Item = Result<TypedRegion, TypedRegionError>>
+ {
+diff --git a/src/ng/locus_generation/pileup/fast_column.rs b/src/ng/locus_generation/pileup/fast_column.rs
+index c6c1ed2..8043001 100644
+--- a/src/ng/locus_generation/pileup/fast_column.rs
++++ b/src/ng/locus_generation/pileup/fast_column.rs
+@@ -116,6 +116,14 @@ struct PlainObservation {
+ 
+ /// The buffers the fast lane reuses column to column, so an ordinary column allocates only
+ /// what it emits.
++///
++/// **SKETCH.** The `stage_*` fields and `used` are the locus-stream shape experiment's,
++/// and they exist only when the walk is filling a block. In that mode the finished column
++/// is not turned into an object: `observations` is swapped with `stage_observations`, so
++/// the accumulating buffer costs one pointer swap to hold and its `chain_ids` vectors are
++/// cleared and refilled instead of being moved out and reallocated. `used` is what makes
++/// that reuse possible — the live prefix of `observations`, since `Vec::clear` would drop
++/// the very allocations the reuse is for.
+ #[derive(Debug, Default)]
+ pub(super) struct FastColumnScratch {
+     reads: Vec<PlainContribution>,
+@@ -124,6 +132,62 @@ pub(super) struct FastColumnScratch {
+     chains: Vec<ChainId>,
+     observations: Vec<PlainObservation>,
+     ref_base: Vec<u8>,
++    /// Live entries in `observations`, columns mode only. Record mode uses the `Vec`'s own
++    /// length, exactly as it did before.
++    used: usize,
++    /// The staged column's position, or `None` when nothing is staged.
++    pub(super) stage_pos: Option<u32>,
++    stage_ref_base: u8,
++    stage_used: usize,
++    stage_observations: Vec<PlainObservation>,
++}
++
++impl FastColumnScratch {
++    /// Forget anything staged — a region boundary, where the held locus is dropped rather
++    /// than emitted for the same reason `sealed` is.
++    pub(super) fn clear_stage(&mut self) {
++        self.stage_pos = None;
++        self.stage_used = 0;
++    }
++
++    /// Write the staged column into `sink`'s block and clear the stage. The chain-id and
++    /// observation vectors stay where they are, allocated, for the next column.
++    pub(super) fn release_staged_into(&mut self, chrom_id: u32, sink: &mut super::super::block::LocusSink) {
++        let Some(pos) = self.stage_pos.take() else {
++            return;
++        };
++        if !sink.accepts(pos) {
++            self.stage_used = 0;
++            return;
++        }
++        let block = sink.block_mut();
++        block.begin_locus(
++            chrom_id,
++            pos,
++            pos,
++            std::slice::from_ref(&self.stage_ref_base),
++            0,
++            0,
++        );
++        for observation in &mut self.stage_observations[..self.stage_used] {
++            observation.chain_ids.sort_unstable();
++            observation.chain_ids.dedup();
++            block.push_observation(
++                std::slice::from_ref(&observation.base),
++                None,
++                observation.read_group,
++                observation.num_obs,
++                observation.fwd,
++                observation.q_sum,
++                observation.mapq_sum,
++                observation.mapq_sum_sq,
++                observation.placed_left,
++                &observation.chain_ids,
++            );
++        }
++        block.end_locus();
++        self.stage_used = 0;
++    }
+ }
+ 
+ /// What [`try_ordinary_column`] decided.
+@@ -132,6 +196,10 @@ pub(super) enum FastColumn {
+     /// The column was ordinary and this is its locus, ready to be emitted at the position
+     /// the general path would have emitted it — see `WalkerState::close_aged_records_into`.
+     Emitted(SampleLocusObservations),
++    /// **SKETCH, columns mode.** The column was ordinary and is held in the scratch's
++    /// stage, to be written into the block at the position the general path would have
++    /// drained its record.
++    Staged,
+     /// Not ordinary. Nothing was changed; run the general path.
+     Fallback,
+ }
+@@ -155,6 +223,9 @@ pub(super) fn try_ordinary_column(
+     scratch: &mut FastColumnScratch,
+     max_snp_column_depth: usize,
+     may_have_mate_overlap: bool,
++    // **SKETCH.** Fill a block instead of building an object. Constant for the life of a
++    // run, so every branch it guards predicts perfectly.
++    emit_columns: bool,
+ ) -> Result<FastColumn, WalkerError> {
+     // The contributor count is at most the active-read count, so this bounds the column
+     // cap from above without knowing which reads contribute.
+@@ -278,27 +349,59 @@ pub(super) fn try_ordinary_column(
+         .first()
+         .expect("one base was fetched and the fetch succeeded");
+ 
+-    scratch.observations.clear();
++    // **The two resets, and why they are not the same one.** Record mode empties the
++    // buffer: its `chain_ids` vectors were moved out into the emitted locus a column ago,
++    // so they are empty shells and dropping them costs nothing. Columns mode keeps them —
++    // that is the whole allocation the block layout removes — so it cannot use `clear`,
++    // and tracks a live prefix instead.
++    if emit_columns {
++        // Every entry, not the live prefix: the buffer arrives here by a swap out of the
++        // stage, so which of its entries are dirty is the *other* buffer's bookkeeping.
++        // The vector's length is a column's observation count — two to five — so clearing
++        // all of it is cheaper than tracking whose turn it was.
++        for observation in &mut scratch.observations {
++            observation.chain_ids.clear();
++        }
++        scratch.used = 0;
++    } else {
++        scratch.observations.clear();
++        scratch.used = 0;
++    }
+     for read in &scratch.reads {
+-        let at = match scratch
+-            .observations
++        let live = scratch.used;
++        let at = match scratch.observations[..live]
+             .iter()
+             .position(|o| o.base == read.base && o.read_group == read.read_group)
+         {
+             Some(at) => at,
+             None => {
+-                scratch.observations.push(PlainObservation {
+-                    base: read.base,
+-                    read_group: read.read_group,
+-                    num_obs: 0,
+-                    q_sum: 0.0,
+-                    fwd: 0,
+-                    placed_left: 0,
+-                    mapq_sum: 0,
+-                    mapq_sum_sq: 0,
+-                    chain_ids: Vec::new(),
+-                });
+-                scratch.observations.len() - 1
++                if live < scratch.observations.len() {
++                    // Columns mode only: an entry from an earlier column, reused with its
++                    // `chain_ids` allocation intact.
++                    let slot = &mut scratch.observations[live];
++                    slot.base = read.base;
++                    slot.read_group = read.read_group;
++                    slot.num_obs = 0;
++                    slot.q_sum = 0.0;
++                    slot.fwd = 0;
++                    slot.placed_left = 0;
++                    slot.mapq_sum = 0;
++                    slot.mapq_sum_sq = 0;
++                } else {
++                    scratch.observations.push(PlainObservation {
++                        base: read.base,
++                        read_group: read.read_group,
++                        num_obs: 0,
++                        q_sum: 0.0,
++                        fwd: 0,
++                        placed_left: 0,
++                        mapq_sum: 0,
++                        mapq_sum_sq: 0,
++                        chain_ids: Vec::new(),
++                    });
++                }
++                scratch.used += 1;
++                live
+             }
+         };
+         let observation = &mut scratch.observations[at];
+@@ -316,12 +419,22 @@ pub(super) fn try_ordinary_column(
+ 
+     // `finalise` sorts on `(bases, read_witness, read_group)`; one byte of bases and one
+     // witness class collapse that to this.
+-    scratch
+-        .observations
+-        .sort_unstable_by_key(|o| (o.base, o.read_group.0));
++    let live = scratch.used;
++    scratch.observations[..live].sort_unstable_by_key(|o| (o.base, o.read_group.0));
++
++    if emit_columns {
++        // **SKETCH.** Nothing is built here. The accumulating buffer becomes the stage by
++        // a pointer swap, and the buffer that was staged becomes the accumulator — its
++        // `chain_ids` vectors intact, to be cleared and refilled at the next column.
++        std::mem::swap(&mut scratch.observations, &mut scratch.stage_observations);
++        scratch.stage_used = live;
++        scratch.stage_ref_base = ref_base;
++        scratch.stage_pos = Some(walker_pos);
++        super::column_census::FAST_COLUMNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        return Ok(FastColumn::Staged);
++    }
+ 
+-    let observations = scratch
+-        .observations
++    let observations = scratch.observations[..live]
+         .iter_mut()
+         .map(|o| {
+             o.chain_ids.sort_unstable();
+diff --git a/src/ng/locus_generation/pileup/generator.rs b/src/ng/locus_generation/pileup/generator.rs
+index 52c9b68..4ec60fa 100644
+--- a/src/ng/locus_generation/pileup/generator.rs
++++ b/src/ng/locus_generation/pileup/generator.rs
+@@ -840,6 +840,10 @@ pub struct PileupGenerator<R: RawRefSeq + EvictableRefSeq + ContigTable, P: Read
+     /// fragment handed two chain ids, which is the corruption the run-lifetime
+     /// allocator exists to prevent, arrived at from the other direction (review).
+     failed: bool,
++    /// **SKETCH.** Whether the walk fills a block instead of building records.
++    columns_mode: bool,
++    /// **SKETCH.** The sink between chromosomes, when no walker holds it.
++    carried_sink: Option<crate::ng::locus_generation::block::LocusSink>,
+ }
+ 
+ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenerator<R, P> {
+@@ -886,6 +890,8 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
+             sample: None,
+             pending_failure: None,
+             failed: false,
++            columns_mode: false,
++            carried_sink: None,
+         })
+     }
+ 
+@@ -1091,6 +1097,93 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
+         }
+     }
+ 
++    /// **SKETCH.** Take the sink this generator's walk should fill.
++    pub fn install_block_sink(&mut self, sink: crate::ng::locus_generation::block::LocusSink) {
++        self.columns_mode = true;
++        match self.chromosome.as_mut() {
++            Some(chromosome) => chromosome.walker.install_sink(sink),
++            None => self.carried_sink = Some(sink),
++        }
++    }
++
++    /// **SKETCH.** The sink, wherever it currently lives — inside the chromosome's walker
++    /// while one exists, in the generator between chromosomes.
++    pub fn block_sink_mut(
++        &mut self,
++    ) -> Option<&mut crate::ng::locus_generation::block::LocusSink> {
++        if !self.columns_mode {
++            return None;
++        }
++        match self.chromosome.as_mut() {
++            Some(chromosome) => Some(chromosome.walker.sink_mut()),
++            None => self.carried_sink.as_mut(),
++        }
++    }
++
++    /// **SKETCH 4.** The sink, borrowed shared. The cohort fold needs every sample's block
++    /// borrowed at the same moment, which is only possible because each borrow is of a
++    /// different generator.
++    pub fn block_sink(&self) -> Option<&crate::ng::locus_generation::block::LocusSink> {
++        if !self.columns_mode {
++            return None;
++        }
++        match self.chromosome.as_ref() {
++            Some(chromosome) => Some(chromosome.walker.sink()),
++            None => self.carried_sink.as_ref(),
++        }
++    }
++
++    /// **SKETCH.** [`next_locus`](Self::next_locus)'s block-shaped twin. `true` means the
++    /// block reached its budget and more of the region is to come; `false` that the region
++    /// is drained.
++    pub fn next_block(
++        &mut self,
++        reads: &SampleReads,
++    ) -> Result<bool, LocusGenerationError> {
++        if let Some(error) = self.pending_failure.take() {
++            return Err(error);
++        }
++        if self.failed {
++            return Ok(false);
++        }
++        let Some(region) = self.current_region else {
++            return Ok(false);
++        };
++        if self.walk.is_none()
++            && let Err(error) = self.open_walk(region, reads)
++        {
++            return Err(self.fail(error));
++        }
++        // PANIC-FREE: opened immediately above.
++        let clamp = self.walk.as_ref().expect("the walk was just opened").region;
++        let walker = &mut self
++            .chromosome
++            .as_mut()
++            .expect("the walk was just opened, so its chromosome's walker is here")
++            .walker;
++        match walker.fill_block() {
++            Ok(false) => Ok(true),
++            Ok(true) => {
++                // The region clamp lives in the sink on this path, so its tally is read
++                // off the sink rather than counted a locus at a time.
++                let outside = std::mem::take(&mut walker.sink_mut().records_outside_region);
++                self.counts.records_outside_region += outside;
++                self.end_walk();
++                if let Some(error) = self.pending_failure.take() {
++                    return Err(error);
++                }
++                Ok(false)
++            }
++            Err(source) => {
++                self.end_walk();
++                Err(self.fail(LocusGenerationError::Walker {
++                    region: clamp,
++                    source,
++                }))
++            }
++        }
++    }
++
+     /// Point the walk at `region`, minting the chromosome's walker and cursor first if this
+     /// is the first region on it.
+     ///
+@@ -1140,6 +1233,15 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
+             .expect("the chromosome walk was just ensured")
+             .walker;
+         walker.move_to_region(region, stop_after)?;
++        if self.columns_mode {
++            // The record path clamps in `next_locus`, after the walker has yielded; the
++            // columnar path has no such moment, so the sink is told the bound.
++            let sink = walker.sink_mut();
++            sink.set_clamp(
++                region.start.get().min(u64::from(u32::MAX)) as u32,
++                region.end.get().min(u64::from(u32::MAX)) as u32,
++            );
++        }
+         // **After the move, not before**, so a region that could not be reached leaves no
+         // half-open walk behind for `end_walk` to fold.
+         let chain_ids_at_open = walker.chain_id_counters();
+@@ -1238,10 +1340,15 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
+         region: GenomeRegion,
+         reads: &SampleReads,
+     ) -> Result<(), LocusGenerationError> {
+-        if let Some(retiring) = self.chromosome.take() {
++        if let Some(mut retiring) = self.chromosome.take() {
+             // Taken before the walker is consumed: a cursor's tallies die with it, and they
+             // are what says whether the cursor did anything (see `cursor_counts`).
+             self.retired_cursor_counts += retiring.walker.reads().reads.counts();
++            // **SKETCH.** The block outlives the walker that filled it: a chromosome
++            // boundary is not a handover point for the consumer.
++            if self.columns_mode {
++                self.carried_sink = Some(retiring.walker.take_sink());
++            }
+ 
+             let mut chain_ids = retiring.walker.into_chain_ids();
+             // **Redundant with `WalkerState::begin_region`, and kept anyway.** The next
+@@ -1276,12 +1383,15 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> PileupGenera
+             "the allocator is absent only while a chromosome walk holds it, and the one \
+              that did has just been retired",
+         );
+-        let walker = super::genome_walk::run(
++        let mut walker = super::genome_walk::run(
+             prepared,
+             Arc::clone(&self.reference),
+             &self.config.to_walker_config(),
+         )
+         .adopting_chain_ids(chain_ids);
++        if let Some(sink) = self.carried_sink.take() {
++            walker.install_sink(sink);
++        }
+         self.chromosome = Some(ChromosomeWalk {
+             contig: region.contig,
+             walker,
+@@ -1307,6 +1417,22 @@ impl<R: RawRefSeq + EvictableRefSeq + ContigTable, P: ReadPreparer> LocusGenerat
+         PileupGenerator::begin_segment(self, region);
+     }
+ 
++    fn install_block_sink(&mut self, sink: crate::ng::locus_generation::block::LocusSink) {
++        PileupGenerator::install_block_sink(self, sink);
++    }
++
++    fn next_block(
++        &mut self,
++        _segment: &(),
++        reads: &SampleReads,
++    ) -> Result<bool, LocusGenerationError> {
++        PileupGenerator::next_block(self, reads)
++    }
++
++    fn block_sink_mut(&mut self) -> Option<&mut crate::ng::locus_generation::block::LocusSink> {
++        PileupGenerator::block_sink_mut(self)
++    }
++
+     fn next_locus(
+         &mut self,
+         _segment: &(),
+diff --git a/src/ng/locus_generation/pileup/genome_walk.rs b/src/ng/locus_generation/pileup/genome_walk.rs
+index 024f9ca..9967fe5 100644
+--- a/src/ng/locus_generation/pileup/genome_walk.rs
++++ b/src/ng/locus_generation/pileup/genome_walk.rs
+@@ -30,7 +30,7 @@
+ //! still the transcription.
+ 
+ use std::cmp::Reverse;
+-use std::collections::{BinaryHeap, VecDeque};
++use std::collections::BinaryHeap;
+ 
+ use crate::pileup_record::ChainId;
+ 
+@@ -189,7 +189,7 @@ where
+     /// (e.g. a wide deletion at an earlier anchor unblocks several
+     /// narrower records simultaneously); they're appended here in
+     /// emission order and drained via `pop_front`.
+-    pending: VecDeque<SampleLocusObservations>,
++    pending: crate::ng::locus_generation::block::LocusSink,
+     /// `true` once end-of-input has been flushed *or* a `next()`
+     /// call has returned an error. Both terminal states stop the
+     /// iterator from doing further work.
+@@ -233,7 +233,7 @@ where
+             reads,
+             reference,
+             state,
+-            pending: VecDeque::new(),
++            pending: crate::ng::locus_generation::block::LocusSink::records(),
+             done: false,
+             stop_after: None,
+         }
+@@ -323,7 +323,13 @@ where
+         // stands where a record the general path would still be holding stands, and a stop
+         // rule blind to it cuts the region one position short — see `WalkerState::sealed`.
+         let first_outstanding_anchor = match (
+-            self.state.sealed.as_ref().map(|l| l.region.start.0 as u32),
++            self.state
++                .sealed
++                .as_ref()
++                .map(|l| l.region.start.0 as u32)
++                // **SKETCH.** The columnar path's staged column stands where `sealed`
++                // stands, and the stop rule has to see it for the same reason.
++                .or(self.state.fast_column_buf.stage_pos),
+             self.state.open_records.first_open_anchor(),
+         ) {
+             (Some(held), Some(open)) => Some(held.min(open)),
+@@ -334,6 +340,39 @@ where
+         self.state.walker_pos > stop && first_outstanding_anchor.is_none_or(|anchor| anchor > stop)
+     }
+ 
++    /// **SKETCH.** Install a sink, so the walk fills a block instead of building records.
++    /// Called once, before anything is walked.
++    pub fn install_sink(&mut self, sink: crate::ng::locus_generation::block::LocusSink) {
++        self.pending = sink;
++    }
++
++    /// **SKETCH.** The sink, so a chromosome change can carry the block over to the next
++    /// walker and a consumer can read what has been filled.
++    pub fn take_sink(&mut self) -> crate::ng::locus_generation::block::LocusSink {
++        std::mem::replace(
++            &mut self.pending,
++            crate::ng::locus_generation::block::LocusSink::records(),
++        )
++    }
++
++    pub fn sink(&self) -> &crate::ng::locus_generation::block::LocusSink {
++        &self.pending
++    }
++
++    pub fn sink_mut(&mut self) -> &mut crate::ng::locus_generation::block::LocusSink {
++        &mut self.pending
++    }
++
++    /// **SKETCH.** Walk until the block reaches its budget or the walk ends. `true` means
++    /// the walk is over; whatever the block holds is still the caller's to read.
++    pub fn fill_block(&mut self) -> Result<bool, WalkerError> {
++        if self.done {
++            return Ok(true);
++        }
++        self.fill_pending()?;
++        Ok(self.done)
++    }
++
+     /// Cumulative counters for the run so far. Safe to call
+     /// mid-stream; the final summary is the value observed after
+     /// `next()` has returned `None`.
+@@ -441,7 +480,7 @@ where
+             // alignment_start (skip uncovered span).
+             self.state.advance(self.reads.peek())?;
+ 
+-            if !self.pending.is_empty() {
++            if self.pending.should_yield() {
+                 return Ok(());
+             }
+         }
+@@ -483,7 +522,7 @@ where
+         self.state.begin_region();
+         // Records produced by the region being left and never collected. The per-region
+         // walker took them to the grave; so does this.
+-        self.pending.clear();
++        self.pending.clear_records();
+         self.done = false;
+         self.stop_after = Some(stop_after);
+         // The same anchor `new` takes, for the same reason: the first read's chromosome is
+@@ -504,14 +543,14 @@ where
+     type Item = Result<SampleLocusObservations, WalkerError>;
+ 
+     fn next(&mut self) -> Option<Self::Item> {
+-        if let Some(record) = self.pending.pop_front() {
++        if let Some(record) = self.pending.pop_record() {
+             return Some(Ok(record));
+         }
+         if self.done {
+             return None;
+         }
+         match self.fill_pending() {
+-            Ok(()) => self.pending.pop_front().map(Ok),
++            Ok(()) => self.pending.pop_record().map(Ok),
+             Err(e) => {
+                 // Terminal-on-first-error: stop yielding after this.
+                 // The previous push-based shape stopped emission as
+@@ -761,6 +800,10 @@ struct WalkerState {
+     /// only thing outstanding. That is also why emitting it first is always coordinate
+     /// order.
+     sealed: Option<SampleLocusObservations>,
++    /// **SKETCH, columns mode.** The general fold's observation buffer, kept across
++    /// records so an observation's `bases` and `chain_ids` vectors are refilled rather
++    /// than allocated per covered base. Empty and untouched on the record path.
++    keyed_pool: Vec<super::open_record::KeyedObservation>,
+ }
+ 
+ impl WalkerState {
+@@ -801,6 +844,7 @@ impl WalkerState {
+             fast_column_enabled: std::env::var_os("PVC_FAST_COLUMN")
+                 .is_none_or(|value| value != "0"),
+             sealed: None,
++            keyed_pool: Vec::new(),
+         }
+     }
+ 
+@@ -871,13 +915,16 @@ impl WalkerState {
+             sample_kept_buf: _,
+             mate_overlap_buf: _,
+             drained_buf: _,
+-            fast_column_buf: _,
++            fast_column_buf,
+             // A knob the walker was built with, like `config`.
+             fast_column_enabled: _,
+             // Region-scoped, and **dropped rather than emitted** — for the reason the open
+             // records a few lines below are dropped: it belongs to the region being left,
+             // whose output nobody collects.
+             sealed,
++            // **SKETCH.** The columnar path's equivalents: the staged column is dropped
++            // with `sealed`, and the observation pool is scratch like the buffers above.
++            keyed_pool: _,
+             // **Not scratch, and region-scoped.** It holds reads the *previous* region's
+             // ceiling gave up; carried across, they would be counted as covering
+             // positions in a region they may not even be on, and
+@@ -885,6 +932,7 @@ impl WalkerState {
+             ceiling_losses_by_end,
+         } = self;
+         *sealed = None;
++        fast_column_buf.clear_stage();
+         ceiling_losses_by_end.clear();
+ 
+         // What `new` starts with. `enter_chrom` overwrites the first three as soon as the
+@@ -1033,7 +1081,7 @@ impl WalkerState {
+     fn process_position<F: RefSeq>(
+         &mut self,
+         reference: &F,
+-        out: &mut VecDeque<SampleLocusObservations>,
++        out: &mut crate::ng::locus_generation::block::LocusSink,
+     ) -> Result<(), WalkerError> {
+         let walker_pos = self.walker_pos;
+         // **Asked once per column, and read by both paths below.** See
+@@ -1045,6 +1093,15 @@ impl WalkerState {
+         // mutably — pruning is how the heap stays O(1) to consult — and both paths below
+         // borrow it immutably.
+         let may_have_mate_overlap = self.active_reads.may_have_mate_overlap_at(walker_pos);
++        // **SKETCH, columns mode only.** The staged column is released *before* the fast
++        // lane runs, because the fast lane's stage is the accumulating buffer itself and
++        // swapping it in would destroy what is still waiting. Nothing between the two
++        // points writes to `out`, so the emitted order is the same; what differs is that
++        // an aborting reference fetch now loses one locus fewer than the record path does.
++        let emit_columns = !out.wants_records();
++        if emit_columns {
++            self.emit_held_locus_into(out);
++        }
+         // **The ordinary column, answered in scalars.** Roughly eight columns in ten are one
+         // covered base at which every read simply matches; for those the general machine
+         // below is asked to express a handful of numbers. The predicate is decided before any
+@@ -1072,11 +1129,13 @@ impl WalkerState {
+                 &mut self.fast_column_buf,
+                 self.config.max_snp_column_depth as usize,
+                 may_have_mate_overlap,
++                emit_columns,
+             )?
+         } else {
+             super::fast_column::FastColumn::Fallback
+         };
+         match attempt {
++            super::fast_column::FastColumn::Staged => return Ok(()),
+             super::fast_column::FastColumn::Emitted(locus) => {
+                 // **The previous position's locus goes out here, and only after this one was
+                 // built without error.** It is one step old, which is where the general path
+@@ -1368,7 +1427,7 @@ impl WalkerState {
+     /// the walker and append them to `out` in emission order.
+     /// Returns without touching `out` if there are no aged records
+     /// to drain.
+-    fn close_aged_records_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
++    fn close_aged_records_into(&mut self, out: &mut crate::ng::locus_generation::block::LocusSink) {
+         // The ordinary column's locus, if one is a step old. First, because the table is
+         // empty whenever one is held — see `sealed`.
+         self.emit_held_locus_into(out);
+@@ -1380,6 +1439,19 @@ impl WalkerState {
+         // `finalise()` consumes each `OpenPileupRecord` by value, so
+         // we drain the hoisted buffer rather than `into_iter()`ing
+         // it; the backing `Vec` stays allocated and reusable.
++        if !out.wants_records() {
++            // **SKETCH, columns mode.** The same close, writing into the block.
++            for open in self.drained_buf.drain(..) {
++                let (witness, storage) =
++                    open.finalise_into_columns(&mut self.keyed_pool, out);
++                self.open_records.recycle(storage);
++                self.summary.reads_with_holed_witness +=
++                    u64::from(witness.reads_with_holed_witness);
++                self.summary.hole_positions += u64::from(witness.hole_positions);
++                self.summary.records_emitted += 1;
++            }
++            return;
++        }
+         for open in self.drained_buf.drain(..) {
+             // The witness tally is resolved at `finalise`. **Resolved there** because a
+             // witness is a read's extent measured against the record's *final* footprint,
+@@ -1392,21 +1464,35 @@ impl WalkerState {
+             self.open_records.recycle(storage);
+             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+             self.summary.hole_positions += u64::from(witness.hole_positions);
+-            out.push_back(record);
++            out.push_record(record);
+             self.summary.records_emitted += 1;
+         }
+     }
+ 
+     /// Hand over an ordinary column's locus once the walker has passed it — the moment the
+     /// general path drains the one-base record it would have left open. See `sealed`.
+-    fn emit_held_locus_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
++    fn emit_held_locus_into(&mut self, out: &mut crate::ng::locus_generation::block::LocusSink) {
++        if !out.wants_records() {
++            // **SKETCH, columns mode.** The staged column, written into the block at the
++            // step the general path would have drained its record.
++            if self
++                .fast_column_buf
++                .stage_pos
++                .is_some_and(|pos| pos < self.walker_pos)
++            {
++                self.fast_column_buf
++                    .release_staged_into(self.chrom_id, out);
++                self.summary.records_emitted += 1;
++            }
++            return;
++        }
+         if self
+             .sealed
+             .as_ref()
+             .is_some_and(|locus| locus.region.end.0 < u64::from(self.walker_pos))
+         {
+             // PANIC-FREE: the predicate above only holds on `Some`.
+-            out.push_back(self.sealed.take().expect("just tested as Some"));
++            out.push_record(self.sealed.take().expect("just tested as Some"));
+             self.summary.records_emitted += 1;
+         }
+     }
+@@ -1461,15 +1547,35 @@ impl WalkerState {
+     /// emission order.
+     fn flush_chromosome_into(
+         &mut self,
+-        out: &mut VecDeque<SampleLocusObservations>,
++        out: &mut crate::ng::locus_generation::block::LocusSink,
+     ) -> Result<(), WalkerError> {
+         // The held ordinary-column locus goes with the records it stood among, and first:
+         // its anchor is the smallest of them. Unconditional here, as `drain_all` is — a
+         // chromosome flush closes everything still in flight regardless of the walker.
+         if let Some(locus) = self.sealed.take() {
+-            out.push_back(locus);
++            out.push_record(locus);
+             self.summary.records_emitted += 1;
+         }
++        if !out.wants_records() {
++            // **SKETCH, columns mode.** Unconditional, as the record path's take is:
++            // a chromosome flush closes everything in flight regardless of the walker.
++            if self.fast_column_buf.stage_pos.is_some() {
++                self.fast_column_buf
++                    .release_staged_into(self.chrom_id, out);
++                self.summary.records_emitted += 1;
++            }
++            for open in self.open_records.drain_all() {
++                let (witness, _storage) = open.finalise_into_columns(&mut self.keyed_pool, out);
++                self.summary.reads_with_holed_witness +=
++                    u64::from(witness.reads_with_holed_witness);
++                self.summary.hole_positions += u64::from(witness.hole_positions);
++                self.summary.records_emitted += 1;
++            }
++            self.active_reads
++                .flush_all(&mut self.chain_ids, self.walker_pos)?;
++            self.reset_chromosome_scoped_state();
++            return Ok(());
++        }
+         // Drain remaining open records (anything that was still
+         // open at end-of-chromosome is by definition ready to
+         // close — there are no future reads on this chromosome).
+@@ -1481,7 +1587,7 @@ impl WalkerState {
+             let (record, witness, _storage) = open.finalise_recycling();
+             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
+             self.summary.hole_positions += u64::from(witness.hole_positions);
+-            out.push_back(record);
++            out.push_record(record);
+             self.summary.records_emitted += 1;
+         }
+         // Release any active-set reads so the active-count
+@@ -1498,6 +1604,12 @@ impl WalkerState {
+         // the active-read count and pending-mates map but
+         // preserves the file-scoped `next_id` counter so chain
+         // ids stay unique across chromosomes.
++        self.reset_chromosome_scoped_state();
++        Ok(())
++    }
++
++    /// The chromosome-boundary reset, named once so the columnar close can share it.
++    fn reset_chromosome_scoped_state(&mut self) {
+         self.chain_ids.reset();
+         self.active_reads.reset();
+         self.open_records.reset();
+@@ -1505,7 +1617,6 @@ impl WalkerState {
+         // end left here would never be popped and would make every position of the next
+         // chromosome look as if a read were missing from it.
+         self.ceiling_losses_by_end.clear();
+-        Ok(())
+     }
+ 
+     fn summary(&self) -> RunSummary {
+diff --git a/src/ng/locus_generation/pileup/open_record.rs b/src/ng/locus_generation/pileup/open_record.rs
+index 566e690..3aacdf1 100644
+--- a/src/ng/locus_generation/pileup/open_record.rs
++++ b/src/ng/locus_generation/pileup/open_record.rs
+@@ -882,6 +882,35 @@ impl OpenPileupRecord {
+         witness_counts: &mut RecordWitnessCounts,
+     ) -> Vec<KeyedObservation> {
+         let mut observations: Vec<KeyedObservation> = Vec::new();
++        let used = self.keyed_observations_into(
++            record_end_exclusive,
++            witness_counts,
++            &mut observations,
++        );
++        debug_assert_eq!(used, observations.len(), "a fresh buffer is never a pool");
++        observations
++    }
++
++    /// As [`keyed_observations_counting`](Self::keyed_observations_counting), but writing
++    /// into a buffer the caller supplies and returning how many entries are live.
++    ///
++    /// **SKETCH.** Handed a fresh `Vec` this is exactly what it always was — every add
++    /// pushes, and the returned length is the vector's. Handed a buffer from an earlier
++    /// record it reuses the entries in place, which is what keeps the columnar walk from
++    /// allocating a `bases` and a `chain_ids` vector per observation per covered base.
++    fn keyed_observations_into(
++        &self,
++        record_end_exclusive: u32,
++        witness_counts: &mut RecordWitnessCounts,
++        observations: &mut Vec<KeyedObservation>,
++    ) -> usize {
++        // Empty for the record path, which is handed a fresh buffer; the pooled path's
++        // reset, and its whole cost.
++        for observation in observations.iter_mut() {
++            observation.key.bases.clear();
++            observation.chain_ids.clear();
++        }
++        let mut used = 0usize;
+         // **Which allele bucket each observation was built from, so grouping reads compares
+         // an index instead of bases.** A read's `bases` below are literally
+         // `self.alleles[state.allele_index].seq`, and `find_allele_index` only ever opens a
+@@ -928,7 +957,7 @@ impl OpenPileupRecord {
+             }
+             let read_group = state.read_group;
+             let agreed_with_reference = self.read_agreed_with_reference(state);
+-            let existing = observations
++            let existing = observations[..used]
+                 .iter()
+                 .zip(&observation_alleles)
+                 .position(|(observation, &observation_allele)| {
+@@ -939,20 +968,31 @@ impl OpenPileupRecord {
+             let observation = match existing {
+                 Some(index) => &mut observations[index],
+                 None => {
+-                    observations.push(KeyedObservation {
+-                        key: ObservationKey {
+-                            bases: bases.to_vec(),
+-                            read_witness,
+-                            read_group,
+-                        },
+-                        support: AlleleSupportStats::default(),
+-                        chain_ids: Vec::new(),
+-                    });
++                    if used < observations.len() {
++                        // Pooled path: an entry from an earlier record, its two vectors
++                        // still allocated.
++                        let slot = &mut observations[used];
++                        slot.key.bases.extend_from_slice(bases);
++                        slot.key.read_witness = read_witness;
++                        slot.key.read_group = read_group;
++                        slot.support = AlleleSupportStats::default();
++                    } else {
++                        observations.push(KeyedObservation {
++                            key: ObservationKey {
++                                bases: bases.to_vec(),
++                                read_witness,
++                                read_group,
++                            },
++                            support: AlleleSupportStats::default(),
++                            chain_ids: Vec::new(),
++                        });
++                    }
+                     // Pushed in the same step as the observation it describes, so the two
+                     // stay index-for-index.
+                     observation_alleles.push(state.allele_index);
+-                    // PANIC-FREE: pushed on the line above.
+-                    observations.last_mut().expect("just pushed")
++                    used += 1;
++                    // PANIC-FREE: written or pushed on the lines above.
++                    &mut observations[used - 1]
+                 }
+             };
+             add_contribution(&mut observation.support, &state.contribution);
+@@ -960,11 +1000,11 @@ impl OpenPileupRecord {
+                 observation.chain_ids.push(state.chain_id);
+             }
+         }
+-        for observation in &mut observations {
++        for observation in &mut observations[..used] {
+             observation.chain_ids.sort_unstable();
+             observation.chain_ids.dedup();
+         }
+-        observations
++        used
+     }
+ 
+     /// Convert into the finished locus ng emits: the region, the reference bytes under it,
+@@ -1172,6 +1212,106 @@ impl OpenPileupRecord {
+         };
+         (locus, witness_counts, storage)
+     }
++
++    /// **SKETCH.** Close the record straight into a block, materialising nothing.
++    ///
++    /// The same computation as [`finalise_recycling`](Self::finalise_recycling) — the same
++    /// witness resolution, the same per-read keying, the same canonical sort — writing its
++    /// result into the caller's columns instead of into an owned locus. `pool` is the
++    /// caller's observation buffer, kept across records so an observation's `bases` and
++    /// `chain_ids` are cleared and refilled rather than allocated and freed.
++    ///
++    /// **What it costs to say twice.** Everything from the witness tally to the sort is
++    /// duplicated from `finalise_recycling` and has to stay in step with it by hand. That
++    /// is the shape of the cost production reported as *"the range-append is written
++    /// twice"*, and it is the reason this is a sketch and not a proposal.
++    pub(super) fn finalise_into_columns(
++        self,
++        pool: &mut Vec<KeyedObservation>,
++        sink: &mut crate::ng::locus_generation::block::LocusSink,
++    ) -> (RecordWitnessCounts, RecordStorage) {
++        let record_pos = self.pos;
++        let record_end_exclusive = self.footprint_end_exclusive();
++        let chrom_id = self.chrom_id;
++        let mut witness_counts = RecordWitnessCounts {
++            reads_complete: 0,
++            reads_partial: 0,
++            reads_with_holed_witness: 0,
++            hole_positions: 0,
++            reads_without_observation: self.reads_without_observation.len() as u32,
++            reads_discarded_by_cap: self
++                .reads_discarded_by_cap
++                .iter()
++                .filter(|read_id| {
++                    !self.folded_reads.contains_key(**read_id)
++                        && !self.reads_without_observation.contains(read_id)
++                })
++                .count() as u32,
++        };
++        let used = self.keyed_observations_into(record_end_exclusive, &mut witness_counts, pool);
++        pool[..used].sort_by(|a, b| {
++            a.key
++                .bases
++                .cmp(&b.key.bases)
++                .then_with(|| {
++                    a.key
++                        .read_witness
++                        .sort_key()
++                        .cmp(&b.key.read_witness.sort_key())
++                })
++                .then_with(|| a.key.read_group.0.cmp(&b.key.read_group.0))
++        });
++
++        if sink.accepts(record_pos) {
++            let reference_bases = self
++                .alleles
++                .first()
++                .expect("alleles[0] is created with the record and never evicted")
++                .seq
++                .as_slice();
++            let block = sink.block_mut();
++            block.begin_locus(
++                chrom_id,
++                record_pos,
++                record_end_exclusive.saturating_sub(1),
++                reference_bases,
++                witness_counts.reads_without_observation,
++                witness_counts.reads_discarded_by_cap,
++            );
++            for observation in &pool[..used] {
++                let runs = match &observation.key.read_witness {
++                    ReadWitness::Complete => None,
++                    ReadWitness::Partial { positions } => Some(positions.runs_slice()),
++                };
++                block.push_observation(
++                    &observation.key.bases,
++                    runs,
++                    observation.key.read_group,
++                    observation.support.num_obs,
++                    observation.support.fwd,
++                    observation.support.q_sum,
++                    observation.support.mapq_sum,
++                    observation.support.mapq_sum_sq,
++                    observation.support.placed_left,
++                    &observation.chain_ids,
++                );
++            }
++            block.end_locus();
++        }
++
++        // The REF bucket's bytes stay in the bucket list and are freed with it, rather
++        // than leaving with an emitted locus — one `into_boxed_slice` reallocation fewer
++        // than the record path pays.
++        let mut alleles = self.alleles;
++        alleles.clear();
++        (
++            witness_counts,
++            RecordStorage {
++                alleles,
++                folded_reads: self.folded_reads,
++            },
++        )
++    }
+ }
+ 
+ /// The two containers a closed record hands back, emptied but with their allocations
+diff --git a/src/ng/locus_generation/witness.rs b/src/ng/locus_generation/witness.rs
+index 06ce044..9415773 100644
+--- a/src/ng/locus_generation/witness.rs
++++ b/src/ng/locus_generation/witness.rs
+@@ -144,6 +144,12 @@ impl WitnessedLocusPositions {
+         self.0.iter().copied()
+     }
+ 
++    /// **SKETCH (locus-stream shape experiment).** The runs as one slice, so a columnar
++    /// block can copy them into a flat buffer without going through the iterator.
++    pub fn runs_slice(&self) -> &[(u16, u16)] {
++        &self.0
++    }
++
+     /// The first run, and the last. **Total, because the set is never empty** — which is the
+     /// point of having them: `runs()` hands back an iterator whose ends are `Option`, so
+     /// every consumer that wants a border pays an `expect` for a case the type has already

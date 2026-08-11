@@ -1,5 +1,13 @@
 /target
 /target-container
+# Feature- and profile-varying builds get their own target dir, so an
+# instrumented binary never overwrites the release one under the same
+# path. Building dhat into the default dir once cost a performance
+# review its whole measurement set: every later "release" run silently
+# re-executed the instrumented binary at ~5x slower, with nothing in
+# the output saying so.
+/target-dhat
+/target-prof
 /tmp/
 /dhat-heap.json
 /flamegraph.svg

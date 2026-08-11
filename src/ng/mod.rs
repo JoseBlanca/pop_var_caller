@@ -8,7 +8,9 @@
 //! segment-criteria port); the read-alignment module ([`alignment`] — a
 //! folder of competing aligners, not a pipeline step); and step 4's locus
 //! generation ([`locus_generation`] — the shared locus type and contract, the STR
-//! generator, and the generic one's copied pileup walk).
+//! generator, and the generic one's copied pileup walk); and step 4's parameter
+//! pre-pass ([`parameter_estimation`] — the SNP/indel path, built milestone by
+//! milestone).
 //!
 //! **Production is frozen.** ng is a from-scratch caller: it does not edit
 //! `src/ssr/` or `src/regions.rs` — nor, since the generic locus generator's port,
@@ -35,6 +37,7 @@ mod scanner_parity;
 
 pub mod alignment;
 pub mod locus_generation;
+pub mod parameter_estimation;
 pub mod raw_chrom_reader;
 pub mod read;
 pub mod ref_seq;
@@ -48,4 +51,7 @@ pub use ref_seq::{
     ContigTable, EvictableRefSeq, InMemoryRefSeq, RawRefSeq, RefSeq, RefSeqError, ResidentRefSeq,
     WindowedRefSeq,
 };
-pub use types::{BaseQual, Bp, ContigId, DomainError, MapQual, MismatchFraction};
+pub use types::{
+    BaseQual, Bp, ContigId, DomainError, ErrorRate, GenotypeFrequency, InbreedingF, MapQual,
+    MismatchFraction, Ploidy,
+};

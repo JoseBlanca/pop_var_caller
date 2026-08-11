@@ -85,7 +85,10 @@ Three sources of names the reader does not have:
    floor run", "the gate". Each was invented in a tool call the reader never saw.
 3. **⚠ Terms the repository uses.** A word in a filename is **not** shared
    vocabulary. `ng_ssr_aligner_bakeoff.rs` exists, and "bake-off" was still
-   meaningless to the reader. Code names are not reader names.
+   meaningless to the reader. Code names are not reader names. **Type names are the
+   easiest of these to miss**, because they read as ordinary nouns: `World` became
+   *worlds* for a whole session before the owner stopped it, where the plain phrase —
+   *a simulated sample* — was shorter than the jargon.
 
 The repair is one clause, not a glossary:
 
@@ -101,6 +104,43 @@ the answer last, and the temptation is to retell it in that order.
 
 > ❌ eight paragraphs of measurement, then the recommendation
 > ✅ "Stop optimising, and don't trust the current ranking. Two reasons…"
+
+### Which question — and it is not the one you settled last
+
+"Is the first sentence the answer?" is a question you will always answer *yes* to,
+because you know which question you were answering. It has to be made falsifiable,
+and there are two tests that do it. Both are cheap and both are mechanical.
+
+**Quote the reader's question at the top of the draft, in their words, before
+writing a line of reply.** Not a paraphrase — the actual sentence from their
+message. Then the first sentence of the reply either answers *that* or it does not,
+and you can see which. The failure this catches is answering the sub-question your
+working settled last: asked *what do we do about a walk that aborts*, replying
+*which file the code goes in*. Both are real answers. Only one was asked.
+
+**The noun test: every noun in the first sentence appears in the reader's own
+message, or is plain English.** A noun that is neither is a term you coined while
+working, and it is doing load-bearing work in the one sentence that cannot afford
+it. Circle them one at a time; this takes ten seconds and does not depend on
+feeling anything.
+
+> ❌ "shed in ng's own admission path, and touch neither copy of the locked file"
+> — *admission path* appears nowhere in the reader's message; it names one of three
+> options they had not seen described.
+> ✅ "refuse the next read and count it, instead of aborting the run" — every noun
+> is theirs or plain.
+
+### When several things are true, lead with the one that changes what they do
+
+BLUF settles that the answer comes first; it does not settle *which* answer when
+there are three. Rank by consequence to the reader, not by how hard each was to
+find — the two orders are usually opposites, because the cheap decisive fact often
+arrives last.
+
+**The reader will often have told you.** A line like *"worth confirming — it
+changes how big this is"* is a ranking instruction: whatever answers it outranks
+everything else in the reply. Re-read their message for that sentence before you
+order the paragraphs, and if they wrote one, the paragraph answering it goes first.
 
 ## Explaining late is worse than not mentioning it
 
@@ -123,15 +163,24 @@ for a number. Replace them. Prefer natural frequencies to small percentages.
 ## The pass before sending
 
 The curse of knowledge specifically disables self-monitoring — you cannot feel the
-gap, so this has to be mechanical, not a vibe check.
+gap, so this has to be mechanical, not a vibe check. **A step you can pass by
+deciding you passed it is not one of these steps.** Every step below either
+produces something you can point at, or compares two texts.
 
+0. **Before drafting**, paste the reader's question at the top, in their words, and
+   any sentence of theirs that ranks the answers ("that changes how big this is").
+   Steps 2 and 6 compare against these; without them both degrade to a vibe check.
 1. Label every paragraph **D**, **K** or **W**. Delete every W.
-2. Read the first sentence alone. Is it the answer?
-3. Circle every name. For each, was it defined in this reply, or is it plain
-   English? A label like `H3` fails. A coined term like "the probe" fails.
+2. Read the first sentence alone, against the quoted question. Does it answer
+   *that* one, or the sub-question your working settled last?
+3. Circle every noun in the first sentence. Each must appear in the reader's
+   message or be plain English. Then circle every name in the rest: was it defined
+   in this reply? A label like `H3` fails. A coined term like "the probe" fails.
 4. For each **D**: is there a recommendation and a trade-off? Could they answer
    without asking you anything first?
 5. Any hedge word standing in for a number?
+6. Are the surviving paragraphs ordered by consequence to the reader — and if they
+   named what would change their assessment, is that paragraph first?
 
 ## Failure log
 
@@ -139,6 +188,71 @@ gap, so this has to be mechanical, not a vibe check.
 real before/after are what make a rule stick — this file's value grows by accretion,
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
+
+### 2026-08-10 — "worlds": a struct name used as if it were English
+
+`examples/ng_multilib_key_harness.rs` calls its simulated samples `World`. Replies across a
+whole session used *worlds* as the noun for them — "E2's 25 worlds", "a world that has a second
+class", "the worlds at the shares HG002 returned" — without ever defining it once.
+
+> ❌ "Three shapes are in the table: the worlds at the shares and rates HG002 and tomato
+> actually returned, each with one library and with two."
+>
+> Owner: *"stop using the word 'worlds' to talk about whatever the fuck you'll talking about"*
+
+> ✅ "Three shapes are in the table, each a **simulated sample** — a made-up sample with a
+> known error rate, heterozygosity and read depth, from which the exact data is computed — at
+> the shares and rates HG002 and tomato actually returned, sequenced once as one library and
+> once as two."
+
+Three failures:
+
+1. **The third instance of one rule**, after `H1`/`H3` (2026-08-04) and `arm E`/`sketch 4`
+   (2026-08-06). Each time the source was different — finding codes, then experiment arms, now
+   a **type name**. `World`, `Cell`, `Coarsening`, `Rule` are all in this category.
+2. **It was never introduced, not even once.** The earlier offenders at least got a defining
+   sentence when they first appeared; this one went straight into load-bearing use in the
+   first reply of the session and stayed for the whole of it.
+3. **The plain replacement was shorter than the coined one.** *A simulated sample.* When a
+   term from the code has a plain synonym the reader already owns, there is no argument left
+   for the coined one — it is not saving words, it is only saving the writer a translation.
+
+### 2026-08-10 — a handoff note answered as if it were the owner's question
+
+The session opened with a briefing written **for** the agent, not **by** the owner. It
+named steps `N4` and `N5`, "E2's 25 worlds", "a world that has a second class", and it
+closed with *"raise that with the owner"*. The session's first reply answered that
+document, in that document's words:
+
+> ❌ "**Yes — give each harness a world that has a second class of site, and the one
+> worth the session is in `ng_multilib_key_harness.rs`.**"
+>
+> Owner: *"what the fuck are you talking about? It seems to me that might be lost in
+> your own world."*
+
+> ✅ "The caller assumes every position of the genome mis-reads at the same rate. On
+> HG002 that fails at 818 positions, and the fit can only explain them by calling the
+> sample heterozygous, so heterozygosity comes out 1.41 times the benchmark's count.
+> The programs that check this estimator for bias only ever simulate genomes where
+> every position is equally error-prone, so re-running them cannot show the fix works.
+> I want to give one of them the bad positions — most of a day."
+
+Three failures, and the first is new:
+
+1. **Step 0 of the pass was run against the wrong text.** It says paste *the reader's
+   question, in their words*. There was no message from the reader — the turn opened
+   with a handoff brief. **New rule: when a turn opens with a handoff, a plan or a
+   briefing rather than a message from the owner, there is no question to quote —
+   write for a reader who has not read that document.** Every name in it is one of
+   yours until this reply defines it. A briefing is the previous session's working,
+   and working is exactly what rule W deletes.
+2. **Every load-bearing noun was internal**: `N4`, `N5`, `E2`, `Checkpoint N`, *a world
+   with a second class of site*, *the cell key*, *a flat ridge*. Identical to the
+   `H1`/`H3` failure of 2026-08-04, with a fresh excuse — the labels came from a
+   committed plan document, which makes them feel published rather than private.
+3. **"Yes —" answered a question the owner had never asked.** Answer-first does not
+   licence answering a question that exists only in the agent's own context; it made
+   the whole reply read as one side of a conversation the reader was not in.
 
 ### 2026-08-04 — a performance review reported in finding codes
 
@@ -154,6 +268,75 @@ genuinely theirs (three findings), an item needing no action, and a fact about m
 own tooling. All four were formatted identically, so the real question was invisible.
 **Rule added:** triage D/K/W, and never format them alike.
 
+### 2026-08-06 — an architecture recommendation delivered in experiment labels
+
+Four experiments settled how a pipeline should pass data between its stages. They were
+reported over several replies as *"sketch 1"* through *"sketch 4"*, their variants as
+*"arm A"* through *"arm E"*, and their results as five-column tables of instruction
+counts. The owner did not argue with any of it; they asked to be told the recommended
+architecture, and pointed at this skill instead of answering.
+
+> ❌ "**Arm E is the finding.** It is record-shaped — the same head scan as arm A — and
+> simply reads the keep column, materialising 28,718 loci instead of 2.83 M."
+>
+> ✅ "When the merge reads a sample's file it should first scan one small number per
+> locus, and build the full locus only where some sample might have a variant — about
+> one position in a hundred."
+
+Three failures, and the first two are already rules:
+
+1. **`arm E` and `sketch 4` are internal labels**, exactly as `H1` and `H3` were on
+   2026-08-04. They were used for a whole day.
+2. **A table of experiment states is working, not an answer.** The reader had asked what
+   to build; five states of a measurement harness are how the answer was found, not what
+   it is.
+3. **New, and the reason this entry exists:** an experiment's *arms* feel like shared
+   vocabulary in a way finding codes do not, because each one was described when it was
+   introduced. It does not survive the reply it was introduced in. **A name defined
+   earlier in the conversation is not defined for the reply the reader is reading now** —
+   if a recommendation cannot be stated without it, the recommendation is not finished.
+
+### 2026-08-09 — a defect reported without saying who caused it
+
+A test failure on real data was reported to the owner over two replies as *"cutting a
+generic region loses a deletion's tail"*, with coordinates, a CIGAR, and a
+recommendation. **The cutting was done by the test itself.** Nothing in the pipeline
+splits a region; the test split them to manufacture the boundaries a future parallel run
+would have. That sentence appeared in neither reply.
+
+> ❌ "**⛦ Stop-and-ask: cutting a generic region loses a deletion's tail.** On tomato
+> SRR7279481 the cut walk yields 7,424,467 generic loci against the uncut walk's
+> 7,424,484 — seventeen fewer, none gained."
+>
+> Owner: *"cutting why? is there a str there? why cut in one run and not in another? I am
+> missing context in your text, so it's impossible for me to understand and to decide
+> anything."*
+
+> ✅ "**I do the cutting — it is my test, not the caller.** The design asks for proof that
+> a genome split across parallel workers gives the same counts as one worker doing all of
+> it. To test that I chop each region into thirds, so the generator meets boundaries a
+> single-threaded run would never see. Nothing in the pipeline chops regions today."
+
+Four failures, and the first is the one that made the rest unreadable:
+
+1. **The agent was the cause and the sentence had no agent.** *"Cutting"* was written as
+   something that happens, so the owner reasonably asked what in the system does it. Every
+   noun in that headline — *cutting*, *generic region*, *tail* — was mine, and one of them
+   named an action only my test performs. **New rule: when the reported behaviour is
+   something your own tooling does, the subject of the first sentence is you.**
+2. **"Why in one run and not another" had a one-word answer that was never given:** I had
+   changed the test between the two runs (halves, then thirds). Reporting a difference
+   across runs without saying what differed reads as a property of the data.
+3. **The owner's question "is there a str there?" was answerable and unanswered** — there
+   were two repeat tracts, 6 and 8 bases, bracketing the region, and they were why the
+   region was short enough for my cut to land inside a deletion. It took one command to
+   find out and should not have needed asking.
+4. **The skill was never loaded.** Same as 2026-08-04 below, in a worktree where
+   `CLAUDE.md` *was* present and does name this file as mandatory. So the symlink fix of
+   2026-08-04 was necessary and is not sufficient: the file being reachable does not make
+   it read. **Rule for the next reader: load this file when the task begins, not when a
+   reply is being drafted** — by the time a result exists, the working that made it opaque
+   has already happened.
 ### 2026-08-10 — a decision asked for in the code's own words
 
 A checkpoint summary ended by handing the owner a "decision" written entirely in names
@@ -193,6 +376,41 @@ checkout, and all this work happened in a worktree. **Rule for the next reader o
 this file:** when a writing rule is broken repeatedly, check first whether it was
 ever in context. Fixed by symlinking `CLAUDE.md` into each worktree; a new worktree
 still needs the link.
+
+### 2026-08-04 — a recommendation whose first sentence answered a sub-question
+
+The owner asked which of three places a depth-shedding fix should live. The reply
+opened:
+
+> ❌ "**Recommendation: shed in ng's own admission path, and touch neither copy of
+> the locked file.**"
+>
+> Owner: *"have you read the reporting-in-chat skill. If you have, what has failed?
+> why haven't you given me the context to understand the first fucking sentence of
+> the conversation?"*
+
+> ✅ "**When too many reads are already open, refuse the next one and count it,
+> instead of aborting the run.** That is the whole fix, and it needs no edit to the
+> file that is locked byte-identical to production's."
+
+Three failures, and the skill as written would have caught none of them — the pass
+step covering this was *"read the first sentence alone. Is it the answer?"*, which
+the writer always answers yes, knowing which question they meant.
+
+1. *"ng's own admission path"* was coined while working: one of three options, named
+   as if the reader had seen the other two described.
+2. The first sentence answered *which file the code goes in* — the sub-question the
+   working settled last — when the question asked was *what do we do about a walk
+   that aborts*.
+3. The largest fact, that production fails on the same input in 0.45 s, sat in the
+   third paragraph because the working found it third. The owner had even written
+   *"worth confirming — it changes how big this is"*, which is a ranking
+   instruction, and it was read as a task rather than as one.
+
+**Fixed structurally, not by resolve:** the *Which question* and *lead with the one
+that changes what they do* sections above, and steps 0, 2, 3 and 6 of the pass —
+each of which compares the draft against the reader's own quoted words instead of
+asking the writer how they feel about it.
 
 ## Sources
 

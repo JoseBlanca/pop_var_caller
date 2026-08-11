@@ -1,7 +1,7 @@
-//! Active-set bookkeeping: holds reads currently overlapping the
-//! walker's position, plus a secondary `read_id → vec_index` map
-//! for O(1) mate lookup. See `ia/specs/pileup_walker.md` §"Active
-//! read table" and §"Active-set bookkeeping".
+//! Active-set bookkeeping: the reads currently overlapping the
+//! walker's position, held so that iterating them yields **ascending
+//! `read_id`**. See `ia/specs/pileup_walker.md` §"Active read table"
+//! and §"Active-set bookkeeping".
 //!
 //! **Released from `copy_fidelity.rs` at D2** — this file is no longer
 //! byte-for-byte production's. What ng added: [`ActiveRead::ever_contributed`]
@@ -9,10 +9,16 @@
 //! `reads_silent_over_footprint` countable (spec §6, plan D2). Everything else
 //! is still the transcription, and the release table in `copy_fidelity.rs`'s
 //! header is the record.
+//!
+//! The depth-cap change of 2026-08-05 added two more:
+//! [`worst_sampling_key`](ActiveReads::worst_sampling_key) and
+//! [`evict_by_read_id`](ActiveReads::evict_by_read_id), which together let the hold
+//! ceiling give up a read chosen by the same rule a capped position uses instead of
+//! refusing whichever read happened to arrive when the set was full.
 
 use std::cell::Cell;
-
-use ahash::AHashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 
 use crate::pileup_record::ChainId;
 
@@ -61,15 +67,51 @@ pub struct ActiveRead {
     pub ever_contributed: Cell<bool>,
 }
 
+/// The reads overlapping the walker's position, **iterated in ascending `read_id`** —
+/// which since this rewrite is a property the code has rather than one a comment claimed.
+///
+/// # Why a queue, and why order is worth a container change
+///
+/// The old shape was a `Vec<ActiveRead>` with a `read_id → index` hash map beside it, and
+/// expiry removed by `swap_remove`. That is O(1) per expiry, but it moves the last entry
+/// into the hole, so **from the first expiry onwards the set is a permutation of admission
+/// order**. Three costs downstream were paid for that permutation: closing a record had to
+/// sort its fold table to get a deterministic `f64` summation order, the fold table had to
+/// be a hash map because arrivals were unordered, and the secondary index had to be
+/// repaired on every expiry — a hash remove plus a hash insert — so the moved entry could
+/// still be found.
+///
+/// A queue removes the permutation without moving reads about. Reads are admitted in
+/// increasing `read_id`, so `push_back` keeps the order; and they leave in very nearly the
+/// order they arrived, because `read_id` ascends with alignment start and a read's end
+/// tracks its start — so an expiry is almost always `pop_front`, which moves nothing. The
+/// exception is a read spanning further than one admitted after it, and it is still near
+/// the front, so `VecDeque::remove` shifts the few entries before it rather than the many
+/// after.
+///
+/// The hash index goes with it: `read_id` ascends along the queue, so a lookup by id is a
+/// binary search.
+///
+/// **A slab and an ordered side list was tried first and measured worse** (+1.6 % at
+/// ~130×, +1.1 % at 30×): parking the reads in fixed slots costs a dependent load on
+/// every one of the ~130 accesses per covered base, which is a far busier path than the
+/// one admission and one expiry per read that it saves.
 #[derive(Debug)]
 pub struct ActiveReads {
-    /// Primary container. Iteration order is admission order; we
-    /// rely on this for deterministic record-formation tiebreaks
-    /// (smaller `read_id` first).
-    reads: Vec<ActiveRead>,
-    /// Secondary index: `read_id → index in reads`. Maintained in
-    /// lockstep with `reads`.
-    by_read_id: AHashMap<u32, usize>,
+    /// Primary container, **ascending by `read_id`** — the iteration order, and the
+    /// record-formation tiebreak (smaller `read_id` first) reads it directly rather than
+    /// relying on a coincidence.
+    reads: VecDeque<ActiveRead>,
+    /// The smallest `alignment_end` any read in the queue has, or `u32::MAX` when the
+    /// queue is empty — **the position before which no read can expire.**
+    ///
+    /// [`expire_passed`](Self::expire_passed) is called at every covered base and its
+    /// answer is "nothing" at most of them, but finding that out used to mean reading
+    /// `alignment_end` off every read in the set. This is the same question answered from
+    /// one `u32`. Kept exact rather than as a floor: it is recomputed by the scan that
+    /// runs when it does fire, and lowered by each admission, which are the only two
+    /// events that can change it.
+    min_alignment_end: u32,
     /// Monotonically-increasing local id, allocated on admission.
     /// Wrap is not a concern at any realistic input size (`u32`
     /// covers 4 billion reads).
@@ -88,16 +130,70 @@ pub struct ActiveReads {
     /// `PileupGeneratorCounts::fold_region_walk` sums it region by region and a walker now
     /// lives long enough to be asked twice.
     silent_exits: u64,
+    /// **ng's** — the last reference position at which each *pair* the set holds still has
+    /// both of its alignments on the reference, smallest first.
+    ///
+    /// One entry is pushed when a second mate is admitted while its first mate is still
+    /// here, and it is dropped once the walker passes it. So the heap is non-empty exactly
+    /// while some pair's two alignments could both reach the walker's column, which is the
+    /// only way a column can have two contributors sharing a chain id — see
+    /// [`may_have_mate_overlap_at`](Self::may_have_mate_overlap_at).
+    ///
+    /// **Not the same question as [`min_alignment_end`](Self::min_alignment_end)**, though
+    /// both are read ends: that one is the earliest position at which *any read* can leave
+    /// the set, and it gates the expiry scan; this one is the latest position at which
+    /// *some pair* still has both mates present, and it gates the mate reconciliation. One
+    /// is a minimum over reads and the other a minimum over pairs, and neither is
+    /// derivable from the other.
+    pair_overlap_ends: BinaryHeap<Reverse<u32>>,
 }
 
 impl ActiveReads {
     pub fn new() -> Self {
         Self {
-            reads: Vec::new(),
-            by_read_id: AHashMap::new(),
+            reads: VecDeque::new(),
+            min_alignment_end: u32::MAX,
             next_read_id: 0,
             silent_exits: 0,
+            pair_overlap_ends: BinaryHeap::new(),
         }
+    }
+
+    /// Could this column have two contributors that share a chain id?
+    ///
+    /// **The answer the walk actually wants is "no", and it wants it in O(1).**
+    /// `resolve_mate_overlap_at_pos` runs at every covered reference base and its first act
+    /// is to build one `(chain_id, index)` tuple per contributor and sort them, only to
+    /// discover — at more than eight columns in ten, at both 30× and 130× — that no two
+    /// share an id. That sort is depth-sized, so at 130× it orders ~130 entries 86 million
+    /// times per contig to answer a question admission already settled. The
+    /// ordinary-column path (`fast_column`) asks the same question and pays the same sort.
+    ///
+    /// **Two contributors share a chain id only if they are the two mates of one pair.**
+    /// Chain ids are allocated once per fragment and *never recycled*
+    /// (`chain_id_allocator.rs`), a second mate takes its first mate's id, and read ids are
+    /// unique within a region — so the only way two reads in this set carry one id is that
+    /// one was admitted as the other's mate. That happens at exactly one place
+    /// ([`admit`](Self::admit)), where both alignments' start and end are in hand, and the
+    /// interval on which the two can both reach the walker is their intersection.
+    ///
+    /// So [`admit`](Self::admit) records the end of that intersection and this prunes the
+    /// ones the walker has passed. A `true` here is an over-approximation — the pair may be
+    /// silent at this particular base, or the column may not be deep enough to include both
+    /// — and costs one ordinary sorted column. A `false` is exact: no pair of this set's
+    /// reads has both alignments still on the reference at `walker_pos`, so no two
+    /// contributors can share an id.
+    ///
+    /// Takes `&mut self` because pruning is how the heap stays O(1) to consult.
+    pub fn may_have_mate_overlap_at(&mut self, walker_pos: u32) -> bool {
+        while let Some(&Reverse(overlap_end)) = self.pair_overlap_ends.peek() {
+            if overlap_end < walker_pos {
+                self.pair_overlap_ends.pop();
+            } else {
+                return true;
+            }
+        }
+        false
     }
 
     /// Reads that left having never contributed anywhere — the run total, current at
@@ -121,7 +217,11 @@ impl ActiveReads {
             self.reads.len(),
         );
         self.reads.clear();
-        self.by_read_id.clear();
+        self.min_alignment_end = u32::MAX;
+        // Positions restart at 1 on the next chromosome, so an end recorded on this one
+        // would read as a live overlap there. Nothing is lost by dropping them: the reads
+        // they describe are gone.
+        self.pair_overlap_ends.clear();
         // next_read_id keeps advancing — read ids stay unique
         // across the whole run, which makes log messages
         // unambiguous.
@@ -141,8 +241,8 @@ impl ActiveReads {
     ///   `PileupGeneratorCounts::fold_region_walk` sums it **per region**, so a set that
     ///   carried it across regions would triangular-sum it by the region count.
     /// - `next_read_id` is zeroed, because a per-region walker restarted it at zero and the
-    ///   ids are region-scoped anyway — `by_read_id` and the mate cross-links never outlive
-    ///   the region that made them, and no id reaches an emitted locus.
+    ///   ids are region-scoped anyway — the mate cross-links never outlive the region that
+    ///   made them, and no id reaches an emitted locus.
     ///
     /// **There is no emptiness assertion, unlike `reset`.** A region can be abandoned
     /// mid-walk — `begin_segment` on a half-drained one — leaving reads in the set that
@@ -150,30 +250,61 @@ impl ActiveReads {
     /// per-region walker did, so this reproduces it rather than reporting it.
     pub fn begin_region(&mut self) {
         self.reads.clear();
-        self.by_read_id.clear();
+        self.min_alignment_end = u32::MAX;
         self.next_read_id = 0;
         self.silent_exits = 0;
+        // Same reason as in `reset`: `walker_pos` restarts at 1, so an end left here would
+        // claim a live pair overlap over the new region's opening megabase.
+        self.pair_overlap_ends.clear();
     }
 
     pub fn is_empty(&self) -> bool {
         self.reads.is_empty()
     }
 
+    /// Every read in the set, **ascending by `read_id`**.
     pub fn iter(&self) -> impl Iterator<Item = &ActiveRead> {
         self.reads.iter()
     }
 
-    /// Look up a read by `read_id` via the secondary index. Used
-    /// by `open_record::process_position` to query each
-    /// contributor's `CigarCursor` for window events at the open
-    /// record's footprint, and by the active-set tests.
-    pub fn get_by_read_id(&self, read_id: u32) -> Option<&ActiveRead> {
-        let idx = *self.by_read_id.get(&read_id)?;
-        Some(&self.reads[idx])
+    /// The entry at `index` in iteration order — what
+    /// [`ReadContribution::active_index`](super::open_record::ReadContribution::active_index)
+    /// records, so the fold reaches a contributor's read with a subscript rather than a
+    /// lookup.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is past the end of the set. The only producer of such an index is
+    /// `iter()`'s own enumeration inside the same walker step, which is why this is a
+    /// subscript rather than an `Option`: a stale index means an admission or an expiry
+    /// ran where none may, and returning `None` would let the fold quietly drop a read
+    /// instead of saying so.
+    pub fn at(&self, index: u32) -> &ActiveRead {
+        &self.reads[index as usize]
     }
 
-    /// Test-only helper: number of reads currently in the set.
-    #[cfg(test)]
+    /// Look up a read by `read_id`. Used by `open_record::refold_live_reads`, which knows
+    /// only the ids its record has already folded, and by the active-set tests.
+    ///
+    /// A binary search, because the queue is ordered by `read_id`. The secondary
+    /// `read_id → index` hash map this replaced had to be repaired on every admission and
+    /// every expiry to stay true, and was read on a path that fires only when a record
+    /// widens.
+    pub fn get_by_read_id(&self, read_id: u32) -> Option<&ActiveRead> {
+        let index = self
+            .reads
+            .binary_search_by_key(&read_id, |entry| entry.read_id)
+            .ok()?;
+        Some(&self.reads[index])
+    }
+
+    /// Number of reads currently in the set — the quantity the walk's
+    /// admission cap is enforced against.
+    ///
+    /// **This is exactly the chain-id allocator's `active_count`**, which is why the
+    /// walk can bound that counter without being able to read it: every read that
+    /// enters here bumps it and every read that leaves here releases it. Was
+    /// `#[cfg(test)]` until the walk began shedding at admission.
     pub fn len(&self) -> usize {
         self.reads.len()
     }
@@ -222,17 +353,41 @@ impl ActiveReads {
             ever_contributed: Cell::new(false),
         };
 
-        let new_index = self.reads.len();
-        self.reads.push(active);
-        self.by_read_id.insert(read_id, new_index);
+        // Read off before the read moves into the queue — the pair-overlap interval below
+        // needs both, and after the push they are behind an index.
+        let alignment_start = active.read.alignment_start;
+        let alignment_end = active.read.alignment_end;
+
+        // `read_id` is `next_read_id` and strictly increases, so appending at the back is
+        // what keeps the queue sorted — this push *is* the ordering guarantee.
+        self.min_alignment_end = self.min_alignment_end.min(alignment_end);
+        self.reads.push_back(active);
 
         // If this was the second mate, also stitch the back-link on
         // the first mate's `ActiveRead` so either side can find the
         // other.
         if let Some(partner) = partner_read_id
-            && let Some(partner_idx) = self.by_read_id.get(&partner).copied()
+            && let Ok(partner_index) = self
+                .reads
+                .binary_search_by_key(&partner, |entry| entry.read_id)
         {
-            self.reads[partner_idx].mate_read_id = Some(read_id);
+            self.reads[partner_index].mate_read_id = Some(read_id);
+
+            // **The one moment a pair is knowable, so the one moment to price it.**
+            // Reads arrive in coordinate order, so this read starts at or after its
+            // partner and the two alignments intersect on
+            // `[alignment_start, min(both ends)]`. Recording that end is what lets
+            // every column outside it skip the per-column search for a shared chain
+            // id ([`may_have_mate_overlap_at`](Self::may_have_mate_overlap_at)).
+            //
+            // The interval's *start* needs no recording: admission happens only once the
+            // walker has reached this read's `alignment_start`, so the pair is already
+            // inside its overlap when the entry is pushed, and a read contributes to no
+            // column before it is admitted.
+            let overlap_end = alignment_end.min(self.reads[partner_index].read.alignment_end);
+            if overlap_end >= alignment_start {
+                self.pair_overlap_ends.push(Reverse(overlap_end));
+            }
         }
 
         Ok(read_id)
@@ -246,28 +401,44 @@ impl ActiveReads {
         walker_pos: u32,
         chain_ids: &mut ChainIdAllocator,
     ) -> Result<(), WalkerError> {
-        // Iterate from the end so swap_remove indices stay valid.
-        let mut i = self.reads.len();
-        while i > 0 {
-            i -= 1;
-            if self.reads[i].read.alignment_end < walker_pos {
-                // Single-fold-per-(record, read) is enforced by
-                // `OpenPileupRecord.folded_reads`, not by per-read
-                // state here — the lazy CIGAR cursor is stateless.
-                //
-                // The `pending_mates` entry (if any) stays alive
-                // here: pair tracking is governed by
-                // `mate_lookup_window`, not by active-set
-                // residence. The chain-id allocator's
-                // `evict_stale_pending` walks the map on every
-                // subsequent `allocate_for_read` and drops entries
-                // whose `seen_at` is past the window.
-                let chrom_id = self.reads[i].read.chrom_id;
-                chain_ids.note_read_exit(chrom_id, walker_pos)?;
-                self.note_exit(i);
-                self.swap_remove(i);
+        // Front to back, removing in place, so the survivors keep their relative order and
+        // the queue is still ascending by `read_id` afterwards. `VecDeque::remove` shifts
+        // whichever side of the removal point is shorter, and reads expire in very nearly
+        // the order they arrived, so the removal point is at or near the front and the
+        // shift is short or absent — `remove(0)` only steps the head pointer.
+        //
+        // Single-fold-per-(record, read) is enforced by `OpenPileupRecord.folded_reads`,
+        // not by per-read state here — the lazy CIGAR cursor is stateless.
+        //
+        // The `pending_mates` entry (if any) stays alive here: pair tracking is governed
+        // by `mate_lookup_window`, not by active-set residence. The chain-id allocator's
+        // `evict_stale_pending` walks the map on every subsequent `allocate_for_read` and
+        // drops entries whose `seen_at` is past the window.
+        //
+        // **The scan only runs when something can leave.** `min_alignment_end` is the
+        // earliest position any read in the set still reaches, so below it the answer is
+        // "nothing expires" and the set is not touched at all. At 30× that is three
+        // positions in four.
+        if self.min_alignment_end >= walker_pos {
+            return Ok(());
+        }
+        let mut next_min = u32::MAX;
+        let mut i = 0usize;
+        while i < self.reads.len() {
+            let alignment_end = self.reads[i].read.alignment_end;
+            if alignment_end >= walker_pos {
+                next_min = next_min.min(alignment_end);
+                i += 1;
+                continue;
+            }
+            // PANIC-FREE: `i` is below `len` on the line above.
+            let leaving = self.reads.remove(i).expect("index checked against len");
+            chain_ids.note_read_exit(leaving.read.chrom_id, walker_pos)?;
+            if !leaving.ever_contributed.get() {
+                self.silent_exits += 1;
             }
         }
+        self.min_alignment_end = next_min;
         Ok(())
     }
 
@@ -282,8 +453,7 @@ impl ActiveReads {
         chain_ids: &mut ChainIdAllocator,
         walker_pos: u32,
     ) -> Result<(), WalkerError> {
-        while let Some(active) = self.reads.pop() {
-            // The secondary index is rebuilt fresh after a flush.
+        while let Some(active) = self.reads.pop_back() {
             // `pending_mates` is cleaned up by the chain-id allocator's
             // `reset()` call (which `walker::flush_chromosome_into`
             // makes right after this method); we don't touch it
@@ -294,31 +464,83 @@ impl ActiveReads {
                 self.silent_exits += 1;
             }
         }
-        self.by_read_id.clear();
+        self.min_alignment_end = u32::MAX;
         Ok(())
     }
 
-    /// **ng's, added by D2** — tally a read leaving at `idx` that never contributed.
+    /// **ng's, added by the depth-cap change** — the held read the ceiling should give
+    /// up first, as `(sampling key, read_id)`, or `None` on an empty set.
     ///
-    /// Separate from [`swap_remove`](Self::swap_remove) rather than folded into it,
-    /// because `swap_remove` is also the index-maintenance routine and a tally hidden
-    /// inside it would fire on any future caller that merely *moves* a read.
-    fn note_exit(&mut self, idx: usize) {
-        if !self.reads[idx].ever_contributed.get() {
-            self.silent_exits += 1;
-        }
+    /// "First" means **largest sampling key**: [`read_sampling`](super::read_sampling)
+    /// keeps the smallest, so the largest is the one furthest from being kept. The
+    /// `read_id` is carried out with it as the eviction handle, and breaks ties in the
+    /// key so two reads that hash alike are still ordered by something deterministic.
+    ///
+    /// **It scans, and it hashes as it goes, on purpose.** Keeping a key on every
+    /// `ActiveRead` — or a heap ordered by key — would make every read in the run pay
+    /// for a decision that concerns almost none of them: the ceiling binds at 17 reads
+    /// in 100,000 even at ~130× coverage, and at the ceiling this module now ships it
+    /// binds on no real fixture at all. So the cost is put where the event is. The scan
+    /// is O(held) and runs only when the set is full, which is the same condition that
+    /// used to make the walk refuse the read outright.
+    pub fn worst_sampling_key(&self) -> Option<(u64, u32)> {
+        self.reads
+            .iter()
+            .map(|active| {
+                (
+                    super::read_sampling::sampling_key(&active.read),
+                    active.read_id,
+                )
+            })
+            .max()
     }
 
-    fn swap_remove(&mut self, idx: usize) {
-        let removed_read_id = self.reads[idx].read_id;
-        self.by_read_id.remove(&removed_read_id);
-        // swap_remove moves the last element (if any) into `idx`.
-        let last_idx = self.reads.len() - 1;
-        if idx != last_idx {
-            let moved_read_id = self.reads[last_idx].read_id;
-            self.by_read_id.insert(moved_read_id, idx);
-        }
-        self.reads.swap_remove(idx);
+    /// **ng's, added by the depth-cap change** — remove one held read by id, releasing
+    /// its active-count slot, and say whether it was there.
+    ///
+    /// **This is an early [`expire_passed`](Self::expire_passed), and deliberately not
+    /// more than one.** The state it leaves behind — a read that folded into open
+    /// records and is no longer in the set — is the state every read reaches anyway the
+    /// moment the walker passes its end while a record it folded into is still open, and
+    /// `refold_live_reads` has always handled it by skipping the read. So eviction adds
+    /// no case to the fold; it only makes an ordinary case arrive sooner.
+    ///
+    /// **It does not count towards `silent_exits`.** That tally means "admitted, walked
+    /// over its whole footprint, and never once contributed" — a read whose bases are
+    /// all `N`. A read the ceiling took back was never walked over its footprint, so
+    /// filing it there would say something untrue about the reads. The walk counts it
+    /// under `reads_evicted_at_ceiling` instead.
+    /// **The removal has to preserve the queue's order**, so it is `VecDeque::remove`
+    /// rather than the `swap_remove` this method was first written against. The ordered
+    /// queue is what lets `get_by_read_id`, `admit`'s partner lookup and the fold table's
+    /// `locate()` be binary searches; a swap here would break all three, and silently —
+    /// the searches would simply start missing reads.
+    ///
+    /// **`min_alignment_end` is deliberately left alone.** It is a lower bound on the
+    /// earliest end still held, and removing a read can only push the true minimum
+    /// later, so a stale value makes `expire_passed` run its scan when it need not have.
+    /// That is slower and never wrong, and the alternative — rescanning the set to
+    /// recompute the minimum — would put an O(held) pass on the eviction path for no
+    /// correctness gain. The same reasoning covers `pair_overlap_ends`: an evicted
+    /// read's pair entry stays in the heap, and a stale entry can only stop the
+    /// mate-overlap skip firing, never lose a reconciliation.
+    pub fn evict_by_read_id(
+        &mut self,
+        read_id: u32,
+        chain_ids: &mut ChainIdAllocator,
+        walker_pos: u32,
+    ) -> Result<bool, WalkerError> {
+        let Ok(idx) = self
+            .reads
+            .binary_search_by_key(&read_id, |entry| entry.read_id)
+        else {
+            return Ok(false);
+        };
+        let chrom_id = self.reads[idx].read.chrom_id;
+        chain_ids.note_read_exit(chrom_id, walker_pos)?;
+        // PANIC-FREE: `idx` came from a successful binary search over this queue.
+        self.reads.remove(idx).expect("index found by search");
+        Ok(true)
     }
 }
 
@@ -437,6 +659,64 @@ mod tests {
         // Both mates should now reference each other.
         assert_eq!(s.get_by_read_id(m1).unwrap().mate_read_id, Some(m2));
         assert_eq!(s.get_by_read_id(m2).unwrap().mate_read_id, Some(m1));
+    }
+
+    /// The predicate the per-column mate-overlap skip reads. It must answer `true`
+    /// **everywhere the two alignments both cover**, one position at a time — a `false`
+    /// inside that span is a lost reconciliation.
+    #[test]
+    fn a_pair_is_visible_at_every_position_its_two_alignments_share() {
+        let mut s = ActiveReads::new();
+        let mut a = ChainIdAllocator::new();
+        // 100..149 and 130..179 — they share 130..149.
+        s.admit(paired_read("p", true, 100, 50), &mut a).unwrap();
+        s.admit(paired_read("p", false, 130, 50), &mut a).unwrap();
+        for pos in 100..=149 {
+            assert!(
+                s.may_have_mate_overlap_at(pos),
+                "the pair is still on the reference at {pos}",
+            );
+        }
+        assert!(
+            !s.may_have_mate_overlap_at(150),
+            "the first mate's alignment ended at 149, so nothing can share a chain id now",
+        );
+    }
+
+    /// The case the skip exists for: mates that do not reach each other. Nothing is
+    /// recorded at all, so every column of the walk takes the cheap exit.
+    #[test]
+    fn mates_whose_alignments_do_not_meet_are_never_visible() {
+        let mut s = ActiveReads::new();
+        let mut a = ChainIdAllocator::new();
+        // 100..149 and 200..249 — disjoint.
+        s.admit(paired_read("p", true, 100, 50), &mut a).unwrap();
+        s.admit(paired_read("p", false, 200, 50), &mut a).unwrap();
+        for pos in [100u32, 149, 150, 200, 249, 250] {
+            assert!(
+                !s.may_have_mate_overlap_at(pos),
+                "the mates never share a position, so none can be claimed at {pos}",
+            );
+        }
+    }
+
+    /// Positions restart at 1 in a new region, so an overlap recorded in the old one would
+    /// read as live over the new region's opening bases — the skip would simply stop
+    /// firing there, which costs time rather than correctness, but the state is wrong.
+    #[test]
+    fn a_region_boundary_forgets_the_previous_region_s_pair_overlaps() {
+        let mut s = ActiveReads::new();
+        let mut a = ChainIdAllocator::new();
+        s.admit(paired_read("p", true, 1_000_000, 50), &mut a)
+            .unwrap();
+        s.admit(paired_read("p", false, 1_000_000, 50), &mut a)
+            .unwrap();
+        assert!(s.may_have_mate_overlap_at(1_000_000));
+        s.begin_region();
+        assert!(
+            !s.may_have_mate_overlap_at(1),
+            "the new region's first column inherited the old region's overlap",
+        );
     }
 
     #[test]

@@ -29,7 +29,8 @@
 //! The per-position walk itself — admit, process, expire, close, advance — is
 //! still the transcription.
 
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 
 use crate::pileup_record::ChainId;
 
@@ -40,9 +41,11 @@ use super::active_read_set::ActiveReads;
 use super::chain_id_allocator::{ChainIdAllocator, ChainIdAllocatorCounters};
 use super::decompose::ReadEvent;
 use super::errors::WalkerError;
+use super::fast_column::FastColumnScratch;
 use super::open_record::{
     OpenPileupRecord, OpenPileupRecordTable, ReadContribution, process_position,
 };
+use super::read_sampling;
 use super::{PreparedRead, ReadLengthError, WalkerConfig};
 use crate::ng::ref_seq::RefSeq;
 
@@ -316,12 +319,19 @@ where
         let Some(stop) = self.stop_after else {
             return false;
         };
-        self.state.walker_pos > stop
-            && self
-                .state
-                .open_records
-                .first_open_anchor()
-                .is_none_or(|anchor| anchor > stop)
+        // **A held ordinary-column locus counts as an open record here**, and must: it
+        // stands where a record the general path would still be holding stands, and a stop
+        // rule blind to it cuts the region one position short — see `WalkerState::sealed`.
+        let first_outstanding_anchor = match (
+            self.state.sealed.as_ref().map(|l| l.region.start.0 as u32),
+            self.state.open_records.first_open_anchor(),
+        ) {
+            (Some(held), Some(open)) => Some(held.min(open)),
+            (Some(held), None) => Some(held),
+            (None, Some(open)) => Some(open),
+            (None, None) => None,
+        };
+        self.state.walker_pos > stop && first_outstanding_anchor.is_none_or(|anchor| anchor > stop)
     }
 
     /// Cumulative counters for the run so far. Safe to call
@@ -420,7 +430,8 @@ where
             // ordering also keeps the active-read count accurate
             // when an emitted record's footprint coincides with a
             // read's `alignment_end`.
-            self.state.process_position(&self.reference)?;
+            self.state
+                .process_position(&self.reference, &mut self.pending)?;
             self.state.expire_passed_reads()?;
             self.state.close_aged_records_into(&mut self.pending);
 
@@ -531,6 +542,21 @@ pub struct RunSummary {
     /// pathologically deep regions; QC pipelines may want to look
     /// at those samples / regions specifically.
     pub column_depth_truncations: u64,
+    /// **ng's — production's `RunSummary` has no counterpart.**
+    ///
+    /// Reads the walk refused to admit because `max_active_reads` were already open.
+    /// Non-zero means some region was deeper than the walk will hold, and the evidence
+    /// there is a subsample of the reads that were available.
+    ///
+    /// **Not comparable with `column_depth_truncations`, which counts *positions*.** This
+    /// counts *reads*, and the two caps act on different quantities: the column cap limits
+    /// how many reads are used at one position, this one limits how many are held open at
+    /// once. Where a region trips this cap the column cap becomes unreachable, because a
+    /// position can no longer gather more contributors than the walk holds reads.
+    ///
+    /// Production cannot state it, so `parity.rs` binds it by name and drops it from the
+    /// counter comparison.
+    pub reads_shed_at_admission: u64,
     /// **ng's, added by D2 — production's `RunSummary` has no counterpart.**
     ///
     /// Reads that were admitted and left the active set having never been a contributor
@@ -563,6 +589,61 @@ pub struct RunSummary {
     /// blind over, which is the quantity that says how much evidence the old drop threw
     /// away rather than merely how many reads it threw away.
     pub hole_positions: u64,
+    /// **ng's, added by the depth-cap change of 2026-08-05.**
+    ///
+    /// Reads the walk gave back after admitting them, because the hold ceiling was full
+    /// and the arriving read had a smaller sampling key than one already held. The read
+    /// counted here is the one *given up*, not the one that arrived.
+    ///
+    /// Read beside [`reads_shed_at_admission`](Self::reads_shed_at_admission): together
+    /// the two are every read the ceiling removed from the evidence, and the split says
+    /// which rule removed it. A run where both are zero is a run whose ceiling never
+    /// shaped the output.
+    pub reads_evicted_at_ceiling: u64,
+    /// **ng's, added by the depth-cap change — and the owner's test of success.**
+    ///
+    /// Positions the walk folded **fewer reads than the per-position cap allows, while
+    /// reads covering that position had been given up by the hold ceiling**. Every one
+    /// of these is a position whose depth is lower than the BAM's for no reason the data
+    /// justifies: not "too deep to fold", simply "the walk was not holding it".
+    ///
+    /// Counted against the ceiling's two losses only — refusals and evictions — because
+    /// those are the ones with no defence. A position truncated by the per-position cap
+    /// is not short: it folded exactly the cap.
+    pub positions_short_of_cap: u64,
+    /// The reads missing from those positions, summed — how *much* was lost, where
+    /// [`positions_short_of_cap`](Self::positions_short_of_cap) says how often. Each
+    /// position contributes the smaller of the gap to the cap and the number of
+    /// ceiling-lost reads actually covering it, so it can never overstate.
+    pub short_of_cap_deficit: u64,
+    /// **ng's** — the deepest column the walk ever assembled, counted **before** the
+    /// per-position cap and **after** the mate-overlap collapse. The quantity the caps
+    /// are set against, so a run says whether its caps were near being reached rather
+    /// than only whether they fired.
+    pub column_depth_high_water: u32,
+    /// **ng's** — the largest the chain-id allocator's first-mates-awaiting-a-partner map
+    /// ever got, carried up from `ChainIdAllocatorCounters` so the headroom under
+    /// `MAX_PENDING_MATES` is reportable.
+    pub pending_mates_high_water: u32,
+    /// **ng's — the four counters that say whether a capped position's evidence is a fair
+    /// sample.** All four are touched only at a position the cap acts on, so they cost
+    /// nothing on a run that never caps.
+    ///
+    /// A capped position keeps `cap` of the reads covering it. Whether that is a *sample*
+    /// or a *selection* cannot be read off the kept reads alone — it needs the population
+    /// they were drawn from. So both are counted, and both are counted twice: once
+    /// altogether, and once for the reads that begin **left of the position**.
+    ///
+    /// Read as two fractions. `…_placed_left / …` over the seen reads is what the position
+    /// actually looks like; the same over the kept reads is what the walk decided it looks
+    /// like. **Equal fractions mean the cap sampled; a larger kept fraction means it
+    /// preferred reads that reach the position from the left**, which is what keeping a
+    /// prefix of an arrival-ordered list does, and what tilts `placed_left` and witness
+    /// extent in everything downstream.
+    pub capped_column_reads_seen: u64,
+    pub capped_column_reads_seen_placed_left: u64,
+    pub capped_column_reads_kept: u64,
+    pub capped_column_reads_kept_placed_left: u64,
 }
 
 impl RunSummary {
@@ -573,6 +654,7 @@ impl RunSummary {
         self.chain_allocations = counters.chain_allocations;
         self.active_reads_high_water = counters.active_reads_high_water;
         self.mate_lookup_evictions = counters.mate_lookup_evictions;
+        self.pending_mates_high_water = counters.pending_mates_high_water;
         self
     }
 
@@ -624,6 +706,23 @@ struct WalkerState {
     /// the same reason as `contributors_buf`: this runs once per covered reference base,
     /// and a truncated column is rare, so the buffer is usually empty and never grows.
     truncated_read_ids_buf: Vec<u32>,
+    /// **ng's, added by the depth-cap change** — the alignment ends of the reads the hold
+    /// ceiling gave up, smallest first, so the walk can say at any position **how many
+    /// reads covering it the ceiling took away**. That is the whole of
+    /// `positions_short_of_cap`, and there is no other way to know it: a read the ceiling
+    /// drops is never decomposed, so nothing downstream can be asked which positions it
+    /// would have reached.
+    ///
+    /// Costs nothing when the ceiling never binds, which is the case this ships for: the
+    /// heap is empty, and the per-position work is one `is_empty` on an empty `Vec`.
+    ceiling_losses_by_end: BinaryHeap<Reverse<u32>>,
+    /// **ng's, added by the depth-cap change** — scratch for the per-position sample:
+    /// `(sampling key, index into the contributor list)` for every contributor, and then
+    /// the indices the sample keeps. Hoisted for the reason every buffer here is: a deep
+    /// enough region caps at many consecutive positions, and each would otherwise
+    /// allocate twice.
+    sample_keys_buf: Vec<(u64, u32)>,
+    sample_kept_buf: Vec<u32>,
     /// EXPERIMENT E2: reusable scratch for `resolve_mate_overlap_at_pos`, replacing
     /// the per-column `AHashMap<ChainId, Vec<usize>>` and its two companion `Vec`s.
     mate_overlap_buf: MateOverlapScratch,
@@ -633,6 +732,35 @@ struct WalkerState {
     /// `drain_aged` paid in round-1. H2 in
     /// `ia/reviews/perf_pileup_2026-05-12.md`.
     drained_buf: Vec<OpenPileupRecord>,
+    /// Reusable buffers for the ordinary-column path — see [`fast_column`](super::fast_column).
+    fast_column_buf: FastColumnScratch,
+    /// **Measurement knob only.** `PVC_FAST_COLUMN=0` sends every column down the general
+    /// path, so the two can be A/B-ed inside one binary rather than across two builds — the
+    /// only way to alternate runs on a host several other measurements are sharing. Read
+    /// once, here, so the per-column cost of carrying it is one predictable branch.
+    fast_column_enabled: bool,
+    /// **The record the ordinary-column path did not have to open** — the locus it built,
+    /// held for exactly as long as the general path would have held the record.
+    ///
+    /// The fast lane finishes a column's locus at the position it walks; the general path
+    /// leaves a one-base record open and drains it one step later. **That one step is
+    /// observable and had to be reproduced**, in two ways a fully-consumed walk cannot show
+    /// and two tests do:
+    ///
+    /// - A walk that **aborts** — a reference fetch past the contig end — loses whatever is
+    ///   still open. Emitting a step early hands the consumer one locus more before the
+    ///   error (`parity::both_walkers_report_the_same_error_on_the_same_malformed_input`).
+    /// - A walk that is **abandoned** part-way stops where its consumer stopped pulling, and
+    ///   a locus offered a step early moves that point back by one position — so fewer reads
+    ///   are admitted and fewer chain ids allocated
+    ///   (`generator::tests::an_abandoned_walk_does_not_leak_its_active_reads_into_the_next_region`).
+    ///
+    /// **One slot is always enough.** The fast lane fires only when no record covers the
+    /// base it is on, which means every record still open ends at or before it — so by the
+    /// time the next position is reached the table is empty, and a locus held here is the
+    /// only thing outstanding. That is also why emitting it first is always coordinate
+    /// order.
+    sealed: Option<SampleLocusObservations>,
 }
 
 impl WalkerState {
@@ -643,17 +771,36 @@ impl WalkerState {
             last_admitted_chrom_id: None,
             last_admitted_locus: None,
             active_reads: ActiveReads::new(),
-            chain_ids: ChainIdAllocator::with_caps(
-                config.max_active_reads,
-                config.mate_lookup_window,
-            ),
+            // **The allocator is handed a cap it can never reach, on purpose.**
+            //
+            // `max_active_reads` is still the ceiling — `admit_read` enforces it, by
+            // refusing the read rather than by failing the walk. Passing the same number
+            // here as well would leave the allocator's two responses to a deep region live
+            // underneath a walk that no longer wants either: a hard
+            // `ActiveReadsExhausted` that can no longer be reached, and a one-shot warning
+            // at three-quarters of the cap telling the user *"the run will fail"*, which
+            // by then is untrue. Neither can be edited — `chain_id_allocator.rs` is locked
+            // byte-identical to production's — so they are put out of reach instead.
+            //
+            // What is lost is a backstop on a bug in the shed itself. It was worth little:
+            // its response to an over-full active set was to abort the run, which is the
+            // behaviour being removed here, and the same over-full set is visible after
+            // the fact in `active_reads_high_water`.
+            chain_ids: ChainIdAllocator::with_caps(u32::MAX, config.mate_lookup_window),
             open_records: OpenPileupRecordTable::with_cap(config.max_record_span),
             summary: RunSummary::default(),
             config,
             contributors_buf: Vec::new(),
             truncated_read_ids_buf: Vec::new(),
+            ceiling_losses_by_end: BinaryHeap::new(),
+            sample_keys_buf: Vec::new(),
+            sample_kept_buf: Vec::new(),
             mate_overlap_buf: MateOverlapScratch::default(),
             drained_buf: Vec::new(),
+            fast_column_buf: FastColumnScratch::default(),
+            fast_column_enabled: std::env::var_os("PVC_FAST_COLUMN")
+                .is_none_or(|value| value != "0"),
+            sealed: None,
         }
     }
 
@@ -720,9 +867,25 @@ impl WalkerState {
             // fields rather than locals.
             contributors_buf: _,
             truncated_read_ids_buf: _,
+            sample_keys_buf: _,
+            sample_kept_buf: _,
             mate_overlap_buf: _,
             drained_buf: _,
+            fast_column_buf: _,
+            // A knob the walker was built with, like `config`.
+            fast_column_enabled: _,
+            // Region-scoped, and **dropped rather than emitted** — for the reason the open
+            // records a few lines below are dropped: it belongs to the region being left,
+            // whose output nobody collects.
+            sealed,
+            // **Not scratch, and region-scoped.** It holds reads the *previous* region's
+            // ceiling gave up; carried across, they would be counted as covering
+            // positions in a region they may not even be on, and
+            // `positions_short_of_cap` would blame this region for the last one's losses.
+            ceiling_losses_by_end,
         } = self;
+        *sealed = None;
+        ceiling_losses_by_end.clear();
 
         // What `new` starts with. `enter_chrom` overwrites the first three as soon as the
         // new region's first read is peeked; they are set here so a region with no reads at
@@ -781,23 +944,162 @@ impl WalkerState {
         // `PreparedRead::length` for the rationale.
         read.length()
             .map_err(|e| malformed_read_from_length_err(e, &read))?;
+
+        // **ng's — the ceiling on what the walk holds, and the one place it can be
+        // enforced.** The per-position caps act after the reads are already open, so they
+        // bound what the walk *uses* and not what it *costs*; this bounds the two
+        // structures that actually fill up on a deep region — the active set and the
+        // allocator's map of first mates waiting for a partner — because a read that
+        // never gets in enters neither.
+        //
+        // **The ceiling stays** (owner, 2026-08-05: *"still with a high enough cap,
+        // otherwise we could run out of memory"*). What changed is its default, from
+        // 4,096 to `DEFAULT_MAX_ACTIVE_READS`, and **how it chooses**.
+        //
+        // # First-come-first-served was the fault, not the ceiling
+        //
+        // The old rule refused whichever read arrived when the set was full. Reads arrive
+        // sorted by alignment start, so that rule kept the leftmost-starting reads of a
+        // deep region and threw away everything after — and a read it threw away
+        // contributed at **no** position, which is what left positions covered by fewer
+        // reads than the BAM had for them. The owner's words: *"what it is wrong is to
+        // leave positions with less coverage because we have discarded reads that cover
+        // it."*
+        //
+        // # What it does instead
+        //
+        // When the set is full, the arriving read and the reads already held are compared
+        // on the **same deterministic function of the read** a capped position uses —
+        // `read_sampling::sampling_key`, a hash of the query name. Smallest keys survive.
+        // If the arrival beats the worst held read, that read is given back and the
+        // arrival takes its place; otherwise the arrival is refused. Either way the set
+        // ends up holding an unbiased subsample of the reads over the region instead of
+        // its leftmost-starting prefix.
+        //
+        // **Nothing is paid for this on the ordinary path.** No key is stored on a read,
+        // no index is kept in key order: the keys are computed by a scan, inside this
+        // branch, which is entered only when the set is already full. At the ceiling this
+        // ships, that is no position on any real fixture measured.
+        //
+        // **Eviction is an early expiry and adds no case to the fold.** A read given back
+        // here may already have folded into open records; so may a read whose end the
+        // walker passes while a record it folded into is still open, and
+        // `refold_live_reads` has always skipped a folded read that is no longer live.
+        // What it does mean is that the read's witness stops being updated as the record
+        // widens — again, exactly what an ordinary expiry means.
+        //
+        // **What is still knowingly given up.** A refused read carries no `read_id` and is
+        // never decomposed, so nothing downstream can say which loci it would have
+        // reached; unlike the per-position cap this cannot feed a per-record
+        // `reads_discarded_by_cap`. `reads_shed_at_admission`, `reads_evicted_at_ceiling`
+        // and `positions_short_of_cap` are the whole report. And a read the ceiling
+        // removes leaves its mate unpartnered, so that pair's two views of an overlap are
+        // not collapsed.
+        if self.active_reads.len() >= self.config.max_active_reads as usize {
+            let arriving_key = read_sampling::sampling_key(&read);
+            match self.active_reads.worst_sampling_key() {
+                // Strictly worse, so an exact tie refuses the arrival — a rule that needs
+                // no tie-break beyond the one already inside `worst_sampling_key`, and
+                // that is reached about once in 2^64 draws.
+                Some((worst_key, worst_read_id)) if worst_key > arriving_key => {
+                    let end_of_evicted = self
+                        .active_reads
+                        .get_by_read_id(worst_read_id)
+                        .map(|active| active.read.alignment_end);
+                    self.active_reads.evict_by_read_id(
+                        worst_read_id,
+                        &mut self.chain_ids,
+                        self.walker_pos,
+                    )?;
+                    self.summary.reads_evicted_at_ceiling += 1;
+                    if let Some(end) = end_of_evicted {
+                        self.ceiling_losses_by_end.push(Reverse(end));
+                    }
+                }
+                _ => {
+                    self.summary.reads_shed_at_admission += 1;
+                    self.ceiling_losses_by_end.push(Reverse(read.alignment_end));
+                    return Ok(());
+                }
+            }
+        }
+
         self.last_admitted_locus = Some(read_locus);
         self.active_reads.admit(read, &mut self.chain_ids)?;
         self.summary.reads_admitted += 1;
         Ok(())
     }
 
-    fn process_position<F: RefSeq>(&mut self, reference: &F) -> Result<(), WalkerError> {
+    fn process_position<F: RefSeq>(
+        &mut self,
+        reference: &F,
+        out: &mut VecDeque<SampleLocusObservations>,
+    ) -> Result<(), WalkerError> {
+        let walker_pos = self.walker_pos;
+        // **Asked once per column, and read by both paths below.** See
+        // [`ActiveReads::may_have_mate_overlap_at`]: `false` means no pair of this set's
+        // reads has both alignments still on the reference here, so no two contributors can
+        // share a chain id. The general path skips its whole mate-overlap step on that
+        // answer; the ordinary-column path skips the sort it would otherwise run to reach
+        // the same conclusion. It is hoisted above both because it needs the active set
+        // mutably — pruning is how the heap stays O(1) to consult — and both paths below
+        // borrow it immutably.
+        let may_have_mate_overlap = self.active_reads.may_have_mate_overlap_at(walker_pos);
+        // **The ordinary column, answered in scalars.** Roughly eight columns in ten are one
+        // covered base at which every read simply matches; for those the general machine
+        // below is asked to express a handful of numbers. The predicate is decided before any
+        // per-read work and handing back costs nothing — see `fast_column`.
+        //
+        // **The one condition the fast lane cannot answer for is a position the hold ceiling
+        // took reads from** (2026-08-05, merging the ordinary-column path with the depth-cap
+        // change). The fast lane emits its locus and returns, above the block below that
+        // prunes `ceiling_losses_by_end` and raises `positions_short_of_cap` — so a fast
+        // column would leave the owner's test of success unable to fire, and would let the
+        // heap grow across a run of columns that never prune it. While the heap holds
+        // anything the general path takes the column, which is where the accounting lives.
+        //
+        // It costs one `is_empty` per column. The heap receives a push only when the set is
+        // at the ceiling, and on every fixture measured at the shipping ceiling of 32,768 it
+        // never receives one — so this is a branch that is false for the whole of a normal
+        // run, and the fast lane's coverage is unchanged wherever the ceiling does not bind.
+        let attempt = if self.fast_column_enabled && self.ceiling_losses_by_end.is_empty() {
+            super::fast_column::try_ordinary_column(
+                walker_pos,
+                self.chrom_id,
+                &self.active_reads,
+                &self.open_records,
+                reference,
+                &mut self.fast_column_buf,
+                self.config.max_snp_column_depth as usize,
+                may_have_mate_overlap,
+            )?
+        } else {
+            super::fast_column::FastColumn::Fallback
+        };
+        match attempt {
+            super::fast_column::FastColumn::Emitted(locus) => {
+                // **The previous position's locus goes out here, and only after this one was
+                // built without error.** It is one step old, which is where the general path
+                // would have drained its record, and the fetch that could still fail has
+                // already succeeded — so an aborting walk loses exactly what it lost before.
+                // The table is empty whenever anything is held (see `sealed`), so there is
+                // nothing this could be pushed ahead of.
+                self.emit_held_locus_into(out);
+                self.sealed = Some(locus);
+                return Ok(());
+            }
+            super::fast_column::FastColumn::Fallback => {}
+        }
+
         // Step 1: query each active read's cursor for events
         // anchored at walker_pos. Reads with no event here are
         // silent (deletion interior or N-skip), so they are not
         // added as contributors at all.
-        let walker_pos = self.walker_pos;
         // Hoisted buffer; cleared per step. L6.
         self.contributors_buf.clear();
         let contributors = &mut self.contributors_buf;
 
-        for active_read in self.active_reads.iter() {
+        for (active_index, active_read) in self.active_reads.iter().enumerate() {
             let events_at_pos = active_read.cursor.events_at(walker_pos, &active_read.read);
 
             if events_at_pos.is_empty() {
@@ -826,6 +1128,7 @@ impl WalkerState {
             active_read.ever_contributed.set(true);
             contributors.push(ReadContribution {
                 read_id: active_read.read_id,
+                active_index: active_index as u32,
                 chain_id: active_read.chain_id,
                 events_at_pos,
                 bq_baq_at_walker_pos: bq_at_walker,
@@ -843,7 +1146,30 @@ impl WalkerState {
         // observation, contributing ln(1)=0 log-likelihood mass)
         // and is flagged so any window event the fold pulls from
         // its cursor also gets BQ-zeroed.
-        resolve_mate_overlap_at_pos(contributors, &mut self.summary, &mut self.mate_overlap_buf);
+        //
+        // **Skipped outright wherever no pair is present, which is most columns at the
+        // depths this walk is for.** Reconciled columns are 1,664 in 10,000 on a 130×
+        // tomato whole-genome sample and 1,911 in 10,000 on a 30× human one; the step's own
+        // no-pair exit still costs a depth-sized tuple build and sort at every one of the
+        // other eight in ten. The active set can rule the column out in O(1) instead,
+        // because a shared chain id is a mate pair and a mate pair is known at admission
+        // (`ActiveReads::may_have_mate_overlap_at`). At 300× a pair is present at most
+        // columns and the skip simply stops firing.
+        if may_have_mate_overlap {
+            resolve_mate_overlap_at_pos(
+                contributors,
+                &mut self.summary,
+                &mut self.mate_overlap_buf,
+            );
+        } else {
+            debug_assert!(
+                !column_shares_a_chain_id(contributors),
+                "the mate-overlap skip fired at {}:{} on a column where two contributors \
+                 share a chain id — the reconciliation was silently lost",
+                self.chrom_id,
+                walker_pos,
+            );
+        }
 
         // Step 2b: per-column depth cap. Adopted from samtools'
         // mpileup (see `WalkerConfig` doc-comment). Apply *after*
@@ -851,24 +1177,171 @@ impl WalkerState {
         // observations, not per-mate. Detect "indel column" from
         // the post-collapse contributor events — any Insertion or
         // Deletion at this anchor flips the column to the tighter
-        // indel cap. Reads in the active set are not
-        // allele-correlated in iteration order, so a deterministic
-        // truncate-to-first-N is approximately unbiased and avoids
-        // the random-sample machinery a per-allele clip would
-        // require.
+        // indel cap.
+        //
+        // **Which reads survive is a fact about the reads** (ng's, 2026-08-05). It used
+        // to be `contributors.truncate(cap)` — keep the first `cap` in whatever order the
+        // active set happened to hold them. That had two faults, and the second is the
+        // one that matters: the order is a permutation produced by `swap_remove`, so a
+        // change to how the set stores reads moved 88,351 of 341,094 emitted rows on a
+        // 300× walk; and wherever arrival order *was* preserved, "first `cap`" meant
+        // "leftmost-starting `cap`", which tilts `placed_left` and witness extent.
+        // `read_sampling` replaces it with the `cap` smallest sampling keys — see that
+        // module for what the rule does and does not guarantee.
         //
         // **The ids the cap removes are kept** (B3). The locus type reports reads a cap
-        // discarded *per record*, and this is the only moment they are knowable: truncation
-        // happens before step 3, so a truncated read opens and widens nothing and is
+        // discarded *per record*, and this is the only moment they are knowable: the drop
+        // happens before step 3, so a dropped read opens and widens nothing and is
         // invisible to every record it would have reached. They are candidates rather than
         // a count — see `OpenPileupRecord::reads_discarded_by_cap`.
         let cap = column_depth_cap(contributors, &self.config);
+        let depth = contributors.len();
+        if depth as u32 > self.summary.column_depth_high_water {
+            self.summary.column_depth_high_water = depth as u32;
+        }
         self.truncated_read_ids_buf.clear();
-        if contributors.len() > cap {
-            self.truncated_read_ids_buf
-                .extend(contributors[cap..].iter().map(|contrib| contrib.read_id));
-            contributors.truncate(cap);
+        if depth > cap {
+            // The fairness census, taken before and after the cap acts — see the four
+            // fields on `RunSummary`. A read is "placed left" when it began before this
+            // position, i.e. it reaches the position from the left rather than starting
+            // at it.
+            self.summary.capped_column_reads_seen += depth as u64;
+            self.summary.capped_column_reads_seen_placed_left += contributors
+                .iter()
+                .filter(|contrib| contrib.alignment_start < walker_pos)
+                .count() as u64;
+            sample_to_cap(
+                contributors,
+                cap,
+                &self.active_reads,
+                &mut self.sample_keys_buf,
+                &mut self.sample_kept_buf,
+                &mut self.truncated_read_ids_buf,
+            );
+            self.summary.capped_column_reads_kept += contributors.len() as u64;
+            self.summary.capped_column_reads_kept_placed_left += contributors
+                .iter()
+                .filter(|contrib| contrib.alignment_start < walker_pos)
+                .count() as u64;
             self.summary.column_depth_truncations += 1;
+        }
+
+        // **The owner's test of success, counted rather than argued.** The heap holds the
+        // alignment ends of the reads the hold ceiling gave up; anything ending before the
+        // walker no longer covers this position and is dropped. What is left is exactly
+        // the reads that cover *here* and are not in the fold because the walk was not
+        // holding them — so a position below the cap folded fewer reads than the cap
+        // allows for a reason the data does not justify.
+        //
+        // A position *at or above* the cap is not short, whatever the ceiling did: it
+        // folded the cap's worth, which is all it was ever going to fold. The pruning
+        // still runs there, so the heap cannot grow across a run of capped positions.
+        //
+        // The whole block is behind an `is_empty` on a heap that never received a push
+        // unless the ceiling bound, so on a run where it never binds this is one branch
+        // per position and nothing else.
+        if !self.ceiling_losses_by_end.is_empty() {
+            while let Some(&Reverse(end)) = self.ceiling_losses_by_end.peek() {
+                if end < walker_pos {
+                    self.ceiling_losses_by_end.pop();
+                } else {
+                    break;
+                }
+            }
+            let lost_here = self.ceiling_losses_by_end.len();
+            if lost_here > 0 && depth < cap {
+                self.summary.positions_short_of_cap += 1;
+                self.summary.short_of_cap_deficit += (cap - depth).min(lost_here) as u64;
+            }
+        }
+
+        // **Measurement only** — how often the column the walk is about to fold is the
+        // ordinary one. Off unless `PVC_COLUMN_CENSUS=1`; see `column_census`.
+        if super::column_census::enabled() && !contributors.is_empty() {
+            use super::column_census as census;
+            census::add(&census::COLUMNS, 1);
+            census::add(&census::CONTRIBUTORS, contributors.len() as u64);
+
+            let record_already_open = self
+                .open_records
+                .find_overlapping(walker_pos, walker_pos.saturating_add(1))
+                .is_some();
+            let indel_event = contributors.iter().any(|c| {
+                c.events_at_pos
+                    .iter()
+                    .any(|e| !matches!(e, ReadEvent::Match { .. }))
+                    || c.events_at_pos.len() != 1
+            });
+            let read_has_deletion = contributors.iter().any(|c| {
+                self.active_reads
+                    .get_by_read_id(c.read_id)
+                    .is_some_and(|a| !a.cursor.spans_only_its_anchors())
+            });
+            let read_has_indel = contributors.iter().any(|c| {
+                self.active_reads
+                    .get_by_read_id(c.read_id)
+                    .is_some_and(|a| !a.cursor.matches_only())
+            });
+            let mate_overlap = contributors
+                .iter()
+                .any(|c| c.bq_zero_in_window || c.bq_override_at_walker_pos.is_some());
+            let depth_cap = !self.truncated_read_ids_buf.is_empty();
+            let first_group = self
+                .active_reads
+                .get_by_read_id(contributors[0].read_id)
+                .map(|a| a.read.read_group);
+            let multi_read_group = contributors.iter().any(|c| {
+                self.active_reads
+                    .get_by_read_id(c.read_id)
+                    .map(|a| a.read.read_group)
+                    != first_group
+            });
+
+            if record_already_open {
+                census::add(&census::REJECT_RECORD_ALREADY_OPEN, 1);
+            }
+            if indel_event {
+                census::add(&census::REJECT_INDEL_EVENT, 1);
+            }
+            if read_has_deletion {
+                census::add(&census::REJECT_READ_HAS_DELETION, 1);
+            }
+            if mate_overlap {
+                census::add(&census::REJECT_MATE_OVERLAP, 1);
+            }
+            if depth_cap {
+                census::add(&census::REJECT_DEPTH_CAP, 1);
+            }
+            if multi_read_group {
+                census::add(&census::REJECT_MULTI_READ_GROUP, 1);
+            }
+            if read_has_indel {
+                census::add(&census::REJECT_READ_HAS_INDEL, 1);
+            }
+            if !(record_already_open
+                || indel_event
+                || read_has_deletion
+                || mate_overlap
+                || depth_cap
+                || multi_read_group)
+            {
+                census::add(&census::COLUMNS_ORDINARY, 1);
+                census::add(&census::CONTRIBUTORS_ORDINARY, contributors.len() as u64);
+            }
+            // The predicate a cheap per-read probe can actually decide: no contributor's
+            // read carries an indel op anywhere, so `events_at` can only be one `Match`.
+            let simple = !(record_already_open || read_has_indel || depth_cap || multi_read_group);
+            if simple && !mate_overlap {
+                census::add(&census::COLUMNS_SIMPLE, 1);
+                census::add(&census::CONTRIBUTORS_SIMPLE, contributors.len() as u64);
+            }
+            if simple {
+                census::add(&census::COLUMNS_SIMPLE_WITH_MATE, 1);
+                census::add(
+                    &census::CONTRIBUTORS_SIMPLE_WITH_MATE,
+                    contributors.len() as u64,
+                );
+            }
         }
 
         // Step 3–6: fold contributors into the records affected
@@ -896,6 +1369,9 @@ impl WalkerState {
     /// Returns without touching `out` if there are no aged records
     /// to drain.
     fn close_aged_records_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
+        // The ordinary column's locus, if one is a step old. First, because the table is
+        // empty whenever one is held — see `sealed`.
+        self.emit_held_locus_into(out);
         self.open_records
             .drain_aged_into(self.walker_pos, &mut self.drained_buf);
         if self.drained_buf.is_empty() {
@@ -912,10 +1388,25 @@ impl WalkerState {
             // (`reads_without_observation`, `reads_discarded_by_cap`) and the complete/partial
             // split is read only by tests; the **holed** pair is kept, because nothing else in
             // a non-test build can state how often a read was blind in the middle of a record.
-            let (record, witness) = open.finalise();
+            let (record, witness, storage) = open.finalise_recycling();
+            self.open_records.recycle(storage);
             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
             self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);
+            self.summary.records_emitted += 1;
+        }
+    }
+
+    /// Hand over an ordinary column's locus once the walker has passed it — the moment the
+    /// general path drains the one-base record it would have left open. See `sealed`.
+    fn emit_held_locus_into(&mut self, out: &mut VecDeque<SampleLocusObservations>) {
+        if self
+            .sealed
+            .as_ref()
+            .is_some_and(|locus| locus.region.end.0 < u64::from(self.walker_pos))
+        {
+            // PANIC-FREE: the predicate above only holds on `Some`.
+            out.push_back(self.sealed.take().expect("just tested as Some"));
             self.summary.records_emitted += 1;
         }
     }
@@ -972,12 +1463,22 @@ impl WalkerState {
         &mut self,
         out: &mut VecDeque<SampleLocusObservations>,
     ) -> Result<(), WalkerError> {
+        // The held ordinary-column locus goes with the records it stood among, and first:
+        // its anchor is the smallest of them. Unconditional here, as `drain_all` is — a
+        // chromosome flush closes everything still in flight regardless of the walker.
+        if let Some(locus) = self.sealed.take() {
+            out.push_back(locus);
+            self.summary.records_emitted += 1;
+        }
         // Drain remaining open records (anything that was still
         // open at end-of-chromosome is by definition ready to
         // close — there are no future reads on this chromosome).
         for open in self.open_records.drain_all() {
-            // Same as `close_aged_records_into` — see the note there.
-            let (record, witness) = open.finalise();
+            // Same as `close_aged_records_into` — see the note there. The storage is
+            // dropped rather than handed back: this runs once per chromosome, against
+            // 86 million times for the loop that does hand it back, so the pool is
+            // better left holding whatever the walk was using mid-chromosome.
+            let (record, witness, _storage) = open.finalise_recycling();
             self.summary.reads_with_holed_witness += u64::from(witness.reads_with_holed_witness);
             self.summary.hole_positions += u64::from(witness.hole_positions);
             out.push_back(record);
@@ -1000,6 +1501,10 @@ impl WalkerState {
         self.chain_ids.reset();
         self.active_reads.reset();
         self.open_records.reset();
+        // **ng's** — reads do not span chromosomes, and `walker_pos` restarts at 1, so an
+        // end left here would never be popped and would make every position of the next
+        // chromosome look as if a read were missing from it.
+        self.ceiling_losses_by_end.clear();
         Ok(())
     }
 
@@ -1054,6 +1559,25 @@ struct MateOverlapScratch {
     bq_updates: Vec<(usize, u8, bool)>,
 }
 
+/// Does any pair of contributors at this column share a chain id?
+///
+/// **The pin on the O(1) skip, and it only exists in debug builds.** The skip's claim is
+/// that a column the active set rules out cannot contain two contributors with one chain
+/// id; a wrong skip loses a mate reconciliation, changes the emitted bytes, and shows up
+/// nowhere else — `mate_overlap_positions` would simply be smaller. This is the all-pairs
+/// scan the skip replaces, asserted every time the skip fires under `cargo test` and under
+/// any debug-built dump, at the cost the old code paid on every column of every build.
+///
+/// Not `#[cfg(debug_assertions)]`: `debug_assert!` expands to a `cfg!`-guarded `assert!`,
+/// so the call is type-checked in every build and elided from the release one.
+fn column_shares_a_chain_id(contributors: &[ReadContribution]) -> bool {
+    contributors.iter().enumerate().any(|(i, a)| {
+        contributors[i + 1..]
+            .iter()
+            .any(|b| a.chain_id == b.chain_id)
+    })
+}
+
 /// Resolve mate-overlap at the current walker position.
 ///
 /// Two regimes, distinguished by whether either side carries an
@@ -1084,25 +1608,6 @@ fn resolve_mate_overlap_at_pos(
     summary: &mut RunSummary,
     scratch: &mut MateOverlapScratch,
 ) {
-    // Fast path: mate overlap requires two contributors at this
-    // walker_pos sharing a chain_id. Solo-read inputs never
-    // hit it; in paired-end inputs the geometry of insert sizes
-    // means most positions also don't. Detecting the no-pair case
-    // up front lets us skip the AHashMap allocation that would
-    // otherwise fire on every walker step (1.5 M allocations on
-    // the `pileup_walker_multi_op/L=5000` fixture, dhat 2026-05-10).
-    // O(n²) early-break duplicate check; at typical n ≤ ~30
-    // contributors per column it beats AHashMap construction +
-    // n probes, and short-circuits as soon as any pair is found.
-    let n = contributors.len();
-    let any_shared = (0..n).any(|i| {
-        let s = contributors[i].chain_id;
-        ((i + 1)..n).any(|j| contributors[j].chain_id == s)
-    });
-    if !any_shared {
-        return;
-    }
-
     // Build a small index: chain_id → list of contributor
     // indices. Anything with a list length >= 2 is a candidate.
     // ahash::AHashMap matches the rest of the module — std HashMap's
@@ -1129,6 +1634,29 @@ fn resolve_mate_overlap_at_pos(
             .map(|(i, c)| (c.chain_id, i)),
     );
     by_chain_id.sort_unstable();
+
+    // **The no-pair exit, read off the sort instead of hunting for it.** Mate overlap
+    // needs two contributors at this position sharing a chain id, and in paired-end
+    // data most columns have none — so this exit is the common case and its cost is
+    // what matters.
+    //
+    // It used to be an all-pairs scan over the unsorted contributors, breaking as soon
+    // as a shared id turned up. That breaks early only when a pair *exists*; the
+    // common case ran the full n(n−1)/2 comparisons, which makes the cheap path the
+    // quadratic one. Its comment priced it at "typical n ≤ ~30 contributors per
+    // column", and at that depth it was the right call. A whole-genome sample at ~130×
+    // puts n near 130, where the scan is ~19× more work per column than at 30 and the
+    // function became the largest single site in the walk (13.8 % of a tomato
+    // `SL4.0ch01` profile, against 4.2 % on a 30× fixture).
+    //
+    // Sorting first and looking for an adjacent equal pair answers the same question in
+    // n log n, and the sort is not new work: every column that *does* have a pair
+    // needed it anyway, three lines below. Equal chain ids are adjacent after a sort on
+    // the `(chain_id, index)` tuple, so "some id repeats" and "some neighbour repeats"
+    // are the same statement.
+    if !by_chain_id.windows(2).any(|w| w[0].0 == w[1].0) {
+        return;
+    }
 
     // Indices to discard outright (indel-overlap losers).
     to_remove.clear();
@@ -1237,12 +1765,19 @@ fn resolve_mate_overlap_at_pos(
         }
     }
 
-    // Drop indel-overlap losers from the contributor list.
-    // Sort descending so swap_remove keeps earlier indices valid.
+    // Drop indel-overlap losers from the contributor list, **in place**: the list arrives
+    // in ascending `read_id` from the active set, and everything downstream of here — the
+    // fold order, and with it the fold table's shape — is built on it still being so.
+    // `swap_remove` would put the last contributor in the loser's place and undo that for
+    // the whole column. The shift costs a memmove of the tail, and only on a column that
+    // has a mate overlap *with an indel on one side*; `swap_remove` charged nothing there
+    // and charged the ordering everywhere.
+    //
+    // Removal is applied back to front so earlier indices stay valid either way.
     to_remove.sort_unstable();
     to_remove.dedup();
     for idx in to_remove.drain(..).rev() {
-        contributors.swap_remove(idx);
+        contributors.remove(idx);
     }
 }
 
@@ -1355,6 +1890,67 @@ fn pair_has_indel(a: &ReadContribution, b: &ReadContribution) -> bool {
     has_indel(a) || has_indel(b)
 }
 
+/// **ng's** — cut `contributors` down to `cap` by keeping the `cap` reads with the
+/// smallest [`sampling_key`](read_sampling::sampling_key), and put the read ids of
+/// everything dropped into `dropped`.
+///
+/// # Why it is a select and not a sort
+///
+/// `select_nth_unstable` partitions in linear time, which is what a rule applied at
+/// every position of a deep region should cost. It leaves the kept side unordered,
+/// so the kept indices are sorted afterwards — `cap` of them, at most 8,000 — and the
+/// contributors compacted in index order. **Keeping the original relative order is not
+/// cosmetic**: the fold's tie-breaks read the contributor list in the order the active
+/// set holds it, so preserving that order is what confines this change to *which* reads
+/// are kept and stops it from also changing how the kept ones are folded.
+///
+/// # The key comes from the active set, not from the contributor
+///
+/// A `ReadContribution` does not carry its read's query name, and putting the key on it
+/// would cost eight bytes on every contributor at every position for a decision taken at
+/// 909 positions in 251,792. So the key is looked up here, through the same secondary
+/// index the fold uses, and only on the positions that cap.
+///
+/// A contributor whose read is somehow not in the active set — a state no path reaches,
+/// since the contributor list is built from that very set two dozen lines earlier — is
+/// given `u64::MAX`, i.e. dropped first. That is the answer that keeps the invariant
+/// "the kept set is a function of the reads" true even if the impossible happens.
+fn sample_to_cap(
+    contributors: &mut Vec<ReadContribution>,
+    cap: usize,
+    active_reads: &ActiveReads,
+    keys: &mut Vec<(u64, u32)>,
+    kept: &mut Vec<u32>,
+    dropped: &mut Vec<u32>,
+) {
+    keys.clear();
+    keys.extend(contributors.iter().enumerate().map(|(index, contrib)| {
+        let key = active_reads
+            .get_by_read_id(contrib.read_id)
+            .map_or(u64::MAX, |active| read_sampling::sampling_key(&active.read));
+        (key, index as u32)
+    }));
+    // `(key, index)`: the index breaks a key tie deterministically, and it is the
+    // contributor's own position in a list built by walking the active set in order — so
+    // a tie is broken the same way a `sort_unstable` on keys alone could not promise.
+    keys.select_nth_unstable(cap);
+    dropped.extend(
+        keys[cap..]
+            .iter()
+            .map(|&(_, index)| contributors[index as usize].read_id),
+    );
+    kept.clear();
+    kept.extend(keys[..cap].iter().map(|&(_, index)| index));
+    kept.sort_unstable();
+    // Compaction in place. `kept` is ascending and its `rank`-th entry is at least
+    // `rank`, so every swap moves an element forward into a slot already dealt with;
+    // no kept contributor can be displaced past the prefix before its turn comes.
+    for (rank, &index) in kept.iter().enumerate() {
+        contributors.swap(rank, index as usize);
+    }
+    contributors.truncate(cap);
+}
+
 /// Per-column depth cap. Returns the lower indel cap if any
 /// contributor reports an Insertion or Deletion at this anchor;
 /// otherwise the SNP/REF cap.
@@ -1429,6 +2025,346 @@ mod tests {
                 "each column folds exactly the cap's worth, or the fixture is not capping"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // The depth cap that acts at the door
+    // ------------------------------------------------------------------
+
+    /// **A region deeper than the walk will hold is walked, not failed.**
+    ///
+    /// This is the whole change, at its smallest: six reads at one position against a
+    /// ceiling of two. Before it, the seventh line of this test was
+    /// `WalkerError::ActiveReadsExhausted` and there were no loci at all — the walk of a
+    /// real 100×-coverage tomato sample died this way 33 Mb into its first chromosome,
+    /// where 4,143 reads pass the filters at a single base.
+    ///
+    /// Every read is accounted for on purpose. A read the ceiling removes must be absent
+    /// from the fold *and* present in one of the two ceiling counters: dropping it from
+    /// both would leave a walk that silently loses reads and reports a clean run, which
+    /// is the failure these counters exist to make impossible.
+    ///
+    /// **Which two the ceiling keeps changed on 2026-08-05** — see
+    /// [`the_ceiling_keeps_the_smallest_sampling_keys`] for that half. Here the claim is
+    /// only that the walk survives and that the arithmetic closes.
+    #[test]
+    fn reads_past_the_active_read_cap_are_shed_and_the_walk_survives() {
+        let config = WalkerConfig {
+            max_active_reads: 2,
+            ..WalkerConfig::default()
+        };
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let reference = MockFasta::new("ACG");
+        let mut walker = run(reads, &reference, &config);
+        let loci: Vec<_> = walker
+            .by_ref()
+            .map(|item| item.expect("the walk must survive a region deeper than its cap"))
+            .collect();
+        let summary = walker.summary();
+
+        assert_eq!(
+            summary.reads_admitted + summary.reads_shed_at_admission,
+            6,
+            "every read the walk saw is either admitted or refused, and none is lost: \
+             {summary:?}"
+        );
+        assert_eq!(
+            summary.reads_evicted_at_ceiling,
+            summary.reads_admitted - 2,
+            "a read admitted beyond the ceiling's worth is one the ceiling gave back, so \
+             the evictions are exactly the admissions past the two the set can hold"
+        );
+        assert!(!loci.is_empty(), "the region still produces loci");
+        for locus in &loci {
+            let folded: u32 = locus
+                .observations
+                .iter()
+                .map(|observation| observation.num_obs)
+                .sum();
+            assert_eq!(
+                folded, 2,
+                "the evidence is the reads the set was holding when the column was folded, \
+                 and only those — every one of these reads arrives before the first \
+                 position is processed, so an evicted read folds nowhere"
+            );
+        }
+    }
+
+    /// **The ceiling keeps a fair subsample, not the reads that arrived first.**
+    ///
+    /// Six reads at one position against a ceiling of two. Which two survive is decided
+    /// by [`read_sampling::sampling_key`] — a hash of the query name — so this test
+    /// computes the same two names independently and asserts the walk kept them. Under
+    /// the old rule it was always `r0` and `r1`, whatever the reads were, because reads
+    /// arrive sorted by alignment start and the first two through the door won.
+    ///
+    /// The fixture is chosen so the expected pair is **not** `r0`/`r1`: an implementation
+    /// that quietly went back to first-come would fail here rather than pass by
+    /// coincidence, and the assertion says which pair it expected.
+    #[test]
+    fn the_ceiling_keeps_the_smallest_sampling_keys() {
+        let config = WalkerConfig {
+            max_active_reads: 2,
+            ..WalkerConfig::default()
+        };
+        // **Each read gets a power-of-two MAPQ**, so the `mapq_sum` of the surviving
+        // column names the surviving *set* and not merely its size — the one field on an
+        // emitted observation that can distinguish six otherwise identical reads.
+        let reads: Vec<_> = (0..6)
+            .map(|index| {
+                let mut read = snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]);
+                read.mapq = 1 << index;
+                read
+            })
+            .collect();
+
+        // The two smallest keys, worked out from the reads alone.
+        let mut ranked: Vec<_> = reads
+            .iter()
+            .map(|read| {
+                (
+                    read_sampling::sampling_key(read),
+                    read.qname.to_string(),
+                    read.mapq,
+                )
+            })
+            .collect();
+        ranked.sort();
+        let expected_names: Vec<&str> = ranked[..2]
+            .iter()
+            .map(|(_, name, _)| name.as_str())
+            .collect();
+        let expected_mapq_sum: u64 = ranked[..2]
+            .iter()
+            .map(|(_, _, mapq)| u64::from(*mapq))
+            .sum();
+        assert!(
+            !(expected_names.contains(&"r0") && expected_names.contains(&"r1")),
+            "this fixture is only a test of the rule if the fair answer differs from the \
+             first-come answer (r0, r1); it no longer does, so change the read names"
+        );
+
+        let reference = MockFasta::new("ACG");
+        let mut walker = run(reads, &reference, &config);
+        let loci: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let mapq_sum: u64 = loci[0]
+            .observations
+            .iter()
+            .map(|observation| u64::from(observation.mapq_sum))
+            .sum();
+
+        assert_eq!(
+            mapq_sum, expected_mapq_sum,
+            "the ceiling kept a pair whose MAPQs sum to {mapq_sum}; the two smallest \
+             sampling keys are {expected_names:?}, summing to {expected_mapq_sum}"
+        );
+    }
+
+    /// **Nothing is shed below the cap** — the guard against a cap that fires early and
+    /// silently subsamples ordinary data, which no output comparison would catch until
+    /// the numbers had already moved.
+    #[test]
+    fn a_region_within_the_cap_sheds_nothing() {
+        let reads: Vec<_> = (0..6)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        let reference = MockFasta::new("ACG");
+        let mut walker = run(reads, &reference, &WalkerConfig::default());
+        let _: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+
+        assert_eq!(summary.reads_admitted, 6);
+        assert_eq!(summary.reads_shed_at_admission, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // The two properties the depth-cap change exists for
+    // ------------------------------------------------------------------
+
+    /// **No position is left short of the cap while reads covering it exist** — the
+    /// owner's own test of the change, as a test.
+    ///
+    /// Forty reads over one base against a hold ceiling of eight and a SNP cap of eight.
+    /// Every position must fold exactly eight, and `positions_short_of_cap` must be zero:
+    /// the ceiling and the cap are the same number here, so the ceiling can shed as much
+    /// as it likes and every position still reaches the cap.
+    ///
+    /// Then the same reads against a ceiling of four. Now the ceiling is *below* the cap,
+    /// which is the configuration that leaves positions with less coverage than the input
+    /// had for them, and the counter must say so — because a counter that reads zero
+    /// whatever the configuration is not measuring anything.
+    #[test]
+    fn no_position_is_short_of_the_cap_while_reads_covering_it_exist() {
+        let reference = MockFasta::new("ACG");
+        let reads = || {
+            (0..40)
+                .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+                .collect::<Vec<_>>()
+        };
+
+        let at_the_cap = WalkerConfig {
+            max_active_reads: 8,
+            max_snp_column_depth: 8,
+            ..WalkerConfig::default()
+        };
+        let mut walker = run(reads(), &reference, &at_the_cap);
+        let loci: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+        assert_eq!(
+            summary.positions_short_of_cap, 0,
+            "the ceiling is at the cap, so no position can be short: {summary:?}"
+        );
+        assert_eq!(summary.short_of_cap_deficit, 0);
+        for locus in &loci {
+            let folded: u32 = locus
+                .observations
+                .iter()
+                .map(|observation| observation.num_obs)
+                .sum();
+            assert_eq!(folded, 8, "every position folds the cap's worth");
+        }
+
+        let below_the_cap = WalkerConfig {
+            max_active_reads: 4,
+            ..at_the_cap
+        };
+        let mut walker = run(reads(), &reference, &below_the_cap);
+        let _: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+        assert!(
+            summary.positions_short_of_cap > 0,
+            "with the ceiling below the cap every position is short, and a counter that \
+             cannot say so is measuring nothing: {summary:?}"
+        );
+        assert!(
+            summary.short_of_cap_deficit >= summary.positions_short_of_cap,
+            "each short position is at least one read short: {summary:?}"
+        );
+    }
+
+    /// **The kept set does not depend on the order the active set holds reads in.**
+    ///
+    /// The same reads at the same positions with the same names, offered to the walk in
+    /// two different arrival orders within a position, must produce the same loci. Under
+    /// the old `truncate` rule they did not: the cap kept a prefix of the active set's
+    /// storage order, so re-ordering the input re-ordered the evidence.
+    ///
+    /// **Permuting the input is the strongest permutation available from outside**, and
+    /// it is a genuine one: `admit_read` requires non-decreasing `(chrom, start)` and
+    /// nothing more, so reads sharing a start may be offered in any order, and that order
+    /// is exactly what the active set's iteration order was. Reversing it is the
+    /// permutation the in-flight ordered-active-set work would otherwise impose.
+    #[test]
+    fn the_kept_set_does_not_depend_on_the_order_the_set_holds_reads_in() {
+        let config = WalkerConfig {
+            max_snp_column_depth: 5,
+            ..WalkerConfig::default()
+        };
+        let reference = MockFasta::new("ACG");
+        let bases: [&[u8]; 4] = [b"ACG", b"CCG", b"AGG", b"ACT"];
+        let forwards: Vec<_> = (0..20)
+            .map(|index| {
+                let mut read = snp_read(
+                    &format!("q{index}"),
+                    1,
+                    bases[index % bases.len()],
+                    &[30; 3],
+                );
+                read.mapq = 20 + index as u8;
+                read
+            })
+            .collect();
+        let backwards: Vec<_> = forwards.iter().rev().cloned().collect();
+
+        let mut walker = run(forwards, &reference, &config);
+        let one: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let mut walker = run(backwards, &reference, &config);
+        let other: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+
+        assert!(!one.is_empty(), "the fixture must emit loci");
+        // `q_sum` is a float sum whose order follows the arrival order, so it is compared
+        // through the same tolerance the parity harness uses rather than exactly. Every
+        // other field — the alleles, their counts, the strand and MAPQ moments — is a
+        // property of the *set* that folded and must match bit for bit.
+        assert_eq!(one.len(), other.len(), "the same loci, either way round");
+        for (a, b) in one.iter().zip(other.iter()) {
+            let key = |locus: &SampleLocusObservations| {
+                let mut rows: Vec<_> = locus
+                    .observations
+                    .iter()
+                    .map(|observation| {
+                        (
+                            observation.bases.to_vec(),
+                            observation.num_obs,
+                            observation.num_fwd,
+                            observation.mapq_sum,
+                            observation.mapq_sum_sq,
+                            observation.placed_left,
+                        )
+                    })
+                    .collect();
+                rows.sort();
+                (locus.region, locus.reference_bases.to_vec(), rows)
+            };
+            assert_eq!(
+                key(a),
+                key(b),
+                "the same reads offered in two orders kept two different sets"
+            );
+        }
+    }
+
+    /// **The ceiling is on reads held open at once, not on reads seen.** A slot freed by
+    /// a read the walker has passed is available to the next one, so a deep pile costs
+    /// the reads inside it and nothing after it.
+    ///
+    /// Three reads at position 1 against a ceiling of two: one is refused. The fourth
+    /// read starts at 100, long after the first three have expired, and is admitted —
+    /// four reads seen, three admitted, one shed. A cap that counted admissions rather
+    /// than residents would shed this last read too, and the depth of a whole
+    /// chromosome would collapse after its first crowded base.
+    #[test]
+    fn a_slot_freed_by_an_expired_read_admits_the_next_one() {
+        let config = WalkerConfig {
+            max_active_reads: 2,
+            ..WalkerConfig::default()
+        };
+        let reference = MockFasta::new(&("ACG".to_string() + &"T".repeat(96) + "ACG"));
+        let mut reads: Vec<_> = (0..3)
+            .map(|index| snp_read(&format!("r{index}"), 1, b"ACG", &[30; 3]))
+            .collect();
+        reads.push(snp_read("late", 100, b"ACG", &[30; 3]));
+
+        let mut walker = run(reads, &reference, &config);
+        let loci: Vec<_> = walker.by_ref().map(|item| item.expect("walks")).collect();
+        let summary = walker.summary();
+
+        assert_eq!(
+            summary.reads_admitted + summary.reads_shed_at_admission,
+            4,
+            "four reads seen, each either admitted or refused"
+        );
+        // **The point of the test, and the one part the sampling rule cannot move.** The
+        // late read is alone over positions 100..=102, so a locus there with one folded
+        // read is proof it was let in — and it can only have been let in if the ceiling
+        // counts residents rather than admissions.
+        let late_locus = loci
+            .iter()
+            .find(|locus| locus.region.start.0 == 100)
+            .expect("the late read must produce a locus of its own at 100");
+        let folded: u32 = late_locus
+            .observations
+            .iter()
+            .map(|observation| observation.num_obs)
+            .sum();
+        assert_eq!(
+            folded, 1,
+            "the late read starts long after the crowded base has cleared, so its slot is \
+             free; a ceiling that counted admissions would have refused it and the depth \
+             of a whole chromosome would collapse after its first crowded base"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1729,6 +2665,7 @@ mod tests {
     ) -> ReadContribution {
         ReadContribution {
             read_id: 0,
+            active_index: 0,
             chain_id: 0,
             events_at_pos: events,
             bq_baq_at_walker_pos: bq,

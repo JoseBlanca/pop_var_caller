@@ -16,7 +16,6 @@ architecture companions, which point here rather than repeating the numbers.*
 | what does binning the depth cost? | both | the ladder's edges are a **correctness** parameter, not only a memory one — but a good ladder costs 0.05 rungs. §4 |
 | what does assuming a heterozygote is a half cost? | [`ng_multilib_key_harness.rs`](../../../../examples/ng_multilib_key_harness.rs) | under 0.5% of heterozygosity at 20 reads a site, up to 10% at three. §5 |
 | can the STR stutter accumulator give an unbiased answer? | [`ng_str_stutter_harness.rs`](../../../../examples/ng_str_stutter_harness.rs) | **not as specified** — it pools reads across loci, which identifies nothing. Keyed by locus it is exact. §6 |
-| what does the per-locus table cost on real reads? | [`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs) | 0.43 entries a locus at 300×, 0.36 MB over 29,811 loci — **not a memory question**. §6.8 |
 
 ---
 
@@ -701,13 +700,12 @@ the locus population — how many loci carry an allele other than the reference 
 many carry two different ones — and the depth.
 
 **A correction the harness forced before any world was run: this path fits four numbers, not
-three.** The STR spec's opening section, the summary table in
+three.** §1 of the spec, the summary table in
 [`parameter_prepass.md`](../spec/parameter_prepass.md) §1, and §3.1's "scan its three noise
-parameters" all counted the substitution rate, the direction split and the fall-off — and omitted
-**how often a read slips at all**. That is the quantity the STR spec's §4 stratifies by, its §4.3
-holds monotonic across strata, and its §5 tabulates at 0.091%, 0.170% and 2.006% by repeat-count
-band. A model with no level cannot express any of those sentences. All three documents now count
-four.
+parameters" all count the substitution rate, the direction split and the fall-off — and omit
+**how often a read slips at all**. That is the quantity §4 stratifies by, §1.1 holds monotonic
+across strata, and §5 tabulates at 0.091%, 0.170% and 2.006% by repeat-count band. A model with
+no level cannot express any of them.
 
 ### 6.2 The cell has to be a locus. Pooling reads across loci identifies nothing
 
@@ -748,8 +746,8 @@ length there is nothing for slippage to be confused with.
   numbers, and the level moves **333-fold depending only on where the search starts**. That is
   the signature §2.2 recorded for the pooled multi-library key — the same answer at every depth,
   moving with the start — and it means *not identified* rather than *badly estimated*. Seven
-  allele lengths spans three repeat units either side of the reference, and 30 loci in 100 carry
-  one of them: an ordinary stratum, not a stress case.
+  allele lengths is not a stress case: it is one repeat unit either side of a tract at a stratum
+  with ordinary variation.
 
 **Keeping a locus's reads together removes it.** Every other measurement below keys the
 accumulator by locus — one entry per locus, holding how many of that locus's reads fell at each
@@ -758,7 +756,7 @@ on both shares, spread 1.000×).
 
 ### 6.3 Where the offsets are measured from
 
-The STR spec recorded offsets from **each locus's own modal observed length** and marked the choice
+Spec §4.1 records offsets from **each locus's own modal observed length** and marks the choice
 `OPEN`, with the answer to its own doubt being *"the origin is a binning choice and not a
 genotype call: the fit marginalises over the genotype, so a heterozygous locus's second allele
 is explained by the genotype term rather than charged to slippage."*
@@ -767,107 +765,7 @@ Three arms, all keyed by locus, differing only in where the origin sits and what
 believes about it. `hets` is how often the fitted genotype frequencies say a locus carries two
 different alleles.
 
-| reads a locus | loci heterozygous | how the accumulator was keyed / what the fit believed | level | direction split | fall-off | heterozygosity |
-|---:|---:|---|---:|---:|---:|---:|
-| 3.2 | 10 in 100 | reference origin, scored as such | **0.0%** | **0.0000** | **0.0000** | **0.0%** |
-| 3.2 | 10 in 100 | modal origin, scored as a fixed origin | **+50.3%** | +0.1658 | −0.0162 | −61.8% |
-| 3.2 | 10 in 100 | modal origin, scored by summing over the centring | −0.3% | −0.0002 | +0.0418 | +0.1% |
-| 3.2 | 46 in 100 | reference origin, scored as such | **0.0%** | **0.0000** | **0.0000** | **0.0%** |
-| 3.2 | 46 in 100 | modal origin, scored as a fixed origin | **+408.4%** | **+0.3105** | +0.0440 | −75.4% |
-| 3.2 | 46 in 100 | modal origin, scored by summing over the centring | −1.1% | −0.0012 | +0.0231 | +0.1% |
-| 5.9 | 46 in 100 | modal origin, scored as a fixed origin | +135.1% | +0.2328 | +0.2726 | −25.4% |
-| 5.9 | 46 in 100 | modal origin, scored by summing over the centring | −0.9% | −0.0003 | +0.0263 | +0.1% |
-| 9.6 | 10 in 100 | modal origin, scored as a fixed origin | +7.5% | +0.0095 | +0.0057 | −7.3% |
-| 9.6 | 46 in 100 | modal origin, scored as a fixed origin | +89.9% | +0.2250 | +0.4146 | −12.1% |
-| 9.6 | 46 in 100 | modal origin, scored by summing over the centring | −0.7% | −0.0001 | +0.0258 | +0.0% |
-
-*(The reference-origin row is exactly zero at every depth and heterozygosity tried; it is shown
-twice and omitted after. A fourth arm, breaking modal ties toward the reference length rather than
-toward the shorter allele, is within 0.005 of the third at every row — the tie rule is not where the
-difference lives. The depths are the realised means of the truncated Poisson the worlds are built
-from, not the nominal ones.)*
-
-**The claim is false as stated, and the size is the same one §2.2 of the spec measured on real
-data.** Centring on each locus's own mode makes the origin a function of the reads, so a fit that
-treats it as a fixed property of the locus is misspecified — and marginalising over the genotype
-does not repair it, because the genotype term is being asked to explain something that moved with
-the data. At three reads a locus with 46 loci in 100 heterozygous, the slippage rate comes back
-**five times too high**.
-
-**The direction split is the row to read twice.** The truth in every world is 0.17 — a read is 4.9
-times as likely to lose a repeat as gain one, exactly what
-[`../spec/parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) §3 measures at tomato
-dinucleotides. The naive modal fit returns 0.48: **a 1.1-fold asymmetry where the truth is
-4.9-fold.** [`../spec/parameter_prepass.md`](../spec/parameter_prepass.md) §2.2 records the same
-thing on HG002 — 0.9× measured over all loci against 3.4× over known-homozygous ones — and
-attributes it to fitting on uncontrolled data. It arises here from a keying choice alone, at the
-same size.
-
-**The bias shrinks with depth and does not go away.** At 9.6 reads a locus it is still +90% with the
-direction split still 0.22 out, because a heterozygous locus's mode is the wrong origin however many
-reads confirm it.
-
-**A fit that models the centring recovers the rate and the direction**, to within 1.1% and 0.004 —
-at the price of an enumeration over every way a locus's reads could have landed, where the reference
-origin costs nothing and is exactly zero. Its fall-off comes back 0.02 to 0.04 high, and **that is
-the harness's and not the estimator's**: §6.3.1.
-
-### 6.3.1 A residual that looked like bias and was an unconverged climb
-
-The mode-centred fit that models its own centring leaves the fall-off **0.02 to 0.04 above** a truth
-of 0.087, in every world, while the level and direction split come back right. A correctly specified
-model cannot be biased, so one of the two had to give.
-
-**The spread across starting points said the answer was solid, and it was wrong to.** All four
-starts — which disagree about the fall-off by more than tenfold, 0.03 against 0.40 — returned fall-
-offs identical to four decimal places. That reads as a fit that found something. It is the opposite:
-**golden-section search is deterministic, so on a direction the objective does not depend on, every
-start returns the same point.** A zero spread is evidence of agreement only where the objective is
-not flat.
-
-**The check that settles it costs two scores.** Evaluate the objective at the truth and at the
-fitted answer — a correctly specified model puts its maximum at the truth, so the second may not
-exceed the first — and vary nothing but how many expectation-maximization passes the inner climb over
-the genotype frequencies is allowed. One world, 3.2 reads a locus, 30 loci in 100 off the reference
-length:
-
-| origin | climb passes | score at the truth | score at the fitted point | fitted − truth |
-|---|---:|---:|---:|---:|
-| modal | 200 | −2.8191907628 | −2.8191772757 | **+1.35e−5** |
-| modal | 2,000 | −2.8191805018 | −2.8191727327 | +7.77e−6 |
-| modal | 20,000 | −2.8191711399 | −2.8191712448 | **−1.05e−7** |
-| modal | 200,000 | −2.8191688934 | −2.8191710559 | −2.16e−6 |
-| reference | 200 | −3.4729561752 | −3.4730394903 | −8.33e−5 |
-| reference | 200,000 | −3.4729561752 | −3.4730394903 | −8.33e−5 |
-
-**It is the climb, and the residual was the harness's.** The reference-origin control returns the
-*same score to ten decimal places* at 200 passes and at 200,000 — the climb has converged — and the
-fitted point sits below the truth, as a correctly specified model requires. Under the modal origin
-the score at the truth is still climbing at 200,000 passes, and the sign of the last column **flips
-between 200 and 20,000**: given enough passes the truth wins, which is exactly what correct
-specification predicts.
-
-**So the mode-centred table does contain the fall-off**, and the earlier reading of this section —
-that it did not — was wrong for the reason this note keeps recording: a number produced by a
-measuring tool that had not converged, read as a property of the thing being measured.
-
-**What is true is a cost, and it is a large one.** Mode-centring makes the genotype frequencies
-overlap — a locus's shape says much less about which alleles it carries once every locus has been
-re-centred on whatever offset happened to be commonest — and expectation-maximization converges at a
-rate set by exactly that overlap (Redner & Walker 1984). The reference-origin climb converges in
-under 200 passes; the mode-centred one has not converged in **a thousand times that**, and it sits
-inside the inner loop of a search that runs once per stratum. **That is the case against the modal
-origin, alongside the +50% to +408% the naive implementation costs** — not that the fall-off is
-unmeasurable.
-
-<!-- CONVERGENCE READING -->
-
-**The lesson for the next harness: a spread across starting points is not a sufficient
-diagnostic.** It catches a search that stopped in different places; it cannot catch a search that
-stopped in the same wrong place, which is what a deterministic optimiser does wherever the objective
-is flat or nearly so. Pair it with the score at the truth, which costs one evaluation and is
-unambiguous: a correctly specified model cannot beat the truth, so a positive value is a defect in
-the measuring code rather than a finding about the estimator.
+<!-- ORIGIN TABLE -->
 
 ### 6.4 Scoring a saturated end bucket
 
@@ -875,7 +773,7 @@ The offset range is small and its ends absorb everything beyond — "at least fo
 short" is one bucket. Scoring that bucket as though every read in it sat exactly on the edge is
 a plug-in; the marginal is the sum over everything the bucket takes in.
 
-Keyed by locus, 5.8 reads a locus, 10 loci in 100 carrying an allele off the reference length.
+Loci keyed by locus, 6 reads apiece, 10 loci in 100 off the reference length.
 
 | range | edge scoring | level | fall-off | level | fall-off |
 |---|---|---:|---:|---:|---:|
@@ -905,75 +803,6 @@ is the regime long tracts sit in, so the error is largest exactly where slippage
 un-rescaled rule sums to 0.9488 over the cell space at ±1, 0.9954 at ±2 and 0.9996 at ±3, so it
 is not the likelihood of anything and no consistency result covers it.
 
-**And the case the reference origin makes unavoidable: alleles that fall outside the range.** With
-offsets measured from the reference tract length, a read's offset is its allele's distance from the
-reference plus the slip, so the end buckets absorb whole alleles and not only far slips. A stratum
-whose alleles span three repeats either side of the reference, 30 loci in 100 carrying one of them,
-at 3.2 reads a locus:
-
-| range | edge scoring | level | direction split | fall-off | heterozygosity |
-|---|---|---:|---:|---:|---:|
-| ±1 | **marginal** | **−0.05%** | −0.0001 | −0.0014 | −1.5% |
-| ±1 | plug at the edge | **−52.3%** | −0.0688 | −0.0850 | −2.1% |
-| ±1 | plug, rescaled | +0.6% | −0.0009 | −0.0850 | −1.6% |
-| ±2 | **marginal** | **0.00%** | **0.0000** | **0.0000** | −0.7% |
-| ±2 | plug at the edge | **−29.3%** | −0.0188 | −0.0527 | −0.1% |
-| ±2 | plug, rescaled | −5.4% | −0.0087 | +0.0178 | −1.6% |
-
-**The range does not have to cover the allele spectrum.** At ±1 — one bucket either side of the
-origin, against alleles reaching three — the marginal rule still returns the slippage level to
-within 0.05% and both shares to within 0.002. What the narrow range costs is the *heterozygosity*
-readout, 1.5% at ±1 and 0.7% at ±2, because alleles that fold into one end bucket cannot be told
-apart afterwards; and heterozygosity is a by-product of this fit rather than something the STR path
-emits.
-
-**What must be wide enough is a different thing: the allele lengths the fit is allowed to consider.**
-In every row above the model's allele support reaches ±3 while its buckets reach ±1 or ±2 — the fit
-knows an allele can sit outside the recorded range, and the marginal scoring is what lets it place
-one there. The recorded range and the fitted allele support are two separate widths, and only the
-second is load-bearing.
-
-**The plug-in gets much worse here, which is worth noting because it is the realistic case.**
-Scoring the end bucket at its edge costs **52% of the slippage level at ±1** where the alleles reach
-±3, against 6.5% where they reach ±1: the more the bucket absorbs, the more a plug-in misreads it,
-and against the reference origin what it absorbs is alleles.
-
-### 6.4.1 Alleles the fit is not allowed to place, which is a different question and has a cliff
-
-Everything above concerns alleles outside the **recorded offset range** while still inside the
-lengths the fit may place mass on. The other case is a locus whose allele is outside that *support*:
-the fit cannot represent it, so it explains those reads the only way left, as slippage. Real tract
-lengths have a long tail — about one HG002 locus in 200 sits further than six repeats from the
-reference (§6.8) — so how much that costs decides where the support's limit goes.
-
-Loci carrying alleles out to ±4, a spectrum falling geometrically away from the reference, 5.8 reads
-a locus. The support is narrowed a step at a time; `outside` is the share of loci with **either**
-copy beyond it.
-
-| the fit's allele support | loci it cannot represent | level | direction split | fall-off |
-|---|---:|---:|---:|---:|
-| ±0 | 42.1% | **+1164%** | +0.308 | +0.325 |
-| ±1 | 19.3% | **+499%** | +0.297 | +0.863 |
-| ±2 | 7.9% | −2.5% | −0.002 | +0.002 |
-| ±3 | 2.5% | +0.1% | 0.000 | 0.000 |
-| **±4 — the control** | **0%** | **+0.3%** | 0.000 | 0.000 |
-
-*(The control reads +0.3% rather than exactly zero: forty-five genotypes make this world's inner
-climb slower than the others', so 0.3% is the run's own resolution and the rows should be read
-against that rather than against zero.)*
-
-**The cost is not proportional to the share left out — it is nothing, and then it is everything.**
-At 2.5% of loci outside the support the slippage level is right to within the run's resolution; at
-7.9% it is 2.5% low; at 19.3% it is **five times too high**, with the direction asymmetry destroyed
-(0.17 becoming 0.47) exactly as the modal origin destroyed it. The transition sits between roughly
-8% and 19% of loci left out.
-
-**So the limit is not a number to tune, it is a threshold to clear.** On the measured distribution
-(§6.8) a limit of ±6 leaves about 0.5% of HG002 loci outside — a fifth of the way to the ±3 row,
-which is already free. Anything comfortably under a few percent costs nothing measurable, and the
-choice stops mattering. What would be dangerous is a limit narrow enough to leave a tenth of the
-loci out, and nothing plausible on this data comes near that.
-
 ### 6.5 The shape of the surface, and the size of the search
 
 [`parameter_prepass.md`](../spec/parameter_prepass.md) §9.3 records that nobody has shown the
@@ -986,8 +815,8 @@ genotype frequencies are maximised out. 41 rungs from 0.0001 to 0.3.
 
 | | interior local maxima | best rung | truth |
 |---|---:|---:|---:|
-| 3.2 reads a locus, 46 loci in 100 heterozygous | **1** | 0.0182 | 0.0200 |
-| 9.6 reads a locus, 10 loci in 100 heterozygous | **1** | 0.0182 | 0.0200 |
+| 3 reads a locus, 46 loci in 100 heterozygous | **1** | 0.0182 | 0.0200 |
+| 8.5 reads a locus, 10 loci in 100 heterozygous | **1** | 0.0182 | 0.0200 |
 
 The best rung is the ladder step nearest the truth — these rungs are 22% apart, against the
 design's 6% — so the offset is resolution and not bias.
@@ -999,9 +828,9 @@ support is dropping the flat scan in favour of a search from several starts, whi
 parameters — and which agrees with itself to 1.00× on every well-specified world in this
 section.
 
-**How sharp the peak is, on the other hand, differs sharply between the two.** At 3.2 reads with
+**How sharp the peak is, on the other hand, differs sharply between the two.** At 3 reads with
 46 loci in 100 heterozygous the profile is nearly flat over a three-fold range of the level
-(0.002 nats between 0.0122 and 0.0272, either side of a peak at 0.0182); at 9.6 reads with 10 in
+(0.002 nats between 0.0122 and 0.0272, either side of a peak at 0.0182); at 8.5 reads with 10 in
 100 heterozygous the same span costs 0.017 nats. The level is weakly determined in exactly the
 regime tomato sits in — which is a statement about precision, not bias, and the reason the
 observation count beside each fit is load-bearing.
@@ -1010,7 +839,7 @@ observation count beside each fit is load-bearing.
 
 Thin strata take their neighbours' value, and a fitted sequence that fails to rise with repeat
 count is merged and refitted (§1.1, inherited from GATK). Both change the estimate and neither
-had a bias measured against it. Two strata pooled and fitted as one, at 3.2 reads a locus:
+had a bias measured against it. Two strata pooled and fitted as one, at 3 reads a locus:
 
 | the two strata's true levels | first stratum's share of the loci | one level fitted for both | worst error carried by a stratum |
 |---|---:|---:|---:|
@@ -1058,103 +887,11 @@ Two consequences, both arithmetic:
 together, are 4.2 million" prices the wrong three: 161³ is the right arithmetic for the wrong
 parameters. What is searched is the slippage — how often, which way, how far.
 
-### 6.8 What the table costs on real reads, and it is not what §6.2's change implied
+### 6.8 What is not measured
 
-*Everything above is exact arithmetic on constructed worlds. This subsection is the opposite: the
-real region-typing walk and the real STR locus generator over real alignments, building the table
-[`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.2 specifies. Harness:
-[`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs).*
-
-**Why it had to be run.** Making an entry a locus rather than a read (§6.2) removed an
-identification failure and took the table's size with it: a tally of reads is a handful of buckets
-a stratum, while a table of locus shapes grows with how many *distinct* shapes the loci take. The
-architecture doc said this ran between two bounds — a few hundred shapes a stratum at three reads a
-locus, one entry per locus at 300× — and that the read cap was what held it near the first. **The
-upper bound is wrong, and the cap is not a memory device.**
-
-**A whole tomato genome at 80 reads a locus, and HG002 at 300× over the 50,000-interval GIAB
-tandem-repeat set.** One read group each; 30 bytes an entry — a 10-byte key, a 4-byte count, and 16
-bytes of map overhead that is an assumption, the entry count being what is measured.
-
-| | loci | entries at cap 12 | uncapped entries | uncapped table |
-|---|---:|---:|---:|---:|
-| tomato, whole genome, 80×| **1,729,176** | 12,767 | **70,305** | **2.01 MB** |
-| HG002, tandem-repeat tier set, 300× | 29,811 | 3,553 | 12,727 | 0.36 MB |
-
-**Entries saturate; they do not scale with the genome.** Fifty-eight times the loci buys five and a
-half times the entries — 0.041 entries a locus on the whole tomato genome against 0.427 on the human
-subset. Most loci at a clean tract are "every read at the reference length", so what distinguishes
-two entries is mostly their depth, and depths repeat. **A whole genome's STR table is two megabytes
-uncapped and under half a megabyte at a working cap**, beside a windowed histogram the same document
-prices at 115 MB per human sample. **The STR table is not a memory question**, and the shared spec's
-§6 should stop treating it as one.
-
-**For a whole human genome the locus count is measured and the entry count is not.** Region typing
-over GRCh38 finds **6,422,899 STR loci**, 3.7 times tomato's — but the repo holds no whole-genome
-human alignment, only the tandem-repeat tier slice, so the entry count at that scale is an
-extrapolation rather than a measurement. Entries grow as roughly the 0.4 power of loci across the
-two rows above, which puts a whole human genome near **120,000 entries, 3.5 MB uncapped** and under
-a megabyte capped. The hard ceiling — one entry per locus — is 193 MB, and nothing observed comes
-within a factor of fifty of it.
-
-**What the cap is still for, and it is less than it was.** It was introduced to hold the table down,
-which it turns out not to need to do. The two reasons that looked like they survived were that the
-exact-bias measurements stopped at 12 reads a locus, so the scoring rule was unmeasured above it;
-and that the entry shape holds its bucket counts in single bytes, which a 300× locus overflows.
-**The first of those is now gone as well** — see below. What is left is the counter width, which is
-a `u8` decision rather than a statistical one, and precision, which is a trade rather than a limit.
-
-**The rule holds at every depth reachable, and reaching them cost nothing but a narrower key.** The
-reason the exact method stopped at 12 reads was the cell space: every way a locus's reads split
-across the buckets, which grows as the depth to the power of the bucket count. **Narrowing the
-recorded range from nine buckets to three takes the space at 60 reads from eight million cells to
-39,710** — and §6.4 had already measured that a range of ±1 scored by its marginal is exactly
-unbiased, so the narrow key is smaller without being weaker. On it:
-
-| reads a locus | cells | level | direction split | fall-off | beats truth |
-|---:|---:|---:|---:|---:|---:|
-| 3.2 | 454 | 0.00% | 0.0000 | 0.0000 | 4e−16 |
-| 6.0 | 1,770 | 0.00% | 0.0000 | 0.0000 | 2e−15 |
-| 12.0 | 5,455 | 0.00% | 0.0000 | 0.0000 | 2e−14 |
-| 20.0 | 12,340 | 0.00% | 0.0000 | 0.0000 | −7e−15 |
-| 30.0 | 30,855 | 0.00% | 0.0000 | 0.0000 | −2e−14 |
-| **45.0** | **76,075** | **0.00%** | **0.0000** | **0.0000** | −1e−14 |
-
-Exactly unbiased on all three parameters at every depth, with the four starting points agreeing to
-1.00× and the score at the truth unbeaten to floating point. **The cap is not a correctness limit**,
-and a design that raises it is not stepping outside what has been measured.
-
-*What is still not enumerable is a deep world at a wide recorded range* — nine buckets at 45 reads
-is 10¹⁰ cells — so this says the rule survives depth, not that depth and a wide range together have
-been tried.
-
-**Two constants this walk also settles.**
-
-- **The recorded offset range at ±4 is comfortable.** Its saturating end buckets take **0.89% of
-  reads** across GRCh38's typed tracts and **0.14%** across tomato's 138 million reads. Nothing is
-  piling up against the ends.
-- **How far a sample's tract lengths sit from the reference length** — the width the fit's allele
-  support has to cover, which §6.4 showed is the one that decides the answer. The locus's modal
-  observed offset: on HG002, **88.9% sit exactly at the reference length**, ±4 holds 99%, ±12 holds
-  99.9% and ±19 holds 99.99%. Tomato, over 1.73 million loci, is tighter — **95.7% at zero**, ±1
-  holding 99%, ±8 holding 99.9% — which is what a within-species reference should give against a
-  human sample carrying two haplotypes' worth of divergence from GRCh38. **A support of ±6 leaves
-  about 0.5% of human loci and 0.2% of tomato loci outside**, against the 8% at which §6.4.1 finds
-  any cost at all.
-
-**And one that the walk shows is doing real work rather than sitting unread.** The guard bucket —
-reads differing from the reference by something that is not a whole number of copies — is **1.37%
-of the reads that differ at all** on HG002 and **1.97%** across the tomato genome, with **10 of 132
-human strata and 28 of 148 tomato strata above the one-in-ten threshold** §5 of the spec sets. So
-the threshold separates strata rather than flagging everything or nothing, which is what a
-diagnostic has to do to be worth emitting — and which strata it separates is what §5.1 of the spec
-uses to place the copy floors.
-
-### 6.9 What is not measured
-
-**Depth above a cap of 12 reads a locus** — a realised mean of 9.6 at the deepest world here. The
-cell space is every way a locus's reads split across the offset buckets, so it grows as the depth to
-the power of the bucket count. HG002 at 300× needs a coarsening of the per-locus cell that nothing
+**Depth above about 12 reads a locus.** The cell space is every way a locus's reads split
+across the offset buckets, so it grows as the depth to the power of the bucket count; the worlds
+here are exact to 12 reads. HG002 at 300× needs a coarsening of the per-locus cell that nothing
 here has priced, and it is the one place the accumulator's memory could stop being kilobytes.
 
 **Periods other than the one shaped like tomato's dinucleotides**, and ploidy above two.
@@ -1164,14 +901,9 @@ independent per-read category, which makes it factorise out exactly; if a read i
 produce a non-whole-repeat length at some allele lengths than others, it does not.
 
 **The interaction between the origin choice and the end buckets.** Both are decisions about the
-offset axis. §6.4's wide-allele block varies the range against the alleles under the *reference*
-origin, which is the case the adopted design has; centring on the mode shifts offsets before they
-saturate, so it must change how often a read lands in an end bucket, and nothing here varies those
-two together. It matters only to a design nobody is now proposing.
-
-**How slowly the mode-centred climb converges, as a number.** §6.3.1 shows it has not converged in
-200,000 passes where the reference-origin climb converges in under 200, which is enough to reject
-the design and is not a rate.
+offset axis and both were priced alone. Centring on the mode shifts offsets before they
+saturate, so it must change how often a read lands in an end bucket; nothing here varies the two
+together.
 
 ---
 
@@ -1192,12 +924,7 @@ Recorded because the same reasoning will be tempting again.
 | a bin mean instead of a cell mean makes the objective unbounded, so every fit rails to the ladder's floor | the mechanism is real, the consequence is not: the fit lands 5.2 rungs low and 29% low on `π_hom_alt`, bounded and **silent** (§4.5) |
 | the depth ladder's edges buy memory and not accuracy | 16 bins against 20, same cap, is 0.55 rungs against 0.05 (§4.3) |
 
-| the STR path fits three numbers — a substitution rate, a direction split and a distance decay | four: **how often a read slips at all** was missing, and it is the quantity the strata exist for (§6.1) |
-| centring each locus's offsets on its own modal length is safe, because the fit marginalises over the genotype | it returns a slippage rate **five times too high** at three reads a locus, and a 1.1-fold direction asymmetry where the truth is 4.9-fold (§6.3) |
-| the STR offset table can be a tally of reads, at kilobytes a stratum | a tally of reads identifies **nothing**: the answer moves 333-fold with the starting point. The entry has to be a locus (§6.2) |
-| …and keying it by locus therefore costs memory, up to one entry per locus at 300× | it does not: 0.43 entries a locus uncapped, 0.36 MB over 29,811 loci. **The claim was mine and it lasted a day** (§6.8) |
-
-And four produced by these harnesses themselves, each of which looked like a finding about
+And three produced by these harnesses themselves, each of which looked like a finding about
 the estimator and was a defect in the measuring code:
 
 - the multi-library sweep's **54% heterozygosity error**, which appeared identically on
@@ -1219,11 +946,3 @@ the estimator and was a defect in the measuring code:
   fixed. **Every number this note published before today is at 3 reads a site**, where the
   depth-1 cell has probability 0.15 and nothing is near either cliff, and §3's tables are
   unchanged by the fixes.
-- **A fall-off 0.02 above its truth, from four starting points that agreed to four decimal
-  places**, on the STR harness's mode-centred arm. Read first as a property the accumulator
-  had lost; it was the inner climb over the genotype frequencies stopping short, and the
-  sign of the gap to the truth flips once it is given a hundred times as many passes
-  (§6.3.1). **The agreement across starting points is what made it convincing, and that is
-  precisely the diagnostic that cannot work here**: a deterministic search returns the same
-  point from every start wherever the objective is nearly flat. The check that does work is
-  the score at the truth, which a correctly specified model cannot be beaten at.

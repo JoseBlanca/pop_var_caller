@@ -65,6 +65,19 @@ milestone checkpoints — they are human-review pause points.
   decision to pause; it does not re-implement their checklists.
 - **Real validation only.** A step is not committed until its build is actually green in the
   container. Never fabricate command output or wave a step through.
+- **Every number about your own work is measured before it is written.** Impl reports and
+  commit messages carry claims about what a step's tests reach — how many cases a fixture
+  covers, how far apart two values are, what a fixture would cost if it were wrong. **Run the
+  thing and read the number; do not recall it.** This is the most reliable defect this loop
+  produces: on one plan in this repo, **fifteen wrong numbers landed in a single milestone,
+  every one the author's own claim about their own fixture, while about forty figures quoted
+  from the design and research documents were all correct.** Wrong numbers survive because a
+  reader re-reads the sentence instead of re-running the fixture. Two habits: prefer a claim
+  the test *asserts* over a claim the prose states, so it cannot go stale silently; and when
+  the prose must carry it, quote the command you got it from. The same applies to *mechanisms*
+  — an explanation of why a fixture behaves as it does is a claim, and a wrong one is worse
+  than a wrong number, because it sends the next reader hunting a symptom that does not
+  occur.
 
 ## The per-step loop
 

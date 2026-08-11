@@ -314,9 +314,13 @@ the scan spacing the same soft number, measured once.
 80,000 reads and one with 8 could be pooled on a coincidence. The evidence count arrives with every
 parameter (§2) and should gate the comparison — but how is not settled, and §10 keeps it open.
 
-**The thin-read-group fallback lives here for the same reason.** The walk marks a read group it could
-not fit; only a step holding every read group can supply the panel-pooled value it borrows, and mark
-it as borrowed ([`parameter_prepass.md`](parameter_prepass.md) §6).
+**The panel-pooled fallback lives here for the same reason — but it is the rung *below* a borrow
+the sample can make for itself.** A library below `MIN_SITES_TO_FIT` in a sample whose other
+libraries were fitted takes their mean, within the sample and needing no other sample
+([`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §5.4). Only when
+**every** library of a sample is thin is there nothing to borrow from, and only then does a step
+holding every read group have something to supply. An earlier version of this paragraph put the
+whole read-group borrow here.
 
 **Soft, and unvalidated on our data.** Neither benchmark cohort exercises this: tomato declares one
 read group per sample and HG002 one for the whole file ([`parameter_prepass.md`](parameter_prepass.md) §5). The grouping rule is therefore

@@ -129,10 +129,18 @@ The checks that carry real evidence are §12's external anchors.
 
 ## 2. The noise model — what `ε` actually contains
 
-**The generic path's noise model is a per-base substitution rate and nothing else.** In the
-likelihood of [`parameter_prepass.md`](parameter_prepass.md) §3, a read over a reference copy shows
-some other base with probability `ε`, and a read over an alternative copy reverts to the reference
-with probability `ε/3`; there is no other way for a read to be wrong. (§3 explains the `3`: three
+> **⚠ AMENDED 2026-08-10 by the second-class-of-site milestone**
+> ([`../impl_plan/noise_model_extension.md`](../impl_plan/noise_model_extension.md)). This section
+> said the noise model is *a per-base substitution rate and nothing else*. **It now has two classes
+> of site**, and §2.1 below states the addition. Everything else in this section — what `ε`
+> contains, why one sample cannot separate its causes, why base qualities are not modelled — is
+> unchanged and is what the *clean* class means.
+
+**The generic path's noise model is a per-base substitution rate, applied at a site drawn from one
+of two classes** (§2.1). Within a class, the likelihood of
+[`parameter_prepass.md`](parameter_prepass.md) §3 applies unchanged: a read over a reference copy
+shows some other base with probability `ε`, and a read over an alternative copy reverts to the
+reference with probability `ε/3`; there is no other way for a read to be wrong. (§3 explains the `3`: three
 bases to go wrong into, one to come back to.) That is appropriate where the
 alternatives to a reference base are three other bases. A repeat tract can also slip a whole copy,
 which this model has nowhere to put — hence the STR path's separate one
@@ -157,6 +165,70 @@ differs from the reference — which are the sites polymorphic in the population
 and chimeras concentrate at repeats and indels. One flat rate therefore understates the
 alternative-read rate wherever the non-uniform contributors pile up and overstates it everywhere
 else.
+
+### 2.1 A second class of site — ADDED 2026-08-10
+
+**One rate per read group fits the body of the distribution and not its tail.** Measured on HG002's
+GIAB confident regions, at the 550,976 loci the benchmark records no variant of any kind, **818
+carry three or more alternative reads where one rate predicts 29**
+([`../research/noise_model_overdispersion_2026-08-10.md`](../research/noise_model_overdispersion_2026-08-10.md)).
+The three-genotype mixture has exactly one class that can explain such a locus, so the surplus
+arrived as heterozygosity: **1.41 times the benchmark's count** on that sample.
+
+**So a site is *clean* with probability `1 − w` and *noisy* with probability `w`, and the genotype
+emission uses that site's own rate.** The noisy rate `ε_noisy` and the share `w` are **one pair per
+sample**, where `ε` is one rate per read group; at a noisy site every library's reads disagree at
+`ε_noisy`. Fitted on real alignments the pair comes out at **0.4% to 1.4% of sites at 4 to 10
+percent**, against clean rates of 2 to 4 in a thousand, and it cuts HG002's fitted heterozygosity
+from 1.41 to **1.085** times the benchmark. A beta-binomial was tried and loses by 425 nats for one
+fewer parameter.
+
+**What makes a site noisy** (owner, 2026-08-10) is not one thing, and the three known causes do not
+belong to the same object. A **duplication the reference does not carry** collects two copies' reads
+at one locus, so every position where the copies differ shows alternative reads at every depth —
+a property of the *genome*, shared by every library made from it. **Contamination in a library**
+raises the alternative count at exactly the loci where the contaminant differs from this sample — a
+property of the *library*, and two libraries of one sample can differ in it. **Error-prone sequence
+context and mismapping** are partly the library's too, since mapping difficulty depends on read
+length and insert size. A noisy population is therefore expected in most samples rather than in
+unlucky ones.
+
+**The pair is fitted per sample all the same, and that is an assumption rather than a measurement.**
+No data distinguishes a per-sample from a per-library share: every sample in both cohorts carries one
+library. **Contamination is the case that would break it first**, because it can lift one library's
+share while leaving its sibling's untouched. To revisit when a multi-library alignment exists.
+
+**A sample that wants a noisier class than the model covers is refused and fitted with one
+rate — it is an outlier, not a reason to widen the model** (owner, 2026-08-10). The error-rate
+ladder runs Phred 10 to 50 because that is the range of *sequencing* noise (§3); an argmax on
+its coarsest rung is the search asking to leave that range, and what such a sample holds is a
+population of positions this model does not describe. Two of five real alignments do it —
+tomato SRR7279482 and SRR7279483, at 0.42% and 0.49% of sites — and what they are asking for
+fits a duplication the reference does not carry, where about **half** the reads disagree, five
+times that rung.
+
+*Rejected: widen the ladder for the noisy class.* As the noisy rate approaches a half, a noisy
+site and a heterozygous site are the same distribution, so the class that exists to take mass
+**away** from heterozygosity would begin taking real heterozygotes with it. **A model flexible
+enough to absorb those two samples would serve every sample that does meet its assumptions
+worse, and that is a regression.** *Rejected: take the next rung down instead* — an answer just
+inside the range carrying none of the evidence that the sample is outside it.
+
+**The refusal is reported rather than silent.** `site_noise` is then `None` for a reason quite
+unlike the ordinary one, so `site_noise_off_the_ladder` says which happened. Such a sample gets
+the one-rate answer it would have had before this milestone, and the caller can see that it did.
+
+**What a sample emits stays one number: the share-weighted marginal** `(1 − w)·ε_clean + w·ε_noisy`
+— the probability a read disagrees with the reference at a site drawn at random. That is the
+quantity a model-free count measures, and measured against one it sits **3.1% high, half a rung of
+the error-rate ladder**. Emitting `ε_clean` instead would report **16% below** that count, which
+[`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §9 calls an
+unambiguous bug. The pair travels beside it as a diagnostic, so a consumer that wants to score a
+read against its own site's class can, without another fit. **It is folded into one number only at
+the emitted surface** — the runs model of §6 is handed the pair, because averaging first puts the
+tail misspecification back inside it: measured, the twenty-fold gap between the heterozygote rates
+inside and outside a run collapses to 4.6-fold when the runs model is handed the marginal, and to
+3.7-fold when it is handed the clean rate alone.
 
 **Telling them apart needs the cohort**, which is why contamination is a cohort-gather parameter in
 the interfaces ([`../arch/ng_step_interfaces.md:347-349`](../arch/ng_step_interfaces.md)) and not
@@ -456,6 +528,34 @@ is far finer than the answer needs — worlds that ran 200 iterations without me
 tolerance of 10⁻¹² were already at the truth to better than a thousandth of a rung. Stop on the
 ladder rung ceasing to move, cap the loop, keep the best-scoring iterate
 ([`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §5.2).
+
+**AMENDED 2026-08-10 — the second class of site sits outside this alternation, and every rung of
+the `ε` scan is scored with it.** The alternation above is unchanged: two blocks, two tables. What
+changed is that the pair `(w, ε_noisy)` of §2.1 is fitted around it, by holding `ε_noisy` at each
+rung of the ladder in turn while the rates, the frequencies and the share settle, and keeping the
+best-scoring rung. **Leaving the pair out of the `ε` scan was a defect and not a simplification**:
+a candidate rate scored under the one-class rule is being asked to explain a table whose tail
+belongs to the other class, so the scan returns the tail-inflated rate whatever pair sits beside
+it — and since that scan is where this step's rate comes from, the rate then never moves. Measured
+on a table generated at HG002's own parameters it came back **three rungs high**, with the
+generating parameters scoring 351 nats better
+([`../reports/implementations/ng_noise_model_extension_n5_fix_2026-08-10.md`](../../reports/implementations/ng_noise_model_extension_n5_fix_2026-08-10.md)).
+
+**The two classes are not identified without an ordering constraint**, and it has the same shape as
+§6.1's `h << Hout`. Swapping the labels of a mixture describes the same distribution, so a "noisy"
+class *finer* than every library's clean rate and holding most of the genome scores identically to
+the reading anyone means — and a sample emits the two rates weighted by the share, so accepting it
+reports a rate an order of magnitude below what the reads support. The runs model resolves its
+version by relabelling after the fit; that is not available here, because the clean rate is one per
+read group and the noisy rate is one per sample, so there is no single rate to swap with. **A
+candidate rate at or below the coarsest fitted clean rate is refused instead.**
+
+**And the 25 worlds above were re-fitted through the extended model and are unchanged** — 0.000
+rungs and 0.000% throughout. That is a regression check and not evidence the extension works: those
+worlds carry one error rate, so there is no second class in them to find. **What is evidence** is a
+further six worlds that do have one, each built as one library and as two and fitted through both
+cell keys, which recover the share, both rates and both frequencies **exactly**
+([`../reports/implementations/ng_noise_model_extension_n4_2026-08-10.md`](../../reports/implementations/ng_noise_model_extension_n4_2026-08-10.md)).
 
 **Ask first how much this can matter.** Both cohorts in hand are single-library throughout
 ([`parameter_prepass.md`](parameter_prepass.md) §5), so the coupling bites only on multi-library
@@ -782,11 +882,12 @@ number, and it is worth being exact about how.
 
 Baum–Welch climbs to a stationary point. A start that guesses the inside state's heterozygote rate
 far below the truth fits every window to the outside state on its first pass, empties the inside
-state, and drives the rate of entering a run to zero. **On a genome with 29% of its length in runs
+state, and drives the rate of entering a run to zero. **On a genome with 26% of its length in runs
 and a floor of spurious heterozygotes three times the real rate, that returns `F` = 0.0000, reports
 convergence, and gives no other signal** — because every start made the same wrong guess, so keeping
 the best-scoring one had nothing better to pick. Starts spanning the separation return 0.2634 on the
-same data (research note §3.4). **At minimum: the inside heterozygote rate started at 1/20, 1/3 and
+same data, against a realised 0.2629 — which is where the 26% above comes from, so the two can be
+checked against each other (research note §3.4). **At minimum: the inside heterozygote rate started at 1/20, 1/3 and
 3/4 of the outside one, crossed with a few implied `F`.** Nine such starts cost seconds on 8,000
 windows and are the difference between an answer and a plausible zero.
 

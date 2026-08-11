@@ -519,9 +519,13 @@ would mean the coarse pass has to be dense enough to find it.
 **Decision: step through the noise parameters; at each step, climb to the best genotype frequencies.**
 In full:
 
-1. **Scan the error rate across its whole plausible range**, coarsely at first, with the steps
-   spaced on a log scale for the reason §3 gives. **The coarse pass is what looks everywhere**; how
-   coarse it may be is bounded by §9.3, since a hump narrower than the spacing can be stepped over.
+1. **Scan the error rate across its whole plausible range**, with the steps spaced on a log scale
+   for the reason §3 gives. **The scan is what looks everywhere.** An earlier version of this point
+   said "coarsely at first", implying a refinement stage; point 3 below and
+   [`../arch/parameter_prepass_generic.md`](../arch/parameter_prepass_generic.md) §4.2 both say the
+   opposite, and the implementation follows them — a single flat pass over 161 rungs at a quarter of
+   a Phred, every one scored, because nobody has shown the curve has a single hump. How coarse the
+   spacing may be is bounded by §9.3, since a hump narrower than it can be stepped over.
    *On the STR path this step is replaced by a search from several starting points*
    ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.2), for the two reasons §3 above gives
    — three parameters times several hundred strata, and a measurement of the curve's shape that this
@@ -921,7 +925,7 @@ whatever grain it is handed.
 |---|---|---|---|
 | generic noise | **read group** | a histogram of `(depth, alt-count)` cells, **including `k = 0` cells**, which is what production discards. Base qualities are neither carried nor used to filter reads: the model has one error rate ([generic](parameter_prepass_generic.md) §2) | [generic](parameter_prepass_generic.md) §2, §3 |
 | windowed heterozygosity | **sample × genomic window** (100 kb) | the same histogram shape, but each site entered once with its **total** depth and alternative count | [generic](parameter_prepass_generic.md) §4 |
-| STR noise | read group × `(period, repeat count)` | a histogram **of loci, not of reads**: each locus is reduced to how many of *its own* reads fell at each whole-repeat offset from the reference tract length, and the table counts how many loci had each such shape. Plus a bucket for reads differing by something that is not a whole number of copies, and **bases compared and bases mismatched** pooled over the stratum — the length buckets alone cannot yield an error rate | [ssr](parameter_prepass_ssr.md) §4.1 |
+| STR noise | read group × `(period, repeat count)` | **one entry per locus**, holding how many of *that locus's* reads fell at each whole-repeat offset from the reference tract length and how many differed by something that is not a whole number of copies, **plus bases compared and bases mismatched** pooled over the stratum — the length buckets alone cannot yield an error rate | [ssr](parameter_prepass_ssr.md) §4.1 |
 | generic census | **read group × selected position** | reads supporting each allele (A/C/G/T + other) at each position of a fixed set drawn from the analysed regions, **identical in every sample** | [census sites](parameter_prepass_census_sites.md) §2 |
 | STR census | **read group × selected locus** | reads at each whole-repeat offset from the locus's reference tract length, a non-whole-repeat bucket, and the same two composition counts, over a fixed set of STR loci | [census sites](parameter_prepass_census_sites.md) §2.1 |
 
@@ -998,21 +1002,20 @@ their sample (§1.3).
 per-read-group generic histogram is a few hundred cells, kilobytes per read group, and does not
 register against the gigabytes the observation stream itself costs.
 
-**The STR table's key changed, its size did not, and both halves of that are measured.** An earlier
-version of this paragraph priced it at "a handful of offset buckets and two counters, likewise
-kilobytes", which was true of a table of *reads*; the key is now one entry per **locus**, for the
-identification reason [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.1 gives. That was
-expected to cost memory, since the number of distinct locus shapes grows with a locus's depth. **It
-does not: on HG002 at 300× the uncapped table is 0.43 entries a locus — 12,727 entries over 29,811
-loci, 0.36 MB** ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.8).
-Deep data deduplicates, because most loci at a clean tract are "every read at the reference length"
-and what separates two entries is mostly their depth. **This object is not where step 4's memory
-goes**; the windowed histogram still is.
+**The STR table's size moved when its key did**, and an earlier version of this paragraph priced it
+at "a handful of offset buckets and two counters, likewise kilobytes". That was true of a table of
+*reads* and is not true of a table of *loci*
+([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.1, which explains why the key had to
+change). What it now holds is one entry per **distinct locus shape**, and the number of possible
+shapes grows with a locus's depth: at tomato's 3 reads a locus there are a few hundred and the whole
+stratum collapses into them; at HG002's 300× nearly every locus would be its own entry. **The
+per-locus read cap is what keeps it near the first bound**, and §10.6's measurement now has to cover
+this object rather than assuming it is free.
 
 | object | per sample | lives until | what a 50-sample run holds |
 |---|---:|---|---|
 | generic read-group histogram | kilobytes | end of that sample's walk | kilobytes × samples in flight |
-| STR locus table | 0.36 MB over 29,811 HG002 loci at 300×, uncapped — **measured**, not arithmetic | end of that sample's walk | likewise × samples in flight |
+| STR locus table | kilobytes at 3 reads a locus; **unmeasured above the per-locus read cap** | end of that sample's walk | likewise × samples in flight |
 | windowed heterozygosity | 30 MB tomato / 115 MB human, binned | end of that sample's walk | 30 MB × samples in flight |
 | generic census | ~1–1.3 MB per read group | **the gather** | ~50–65 MB at one read group per sample |
 | STR census | ~1–2 MB per read group | **the gather** | ~50–100 MB, likewise |
@@ -1041,13 +1044,19 @@ costs: a factor of 8,000 on this object, and nothing at all on the other four.
 **Errors, and how well determined each parameter is.** Two different things, and every parameter
 carries both.
 
-*Where it came from.* Too little data to fit is not an error, it is a provenance. **There are two
-different borrows and they happen at different levels**, which is worth keeping straight:
+*Where it came from.* Too little data to fit is not an error, it is a provenance. **There are
+three different borrows and they happen at different levels**, which is worth keeping straight:
 
-- **within a sample** — a thin stratum takes its neighbouring strata's value, adjacent repeat
-  counts at the same period;
-- **at the cohort gather** — a read group too thin to fit *at all* takes the panel-pooled value,
-  which is the only borrow that needs other samples.
+- **within a sample, across strata** — a thin stratum takes its neighbouring strata's value,
+  adjacent repeat counts at the same period;
+- **within a sample, across read groups** — a library below `MIN_SITES_TO_FIT` takes the mean of
+  the sample's other libraries' fitted rates. This one was missing from an earlier version of this
+  list, which sent the read-group borrow to the cohort gather; it is
+  [`parameter_prepass_generic.md`](parameter_prepass_generic.md)'s architecture §5.4 and it needs
+  no other sample;
+- **at the cohort gather** — a read group too thin to fit *at all*, in a sample where **every**
+  library is thin, takes the panel-pooled value. That is the only borrow that needs other samples,
+  and it is the rung below the within-sample one.
 
 Either way the parameter is **marked as having borrowed**, because one that came from a neighbour is
 softer than one fitted in place and the consumer should be able to tell. Four states — **fitted
@@ -1164,15 +1173,6 @@ agreeing with it would be failure. §10 says how correctness is shown instead.
    through the parameter end to end precisely because the answer is unknown, so it is correct either
    way. What the answer buys is the option of a cheaper search, not a correction.
 
-   **Partially answered on the STR path, and it is worth being exact about how little that
-   transfers.** Profiling the *slippage level* — the other two slippage parameters and the genotype
-   frequencies maximised out at each value — gives exactly one interior maximum on 41 rungs, in both
-   worlds tried ([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.5).
-   That is a different model, a different parameter and two worlds, so it is encouragement rather
-   than an answer here; what it did settle is that path's own search
-   ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.2), where a flat scan was not
-   affordable and the question was therefore blocking.
-
 **Open questions belonging to the other four documents** — everything about stutter, including the
 STR half of §4.2's weighting question
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §8); the `ε`/genotype-frequency coupling,
@@ -1284,9 +1284,10 @@ group's reads in the tomato CRAMs, which is a metamorphic check requiring no tru
    - **HG002 at 300×**, which stresses *depth*. §6's cell counts assume depth ≤ 100; at 300× the
      binning runs past the end of that table and the `(depth, alt-count)` cell count grows with it.
      This is where the arithmetic is likeliest to be wrong, and the depth cap is the knob if it is.
-     It also inflates the census sites' sparse list, which grows with depth × error rate. **The STR
-     locus table is already done**: 0.36 MB uncapped over 29,811 loci at 300× (§6), so it is the
-     one object of the five that this run need not re-price.
+     It also inflates the census sites' sparse list, which grows with depth × error rate. **And it
+     is where the STR locus table has no arithmetic at all** (§6): the number of distinct locus
+     shapes grows with a locus's depth, so 300× is exactly the run that says whether the per-locus
+     read cap is doing its job. Sweep the cap.
    - **The whole tomato cohort, every sample**, which stresses *sample count*. What grows here is the
      census sites, held for every sample until the gather. The windowed histograms should **not**
      grow with the cohort — they are dropped per sample (§1.3) — so this run doubles as the check

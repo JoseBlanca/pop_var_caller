@@ -50,8 +50,9 @@ Every milestone below is proven against them or against an identity, never again
 
 ## Scope
 
-**In:** `src/ng/parameter_estimation/` — `mod.rs`, `fitting/{mod.rs, mixture_weights.rs}`,
-`generic/{mod.rs, depth_and_alt_reads.rs, histogram.rs, runs.rs}`; the four constrained
+**In:** `src/ng/parameter_estimation/` — `mod.rs`, `fitting/{mod.rs, mixture_weights.rs, ladder_scan.rs}`,
+`generic/{mod.rs, accumulators.rs, coupled_fit.rs, depth_and_alt_reads.rs, depth_bins.rs,
+fallback.rs, histogram.rs, noise_model.rs, read_group_error_rate.rs, runs.rs}`; the four constrained
 newtypes step 4 adds to `types.rs`; `DepthBinEdges` and the cell table; the read-group and
 windowed accumulators with their merge; `fit_mixture_weights`, the `NoiseModel` seam and the
 profile scan; the coupled error-rate/frequency loop; the runs model; the fallback ladder and
@@ -59,10 +60,9 @@ profile scan; the coupled error-rate/frequency loop; the runs model; the fallbac
 
 **Out (each handed to a named later plan):**
 
-- **The STR stutter table and its noise model** — spec
-  [`parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) and architecture
-  [`parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) are both settled as of
-  2026-08-06, so its plan is writable. It is the **second
+- **The STR stutter histogram and its noise model** — spec
+  [`parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) is settled and its
+  architecture is **in draft**, so its plan waits on that settling. It is the **second
   implementor of `NoiseModel` and the second consumer of `fitting/`** (arch §4), which this
   plan builds and it reuses — which is the thing that will show whether the seam was cut in
   the right place. Two changes it asks of `fitting/` are already known and neither is a
@@ -102,6 +102,19 @@ profile scan; the coupled error-rate/frequency loop; the runs model; the fallbac
   exactly rather than simulated, so "matches the harness" is a real assertion and not a
   tautology. Where an identity is available it is asserted directly instead (arch §9, spec
   §12.8).
+- **Choose every fixture's depth against the regime where the thing being tested stops being
+  distinguishable** (added 2026-08-09, Milestone E; it cost two steps to learn). Almost
+  everything this plan fits is a competition between two explanations of the same alternative
+  read — sequencing error against real variation — and **at twenty reads a site those two
+  explanations never overlap**: a heterozygote shows about ten alternative reads and a
+  homozygous-reference site about one in fifty. A fixture there is not a weak test of the
+  coupling, it is *no* test of it. Measured: E1's frequency test returned the same rung under
+  the true frequencies and under ten times them until it moved to six reads; and E2's world
+  returned the right rates from **every** start on the ladder — rung 0 included, a hundred
+  times the true rate — so four mutations survived it, one of them the estimator the design
+  explicitly rejects. **Where a step tests an interaction, the fixture belongs at three to six
+  reads a site.** Deep fixtures still earn their place for what is genuinely depth-dependent:
+  the binning rule is invisible below about 100× (F2), and the cap of C2 fires nowhere else.
 - **Isolate the steps whose failure is silent, and say so.** Most of this module fails loudly
   — a panic, a test. **Six do not**: the depth ladder (A4), the depth a cell is scored at (B3),
   the depth cap's draw (C2), the multi-library scoring rule (D2), the coupled loop (E2) and the
@@ -140,14 +153,16 @@ profile scan; the coupled error-rate/frequency loop; the runs model; the fallbac
 
 ### Milestone A — vocabulary and the local types (types, no logic)
 
-**A1. Scaffold the `parameter_estimation/` module tree.**  ☐
+**A1. Scaffold the `parameter_estimation/` module tree.**  ✅
 `mod.rs`, `fitting/{mod.rs, mixture_weights.rs}`, `generic/{mod.rs, depth_and_alt_reads.rs,
 histogram.rs, runs.rs}`, each with its `#[cfg(test)]` block; wire `pub mod
 parameter_estimation;` into `ng/mod.rs`. The folder split is the project rule that the shaping
-of data and the mathematics on it never share a file. *Source:* arch §Module home,
-[module layout](../arch/module_layout.md).
+of data and the mathematics on it never share a file. A fifth file under `generic/`,
+`depth_bins.rs`, arrived with A4 and is now in the architecture's module table — the binning
+rule fits neither side of that split, and all three A4 reviewers judged its own file right.
+*Source:* arch §Module home, [module layout](../arch/module_layout.md).
 
-**A2. Extend `types.rs` with the four constrained newtypes.**  ☐
+**A2. Extend `types.rs` with the four constrained newtypes.**  ✅
 `ErrorRate`, `GenotypeFrequency`, `InbreedingF`, `Ploidy` — each with a private field, a
 `try_new` returning `DomainError`, and `.get()`, copying `MismatchFraction`'s shape
 ([`types.rs:243`](../../../../src/ng/types.rs)). Four types and not one shared `Probability`:
@@ -156,14 +171,14 @@ to something expecting an error rate and compile. `Ploidy` rejects zero, because
 likelihood divides by it. Unit tests: boundary values accepted, out-of-range rejected, `Ploidy
 = 0` rejected. *Source:* arch §2.1.
 
-**A3. The step-4-local scalars and the error-rate ladder.**  ☐
+**A3. The step-4-local scalars and the error-rate ladder.**  ✅
 `WindowIndex`, `INBREEDING_WINDOW_BP = Bp(100_000)`, the three `ERROR_RATE_LADDER_*_PHRED`
 constants and `error_rate_ladder()`. Unit test: 161 rungs, ascending, spanning Phred 10 to 50,
 adjacent rungs a ratio of `10^0.025` apart. No `Phred` newtype — a second log-scaled
 probability type beside `LogProb` would make a base mix-up a plausible wrong number instead of
 a compile error. *Depends:* A2. *Source:* arch §2.1.
 
-**A4. `DepthBin` and `DepthBinEdges` — the ladder itself.**  ☐ **Own commit, do not bundle.**
+**A4. `DepthBin` and `DepthBinEdges` — the ladder itself.**  ✅ **Own commit, do not bundle.**
 Exact integers to 8, then eleven geometrically widening bins to a cap of 124 — twenty bins,
 583 cells. `bin_for`, `row_start`, `depth_range` (a `RangeInclusive`, so an off-by-one cannot
 silently mis-size a row), `cell_count`, `bin_count`, `max_depth`. **The silent failure this
@@ -174,14 +189,14 @@ cap biases the error rate by 0.55 rungs and the homozygous-non-reference rate by
 the exact region, that `cell_count()` is 583, and that `bin_for` is monotone and total over
 `0..=124`. *Depends:* A1. *Source:* arch §2.2, spec §4, research note §4.3.
 
-**A5. The output types.**  ☐
+**A5. The output types.**  ✅
 `Provenance`, `Estimate<T>`, `SampleRates` with its two diploid accessors,
 `GenericSampleParameters`, `FitTermination`, `ScanResult<P>`, `CoupledFit`, `RunsModelStarts`
 (defaults `separations = [0.05, 1/3, 0.75]`, `implied_f = [0.05, 0.5, 0.75]`), `RunsModelFit`,
 `StartOutcome`. Types only. Unit test: `SampleRates::observed_heterozygosity()` is `None`
 above ploidy 2 and the frequencies sum to one. *Depends:* A2. *Source:* arch §2.4, §5.2, §5.3.
 
-**A6. `ParameterEstimationError` and the fit floors.**  ☐
+**A6. `ParameterEstimationError` and the fit floors.**  ✅
 The four variants — `GenotypeFrequenciesNotFittable`, `InbreedingNotFittable`,
 `InbreedingStatesNotSeparated`, `Domain` — with `MIN_SITES_TO_FIT = 10_000`,
 `MIN_WINDOWS_TO_FIT_INBREEDING = 3_000`, `DEFAULT_ERROR_RATE = 0.001` and
@@ -196,7 +211,7 @@ produces a confident wrong number. *Depends:* A2. *Source:* arch §5.4.
 
 ### Milestone B — the cell table (storage, no loci)
 
-**B1. `SiteKey`, `DepthAndAltReads` and `CellCounter`.**  ☐
+**B1. `SiteKey`, `DepthAndAltReads` and `CellCounter`.**  ✅
 Two arms and no third: `Attributed { depth_bin, alt_by_group }` for at most
 `MAX_ATTRIBUTED_ALT_READS = 4` alternative reads, `Pooled { depth_bin, alt_reads }` above it.
 `alt_by_group` in read-group order so the key is canonical. `CellCounter` implemented for
@@ -204,7 +219,7 @@ Two arms and no third: `Attributed { depth_bin, alt_by_group }` for at most
 Unit test: two sites differing only in the order their read groups are listed produce the same
 key. *Depends:* A4. *Source:* arch §2.2.
 
-**B2. `DepthAltHistogram<C>` — storage, `add_site`, `cells`, the two counters.**  ☐
+**B2. `DepthAltHistogram<C>` — storage, `add_site`, `cells`, the two counters.**  ✅
 The flat ragged `counts` and `depth_sums` located through `edges.row_start`, the sparse `fine`
 map for the attributed arm, the `Arc<DepthBinEdges>` handle. `add_site` derives the bin from
 the exact depth it is handed and adds that depth to the cell's running sum. `cells(ploidy)`
@@ -214,7 +229,7 @@ two differ because a generic locus can be widened to an indel's reference span. 
 a hand-built table's rows are the right widths; `cells()` is stable in order across runs.
 *Depends:* B1. *Source:* arch §2.2.
 
-**B3. `mean_depth_in_cell`.**  ☐ **Own commit, do not bundle.**
+**B3. `mean_depth_in_cell`.**  ✅ **Own commit, do not bundle.**
 The mean of the exact depths that landed in **this cell**, from its own depth sum. **The
 silent failure this isolates:** taking the mean over the whole *bin* instead charges 0.3% of
 sites a negative number of reference reads, and the fit then lands 5.2 rungs below the true
@@ -226,11 +241,13 @@ exact case the per-bin mean fails — plus a per-bin-mean unit test showing that
 violating it, so the assertion is proven to bite. *Depends:* B2. *Source:* arch §2.2, spec
 §12.10, research note §4.5.
 
-**B4. `merge` and `whole_sample_histogram`.**  ☐
+**B4. `merge` and `fold_windows_of_one_ploidy`.**  ✅
 Element-wise integer addition on the pooled table and a key-wise sum on the attributed map,
 panicking unless the two histograms hold the same edges object (`Arc::ptr_eq` — a proof, not a
-length comparison). `whole_sample_histogram` folds the windows for one ploidy and **widens
-both counters to `u64` here and only here**. The depth sum is the one that forces it: folded
+length comparison). `fold_windows_of_one_ploidy` — named `whole_sample_histogram` when this
+plan was written, renamed on the owner's call (2026-08-06) because the ploidy restriction
+cannot live in the signature and "whole sample" reads as *all* of it — folds the windows for
+one ploidy and **widens both counters to `u64` here and only here**. The depth sum is the one that forces it: folded
 over a human genome the site count reaches 3.1 × 10⁹ against a `u32` ceiling of 4.29 × 10⁹ —
 close, but inside — while the depth sum reaches 3.1 × 10¹¹, **seventy-two times over**. A fold
 that widened the site counts and left the depth sums alone would wrap the very quantity
@@ -242,7 +259,7 @@ unsplit one, cell for cell, in either merge order. *Depends:* B3. *Source:* arch
 
 ### Milestone C — one locus → one cell (data shaping)
 
-**C1. `count_whole_site` and `count_by_read_group`.**  ☐
+**C1. `count_whole_site` and `count_by_read_group`.**  ✅
 The only place that decides what counts as an alternative read — which is why it is its own
 file and not a method on the locus type. **Complete witnesses only**
 ([`locus_generation/mod.rs:134`](../../../../src/ng/locus_generation/mod.rs)): a read that
@@ -252,7 +269,7 @@ counting them would assert they showed the reference. Unit tests over hand-built
 `SampleLocusObservations`: a one-base locus, a locus with a partial witness, a locus where
 every read is a non-witness. *Depends:* B1. *Source:* arch §2.3.
 
-**C2. The depth cap — subsample, do not rescale.**  ☐ **Own commit, do not bundle.**
+**C2. The depth cap — subsample, do not rescale.**  ✅ **Own commit, do not bundle.**
 A site deeper than `max_site_depth(edges)` keeps 124 of its reads and counts the alternative
 ones among them, seeded from the locus position so a region-sharded walk and a single-threaded
 one keep the same reads. Fires in `count_*`, before the pair is built, so the depth recorded
@@ -265,7 +282,7 @@ many seeds the kept alternative count is hypergeometric — mean and variance ma
 form — and the same locus position gives the same draw on every run. *Depends:* C1, A4.
 *Source:* arch §2.2 (`max_site_depth`), §2.3.
 
-**C3. `GenericAccumulators`, `add_locus`, `AccumulationCounts`.**  ☐
+**C3. `GenericAccumulators`, `add_locus`, `AccumulationCounts`.**  ✅
 The two keyed collections (`BTreeMap` and not `HashMap`: the runs model reads windows in
 genome order, and every fit is a floating-point sum over cells, which is not associative);
 `InbreedingMode`, which drops the window key when `F` is supplied and collapses the object
@@ -284,7 +301,7 @@ every order give the same counters. *Depends:* C2, B4. *Source:* arch §3.
 
 ### Milestone D — the fitting machinery (the mathematics, no loci)
 
-**D1. `fit_mixture_weights` — the concave climb.**  ☐
+**D1. `fit_mixture_weights` — the concave climb.**  ✅
 Given each cell's per-genotype likelihood and a weight per cell, the genotype frequencies that
 best explain the table. Expectation-maximization is a reasonable default and nothing depends
 on it being EM. **Convergence failure is a bug, not a data condition** — the surface is
@@ -293,7 +310,7 @@ Not used by the runs model, whose two states are a constrained parameterisation 
 free point on the simplex. Unit test: recovers known frequencies from a hand-built table from
 any interior start. *Depends:* A5. *Source:* arch §4.1, spec parameter_prepass §3.1.
 
-**D2. The generic `NoiseModel` — §5.1's closed form.**  ☐ **Own commit, do not bundle.**
+**D2. The generic `NoiseModel` — §5.1's closed form.**  ✅ **Own commit, do not bundle.**
 `ln L(cell | θ)` summing over the split the key forgot rather than inventing a per-library
 depth: one multinomial over `G + 1` categories, one "alternative from library g" per library
 and one pooled "showed the reference". **The silent failure this isolates:** the plug-in an
@@ -309,7 +326,7 @@ Then a fourth: on the cell space of one of the harness's worlds, this implementa
 `ln_component_attributed` to floating point. **Any later change to this expression re-runs all
 four first.** *Depends:* B3. *Source:* arch §5.1, spec §1, §12.8.
 
-**D3. `fit_by_profile_scan` and the rail flag.**  ☐
+**D3. `fit_by_profile_scan` and the rail flag.**  ✅
 Step through the ladder, climb to the best frequencies at each rung, keep the best-scoring
 rung. **Every rung is scored — no early exit**, because nobody has shown the curve has a
 single hump. Takes a slice of cells and not a histogram, which is what makes the "shared with
@@ -326,15 +343,22 @@ a known rate recovers that rung; a table generated outside Phred 10–50 sets th
 
 ### Milestone E — the four fits
 
-**E1. The per-read-group error rate.**  ☐
-`fit_by_profile_scan` over `ReadGroupHistograms`, once per read group, keeping only `ε` — the
-frequencies it climbs to at each rung are a means, not an output. *Depends:* D3, C3.
-*Source:* arch §5.1, spec §3.
+**E1. The per-read-group error rate.**  ✅
+A scan over `ReadGroupHistograms`, once per read group, keeping only `ε`. **Not
+`fit_by_profile_scan`** — that climbs its own frequencies at every rung, which is a different
+estimator and the one never measured. E1 is the `ε` half of E2's alternation, so it scores
+every rung at the genotype frequencies it is **handed**, one shared set across the read
+groups, and climbs nothing (owner's call, 2026-08-07; the harness's own
+`fit_eps_on_read_group(space, freqs)`). That is a **sibling** of the profile scan rather than
+a mode of it, because a scan at fixed frequencies is not a profile likelihood.
+*Depends:* D3, C3. *Source:* arch §5.1, spec §3, §5.1.
 
-**E2. The coupled loop.**  ☐ **Own commit, do not bundle.**
-Alternate: each read group's rate from its own table at the previous frequencies, then the
-frequencies from the whole-sample table at those rates, capped at 20 iterations, keeping the
-**best-scoring** iterate and reporting `FitTermination`. **Stop when every read group's winning
+**E2. The coupled loop.**  ✅ **Own commit, do not bundle.**
+Alternate: the frequencies from the whole-sample table at the previous rates, then each read
+group's rate from its own table at **those** frequencies and without re-climbing them —
+capped at 20 iterations, keeping the **best-scoring** iterate and reporting `FitTermination`.
+(An earlier draft had the two blocks the other way round and the rate step re-climbing; the
+order is a phase and changes no fixed point, but the re-climbing is a different estimator.) **Stop when every read group's winning
 rung is unchanged** — the scan returns a rung index, so "moves by less than one rung" and "does
 not move" are the same condition and only the second is testable. **The silent failure this
 isolates:** this is a fixed point of two estimating equations rather than a climb on one
@@ -342,11 +366,14 @@ objective, so a wrong alternation converges to a plausible wrong pair and report
 loop oscillating between two adjacent rungs would satisfy a movement tolerance forever.
 *Oracle:* from a start at three times the true rates and half the true frequencies, the fixed
 point is the truth in the harness's 25 worlds — error rates to 0.000 rungs and both
-frequencies to 0.000% (research note §2.6). At one read group it must terminate after one
-iteration, because the two tables are then the same table. *Depends:* E1. *Source:* arch §5.2,
-spec §5.1.
+frequencies to 0.000% (research note §2.6). And **at one read group the alternation must reach
+the profile scan's answer**: with one library the two tables are the same table, so both
+procedures converge to the same joint maximum — each block being an exact maximisation of one
+objective. (It does **not** terminate after one iteration, which an earlier version of this
+oracle asked for: that is true of a profile scan and false of coordinate ascent. What the
+difference costs is iterations, not answers.) *Depends:* E1. *Source:* arch §5.2, spec §5.1.
 
-**E3. The runs model — a two-state HMM over windows.**  ☐ **Own commit, do not bundle.**
+**E3. The runs model — a two-state HMM over windows.**  ✅ **Own commit, do not bundle.**
 Each state its own three genotype frequencies, fitted freely, with the ordering constraint
 `h << Hout` applied by relabelling after the fit; both transition rates fitted per base; the
 emission a **sum over the window's cells**, never a per-window heterozygote count; the chain
@@ -372,7 +399,7 @@ surface inside the simplex rather than a free point on it, and the concavity tha
 safe does not transfer to a curve. *Depends:* E1, C3, B3. *Source:* arch §5.3, §4.1, spec
 §6.1, §6.5.
 
-**E4. The fallback ladder and the floors.**  ☐
+**E4. The fallback ladder and the floors.**  ✅
 Fitted here → borrowed from the sample's other groups → supplied → defaulted, each carrying
 its `Provenance`. `MIN_SITES_TO_FIT` gates the first; below
 `MIN_WINDOWS_TO_FIT_INBREEDING` the runs model **fails rather than emits**, because inbreeding
@@ -388,7 +415,7 @@ runs detected* from *a small autozygous fraction*. Unit tests: a thin read group
 
 ### Milestone F — the entry points and end to end
 
-**F1. The two ways in.**  ☐
+**F1. The two ways in.**  ✅
 `GenericEstimationConfig`, `estimate_generic_parameters(loci, config)` for a caller with
 nothing else to do with the stream, and `GenericAccumulators::estimate(config)` for one that
 drove the accumulator itself. The first is the second over an accumulator fed by the stream,
@@ -396,7 +423,7 @@ so the two cannot diverge. A `LocusGenerationError` in the stream is fatal and p
 loci a walk failed to produce are missing evidence, not zero evidence, and a rate fitted over a
 truncated genome is wrong in a way nothing announces. *Depends:* E4. *Source:* arch §1.1.
 
-**F2. Recovery from a directly-filled accumulator — no reads, no reference.**  ☐
+**F2. Recovery from a directly-filled accumulator — no reads, no reference.**  ✅
 Fill a histogram cell by cell from known parameters and refit. At ploidy 2 **and 4**, and
 **at 3 reads a site and at 300×**: at tomato's depth every site sits in a one-per-depth bin,
 so a binning fault is invisible below about 100×, and the deep arm is the only one that
@@ -407,7 +434,7 @@ the two frequencies the measured binning bias of the adopted ladder is 0.3% (res
 §4.3), so assert 1% relative: loose enough that binning alone cannot fail it, tight enough
 that a real fault cannot pass. *Depends:* F1. *Source:* arch §9, spec parameter_prepass §10.1.
 
-**F3. The identities that need no simulated truth, on both real cohorts.**  ☐
+**F3. The identities that need no simulated truth, on both real cohorts.**  ✅
 Three assertions on the tomato CRAMs and the HG002 alignments as they stand, all of which hold
 by construction and none of which needs a truth set: the read-group histogram equals the
 windowed one folded over its windows, cell for cell, on a single-library sample (which is every
@@ -473,11 +500,10 @@ against real data. *Depends:* G2. *Source:* arch §9.
 ## Out of scope (next plans)
 
 - **The STR stutter path of step 4** — spec
-  [`parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) and architecture
-  [`parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md), both settled 2026-08-06; its
-  plan follows them. It is `fitting/`'s second implementor, and the two changes it needs there
-  are additive and are the two this plan already anticipated: a `fit_mixture_weights` that
-  widens past three genotypes, and a multi-start maximiser beside the profile scan.
+  [`parameter_prepass_ssr.md`](../spec/parameter_prepass_ssr.md) is settled and its
+  architecture is in draft; its plan follows that. It is `fitting/`'s second implementor, and
+  the two changes it needs there are additive: a `fit_mixture_weights` that widens past three
+  genotypes, and a multi-start maximiser beside the profile scan.
 - **The two censuses** — spec
   [`parameter_prepass_census_sites.md`](../spec/parameter_prepass_census_sites.md); needs an
   architecture document.
