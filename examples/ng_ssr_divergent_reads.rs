@@ -39,8 +39,12 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 use pop_var_caller::ng::region_typing::segment_criteria::SsrSegment;
-use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig, TypedRegionIterator};
+use pop_var_caller::ng::region_typing::{RegionKind, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 use pop_var_caller::ng::types::{Bp, ContigId};
+
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 
 /// A read's measurement under one aligner, normalised for comparison: the coverage class and the
 /// measured tract bases (the partial *reach* integer is dropped — it is not the tract measurement).
@@ -144,12 +148,16 @@ fn run(
         ReferenceCheck::VerifyAgainstIndex,
     )?;
     let contigs = info.contig_list();
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run: the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     // One reference for every file this run opens — and so one copy of the bases.
     let reference = OpenReference::new(info);
     let sample =
         SampleReads::open_only_sample(bams, &reference, ReadFilterConfig::default(), true)?;
 
     let walk_config = TypedRegionConfig::default();
+    let criteria = StrRepeatCriteria::from(&walk_config);
     let bundle_threshold = Bp(walk_config.criteria.bundle_threshold);
     let config = SsrGeneratorConfig::default();
     let emission = PerQualityEmission::new();
@@ -180,12 +188,11 @@ fn run(
         if !contig_filter.is_empty() && !contig_filter.iter().any(|name| name == &entry.name) {
             continue;
         }
-        let walk_reference = WindowedRefSeq::new(fasta.to_path_buf(), contigs.clone());
-        let mut walk = TypedRegionIterator::over_contig(
-            walk_reference,
+        let this_contig = [catalog_regions::whole_contig(
             ContigId(index as u32),
-            walk_config.clone(),
-        )?;
+            entry.length,
+        )];
+        let mut walk = catalog.genome_segments(&criteria, ReadScope::Regions(&this_contig))?;
         for region in walk.by_ref() {
             let region = region?;
             let RegionKind::SsrSegment(segment) = &region.kind else {
