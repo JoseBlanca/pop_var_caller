@@ -77,6 +77,9 @@ pub struct RepeatCatalogBuilder {
 
     tally: BuildTally,
     failure: Option<RepeatCatalogError>,
+    /// The longest tract written per contig, in contig order — the header carries it so a
+    /// later reader can window its reads exactly (`RepeatCatalogHeader::reach_into_window`).
+    longest_tract: Vec<u64>,
 }
 
 impl RepeatCatalogBuilder {
@@ -100,6 +103,7 @@ impl RepeatCatalogBuilder {
             threads: 1,
             tally: BuildTally::default(),
             failure: None,
+            longest_tract: Vec::new(),
         })
     }
 
@@ -137,6 +141,18 @@ impl RepeatCatalogBuilder {
             built_under: self.criteria.clone(),
             scan: self.scan,
             tool_version: tool_version.to_string(),
+            // One number per contig, and it is what lets a reader ask for a stretch instead
+            // of a whole contig: no row outside a window can reach further into it than the
+            // longest tract there is (§*A windowed read*, `reach_into_window`).
+            longest_tract_bp: {
+                let mut per_contig = vec![0u64; reference.contigs.len()];
+                for (index, longest) in self.longest_tract.iter().enumerate() {
+                    if let Some(slot) = per_contig.get_mut(index) {
+                        *slot = *longest;
+                    }
+                }
+                per_contig
+            },
         };
 
         let rows = writer.finish(&header)?;
@@ -181,6 +197,18 @@ impl RepeatCatalogBuilder {
         };
 
         for result in scanned {
+            if let Some(contig) = result.rows.first().map(|row| row.contig.get() as usize) {
+                if self.longest_tract.len() <= contig {
+                    self.longest_tract.resize(contig + 1, 0);
+                }
+                let longest = result
+                    .rows
+                    .iter()
+                    .map(|row| row.detected.len_bp())
+                    .max()
+                    .unwrap_or(0);
+                self.longest_tract[contig] = self.longest_tract[contig].max(longest);
+            }
             for rejection in result.rejections {
                 self.tally.charge(rejection);
             }

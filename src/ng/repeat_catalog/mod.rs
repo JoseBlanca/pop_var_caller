@@ -200,6 +200,33 @@ pub struct RepeatCatalogHeader {
     /// The crate version that wrote the file, so a change in the detector invalidates it
     /// even when every setting matches.
     pub tool_version: String,
+    /// The longest tract stored, per contig, in the header's contig order — 0 where a
+    /// contig holds no repeats.
+    ///
+    /// **This is what makes a windowed read exact.** Classification is not local: a repeat
+    /// outside the stretch you asked for still bundles with one inside it, and a long array
+    /// outside still swallows a locus inside. So a reader that wants a stretch must also
+    /// read every row that could reach into it, and the reach of the longest row is the
+    /// bound. Guessing it would be a silent wrong answer near long arrays; the builder
+    /// knows it exactly and it costs one number per contig.
+    pub longest_tract_bp: Vec<u64>,
+}
+
+impl RepeatCatalogHeader {
+    /// How far outside a requested stretch a row can sit and still change the answer inside
+    /// it: the contig's longest tract, plus the bundle radius the reader is asking with.
+    ///
+    /// A read window padded by this holds every row that can affect the answer, and no
+    /// policy the file serves can need more — a wider bundle radius is the reader's to pass
+    /// in, and a longer tract than the longest one stored does not exist in that contig.
+    pub fn reach_into_window(&self, contig: ContigId, bundle_threshold: u64) -> u64 {
+        let longest = self
+            .longest_tract_bp
+            .get(contig.get() as usize)
+            .copied()
+            .unwrap_or(0);
+        longest + bundle_threshold
+    }
 }
 
 /// Everything that can stop a catalog being built or read.

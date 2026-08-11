@@ -15,7 +15,9 @@ use crate::ng::reference_info::{ContigInfo, ReferenceInfo};
 use crate::ng::region_typing::segment_criteria::SsrSegment;
 use crate::ng::region_typing::{GenomeRegions, TypedRegion};
 use crate::ng::repeat_catalog::StrRepeatCriteria;
-use crate::ng::repeat_catalog::parquet_file::{HEADER_KEY, decode_header, row_from_batch};
+use crate::ng::repeat_catalog::parquet_file::{
+    HEADER_KEY, decode_header, row_from_batch, rows_overlapping,
+};
 use crate::ng::repeat_catalog::segments::{
     loci_of_contig, segments_of_contig, segments_of_contig_in,
 };
@@ -172,21 +174,65 @@ impl RepeatCatalog {
         &self,
         criteria: &StrRepeatCriteria,
         wanted: &GenomeRegions,
-    ) -> Result<Vec<TypedRegion>, RepeatCatalogError> {
+    ) -> Result<RegionSegments<'_>, RepeatCatalogError> {
         self.check_serves(criteria)?;
 
         let spans: Vec<GenomeRegion> = wanted.iter().collect();
-        let mut out = Vec::new();
-        for (contig, name, length) in self.contig_walk(None) {
-            if !spans.iter().any(|s| s.contig == contig) {
-                continue;
-            }
-            let rows = rows_of_contig(self, contig)?;
-            out.extend(segments_of_contig_in(
-                &name, contig, length, &rows, criteria, &spans,
-            ));
+        let contigs: Vec<(ContigId, String, Bp)> = self
+            .contig_walk(None)
+            .into_iter()
+            .filter(|(id, _, _)| spans.iter().any(|s| s.contig == *id))
+            .collect();
+
+        Ok(RegionSegments {
+            catalog: self,
+            criteria: criteria.clone(),
+            spans,
+            contigs: contigs.into_iter(),
+            buffered: Vec::new().into_iter(),
+        })
+    }
+
+    /// The rows of `contig` that can affect the answer inside `spans` — the rows overlapping
+    /// each span, widened by how far a row outside one can reach into it.
+    ///
+    /// **The widening is what makes this exact rather than approximate.** A tract within the
+    /// bundle radius of a requested stretch bundles with what is inside it, and a long array
+    /// overlapping it swallows a locus inside; the longest tract in the contig plus the
+    /// reader's bundle radius bounds both, and the header stores that length per contig.
+    ///
+    /// Rows are selected with a filter over `detected_start` and `detected_end`, so with the
+    /// page index loaded the reader skips whole pages whose coordinate range lies outside
+    /// every window — the file's own index doing the work rather than a scan of the contig.
+    fn rows_of_contig_in(
+        &self,
+        contig: ContigId,
+        spans: &[GenomeRegion],
+        criteria: &StrRepeatCriteria,
+    ) -> Result<Vec<FoundRepeat>, RepeatCatalogError> {
+        let reach = self
+            .header
+            .reach_into_window(contig, criteria.classification.bundle_threshold);
+        let windows: Vec<(u64, u64)> = spans
+            .iter()
+            .filter(|s| s.contig == contig)
+            .map(|s| {
+                (
+                    s.start.get().saturating_sub(reach),
+                    s.end.get().saturating_add(reach),
+                )
+            })
+            .collect();
+        if windows.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(out)
+
+        rows_overlapping(&self.path, contig, &windows).map_err(|source| {
+            RepeatCatalogError::Unreadable {
+                path: self.path.clone(),
+                source,
+            }
+        })
     }
 
     /// The contigs a read covers — all of them, or the one asked for — with the names and
@@ -329,6 +375,42 @@ impl Iterator for GenomeSegments<'_> {
             };
             self.buffered =
                 segments_of_contig(&name, contig, length, &rows, &self.criteria).into_iter();
+        }
+    }
+}
+
+/// The segments inside a region set, one contig at a time.
+///
+/// **Only the rows that can affect the answer are read**, not the contig: each requested
+/// stretch is widened by how far a row outside it can reach in, and the file's page index
+/// skips the pages outside those windows (`rows_overlapping`).
+pub struct RegionSegments<'a> {
+    catalog: &'a RepeatCatalog,
+    criteria: StrRepeatCriteria,
+    spans: Vec<GenomeRegion>,
+    contigs: std::vec::IntoIter<(ContigId, String, Bp)>,
+    buffered: std::vec::IntoIter<TypedRegion>,
+}
+
+impl Iterator for RegionSegments<'_> {
+    type Item = Result<TypedRegion, RepeatCatalogError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(region) = self.buffered.next() {
+                return Some(Ok(region));
+            }
+            let (contig, name, length) = self.contigs.next()?;
+            let rows = match self
+                .catalog
+                .rows_of_contig_in(contig, &self.spans, &self.criteria)
+            {
+                Ok(rows) => rows,
+                Err(e) => return Some(Err(e)),
+            };
+            self.buffered =
+                segments_of_contig_in(&name, contig, length, &rows, &self.criteria, &self.spans)
+                    .into_iter();
         }
     }
 }
@@ -514,6 +596,7 @@ mod tests {
             built_under: StrRepeatCriteria::default(),
             scan: ScanParams::default(),
             tool_version: "test-0.1".to_string(),
+            longest_tract_bp: vec![0; 2],
         }
     }
 

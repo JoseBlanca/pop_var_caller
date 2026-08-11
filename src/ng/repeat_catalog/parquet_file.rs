@@ -20,6 +20,7 @@ use arrow_array::builder::{
 use arrow_array::{Array, ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
@@ -36,7 +37,7 @@ pub(crate) const HEADER_KEY: &str = "ng_repeat_catalog";
 
 /// The header encoding's own version, bumped when its grammar changes. Distinct from the
 /// tool version: a file may be readable by a later tool that writes the same grammar.
-pub(crate) const HEADER_FORMAT_VERSION: u32 = 1;
+pub(crate) const HEADER_FORMAT_VERSION: u32 = 2;
 
 /// What the writer stamps into the file's `created_by`.
 ///
@@ -256,9 +257,9 @@ pub(crate) fn encode_header(header: &RepeatCatalogHeader) -> String {
         criteria.max_str_len_bp.get(),
     ));
 
-    for contig in &header.contigs {
+    for (index, contig) in header.contigs.iter().enumerate() {
         out.push_str(&format!(
-            "contig\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "contig\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             contig.name,
             contig.length,
             contig
@@ -268,6 +269,7 @@ pub(crate) fn encode_header(header: &RepeatCatalogHeader) -> String {
             contig.offset,
             contig.line_bases,
             contig.line_width,
+            header.longest_tract_bp.get(index).copied().unwrap_or(0),
         ));
     }
     out
@@ -286,6 +288,7 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
     let mut scan = None;
     let mut built_under = None;
     let mut contigs = Vec::new();
+    let mut longest_tract_bp = Vec::new();
 
     for line in text.lines().filter(|l| !l.is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();
@@ -340,7 +343,7 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
                     max_str_len_bp: Bp(f[9].parse().map_err(|_| malformed("satellite cap"))?),
                 });
             }
-            "contig" if f.len() >= 7 => {
+            "contig" if f.len() >= 8 => {
                 contigs.push(crate::ng::reference_info::ContigInfo {
                     name: f[1].to_string(),
                     length: f[2].parse().map_err(|_| malformed("contig length"))?,
@@ -349,6 +352,7 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
                     line_bases: f[5].parse().map_err(|_| malformed("contig line bases"))?,
                     line_width: f[6].parse().map_err(|_| malformed("contig line width"))?,
                 });
+                longest_tract_bp.push(f[7].parse().map_err(|_| malformed("longest tract"))?);
             }
             other => return Err(malformed(&format!("unknown line `{other}`"))),
         }
@@ -356,6 +360,7 @@ pub fn decode_header(text: &str, path: &Path) -> Result<RepeatCatalogHeader, Rep
 
     Ok(RepeatCatalogHeader {
         contigs,
+        longest_tract_bp,
         reference_md5: reference_md5.ok_or_else(|| malformed("no reference digest"))?,
         built_under: built_under.ok_or_else(|| malformed("no criteria"))?,
         scan: scan.ok_or_else(|| malformed("no scan settings"))?,
@@ -376,6 +381,106 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
         *slot = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+/// Every row of `contig` whose tract overlaps one of `windows`, in file order.
+///
+/// **The file's own index does the skipping.** The page index — which the writer emits by
+/// default, since `EnabledStatistics::Page` is parquet's default — carries each page's
+/// minimum and maximum per column, and rows are written in ascending start within a contig,
+/// so a filter on `detected_start` / `detected_end` lets the reader drop whole pages without
+/// decompressing them. Asking for a megabase of a 90 Mb chromosome reads the pages that
+/// megabase touches, not the chromosome.
+///
+/// `windows` are 1-based inclusive and already widened by the caller (see
+/// `RepeatCatalog::rows_of_contig_in`) — this function does no widening of its own, because
+/// how far a row can reach is a question about classification, not about the file.
+pub fn rows_overlapping(
+    path: &Path,
+    contig: ContigId,
+    windows: &[(u64, u64)],
+) -> Result<Vec<FoundRepeat>, Box<dyn std::error::Error + Send + Sync>> {
+    use arrow_array::{BooleanArray, UInt32Array, UInt64Array};
+    use parquet::arrow::ProjectionMask;
+    use parquet::arrow::arrow_reader::{ArrowPredicateFn, ArrowReaderOptions, RowFilter};
+    use parquet::file::metadata::PageIndexPolicy;
+
+    let file = File::open(path)?;
+    // `Required`, not `Optional`: our own writer always emits the page index, so a file
+    // without one is not a catalog this build wrote, and silently falling back to a full
+    // scan would turn a wrong file into a slow answer.
+    let options = ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Required);
+    let builder = ParquetRecordBatchReaderBuilder::try_new_with_options(file, options)?;
+
+    // The contig's own row group, found from the row-group statistics rather than by
+    // reading rows.
+    let groups: Vec<usize> = (0..builder.metadata().num_row_groups())
+        .filter(|group| {
+            matches!(
+                builder.metadata().row_group(*group).column(0).statistics(),
+                Some(stats) if statistics_min_u32(stats) == Some(contig.get())
+            )
+        })
+        .collect();
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let schema = builder.parquet_schema();
+    // Columns 1 and 2 are `detected_start` and `detected_end` (`catalog_schema`).
+    let coordinate_columns = ProjectionMask::roots(schema, [0, 1, 2]);
+    let windows = windows.to_vec();
+    let predicate = ArrowPredicateFn::new(coordinate_columns, move |batch| {
+        let contig_column = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .expect("the contig column is UInt32");
+        let starts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("detected_start is UInt64");
+        let ends = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .expect("detected_end is UInt64");
+        Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|i| {
+            let start = starts.value(i);
+            let end = ends.value(i);
+            Some(
+                contig_column.value(i) == contig.get()
+                    && windows
+                        .iter()
+                        .any(|(from, to)| start <= *to && end >= *from),
+            )
+        })))
+    });
+
+    let reader = builder
+        .with_row_groups(groups)
+        .with_row_filter(RowFilter::new(vec![Box::new(predicate)]))
+        .build()?;
+
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        for i in 0..batch.num_rows() {
+            rows.push(row_from_batch(&batch, i).ok_or("a row does not match the catalog schema")?);
+        }
+    }
+    Ok(rows)
+}
+
+/// The minimum of a column chunk's statistics, when it is an integer column.
+fn statistics_min_u32(stats: &parquet::file::statistics::Statistics) -> Option<u32> {
+    use parquet::file::statistics::Statistics;
+    match stats {
+        Statistics::Int32(s) => s.min_opt().map(|v| *v as u32),
+        Statistics::Int64(s) => s.min_opt().map(|v| *v as u32),
+        _ => None,
+    }
 }
 
 /// Rebuild one row from the column batch's `i`-th entry. Shared with the reader (B2).
@@ -447,6 +552,7 @@ mod tests {
             built_under: StrRepeatCriteria::default(),
             scan: ScanParams::default(),
             tool_version: "test-0.1".to_string(),
+            longest_tract_bp: vec![0; 2],
         }
     }
 
@@ -492,7 +598,11 @@ mod tests {
 
     #[test]
     fn a_future_header_format_is_refused_rather_than_guessed_at() {
-        let encoded = encode_header(&header()).replace("format\t1", "format\t2");
+        // Version-agnostic: whatever this build writes, a file one version ahead is refused.
+        let encoded = encode_header(&header()).replace(
+            &format!("format\t{HEADER_FORMAT_VERSION}"),
+            &format!("format\t{}", HEADER_FORMAT_VERSION + 1),
+        );
         let err = decode_header(&encoded, Path::new("test.parquet")).expect_err("refused");
         assert!(
             format!("{err}").contains("unreadable or truncated"),

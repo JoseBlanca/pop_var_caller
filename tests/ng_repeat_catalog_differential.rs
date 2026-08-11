@@ -476,8 +476,8 @@ fn the_sample_is_capped_stable_and_counted_in_full() {
 /// comes out whole while a generic stretch is clipped.
 #[test]
 fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
-    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
     use pop_var_caller::ng::WindowedRefSeq;
+    use pop_var_caller::ng::region_typing::{GenomeRegions, TypedRegionIterator};
     use pop_var_caller::regions::ContigBounds;
 
     let dir = tempfile::tempdir().expect("tmp");
@@ -548,9 +548,11 @@ fn a_region_subset_from_the_file_equals_the_walk_over_the_same_spans() {
 
     let catalog =
         RepeatCatalog::open_checking_against_reference(&catalog_path, &reference).expect("opens");
-    let from_file = catalog
+    let from_file: Vec<TypedRegion> = catalog
         .genome_segments_in(&criteria, &spans)
-        .expect("servable");
+        .expect("servable")
+        .map(|r| r.expect("a region"))
+        .collect();
 
     assert!(!walked.is_empty(), "the spans must contain something");
     assert_eq!(
