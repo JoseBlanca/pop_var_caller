@@ -30,6 +30,8 @@ mod real_alignments;
 #[cfg(test)]
 mod recovery;
 pub mod runs;
+#[cfg(test)]
+mod truth_anchors;
 
 use std::collections::{BTreeMap, BTreeSet};
 

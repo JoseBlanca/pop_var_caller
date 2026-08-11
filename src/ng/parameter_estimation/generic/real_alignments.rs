@@ -195,7 +195,7 @@ struct WalkTally {
 /// Held together because a walk needs all of it and the sharding identity makes five:
 /// one parsed `.fai`, one contig table and one `OpenReference` shared by every walk, so
 /// that what the arms differ in is the region list and nothing else.
-struct WalkInputs {
+pub(super) struct WalkInputs {
     fasta: PathBuf,
     contigs: Arc<ContigList>,
     index: Arc<fai::Index>,
@@ -211,11 +211,11 @@ struct WalkInputs {
     /// The alignment file and the BED, as one string — every assertion message opens with
     /// it, because a failure here is read by whoever ran the command and not by whoever
     /// wrote it.
-    run_label: String,
+    pub(super) run_label: String,
 }
 
 impl WalkInputs {
-    fn from_env() -> Self {
+    pub(super) fn from_env() -> Self {
         let fasta = PathBuf::from(required_env_var("PVC_PREPASS_FASTA"));
         let reads = PathBuf::from(required_env_var("PVC_PREPASS_READS"));
         let bed = PathBuf::from(required_env_var("PVC_PREPASS_BED"));
@@ -276,7 +276,7 @@ impl WalkInputs {
     /// **One config per test, and every shard's accumulator built from it**, because
     /// `merge` proves the shards share their binning rule and their ploidy map by pointer
     /// identity rather than by value.
-    fn config(&self, inbreeding: InbreedingMode) -> GenericEstimationConfig {
+    pub(super) fn config(&self, inbreeding: InbreedingMode) -> GenericEstimationConfig {
         GenericEstimationConfig {
             sample_name: self.sample.sample.to_string(),
             read_groups: self.sample.read_groups.clone(),
@@ -296,7 +296,7 @@ impl WalkInputs {
     /// they differ in is which accumulator each region's loci reach.
     /// Re-typing per arm would put region typing inside the comparison, and a difference
     /// there would read as a difference in the accumulator.
-    fn typed_regions(&self) -> Vec<TypedRegion> {
+    pub(super) fn typed_regions(&self) -> Vec<TypedRegion> {
         let mut typed = Vec::new();
         let walk = TypedRegionIterator::over_regions(
             WindowedRefSeq::with_shared_index(
@@ -324,11 +324,78 @@ impl WalkInputs {
         typed
     }
 
-    /// Walk `regions`, add every locus to `into`, and tally what went past **outside** the
-    /// accumulator.
+    /// Walk `regions` and hand every locus to `visit`, in the order the generator produces
+    /// them. A fresh `SampleReads` and a fresh generator per call, which is what a region
+    /// shard of a real run has: the accumulators are what merge, not the readers.
     ///
-    /// A fresh `SampleReads` and a fresh generator per call, which is what a region shard
-    /// of a real run has: the accumulators are what merge, not the readers.
+    /// **Factored out of [`WalkInputs::accumulate`] so that G1's anchors walk the same stream
+    /// this file's identities do** (`truth_anchors.rs`). Two walks over one alignment that
+    /// differed even in their read filter would compare a fitted number against a truth
+    /// counted over a different population of reads, which is the one thing an anchor may not
+    /// do.
+    pub(super) fn for_each_locus(
+        &self,
+        regions: Vec<TypedRegion>,
+        visit: &mut dyn FnMut(&crate::ng::locus_generation::SampleLocusObservations),
+    ) {
+        let sample = SampleReads::open(
+            &self.sample,
+            &self.read_groups,
+            &self.reference,
+            ReadFilterConfig::default(),
+            true,
+        )
+        .expect("the alignment file opens against this reference");
+        let preparer = LeftAlignPreparer::with_default_normalizer(self.accessor());
+        let generator = {
+            let fasta = self.fasta.clone();
+            let contigs = self.contigs.clone();
+            let index = self.index.clone();
+            #[allow(
+                clippy::arc_with_non_send_sync,
+                reason = "as in `accumulate` below: file-backed and single-threaded"
+            )]
+            let reference = Arc::new(self.accessor());
+            PileupGenerator::new(
+                reference,
+                move || {
+                    WindowedRefSeq::with_shared_index(fasta.clone(), contigs.clone(), index.clone())
+                },
+                preparer,
+                PileupGeneratorConfig::default(),
+            )
+            .expect("the generic generator builds against this reference")
+        };
+        let generators = GeneratorSet::new(
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+            GeneratorSlot::Generator(Box::new(generator)),
+            GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+        );
+        let regions: Vec<Result<TypedRegion, TypedRegionError>> =
+            regions.into_iter().map(Ok).collect();
+        let mut stream =
+            SampleLocusObservationsIterator::new(regions.into_iter(), sample, generators);
+        for locus in &mut stream {
+            let locus = locus.expect("the walk runs to completion on a well-formed alignment");
+            visit(&locus);
+        }
+    }
+
+    /// How many read groups this sample carries — G1 needs it because its model-free count is
+    /// pooled over the whole site while its comparison is per read group.
+    pub(super) fn read_group_count(&self) -> usize {
+        self.sample.read_groups.len()
+    }
+
+    /// The contig table this walk resolved its BED against — G1 needs the *names*, because a
+    /// truth VCF is keyed by name where the walk is keyed by index.
+    pub(super) fn contig_name(&self, contig: u32) -> String {
+        self.contigs.entries[contig as usize].name.clone()
+    }
+
+    /// Walk `regions`, add every locus to `into`, and tally what went past **outside** the
+    /// accumulator — so that the tally and the accumulator's own counters are two independent
+    /// counts of the same walk rather than one number read twice.
     fn accumulate(&self, regions: Vec<TypedRegion>, into: &mut GenericAccumulators) -> WalkTally {
         let sample = SampleReads::open(
             &self.sample,
@@ -417,7 +484,7 @@ impl WalkInputs {
     /// every arm read the wrong bases* is the first hypothesis a reader of a red identity
     /// needs ruled out. The verification runs on a background thread and a walk over half a
     /// million loci has long outlasted it, so waiting costs nothing.
-    fn confirm_reference(&mut self) {
+    pub(super) fn confirm_reference(&mut self) {
         if let Some(handle) = self.verification.take() {
             handle
                 .join()
@@ -426,7 +493,7 @@ impl WalkInputs {
     }
 }
 
-fn required_env_var(variable: &str) -> String {
+pub(super) fn required_env_var(variable: &str) -> String {
     std::env::var(variable)
         .unwrap_or_else(|_| panic!("set {variable} — see this module's doc comment"))
 }

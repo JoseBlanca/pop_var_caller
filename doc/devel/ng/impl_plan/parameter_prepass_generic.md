@@ -448,7 +448,15 @@ arch §9, spec §12.6.
 
 ### Milestone G — the anchors against real data
 
-**G1. Model-free values from the GIAB truth set.**  ☐
+**G1. Model-free values from the GIAB truth set.**  ✅ — `generic/truth_anchors.rs`,
+[report](../../reports/implementations/ng_parameter_prepass_generic_g1_2026-08-11.md).
+**The fitted error rate lands 0.1% from a count with no model in it** (2.3327 × 10⁻³ against
+2.3300 × 10⁻³ at 30x; +0.3% at 300x), and the benchmark heterozygosity this code counts for
+itself — 9.9666 × 10⁻⁴ — is to every digit what the research note reached independently in
+Python. **Per locus rather than per base** (owner, 2026-08-10), so the anchor and the ratios
+step 4a reports are one measurement. **⚠ The counting is blind in one direction**: over-classifying
+lowers the model-free rate and only makes the assertion easier, with headroom of 0.12%; what
+guards that direction is the classification checks, not the assertion.
 The error rate as non-reference bases over total bases at truth homozygous-reference
 positions — a count, no model and no fit; heterozygosity as the truth het count over the
 confident regions' length; the homozygous-non-reference rate as the 1/1 count over the same.
