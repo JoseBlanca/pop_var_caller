@@ -80,15 +80,16 @@ use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
-use pop_var_caller::ng::region_typing::{
-    RegionKind, TypedRegion, TypedRegionConfig, TypedRegionError, TypedRegionIterator,
-};
+use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{ReadScope, RepeatCatalog, StrRepeatCriteria};
 #[cfg(test)]
 use pop_var_caller::ng::types::ReadGroupId;
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
 /// The shared "should this run check the reference?" rule — see the module's own docs for
 /// why the default is to check even in a tool that is re-run constantly.
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 #[path = "shared/reference_check.rs"]
 mod reference_check_knob;
 use reference_check_knob::reference_check_from_env;
@@ -354,10 +355,10 @@ fn witness_label(witness: &ReadWitness) -> String {
 /// Adjacent pieces tile the original exactly: the last piece ends where the region does, so a
 /// record whose footprint crosses a piece boundary is the halo case, which is what the
 /// boundary check exercises (spec §2).
-fn split_generic(
-    item: Result<TypedRegion, TypedRegionError>,
+fn split_generic<E>(
+    item: Result<TypedRegion, E>,
     chunk_bp: Option<u64>,
-) -> Vec<Result<TypedRegion, TypedRegionError>> {
+) -> Vec<Result<TypedRegion, E>> {
     let Some(chunk) = chunk_bp else {
         return vec![item];
     };
@@ -434,6 +435,9 @@ fn run_dump<P: ReadPreparer + 'static>(
     let (info, verify) =
         read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf(), reference_check)?;
     let contigs = Arc::new(info.contig_list());
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run: the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     let index = WindowedRefSeq::read_index(fasta)?;
 
     // One reference for every file this run opens, and so one copy of the bases — the shape
@@ -493,21 +497,22 @@ fn run_dump<P: ReadPreparer + 'static>(
     // rebuilt — its chain-id allocator is run-lifetime, so restarting it would give two
     // fragments on two contigs the same identity (spec §8).
     //
-    // The per-contig typed-region walks are built up front and chained. Each is a path, a
-    // contig table and a shared index — no I/O until its first fetch — so the ones a contig
-    // filter excludes are never built at all, and the ones it keeps cost nothing until walked.
+    // **The typed regions come from the catalog beside the reference.** One reader over every
+    // selected contig rather than one per contig chained together: the reader already streams
+    // a contig at a time, so a contig the filter excludes is never opened and the ones it
+    // keeps cost nothing until they are read.
     let walk_config = TypedRegionConfig::default();
-    let mut walks = Vec::new();
-    for (index_of_contig, entry) in contigs.entries.iter().enumerate() {
-        if contig_filter.is_some_and(|name| entry.name != name) {
-            continue;
-        }
-        walks.push(TypedRegionIterator::over_contig(
-            WindowedRefSeq::with_shared_index(fasta.to_path_buf(), contigs.clone(), index.clone()),
-            ContigId(index_of_contig as u32),
-            walk_config.clone(),
-        )?);
-    }
+    let criteria = StrRepeatCriteria::from(&walk_config);
+    let wanted: Vec<GenomeRegion> = contigs
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !contig_filter.is_some_and(|name| entry.name != name))
+        .map(|(index_of_contig, entry)| {
+            catalog_regions::whole_contig(ContigId(index_of_contig as u32), entry.length)
+        })
+        .collect();
+    let walks = catalog.genome_segments(&criteria, ReadScope::Regions(&wanted))?;
 
     // Counted inside the stream, because the stream is moved into the locus iterator and
     // nothing downstream sees the regions: the dump wants to say how many *generic* base pairs
@@ -518,8 +523,6 @@ fn run_dump<P: ReadPreparer + 'static>(
         let generic_bp = generic_bp.clone();
         let generic_regions = generic_regions.clone();
         walks
-            .into_iter()
-            .flatten()
             .flat_map(move |item| split_generic(item, chunk_bp))
             .inspect(move |item| {
                 if let Ok(region) = item

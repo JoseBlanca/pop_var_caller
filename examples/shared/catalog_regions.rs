@@ -35,3 +35,33 @@ pub fn whole_contig(contig: ContigId, length: u64) -> GenomeRegion {
         end: Position(length),
     }
 }
+
+/// Build the reference's catalog, for a **synthetic fixture that has none**.
+///
+/// A real reference gets one from `pop_var_caller_exp repeat-catalog`, once, and every tool
+/// reads it. A fixture a test writes has no such run behind it, so the test does what that
+/// command does: streams the reference once and writes the catalog beside it.
+#[allow(dead_code)]
+pub fn build_catalog_beside(fasta: &std::path::Path) {
+    use pop_var_caller::ng::reference_info::{ReferenceSource, read_reference_info_observing};
+    use pop_var_caller::ng::repeat_catalog::{
+        RepeatCatalogBuilder, StrRepeatCriteria, sibling_catalog_path,
+    };
+    use pop_var_caller::ng::tandem_repeat::ScanParams;
+
+    let mut builder = RepeatCatalogBuilder::create(
+        &sibling_catalog_path(fasta),
+        StrRepeatCriteria::default(),
+        ScanParams::default(),
+    )
+    .expect("a builder");
+    let info = read_reference_info_observing(
+        ReferenceSource::Fasta {
+            fasta: fasta.to_path_buf(),
+            fai: None,
+        },
+        &mut builder,
+    )
+    .expect("the reference pass runs");
+    builder.finish(&info).expect("the catalog is written");
+}

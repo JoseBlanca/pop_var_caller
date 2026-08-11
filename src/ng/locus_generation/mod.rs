@@ -367,6 +367,16 @@ pub enum LocusGenerationError {
     /// The upstream typed-region walk failed.
     #[error("typed-region walk failed during locus generation")]
     TypedRegion(#[from] TypedRegionError),
+    /// The reference's repeat catalog — the other source a region stream can come from —
+    /// could not be read.
+    ///
+    /// **Two variants and not one, because the two sources fail differently and a reader of
+    /// the message needs to know which.** A walk fails on the reference; a catalog fails on a
+    /// file that is missing, describes another reference, or cannot answer the policy asked
+    /// for — and that first case names the command that writes one, which is the only one a
+    /// person can act on.
+    #[error("reading the reference's repeat catalog during locus generation")]
+    RepeatCatalog(#[from] crate::ng::repeat_catalog::RepeatCatalogError),
     /// The read query for a region could not be **opened** — a missing or unreadable
     /// index, a contig the file does not have, a region the planner rejects.
     ///
@@ -449,7 +459,9 @@ impl LocusGenerationError {
     /// every variant, which is what would rot the moment a variant is added.
     pub fn region(&self) -> Option<GenomeRegion> {
         match self {
-            LocusGenerationError::TypedRegion(_) => None,
+            // Both region-source failures are failures of the *stream*, so neither has a
+            // region to name — that being the point of keeping them apart from the rest.
+            LocusGenerationError::TypedRegion(_) | LocusGenerationError::RepeatCatalog(_) => None,
             LocusGenerationError::OpenReadQuery { region, .. }
             | LocusGenerationError::ForeignSample { region }
             | LocusGenerationError::Reads { region, .. }
@@ -760,9 +772,10 @@ impl<T> SampleLocusObservationsIterator<T> {
     }
 }
 
-impl<T> Iterator for SampleLocusObservationsIterator<T>
+impl<T, E> Iterator for SampleLocusObservationsIterator<T>
 where
-    T: Iterator<Item = Result<TypedRegion, TypedRegionError>>,
+    T: Iterator<Item = Result<TypedRegion, E>>,
+    E: Into<LocusGenerationError>,
 {
     type Item = Result<SampleLocusObservations, LocusGenerationError>;
 
@@ -797,8 +810,10 @@ where
     }
 }
 
-impl<T> std::iter::FusedIterator for SampleLocusObservationsIterator<T> where
-    T: Iterator<Item = Result<TypedRegion, TypedRegionError>>
+impl<T, E> std::iter::FusedIterator for SampleLocusObservationsIterator<T>
+where
+    T: Iterator<Item = Result<TypedRegion, E>>,
+    E: Into<LocusGenerationError>,
 {
 }
 
@@ -1201,7 +1216,7 @@ mod tests {
     fn the_iterator_drains_and_accounts_a_multi_kind_stream() {
         let (_reference_dir, _bam_dir, reads) = sample_reads_over_fixture();
         let regions = vec![
-            Ok(typed(RegionKind::Generic, 1, 10)),
+            Ok::<_, TypedRegionError>(typed(RegionKind::Generic, 1, 10)),
             Ok(typed(an_ssr_segment(20, 25), 20, 25)),
             Ok(typed(RegionKind::Satellite, 200, 400)),
         ];
@@ -1234,7 +1249,7 @@ mod tests {
     fn loci_come_out_in_coordinate_order_across_kinds() {
         let (_reference_dir, _bam_dir, reads) = sample_reads_over_fixture();
         let regions = vec![
-            Ok(typed(RegionKind::Generic, 1, 10)),
+            Ok::<_, TypedRegionError>(typed(RegionKind::Generic, 1, 10)),
             Ok(typed(an_ssr_segment(20, 25), 20, 25)),
             Ok(typed(a_bundle(), 100, 160)),
         ];
@@ -1262,7 +1277,7 @@ mod tests {
     fn a_region_yielding_several_loci_streams_them_all_before_advancing() {
         let (_reference_dir, _bam_dir, reads) = sample_reads_over_fixture();
         let regions = vec![
-            Ok(typed(RegionKind::Generic, 1, 10)), // generic slot → 3 loci at start=1
+            Ok::<_, TypedRegionError>(typed(RegionKind::Generic, 1, 10)), // generic slot → 3 loci at start=1
             Ok(typed(an_ssr_segment(20, 25), 20, 25)), // ssr slot → 2 loci at start=20
         ];
         let set = GeneratorSet::new(
@@ -1286,7 +1301,7 @@ mod tests {
         let (_reference_dir, _bam_dir, reads) = sample_reads_over_fixture();
         let regions = vec![
             Ok(typed(an_ssr_segment(20, 25), 20, 25)),
-            Ok(typed(RegionKind::Generic, 1, 10)),
+            Ok::<_, TypedRegionError>(typed(RegionKind::Generic, 1, 10)),
         ];
         let set = GeneratorSet::new(
             GeneratorSlot::Generator(Box::new(FailAfterOneGenerator { emitted: false })),
@@ -1315,7 +1330,7 @@ mod tests {
     fn a_stream_error_is_fatal_and_the_iterator_fuses() {
         let (_reference_dir, _bam_dir, reads) = sample_reads_over_fixture();
         let regions = vec![
-            Ok(typed(RegionKind::Generic, 1, 10)),
+            Ok::<_, TypedRegionError>(typed(RegionKind::Generic, 1, 10)),
             Err(TypedRegionError::MarginNarrowerThanFlank {
                 max_str_len: 1,
                 bundle_threshold: 2,

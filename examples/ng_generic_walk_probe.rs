@@ -142,13 +142,16 @@ use pop_var_caller::ng::reference_info::{
     ReferenceCheck, ReferenceInfoCache, read_reference_verifying_or_creating_fai,
 };
 
-use pop_var_caller::ng::region_typing::{
-    RegionKind, TypedRegion, TypedRegionConfig, TypedRegionError, TypedRegionIterator,
+use pop_var_caller::ng::region_typing::{RegionKind, TypedRegion, TypedRegionConfig};
+use pop_var_caller::ng::repeat_catalog::{
+    ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
 };
 use pop_var_caller::ng::types::{ContigId, GenomeRegion, Position};
 
 /// The shared "should this run check the reference?" rule — see the module's own docs for
 /// why the default is to check even in a tool built for measuring.
+#[path = "shared/catalog_regions.rs"]
+mod catalog_regions;
 #[path = "shared/reference_check.rs"]
 mod reference_check_knob;
 use reference_check_knob::{reference_check_from_env, reference_check_label};
@@ -374,10 +377,10 @@ fn contig_is_selected(name: &str, filter: Option<&str>) -> bool {
 /// dump owns its own output contract, and a shared body would let a change made for one
 /// tool move the other's baseline. (Not because sharing is impossible — the fixture module
 /// below is shared exactly that way. The reason is that these two must be free to differ.)
-fn split_generic(
-    item: Result<TypedRegion, TypedRegionError>,
+fn split_generic<E>(
+    item: Result<TypedRegion, E>,
     chunk_bp: Option<u64>,
-) -> Vec<Result<TypedRegion, TypedRegionError>> {
+) -> Vec<Result<TypedRegion, E>> {
     let Some(chunk) = chunk_bp else {
         return vec![item];
     };
@@ -458,6 +461,9 @@ fn walk<P: ReadPreparer + 'static>(
     let (info, verify) =
         read_reference_verifying_or_creating_fai(cache, fasta.to_path_buf(), reference_check)?;
     let contigs = Arc::new(info.contig_list());
+    // **The typed regions come from the catalog beside the reference**, checked against what
+    // the pass just reported. No catalog, no run: the error names the command that writes one.
+    let catalog = RepeatCatalog::open_beside_reference(fasta, &info)?;
     let index = WindowedRefSeq::read_index(fasta)?;
 
     let reference = OpenReference::new(info);
@@ -490,7 +496,9 @@ fn walk<P: ReadPreparer + 'static>(
     // `Generic` region per contig. Boxed because the two are different iterator types
     // and the choice is made at run time; the box costs one virtual call per *region*,
     // which against a per-region cost measured in tens of microseconds is not a term.
-    let typed: Box<dyn Iterator<Item = Result<TypedRegion, TypedRegionError>>> = if whole_contig {
+    // The error type is the catalog's, because that is where the real stream comes from; the
+    // whole-contig branch yields only `Ok`, so it fits either way.
+    let typed: Box<dyn Iterator<Item = Result<TypedRegion, RepeatCatalogError>>> = if whole_contig {
         let mut whole = Vec::new();
         for (index_of_contig, entry) in contigs.entries.iter().enumerate() {
             if !contig_is_selected(&entry.name, contig_filter) {
@@ -507,23 +515,24 @@ fn walk<P: ReadPreparer + 'static>(
         }
         Box::new(whole.into_iter())
     } else {
+        // **From the catalog beside the reference**, one reader over every selected contig:
+        // it already streams a contig at a time, so a contig the filter excludes is never
+        // opened. Collected rather than borrowed, because the box outlives this scope.
         let walk_config = TypedRegionConfig::default();
-        let mut walks = Vec::new();
-        for (index_of_contig, entry) in contigs.entries.iter().enumerate() {
-            if !contig_is_selected(&entry.name, contig_filter) {
-                continue;
-            }
-            walks.push(TypedRegionIterator::over_contig(
-                WindowedRefSeq::with_shared_index(
-                    fasta.to_path_buf(),
-                    contigs.clone(),
-                    index.clone(),
-                ),
-                ContigId(index_of_contig as u32),
-                walk_config.clone(),
-            )?);
-        }
-        Box::new(walks.into_iter().flatten())
+        let criteria = StrRepeatCriteria::from(&walk_config);
+        let wanted: Vec<GenomeRegion> = contigs
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| contig_is_selected(&entry.name, contig_filter))
+            .map(|(index_of_contig, entry)| {
+                catalog_regions::whole_contig(ContigId(index_of_contig as u32), entry.length)
+            })
+            .collect();
+        let regions: Vec<Result<TypedRegion, RepeatCatalogError>> = catalog
+            .genome_segments(&criteria, ReadScope::Regions(&wanted))?
+            .collect();
+        Box::new(regions.into_iter())
     };
 
     let generic_bp = std::rc::Rc::new(std::cell::Cell::new(0u64));
@@ -1015,18 +1024,24 @@ mod tests {
         )
         .expect("the fixture's reference reads");
         let contigs = Arc::new(info.contig_list());
-        let index =
-            WindowedRefSeq::read_index(&sample.fasta).expect("the .fai just written parses");
-        let generic: Vec<GenomeRegion> = TypedRegionIterator::over_contig(
-            WindowedRefSeq::with_shared_index(sample.fasta.clone(), contigs, index),
+        // The same regions the probe itself reads, from the same place: the catalog beside
+        // the fixture's reference, built here because a synthetic fixture has none.
+        catalog_regions::build_catalog_beside(&sample.fasta);
+        let catalog = RepeatCatalog::open_beside_reference(&sample.fasta, &info)
+            .expect("the catalog just built opens");
+        let config = TypedRegionConfig::default();
+        let criteria = StrRepeatCriteria::from(&config);
+        let whole = [catalog_regions::whole_contig(
             ContigId(0),
-            TypedRegionConfig::default(),
-        )
-        .expect("the typed-region walk starts")
-        .map(|region| region.expect("the fixture types without error"))
-        .filter(|region| region.kind == RegionKind::Generic)
-        .map(|region| region.region)
-        .collect();
+            contigs.entries[0].length,
+        )];
+        let generic: Vec<GenomeRegion> = catalog
+            .genome_segments(&criteria, ReadScope::Regions(&whole))
+            .expect("the policy is servable")
+            .map(|region| region.expect("the fixture types without error"))
+            .filter(|region| region.kind == RegionKind::Generic)
+            .map(|region| region.region)
+            .collect();
         if let Some(handle) = verify {
             handle.join().expect("the reference verification thread");
         }
@@ -1280,10 +1295,11 @@ mod tests {
         };
 
         for chunk in [1u64, 7, 333, 1_000, 5_000] {
-            let pieces: Vec<TypedRegion> = split_generic(Ok(region.clone()), Some(chunk))
-                .into_iter()
-                .map(|piece| piece.expect("splitting an Ok region yields Ok pieces"))
-                .collect();
+            let pieces: Vec<TypedRegion> =
+                split_generic(Ok::<_, RepeatCatalogError>(region.clone()), Some(chunk))
+                    .into_iter()
+                    .map(|piece| piece.expect("splitting an Ok region yields Ok pieces"))
+                    .collect();
 
             assert_eq!(pieces.first().map(|p| p.region.start), Some(Position(1)));
             assert_eq!(pieces.last().map(|p| p.region.end), Some(Position(1_000)));
@@ -1332,7 +1348,7 @@ mod tests {
             (generic.clone(), Some(0)),
             (repeat.clone(), Some(100)),
         ] {
-            let pieces = split_generic(Ok(item.clone()), chunk);
+            let pieces = split_generic(Ok::<_, RepeatCatalogError>(item.clone()), chunk);
             let [only] = pieces.as_slice() else {
                 panic!(
                     "chunk {chunk:?} split {:?} into {} pieces",
@@ -1352,10 +1368,13 @@ mod tests {
     /// of the contig silently.
     #[test]
     fn a_failed_region_passes_through_the_splitter() {
-        let failed = Err(TypedRegionError::MarginNarrowerThanFlank {
-            max_str_len: 10,
-            bundle_threshold: 20,
-        });
+        // The error the real stream carries now: the catalog's, from a reader whose policy
+        // the file cannot answer.
+        let failed: Result<TypedRegion, RepeatCatalogError> =
+            Err(RepeatCatalogError::ToolVersionDiffers {
+                built: "another-build".to_string(),
+                running: "this-build".to_string(),
+            });
         let passed = split_generic(failed, Some(100));
 
         assert_eq!(passed.len(), 1);
