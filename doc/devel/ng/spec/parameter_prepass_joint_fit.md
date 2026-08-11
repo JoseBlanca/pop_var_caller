@@ -214,6 +214,19 @@ constrained by the spectrum, so a sample whose real genotype distribution depart
 panel's spectrum and its own `F` predict cannot express that departure. §8 says how to tell that
 apart from noise.
 
+**On a nearly homozygous sample they are a residual under a much larger background, and that is not a
+precision problem.** Measured on a proportion's own scale the estimate gets *tighter* as heterozygosity
+falls — `√(p/n)` shrinks with `p` — so a low-heterozygosity sample needs no more loci
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.2). What changes is the
+mixture: at tomato's least heterozygous sample, **about 97 in every 100 positions carrying an
+alternative read are sequencing error or a noisy locus** rather than a real heterozygote, so `Hobs` is
+what survives subtracting the background, and a few percent of error in the background's fitted weight
+is the whole of the answer. More loci do not change that ratio.
+
+**This is where the route has something to offer, which is why it belongs in this document too.** The
+background is fitted from every sample and every locus at once rather than from the one inbred sample,
+and §2.2's per-locus identification names the offending loci instead of averaging over them.
+
 ### 3.3 How the maximum is found
 
 **Alternate, as the per-sample route already does.** [`parameter_prepass_generic.md`](parameter_prepass_generic.md)
@@ -275,7 +288,9 @@ a stratum with eleven loci in it fittable.
 ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §6). If the per-stratum cap
 keeps every locus in most strata, this route holds the same loci as the per-stratum histogram *and*
 remembers which was which — a much stronger position than the generic path's one position in a few
-hundred.
+hundred. **That question is now one call rather than an experiment**, `count_loci_per_stratum` on the
+repeat catalog at the STR path's calling floors, and it is the cheapest thing outstanding in these
+three documents.
 
 ---
 
@@ -401,7 +416,7 @@ dominates, the budget is the knob and
 **Determinism.** The fit sums over loci in a fixed order and over samples in a fixed order, so no
 parameter varies with thread count. Multiple starting points are enumerated, not sampled.
 
-**Errors.** The eight identity values of
+**Errors.** The nine identity values of
 [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4 must all match across
 samples, and **a mismatch must refuse, not average**.
 
@@ -409,8 +424,29 @@ samples, and **a mismatch must refuse, not average**.
 
 ## 8. The comparison this route exists for
 
-**Both routes run on the same data and their estimates are compared.** Four measurements, in the order
-they can be made.
+**Both routes run on the same data and their estimates are compared, on three axes: accuracy, memory
+and speed.** The reference is the per-sample whole-genome histogram route
+([`parameter_prepass_generic.md`](parameter_prepass_generic.md),
+[`parameter_prepass_ssr.md`](parameter_prepass_ssr.md)), and the medium is **synthetic data**, because
+only there is the truth known — draw genotypes at known allele frequencies, draw depths, draw reads at
+a known error rate, and fill both routes' accumulators from the same draw.
+
+**Two things that framing does not cover, and both are cheap to add rather than reasons to change
+it.**
+
+- **Synthetic data answers "does each estimator recover what it was given", not "is the model right
+  about real reads".** The noisy-locus class exists because 818 non-variant HG002 loci carried three
+  or more alternative reads where one error rate predicts 29 (§2.2) — that is a property of real
+  mismapping and error-prone context, and a generator reproduces it only if someone builds it in, in
+  which case the fit is being graded against an assumption. **So measurement 3 below is deliberately
+  not synthetic**, and it is the one that grades the model rather than the arithmetic.
+- **Memory and speed are only comparable at realistic scale.** The numbers that decide this route —
+  the records held for every sample at once, and the per-sample windowed histogram the other route
+  holds in flight — do not appear on a small fixture. Run the cost measurements at the shape of a real
+  cohort: a genome-sized position budget, fifty samples, and the concurrency the walk would actually
+  use.
+
+Five measurements, in the order they can be made.
 
 1. **Bias, against synthetic truth.** Draw genotypes at known allele frequencies, draw depths, draw
    reads at a known error rate; fill both routes' accumulators from the same draw; fit both. **Repeat
@@ -428,11 +464,20 @@ they can be made.
    confident-region loci and see whether heterozygosity comes in below the 1.09× the blind two-class
    mixture reaches. **This is the measurement most likely to decide the comparison**, because it is the
    one thing this route can do that no amount of extra data can buy the other.
-4. **Memory and wall clock, measured rather than computed.** §7's figures are arithmetic. Report the
+4. **The least heterozygous samples, separately.** Report every measurement above **split by the
+   sample's own heterozygosity**, never pooled over the cohort. The reason is not that the estimate
+   gets noisier there — on a proportion's own scale it gets tighter (§3.2) — but that **the failure
+   mode changes**: at the cohort median a shortfall shows up as scatter, and at tomato's floor of
+   0.149 per kilobase, where about 97 in 100 positions with an alternative read are artefact, a
+   mis-fitted background shows up as a **confident wrong number** that no cohort mean would reveal and
+   no extra loci would cure. Include a drawn sample an order of magnitude below that floor, for a
+   selfing line. **It is also the axis on which the two routes are least interchangeable**, since the
+   per-sample route reads every site and this one reads a subsample of them.
+5. **Memory and wall clock, measured rather than computed.** §7's figures are arithmetic. Report the
    records at rest, the fit's working set, and the fit's wall clock at several core counts, on the
    whole tomato cohort — the run that stresses sample count, which is the axis this route's cost
    scales on. **Report it at each budget of
-   [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.1's downward sweep**, since
+   [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3's downward sweep**, since
    the two questions share one experiment.
 
 **What must be recorded so that nobody re-runs the walk to finish this**: both routes' fitted values,

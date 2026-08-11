@@ -202,12 +202,13 @@ unremarkable.
 
 ## 4. What travels once per sample, beside the records
 
-**Eight values, and the fit must refuse to pool samples that disagree on any of them.**
+**Nine values, and the fit must refuse to pool samples that disagree on any of them.**
 
-Six identify the loci and are
+Seven identify the loci and are
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §5.1's: the seed, the reference
-digest, the analysed-region-set digest, **the STR catalog's digest**, the generic target count, and
-the STR per-stratum cap.
+digest, the analysed-region-set digest, **the repeat catalog's build settings and scoring weights**,
+**the STR routing criteria this run asked it for**, the generic target count, and the STR per-stratum
+cap.
 
 **Two more are this document's**, and both are load-bearing rather than informational:
 
