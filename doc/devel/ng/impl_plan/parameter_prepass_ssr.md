@@ -408,7 +408,7 @@ quantity this run measures rather than assumes. Each fit records its starts and 
 `StratumFit::starts_tried`, and raises `SlippageNotIdentified` when they span more than
 `START_AGREEMENT_LIMIT` in the level. *Depends:* D4, E1. *Source:* arch §4.1, spec §4.2.
 
-**E3. Borrowing for a thin stratum — two floors, and the fit splits between them.**  ☐
+**E3. Borrowing for a thin stratum — two floors, and the fit splits between them.**  ✅
 Below `MIN_LOCI_TO_FIT`, take the neighbouring repeat counts at the same period rather than fitting
 noise, marked `Provenance::Borrowed` with `fitted_over` naming the strata it came from. A period with
 no fittable stratum anywhere raises `NoFittableStratumAtPeriod` rather than defaulting.

@@ -45,7 +45,7 @@ pub mod offset_bucket;
 pub mod slippage;
 pub mod stratum_table;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -677,9 +677,12 @@ pub enum SsrEstimationError {
     /// remedies: a period whose thickest stratum held 812 loci wants a run over more of the
     /// genome, and one that held 3 wants dropping.
     #[error(
-        "sample {sample}, read group {read_group}: period {period} has no stratum with \
-         {MIN_LOCI_TO_FIT} loci to fit or borrow from — its thickest holds {thickest_loci}; \
-         drop the period or widen the run"
+        "sample {sample}, read group {read_group}: period {period} has no stratum this unit could \
+         fit, so there is nothing to borrow from — its thickest of {strata} holds \
+         {thickest_loci} loci against the {MIN_LOCI_TO_FIT} needed, and \
+         {strata_with_moved_reads} of them held a read that moved by a whole motif copy. Widen \
+         the run if those counts are small; if they are not, these tracts are not slipping like \
+         repeats and the period wants dropping"
     )]
     NoFittableStratumAtPeriod {
         sample: String,
@@ -689,6 +692,13 @@ pub enum SsrEstimationError {
         period: SsrPeriod,
         /// How many loci the period's thickest stratum held.
         thickest_loci: u64,
+        /// How many strata the period held at all.
+        strata: usize,
+        /// **How many of them held a read on the whole-repeat grid**, which is the second way a
+        /// period can fail and needs the opposite remedy. A period of thick strata whose reads
+        /// all carry ordinary indels inside the tract reads as "widen the run" without this, and
+        /// widening it would collect more of the same.
+        strata_with_moved_reads: usize,
     },
 
     /// The search reached materially different answers from different starting points, so what
@@ -1200,10 +1210,15 @@ fn read_counts(entries: &[StratumEntry]) -> StratumReads {
 /// data is a borrow, and it is recorded as one — it is a search that did not settle, and the
 /// number it would otherwise report is where it stopped rather than what the loci say.
 ///
-/// A stratum **no read of which sat on the whole-repeat grid** is absent from the result rather
-/// than fitted, for the reason [`fit_slippage`] gives: there is nothing there for the model to
-/// explain, and what a search returns on a flat surface is where its steps stopped. Filling that
-/// gap is the borrowing step's business.
+/// Two kinds of stratum are **absent from the result rather than fitted**, and both then borrow:
+/// one holding fewer than [`MIN_LOCI_TO_FIT`] loci, and one no read of which sat on the
+/// whole-repeat grid ([`fit_slippage`]).
+///
+/// **The locus floor is applied here, before the search, and that is not only an economy.** A
+/// stratum of two loci is exactly the stratum whose four starts cannot agree — measured, one locus
+/// gives a spread of 193 — so fitting it first and refusing it afterwards would stop the whole
+/// sample on a stratum whose answer was going to be thrown away. The economy is real too: on a
+/// genome most strata are thin, and each one skipped is several hundred climbs not run.
 pub fn fit_slippage_by_stratum(
     accumulators: &SsrAccumulators,
     sample: &str,
@@ -1211,6 +1226,9 @@ pub fn fit_slippage_by_stratum(
 ) -> Result<BTreeMap<StratumKey, StratumSlippageFit>, SsrEstimationError> {
     let mut fits = BTreeMap::new();
     for (key, table) in accumulators.strata() {
+        if !thick_enough_to_fit(table.loci()) {
+            continue;
+        }
         let Some(fit) = fit_slippage(table, key.stratum, key.ploidy, precision) else {
             continue;
         };
@@ -1218,6 +1236,18 @@ pub fn fit_slippage_by_stratum(
         fits.insert(key, fit);
     }
     Ok(fits)
+}
+
+/// Whether a stratum holds enough loci to be fitted from rather than borrowed for
+/// ([`MIN_LOCI_TO_FIT`]).
+///
+/// **One spelling of the rule, used on both sides of the seam**: the walk applies it before
+/// searching, and the borrowing applies it again to whatever map it is handed, because a map can
+/// arrive from a caller that did its own fitting.
+#[inline]
+#[must_use]
+pub fn thick_enough_to_fit(loci: u64) -> bool {
+    loci >= MIN_LOCI_TO_FIT
 }
 
 /// Refuse a fit whose starting points did not converge on one answer.
@@ -1247,6 +1277,364 @@ pub fn starts_must_agree(
         });
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// The third fit, which is not a fit: borrowing, against two floors.
+// ---------------------------------------------------------------------
+
+/// One stratum's slippage **as it will be reported**: the model, where each half of it came from,
+/// and the fit of its own loci where it had one.
+///
+/// **Two provenance lists and not one**, which is this type's least obvious feature and the one a
+/// consumer must not collapse. The level and the two shares are measured from different
+/// populations, and at the bottom of the repeat range those populations differ by four orders of
+/// magnitude: 100,000 loci at five reads each hold half a million reads, of which — at the 0.091%
+/// level measured below four repeats — about 455 slipped, about 77 of those gained a repeat, and
+/// about 5 of those gained two. The level is a proportion over 500,000 reads and the fall-off's
+/// gaining arm stands on 5. So a stratum can keep the level it measured and borrow the two shares
+/// it did not (`spec/parameter_prepass_ssr.md` §4.5).
+#[derive(Clone, PartialEq, Debug)]
+pub struct StratumSlippage {
+    /// The three parameters as reported, with how much evidence stood behind them and whether
+    /// they were measured here.
+    ///
+    /// **[`Provenance::FittedHere`] means the *level* is this stratum's own**, which is the
+    /// number a reader takes from it; a stratum that kept its level and borrowed its two shares
+    /// is `FittedHere` with a non-empty [`Self::shares_fitted_over`]. That is a different claim
+    /// from a whole borrow and the summary counts it apart.
+    pub slippage: Estimate<SlippageModel>,
+    /// Which strata **the level** came from: empty where it is this stratum's own, and otherwise
+    /// the neighbours it was taken from.
+    pub fitted_over: SmallVec<[Stratum; 2]>,
+    /// Which strata **the direction share and the fall-off** came from, which is not always the
+    /// same answer. Empty where they are this stratum's own.
+    ///
+    /// **Empty *and* [`Self::slipped_reads`] below [`MIN_SLIPPED_READS_TO_FIT_SHARES`] is a third
+    /// state, and it is the one to report**: the two shares are this stratum's own, they stand on
+    /// fewer moved reads than the floor asks, and no stratum in its period had enough to lend. It
+    /// is derived rather than stored because it is exactly those two fields and a third would be
+    /// a second place for the same fact. Spec §4.5 expects it wherever a whole period sits at the
+    /// bottom of the repeat range.
+    pub shares_fitted_over: SmallVec<[Stratum; 2]>,
+    /// The fit of this stratum's own loci, where it had one. `None` where the stratum was too
+    /// thin to fit or held nothing the model could score, which is exactly when the whole model
+    /// is borrowed.
+    ///
+    /// Carried so that a reader who finds a fit surprising can see the starts behind it and the
+    /// genotype frequencies it was scored against.
+    pub own_fit: Option<StratumSlippageFit>,
+    /// How many loci the stratum holds — its own, whatever it borrowed.
+    pub loci: u64,
+    /// How many of its reads moved by a whole number of copies — the count the second floor is
+    /// against, emitted whichever side of it the stratum fell.
+    pub slipped_reads: u64,
+}
+
+/// **Resolve every stratum's slippage against the two floors**, borrowing from neighbouring
+/// repeat counts at the same period where a stratum cannot answer for itself
+/// (`spec/parameter_prepass_ssr.md` §4.3, §4.5).
+///
+/// Two tests and not one, and a stratum can fail the second while clearing the first by four
+/// orders of magnitude:
+///
+/// 1. **Fewer than [`MIN_LOCI_TO_FIT`] loci, or nothing its model could score** — the whole model
+///    is borrowed, and [`StratumSlippage::fitted_over`] names where from.
+/// 2. **Fewer than [`MIN_SLIPPED_READS_TO_FIT_SHARES`] reads that moved** — the level is kept and
+///    only the direction share and the fall-off are borrowed, named in
+///    [`StratumSlippage::shares_fitted_over`]. The level is untouched by that thinness because it
+///    is a proportion over every read rather than over the ones that moved.
+///
+/// **Neighbours are the nearest usable stratum below and the nearest above, at the same period,
+/// library and ploidy** — never across periods, because a mononucleotide run and a hexamer run
+/// slip at rates that differ twenty-two-fold, and never across ploidies.
+///
+/// **"Usable" is a different set for the level and for the two shares, and that is the point of
+/// the second floor.** The level is taken from a stratum that was fitted; the two shares only
+/// from one that was fitted *and* cleared [`MIN_SLIPPED_READS_TO_FIT_SHARES`]. Taking both from
+/// the same lender would let a run reject a stratum's shares as standing on 40 moved reads and
+/// then hand those same shares to its thin neighbour as a measurement.
+///
+/// **Between two lenders the level is interpolated in the logarithm and the shares linearly, both
+/// weighted by how far each lender sits in repeat counts.** A level rises about 1.3-fold per
+/// repeat count and spans orders of magnitude across a dataset, so what interpolates it is the
+/// multiplicative middle: at a four-fold gap an arithmetic mean sits 25% above it. Weighting by
+/// distance is what keeps that true when the lenders are not equidistant — with fitted strata at
+/// 5 and 12 repeats and everything between them thin, an unweighted geometric mean gives all six
+/// the same 0.0387, which is 2.65 times too high at 6 repeats and 2.65 times too low at 11. At
+/// the midpoint the weights are equal and this is the plain geometric mean.
+///
+/// **The second floor raises nothing when no stratum in the period clears it**, unlike the first.
+/// That is not an oversight: spec §4.5 expects *every* stratum at the bottom of the repeat range
+/// to miss it — at a level of 0.091% it takes about 880,000 loci at five reads each — so a period
+/// where none clears it is the common case and the honest answer is that each stratum keeps the
+/// shares it measured, with `shares_fitted_over` empty to say they are its own.
+///
+/// # Errors
+///
+/// [`SsrEstimationError::NoFittableStratumAtPeriod`] where a period holds no stratum that could be
+/// fitted at all, so there is nothing to borrow from. **Deliberately has no default to fall back
+/// on**: a slippage level spans twenty-two-fold across repeat counts within one dataset, so any
+/// constant would be wrong for most strata — and wrong in the direction that reads as a
+/// measurement.
+pub fn resolve_slippage(
+    accumulators: &SsrAccumulators,
+    mut fits: BTreeMap<StratumKey, StratumSlippageFit>,
+    sample: &str,
+) -> Result<BTreeMap<StratumKey, StratumSlippage>, SsrEstimationError> {
+    let mut resolved = BTreeMap::new();
+    for period in periods_of(accumulators) {
+        // The period's strata in repeat-count order, with what is known about each. `strata()`
+        // yields keys in that order already, so this preserves it.
+        let mut group: Vec<PeriodMember> = accumulators
+            .strata()
+            .filter(|(key, _)| {
+                key.read_group == period.read_group
+                    && key.ploidy == period.ploidy
+                    && key.stratum.period == period.period
+            })
+            .map(|(key, table)| {
+                let fit = fits.remove(&key);
+                // The fit counted this already, off the same table. Where there is no fit —
+                // because the stratum held nothing the model could score — the table is asked,
+                // so that a stratum which borrows still reports how many of its reads moved.
+                let slipped_reads = fit.as_ref().map_or_else(
+                    || read_counts(&table.entries()).slipped,
+                    |fit| fit.slipped_reads,
+                );
+                PeriodMember {
+                    key,
+                    fit,
+                    loci: table.loci(),
+                    slipped_reads,
+                }
+            })
+            .collect();
+        // Too thin to speak for itself, whatever its own fit said. The walk applies this before
+        // searching; a map that came from elsewhere may not have.
+        for member in &mut group {
+            if !thick_enough_to_fit(member.loci) {
+                member.fit = None;
+            }
+        }
+
+        if group.iter().all(|member| member.fit.is_none()) {
+            return Err(SsrEstimationError::NoFittableStratumAtPeriod {
+                sample: sample.to_owned(),
+                read_group: period.read_group,
+                period: period.period,
+                thickest_loci: group.iter().map(|member| member.loci).max().unwrap_or(0),
+                strata: group.len(),
+                strata_with_moved_reads: group
+                    .iter()
+                    .filter(|member| member.slipped_reads > 0)
+                    .count(),
+            });
+        }
+
+        for at in 0..group.len() {
+            resolved.insert(group[at].key, resolve_one(&group, at));
+        }
+    }
+    Ok(resolved)
+}
+
+/// One stratum of a period, and what is known about it going into the borrowing.
+struct PeriodMember {
+    key: StratumKey,
+    /// Its own fit, or `None` where it was too thin to fit or held nothing scoreable.
+    fit: Option<StratumSlippageFit>,
+    loci: u64,
+    slipped_reads: u64,
+}
+
+/// Which `(library, ploidy, period)` groups the accumulator holds — the sets the borrowing runs
+/// inside, each exactly once.
+///
+/// **A set and not a de-duplicated list.** A stratum key sorts by library, then period **and
+/// repeat count**, then ploidy, so on a genome carrying two ploidies the groups interleave —
+/// ploidy 1 at four repeats, ploidy 2 at four repeats, ploidy 1 at five — and dropping only
+/// *consecutive* repeats would hand the same group to the borrowing several times over. The
+/// second visit would find its strata's fits already taken and would borrow for every one of
+/// them.
+fn periods_of(accumulators: &SsrAccumulators) -> BTreeSet<PeriodKey> {
+    accumulators
+        .strata()
+        .map(|(key, _)| PeriodKey {
+            read_group: key.read_group,
+            ploidy: key.ploidy,
+            period: key.stratum.period,
+        })
+        .collect()
+}
+
+/// A library, a ploidy and a motif period — the set a stratum may borrow inside.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct PeriodKey {
+    read_group: ReadGroupId,
+    ploidy: Ploidy,
+    period: SsrPeriod,
+}
+
+/// Resolve the stratum at `at` against its period's other members.
+///
+/// **The level and the two shares are borrowed independently**, from two different sets of
+/// lenders, which is what stops a run rejecting a stratum's shares for standing on 40 moved reads
+/// and then lending those same shares to its thin neighbour.
+fn resolve_one(group: &[PeriodMember], at: usize) -> StratumSlippage {
+    let member = &group[at];
+    let own = member.fit.clone();
+
+    // Anyone fitted may lend a level. Only someone who cleared the second floor may lend shares.
+    let level_lender = |other: &PeriodMember| other.fit.as_ref().map(|fit| fit.model);
+    let shares_lender = |other: &PeriodMember| {
+        other
+            .fit
+            .as_ref()
+            .filter(|_| other.slipped_reads >= MIN_SLIPPED_READS_TO_FIT_SHARES)
+            .map(|fit| fit.model)
+    };
+
+    let shares = nearest(group, at, shares_lender);
+    let own_shares_are_measured = member.slipped_reads >= MIN_SLIPPED_READS_TO_FIT_SHARES;
+
+    let Some(fitted) = own.as_ref() else {
+        // Nothing of its own: the level comes from the nearest fitted neighbours, and the two
+        // shares from the nearest that measured them — which need not be the same strata, and
+        // where there are none, from the level's lenders, because there is nothing better and it
+        // is at least a fitted answer.
+        let level = nearest(group, at, level_lender)
+            .expect("the period holds at least one fitted stratum, checked before this walk");
+        let shares = shares.unwrap_or_else(|| level.clone());
+        return StratumSlippage {
+            slippage: Estimate {
+                value: SlippageModel::new(
+                    level.model.slip_rate,
+                    shares.model.gain_share,
+                    shares.model.step_decay,
+                ),
+                provenance: Provenance::Borrowed,
+                // **The lenders' reads, not this stratum's**, which the SNP/indel path's own
+                // fallback settled the same way: what stands behind a borrowed number is the
+                // evidence it was measured on, and this stratum's own count is the reason it had
+                // to borrow.
+                observations: level.observations,
+            },
+            fitted_over: level.from,
+            shares_fitted_over: shares.from,
+            own_fit: None,
+            loci: member.loci,
+            slipped_reads: member.slipped_reads,
+        };
+    };
+
+    // Its level is its own. Are the two shares?
+    let (model, shares_from) = match (own_shares_are_measured, shares) {
+        (true, _) => (fitted.model, SmallVec::new()),
+        // Its own level, its neighbours' shares.
+        (false, Some(borrowed)) => (
+            SlippageModel::new(
+                fitted.model.slip_rate,
+                borrowed.model.gain_share,
+                borrowed.model.step_decay,
+            ),
+            borrowed.from,
+        ),
+        // Nobody in the period measured the shares on enough reads, which spec §4.5 expects
+        // wherever a whole period sits at the bottom of the repeat range. Keeping its own is the
+        // only answer left; an empty list beside a `slipped_reads` under the floor is what says
+        // so, and the summary counts those apart.
+        (false, None) => (fitted.model, SmallVec::new()),
+    };
+
+    StratumSlippage {
+        slippage: Estimate {
+            value: model,
+            provenance: Provenance::FittedHere,
+            observations: fitted.scored_reads,
+        },
+        fitted_over: SmallVec::new(),
+        shares_fitted_over: shares_from,
+        own_fit: own,
+        loci: member.loci,
+        slipped_reads: member.slipped_reads,
+    }
+}
+
+/// What a borrow took, and from where.
+#[derive(Clone, PartialEq, Debug)]
+struct Borrowed {
+    model: SlippageModel,
+    /// The strata it was taken from, in ascending repeat count.
+    from: SmallVec<[Stratum; 2]>,
+    /// The reads the lenders' own fits were measured over, summed — the warrant that travels with
+    /// a borrowed number.
+    observations: u64,
+}
+
+/// One lender: which stratum, at what repeat count, what it fitted, and on how many reads.
+struct Lender {
+    stratum: Stratum,
+    repeats: u32,
+    model: SlippageModel,
+    scored_reads: u64,
+}
+
+/// The nearest usable stratum below `at` and the nearest above it, interpolated — or `None` where
+/// the period holds neither.
+///
+/// **Interpolated by distance in repeat counts, in the logarithm for the level and linearly for
+/// the two shares**, for the reason [`resolve_slippage`] gives. With one side only, that side's
+/// model is taken unchanged: extrapolating a trend from a single point would be inventing one.
+fn nearest(
+    group: &[PeriodMember],
+    at: usize,
+    usable: impl Fn(&PeriodMember) -> Option<SlippageModel>,
+) -> Option<Borrowed> {
+    let lender = |other: usize| {
+        usable(&group[other]).map(|model| Lender {
+            stratum: group[other].key.stratum,
+            repeats: group[other].key.stratum.repeats.get(),
+            model,
+            scored_reads: group[other].fit.as_ref().map_or(0, |fit| fit.scored_reads),
+        })
+    };
+    let below = (0..at).rev().find_map(lender);
+    let above = (at + 1..group.len()).find_map(lender);
+
+    match (below, above) {
+        (Some(lower), Some(higher)) => {
+            let here = f64::from(group[at].key.stratum.repeats.get());
+            // How far each lender sits from the stratum being filled. The two are distinct
+            // repeat counts on either side of it, so the span is at least two and the weights
+            // are finite.
+            let span = f64::from(higher.repeats) - f64::from(lower.repeats);
+            let toward_higher = (here - f64::from(lower.repeats)) / span;
+            let between = |from: f64, to: f64| from + toward_higher * (to - from);
+            let level = between(
+                lower.model.slip_rate.get().ln(),
+                higher.model.slip_rate.get().ln(),
+            )
+            .exp();
+            let model = SlippageModel::try_new(
+                level,
+                between(lower.model.gain_share.get(), higher.model.gain_share.get()),
+                between(lower.model.step_decay.get(), higher.model.step_decay.get()),
+            )
+            .expect("a value between two probabilities is a probability");
+            Some(Borrowed {
+                model,
+                from: SmallVec::from_slice(&[lower.stratum, higher.stratum]),
+                observations: lower.scored_reads + higher.scored_reads,
+            })
+        }
+        (Some(one), None) | (None, Some(one)) => Some(Borrowed {
+            model: one.model,
+            from: SmallVec::from_slice(&[one.stratum]),
+            observations: one.scored_reads,
+        }),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -2097,6 +2485,8 @@ mod tests {
             read_group: ReadGroupId(3),
             period: period(4),
             thickest_loci: 812,
+            strata: 9,
+            strata_with_moved_reads: 9,
         };
         let message = no_stratum.to_string();
         assert!(message.contains("SL_landrace_07"), "{message}");
@@ -2757,14 +3147,15 @@ mod tests {
         }
     }
 
-    /// **The walk fits every stratum the accumulator holds, under the accumulator's own keys.**
-    /// Two strata of one library here, one of them slipping and one not, so a walk that fitted
-    /// one stratum and copied its answer to the rest would be visible.
+    /// **The walk fits every stratum thick enough to speak for itself, under the accumulator's
+    /// own keys.** Two strata of one library here, one of them slipping and one not, so a walk
+    /// that fitted one stratum and copied its answer to the rest would be visible. Both hold
+    /// [`MIN_LOCI_TO_FIT`] loci, which is what the walk asks before it searches at all.
     #[test]
     fn the_walk_fits_every_stratum_under_its_own_key() {
-        let mut accumulators = stratum_losing_repeats(300, 1);
+        let mut accumulators = stratum_losing_repeats(MIN_LOCI_TO_FIT, 1);
         // A second stratum — a mononucleotide run — whose reads never left the reference.
-        for locus in 0..300u64 {
+        for locus in 0..MIN_LOCI_TO_FIT {
             accumulators.add_locus(&tract(
                 500_000 + locus * 100,
                 b"AAAAAAAA",
@@ -2825,13 +3216,19 @@ mod tests {
             max_sweeps: 1,
         };
 
+        // **A thousand loci and not one**, because the walk skips a stratum under
+        // `MIN_LOCI_TO_FIT` before it searches. They are all the same shape, so the stratum is
+        // still one entry and the fit costs the same: the score is multiplied by a thousand and
+        // its shape — which is what the search reads — is unchanged.
         let mut accumulators = SsrAccumulators::new(diploid());
-        accumulators.add_locus(&tract(
-            1_000,
-            reference,
-            b"AT",
-            vec![observation(far_longer, 0, 1)],
-        ));
+        for locus in 0..MIN_LOCI_TO_FIT {
+            accumulators.add_locus(&tract(
+                1_000 + locus * 100,
+                reference,
+                b"AT",
+                vec![observation(far_longer, 0, 1)],
+            ));
+        }
 
         let (key, table) = only_table(&accumulators);
         let fit = fit_slippage(table, key.stratum, key.ploidy, coarse).expect("a scoreable read");
@@ -3062,6 +3459,590 @@ mod tests {
                 .expect("no fit means nothing to disagree about")
                 .is_empty(),
             "and the walk leaves it out rather than reporting a level for it"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Borrowing, against the two floors.
+    // -----------------------------------------------------------------
+
+    /// A hand-built slippage fit at a stated level, for the borrowing tests: they are about which
+    /// model a stratum ends up reporting, and running a search to produce each one would make
+    /// them slow and would put the answer at the mercy of the search.
+    fn fit_at(level: f64, gain_share: f64, step_decay: f64, slipped: u64) -> StratumSlippageFit {
+        StratumSlippageFit {
+            slipped_reads: slipped,
+            scored_reads: slipped.max(1) * 100,
+            ..fitted_at(SlippageModel::try_new(level, gain_share, step_decay).expect("a model"))
+        }
+    }
+
+    /// An accumulator holding one locus per stratum named, so that every key exists, paired with
+    /// hand-built fits for the strata that are meant to have one. `(repeats, loci, fit)`.
+    fn period_of(
+        strata: &[(u32, u64, Option<StratumSlippageFit>)],
+    ) -> (SsrAccumulators, BTreeMap<StratumKey, StratumSlippageFit>) {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut fits = BTreeMap::new();
+        let mut at = 1_000u64;
+        for &(repeats, loci, ref fit) in strata {
+            let reference: Vec<u8> = b"AT".repeat(repeats as usize);
+            for _ in 0..loci {
+                accumulators.add_locus(&tract(
+                    at,
+                    &reference,
+                    b"AT",
+                    vec![observation(&reference, 0, 4)],
+                ));
+                at += 200;
+            }
+            if let Some(fit) = fit {
+                fits.insert(
+                    StratumKey {
+                        read_group: ReadGroupId(0),
+                        stratum: stratum(2, repeats),
+                        ploidy: Ploidy::try_new(2).expect("two genome copies"),
+                    },
+                    fit.clone(),
+                );
+            }
+        }
+        (accumulators, fits)
+    }
+
+    fn key_at(repeats: u32) -> StratumKey {
+        StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, repeats),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        }
+    }
+
+    /// **A thin stratum between two thick ones takes the whole model from both, and says so.**
+    /// Its own loci are too few to fit — under [`MIN_LOCI_TO_FIT`] — so what it reports is its
+    /// neighbours' answer, and `fitted_over` names the two it came from.
+    ///
+    /// **The level is their geometric mean and the shares their arithmetic mean.** Slippage rises
+    /// about 1.3-fold per repeat count and spans orders of magnitude across a dataset, so the
+    /// mean that interpolates it is the multiplicative one: between 0.01 and 0.04 that is 0.02,
+    /// where an arithmetic mean would give 0.025 — 25% higher, and higher is the direction that
+    /// reads as a measurement.
+    #[test]
+    fn a_thin_stratum_between_two_thick_ones_borrows_the_whole_model() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 9_000))),
+            (6, 4, None),
+            (7, 1_200, Some(fit_at(0.04, 0.30, 0.09, 9_000))),
+        ]);
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("two of the three could be fitted");
+        let thin = &resolved[&key_at(6)];
+
+        assert_eq!(thin.slippage.provenance, Provenance::Borrowed);
+        assert!(
+            (thin.slippage.value.slip_rate.get() - 0.02).abs() < 1e-12,
+            "the geometric mean of 0.01 and 0.04: {}",
+            thin.slippage.value
+        );
+        assert!(
+            (thin.slippage.value.gain_share.get() - 0.25).abs() < 1e-12,
+            "the arithmetic mean of 0.20 and 0.30: {}",
+            thin.slippage.value
+        );
+        assert_eq!(
+            thin.fitted_over.as_slice(),
+            &[stratum(2, 5), stratum(2, 7)],
+            "both neighbours are named"
+        );
+        assert!(
+            thin.own_fit.is_none(),
+            "it was never fitted on its own loci"
+        );
+        assert_eq!(thin.loci, 4, "its own locus count, not its lenders'");
+        assert_eq!(
+            thin.slippage.observations, 1_800_000,
+            "and its warrant is both lenders' scored reads, 900,000 each"
+        );
+
+        // And the two thick ones keep their own, with nothing named.
+        let thick = &resolved[&key_at(5)];
+        assert_eq!(thick.slippage.provenance, Provenance::FittedHere);
+        assert_eq!(thick.slippage.value.slip_rate.get(), 0.01);
+        assert!(thick.fitted_over.is_empty());
+        assert!(thick.shares_fitted_over.is_empty());
+        assert!(
+            thick.own_fit.is_some(),
+            "a stratum fitted on its own loci keeps that fit for a reader to check"
+        );
+        assert_eq!(thick.loci, 1_200);
+        assert_eq!(
+            thick.slippage.observations, 900_000,
+            "what it measured its own model over"
+        );
+    }
+
+    /// **The locus floor is applied to whatever map arrives, not only inside the walk.** The walk
+    /// skips a thin stratum before searching, so in a whole run no fit reaches here for one — but
+    /// this function is public and a caller may have fitted its own. A stratum of four loci with
+    /// a fit in hand still borrows.
+    #[test]
+    fn a_thin_stratum_that_arrives_with_a_fit_borrows_anyway() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 9_000))),
+            (6, 4, Some(fit_at(0.9, 0.9, 0.9, 9_000))),
+            (7, 1_200, Some(fit_at(0.04, 0.30, 0.09, 9_000))),
+        ]);
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("two of the three are thick enough");
+        let thin = &resolved[&key_at(6)];
+
+        assert_eq!(thin.slippage.provenance, Provenance::Borrowed);
+        assert!(
+            (thin.slippage.value.slip_rate.get() - 0.02).abs() < 1e-12,
+            "its own 0.9 stood on four loci and is not what it reports: {}",
+            thin.slippage.value
+        );
+        assert!(thin.own_fit.is_none(), "the fit it arrived with is dropped");
+    }
+
+    /// **The floor on moved reads is 4,000 and the boundary belongs to keeping.** A stratum with
+    /// 3,999 borrows its two shares; one with 4,000 keeps them. Without a fixture either side of
+    /// that number, any threshold between two fixtures' counts behaves alike — and the locus
+    /// floor's 1,000 sits inside the gap this test closes.
+    #[test]
+    fn the_moved_read_floor_is_where_the_constant_says_and_the_boundary_keeps() {
+        for (moved, kept) in [
+            (MIN_SLIPPED_READS_TO_FIT_SHARES - 1, false),
+            (MIN_SLIPPED_READS_TO_FIT_SHARES, true),
+        ] {
+            let (accumulators, fits) = period_of(&[
+                (5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 9_000))),
+                (6, 1_200, Some(fit_at(0.03, 0.99, 0.99, moved))),
+                (7, 1_200, Some(fit_at(0.04, 0.30, 0.09, 9_000))),
+            ]);
+            let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+                .expect("all three were fitted");
+            let middle = &resolved[&key_at(6)];
+
+            assert_eq!(
+                middle.slippage.value.slip_rate.get(),
+                0.03,
+                "the level is its own either way"
+            );
+            if kept {
+                assert_eq!(
+                    middle.slippage.value.gain_share.get(),
+                    0.99,
+                    "{moved} moved reads is the floor, so its own shares stand"
+                );
+                assert!(middle.shares_fitted_over.is_empty());
+            } else {
+                assert!(
+                    (middle.slippage.value.gain_share.get() - 0.25).abs() < 1e-12,
+                    "{moved} moved reads is one short of the floor, so the shares are borrowed"
+                );
+                assert_eq!(
+                    middle.shares_fitted_over.as_slice(),
+                    &[stratum(2, 5), stratum(2, 7)]
+                );
+            }
+        }
+    }
+
+    /// **Where no stratum in a period measured its shares on enough moved reads, each keeps its
+    /// own and the emptiness says so.** Spec §4.5 expects this wherever a whole period sits at
+    /// the bottom of the repeat range, so it is the common case rather than an edge one, and it
+    /// raises nothing — unlike the locus floor, which by construction has neighbours to fall back
+    /// on.
+    ///
+    /// **The state a reader has to be able to see is the pair**: `shares_fitted_over` empty *and*
+    /// `slipped_reads` under the floor. Empty alone means "its own"; empty beside 12 moved reads
+    /// means "its own, and nobody in the period had better".
+    #[test]
+    fn a_period_where_nobody_measured_the_shares_keeps_them_and_says_nothing_was_borrowed() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 12))),
+            (6, 1_200, Some(fit_at(0.03, 0.99, 0.99, 8))),
+        ]);
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("both cleared the locus floor");
+
+        for (repeats, own_gain, moved) in [(5u32, 0.20, 12u64), (6, 0.99, 8)] {
+            let kept = &resolved[&key_at(repeats)];
+            assert_eq!(
+                kept.slippage.value.gain_share.get(),
+                own_gain,
+                "there was nobody to borrow from, so it keeps what it measured"
+            );
+            assert!(
+                kept.shares_fitted_over.is_empty(),
+                "and names no lender, because there was none"
+            );
+            assert_eq!(kept.slipped_reads, moved);
+            assert!(
+                kept.slipped_reads < MIN_SLIPPED_READS_TO_FIT_SHARES,
+                "which is what makes the empty list mean 'nobody had better'"
+            );
+        }
+    }
+
+    /// **Borrowing crosses neither a motif period nor a library.** Strata sort by library, then
+    /// period and repeat count, so a group taken as a contiguous run of that order would let a
+    /// dinucleotide stratum take a mononucleotide's level and one library take another's — and
+    /// those differ by more than any two repeat counts do.
+    ///
+    /// Each thin stratum here is placed so that a leaked neighbour would sit **below** it, since
+    /// that is the side the ordering makes reachable.
+    #[test]
+    fn borrowing_crosses_neither_a_period_nor_a_library() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut fits = BTreeMap::new();
+        let mut at = 1_000u64;
+        let add = |accumulators: &mut SsrAccumulators,
+                   at: &mut u64,
+                   group: u32,
+                   motif: &[u8],
+                   repeats: u32,
+                   loci: u64| {
+            let reference: Vec<u8> = motif.repeat(repeats as usize);
+            for _ in 0..loci {
+                accumulators.add_locus(&tract(
+                    *at,
+                    &reference,
+                    motif,
+                    vec![observation(&reference, group, 4)],
+                ));
+                *at += 400;
+            }
+            StratumKey {
+                read_group: ReadGroupId(group),
+                stratum: Stratum::new(
+                    SsrPeriod::try_new(motif.len()).expect("a period in range"),
+                    RepeatCount(repeats),
+                ),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            }
+        };
+
+        // Library 0: a thick mononucleotide stratum, then a thin dinucleotide one with a thick
+        // dinucleotide neighbour above it.
+        let mono = add(&mut accumulators, &mut at, 0, b"A", 8, 1_200);
+        let thin_di = add(&mut accumulators, &mut at, 0, b"AT", 5, 4);
+        let di = add(&mut accumulators, &mut at, 0, b"AT", 6, 1_200);
+        // Library 1: a thin stratum below a thick one, with library 0's strata ahead of both in
+        // key order.
+        let thin_other = add(&mut accumulators, &mut at, 1, b"AT", 4, 4);
+        let other = add(&mut accumulators, &mut at, 1, b"AT", 7, 1_200);
+
+        fits.insert(mono, fit_at(0.5, 0.9, 0.9, 9_000));
+        fits.insert(di, fit_at(0.01, 0.20, 0.05, 9_000));
+        fits.insert(other, fit_at(0.9, 0.4, 0.4, 9_000));
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("every period of every library holds a fittable stratum");
+
+        assert_eq!(
+            resolved[&thin_di].fitted_over.as_slice(),
+            &[Stratum::new(period(2), RepeatCount(6))],
+            "the dinucleotide stratum above it, not the mononucleotide one below"
+        );
+        assert_eq!(resolved[&thin_di].slippage.value.slip_rate.get(), 0.01);
+
+        assert_eq!(
+            resolved[&thin_other].fitted_over.as_slice(),
+            &[Stratum::new(period(2), RepeatCount(7))],
+            "its own library's stratum, not the other library's"
+        );
+        assert_eq!(resolved[&thin_other].slippage.value.slip_rate.get(), 0.9);
+    }
+
+    /// **A stratum can clear the first floor a hundred times over and still fail the second**, and
+    /// then it keeps the level it measured and borrows only the direction share and the fall-off.
+    /// The two provenance lists differ, which is the whole reason there are two of them: the level
+    /// is a proportion over every read, and the two shares are measured only by the reads that
+    /// moved.
+    ///
+    /// 100,000 loci with 40 reads that moved: a hundred times the locus floor, a hundredth of the
+    /// slipped-read floor.
+    #[test]
+    fn a_thick_stratum_with_almost_no_moved_reads_keeps_its_level_and_borrows_its_shares() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 9_000))),
+            (6, 1_200, Some(fit_at(0.02, 0.99, 0.99, 40))),
+            (7, 1_200, Some(fit_at(0.04, 0.30, 0.09, 9_000))),
+        ]);
+
+        let resolved =
+            resolve_slippage(&accumulators, fits, "SL_landrace_07").expect("all three were fitted");
+        let middle = &resolved[&key_at(6)];
+
+        assert_eq!(
+            middle.slippage.provenance,
+            Provenance::FittedHere,
+            "the level it reports is its own"
+        );
+        assert_eq!(
+            middle.slippage.value.slip_rate.get(),
+            0.02,
+            "kept exactly, not averaged with anything"
+        );
+        assert!(
+            (middle.slippage.value.gain_share.get() - 0.25).abs() < 1e-12,
+            "the two shares came from the neighbours: {}",
+            middle.slippage.value
+        );
+        assert!(
+            middle.fitted_over.is_empty(),
+            "nothing was borrowed for the level"
+        );
+        assert_eq!(
+            middle.shares_fitted_over.as_slice(),
+            &[stratum(2, 5), stratum(2, 7)],
+            "and the two shares say where they came from"
+        );
+        assert_eq!(middle.slipped_reads, 40, "emitted either side of the floor");
+        assert!(
+            middle.own_fit.is_some(),
+            "its own fit is still there to be read"
+        );
+    }
+
+    /// **A period where every stratum is too thin has nothing to borrow from, and says so rather
+    /// than defaulting.** A slippage level spans twenty-two-fold across repeat counts inside one
+    /// dataset, so any constant would be wrong for most strata — and wrong in the direction that
+    /// reads as a measurement. The message names how far short the period fell, because that is
+    /// what separates the two remedies: a period whose thickest stratum held 800 loci wants a run
+    /// over more of the genome, and one that held 3 wants dropping.
+    #[test]
+    fn a_period_with_no_fittable_stratum_errors_rather_than_defaulting() {
+        let (accumulators, fits) = period_of(&[(5, 4, None), (6, 7, None)]);
+
+        let refused = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect_err("neither stratum could be fitted");
+        let message = refused.to_string();
+
+        assert!(message.contains("SL_landrace_07"), "{message}");
+        assert!(message.contains("period 2"), "{message}");
+        assert!(
+            message.contains("thickest of 2 holds 7 loci"),
+            "how far short it fell, and over how many strata: {message}"
+        );
+        assert!(
+            message.contains("0 of them held a read that moved"),
+            "and which of the two ways the period failed: {message}"
+        );
+    }
+
+    /// **A stratum whose shares were rejected may not lend them on.** The middle stratum here
+    /// clears the locus floor but has 40 moved reads, so its own direction share of 0.99 is
+    /// refused and replaced — and the thin stratum above it must not then be handed that same
+    /// 0.99 as a measurement. Its level comes from its nearest fitted neighbour, which is the
+    /// middle stratum; its two shares come from the nearest that measured them, which is not.
+    ///
+    /// The two provenance lists therefore name **different strata**, which is the sharpest form
+    /// of the reason there are two of them.
+    #[test]
+    fn a_borrowed_model_does_not_take_shares_that_were_refused_next_door() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 9_000))),
+            (6, 1_200, Some(fit_at(0.02, 0.99, 0.99, 40))),
+            (7, 4, None),
+        ]);
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("two strata could be fitted");
+        let thin = &resolved[&key_at(7)];
+
+        assert_eq!(thin.slippage.provenance, Provenance::Borrowed);
+        assert_eq!(
+            thin.fitted_over.as_slice(),
+            &[stratum(2, 6)],
+            "the level came from the nearest fitted stratum"
+        );
+        assert_eq!(
+            thin.shares_fitted_over.as_slice(),
+            &[stratum(2, 5)],
+            "and the shares from the nearest that measured them on enough moved reads"
+        );
+        assert_eq!(
+            thin.slippage.value.gain_share.get(),
+            0.20,
+            "0.99 was refused at stratum 6 and may not arrive here as a measurement"
+        );
+        assert_eq!(
+            thin.slippage.value.slip_rate.get(),
+            0.02,
+            "the level is still the nearest fitted one"
+        );
+        assert_eq!(
+            thin.slippage.observations, 4_000,
+            "what stands behind a borrowed number is the reads its lender measured it on — the \
+             4,000 scored by the stratum at 6 repeats, not this stratum's own nothing"
+        );
+    }
+
+    /// **A borrow between two distant lenders is interpolated by how far each one sits**, not
+    /// averaged. Here the fitted strata are at 5 and 12 repeats, with everything between them
+    /// thin: an unweighted geometric mean would hand all six the same 0.0387, which is 2.6 times
+    /// too high at 6 repeats and 2.6 times too low at 11. Slippage rises about 1.3-fold per
+    /// repeat count, so a straight line in the logarithm is the shape being interpolated.
+    #[test]
+    fn a_borrow_between_distant_lenders_follows_the_gap_between_them() {
+        let mut strata: Vec<(u32, u64, Option<StratumSlippageFit>)> =
+            vec![(5, 1_200, Some(fit_at(0.01, 0.20, 0.05, 9_000)))];
+        strata.extend((6..12).map(|repeats| (repeats, 4u64, None)));
+        strata.push((12, 1_200, Some(fit_at(0.15, 0.30, 0.09, 9_000))));
+        let (accumulators, fits) = period_of(&strata);
+
+        let resolved =
+            resolve_slippage(&accumulators, fits, "SL_landrace_07").expect("both ends were fitted");
+        let level_at = |repeats: u32| resolved[&key_at(repeats)].slippage.value.slip_rate.get();
+
+        assert!(
+            (level_at(6) - 0.0147237).abs() < 1e-6,
+            "one seventh of the way from 0.01 to 0.15 in the logarithm: {}",
+            level_at(6)
+        );
+        assert!(
+            (level_at(11) - 0.1018769).abs() < 1e-6,
+            "six sevenths of the way: {}",
+            level_at(11)
+        );
+        for repeats in 6..11 {
+            assert!(
+                level_at(repeats) < level_at(repeats + 1),
+                "the borrowed levels rise with the repeat count"
+            );
+        }
+    }
+
+    /// **A stratum too thin to fit no longer stops the sample.** The locus floor is applied
+    /// before the search, and it has to be: a two-locus stratum is exactly the one whose four
+    /// starting points cannot agree — measured, a thousand loci of one read each give a spread of
+    /// 67 — so fitting it and refusing it afterwards would end the run on a stratum whose answer
+    /// was going to be thrown away.
+    #[test]
+    fn a_stratum_too_thin_to_fit_is_never_searched_and_so_never_refused() {
+        let reference = b"ATATATATATATATATATAT";
+        let far_longer = b"ATATATATATATATATATATATATATATATATATATATATATATATATAT";
+
+        let mut accumulators = stratum_losing_repeats(MIN_LOCI_TO_FIT, 1);
+        // Two loci at a longer tract, each holding the one read that says nothing.
+        for locus in 0..2u64 {
+            accumulators.add_locus(&tract(
+                800_000 + locus * 100,
+                b"ATATATATATATATATATATATAT",
+                b"AT",
+                vec![observation(far_longer, 0, 1)],
+            ));
+        }
+        assert_eq!(accumulators.stratum_count(), 2);
+        let _ = reference;
+
+        let fits =
+            fit_slippage_by_stratum(&accumulators, "SL_landrace_07", SearchPrecision::fast())
+                .expect("the thin stratum is skipped rather than fitted and refused");
+        assert_eq!(fits.len(), 1, "only the thick stratum was searched");
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("the thick stratum can be borrowed from");
+        assert_eq!(
+            resolved[&key_at(12)].slippage.provenance,
+            Provenance::Borrowed,
+            "and the thin one takes its model from the stratum that was fitted"
+        );
+    }
+
+    /// **A stratum at the end of the range borrows from the one side it has.** There is no
+    /// neighbour below the shortest tract of a period, so what it takes is the nearest above it,
+    /// unaveraged, and only that one is named.
+    #[test]
+    fn a_stratum_at_the_end_of_the_range_borrows_from_the_side_it_has() {
+        let (accumulators, fits) = period_of(&[
+            (5, 4, None),
+            (6, 1_200, Some(fit_at(0.02, 0.30, 0.09, 9_000))),
+        ]);
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("the second stratum was fitted");
+        let lowest = &resolved[&key_at(5)];
+
+        assert_eq!(lowest.slippage.value.slip_rate.get(), 0.02, "taken whole");
+        assert_eq!(lowest.fitted_over.as_slice(), &[stratum(2, 6)]);
+    }
+
+    /// **Borrowing never crosses a ploidy**, and this is the fixture that says so, because the
+    /// two ploidies' strata interleave in key order: a stratum sorts by library, then period and
+    /// repeat count, then ploidy, so the walk meets ploidy 1 at five repeats, ploidy 2 at five,
+    /// ploidy 1 at six. A grouping that took only *consecutive* runs of that order would hand the
+    /// same set to the borrowing twice, and the second visit — its fits already spent — would
+    /// borrow for every stratum in it.
+    ///
+    /// Here the haploid strata are thick and the diploid ones thin, at levels ten-fold apart, so
+    /// a diploid stratum borrowing across the boundary would report the haploid level.
+    #[test]
+    fn borrowing_stays_inside_one_ploidy() {
+        let mut accumulators = SsrAccumulators::new(Arc::new(PloidyChangesAt {
+            haploid_from: 500_000,
+        }));
+        let mut fits = BTreeMap::new();
+        let mut at = 1_000u64;
+        // Diploid strata below the boundary: 5 and 7 repeats thick, 6 thin.
+        // Haploid strata above it: all three thick, at a very different level.
+        for (repeats, diploid_loci) in [(5u32, 1_200u64), (6, 4), (7, 1_200)] {
+            let reference: Vec<u8> = b"AT".repeat(repeats as usize);
+            for _ in 0..diploid_loci {
+                accumulators.add_locus(&tract(
+                    at,
+                    &reference,
+                    b"AT",
+                    vec![observation(&reference, 0, 4)],
+                ));
+                at += 200;
+            }
+            let mut haploid_at = 500_000 + u64::from(repeats) * 400_000;
+            for _ in 0..1_200 {
+                accumulators.add_locus(&tract(
+                    haploid_at,
+                    &reference,
+                    b"AT",
+                    vec![observation(&reference, 0, 4)],
+                ));
+                haploid_at += 200;
+            }
+            let haploid = StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, repeats),
+                ploidy: Ploidy::try_new(1).expect("one genome copy"),
+            };
+            fits.insert(haploid, fit_at(0.5, 0.9, 0.9, 9_000));
+            if diploid_loci >= MIN_LOCI_TO_FIT {
+                fits.insert(key_at(repeats), fit_at(0.01, 0.20, 0.05, 9_000));
+            }
+        }
+
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("both ploidies hold fittable strata");
+        let thin = &resolved[&key_at(6)];
+
+        assert!(
+            (thin.slippage.value.slip_rate.get() - 0.01).abs() < 1e-12,
+            "both diploid neighbours sit at 0.01; the haploid strata sit at 0.5: {}",
+            thin.slippage.value
+        );
+        assert_eq!(
+            resolved[&StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, 6),
+                ploidy: Ploidy::try_new(1).expect("one genome copy"),
+            }]
+                .slippage
+                .provenance,
+            Provenance::FittedHere,
+            "and the haploid stratum at the same repeat count kept its own fit"
         );
     }
 }
