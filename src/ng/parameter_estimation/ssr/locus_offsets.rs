@@ -8,16 +8,19 @@
 //! Its own file because the shaping of data and the mathematics on it never live together
 //! (`arch/parameter_prepass_ssr.md` §Module home) — [`super::slippage`] is the mathematics.
 //!
-//! The reductions land one at a time through Milestone C. Two are here: which stratum a locus
-//! belongs to at all, and how one read group's reads at it fall across the offset buckets.
-//! Turning that tally into the entry a table is keyed on needs the read cap's draw, which is
-//! the next step — so what the architecture calls `shape_of` is this file's [`tally_of`]
-//! followed by that draw, rather than one function.
+//! Three reductions live here, in the order a locus meets them: which stratum it belongs to at
+//! all ([`stratum_of`]), how one read group's reads at it fall across the offset buckets
+//! ([`tally_of`]), and the thinning of that tally down to the read cap ([`shape_of`]) that turns
+//! it into the entry a stratum's table is keyed on. The architecture sketches the last two as one
+//! function; they are two because the caller needs what the tally counts *besides* the shape —
+//! the reads it left out — and because the cap's draw needs the whole tally to draw from.
 
 use crate::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
-use crate::ng::types::{Bp, ReadGroupId, SsrPeriod};
+use crate::ng::parameter_estimation::subsample::{SelectionWalk, seed_at};
+use crate::ng::types::{Bp, GenomeRegion, ReadGroupId, SsrPeriod};
 
-use super::{OFFSET_BUCKETS, RepeatCount, Stratum, WholeRepeatOffset, bucket_of};
+use super::stratum_table::LocusShape;
+use super::{MAX_LOCUS_READS, OFFSET_BUCKETS, RepeatCount, Stratum, WholeRepeatOffset, bucket_of};
 
 /// Which stratum a locus belongs to, or why none does.
 ///
@@ -242,6 +245,107 @@ pub fn tally_of(locus: &SampleLocusObservations, read_group: ReadGroupId) -> Off
     }
 
     tally
+}
+
+/// The shape a locus enters a stratum's table as, and the depth it was thinned from if the
+/// read cap fired.
+///
+/// **The depth it came from is carried rather than recomputed**, because it is the number the
+/// accumulator reports: a run where most loci were thinned is a run whose depths are the cap's
+/// and not the data's, and nothing downstream could tell from the shape alone.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct EnteredShape {
+    shape: LocusShape,
+    subsampled_from: Option<u32>,
+}
+
+impl EnteredShape {
+    /// The shape itself — what the table is keyed on.
+    #[inline]
+    #[must_use]
+    pub fn shape(self) -> LocusShape {
+        self.shape
+    }
+
+    /// The depth this locus was thinned from, where the cap fired; `None` where every read it
+    /// showed was entered.
+    #[inline]
+    #[must_use]
+    pub fn subsampled_from(self) -> Option<u32> {
+        self.subsampled_from
+    }
+}
+
+/// Reduce one read group's tally at one locus to the shape its table is keyed on, thinning to
+/// [`MAX_LOCUS_READS`] where the reads are deeper — `None` where the tally holds no reads at
+/// all, since a locus with no evidence is one to leave out rather than to enter empty.
+///
+/// **It takes the tally rather than the locus**, where the architecture sketches one function
+/// from the locus. Two reasons, and the second is the load-bearing one: the caller has the
+/// tally already — it needs the partial-witness count the tally carries and this function does
+/// not — and re-deriving it here would walk the locus's observations twice per locus on a walk
+/// of millions. The position comes separately because it is the only other thing the draw may
+/// depend on.
+///
+/// **The thinning is a uniform subsample, and a subsample is exact rather than approximate**:
+/// it leaves the bucket counts distributed exactly as they would have been at the lower depth,
+/// so what the cap costs is precision and never a bias. Dropping the deep loci instead would be
+/// depth-dependent selection, which is the bias step 4 exists to remove.
+///
+/// **The draw is seeded from the locus's position and from nothing else, and that is this
+/// step's whole difficulty.** Seeded so, a region-sharded walk and a single-threaded one keep
+/// the same reads at every locus, and merging their tables stays an equality; seeded from a
+/// counter, a thread or the clock, the two diverge by a few reads at each deep locus — a
+/// difference no test that does not compare two whole walks would ever show, and one that would
+/// make a fitted level move with the thread count. **That whole-walk comparison cannot be
+/// written here**, because nothing at this step has a shard to lay out differently: it belongs
+/// to the accumulator, and what this file can hold is that the draw is reproducible, that it
+/// moves with the position, and that it carries no state between calls.
+///
+/// The population is the tally's own depth — the reads that measured a length. A read that saw
+/// only part of the tract is a lower bound rather than a length, so it is not in the tally and
+/// must not be in the population either: drawing twelve from a population the walk never walks
+/// would enter the locus with fewer reads than the cap, silently, since a short shape is a legal
+/// shape.
+///
+/// The buckets are drawn from in order and the guard last, through one walk over that whole
+/// depth, so exactly `MAX_LOCUS_READS` reads survive and each is as likely to be one of them as
+/// any other.
+#[must_use]
+pub fn shape_of(tally: OffsetTally, at: GenomeRegion) -> Option<EnteredShape> {
+    let depth = tally.depth();
+    if depth == 0 {
+        return None;
+    }
+
+    let (reads_by_bucket, reads_not_whole_repeat, subsampled_from) = if depth <= MAX_LOCUS_READS {
+        (
+            tally.reads_by_bucket(),
+            tally.reads_not_whole_repeat(),
+            None,
+        )
+    } else {
+        let mut walk = SelectionWalk::new(seed_at(at), depth, MAX_LOCUS_READS);
+        let mut kept = [0; OFFSET_BUCKETS];
+        for (bucket, reads) in tally.reads_by_bucket().into_iter().enumerate() {
+            kept[bucket] = walk.keep_from(reads);
+        }
+        // The guard last, so the walk covers the locus's whole depth exactly once — the reads
+        // that showed a non-whole-repeat length are as eligible for the draw as any other, and
+        // leaving them out of it would make the guard share a property of the depth.
+        let kept_guard = walk.keep_from(tally.reads_not_whole_repeat());
+        (kept, kept_guard, Some(depth))
+    };
+
+    // PANIC-FREE: the counts are either the tally's, which the branch above holds at or below
+    // the cap, or a draw of exactly `MAX_LOCUS_READS` from it; and the depth is at least one,
+    // which the early return above establishes.
+    let shape = LocusShape::try_new(reads_by_bucket, reads_not_whole_repeat)
+        .expect("a capped tally holds between one read and the cap");
+    Some(EnteredShape {
+        shape,
+        subsampled_from,
+    })
 }
 
 #[cfg(test)]
@@ -806,6 +910,287 @@ mod tests {
         generic.kind = LocusKind::Generic;
 
         assert_eq!(tally_of(&generic, ReadGroupId(0)), OffsetTally::default());
+    }
+
+    // -----------------------------------------------------------------
+    // The read cap: a uniform subsample, seeded from the locus's position.
+    // -----------------------------------------------------------------
+
+    /// The same locus, moved to another position — the span goes with it, so the position is the
+    /// only thing that changes. (Assigning the start first and deriving the end from it afterwards
+    /// leaves the end where it was and varies the *span* instead, which is a different fixture and
+    /// one a span-seeded draw would pass.)
+    fn at_position(start: u64, mut locus: SampleLocusObservations) -> SampleLocusObservations {
+        let span = locus.region.end.0 - locus.region.start.0;
+        locus.region.start = Position(start);
+        locus.region.end = Position(start + span);
+        locus
+    }
+
+    /// The shape one read group's reads give a locus, cap and all.
+    fn shape_at(locus: &SampleLocusObservations, read_group: ReadGroupId) -> Option<EnteredShape> {
+        shape_of(tally_of(locus, read_group), locus.region)
+    }
+
+    /// A locus of `short` reads one copy short and `at_reference` reads at the reference length.
+    fn deep_locus(at_reference: u32, short: u32) -> SampleLocusObservations {
+        ssr_locus(
+            b"ATATATATATATATATATAT",
+            b"AT",
+            vec![
+                observation(b"ATATATATATATATATATAT", at_reference),
+                observation(b"ATATATATATATATATAT", short),
+            ],
+        )
+    }
+
+    /// A locus no deeper than the cap enters every read it showed, and says it was not thinned.
+    #[test]
+    fn a_locus_no_deeper_than_the_cap_enters_every_read_it_showed() {
+        let entered = shape_at(&deep_locus(8, 4), ReadGroupId(0)).expect("twelve reads");
+
+        assert_eq!(entered.subsampled_from(), None);
+        assert_eq!(entered.shape().depth(), MAX_LOCUS_READS);
+        assert_eq!(entered.shape().reads_in(bucket_of(WholeRepeatOffset(0))), 8);
+        assert_eq!(
+            entered.shape().reads_in(bucket_of(WholeRepeatOffset(-1))),
+            4
+        );
+    }
+
+    /// **A deeper locus is thinned to the cap and says what it was thinned from** — the count a
+    /// run reads to tell "the data was this shallow" from "the cap set the depth".
+    #[test]
+    fn a_locus_deeper_than_the_cap_is_thinned_to_it_and_says_so() {
+        let entered = shape_at(&deep_locus(200, 100), ReadGroupId(0)).expect("three hundred reads");
+
+        assert_eq!(entered.subsampled_from(), Some(300));
+        assert_eq!(
+            entered.shape().depth(),
+            MAX_LOCUS_READS,
+            "exactly the cap survives, never more and never fewer"
+        );
+    }
+
+    /// **A locus with no reads of this group enters nothing**, rather than an empty shape: a
+    /// locus with no evidence would still count towards `MIN_LOCI_TO_FIT` and towards every
+    /// "loci behind this fit" number while saying nothing about any parameter.
+    #[test]
+    fn a_locus_this_read_group_did_not_witness_enters_nothing() {
+        assert_eq!(shape_at(&deep_locus(8, 4), ReadGroupId(3)), None);
+
+        let reference = b"ATATATATATATATATATAT";
+        let only_partial = ssr_locus(
+            reference,
+            b"AT",
+            vec![partial_observation(b"ATATATATATATATAT", 9)],
+        );
+        assert_eq!(
+            shape_at(&only_partial, ReadGroupId(0)),
+            None,
+            "nine partial witnesses are nine lower bounds, which is no evidence about a length"
+        );
+    }
+
+    /// **The draw is a function of the locus's position and of nothing else.** This is the
+    /// property the whole sharded design rests on: a region-sharded walk and a single-threaded
+    /// one meet the same locus at the same position, so they keep the same reads and their
+    /// tables merge as an equality. Seeded from a counter or a thread, the two would differ by
+    /// a few reads at each deep locus, which nothing short of comparing two whole walks would
+    /// ever show.
+    ///
+    /// Checked over two hundred positions: every locus draws the same shape twice, and the
+    /// shapes across positions are not all one shape — so the seed is genuinely being used.
+    #[test]
+    fn the_draw_is_the_same_every_time_and_depends_on_the_position() {
+        let mut shapes = std::collections::BTreeSet::new();
+
+        for start in 0..200u64 {
+            let locus = at_position(start, deep_locus(200, 100));
+
+            let once = shape_at(&locus, ReadGroupId(0)).expect("three hundred reads");
+            let again = shape_at(&locus, ReadGroupId(0)).expect("three hundred reads");
+
+            assert_eq!(
+                once, again,
+                "the locus at {start} drew two different shapes"
+            );
+            shapes.insert(once.shape());
+        }
+
+        assert!(
+            shapes.len() >= 5,
+            "200 positions drew only {} distinct shapes, so the position is barely reaching \
+             the draw",
+            shapes.len()
+        );
+    }
+
+    /// **What the cap keeps is a uniform subsample, and this is what makes that measurable**:
+    /// over many loci the reads kept from one bucket are hypergeometric — mean
+    /// `cap · k / depth`, variance `cap · (k/depth) · (1 − k/depth) · (depth − cap) / (depth − 1)`.
+    /// A draw that favoured the buckets it visited first, or that drew each bucket
+    /// independently, would match the mean and miss the variance.
+    #[test]
+    fn the_kept_reads_are_hypergeometric_in_mean_and_variance() {
+        let (at_reference, short) = (200u32, 100u32);
+        let depth = f64::from(at_reference + short);
+        let cap = f64::from(MAX_LOCUS_READS);
+        let share = f64::from(short) / depth;
+
+        let kept: Vec<f64> = (0..100_000u64)
+            .map(|start| {
+                let locus = at_position(start * 7, deep_locus(at_reference, short));
+                let entered = shape_at(&locus, ReadGroupId(0)).expect("three hundred reads");
+                f64::from(entered.shape().reads_in(bucket_of(WholeRepeatOffset(-1))))
+            })
+            .collect();
+
+        let draws = kept.len() as f64;
+        let mean = kept.iter().sum::<f64>() / draws;
+        let variance = kept.iter().map(|k| (k - mean).powi(2)).sum::<f64>() / draws;
+
+        let expected_mean = cap * share;
+        let expected_variance = cap * share * (1.0 - share) * (depth - cap) / (depth - 1.0);
+
+        assert!(
+            (mean - expected_mean).abs() < 0.06,
+            "mean {mean} against {expected_mean}"
+        );
+        assert!(
+            (variance - expected_variance).abs() < 0.05,
+            "variance {variance} against {expected_variance}; a draw made **with** replacement \
+             would sit at {}, and the whole difference between the two models is {}",
+            cap * share * (1.0 - share),
+            cap * share * (1.0 - share) - expected_variance
+        );
+    }
+
+    /// **The draw's population is the reads that measured a length, not every read at the
+    /// locus.** A read that reached only one border of the tract is a lower bound rather than a
+    /// length, so it is not in the tally and must not be in the population either: drawing
+    /// twelve from a population the walk never walks would enter this locus at five reads
+    /// instead of twelve — silently, because a short shape is a legal shape.
+    #[test]
+    fn a_capped_locus_enters_the_full_cap_however_many_partial_witnesses_it_carries() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = ssr_locus(
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 200),
+                observation(b"ATATATATATATATATAT", 100),
+                partial_observation(b"ATATATATATATATAT", 500),
+            ],
+        );
+
+        let entered = shape_at(&locus, ReadGroupId(0)).expect("three hundred complete reads");
+
+        assert_eq!(entered.shape().depth(), MAX_LOCUS_READS);
+        assert_eq!(
+            entered.subsampled_from(),
+            Some(300),
+            "the five hundred lower bounds are not part of the depth the cap thinned"
+        );
+    }
+
+    /// **A locus no deeper than the cap keeps its guard reads too.** The shallow path copies the
+    /// tally across rather than drawing, and dropping the guard there would bias the guard share
+    /// towards zero on the majority of loci — the diagnostic that decides whether this noise
+    /// model describes a stratum at all — without anything failing.
+    #[test]
+    fn a_locus_no_deeper_than_the_cap_keeps_its_guard_reads() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = ssr_locus(
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 6),
+                // A base short of the reference: off the whole-repeat grid, so the guard's.
+                observation(b"ATATATATATATATATATA", 4),
+            ],
+        );
+
+        let entered = shape_at(&locus, ReadGroupId(0)).expect("ten reads");
+
+        assert_eq!(entered.subsampled_from(), None);
+        assert_eq!(entered.shape().reads_not_whole_repeat(), 4);
+        assert_eq!(entered.shape().depth(), 10);
+    }
+
+    /// The two ends of the cap's range: one read deeper than the cap is the first depth at which
+    /// the walk runs at all, and a single read is the shallowest locus there is.
+    #[test]
+    fn the_cap_thins_a_locus_one_read_deeper_than_it_and_leaves_a_single_read_alone() {
+        let one_over = shape_at(&deep_locus(9, 4), ReadGroupId(0)).expect("thirteen reads");
+        assert_eq!(one_over.subsampled_from(), Some(13));
+        assert_eq!(one_over.shape().depth(), MAX_LOCUS_READS);
+
+        let alone = shape_at(&deep_locus(1, 0), ReadGroupId(0)).expect("one read");
+        assert_eq!(alone.subsampled_from(), None);
+        assert_eq!(alone.shape().depth(), 1);
+    }
+
+    /// **The draw is a format, not only a relation.** `seed_at`'s own note says it may not
+    /// change silently with a dependency bump or a compiler version, because it decides which
+    /// reads a fit sees — and every other test here asserts a *relation* (reproducible,
+    /// position-dependent, sums to the cap, hypergeometric in aggregate), all of which survive
+    /// reordering the walk or moving where its state advances. These are the shapes the current
+    /// algorithm draws at four positions; a diff to them is a change to that format, and a
+    /// decision rather than a refactor.
+    #[test]
+    fn the_draw_at_a_known_position_is_the_recorded_one() {
+        for (start, at_reference, short) in [
+            (1_000u64, 7u32, 5u32),
+            (1_001, 7, 5),
+            (5_000, 11, 1),
+            (900_000, 7, 5),
+        ] {
+            let entered = shape_at(&at_position(start, deep_locus(200, 100)), ReadGroupId(0))
+                .expect("three hundred reads");
+
+            assert_eq!(
+                (
+                    entered.shape().reads_in(bucket_of(WholeRepeatOffset(0))),
+                    entered.shape().reads_in(bucket_of(WholeRepeatOffset(-1))),
+                ),
+                (at_reference, short),
+                "the draw at {start} changed: that is a format change, not a refactor"
+            );
+        }
+    }
+
+    /// **The guard's reads are in the draw like any others.** Leaving them out of it — capping
+    /// only the reads that landed in a bucket — would make the guard share rise with depth at
+    /// every locus the cap fires on, and the guard share is the diagnostic that decides whether
+    /// this noise model describes a stratum at all.
+    #[test]
+    fn the_guard_reads_are_thinned_with_the_rest() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = ssr_locus(
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 150),
+                // A base short of the reference: off the whole-repeat grid, so the guard's.
+                observation(b"ATATATATATATATATATA", 150),
+            ],
+        );
+
+        let guard_reads: u32 = (0..400u64)
+            .map(|start| {
+                let entered = shape_at(&at_position(start * 11, locus.clone()), ReadGroupId(0))
+                    .expect("three hundred reads");
+                assert_eq!(entered.shape().depth(), MAX_LOCUS_READS);
+                entered.shape().reads_not_whole_repeat()
+            })
+            .sum();
+
+        let mean = f64::from(guard_reads) / 400.0;
+        assert!(
+            (mean - 6.0).abs() < 0.2,
+            "half the reads are the guard's, so half the cap should be too: {mean} against 6"
+        );
     }
 
     proptest::proptest! {

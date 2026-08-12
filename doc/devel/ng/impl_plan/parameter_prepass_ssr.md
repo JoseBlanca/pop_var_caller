@@ -288,7 +288,7 @@ because a run where it fires everywhere is a run whose depths are the cap's and 
 every read at the origin, and the same locus scored without the guard must produce a visibly
 different one — so the test is proven to bite. *Depends:* C1. *Source:* arch §2.3, spec §3.
 
-**C3. The read cap — subsample, seeded from the locus's position.**  ☐ **Own commit, do not bundle.**
+**C3. The read cap — subsample, seeded from the locus's position.**  ✅ **Own commit, do not bundle.**
 A locus deeper than `MAX_LOCUS_READS` is entered from a uniform random subsample of its reads down to
 the cap. A subsample is exact rather than approximate: thinning a locus's reads uniformly leaves the
 bucket counts distributed exactly as they would be at the lower depth. **The silent failure this

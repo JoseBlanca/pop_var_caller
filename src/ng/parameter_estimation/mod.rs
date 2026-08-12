@@ -26,6 +26,9 @@
 //!   vocabulary they are keyed on, and what each of the four numbers is fitted from.
 //! - [`ssr`] — the STR path: the same procedure over a noise model that lets a read gain
 //!   or lose whole repeat copies, fitted per motif period and repeat count.
+//! - `subsample` — how either path thins a locus's reads down to its cap, seeded from the
+//!   locus's position so that two runs over the same sample keep the same reads however the
+//!   genome was cut into shards. Shared because both caps are the same draw.
 //!
 //! The path-specific vocabulary is not here: an error-rate ladder in per-base
 //! probabilities and a window size for runs of homozygosity are the SNP/indel path's, and
@@ -41,6 +44,7 @@
 pub mod fitting;
 pub mod generic;
 pub mod ssr;
+pub(crate) mod subsample;
 
 use crate::ng::types::{DomainError, Ploidy};
 
