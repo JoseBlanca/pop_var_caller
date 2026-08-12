@@ -722,21 +722,68 @@ named separately.
 **Free parameters per stratum: the four slippage numbers, the length spectrum's shape, and `κ`.**
 None of them is per locus.
 
+**Measured, 2026-08-12, and it is the strongest result on this path**
+([`../reports/joint_str_estimator_2026-08-12.md`](../reports/joint_str_estimator_2026-08-12.md),
+`examples/ng_joint_str_harness.rs`). Twenty samples, drawn truths.
+
+- **`κ` is identified**: fitted 0.487 against a truth of 0.500 at three length classes.
+- **Per-stratum really is the large-`κ` limit**, so the choice between the two is one fitted number
+  as this section claims. The per-stratum model's error on the slippage level runs from **−37.1%**
+  where 87% of loci carry one length to **−0.9%** where none does, and one Dirichlet fit is within a
+  percent of the truth at every point of that thousand-fold range.
+- **At tomato's three reads a site the per-stratum model does not lose accuracy, it loses the
+  parameters**: the slippage level comes back **70.9% low** (0.0233 against 0.0800), the direction
+  split pins at 1.000 and the fall-off collapses to zero, where the per-locus fit returns +0.3%,
+  −0.2% and +1.1%. **That is this route's case on this path, on the cohort the caller is aimed at.**
+
+*What is not measured is which `κ` a real stratum has, and it cannot be until the STR records exist
+and a walk fills them.*
+
 ### 4.2 Which lengths a locus may carry, and what bounds the sum
 
-A Dirichlet over thirteen length classes cannot be integrated by quadrature the way a Beta over one
-frequency can, so the sum has to be over a **bounded set of configurations** instead. The bound comes
-from what a repeat tract is: across a cohort almost every locus is fixed for one length or segregates
-two neighbouring ones.
+A Dirichlet over thirteen length classes cannot be integrated by a **grid** the way a Beta over one
+frequency can: nested quantile quadrature at 24 nodes a dimension needs `24^(classes − 1)` points,
+which is 576 at three length classes, 331,776 at five and 1.1 × 10¹¹ at the ±4 the record stores.
 
-**Decision: sum over the monomorphic configurations and the biallelic ones**, with the biallelic
-frequency on the same quadrature the generic path uses, and the candidate lengths being the reference
-tract length together with every length any read in the cohort reported at that locus, one step
-either side. Configurations beyond two segregating lengths are not enumerated; a locus that needs
-them is a locus the guard bucket
-([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §3.3) is already watching.
+**An earlier version of this section concluded from that arithmetic that the sum had to be over a
+bounded set of configurations — a locus fixed for one length, or segregating two — and that decision
+is withdrawn. It was measured on 2026-08-12 and it costs the slippage level up to eight times over**
+([`../reports/joint_str_estimator_2026-08-12.md`](../reports/joint_str_estimator_2026-08-12.md)). Two
+things were wrong with it.
 
-**The candidate set is data-dependent, and unlike the generic path's that is defensible here** — a
+- **The support cannot hold a locus carrying three or more lengths**, so the fit's only way to
+  explain three lengths among a locus's reads is to say the reads slipped. The fitted slippage level
+  tracks that population and nothing else: **+0.9% where no locus carries three lengths, +23.7% where
+  18% do, +722% where 99.9% do.** The bias is six to twelve times the spread between draws, so it is
+  what the description converges to rather than the luck of one data set. Narrowing the candidate
+  lengths to those the reads reported makes the support smaller, not wider, so it does not help.
+- **It destroys the property §4.1 was adopted for.** A large concentration *is* the per-stratum
+  model, and it is also the regime in which every locus carries every length — which is where this
+  support is worst. Under it, "per locus or per stratum is one fitted number" cannot be tested at
+  all.
+
+**Decision: integrate the Dirichlet over a fixed low-discrepancy point set** — a Halton sequence in
+`classes − 1` dimensions pushed through the stick-breaking Beta quantiles. **256 points, whatever the
+class count**, which at the record's nine classes is smaller than the withdrawn support's own 441.
+Measured against the grid at three classes it returns the same answers to within 0.3 percentage
+points on the concentration and 0.2 on every slippage number, in half the time; at five classes the
+grid cannot be run and the point set fits in 96 seconds.
+
+**The points are fixed and the quantile map is continuous in the concentration**, so the objective is
+a smooth function of it rather than a jittery one — which is what makes this quadrature rather than
+Monte Carlo, and what stops the search chasing sampling noise.
+
+**And it is robust to the model being wrong.** With the truth drawn from the withdrawn support's own
+family instead — 71.8% of loci fixed for one length, none carrying three — the point set still
+returns the slippage level to **−1.0%**, against that family's own −0.7%. The reverse does not hold.
+
+*Withdrawn with it: the claim that a locus needing more than two lengths is one the guard bucket
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §3.3) is already
+watching. The guard catches reads differing by a non-whole number of motif copies, which is a
+different thing from a locus segregating three lengths; nothing was watching the second.*
+
+**What survives from the withdrawn decision is the candidate set's reasoning, and it is worth keeping
+even though the support no longer needs it** — a
 length no read reported in the cohort's 150 reads at that locus is genuinely absent, where a base no
 read showed is merely a base that no error happened to produce. *Open, and cheap to settle:* what the
 candidate set's size distribution actually is on tomato, which prices the sum. **Settled by:** one

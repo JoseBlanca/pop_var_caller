@@ -339,7 +339,13 @@ use:
 |---:|---:|
 | 50 | 77–82% |
 | 200 | 82–85% |
-| 1,000 | **89–92%** |
+| 1,000 | **89–92%** (four budgets: 92, 89, 92, 91) |
+
+**One requirement does fall with the panel, and it is the inbreeding coefficient.** Against a drawn
+truth of 0.600, fifty samples need twenty thousand positions to get inside a percentage point and
+return 0.563 at five thousand; a thousand samples return 0.586 at five thousand and 0.601 at three
+hundred and twenty thousand. That is what "fitted from reads" predicts: a thousand samples at five
+thousand positions is twenty times the read observations fifty samples get there.
 
 **Twenty times the panel buys about a seventh more usable markers.** Under this truth's density —
 `Beta(0.3, 1.2)`, a neutral rare-allele pile-up — about a quarter of segregating sites sit below one
@@ -387,9 +393,13 @@ agrees to twelve decimal places.
   harness is biallelic today, so the test that would catch it — a cohort with no real variant
   anywhere, where a fit that picks the largest of three error counts inflates the rare classes — needs
   the four-allele emission first.
-- **Everything about the STR path's per-locus length frequencies.** The design mirrors the generic
-  path (a latent drawn from a fitted per-stratum prior, with one concentration number saying how
-  monomorphic loci are), and no code has been written for it.
+- ~~**Everything about the STR path's per-locus length frequencies.**~~ **Closed the same day** by
+  [`joint_str_estimator_2026-08-12.md`](joint_str_estimator_2026-08-12.md): the concentration is
+  identified, the per-stratum model is its large-concentration limit as designed, and at tomato's
+  three reads a site the per-stratum model returns a slippage level 70.9% low where the per-locus fit
+  returns +0.3%. **The way that integral was to be computed is withdrawn** — summing over
+  fixed-for-one-length and segregating-two configurations costs the slippage level up to eight times
+  over — and replaced by a fixed low-discrepancy point set.
 - **The two-class residual on real data**, which is the comparison's headline measurement and now has
   three arms rather than one (spec §8).
 
