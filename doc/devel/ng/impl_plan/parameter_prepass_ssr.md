@@ -338,7 +338,7 @@ one over its support at every parameter setting tried; at a level of zero it is 
 zero elsewhere; the ratio of the two-step to the one-step term equals the fall-off in both
 directions. *Depends:* A4. *Source:* spec §3, harness `Slip::p`.
 
-**D2. `SsrNoiseModel::genotype_likelihoods` — the marginal end-bucket rule.**  ☐ **Own commit, do
+**D2. `SsrNoiseModel::genotype_likelihoods` — the marginal end-bucket rule.**  ✅ **Own commit, do
 not bundle.**
 A genotype is an unordered pair of allele offsets. Each read picks one of the two copies and then
 slips, so a bucket's probability is the average of the two copies' slip kernels, and a shape's

@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::ng::types::{DomainError, ErrorRate};
+use crate::ng::types::{DomainError, ErrorRate, Ploidy};
 
 use super::{MAX_LOCUS_READS, OFFSET_BUCKETS, OffsetBucket, WholeRepeatOffset, bucket_of};
 
@@ -248,7 +248,8 @@ impl BaseComparison {
     }
 }
 
-/// One entry of a stratum's table, as a fit reads it: a locus shape, and how many loci had it.
+/// One entry of a stratum's table, as the table hands it out: a locus shape, and how many loci
+/// had it. [`StratumCell`] is the same entry as a *fit* reads it, which is one fact more.
 ///
 /// **Named fields rather than the `(LocusShape, u64)` the architecture sketches**, for the reason
 /// the sibling path's `Cell` replaced its own sketched tuple: nothing in a tuple says that the
@@ -261,6 +262,63 @@ pub struct StratumEntry {
     pub shape: LocusShape,
     /// How many loci in this stratum showed that shape.
     pub loci: u64,
+}
+
+/// One entry with the ploidy its loci sit at — **an entry as the fit scores it**, which is one
+/// more fact than an entry as the table stores it.
+///
+/// **The ploidy is not on [`StratumEntry`] because the table cannot answer it.** A table is keyed
+/// by `(read group, stratum)` and a stratum spans the genome, so how many genome copies a locus
+/// sits on is a property of where it was, which the accumulator deliberately forgets: an entry is
+/// the same object whatever the ploidy, and only the *scoring* differs
+/// (`arch/parameter_prepass_ssr.md` §4). The map travels with the fit's configuration — and, for
+/// the merge guard, on the accumulator too — so the fit is what pairs the two, and that is what
+/// this type is.
+///
+/// **It carries the ploidy per cell rather than per fit** because that is the shape of the
+/// `fitting/` seam — [`WeightedCell`](crate::ng::parameter_estimation::fitting::WeightedCell)
+/// asks each cell for its own, since the sibling path fits one error rate across every ploidy its
+/// reads covered.
+///
+/// **What that does not yet buy is a fit over two ploidies at once, and the reason is upstream of
+/// this type.** A table is keyed by `(read group, stratum)` with no ploidy in it, so two loci of
+/// different ploidy that showed the same shape already collapse into one entry, and no pairing
+/// here can split them apart again. Ploidy on the cell is what leaves the scoring code alone if
+/// the accumulator's key ever gains it; it is necessary and not sufficient.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct StratumCell {
+    entry: StratumEntry,
+    ploidy: Ploidy,
+}
+
+impl StratumCell {
+    /// Pair one of a table's entries with the ploidy its loci sit at.
+    #[inline]
+    #[must_use]
+    pub fn new(entry: StratumEntry, ploidy: Ploidy) -> Self {
+        Self { entry, ploidy }
+    }
+
+    /// How one locus's reads fell across the offset buckets.
+    #[inline]
+    #[must_use]
+    pub fn shape(self) -> LocusShape {
+        self.entry.shape
+    }
+
+    /// How many genome copies the loci behind this entry sit on.
+    #[inline]
+    #[must_use]
+    pub fn ploidy(self) -> Ploidy {
+        self.ploidy
+    }
+
+    /// How many loci in this stratum showed that shape.
+    #[inline]
+    #[must_use]
+    pub fn loci(self) -> u64 {
+        self.entry.loci
+    }
 }
 
 /// One stratum's evidence, for one read group: every distinct locus shape and how many loci had
