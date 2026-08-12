@@ -329,7 +329,7 @@ nothing; three shards merged in every order give identical tables and identical 
 
 ### Milestone D — the noise model and the search (the mathematics, no loci)
 
-**D1. The slip kernel.**  ☐
+**D1. The slip kernel.**  ✅
 `P(a read shows exactly d whole repeats more than its allele)` from the three slippage parameters: no
 slip with probability `1 − level`; otherwise a direction drawn from the gain share and a distance
 drawn from a geometric fall-off, **one fall-off shared by both directions** (spec §3). The truncation
