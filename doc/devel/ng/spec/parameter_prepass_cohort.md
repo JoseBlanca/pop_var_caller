@@ -84,11 +84,11 @@ restated here only so this document can be read on its own.
 |---|---|---|
 | per-read-group parameters | the error rate and the stutter parameters — the chemistry, each with its provenance and the count of observations behind it | §7 (grouping), §5 (contamination) |
 | per-sample parameters | heterozygosity and the homozygous-non-reference rate, likewise with provenance and evidence count. **These are per sample, not per read group**, because they are counted over whole sites and a read-group histogram has split them ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §1) | §3 (diversity), §5 |
-| the sample's inbreeding coefficient | `F`, from the windowed accumulator | §3 (diversity) |
+| the sample's inbreeding coefficient | `F_autozygosity`, from the windowed accumulator | §3 (diversity) |
 | **the census sites** | reads supporting **each allele** (A/C/G/T, plus a bucket for anything else) at a fixed set of scattered positions, **the same positions in every sample**, kept **per read group** so that chemistry stays separable | §4, §5, §6 — everything cross-sample. All of these want the *sample's* counts, which is the read groups at a position summed — exact, since they are raw counts at one place |
 | **the STR census sites** | this sample's reads at each whole-repeat offset from the reference tract length, plus a non-whole-repeat bucket, at a fixed set of STR loci | §3 — the STR diversity |
 
-**The histograms those first two rows were fitted from do not arrive here at all.** `F`, the
+**The histograms those first two rows were fitted from do not arrive here at all.** `F_autozygosity`, the
 heterozygosity and the homozygous-non-reference rate all come out of one sample's windowed histogram
 ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4), which is reduced to exactly those
 numbers at the end of that sample's walk and then dropped
@@ -178,15 +178,16 @@ observed heterozygosity  =  expected heterozygosity × (1 − F)
   Hexp = mean over samples of   Hobs(sample) / (1 − F(sample))
 ```
 
-**and it is the ratio estimator ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.1) for `F` read backwards.** That estimator is `F = 1 − Hobs/Hexp`
+**and it is the ratio estimator ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.1) for `F_hom_excess` read backwards.** That estimator is `F = 1 − Hobs/Hexp`
 — the same equation solved for the other unknown. Which raises a trap worth stating plainly:
 
-> **Do not take `F` from the ratio estimator and then compute expected heterozygosity from it.** That
-> is circular: the ratio estimator *needs* an expected heterozygosity to produce `F`, so feeding its
-> `F` back in returns whatever you assumed. The runs-of-homozygosity estimator has no such problem,
-> because it reads `F` off the **genomic distribution** of heterozygosity — long homozygous stretches
+> **Do not take an inbreeding coefficient from the ratio estimator and then compute expected
+> heterozygosity from it.** That
+> is circular: the ratio estimator *needs* an expected heterozygosity to produce `F_hom_excess`, so
+> feeding its answer back in returns whatever you assumed. The runs-of-homozygosity estimator has no such problem,
+> because it reads `F_autozygosity` off the **genomic distribution** of heterozygosity — long homozygous stretches
 > against ordinary ones — and never needs a population expectation. **This is a constraint the gather
-> places on the open choice of `F` estimator** ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §11): the runs estimator is what makes
+> places on the open choice of inbreeding estimator** ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §11): the runs estimator is what makes
 > the cohort's diversity estimable at all.
 
 **Build it from observed heterozygosity, not from the non-reference rate, and that is deliberate.**
@@ -249,8 +250,17 @@ sites reach the spectrum directly, this route is a curiosity rather than a fallb
 
 **The fitted error rate is not only sequencing error.** A read showing an allele the individual does
 not carry may be a misread base, DNA from another individual in the library, or a read from a
-paralogous locus mismapped here. Nothing in one sample separates them, so the fitted rate is
-their sum, and [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2 says so.
+paralogous locus mismapped here. **At a site the sample is homozygous for, nothing in one sample
+separates them**, so the fitted rate is their sum, and
+[`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2 says so.
+
+> **The criterion below is unchanged, and the estimator now has a home** —
+> [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4, the per-site route's generic
+> path, which fits the population frequencies this criterion needs over the same loci in the same pass
+> (owner, 2026-08-12). It adds a third signature to the two below: a contaminant allele sits in
+> **few** reads where a real heterozygote's two alleles are balanced — which needs depth to mean
+> anything, since at three reads a site one alternative read is a third. **Not on the STR loci**, where
+> stutter lands on the population's own alleles by construction (§4.1 there).
 
 **The cohort separates them, and the criterion is simple.** Contaminant reads carry *real segregating
 alleles* and land preferentially at sites polymorphic in the panel. Sequencing errors do not — they

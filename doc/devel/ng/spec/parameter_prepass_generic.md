@@ -12,6 +12,14 @@ production: everything said about them here is a record, not a change.*
 
 ## 1. What this path produces, and what it reads
 
+**First, what this document is and is not.** The per-sample walk fills **five** accumulators
+([`parameter_prepass.md`](parameter_prepass.md) §5.1): two generic histograms, the STR table, and the
+two censuses. **This document covers the two histograms**, and "the generic path" is that narrower
+thing throughout — not everything the SNP/indel side does. The censuses are filled by the same walk,
+at the same time, over the same loci; they are specified in
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) because their consumers are
+cross-sample.
+
 **Four numbers, out of two accumulated objects.**
 
 | parameter | grain | fitted from | section |

@@ -189,6 +189,37 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-12 — a comparison with only one side of it written down
+
+Arguing that contamination cannot be measured at repeat tracts, a reply gave the size of the
+noise and never the size of the signal it was being compared with, nor what the noise was:
+
+> ❌ "Slippage size is the smaller half of it: 2 reads in 100 at six repeats and above sit at a
+> length the sample does not carry, which already exceeds any contamination worth measuring."
+>
+> Owner: *"I don't understand what you're talking about."*
+
+> ✅ "When a read crosses a repeat tract, the copying steps before sequencing sometimes add or
+> drop a whole repeat unit, so the read reports a tract one unit longer or shorter than the DNA
+> it came from — about **2 reads in 100** at tracts of six repeats or more. Contamination at 1%
+> would put about **1 read in 100** at a wrong length. So the thing we would be hunting is half
+> the size of the thing that imitates it, before asking whether the two can be told apart."
+
+Three failures:
+
+1. **A comparison was stated as a conclusion.** *"Exceeds any contamination worth measuring"*
+   asks the reader to supply the other number themselves. `CLAUDE.md`'s rule is *never assert a
+   property without its size, its subject and its measure* — here the subject and the measure
+   were present and **the second size was missing**, which is the same failure in a form that
+   looks quantitative because one number is there.
+2. **The noise was named by its effect, never by what it is.** *"Sit at a length the sample does
+   not carry"* is what slippage does; the reply never said a polymerase adds or drops a repeat
+   unit. A reader who does not already know the mechanism cannot check the claim.
+3. **It was carried from a document into chat unchanged.** The sentence works in
+   `parameter_prepass_joint_fit.md` §4.1, where slippage has been defined for pages. Prose that
+   is fine in its own document is not thereby fine in a reply — **the chat reader has not read
+   the document**, even when they are the person who is about to.
+
 ### 2026-08-10 — "worlds": a struct name used as if it were English
 
 `examples/ng_multilib_key_harness.rs` calls its simulated samples `World`. Replies across a

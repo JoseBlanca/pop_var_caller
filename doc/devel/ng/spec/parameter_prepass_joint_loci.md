@@ -7,6 +7,8 @@ what it produces and why it exists. This one settles **which loci every sample k
 and nothing else. What is recorded at each is
 [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md).*
 
+*Types and interfaces: [`../arch/parameter_prepass_joint_loci.md`](../arch/parameter_prepass_joint_loci.md).*
+
 ***The STR half of it is built.*** *The repeat catalog ships the per-stratum sampler this document
 asked for ([`repeat_catalog.md`](repeat_catalog.md), `src/ng/repeat_catalog/`), so §3 now records why
 the rule is that one and what using it obliges a consumer to do, rather than proposing it. The generic
@@ -82,11 +84,18 @@ this section summarises rather than restates so that the STR rule beside it can 
   each other, so it is scale-free. The threshold rule needs the range only because it converts a hash
   into a keep-or-drop decision on its own, and it can do that because its denominator — the analysed
   length — is known without scanning anything. The STR denominator is not, which is the whole of §3.1.
-- **Scattered positions, never contiguous blocks.** Sites within a block share a genealogy, so a block
-  of *k* linked positions carries far less independent information than *k* scattered ones. The
-  estimators downstream treat sites as independent, and scattering is what makes that nearly true.
-- **Repeat tracts are excluded**, using region typing's delimitation — their variability would distort
-  every substitution statistic computed from the set.
+- **Scattered positions, never contiguous blocks.** Sites within a block share a genealogy, so *k*
+  positions in one block say less about a genome-wide rate than *k* scattered ones. **What scattering
+  does not buy is independence**, and the census-sites document overstated this: at one position in
+  four hundred the gaps are geometric, so about 442,000 of two million kept positions have their
+  neighbour within 100 bases, and in a selfing panel linkage reaches past a kilobase
+  ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §1). The rates are
+  unaffected — a mean over correlated sites has the same expectation — but the standard errors of §4.2
+  are optimistic, and anything distance-dependent needs a clustered budget rather than a bigger
+  scattered one.
+- **Repeat tracts are excluded.** Step 3 has already marked which stretches of the reference are
+  repeat tracts and this rule reads that marking; their variability would distort every substitution
+  statistic computed from the set.
 
 **There is nothing to stratify on here**, which is worth one sentence because §3 does stratify. The
 generic path's rates are not stratified at all — the error rate, the heterozygosity and the distance
@@ -301,6 +310,14 @@ against the range we actually have:
 | at the cohort median, 0.865 /kb | ~1,730 | 2.1 × 10⁻⁵ | 8.2 – 9.1 × 10⁻⁴ |
 | at the cohort floor, 0.149 /kb | ~300 | 8.6 × 10⁻⁶ | 1.3 – 1.7 × 10⁻⁴ |
 
+> **⚠ Both intervals assume the two million sites are independent draws, and they are not** (§2). The
+> effective count is the number of independent stretches of genome the panel carries: if a 100 kb
+> stretch behaves as one draw, two million positions carry 8,000 and both intervals widen sixteen-fold
+> — which puts the floor sample's across zero, at ±1.4 × 10⁻⁴ around an estimate of 1.49 × 10⁻⁴. The
+> true factor is between about 3 and 16 depending on how far linkage reaches in this panel, **which is
+> measurable from the cohort calls that already exist and is not measured here.** What survives
+> unchanged is the *comparison* the section is making, since both rows widen by the same factor.
+
 **The inbred sample's interval is narrower**, and the same holds a further order of magnitude down.
 Reading it the other way round — 2% of the estimate against 6% — is a *relative* error, and nothing
 here consumes one: the caller multiplies a prior, the diversity divides, and both work on the number
@@ -321,7 +338,17 @@ disagreeing with the reference at 5% rather than 0.19%
 **2,500** more. Against those, a sample at the cohort floor has about **260** heterozygous loci that
 show an alternative read at all.
 
-**So roughly 3 in every 100 positions carrying an alternative read are really heterozygous, and the
+**And that arithmetic leaves out the largest contributor.** A duplication the reference does not
+carry shows about half its reads disagreeing at every position where the copies differ, in every
+sample; the generic path's fit asks for such a population at **0.42% and 0.49% of sites** on two
+tomato samples and is refused, because the class that would hold it cannot be widened without eating
+real heterozygotes ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1;
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 is what this route does
+instead). That is between **1,700 and 8,400** of two million positions, nearly all of them
+showing an alternative read — more than the 6,000 error positions and the 2,500 noisy ones put
+together, against the same 260.
+
+**So at most 3 in every 100 positions carrying an alternative read are really heterozygous, and the
 other 97 are noise.** That is the number to plan for, and it is not a counting problem:
 
 - **More sites do not fix it.** The signal and the background grow together, so the *ratio* is
@@ -340,17 +367,26 @@ and it is the sharpest question these three documents carry** (§6.2).
 
 **And it lands on inbreeding rather than on genotype calls.** A heterozygosity prior wrong by a factor
 of two at 1.5 × 10⁻⁴ flips nothing — the posterior odds for a site showing one alternative read of
-three stay near 10⁻³ either way. But the homozygote-excess `F` is `1 − Hobs/Hexp`
-([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §5), so where `F` is near 1 the
-whole of `1 − F` is `Hobs/Hexp` — and `1 − F` is what the caller's genotype prior multiplies. **On an
-autogamous panel the per-sample heterozygosity is the inbreeding estimate wearing a different name**,
-which is what makes a background-driven bias in it worth this much care.
+three stay near 10⁻³ either way. But `F_hom_excess` is `1 − Hobs/Hexp`
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §5), so where it is near 1 the
+whole of `1 − F_hom_excess` is `Hobs/Hexp`: **the heterozygosity *is* the estimate**, and a bias in it
+passes through at full size. What the caller's genotype prior multiplies is `1 − F_autozygosity`, a
+different number — but the two run together on an autogamous panel, which is precisely the panel where
+this bias is largest, so the exposure is real whichever of the two a caller is handed.
 
 ### 4.3 The experiment: sweep downward, and at the low end
 
 Refit at 2 M, 500 k, 100 k and 20 k positions on the same drawn data and find **the first budget at
 which the fitted values move by more than a caller could feel**. Two million was chosen for the
 cross-sample statistics and has never been checked against this use.
+
+**Report two things at each budget and nothing else: what it cost at rest, and each parameter's error
+against the drawn truth — one row per parameter.** They are the two quantities the knob trades, and
+they must not be pooled: the error rate and the per-sample rates degrade as the square root of the
+budget, while the spectrum's rare classes empty out altogether, so a single "precision" column would
+report a budget as adequate that has already lost the spectrum
+([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.1). **Report the
+segregating-site count each budget yielded** beside them; it is an outcome of the panel, not a target.
 
 **Run it at the low end of the heterozygosity distribution as well as at the median** — not because
 the budget should differ (§4.2 says it should not) but because **the failure there is of a different
@@ -370,7 +406,7 @@ it shrinks. **The budget buys precision for the pooled rates and nothing at all 
 
 ### 4.5 The STR cap may turn out to be no cap at all
 
-[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.1 suspects the whole STR
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.3 suspects the whole STR
 set may fit with no sampling: there are orders of magnitude fewer STR loci than genome positions, and
 a far larger fraction of them vary. **The mechanism costs nothing either way** — a cap high enough to
 admit every locus keeps every locus, and `sample_loci_per_stratum` is the same call — so this is a
@@ -406,7 +442,8 @@ different questions.
 
 ### 5.1 What must travel with a sample so the fit can check
 
-Seven values, checked for agreement across every sample before anything is pooled:
+Seven values identifying what was asked for, checked for agreement across every sample before anything
+is pooled — and then an eighth, below, that checks what came back:
 
 | value | why a mismatch is silent |
 |---|---|
@@ -430,6 +467,20 @@ The first two rows are already required by
 [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §2; the last four are this document's
 addition and fail in exactly the same silent way.
 
+**All seven check the question, and none of them checks the answer.** They say two runs were *asked*
+for the same loci. They cannot see a hash function that changed between versions, a threshold computed
+in 64 bits on one machine and 128 on another, a catalog read in a different order by a sampler whose
+order-independence has regressed, or a walk that filled its array from the wrong end — every one of
+those leaves all seven agreeing and the kept sets different.
+
+**So an eighth value travels, and it is the only direct one: a digest of the loci actually kept,
+computed as the records are filled rather than by re-deriving the rule.** Thirty-two bytes per sample,
+plus one digest per megabase so a mismatch names the block it happened in — 6.4 kB on tomato, half a
+percent of the record. A digest produced by running the selection a second time proves only that the
+selection is deterministic, which nobody doubts; it must witness the array that was written.
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.2 carries the reasoning
+and the test that distinguishes the two.
+
 ---
 
 ## 6. Open questions
@@ -452,7 +503,7 @@ addition and fail in exactly the same silent way.
    is what happens when they do not fit, and it costs nothing to keep either way (§4.3), but the
    measurement decides whether it ever fires.
 2. **Can a sample at 0.149 heterozygotes per kilobase be told apart from the artefact floor?** —
-   OPEN, and **the sharpest question in these three documents** (§4.2). About 97 in every 100
+   OPEN, and **the sharpest question in these three documents** (§4.2). At least 97 in every 100
    positions carrying an alternative read there are noise, so the answer turns on how well the panel
    pins the background and how many of the offending loci it can name individually (§4.4) — **not on
    the site budget, which changes the ratio not at all**. *Leaning:* yes at tomato's floor and unknown
@@ -461,16 +512,16 @@ addition and fail in exactly the same silent way.
    **Settled by:** §4.3's sweep run at the low end, against drawn genomes whose true heterozygosity is
    known.
 
-   **It is not an incidental output on such a panel** (§4.2): `1 − F` is `Hobs/Hexp` where `F` is near
-   1, so this is the inbreeding estimate under another name, and inbreeding is what the caller's
-   genotype prior multiplies.
+   **It is not an incidental output on such a panel** (§4.2): `1 − F_hom_excess` is `Hobs/Hexp` where
+   that coefficient is near 1, so the heterozygosity is the inbreeding estimate under another name —
+   and on an autogamous panel it tracks the `F_autozygosity` the caller's genotype prior multiplies.
 3. **Where does the generic budget start to matter?** — OPEN. §4.3 gives the experiment. *Leaning:*
    below two million, since the error rate is already pinned to one part in eighty there and a low
    heterozygosity does not by itself demand more loci (§4.2). What could still force a per-run knob is
    question 2's answer rather than any counting argument.
 4. **What fraction of STR loci vary across a cohort?** — OPEN, and it is the other half of question 1:
    it decides whether a cap set to keep everything actually delivers the ~10,000 varying loci the
-   cross-sample statistics want ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.1).
+   cross-sample statistics want ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.3).
    **The same low-heterozygosity concern applies here and is smaller**, because a repeat tract mutates
    orders of magnitude faster than a base does, so an autogamous panel that is nearly monomorphic for
    substitutions still segregates at its STR loci.
@@ -513,3 +564,8 @@ asserted. They are not restated here. What follows is this consumer's own.*
 7. **A mismatch across samples is refused.** Two samples selected under different seeds, references,
    region sets, catalog build settings, routing criteria, target counts **or caps** must produce an
    error and not an average (§5.1).
+8. **The kept-loci digest catches what the seven values cannot** (§5.1). Change the selection's answer
+   while leaving all seven inputs identical — swap two kept loci, or drop one and add another — and the
+   digest must change, the per-megabase digest must name the block, and the fit must refuse. **Then
+   check the check**: a digest re-derived by running the selection again passes this test unchanged,
+   which is why §5.1 requires it to be computed where the records are written.

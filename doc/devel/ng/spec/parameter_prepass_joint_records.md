@@ -8,6 +8,8 @@ how it is encoded**. Which loci are kept is
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md); the mathematics that reads these
 records is the fit document.*
 
+*Types and interfaces: [`../arch/parameter_prepass_joint_records.md`](../arch/parameter_prepass_joint_records.md).*
+
 ***It changes one decision in [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md)***
 *§5 — the depth ladder is twenty bins and five bits, not sixteen and four (§2.2) — and that document
 carries a note saying so.*
@@ -20,11 +22,14 @@ carries a note saying so.*
 The walk visits every locus once; a field not written then would need a second traversal of the reads,
 which is the one thing this whole step is built to avoid.
 
-**It is a module of its own because it is a codec, not mathematics.** Given one locus's observations
-it produces a record; given a file of records it hands them back unchanged. It knows nothing about
-likelihoods, and the fit knows nothing about how a record is packed — the same division the code
-already makes between `parameter_estimation::generic` (the shaping) and `parameter_estimation::fitting`
-(the mathematics). It can be built and tested against nothing but itself: write, read back, compare.
+**It is a module of its own because it defines the types that hold this information, and two other
+modules stand on them.** The walk fills a record as it finishes each kept locus; the fit reads every
+sample's records and computes from nothing else. Neither has to know what the other does: the walk
+needs no likelihood, and the fit needs no knowledge of how a record is packed — the same division the
+code already draws between `parameter_estimation::generic`, which shapes the data, and
+`parameter_estimation::fitting`, which does the mathematics. **Because the types are the whole of it,
+it can be built before either user exists**, and tested by filling a record, writing it out, reading
+it back and comparing.
 
 **Two kinds of record, because the two paths observe different things.** At an ordinary position the
 observation is *which base a read showed*; at a repeat tract it is *how long a tract a read showed*.
@@ -139,9 +144,18 @@ library's rate with no bound and no pooling arm.
 - **how many reads showed each whole-repeat offset from the reference tract length**, over a recorded
   range of **±4** with saturating end buckets;
 - **one guard bucket** for reads differing by something that is not a whole number of motif copies;
-- **bases compared and bases mismatched**, the two counters the STR path's substitution error is
-  fitted from. Offsets record *length*, and a substitution that does not change a tract's length is
-  invisible to them, so without these the error rate cannot be recovered at all.
+- **bases compared, and the mismatching bases as a difference list** — `(which read, offset from the
+  tract start, which base)` per mismatch. Offsets record *length*, and a substitution that does not
+  change a tract's length is invisible to them, so without this channel the error rate cannot be
+  recovered at all. **A pair of counters would do for the rate and for nothing else**
+  ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §2.1): it cannot separate
+  a substitution inside the tract, which interrupts the motif and changes what a repeat unit is, from
+  ordinary error in the flank, and it cannot say that two reads carried the *same* interruption, which
+  is what makes an interruption an allele rather than an error. **The list costs about what the
+  counters cost** — at 300 base comparisons a locus and an error rate of 0.002 a locus carries about
+  0.6 mismatching bases — because it is driven by the error rate, exactly as §2.3's sparse list is.
+  Storing the reads instead would be 75 bytes per locus per sample two-bit packed, 3.7 GB across fifty
+  samples at a million loci, against the 60–110 MB of §5.
 
 ### 3.1 The origin is the reference tract length — settled, and measured
 
@@ -154,7 +168,7 @@ asymmetry where the truth is 4.9-fold.
 Both routes therefore share one origin, which is also what makes the comparison between them a
 comparison of the same quantity.
 
-### 3.2 Two widths, and only one is load-bearing
+### 3.2 Two widths
 
 - **The recorded range is ±4.** Narrow is fine.
 - **The allele lengths the fit may place mass on reach ±6.** That is the load-bearing one, because it
@@ -176,6 +190,12 @@ the offsets*. Nothing about the slippage parameters is estimated from it.
 tract length. Above that, the locus is not something this noise model describes and the fit should say
 so rather than fit it.
 
+**Record what it caught, not only how many**, by the same sparse mechanism as the difference list: a
+non-whole-repeat read keeps its offset and its size. A partial unit at a tract edge is alignment
+ambiguity; an indel in the flank is a different thing; a locus over the threshold for the first reason
+and one over it for the second are not the same locus. A bare count can raise the threshold and never
+explain it.
+
 ### 3.4 The read cap must match the other route's
 
 [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.1 caps how many of a locus's reads are
@@ -194,21 +214,45 @@ the cap with the route. At tomato's three reads a locus neither cap fires; at HG
 
 **Encoding follows §2.3's shape**: a dense binned count of spanning reads per locus, plus a sparse list
 of the non-zero offsets. At three reads a locus nearly every read sits at offset 0, so the sparse list
-is short. **Zero depth and no-spanning-read are distinct and both are recorded** — a locus a sample did
-not span carries no information about its alleles, and is different from one it spanned and found
-unremarkable.
+is short.
+
+**Four states, not two.** A sample at a kept STR locus may have had no read reach the locus at all;
+reads that reached it but none crossing the whole tract, so none reports a length; or reads that
+crossed it, whether they showed the reference length or another. (The fourth, *never walked*, is §5's
+and is a bug rather than data.) The generic set's zero-depth-against-quiet distinction is the last
+pair, not the first.
+
+**A read that did not cross the tract is not nothing, and this record has nowhere to put it.** It
+proves the tract is **at least** as long as the stretch it covered — a censored observation, which
+[`locus_generation_ssr.md`](locus_generation_ssr.md) records deliberately and whose admission gate is
+overlap rather than spanning for exactly that reason: 7,085 such reads on chromosome 1 of tomato
+SRR7279503 alone. **The gap is worth stating because the censoring is not random.** A tract longer
+than a read is never crossed, in every sample at every depth, so it runs along repeat count — the axis
+the slippage numbers are fitted within — and a stratum unobservable with this read length must not
+look like one that was merely unlucky with coverage. **What to record is open**; the cheapest form is
+one count of covering-but-not-crossing reads per locus beside the offsets, which distinguishes the
+states without asking the fit to score a lower bound (which [`locus_generation_ssr.md`](locus_generation_ssr.md)
+leaves to the caller).
 
 ---
 
 ## 4. What travels once per sample, beside the records
 
-**Nine values, and the fit must refuse to pool samples that disagree on any of them.**
+**Ten values, and the fit must refuse to pool samples that disagree on any of them.**
 
 Seven identify the loci and are
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §5.1's: the seed, the reference
 digest, the analysed-region-set digest, **the repeat catalog's build settings and scoring weights**,
 **the STR routing criteria this run asked it for**, the generic target count, and the STR per-stratum
 cap.
+
+**An eighth is the only one that checks the answer rather than the question** — a digest of the loci
+actually kept, computed as these records are filled and blocked per megabase so a mismatch names where
+it happened ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §5.1,
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.2). The other seven all
+agree when a hash function or a threshold's arithmetic has changed underneath them; this one does not.
+**It must be produced by the code that writes the entries**, not by re-running the selection, or it
+witnesses nothing about this file.
 
 **Two more are this document's**, and both are load-bearing rather than informational:
 
@@ -233,7 +277,8 @@ merging is concatenation in position order. Nothing needs communication between 
 
 **Errors.** Three states must be distinguishable after a write and a read: **never walked** (a bug),
 **walked with zero depth** (data), and **reads present, none non-reference** (data). §2.2's fifth bit
-is what makes the first expressible.
+is what makes the first expressible. **At an STR locus there is a fourth** — reads reached the locus
+but none crossed the tract (§3) — and it is the one with no field today.
 
 **Determinism.** The read subsample of §3.4 is seeded from the locus's position, so the same sample
 walked in one region and in many produces byte-identical records.
@@ -247,19 +292,28 @@ walked in one region and in many produces byte-identical records.
    a multi-allelic position. All must come back distinguishable and unchanged.
 2. **The STR ends saturate and the guard catches.** A read at an offset beyond the recorded range must
    land in the end bucket rather than being dropped or wrapping, and a read whose tract differs by a
-   non-whole number of motif copies must land in the guard bucket. Both are cheap to assert and both
-   are silent when wrong.
-3. **The depth ladder costs what it was measured to cost.** §2.2 adopts the twenty-bin ladder on a
+   non-whole number of motif copies must land in the guard bucket, with its offset and size. Both are
+   cheap to assert and both are silent when wrong.
+3. **The difference list places a mismatch where it happened** (§3). A substitution planted in the
+   flank and one planted inside the tract must come back distinguishable, and two reads carrying the
+   same interior substitution must come back as two entries at one offset — not as one entry, and not
+   as a count of two. **That is the assertion an interrupted-repeat model would rest on**, and a
+   read-blind encoding passes every other check in this list.
+4. **The four states at an STR locus round-trip** (§3): no read reaching the locus, reads reaching it
+   but none crossing the tract, reads crossing it, and the region never walked. Plant the second
+   deliberately — it is the state with no field, so the test either shows a lower bound surviving or
+   shows that it does not.
+5. **The depth ladder costs what it was measured to cost.** §2.2 adopts the twenty-bin ladder on a
    measurement made against pooled cells, and here each sample-locus record is binned separately.
    Fit synthetic data at full depth resolution and at the ladder; the gap must be within the 0.054
    rungs that measurement reports. **This is the one number carried across from a different
    arrangement of the same data**, so it is the one to check rather than assume.
-4. **Read groups fold exactly.** A sample's counts at a position must equal the sum of its read
+6. **Read groups fold exactly.** A sample's counts at a position must equal the sum of its read
    groups' — raw counts at one place, so the equality is exact and not approximate. Assert it on a
    sample carrying two read groups.
-5. **Sharded recording is exact.** The same sample walked in one region and in many must give
+7. **Sharded recording is exact.** The same sample walked in one region and in many must give
    byte-identical records, including the STR read subsample.
-6. **Size is measured, not assumed.** §5's figures are arithmetic. Measure the records at rest on two
+8. **Size is measured, not assumed.** §5's figures are arithmetic. Measure the records at rest on two
    runs that stress different axes: **HG002 at 300×**, where depth runs past the ladder's cap and the
    sparse list grows with depth × error rate; and **the whole tomato cohort**, where what grows is the
    number of samples held at once. Report the two sets separately.
