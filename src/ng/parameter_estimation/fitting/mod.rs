@@ -26,6 +26,7 @@
 
 pub mod ladder_scan;
 pub mod mixture_weights;
+pub mod multistart;
 
 use crate::ng::types::Ploidy;
 

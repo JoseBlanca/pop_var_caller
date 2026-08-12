@@ -384,7 +384,7 @@ struct WinningRung<P, S> {
 ///
 /// If `cells` is empty, if the model declares no genotypes at a ploidy present, or if a
 /// ploidy present carries no sites at all.
-fn ploidy_plans<M>(model: &M, cells: &[M::Cell]) -> Vec<PloidyPlan>
+pub(super) fn ploidy_plans<M>(model: &M, cells: &[M::Cell]) -> Vec<PloidyPlan>
 where
     M: NoiseModel,
 {
@@ -465,67 +465,15 @@ where
     let mut best: Option<WinningRung<M::NoiseParams, S>> = None;
 
     for (rung, noise) in ladder.iter().enumerate() {
-        let mut rung_log_likelihood = 0.0;
-        let mut scoring_output = S::default();
-
-        for plan in plans {
-            ln_likelihood_row_major.clear();
-            for &position in &plan.positions {
-                let before = ln_likelihood_row_major.len();
-                model.append_genotype_likelihoods(
-                    &cells[position],
-                    noise,
-                    plan.ploidy,
-                    &mut ln_likelihood_row_major,
-                );
-                assert_eq!(
-                    ln_likelihood_row_major.len() - before,
-                    plan.genotypes,
-                    "the model declares {} genotypes at ploidy {} and appended {} for \
-                     cell {position}",
-                    plan.genotypes,
-                    plan.ploidy,
-                    ln_likelihood_row_major.len() - before
-                );
-            }
-
-            // **What the model wrote is checked here, where the rung is still in
-            // scope.** The same faults are refused two frames down, by
-            // `GenotypeLikelihoodTable::from_natural_logs` and by the climb — but
-            // those messages name a row of a buffer and nothing else, and the rung is
-            // the one part no later frame can recover, because the noise parameters
-            // are gone by then. A model that goes wrong at one rung of 161 is exactly
-            // the case worth localising.
-            for ((row, &position), &cell_weight) in ln_likelihood_row_major
-                .chunks_exact(plan.genotypes)
-                .zip(&plan.positions)
-                .zip(&plan.cell_weights)
-            {
-                for (genotype, &entry) in row.iter().enumerate() {
-                    assert!(
-                        entry.is_finite() || entry == f64::NEG_INFINITY,
-                        "rung {rung}, ploidy {}: cell {position} scored {entry} under \
-                         genotype {genotype}, which is not a log-likelihood",
-                        plan.ploidy
-                    );
-                }
-                // A cell that carries no sites may legally say no genotype produced
-                // it — the climb never looks at it — so the weight is what makes this
-                // a fault rather than a shape.
-                assert!(
-                    cell_weight == 0.0 || row.iter().any(|&entry| entry > f64::NEG_INFINITY),
-                    "rung {rung}, ploidy {}: no genotype can have produced cell \
-                     {position}, which holds {cell_weight} sites",
-                    plan.ploidy
-                );
-            }
-
-            let table = GenotypeLikelihoodTable::from_natural_logs(
-                &ln_likelihood_row_major,
-                plan.genotypes,
-            );
-            rung_log_likelihood += score_one_ploidy(rung, plan, table, &mut scoring_output);
-        }
+        let (rung_log_likelihood, scoring_output) = score_one_candidate(
+            model,
+            cells,
+            noise,
+            plans,
+            &mut ln_likelihood_row_major,
+            &format!("rung {rung}"),
+            |plan, table, output| score_one_ploidy(rung, plan, table, output),
+        );
 
         // The rung's answer is built here rather than at the end from a stored index,
         // so that the rail flag is decided where `rung` is in scope and there is no
@@ -552,17 +500,97 @@ where
     best.expect("the ladder is not empty, so some rung won")
 }
 
+/// **Score one set of noise parameters over every ploidy's cells** — the whole of what a
+/// rung of a ladder and a trial of a search have in common, which is why it is a function
+/// rather than a loop body.
+///
+/// It builds the row-major table each ploidy's climb borrows, refusing anything the model
+/// wrote that is not a log-likelihood, and returns the summed score together with whatever
+/// the caller's per-ploidy step collected.
+///
+/// `at` names the candidate in a panic message — "rung 47", "start 2, sweep 1". **It is the
+/// one part no later frame can recover**: by the time the climb refuses the table, the noise
+/// parameters are gone, and a model that goes wrong at one candidate of several hundred is
+/// exactly the case worth localising.
+///
+/// `scratch` is cleared and refilled once per ploidy rather than allocated here: a ladder
+/// walks 161 rungs and a multi-start search several hundred trials, and the table is the
+/// largest thing either builds.
+pub(super) fn score_one_candidate<M, S, F>(
+    model: &M,
+    cells: &[M::Cell],
+    noise: &M::NoiseParams,
+    plans: &[PloidyPlan],
+    scratch: &mut Vec<f64>,
+    at: &str,
+    mut score_one_ploidy: F,
+) -> (f64, S)
+where
+    M: NoiseModel,
+    S: Default,
+    F: FnMut(&PloidyPlan, GenotypeLikelihoodTable<'_>, &mut S) -> f64,
+{
+    let mut log_likelihood = 0.0;
+    let mut scoring_output = S::default();
+
+    for plan in plans {
+        scratch.clear();
+        for &position in &plan.positions {
+            let before = scratch.len();
+            model.append_genotype_likelihoods(&cells[position], noise, plan.ploidy, scratch);
+            assert_eq!(
+                scratch.len() - before,
+                plan.genotypes,
+                "the model declares {} genotypes at ploidy {} and appended {} for cell \
+                 {position}",
+                plan.genotypes,
+                plan.ploidy,
+                scratch.len() - before
+            );
+        }
+
+        for ((row, &position), &cell_weight) in scratch
+            .chunks_exact(plan.genotypes)
+            .zip(&plan.positions)
+            .zip(&plan.cell_weights)
+        {
+            for (genotype, &entry) in row.iter().enumerate() {
+                assert!(
+                    entry.is_finite() || entry == f64::NEG_INFINITY,
+                    "{at}, ploidy {}: cell {position} scored {entry} under genotype \
+                     {genotype}, which is not a log-likelihood",
+                    plan.ploidy
+                );
+            }
+            // A cell that carries no sites may legally say no genotype produced it — the
+            // climb never looks at it — so the weight is what makes this a fault rather
+            // than a shape.
+            assert!(
+                cell_weight == 0.0 || row.iter().any(|&entry| entry > f64::NEG_INFINITY),
+                "{at}, ploidy {}: no genotype can have produced cell {position}, which \
+                 holds {cell_weight} sites",
+                plan.ploidy
+            );
+        }
+
+        let table = GenotypeLikelihoodTable::from_natural_logs(scratch, plan.genotypes);
+        log_likelihood += score_one_ploidy(plan, table, &mut scoring_output);
+    }
+
+    (log_likelihood, scoring_output)
+}
+
 /// Everything about one ploidy's cells that does not change along the ladder.
 ///
 /// Built once before the rungs, because the cells, their weights and the width of their
 /// genotype set are the same at every rung — only the noise parameters move.
-struct PloidyPlan {
-    ploidy: Ploidy,
+pub(super) struct PloidyPlan {
+    pub(super) ploidy: Ploidy,
     /// How many genotypes this ploidy's cells are scored against, as the model declares
     /// it. Not `ploidy + 1`: that is the SNP/indel path's count and not every path's.
-    genotypes: usize,
+    pub(super) genotypes: usize,
     /// Where this ploidy's cells sit in the caller's slice.
-    positions: Vec<usize>,
+    pub(super) positions: Vec<usize>,
     /// One site count per entry of `positions`, in the same order.
     ///
     /// **Parallel to `positions` rather than zipped into it**, because
@@ -572,10 +600,10 @@ struct PloidyPlan {
     /// `usize` index and the other an `f64` weight — so what has to hold is only that
     /// they stay the same length and the same order, and both are built in one pass
     /// below.
-    cell_weights: Vec<f64>,
+    pub(super) cell_weights: Vec<f64>,
     /// The interior point the climb starts from. Where it starts does not matter — the
     /// surface is concave — so it is built once rather than at every rung.
-    uniform_start: Vec<f64>,
+    pub(super) uniform_start: Vec<f64>,
 }
 
 #[cfg(test)]

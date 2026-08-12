@@ -366,7 +366,7 @@ and the same code, and convergence failure stays a bug rather than a data condit
 existing generic three-genotype test still passes, and a hand-built 45-genotype table recovers its
 known weights from any interior start. *Depends:* generic D1. *Source:* arch §3.
 
-**D4. `fit_by_multistart`, and the spread it must report.**  ☐ **Own commit, do not bundle.**
+**D4. `fit_by_multistart`, and the spread it must report.**  ✅ **Own commit, do not bundle.**
 Maximise the three slippage parameters from several starting points, climbing the genotype
 frequencies at every trial, and return the best-scoring **with every start's outcome beside it**.
 `SLIPPAGE_STARTS` is four starts that disagree about the level, the direction and the decay **at

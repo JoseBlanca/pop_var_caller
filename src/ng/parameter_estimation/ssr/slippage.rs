@@ -33,6 +33,7 @@ use std::fmt;
 use smallvec::SmallVec;
 
 use crate::genetics::lgamma;
+use crate::ng::parameter_estimation::fitting::multistart::SearchableNoise;
 use crate::ng::parameter_estimation::fitting::{NoiseModel, WeightedCell};
 use crate::ng::types::{DomainError, Ploidy, checked_probability};
 
@@ -607,6 +608,145 @@ fn ln_factorial(n: u32) -> f64 {
     lgamma(f64::from(n) + 1.0)
 }
 
+/// The logit and its inverse — the scale the two share-shaped parameters are searched on, so a
+/// search cannot walk out of `(0, 1)` whatever step it takes.
+fn logit(share: f64) -> f64 {
+    (share / (1.0 - share)).ln()
+}
+
+fn expit(scaled: f64) -> f64 {
+    1.0 / (1.0 + (-scaled).exp())
+}
+
+/// **How wide the search may range on each of the three axes**, on that axis's own scale.
+///
+/// The level runs from 1e-5 to 0.6 — the measured range is 0.00091 to 0.150, so both ends have
+/// room and neither is where a real answer sits. The two shares stop just inside 0 and 1, because
+/// the logit of either endpoint is infinite and the golden section needs a finite bracket; a fit
+/// that genuinely wants a share of zero rails at 0.005 or 0.002 and is visible as having done so.
+const LEVEL_RANGE: (f64, f64) = (1e-5, 0.6);
+const GAIN_SHARE_RANGE: (f64, f64) = (0.005, 0.995);
+const STEP_DECAY_RANGE: (f64, f64) = (0.002, 0.95);
+
+/// The lowest level [`slippage_starts`] will build a start around — above the search's own lower
+/// bound, so that the four multipliers stay four distinct points. See that function.
+const STARTING_LEVEL_FLOOR: f64 = 1e-4;
+
+/// **The three slippage parameters as a search walks them**, each on the scale that makes a step
+/// mean the same thing everywhere along it.
+///
+/// The level is searched on a **log** scale, because it spans twenty-two-fold across the repeat
+/// counts of one dataset and a step that is 1% of 0.15 is 165% of 0.00091. The two shares are
+/// searched on a **logit** scale, because they are fractions in `(0, 1)` and a search on that
+/// scale cannot walk out of the range whatever step it takes.
+///
+/// **The level is axis 0**, which is what makes it the parameter
+/// [`MultistartResult::headline_spread`](crate::ng::parameter_estimation::fitting::multistart::MultistartResult::headline_spread)
+/// reports the disagreement in — and the level is the number a stratum is chosen by, so it is the
+/// right one to judge a fit on.
+impl SearchableNoise for SlippageModel {
+    fn axes() -> usize {
+        3
+    }
+
+    fn axis_bounds(axis: usize) -> (f64, f64) {
+        match axis {
+            0 => (LEVEL_RANGE.0.ln(), LEVEL_RANGE.1.ln()),
+            1 => (logit(GAIN_SHARE_RANGE.0), logit(GAIN_SHARE_RANGE.1)),
+            2 => (logit(STEP_DECAY_RANGE.0), logit(STEP_DECAY_RANGE.1)),
+            other => panic!("a slippage model has three axes and was asked for axis {other}"),
+        }
+    }
+
+    fn coordinate(&self, axis: usize) -> f64 {
+        match axis {
+            0 => self.slip_rate.get().ln(),
+            1 => logit(self.gain_share.get()),
+            2 => logit(self.step_decay.get()),
+            other => panic!("a slippage model has three axes and was asked for axis {other}"),
+        }
+    }
+
+    fn headline(&self) -> f64 {
+        self.slip_rate.get()
+    }
+
+    fn with_coordinate(&self, axis: usize, value: f64) -> Self {
+        // Clamped back into the range each constrained type accepts, because the exponential and
+        // the logistic can each return a value one ulp outside `[0, 1]` at the ends of their
+        // brackets — and `try_new` would then reject a point the search legitimately reached.
+        let moved = match axis {
+            0 => Self::try_new(
+                value.exp().clamp(0.0, 1.0),
+                self.gain_share.get(),
+                self.step_decay.get(),
+            ),
+            1 => Self::try_new(
+                self.slip_rate.get(),
+                expit(value).clamp(0.0, 1.0),
+                self.step_decay.get(),
+            ),
+            2 => Self::try_new(
+                self.slip_rate.get(),
+                self.gain_share.get(),
+                expit(value).clamp(0.0, 1.0),
+            ),
+            other => panic!("a slippage model has three axes and was asked for axis {other}"),
+        };
+        moved.expect("every axis is written back inside its own type's range")
+    }
+}
+
+/// **Four starting points, each disagreeing about the level, the direction and the fall-off at
+/// once** (`spec/parameter_prepass_ssr.md` §4.2).
+///
+/// **Starts that disagree only about the headline parameter are not a spread**, and that is the
+/// trap this set exists to avoid: on the sibling path's inbreeding fit, five starts that disagreed
+/// about the headline number while sharing one guess at a nuisance axis returned a confident zero
+/// on a genome 29% covered by runs.
+///
+/// **The level is a multiplier on a starting estimate rather than an absolute value**, because a
+/// stratum's level spans twenty-two-fold across repeat counts, so a fixed ladder of absolute rates
+/// would begin every stratum in the wrong place. `level_estimate` is meant to be the share of
+/// reads sitting off the reference length — an over-estimate, since it counts real alleles too,
+/// which is why the four multipliers run below one as well as above it.
+///
+/// **The floor is 1e-4 and not the search's own lower bound of 1e-5**, which is the reference
+/// implementation's value and is what keeps the four starts distinct: `1e-4 × {3, ⅓, 1, 0.3}` is
+/// `3e-4, 3.3e-5, 1e-4, 3e-5`, all four clear of the bound. Floored at 1e-5 instead, a stratum
+/// where no read left the reference length gives an estimate of zero and **three of the four
+/// starts collapse onto the same point** — the set would still be four starts and would no longer
+/// be a spread.
+///
+/// # Panics
+///
+/// If `level_estimate` is not a number. It is a share of reads, so a caller reaches this by
+/// dividing by a zero read count — a stratum with no whole-repeat reads at all — and a `NaN`
+/// clamped and handed to the search would make every candidate score alike.
+#[must_use]
+pub fn slippage_starts(level_estimate: f64) -> SmallVec<[SlippageModel; 4]> {
+    assert!(
+        !level_estimate.is_nan(),
+        "the starting points were asked for at a slippage estimate that is not a number, which \
+         is what dividing by a stratum with no whole-repeat reads gives"
+    );
+    let level = level_estimate.clamp(STARTING_LEVEL_FLOOR, 0.3);
+    // (multiplier on the estimate, gain share, step decay)
+    [
+        (3.0, 0.20, 0.03),
+        (1.0 / 3.0, 0.80, 0.40),
+        (1.0, 0.50, 0.15),
+        (0.3, 0.35, 0.08),
+    ]
+    .into_iter()
+    .map(|(multiplier, gain_share, step_decay)| {
+        let scaled = (level * multiplier).clamp(LEVEL_RANGE.0, 0.5);
+        SlippageModel::try_new(scaled, gain_share, step_decay)
+            .expect("three probabilities, each built inside its own range")
+    })
+    .collect()
+}
+
 impl fmt::Display for SlippageModel {
     /// `0.02010 of reads slipping, 0.170 of those gaining, 0.065 of those taking a further
     /// step` — the shape a summary line over several hundred strata wants.
@@ -642,6 +782,10 @@ impl fmt::Display for SlippageModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::ng::parameter_estimation::fitting::multistart::{
+        SearchPrecision, fit_by_multistart,
+    };
 
     use super::super::OFFSET_HALF_RANGE;
     use super::super::stratum_table::{LocusShape, StratumEntry};
@@ -1445,6 +1589,298 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // D4 — the search, and the control it has to read zero on.
+    // -----------------------------------------------------------------
+
+    /// **A stratum's whole entry space, weighted by each shape's exact probability under a known
+    /// truth** — the method the whole of Milestone D rests on, and the reason its answers have no
+    /// tolerance to argue about.
+    ///
+    /// Replace each entry's observed locus count with `N ×` its probability under the truth and
+    /// the sum the estimator maximises becomes the objective it would climb with an infinite
+    /// genome: what comes back is the value a consistent estimator converges to, with **no
+    /// sampling noise in it at all**, so "unbiased" is decided rather than estimated. Same method
+    /// as [`examples/ng_str_stutter_harness.rs`](../../../../../examples/ng_str_stutter_harness.rs),
+    /// against the same truth.
+    ///
+    /// **`N` is a billion loci and a shape is dropped once its share of them rounds below one.**
+    /// A `WeightedCell` counts sites in whole numbers, so the exactness is limited by that
+    /// rounding, and the limit is what the *dropped shapes add up to* rather than what each one
+    /// carries. Measured on the depth-4 fixture below: 273 of the 495 shapes round to nothing and
+    /// together hold **1.1e-8** of the mass, while the rounding over all 495 comes to **6.4e-8**.
+    /// That is three orders below the search's own resolution and nearly six below the 0.005 the
+    /// shares are asserted to, so it cannot be what any assertion here is reading.
+    fn exact_entry_space(
+        model: &SsrNoiseModel,
+        truth: &SlippageModel,
+        allele_frequencies: &[(WholeRepeatOffset, f64)],
+        ploidy: Ploidy,
+        depth: u32,
+    ) -> Vec<StratumCell> {
+        const LOCI: f64 = 1e9;
+
+        // The genotype frequencies the truth implies, under Hardy-Weinberg over the alleles
+        // named: `p²` for a homozygote and `2pq` for a heterozygote, in the model's own genotype
+        // order so they line up with the likelihoods it returns.
+        let support = model.allele_support();
+        let share_of = |index: usize| {
+            allele_frequencies
+                .iter()
+                .find(|(offset, _)| *offset == support[index])
+                .map_or(0.0, |(_, share)| *share)
+        };
+        let mut genotype_frequencies = Vec::new();
+        model.for_each_genotype(ploidy, |genotype| {
+            let product: f64 = genotype.iter().map(|&allele| share_of(allele)).product();
+            // How many orderings of this multiset there are — 1 for a homozygote, 2 for a
+            // diploid heterozygote.
+            let orderings = if genotype.windows(2).all(|pair| pair[0] == pair[1]) {
+                1.0
+            } else {
+                2.0
+            };
+            genotype_frequencies.push(orderings * product);
+        });
+        let total: f64 = genotype_frequencies.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "the truth's genotype frequencies sum to {total}"
+        );
+
+        let mut cells = Vec::new();
+        let mut row = Vec::new();
+        for shape in shapes_at_whole_repeat_depth(depth) {
+            row.clear();
+            model.append_genotype_likelihoods(&cell_of(shape, ploidy), truth, ploidy, &mut row);
+            let probability: f64 = row
+                .iter()
+                .zip(&genotype_frequencies)
+                .map(|(ln_likelihood, frequency)| frequency * ln_likelihood.exp())
+                .sum();
+            let loci = (probability * LOCI).round() as u64;
+            if loci > 0 {
+                cells.push(StratumCell::new(StratumEntry { shape, loci }, ploidy));
+            }
+        }
+        cells
+    }
+
+    /// **The control the whole method rests on: generate under the truth, fit, and get the truth
+    /// back.** With the entry space weighted by its exact probabilities there is no sampling noise
+    /// for a residual to hide in, so anything other than recovery is this code's fault.
+    ///
+    /// **And the spread is not read alone**, which is the trap that cost a published finding on
+    /// 2026-08-06: a deterministic search returns the same point from every start wherever the
+    /// objective is flat, so four starts agreeing is also what a search that never looked
+    /// produces. It is paired here with the score at the truth — one extra evaluation, and a
+    /// correctly specified model cannot be beaten at its own truth, so **a fitted point scoring
+    /// above it would be a defect in this test rather than a finding about the estimator**.
+    ///
+    /// **Ignored by default, and run by hand — measured at 12 minutes in a debug build**
+    /// (719.6 s of test time on an 8-core Apple `container` VM):
+    ///
+    /// ```text
+    /// ./scripts/dev.sh cargo test --lib the_search_recovers_a_known_truth -- --ignored
+    /// ```
+    ///
+    /// Every candidate the search tries runs a whole climb over this stratum's 36 genotypes and
+    /// the 222 cells its entry space leaves after the rounding below, and the search tries
+    /// several hundred: four starts, three axes, and about 29 golden-section steps an axis —
+    /// which is where the bracket reaches the tolerance, not the cap of forty — over up to eight
+    /// sweeps. **Shortening the search is what a control may least afford**: at a coarser
+    /// resolution a genuine 1% bias and the search's own step are the same size, so it would be
+    /// reporting its own grid rather than the estimator. Reported at Checkpoint D rather than
+    /// quietly weakened.
+    #[test]
+    #[ignore = "nine minutes in a debug build; the sharp control, run by hand"]
+    fn the_search_recovers_a_known_truth_and_no_start_beats_it() {
+        let model = SsrNoiseModel::for_stratum(RepeatCount(1));
+        let truth = SlippageModel::try_new(0.0201, 0.17, 0.09).expect("three probabilities");
+        let diploid = ploidy(2);
+        // Three allele lengths at a 30% non-reference **allele** frequency, which under the
+        // Hardy-Weinberg weighting below is **51 loci in 100** carrying something other than the
+        // reference — enough that the fit has to tell a long allele from a slipped read rather
+        // than having only one story available.
+        let alleles = [
+            (WholeRepeatOffset(-1), 0.15),
+            (WholeRepeatOffset(0), 0.70),
+            (WholeRepeatOffset(1), 0.15),
+        ];
+        let cells = exact_entry_space(&model, &truth, &alleles, diploid, 4);
+        assert!(
+            cells.len() > 20,
+            "the entry space collapsed to {} shapes, so this control is not exercising one",
+            cells.len()
+        );
+
+        // The starts are handed the share of reads sitting off the reference length, which is
+        // what a real driver has before it fits anything — an over-estimate of the level, since
+        // it counts real alleles too.
+        let off_reference: u64 = cells
+            .iter()
+            .map(|cell| u64::from(cell.shape().reads_off_reference()) * cell.loci())
+            .sum();
+        let reads: u64 = cells
+            .iter()
+            .map(|cell| u64::from(cell.shape().whole_repeat_depth()) * cell.loci())
+            .sum();
+        let starts = slippage_starts(off_reference as f64 / reads as f64);
+
+        let fitted = fit_by_multistart(&model, &cells, &starts, SearchPrecision::fine());
+
+        assert_eq!(fitted.starts.len(), 4, "every start is reported");
+        assert!(
+            fitted.termination.converged,
+            "a start ran out of sweeps after {}",
+            fitted.termination.iterations
+        );
+
+        let level = fitted.best.slip_rate.get();
+        let gain = fitted.best.gain_share.get();
+        let decay = fitted.best.step_decay.get();
+        assert!(
+            (level / truth.slip_rate.get() - 1.0).abs() < 0.01,
+            "the level came back at {level} against a truth of {}",
+            truth.slip_rate.get()
+        );
+        assert!(
+            (gain - truth.gain_share.get()).abs() < 0.005,
+            "the direction split came back at {gain} against a truth of 0.17"
+        );
+        assert!(
+            (decay - truth.step_decay.get()).abs() < 0.005,
+            "the fall-off came back at {decay} against a truth of 0.09"
+        );
+
+        // **Paired with the score at the truth, and this is the half that is not optional.** The
+        // spread says the four starts agreed; the score says they agreed on the right thing.
+        let at_truth = score_of(&model, &cells, &truth);
+        assert!(
+            fitted.log_likelihood.get() <= at_truth + 1e-6,
+            "the fitted point scores {} against {at_truth} at the truth, so this test is wrong \
+             rather than the estimator",
+            fitted.log_likelihood.get()
+        );
+        assert!(
+            fitted.headline_spread < 1.06,
+            "the four starts reached levels spanning {}-fold",
+            fitted.headline_spread
+        );
+    }
+
+    /// **What the search reports beside its answer, which is the half a consumer judges it on.**
+    /// Cheap enough for the suite — one sweep over a two-read entry space — because what it pins
+    /// is the reporting and not the recovery: every start recorded, best-scoring first, the spread
+    /// measured on the level, and how the search ended.
+    ///
+    /// **The sharp recovery control is
+    /// [`the_search_recovers_a_known_truth_and_no_start_beats_it`], which is ignored by default**
+    /// and takes nine minutes. This test would pass on a search that stopped after one sweep in
+    /// the wrong place; that one would not.
+    #[test]
+    fn every_start_is_reported_with_its_score_and_the_spread_across_them() {
+        let model = SsrNoiseModel::for_stratum(RepeatCount(1));
+        let truth = SlippageModel::try_new(0.0201, 0.17, 0.09).expect("three probabilities");
+        let diploid = ploidy(2);
+        let alleles = [(WholeRepeatOffset(0), 1.0)];
+        let cells = exact_entry_space(&model, &truth, &alleles, diploid, 2);
+
+        let starts = slippage_starts(0.03);
+        assert_eq!(starts.len(), 4);
+        // **Each start disagrees with the next about all three parameters at once**, which is the
+        // property the set exists for: five starts that disagreed about the headline number while
+        // sharing one guess at a nuisance axis returned a confident zero on the sibling path
+        // (`spec/parameter_prepass_ssr.md` §4.2).
+        for (earlier, later) in starts.iter().zip(starts.iter().skip(1)) {
+            assert_ne!(earlier.slip_rate.get(), later.slip_rate.get());
+            assert_ne!(earlier.gain_share.get(), later.gain_share.get());
+            assert_ne!(earlier.step_decay.get(), later.step_decay.get());
+        }
+
+        let fitted = fit_by_multistart(
+            &model,
+            &cells,
+            &starts,
+            // **Two golden-section steps an axis and one sweep**, which is all this test needs:
+            // it asks what the search *reports*, not where it lands. Each step is a whole climb
+            // over the stratum's 36 genotypes, so the cost is set here and nowhere else.
+            SearchPrecision {
+                tolerance: 0.05,
+                max_axis_steps: 2,
+                max_sweeps: 1,
+            },
+        );
+
+        assert_eq!(
+            fitted.starts.len(),
+            4,
+            "every start is reported, not just the winner"
+        );
+        for (better, worse) in fitted.starts.iter().zip(fitted.starts.iter().skip(1)) {
+            assert!(
+                better.log_likelihood >= worse.log_likelihood,
+                "the starts are not ordered best-scoring first"
+            );
+        }
+        assert_eq!(
+            fitted.best, fitted.starts[0].reached,
+            "the winner is the best-scoring start"
+        );
+        assert!(
+            (fitted.log_likelihood.get() - fitted.starts[0].log_likelihood.get()).abs() < 1e-9,
+            "the reported score is not the winner's"
+        );
+
+        // Every start began somewhere different, and the report says where.
+        let began: Vec<f64> = fitted
+            .starts
+            .iter()
+            .map(|start| start.from.slip_rate.get())
+            .collect();
+        for (earlier, later) in began.iter().zip(began.iter().skip(1)) {
+            assert_ne!(earlier, later);
+        }
+
+        // The spread is the highest-to-lowest ratio of the **level** across what the starts
+        // reached — a ratio, because the level spans orders of magnitude across a real ladder of
+        // strata.
+        let reached: Vec<f64> = fitted
+            .starts
+            .iter()
+            .map(|start| start.reached.slip_rate.get())
+            .collect();
+        let highest = reached.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lowest = reached.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            (fitted.headline_spread - highest / lowest).abs() < 1e-9,
+            "the spread reads {} where the levels reached span {highest} to {lowest}",
+            fitted.headline_spread
+        );
+
+        // One sweep is not enough to settle, and the search says so rather than presenting where
+        // it stopped as where it converged.
+        assert_eq!(fitted.termination.iterations, 1);
+    }
+
+    /// What one set of slippage parameters scores over the whole table, with the genotype
+    /// frequencies climbed at it — a search of one start and no sweeps, which is the cheapest way
+    /// to ask the question through exactly the code the search asks it through.
+    fn score_of(model: &SsrNoiseModel, cells: &[StratumCell], noise: &SlippageModel) -> f64 {
+        fit_by_multistart(
+            model,
+            cells,
+            std::slice::from_ref(noise),
+            SearchPrecision {
+                tolerance: 1e-5,
+                max_axis_steps: 0,
+                max_sweeps: 0,
+            },
+        )
+        .log_likelihood
+        .get()
     }
 
     /// **What the fit weighs a cell by is how many loci showed that shape — not how many reads
