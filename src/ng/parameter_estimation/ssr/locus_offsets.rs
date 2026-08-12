@@ -19,7 +19,7 @@ use crate::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservation
 use crate::ng::parameter_estimation::subsample::{SelectionWalk, seed_at};
 use crate::ng::types::{Bp, GenomeRegion, ReadGroupId, SsrPeriod};
 
-use super::stratum_table::LocusShape;
+use super::stratum_table::{BaseComparison, LocusShape};
 use super::{MAX_LOCUS_READS, OFFSET_BUCKETS, RepeatCount, Stratum, WholeRepeatOffset, bucket_of};
 
 /// Which stratum a locus belongs to, or why none does.
@@ -245,6 +245,83 @@ pub fn tally_of(locus: &SampleLocusObservations, read_group: ReadGroupId) -> Off
     }
 
     tally
+}
+
+/// How one read group's reads at one locus read against the tract they sit in: bases compared,
+/// and bases that differed.
+///
+/// **Each read is compared against the motif tiled to the length that read itself shows**, not
+/// to the reference tract's length — so a read that lost a *whole copy* is compared against a
+/// tract one copy shorter, and its mismatches are substitutions rather than the slip. That is
+/// the separation this function exists to make: the length channel scores *which offset* a read
+/// landed at, and this one scores *how its bases read* at that offset, and the two factorise
+/// exactly (`spec/parameter_prepass_ssr.md` §4.1).
+///
+/// **The separation is exact for a read whose length differs by whole copies, and not for the
+/// others** — worth stating, because the difference is charged to the rate this feeds. A read
+/// carrying a one-base indel *inside* the tract, which is the population the guard bucket holds,
+/// tiles out of phase from the indel onward: it is charged not one mismatch but about half the
+/// bases after it, where the same base lost at the tract's edge costs nothing. Such reads are
+/// 9 in 1,000 of the length-differing reads at a clean stratum and a third to a half of them in
+/// the two bands `GUARD_SHARE_LIMIT` exists to flag — so a stratum above that limit has a
+/// substitution rate that should not be read either, which is one more reason the diagnostic
+/// travels beside the numbers.
+///
+/// **It is an alignment, not a call.** Nothing here decides which allele a read carries or
+/// discards a read for disagreeing — that would put back the threshold-then-count bias step 4
+/// exists to remove.
+///
+/// **Its caveat travels with the emitted parameters**: a tract the reference does not tile
+/// perfectly — an interruption inside the repeat — charges those interior differences to the
+/// substitution rate, because this function has no way to tell an interruption from a misread
+/// base. `SsrSegment::purity_fraction()` is what makes that measurable per stratum. The
+/// alternative is to have step 3's aligner emit the count it already computes while scoring,
+/// which is better and touches another step; adopting it later changes this function's body and
+/// no signature (`arch/parameter_prepass_ssr.md` §2.3's `OPEN`).
+///
+/// **Complete witnesses only**, for the reason [`tally_of`] gives: a partial witness saw part of
+/// the tract, so the bases it shows are not that read's tract.
+///
+/// **Every complete witness, including the ones the read cap thinned away.** The cap exists to
+/// bound the space of *shapes* a table can hold; two running totals have no such problem, and
+/// counting only the drawn reads would throw away precision for nothing.
+#[must_use]
+pub fn base_comparison_of(
+    locus: &SampleLocusObservations,
+    read_group: ReadGroupId,
+) -> BaseComparison {
+    let LocusKind::Ssr(detail) = &locus.kind else {
+        return BaseComparison::try_new(0, 0).expect("no bases compared and none mismatched");
+    };
+    let motif = detail.motif.as_bytes();
+
+    let mut compared = 0u32;
+    let mut mismatched = 0u32;
+    for observation in &locus.observations {
+        if observation.read_group != read_group || observation.read_witness != ReadWitness::Complete
+        {
+            continue;
+        }
+        let differing = observation
+            .bases
+            .iter()
+            .zip(motif.iter().cycle())
+            .filter(|(shown, tiled)| shown != tiled)
+            .count();
+
+        // PANIC-FREE: both counts are of slices held in memory, so each fits a `u32` unless a
+        // single read showed four billion bases. The products and the running sums are bounded
+        // by the locus's reads times the longest length any of them showed — the generator caps
+        // a locus at `DEFAULT_SSR_MAX_READS_PER_LOCUS` reads by default, and even an uncapped
+        // locus has to hold its reads in memory to reach here.
+        let shown = u32::try_from(observation.bases.len()).expect("a read's length fits a u32");
+        let differing = u32::try_from(differing).expect("no more mismatches than bases shown");
+        compared += observation.num_obs * shown;
+        mismatched += observation.num_obs * differing;
+    }
+
+    BaseComparison::try_new(compared, mismatched)
+        .expect("a read cannot mismatch more bases than it showed")
 }
 
 /// The shape a locus enters a stratum's table as, and the depth it was thinned from if the
@@ -910,6 +987,178 @@ mod tests {
         generic.kind = LocusKind::Generic;
 
         assert_eq!(tally_of(&generic, ReadGroupId(0)), OffsetTally::default());
+    }
+
+    // -----------------------------------------------------------------
+    // How a read group's bases read against the tract.
+    // -----------------------------------------------------------------
+
+    /// **A perfect tract mismatches nothing, at every length its reads show.** Each read is
+    /// compared against the motif tiled to its *own* length, so a read that lost a copy is
+    /// compared against a tract one copy shorter and its slip costs it no mismatch — which is
+    /// the whole separation between the two channels.
+    #[test]
+    fn reads_that_tile_their_own_length_perfectly_mismatch_nothing() {
+        let locus = ssr_locus(
+            b"ATATATATATATATATATAT",
+            b"AT",
+            vec![
+                observation(b"ATATATATATATATATATAT", 5),
+                observation(b"ATATATATATATATAT", 3),
+                observation(b"ATATATATATATATATATATATAT", 2),
+            ],
+        );
+
+        let composition = base_comparison_of(&locus, ReadGroupId(0));
+
+        assert_eq!(
+            composition.bases_compared(),
+            5 * 20 + 3 * 16 + 2 * 24,
+            "every base of every read is compared, at the length that read shows"
+        );
+        assert_eq!(composition.bases_mismatched(), 0);
+    }
+
+    /// **One interior substitution is one mismatch per read**, whatever length the read shows —
+    /// a read that also slipped is still charged exactly the one base that differs.
+    #[test]
+    fn one_substitution_inside_the_tract_mismatches_once_in_every_read_that_carries_it() {
+        let locus = ssr_locus(
+            b"ATATATATATATATATATAT",
+            b"AT",
+            vec![
+                // One base changed, at the reference length and two copies short.
+                observation(b"ATATATATACATATATATAT", 4),
+                observation(b"ATATATATACATATAT", 3),
+            ],
+        );
+
+        let composition = base_comparison_of(&locus, ReadGroupId(0));
+
+        assert_eq!(composition.bases_compared(), 4 * 20 + 3 * 16);
+        assert_eq!(
+            composition.bases_mismatched(),
+            7,
+            "one base in each of seven reads"
+        );
+    }
+
+    /// **Only this read group's reads, and only its complete witnesses.** A partial witness's
+    /// bases are part of a tract rather than a tract, so comparing them against a tiled motif of
+    /// their own length would charge the missing part to the substitution rate.
+    #[test]
+    fn the_composition_counts_one_read_groups_complete_witnesses_and_nothing_else() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = ssr_locus(
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 4),
+                from_group(1, observation(b"ACACACACACACACACACAC", 6)),
+                partial_observation(b"ATATATATACATATATATAT", 5),
+            ],
+        );
+
+        let first = base_comparison_of(&locus, ReadGroupId(0));
+        assert_eq!(
+            first.bases_compared(),
+            80,
+            "four complete reads of twenty bases"
+        );
+        assert_eq!(first.bases_mismatched(), 0);
+
+        let second = base_comparison_of(&locus, ReadGroupId(1));
+        assert_eq!(second.bases_compared(), 120);
+        assert_eq!(
+            second.bases_mismatched(),
+            60,
+            "every second base of every read of that library differs"
+        );
+    }
+
+    /// **A mismatch past the reference tract's length is still a mismatch**, which is what
+    /// "tiled to the length the read shows" means — and the only case that can say it: for a
+    /// read *shorter* than the tract, tiling to the read and tiling to the reference agree, so
+    /// every other fixture here passes under either rule.
+    #[test]
+    fn a_mismatch_past_the_reference_length_is_still_counted() {
+        // A twenty-base reference; the read shows twenty-four bases, one of them changed at
+        // index 22 — four bases past where the reference tract ends.
+        let locus = ssr_locus(
+            b"ATATATATATATATATATAT",
+            b"AT",
+            vec![observation(b"ATATATATATATATATATATATCT", 2)],
+        );
+
+        let composition = base_comparison_of(&locus, ReadGroupId(0));
+
+        assert_eq!(composition.bases_compared(), 48);
+        assert_eq!(
+            composition.bases_mismatched(),
+            2,
+            "one base past the reference tract, in each of two reads"
+        );
+    }
+
+    /// **An interrupted reference tract charges its interruption to the substitution rate**,
+    /// because the comparison is against the tiled motif and not against the reference bases.
+    /// This is the caveat the doc says `purity_fraction()` makes measurable per stratum; a rule
+    /// comparing reads against the reference would report zero here and the caveat would be
+    /// false.
+    #[test]
+    fn an_interrupted_reference_charges_its_interruption_to_the_substitution_rate() {
+        let reference = b"ATATATATACATATATATAT";
+        let locus = ssr_locus(reference, b"AT", vec![observation(reference, 3)]);
+
+        let composition = base_comparison_of(&locus, ReadGroupId(0));
+
+        assert_eq!(composition.bases_compared(), 60);
+        assert_eq!(composition.bases_mismatched(), 3);
+    }
+
+    /// **A read that lost a base rather than a copy is charged out of phase**, and this pins the
+    /// size of it: the same base lost at the tract's edge costs nothing, while lost in the
+    /// middle it costs eleven of the read's nineteen bases. It is a real cost to a real
+    /// population — the reads the guard bucket holds — and it is why a stratum above
+    /// `GUARD_SHARE_LIMIT` has a substitution rate that should not be read either.
+    #[test]
+    fn a_read_carrying_an_interior_indel_is_charged_from_the_indel_onward() {
+        let reference = b"ATATATATATATATATATAT";
+
+        let at_the_edge = ssr_locus(
+            reference,
+            b"AT",
+            vec![observation(b"ATATATATATATATATATA", 1)],
+        );
+        assert_eq!(
+            base_comparison_of(&at_the_edge, ReadGroupId(0)).bases_mismatched(),
+            0,
+            "a base lost at the end leaves every remaining base in phase"
+        );
+
+        let in_the_middle = ssr_locus(
+            reference,
+            b"AT",
+            vec![observation(b"ATATATATTATATATATAT", 1)],
+        );
+        assert_eq!(
+            base_comparison_of(&in_the_middle, ReadGroupId(0)).bases_mismatched(),
+            11,
+            "from the lost base onward the read tiles out of phase"
+        );
+    }
+
+    /// A locus that is not one repeat tract has no motif to tile, so it compares nothing —
+    /// rather than comparing its reads against whatever the previous locus's motif was.
+    #[test]
+    fn a_locus_that_is_not_one_repeat_tract_compares_no_bases() {
+        let mut generic = ssr_locus(b"ATATATATAT", b"AT", vec![observation(b"ATATATATAT", 4)]);
+        generic.kind = LocusKind::Generic;
+
+        let composition = base_comparison_of(&generic, ReadGroupId(0));
+
+        assert_eq!(composition.bases_compared(), 0);
+        assert_eq!(composition.bases_mismatched(), 0);
     }
 
     // -----------------------------------------------------------------

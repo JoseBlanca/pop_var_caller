@@ -299,7 +299,7 @@ that does not compare two walks would ever show. *Oracle:* the same locus gives 
 every run and in every shard layout, and over many positions the kept bucket counts are
 hypergeometric in mean and variance. *Depends:* C2. *Source:* arch §2.1, spec §4.1.
 
-**C4. `composition_of` — bases compared and bases mismatched.**  ☐
+**C4. `composition_of` — bases compared and bases mismatched.**  ✅
 Compare each read's bases against the motif tiled to **the length that read shows**, so a mismatch is
 a substitution and not a slip. **This is an alignment, not a call**, so it does not reintroduce the
 threshold-then-count bias step 4 exists to remove. It is the answer that needs nothing upstream; the
@@ -311,7 +311,7 @@ charged to the substitution rate, which `SsrSegment::purity_fraction()`
 per stratum. Unit tests: a perfect tract mismatches nothing; a tract with one interior substitution
 mismatches once at every length the read shows. *Depends:* C1. *Source:* arch §2.3.
 
-**C5. `SsrAccumulators`, `add_locus`, `merge`, `adjustments`.**  ☐
+**C5. `SsrAccumulators`, `add_locus`, `merge`, `adjustments`.**  ✅
 One `StratumTable` per `(read group, stratum)`. `add_locus` **borrows** the locus and passes it on
 untouched, ignores a `kind` that is not `LocusKind::Ssr`, and tallies rather than repairs. **A locus
 covered by two read groups makes two entries and that is sound** — the genotype is drawn once for the

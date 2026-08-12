@@ -47,11 +47,18 @@ pub mod stratum_table;
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+use crate::ng::locus_generation::SampleLocusObservations;
 use crate::ng::parameter_estimation::Estimate;
+use crate::ng::parameter_estimation::generic::accumulators::PloidyMap;
+use crate::ng::parameter_estimation::ssr::locus_offsets::{
+    LocusStratum, base_comparison_of, shape_of, stratum_of, tally_of,
+};
 use crate::ng::parameter_estimation::ssr::slippage::SlippageModel;
+use crate::ng::parameter_estimation::ssr::stratum_table::StratumTable;
 use crate::ng::types::{DomainError, ErrorRate, ReadGroupId, SsrPeriod};
 
 pub use offset_bucket::{OFFSET_BUCKETS, OFFSET_HALF_RANGE, OffsetBucket, bucket_of};
@@ -675,6 +682,171 @@ pub enum SsrEstimationError {
     },
 }
 
+// ---------------------------------------------------------------------
+// The accumulator: one table per (read group, stratum), filled a locus
+// at a time.
+// ---------------------------------------------------------------------
+
+/// Step 4's STR front door: one [`StratumTable`] per `(read group, stratum)`, and the tally of
+/// everything this unit did to a locus other than enter it as it arrived.
+///
+/// **One per region shard**, merged when the shards are done. Merging is exact — every table's
+/// entries are integer counts and every counter is a plain sum — so a genome cut any way and
+/// merged in any order gives the tables one walk would have built. That is what the read cap's
+/// position-seeded draw is for: without it the two would differ by a few reads at each deep
+/// locus.
+///
+/// **No trait over it**, unlike the fitting seam: nothing generic drives an accumulator, and the
+/// walk knows which object it is filling (`arch/parameter_prepass_ssr.md` §5).
+pub struct SsrAccumulators {
+    by_stratum: BTreeMap<(ReadGroupId, Stratum), StratumTable>,
+    /// How many genome copies a locus sits on. Not read while accumulating — an entry is the
+    /// same whatever the ploidy — but carried here because the fits are keyed on the same
+    /// object and a merge must refuse two shards that were handed different maps.
+    ploidy: Arc<dyn PloidyMap>,
+    counts: SsrAccumulationCounts,
+}
+
+impl SsrAccumulators {
+    /// One accumulator, for one region shard.
+    #[must_use]
+    pub fn new(ploidy: Arc<dyn PloidyMap>) -> Self {
+        Self {
+            by_stratum: BTreeMap::new(),
+            ploidy,
+            counts: SsrAccumulationCounts::default(),
+        }
+    }
+
+    /// Add one locus.
+    ///
+    /// **Borrows it and passes it on untouched** — the caller keeps the locus and hands it to
+    /// whatever else reads the stream — and **tallies rather than repairs**: a locus this unit
+    /// cannot file is counted and skipped, never rounded into a stratum it does not belong to.
+    ///
+    /// A locus that is not one repeat tract is passed over in silence. One whose reference tract
+    /// is not a whole number of motif copies is counted in
+    /// [`loci_without_whole_repeat_reference`](SsrAccumulationCounts::loci_without_whole_repeat_reference),
+    /// which should read near zero and is a bug report against the classification that admitted
+    /// it if it does not.
+    ///
+    /// **A locus covered by two read groups makes one entry in each group's table, and that is
+    /// sound**: the genotype is drawn once for the locus and enters both through the same
+    /// mixture, so the product over them is a composite likelihood — consistent, and losing
+    /// precision rather than correctness. What must not be split is a locus's reads *within* one
+    /// read group, which is what keying an entry by locus prevents.
+    pub fn add_locus(&mut self, locus: &SampleLocusObservations) {
+        let stratum = match stratum_of(locus) {
+            LocusStratum::Stratified(stratum) => stratum,
+            LocusStratum::NotOneRepeatTract => return,
+            LocusStratum::WithoutWholeRepeatReference { .. } => {
+                self.counts.loci_without_whole_repeat_reference += 1;
+                return;
+            }
+        };
+
+        // Counted once for the locus rather than once per read group: it is a property of the
+        // locus, and the generator does not attribute those reads to a library.
+        self.counts.reads_without_observation += u64::from(locus.reads_without_observation);
+        if locus.reads_discarded_by_cap > 0 {
+            self.counts.loci_with_upstream_subsample += 1;
+        }
+
+        // The read groups this locus actually witnessed, in a fixed order, so that two shards
+        // walking the same locus build the same tables in the same sequence. Taken from the
+        // observations rather than from a declared list, because a list is a second place for a
+        // read group to be missing from.
+        let mut read_groups: SmallVec<[ReadGroupId; 2]> = locus
+            .observations
+            .iter()
+            .map(|observation| observation.read_group)
+            .collect();
+        read_groups.sort_unstable();
+        read_groups.dedup();
+
+        let mut cap_fired = false;
+        for read_group in read_groups {
+            let tally = tally_of(locus, read_group);
+            self.counts.reads_with_partial_witness += u64::from(tally.reads_with_partial_witness());
+
+            let Some(entered) = shape_of(tally, locus.region) else {
+                // This library witnessed no length here. The next one may still have.
+                continue;
+            };
+            cap_fired |= entered.subsampled_from().is_some();
+
+            self.by_stratum
+                .entry((read_group, stratum))
+                .or_default()
+                .add_locus(entered.shape(), base_comparison_of(locus, read_group));
+        }
+        // **Once for the locus, however many of its libraries were thinned**, because that is
+        // what the counter is named after and what a reader compares against the locus count. The
+        // cap itself fires per library — each library's reads are drawn from separately — so
+        // counting each firing would let a field called `loci_…` exceed the loci walked.
+        if cap_fired {
+            self.counts.loci_subsampled_to_cap += 1;
+        }
+    }
+
+    /// Combine a shard's tables and counters into these. Associative and exact.
+    ///
+    /// # Panics
+    ///
+    /// If the two shards were handed different ploidy maps. Their entries would then have been
+    /// built for different sets of genotypes, and pooling them would score a locus against the
+    /// wrong set — the same guard the SNP/indel path's merge carries, and for the same reason.
+    pub fn merge(&mut self, other: Self) {
+        // Pointer identity rather than equality, as the sibling path's merge does: a shard's
+        // accumulator is built from one shared map, so two shards that disagree here were driven
+        // by different configurations rather than by two equal maps.
+        assert!(
+            Arc::ptr_eq(&self.ploidy, &other.ploidy),
+            "these two shards were handed different ploidy maps, so the fits over their merged \
+             tables would score a locus against a set of genotypes only one of them was built for"
+        );
+
+        for (key, table) in other.by_stratum {
+            match self.by_stratum.get_mut(&key) {
+                Some(mine) => mine.merge(&table),
+                None => {
+                    self.by_stratum.insert(key, table);
+                }
+            }
+        }
+        self.counts.merge(&other.counts);
+    }
+
+    /// Every stratum's evidence, in read-group and then stratum order — which is the order the
+    /// fits walk it in, and a property of the contents rather than of when a locus arrived.
+    ///
+    /// An iterator rather than the map itself, so that how the tables are stored stays this
+    /// unit's business: the same reason `StratumTable` hands out its entries as a list.
+    pub fn strata(&self) -> impl Iterator<Item = (ReadGroupId, Stratum, &StratumTable)> {
+        self.by_stratum
+            .iter()
+            .map(|(&(read_group, stratum), table)| (read_group, stratum, table))
+    }
+
+    /// One stratum's evidence for one read group, or `None` where that pair holds no loci.
+    #[must_use]
+    pub fn table_for(&self, read_group: ReadGroupId, stratum: Stratum) -> Option<&StratumTable> {
+        self.by_stratum.get(&(read_group, stratum))
+    }
+
+    /// How many `(read group, stratum)` pairs hold any loci at all.
+    #[must_use]
+    pub fn stratum_count(&self) -> usize {
+        self.by_stratum.len()
+    }
+
+    /// Everything this unit did to a locus other than enter it as it arrived.
+    #[must_use]
+    pub fn adjustments(&self) -> &SsrAccumulationCounts {
+        &self.counts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +1119,430 @@ mod tests {
             summary.worst_guard_share.map(|(s, _)| s),
             summary.worst_unexplained_locus_share.map(|(s, _)| s)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The accumulator.
+    // -----------------------------------------------------------------
+
+    use crate::ng::locus_generation::{
+        LocusKind, LocusLen, ReadWitness, SequenceObservation, SsrDetail,
+    };
+    use crate::ng::parameter_estimation::generic::accumulators::ConstantPloidy;
+    use crate::ng::types::{ContigId, GenomeRegion, Motif, Ploidy, Position};
+
+    fn diploid() -> Arc<dyn PloidyMap> {
+        Arc::new(ConstantPloidy(
+            Ploidy::try_new(2).expect("two genome copies"),
+        ))
+    }
+
+    fn observation(bases: &[u8], group: u32, num_obs: u32) -> SequenceObservation {
+        SequenceObservation {
+            bases: Box::from(bases),
+            read_witness: ReadWitness::Complete,
+            read_group: ReadGroupId(group),
+            num_obs,
+            num_fwd: num_obs / 2,
+            q_sum: -10.0,
+            mapq_sum: 60 * num_obs,
+            mapq_sum_sq: 3_600 * u64::from(num_obs),
+            placed_left: 0,
+            chain_ids: Vec::new(),
+        }
+    }
+
+    /// A tract at `start`, tiled by `motif`, carrying whatever reads a test wants.
+    fn tract(
+        start: u64,
+        reference_bases: &[u8],
+        motif: &[u8],
+        observations: Vec<SequenceObservation>,
+    ) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(start),
+                end: Position(start + reference_bases.len().max(1) as u64 - 1),
+            },
+            reference_bases: Box::from(reference_bases),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Ssr(SsrDetail {
+                motif: Motif::new(motif).expect("a motif inside the STR period range"),
+                left_flank: Box::from(&b"CCCGGG"[..]),
+                right_flank: Box::from(&b"TTTAAA"[..]),
+            }),
+        }
+    }
+
+    fn dinucleotide(start: u64, reads_at_reference: u32) -> SampleLocusObservations {
+        let reference = b"ATATATATATATATATATAT";
+        tract(
+            start,
+            reference,
+            b"AT",
+            vec![observation(reference, 0, reads_at_reference)],
+        )
+    }
+
+    /// One stratum's table, for a test that knows it is there.
+    fn table(
+        accumulators: &SsrAccumulators,
+        group: u32,
+        period_bases: u8,
+        repeats: u32,
+    ) -> &StratumTable {
+        accumulators
+            .table_for(ReadGroupId(group), stratum(period_bases, repeats))
+            .expect("a table for that read group and stratum")
+    }
+
+    /// **Loci reduce to entries, filed by read group and stratum**, and two loci of the same
+    /// period and reference repeat count land in one table however far apart they sit.
+    #[test]
+    fn loci_of_the_same_stratum_land_in_one_table() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&dinucleotide(1_000, 5));
+        accumulators.add_locus(&dinucleotide(9_000, 5));
+        accumulators.add_locus(&tract(
+            2_000,
+            b"AAAAAAAA",
+            b"A",
+            vec![observation(b"AAAAAAAA", 0, 4)],
+        ));
+
+        assert_eq!(
+            accumulators.stratum_count(),
+            2,
+            "two strata, not two loci and not one"
+        );
+        assert_eq!(table(&accumulators, 0, 2, 10).loci(), 2);
+        assert_eq!(table(&accumulators, 0, 1, 8).loci(), 1);
+    }
+
+    /// **A locus covered by two libraries makes one entry in each**, because slippage is a
+    /// property of the chemistry: pooling them would fit one stutter model to two.
+    #[test]
+    fn a_locus_two_libraries_witnessed_makes_one_entry_in_each_of_their_tables() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 0, 5),
+                observation(b"ATATATATATATATATAT", 1, 4),
+            ],
+        );
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&locus);
+
+        assert_eq!(accumulators.stratum_count(), 2);
+        assert_eq!(table(&accumulators, 0, 2, 10).loci(), 1);
+        assert_eq!(table(&accumulators, 1, 2, 10).loci(), 1);
+        assert_ne!(
+            table(&accumulators, 0, 2, 10).entries(),
+            table(&accumulators, 1, 2, 10).entries(),
+            "the two libraries saw different lengths, so their entries differ"
+        );
+    }
+
+    /// **A locus this unit cannot file is counted and skipped, never rounded.** A locus of
+    /// another kind is passed over in silence; a tract whose reference length is not a whole
+    /// number of copies is a delimiting fault upstream and is reported.
+    #[test]
+    fn a_locus_with_no_stratum_is_counted_or_passed_over_but_never_entered() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+
+        let mut generic = dinucleotide(1_000, 5);
+        generic.kind = LocusKind::Generic;
+        accumulators.add_locus(&generic);
+
+        accumulators.add_locus(&tract(
+            2_000,
+            b"CAGCAGCAGCAGC",
+            b"CAG",
+            vec![observation(b"CAGCAGCAGCAGC", 0, 5)],
+        ));
+
+        assert_eq!(accumulators.stratum_count(), 0);
+        assert_eq!(
+            accumulators
+                .adjustments()
+                .loci_without_whole_repeat_reference,
+            1,
+            "the fractional tract is reported and the generic locus is not"
+        );
+    }
+
+    /// The adjustments are what a run reads to tell a shallow sample from a capped one, and each
+    /// counts a different thing: loci the cap thinned, loci the generator had already thinned,
+    /// reads that witnessed nothing, and reads whose witness was partial.
+    #[test]
+    fn the_adjustments_count_what_was_done_to_each_locus() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut deep = tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 0, 200),
+                SequenceObservation {
+                    read_witness: ReadWitness::from_left(8, LocusLen::from_positions(20))
+                        .expect("a run of eight positions"),
+                    ..observation(b"ATATATAT", 0, 7)
+                },
+            ],
+        );
+        deep.reads_without_observation = 3;
+        deep.reads_discarded_by_cap = 11;
+        // Both thinning counters read one here, so this fixture cannot tell them apart; the
+        // fixture that can is `the_locus_counters_count_loci_however_many_libraries_covered_them`.
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&deep);
+        accumulators.add_locus(&dinucleotide(2_000, 4));
+
+        assert_eq!(
+            *accumulators.adjustments(),
+            SsrAccumulationCounts {
+                loci_subsampled_to_cap: 1,
+                loci_with_upstream_subsample: 1,
+                reads_without_observation: 3,
+                reads_with_partial_witness: 7,
+                loci_without_whole_repeat_reference: 0,
+            }
+        );
+    }
+
+    /// **A genome cut any way and merged in any order gives the tables one walk would have
+    /// built** — entry for entry and counter for counter. This is the property the whole
+    /// sharded design rests on, and it is an equality rather than a tolerance because every
+    /// number in a table is an integer count and the read cap's draw is seeded from the locus's
+    /// own position rather than from the shard's.
+    #[test]
+    fn a_walk_cut_into_shards_and_merged_equals_the_uncut_walk() {
+        let reference = b"ATATATATATATATATATAT";
+        let loci: Vec<SampleLocusObservations> = (0..9u64)
+            .map(|at| {
+                let start = 1_000 + at * 500;
+                // Deep enough that the read cap fires, so the draw is under test rather than
+                // bypassed: below the cap every implementation agrees.
+                tract(
+                    start,
+                    reference,
+                    b"AT",
+                    vec![
+                        observation(reference, 0, 40 + u32::try_from(at).expect("small")),
+                        observation(b"ATATATATATATATATAT", u32::from(at % 2 == 0), 30),
+                    ],
+                )
+            })
+            .collect();
+
+        // A mononucleotide stratum at one end only, so a cut can leave it wholly inside one
+        // shard — which is what makes the merge's adopt-a-new-key branch run at all.
+        let mut loci = loci;
+        loci.push(tract(
+            9_000,
+            b"AAAAAAAAAAAAAAAA",
+            b"A",
+            vec![observation(b"AAAAAAAAAAAAAAAA", 0, 40)],
+        ));
+
+        let mut whole = SsrAccumulators::new(diploid());
+        for locus in &loci {
+            whole.add_locus(locus);
+        }
+
+        let ploidy = diploid();
+        for cut in [1usize, 4, 8] {
+            let (left, right) = loci.split_at(cut);
+            let mut first = SsrAccumulators::new(Arc::clone(&ploidy));
+            for locus in left {
+                first.add_locus(locus);
+            }
+            let mut second = SsrAccumulators::new(Arc::clone(&ploidy));
+            for locus in right {
+                second.add_locus(locus);
+            }
+            first.merge(second);
+
+            assert_eq!(
+                first.stratum_count(),
+                whole.stratum_count(),
+                "cut after {cut} loci"
+            );
+            for (read_group, stratum, table) in whole.strata() {
+                assert_eq!(
+                    first.table_for(read_group, stratum),
+                    Some(table),
+                    "cut after {cut} loci, at read group {read_group}, {stratum}"
+                );
+            }
+            assert_eq!(
+                first.adjustments(),
+                whole.adjustments(),
+                "cut after {cut} loci"
+            );
+        }
+    }
+
+    /// **A stratum only one shard saw survives the merge.** The receiving accumulator holds no
+    /// table under that key, so the merge has to adopt the shard's rather than pass it over —
+    /// the branch a fixture whose every shard sees every stratum never reaches. Strata are
+    /// unevenly spread along a genome, so what this protects is exactly the rarest ones: the
+    /// stratum a single shard holds is the one nearest `MIN_LOCI_TO_FIT`.
+    #[test]
+    fn a_stratum_only_one_shard_saw_survives_the_merge() {
+        let ploidy = diploid();
+        let mut first = SsrAccumulators::new(Arc::clone(&ploidy));
+        first.add_locus(&dinucleotide(1_000, 5));
+
+        let mut second = SsrAccumulators::new(Arc::clone(&ploidy));
+        second.add_locus(&tract(
+            2_000,
+            b"AAAAAAAA",
+            b"A",
+            vec![observation(b"AAAAAAAA", 0, 4)],
+        ));
+
+        first.merge(second);
+
+        assert_eq!(first.stratum_count(), 2);
+        assert_eq!(table(&first, 0, 2, 10).loci(), 1);
+        assert_eq!(table(&first, 0, 1, 8).loci(), 1);
+    }
+
+    /// **Each table holds its own read group's bases**, which is the one thing the entries
+    /// cannot show: a shape carries no base counts, so a table handed another library's
+    /// comparison looks identical until its substitution rate is read. Under a mix-up every
+    /// library's rate becomes the first library's; under a dropped comparison every stratum in
+    /// the genome reports no rate at all.
+    #[test]
+    fn each_read_groups_table_holds_that_read_groups_bases() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 0, 4),
+                observation(b"ACACACACACACACACACAC", 1, 6),
+            ],
+        );
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&locus);
+
+        let clean = table(&accumulators, 0, 2, 10)
+            .substitution_rate()
+            .expect("bases were compared");
+        let noisy = table(&accumulators, 1, 2, 10)
+            .substitution_rate()
+            .expect("bases were compared");
+
+        assert!(clean.get().abs() < 1e-12, "{clean:?}");
+        assert!(
+            (noisy.get() - 0.5).abs() < 1e-12,
+            "every second base of that library's reads differs: {noisy:?}"
+        );
+    }
+
+    /// **Which counters count loci, and which count a locus once per library.** Reads that
+    /// witnessed nothing, and a subsample the generator had already made, are properties of the
+    /// locus and are counted once however many libraries covered it. The read cap fires per
+    /// library — each library's reads are drawn from separately — but the counter is named after
+    /// loci and counts them, or a field called `loci_…` could exceed the loci walked.
+    ///
+    /// The two thinning counters are given **different** values on purpose: they mean opposite
+    /// things — this unit's cap against the generator's own reservoir — and a fixture where both
+    /// read one passes with them exchanged.
+    #[test]
+    fn the_locus_counters_count_loci_however_many_libraries_covered_them() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut two_libraries = tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![
+                observation(reference, 0, 40),
+                observation(b"ATATATATATATATATAT", 0, 31),
+                observation(reference, 1, 50),
+                observation(b"ATATATATATATATATAT", 1, 23),
+            ],
+        );
+        two_libraries.reads_without_observation = 3;
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&two_libraries);
+        // A second locus the generator had already thinned, and this unit's cap did not.
+        let mut upstream_thinned = dinucleotide(2_000, 4);
+        upstream_thinned.reads_discarded_by_cap = 11;
+        accumulators.add_locus(&upstream_thinned);
+        accumulators.add_locus(&dinucleotide(3_000, 5));
+
+        assert_eq!(
+            *accumulators.adjustments(),
+            SsrAccumulationCounts {
+                loci_subsampled_to_cap: 1,
+                loci_with_upstream_subsample: 1,
+                reads_without_observation: 3,
+                reads_with_partial_witness: 0,
+                loci_without_whole_repeat_reference: 0,
+            },
+            "one locus thinned by this unit, a different one thinned by the generator, and \
+             three reads that witnessed nothing — each counted once for the locus"
+        );
+    }
+
+    /// A library that witnessed no length at a locus does not take the other libraries' evidence
+    /// with it: the loop passes over that library and files the rest.
+    #[test]
+    fn a_library_that_witnessed_nothing_does_not_cost_the_others_their_entry() {
+        let reference = b"ATATATATATATATATATAT";
+        let locus = tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![
+                SequenceObservation {
+                    read_witness: ReadWitness::from_left(8, LocusLen::from_positions(20))
+                        .expect("a run of eight positions"),
+                    ..observation(b"ATATATAT", 0, 5)
+                },
+                observation(reference, 1, 6),
+            ],
+        );
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&locus);
+
+        assert_eq!(
+            accumulators.stratum_count(),
+            1,
+            "only the second library files"
+        );
+        assert_eq!(table(&accumulators, 1, 2, 10).loci(), 1);
+        assert_eq!(accumulators.adjustments().reads_with_partial_witness, 5);
+    }
+
+    /// **Two shards handed different ploidy maps cannot be merged**: their tables would be
+    /// fitted against different sets of genotypes, and the fit would score a locus against a set
+    /// only one of them was built for.
+    #[test]
+    #[should_panic(expected = "different ploidy maps")]
+    fn merging_two_shards_built_on_different_ploidy_maps_is_refused() {
+        let mut first = SsrAccumulators::new(diploid());
+        first.add_locus(&dinucleotide(1_000, 5));
+
+        let mut second = SsrAccumulators::new(diploid());
+        second.add_locus(&dinucleotide(2_000, 5));
+
+        first.merge(second);
     }
 
     /// A sharded walk must report the same adjustments as a single-threaded one, so the
