@@ -267,73 +267,130 @@ pub fn allele_support(reference_repeats: RepeatCount) -> Vec<WholeRepeatOffset> 
 // (`spec/parameter_prepass_ssr.md` §4.4).
 // ---------------------------------------------------------------------
 
-/// One allele pair the fit placed mass on, and how much: a genotype and its frequency.
+/// One genotype the fit placed mass on, and how much: the allele lengths a locus of this stratum
+/// carries, and the share of its loci that carry them.
 ///
-/// The two alleles are **unordered** — a locus carrying a reference-length allele and one a
-/// repeat short is the same genotype either way round — and the convention that keeps one
-/// spelling per genotype is that `shorter <= longer`.
+/// **As many alleles as the locus has genome copies, not two.** An earlier version of this type
+/// held a *pair*, which fits a diploid genome and nothing else — while everything under it is
+/// written for any ploidy: the scoring rule walks `C(A + P − 1, P)` unordered tuples of `A` allele
+/// lengths, which is 91 at thirteen lengths and two copies and 1,820 at four. A tetraploid stratum
+/// would have fitted perfectly and then had no way to report what it fitted (owner's call,
+/// 2026-08-12).
 ///
-/// **Named fields rather than the tuple the architecture sketches**, for the reason
-/// `fitting/`'s own `WeightedCell` replaced a three-member tuple: nothing in
-/// `(WholeRepeatOffset, WholeRepeatOffset, f64)` says which member is which, and two of the
-/// three have the same type.
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub struct AllelePairFrequency {
-    /// The shorter of the two alleles, as an offset from the reference tract length.
-    shorter: WholeRepeatOffset,
-    /// The longer of the two. Equal to `shorter` at a homozygous genotype.
-    longer: WholeRepeatOffset,
-    /// The share of the stratum's loci the fit gives this pair.
+/// The alleles are **unordered** — a locus carrying the reference length and one a repeat short is
+/// the same genotype either way round — and the convention that keeps one spelling per genotype is
+/// that they are held in ascending order, which is also the order
+/// [`SsrNoiseModel::for_each_genotype`](slippage::SsrNoiseModel::for_each_genotype) emits them in.
+///
+/// **Named fields rather than the tuple the architecture sketches**, for the reason `fitting/`'s
+/// own `WeightedCell` replaced a three-member tuple: nothing in a tuple says which member is
+/// which, and the alleles all have the same type.
+#[derive(Clone, PartialEq, Debug)]
+pub struct GenotypeFrequency {
+    /// The allele lengths this genotype carries, as offsets from the reference tract length,
+    /// **ascending**, one per genome copy.
+    alleles: SmallVec<[WholeRepeatOffset; 2]>,
+    /// The share of the stratum's loci the fit gives this genotype.
     frequency: f64,
 }
 
-impl AllelePairFrequency {
-    /// The only constructor, and it **establishes the unordered convention rather than
-    /// trusting it**: the two alleles are sorted, so one genotype has one spelling however
-    /// the caller happened to hold it. Without that, a fit emitting `(-1, 0)` and one
-    /// emitting `(0, -1)` would describe the same genotype twice and the frequencies would
-    /// not sum to one.
+impl GenotypeFrequency {
+    /// The only constructor, and it **establishes the unordered convention rather than trusting
+    /// it**: the alleles are sorted, so one genotype has one spelling however the caller happened
+    /// to hold it. Without that, a fit emitting `(-1, 0)` and one emitting `(0, -1)` would
+    /// describe the same genotype twice and the frequencies would not sum to one.
+    ///
+    /// # Panics
+    ///
+    /// If `alleles` is empty. A genotype of no alleles is not a locus on zero chromosomes, it is a
+    /// caller that lost the ploidy on the way here — and it would sort and compare equal to every
+    /// other empty genotype, so a table keyed on it would collapse.
     #[must_use]
-    pub fn new(one: WholeRepeatOffset, other: WholeRepeatOffset, frequency: f64) -> Self {
-        let (shorter, longer) = if one <= other {
-            (one, other)
-        } else {
-            (other, one)
-        };
-        Self {
-            shorter,
-            longer,
-            frequency,
-        }
+    pub fn new(alleles: impl IntoIterator<Item = WholeRepeatOffset>, frequency: f64) -> Self {
+        let mut alleles: SmallVec<[WholeRepeatOffset; 2]> = alleles.into_iter().collect();
+        assert!(
+            !alleles.is_empty(),
+            "a genotype carries one allele per genome copy, and a locus sits on at least one"
+        );
+        alleles.sort_unstable();
+        Self { alleles, frequency }
     }
 
-    /// The shorter of the two alleles.
+    /// The allele lengths this genotype carries, ascending — one per genome copy.
     #[inline]
     #[must_use]
-    pub fn shorter(self) -> WholeRepeatOffset {
-        self.shorter
+    pub fn alleles(&self) -> &[WholeRepeatOffset] {
+        &self.alleles
     }
 
-    /// The longer of the two — equal to [`Self::shorter`] at a homozygous genotype.
+    /// How many genome copies this genotype is over — its ploidy.
     #[inline]
     #[must_use]
-    pub fn longer(self) -> WholeRepeatOffset {
-        self.longer
+    pub fn copies(&self) -> usize {
+        self.alleles.len()
     }
 
-    /// The share of the stratum's loci the fit gives this pair.
+    /// The share of the stratum's loci the fit gives this genotype.
     #[inline]
     #[must_use]
-    pub fn frequency(self) -> f64 {
+    pub fn frequency(&self) -> f64 {
         self.frequency
     }
 
-    /// Whether both alleles are the same length — a homozygous genotype.
+    /// Whether every copy carries the same length — a homozygous genotype.
+    ///
+    /// **At any ploidy**, which the pair this replaced could not say: a tetraploid locus is
+    /// homozygous when all four agree, and `alleles[0] == alleles[1]` would have called
+    /// `(0, 0, −1, −1)` homozygous.
     #[inline]
     #[must_use]
-    pub fn is_homozygous(self) -> bool {
-        self.shorter == self.longer
+    pub fn is_homozygous(&self) -> bool {
+        self.alleles
+            .first()
+            .is_some_and(|first| self.alleles.iter().all(|allele| allele == first))
     }
+}
+
+/// **Turn a fit's bare frequencies into the genotypes they are over** — the one place that walk
+/// happens outside the scoring rule.
+///
+/// The frequencies come back from the search as a flat vector whose order is
+/// [`SsrNoiseModel::for_each_genotype`](slippage::SsrNoiseModel::for_each_genotype)'s, which is why
+/// that method is public: re-deriving the walk in another module is how two orders that disagree
+/// get written.
+///
+/// # Panics
+///
+/// If the fit's frequency count does not match the number of genotypes its own allele support and
+/// `ploidy` make. That is a fit assembled from parts that do not belong together — the support of
+/// one stratum with the frequencies of another — and the alternative to a panic is a report whose
+/// genotypes are silently shifted against their frequencies.
+#[must_use]
+pub fn genotypes_of(fit: &StratumSlippageFit, ploidy: Ploidy) -> Vec<GenotypeFrequency> {
+    let model = fit.noise_model();
+    let support = model.allele_support();
+    let mut genotypes = Vec::with_capacity(fit.genotype_frequencies.len());
+    model.for_each_genotype(ploidy, |alleles| {
+        let frequency = fit
+            .genotype_frequencies
+            .get(genotypes.len())
+            .copied()
+            .unwrap_or(f64::NAN);
+        genotypes.push(GenotypeFrequency::new(
+            alleles.iter().map(|&at| support[at]),
+            frequency,
+        ));
+    });
+    assert_eq!(
+        genotypes.len(),
+        fit.genotype_frequencies.len(),
+        "the fit holds {} frequencies over a support of {} allele lengths at ploidy {ploidy}, \
+         which makes {} genotypes",
+        fit.genotype_frequencies.len(),
+        support.len(),
+        genotypes.len()
+    );
+    genotypes
 }
 
 /// Where one of the search's starting points began, where it ended, and what it scored.
@@ -390,9 +447,10 @@ pub struct StratumFit {
     /// (`spec/parameter_prepass_ssr.md` §1.1, §4.5).
     pub substitution: Estimate<ErrorRate>,
     /// The allele-length distribution the fit weighed the genotype against, one entry per
-    /// unordered pair. Emitted because it is what a reader needs when a slippage rate looks
+    /// unordered tuple of allele lengths — **one per genome copy, at whatever ploidy the locus
+    /// sits on**, not a pair. Emitted because it is what a reader needs when a slippage rate looks
     /// wrong, and because the cohort gather has a use for it.
-    pub genotypes: Vec<AllelePairFrequency>,
+    pub genotypes: Vec<GenotypeFrequency>,
     /// Of the reads that differed from the **reference tract length**, the share that did so
     /// by something other than a whole number of copies. Above [`GUARD_SHARE_LIMIT`] this
     /// model does not describe the stratum, and its fitted slippage is mostly mis-modelled
@@ -1006,15 +1064,16 @@ pub struct StratumSlippageFit {
     /// **Kept as bare frequencies here** rather than as allele pairs: the walk is over `P`-tuples
     /// at ploidy `P`, and a pair is only the diploid case of one.
     pub genotype_frequencies: Vec<f64>,
-    /// The allele lengths those frequencies are over, ascending, as offsets from the reference
-    /// tract length.
+    /// The reference repeat count the noise model was built from — **which is not always the
+    /// stratum's own**, and that is why it is carried.
     ///
-    /// **Carried rather than left to be rebuilt from the stratum**, because after a merge the two
-    /// are not the same answer: the monotonicity walk pools two neighbouring repeat counts and
-    /// refits with the model of the **lower** one, so a consumer rebuilding the support from the
-    /// key would index the frequencies by a support two lengths wider than the one they were
-    /// fitted over.
-    pub allele_support: SmallVec<[WholeRepeatOffset; 13]>,
+    /// The allele lengths the frequencies above are indexed by follow from it, clipped at the low
+    /// end because a tract of four copies cannot carry an allele six copies shorter. After a merge
+    /// the model is built from the **lowest** repeat count in the pooled set, so a consumer
+    /// rebuilding the support from the key would index the frequencies by a support two lengths
+    /// wider than the one they were fitted over. Read it through
+    /// [`Self::noise_model`] rather than rebuilding the clip by hand.
+    pub model_repeats: RepeatCount,
     /// What [`Self::model`] scored, as a natural logarithm.
     pub log_likelihood: f64,
     /// Every starting point, best-scoring first — the diagnostic several starts exist to produce.
@@ -1065,6 +1124,16 @@ pub struct StratumSlippageFit {
     pub scored_reads: u64,
     /// How many loci stood behind the fit.
     pub loci: u64,
+}
+
+impl StratumSlippageFit {
+    /// The noise model this fit's genotype frequencies are over — built from
+    /// [`Self::model_repeats`], so it carries the same allele lengths the search scored against
+    /// even where a merge moved them.
+    #[must_use]
+    pub fn noise_model(&self) -> SsrNoiseModel {
+        SsrNoiseModel::for_stratum(self.model_repeats)
+    }
 }
 
 /// **Fit one stratum's three slippage parameters from its own loci**, searching from four
@@ -1139,7 +1208,7 @@ pub fn fit_slippage(
     Some(StratumSlippageFit {
         model: fitted.best,
         genotype_frequencies,
-        allele_support: SmallVec::from_slice(model.allele_support()),
+        model_repeats: stratum.repeats,
         log_likelihood: fitted.log_likelihood.get(),
         starts_tried: fitted
             .starts
@@ -1966,9 +2035,8 @@ mod tests {
             stratum: here,
             slippage: fitted_here(a_slippage(0.00091), 500_000),
             substitution: fitted_here(ErrorRate::try_new(0.003).unwrap(), 500_000),
-            genotypes: vec![AllelePairFrequency::new(
-                WholeRepeatOffset(0),
-                WholeRepeatOffset(0),
+            genotypes: vec![GenotypeFrequency::new(
+                [WholeRepeatOffset(0), WholeRepeatOffset(0)],
                 1.0,
             )],
             not_whole_repeat_share: 0.02,
@@ -2038,23 +2106,75 @@ mod tests {
         assert!(empty.strata_merged.is_empty());
     }
 
-    /// **One genotype has one spelling**, whichever way round the fit held its two alleles —
-    /// otherwise the same pair appears twice in a stratum's frequencies and they no longer sum
-    /// to one.
+    /// **One genotype has one spelling**, whichever order the fit held its alleles in — otherwise
+    /// the same genotype appears twice in a stratum's frequencies and they no longer sum to one.
     #[test]
-    fn an_allele_pair_orders_its_two_alleles_however_it_was_given_them() {
-        let one_way = AllelePairFrequency::new(WholeRepeatOffset(-1), WholeRepeatOffset(2), 0.25);
-        let other_way = AllelePairFrequency::new(WholeRepeatOffset(2), WholeRepeatOffset(-1), 0.25);
+    fn a_genotype_orders_its_alleles_however_it_was_given_them() {
+        let one_way = GenotypeFrequency::new([WholeRepeatOffset(-1), WholeRepeatOffset(2)], 0.25);
+        let other_way = GenotypeFrequency::new([WholeRepeatOffset(2), WholeRepeatOffset(-1)], 0.25);
 
         assert_eq!(one_way, other_way);
-        assert_eq!(one_way.shorter(), WholeRepeatOffset(-1));
-        assert_eq!(one_way.longer(), WholeRepeatOffset(2));
+        assert_eq!(
+            one_way.alleles(),
+            &[WholeRepeatOffset(-1), WholeRepeatOffset(2)]
+        );
+        assert_eq!(one_way.copies(), 2);
         assert_eq!(one_way.frequency(), 0.25);
         assert!(!one_way.is_homozygous());
 
-        let homozygous = AllelePairFrequency::new(WholeRepeatOffset(3), WholeRepeatOffset(3), 0.5);
+        let homozygous = GenotypeFrequency::new([WholeRepeatOffset(3), WholeRepeatOffset(3)], 0.5);
         assert!(homozygous.is_homozygous());
-        assert_eq!(homozygous.shorter(), homozygous.longer());
+    }
+
+    /// **A genotype carries one allele per genome copy, at any ploidy** — which is the whole point
+    /// of widening this off a pair. A tetraploid genotype holds four lengths, sorts them, and
+    /// answers *homozygous* only when all four agree: the pair this replaced could compare the
+    /// first two and call `(0, 0, −1, −1)` homozygous.
+    #[test]
+    fn a_genotype_holds_one_allele_per_genome_copy_at_any_ploidy() {
+        let tetraploid = GenotypeFrequency::new(
+            [
+                WholeRepeatOffset(-1),
+                WholeRepeatOffset(0),
+                WholeRepeatOffset(-1),
+                WholeRepeatOffset(0),
+            ],
+            0.1,
+        );
+        assert_eq!(tetraploid.copies(), 4);
+        assert_eq!(
+            tetraploid.alleles(),
+            &[
+                WholeRepeatOffset(-1),
+                WholeRepeatOffset(-1),
+                WholeRepeatOffset(0),
+                WholeRepeatOffset(0)
+            ],
+            "sorted, so one genotype has one spelling"
+        );
+        assert!(
+            !tetraploid.is_homozygous(),
+            "two copies of each of two lengths is not homozygous"
+        );
+
+        let all_four_agree = GenotypeFrequency::new([WholeRepeatOffset(2); 4], 0.1);
+        assert!(all_four_agree.is_homozygous());
+
+        let haploid = GenotypeFrequency::new([WholeRepeatOffset(-3)], 0.1);
+        assert_eq!(haploid.copies(), 1);
+        assert!(
+            haploid.is_homozygous(),
+            "one copy agrees with itself, which is what a haploid locus is"
+        );
+    }
+
+    /// **A genotype of no alleles is refused rather than stored.** It is not a locus on zero
+    /// chromosomes — [`Ploidy`] makes that unrepresentable — it is a caller that lost the ploidy
+    /// on the way here, and every such genotype would sort and compare equal to every other.
+    #[test]
+    #[should_panic(expected = "one allele per genome copy")]
+    fn a_genotype_with_no_alleles_is_refused() {
+        let _ = GenotypeFrequency::new([], 1.0);
     }
 
     /// **The guard share and the unexplained-locus share answer different questions**, so the
@@ -3286,12 +3406,79 @@ mod tests {
         );
     }
 
+    /// **The frequencies read back as genotypes in the order they were fitted in, at every
+    /// ploidy** — including the tetraploid one the pair this replaced could not express at all.
+    ///
+    /// **Each frequency is set to its own position**, which is what pins the alignment: a walk
+    /// that emitted the genotypes in any other order, or that started one place off, would report
+    /// every genotype against another genotype's frequency and nothing about the values would
+    /// look wrong.
+    #[test]
+    fn the_frequencies_read_back_as_genotypes_in_the_order_they_were_fitted() {
+        for (copies, expected) in [(1u8, 13usize), (2, 91), (4, 1_820)] {
+            let ploidy = Ploidy::try_new(copies).expect("a ploidy in range");
+            let fit = StratumSlippageFit {
+                genotype_frequencies: (0..expected).map(|at| at as f64).collect(),
+                model_repeats: RepeatCount(6),
+                ..fitted_at(SlippageModel::try_new(0.02, 0.17, 0.065).expect("a model"))
+            };
+
+            let genotypes = genotypes_of(&fit, ploidy);
+
+            assert_eq!(
+                genotypes.len(),
+                expected,
+                "thirteen allele lengths over {copies} genome copies"
+            );
+            for (at, genotype) in genotypes.iter().enumerate() {
+                assert_eq!(
+                    genotype.copies(),
+                    usize::from(copies),
+                    "one allele per genome copy"
+                );
+                assert_eq!(
+                    genotype.frequency(),
+                    at as f64,
+                    "genotype {at} carries the frequency at position {at}"
+                );
+                assert!(
+                    genotype.alleles().windows(2).all(|pair| pair[0] <= pair[1]),
+                    "the alleles are ascending: {:?}",
+                    genotype.alleles()
+                );
+            }
+            assert!(
+                genotypes[0].is_homozygous() && genotypes[0].alleles()[0] == WholeRepeatOffset(-6),
+                "the walk starts at every copy on the shortest allele"
+            );
+            assert!(
+                genotypes[expected - 1].is_homozygous()
+                    && genotypes[expected - 1].alleles()[0] == WholeRepeatOffset(6),
+                "and ends at every copy on the longest"
+            );
+        }
+    }
+
+    /// **A fit whose frequency count does not match its own support and ploidy is refused.** That
+    /// is a fit assembled from parts that do not belong together, and the alternative to a panic
+    /// is a report whose genotypes are silently shifted against their frequencies.
+    #[test]
+    #[should_panic(expected = "which makes 91 genotypes")]
+    fn a_fit_whose_frequencies_do_not_match_its_genotypes_is_refused() {
+        let fit = StratumSlippageFit {
+            genotype_frequencies: vec![1.0; 66],
+            model_repeats: RepeatCount(6),
+            ..fitted_at(SlippageModel::try_new(0.02, 0.17, 0.065).expect("a model"))
+        };
+        let _ = genotypes_of(&fit, Ploidy::try_new(2).expect("two genome copies"));
+    }
+
     /// A fit with everything but the field a test is about.
     fn fitted_at(model: SlippageModel) -> StratumSlippageFit {
         StratumSlippageFit {
             model,
             genotype_frequencies: vec![1.0],
-            allele_support: SmallVec::from_slice(&[WholeRepeatOffset(0)]),
+            model_repeats: RepeatCount(6),
             log_likelihood: -12.0,
             starts_tried: SmallVec::from_vec(vec![SlippageStart {
                 from: model,
@@ -3474,7 +3661,7 @@ mod tests {
             .expect("a stratum whose reads sat on the whole-repeat grid");
 
         assert_eq!(
-            fit.allele_support.as_slice(),
+            fit.noise_model().allele_support(),
             &[
                 WholeRepeatOffset(-4),
                 WholeRepeatOffset(-3),
@@ -4063,11 +4250,26 @@ mod tests {
             "the fixture really did merge"
         );
         assert_eq!(
-            pooled.fit.allele_support.len(),
+            pooled.fit.model_repeats,
+            RepeatCount(4),
+            "the model came from the lower of the two repeat counts"
+        );
+        assert_eq!(
+            pooled.fit.noise_model().allele_support().len(),
             11,
             "eleven lengths, which is the four-copy stratum's support and not the six-copy one's"
         );
         assert_eq!(pooled.fit.genotype_frequencies.len(), 66);
+
+        // And the frequencies really can be read back as genotypes over that support.
+        let genotypes = genotypes_of(&pooled.fit, Ploidy::try_new(2).expect("two genome copies"));
+        assert_eq!(genotypes.len(), 66);
+        assert!(
+            genotypes
+                .iter()
+                .all(|genotype| genotype.alleles()[0] >= WholeRepeatOffset(-4)),
+            "no genotype reaches below a four-copy tract's shortest allele"
+        );
     }
 
     // -----------------------------------------------------------------
