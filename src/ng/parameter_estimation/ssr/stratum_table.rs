@@ -267,24 +267,18 @@ pub struct StratumEntry {
 /// One entry with the ploidy its loci sit at — **an entry as the fit scores it**, which is one
 /// more fact than an entry as the table stores it.
 ///
-/// **The ploidy is not on [`StratumEntry`] because the table cannot answer it.** A table is keyed
-/// by `(read group, stratum)` and a stratum spans the genome, so how many genome copies a locus
-/// sits on is a property of where it was, which the accumulator deliberately forgets: an entry is
-/// the same object whatever the ploidy, and only the *scoring* differs
-/// (`arch/parameter_prepass_ssr.md` §4). The map travels with the fit's configuration — and, for
-/// the merge guard, on the accumulator too — so the fit is what pairs the two, and that is what
-/// this type is.
+/// **The ploidy is not on [`StratumEntry`] because an entry does not depend on it.** How one
+/// locus's reads fell across the buckets is the same object whatever the ploidy; what differs is
+/// only the *scoring* (`arch/parameter_prepass_ssr.md` §4). Where the ploidy lives is one level
+/// up, on the key the table is stored under
+/// ([`StratumKey`](crate::ng::parameter_estimation::ssr::StratumKey)), so a table never holds
+/// two ploidies' loci and the fit reads one answer for the whole of it.
 ///
 /// **It carries the ploidy per cell rather than per fit** because that is the shape of the
 /// `fitting/` seam — [`WeightedCell`](crate::ng::parameter_estimation::fitting::WeightedCell)
 /// asks each cell for its own, since the sibling path fits one error rate across every ploidy its
-/// reads covered.
-///
-/// **What that does not yet buy is a fit over two ploidies at once, and the reason is upstream of
-/// this type.** A table is keyed by `(read group, stratum)` with no ploidy in it, so two loci of
-/// different ploidy that showed the same shape already collapse into one entry, and no pairing
-/// here can split them apart again. Ploidy on the cell is what leaves the scoring code alone if
-/// the accumulator's key ever gains it; it is necessary and not sufficient.
+/// reads covered. On this path every cell of one fit answers the same, because they all come from
+/// one table.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct StratumCell {
     entry: StratumEntry,

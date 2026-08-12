@@ -345,8 +345,18 @@ fn climb_with_cap(
         // `-∞ - ∞ = -∞` to make the check vacuous by arithmetic. The slack is relative
         // because the score scales with the total cell weight: −1,001 over a thousand
         // sites and −1,001,017 over a million.
+        //
+        // **And it has an absolute floor, because a relative slack vanishes where the
+        // score does.** A table the model explains almost perfectly scores just below
+        // zero — a single locus whose one read is where the fitted genotype puts it gives
+        // −3.7e-8 — and there `1e-9 × |score|` is 3.7e-17, finer than the rounding of the
+        // sum that produced it. Measured on such a table, a pass moved from
+        // −3.748510590817489e-8 to −3.748510613021949e-8, a loss of 2.2e-16, and this
+        // assertion failed on arithmetic noise rather than on a defect. The floor is
+        // 1e-12, which is a thousandth of the score's own convergence tolerance and so
+        // cannot mask a real descent.
         debug_assert!(
-            passes == 0 || score >= previous_score - 1e-9 * previous_score.abs(),
+            passes == 0 || score >= previous_score - 1e-9 * previous_score.abs() - 1e-12,
             "a pass lost ground: {previous_score} → {score}"
         );
         previous_score = score;

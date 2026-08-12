@@ -399,7 +399,7 @@ counters return their base-weighted mean, which is the right answer for a model 
 *Oracle:* the harness recovers 0.0030 from a truth of 0.0030 by a search that had no need to run.
 *Depends:* B3, C5. *Source:* arch §4.1, spec §4.1.
 
-**E2. The three slippage parameters, per stratum.**  ☐
+**E2. The three slippage parameters, per stratum.**  ✅
 `fit_by_multistart` over that stratum's shapes, with `fit_mixture_weights` climbing the genotype
 frequencies at each trial. Genotype frequencies are **fitted freely** over unordered allele pairs
 rather than tied through one allele frequency, matching the generic path and for the same reason: a

@@ -52,12 +52,18 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::ng::locus_generation::SampleLocusObservations;
+use crate::ng::parameter_estimation::fitting::FitTermination;
+use crate::ng::parameter_estimation::fitting::multistart::{SearchPrecision, fit_by_multistart};
 use crate::ng::parameter_estimation::generic::accumulators::PloidyMap;
 use crate::ng::parameter_estimation::ssr::locus_offsets::{
     LocusStratum, base_comparison_of, shape_of, stratum_of, tally_of,
 };
-use crate::ng::parameter_estimation::ssr::slippage::SlippageModel;
-use crate::ng::parameter_estimation::ssr::stratum_table::StratumTable;
+use crate::ng::parameter_estimation::ssr::slippage::{
+    SlippageModel, SsrNoiseModel, slippage_starts,
+};
+use crate::ng::parameter_estimation::ssr::stratum_table::{
+    StratumCell, StratumEntry, StratumTable,
+};
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{DomainError, ErrorRate, Ploidy, ReadGroupId, SsrPeriod};
 
@@ -690,8 +696,8 @@ pub enum SsrEstimationError {
     ///
     /// **Not "too little data"** — that is a borrow, and it is recorded as one.
     #[error(
-        "sample {sample}, read group {read_group}: stratum ({stratum}) reached slippage levels \
-         spanning {spread:.1}x across {starts} starting points, more than the \
+        "sample {sample}, read group {read_group}: stratum ({stratum}) at ploidy {ploidy} reached \
+         slippage levels spanning {spread:.1}x across {starts} starting points, more than the \
          {START_AGREEMENT_LIMIT} that leaves the level identified — this is a search that did \
          not settle, not a slippage level"
     )]
@@ -700,6 +706,9 @@ pub enum SsrEstimationError {
         /// Which library's fit did not settle.
         read_group: ReadGroupId,
         stratum: Stratum,
+        /// And at which ploidy: one stratum is fitted once per ploidy its loci sat on, so the
+        /// three above do not name one fit on a genome that carries more than one.
+        ploidy: Ploidy,
         /// The highest level any start reached, divided by the lowest.
         spread: f64,
         /// How many starts were tried.
@@ -962,6 +971,282 @@ pub fn substitution_rates(
         .strata()
         .filter_map(|(key, table)| substitution_rate_of(table).map(|rate| (key, rate)))
         .collect()
+}
+
+// ---------------------------------------------------------------------
+// The second fit: the three slippage parameters, searched per stratum.
+// ---------------------------------------------------------------------
+
+/// What one stratum's slippage search returned: the three parameters, the genotype frequencies
+/// they were fitted against, and enough beside them to tell a fitted answer from a stopped
+/// search.
+///
+/// **Not [`StratumFit`] yet**, and the difference is provenance. Everything here was measured on
+/// this stratum's own loci; whether that is what the stratum ends up *reporting* is decided
+/// afterwards, by the two floors that may borrow the model from a neighbour and by the
+/// monotonicity walk that may merge two strata and refit. This type is what those steps read.
+#[derive(Clone, PartialEq, Debug)]
+pub struct StratumSlippageFit {
+    /// The best-scoring of the starts: how often a read slips, which way, and how far.
+    pub model: SlippageModel,
+    /// How often each genotype occurred, in the order
+    /// [`SsrNoiseModel::for_each_genotype`](slippage::SsrNoiseModel::for_each_genotype) visits
+    /// them — which is the walk that gives them meaning, and the reason that method is public.
+    ///
+    /// **Kept as bare frequencies here** rather than as allele pairs: the walk is over `P`-tuples
+    /// at ploidy `P`, and a pair is only the diploid case of one.
+    pub genotype_frequencies: Vec<f64>,
+    /// The allele lengths those frequencies are over, ascending, as offsets from the reference
+    /// tract length.
+    ///
+    /// **Carried rather than left to be rebuilt from the stratum**, because after a merge the two
+    /// are not the same answer: the monotonicity walk pools two neighbouring repeat counts and
+    /// refits with the model of the **lower** one, so a consumer rebuilding the support from the
+    /// key would index the frequencies by a support two lengths wider than the one they were
+    /// fitted over.
+    pub allele_support: SmallVec<[WholeRepeatOffset; 13]>,
+    /// What [`Self::model`] scored, as a natural logarithm.
+    pub log_likelihood: f64,
+    /// Every starting point, best-scoring first — the diagnostic several starts exist to produce.
+    pub starts_tried: SmallVec<[SlippageStart; 4]>,
+    /// The highest slippage level any start reached, divided by the lowest.
+    ///
+    /// Compared against [`START_AGREEMENT_LIMIT`] by whoever is in a position to name the sample
+    /// and the library, which this function is not.
+    pub start_spread: f64,
+    /// Whether **every** inner climb over the genotype frequencies reached stillness, or some ran
+    /// out of passes.
+    ///
+    /// **False is not an error, and this is where that is decided.** The surface the climb walks
+    /// is concave, so a climb that ran out did not find a wrong summit — it ran out of time on the
+    /// right one. What differs from the sibling path, where the same condition is treated as a
+    /// bug, is how far there is to go: that path's climb has three genotypes and its pass cap was
+    /// measured on them, while a stratum here has between 66 and 91, most heading to a frequency
+    /// of zero. Making this fatal would end most real runs; ignoring it would hide the one thing
+    /// that makes a candidate score below its own summit, so a neighbouring candidate can win on
+    /// that alone. So it is reported and never silently dropped, and the summary counts it.
+    pub every_climb_settled: bool,
+    /// How the **outer** search over the three parameters ended — settled, or out of sweeps — and
+    /// how many sweeps that took.
+    ///
+    /// **A different question from [`Self::every_climb_settled`]**, which is about the climb over
+    /// the genotype frequencies inside each candidate. This one has no concavity proof behind it
+    /// at all, which is why the search is capped and the best-scoring iterate kept
+    /// (`arch/parameter_prepass_ssr.md` §3).
+    pub termination: FitTermination,
+    /// Reads that showed a length **a whole number of motif copies** away from the reference
+    /// tract's — the count that decides whether the direction share and the fall-off are
+    /// measurable at all.
+    ///
+    /// **Whole-repeat movement only, which is narrower than "a length other than the
+    /// reference's".** The reads that moved by something else — an ordinary indel inside the
+    /// tract, an interruption — are counted apart, in [`Self::guard_reads`], because they carry
+    /// nothing about *which way* a slip went or *how far*, and those two are exactly what this
+    /// count gates ([`MIN_SLIPPED_READS_TO_FIT_SHARES`]). Pooling them would overstate the
+    /// evidence behind the two shares by the guard share of the stratum, which spec §5 measures
+    /// at up to 58.5% — a stratum reporting the floor's 4,000 would then have put about 1,660
+    /// reads behind its fall-off.
+    pub slipped_reads: u64,
+    /// Reads that differed from the reference tract length by something **other** than a whole
+    /// number of copies. Reported beside the count above so the two are never confused.
+    pub guard_reads: u64,
+    /// Reads that sat on the whole-repeat grid, and so were scored by the model — the denominator
+    /// the slippage level is a share of.
+    pub scored_reads: u64,
+    /// How many loci stood behind the fit.
+    pub loci: u64,
+}
+
+/// **Fit one stratum's three slippage parameters from its own loci**, searching from four
+/// starting points spread over all three and climbing the genotype frequencies at every trial
+/// (`spec/parameter_prepass_ssr.md` §4.2).
+///
+/// The genotype is summed over rather than guessed at: at each candidate the frequencies of the
+/// unordered allele tuples are climbed to their best — the half of the problem with a concavity
+/// proof behind it — and only then is the candidate scored. **The frequencies are fitted freely**
+/// rather than tied through one allele frequency, matching the SNP/indel path and for the same
+/// reason: a Hardy–Weinberg tie presumes the inbreeding coefficient is zero, and that is a
+/// quantity this run measures rather than assumes.
+///
+/// **Four starts and not one, spread over all three parameters.** Starts that disagree about the
+/// headline number while sharing one guess at a nuisance axis are how the SNP/indel path's
+/// inbreeding fit returned a confident zero on a genome 29% covered by runs of homozygosity.
+/// Where the four land is reported whatever they say.
+///
+/// The four starts are placed around the share of this stratum's reads that moved a whole number
+/// of copies, which over-estimates the slippage level because it counts real non-reference alleles
+/// too — which is why the four multipliers run below one as well as above.
+///
+/// **`None` where no read of the stratum sat on the whole-repeat grid**, and that is a guard
+/// rather than a tidiness: the model scores only whole-repeat movement, so every genotype and
+/// every candidate score alike on such a stratum, and a search over a flat surface returns
+/// wherever its steps happened to stop. Measured on 500 loci whose every read carried an ordinary
+/// indel inside the tract, the search came back at a level of **0.5976** — the top of its range —
+/// with the four starts agreeing to 1.00, so the one diagnostic that guards this fit could not
+/// see it. Such a stratum has as many loci as any other, so the borrowing step's floor cannot see
+/// it either; refusing the fit here is what makes it borrow.
+///
+/// # Panics
+///
+/// If the table holds no entries, or if the search returns frequencies at some ploidy other than
+/// the cells'. Neither can arise from an accumulator: a table exists because a locus made it, and
+/// every cell of one fit carries the ploidy of the key its table is stored under.
+#[must_use]
+pub fn fit_slippage(
+    table: &StratumTable,
+    stratum: Stratum,
+    ploidy: Ploidy,
+    precision: SearchPrecision,
+) -> Option<StratumSlippageFit> {
+    let entries = table.entries();
+    assert!(
+        !entries.is_empty(),
+        "a stratum with no entries has nothing to fit: {stratum}"
+    );
+
+    let reads = read_counts(&entries);
+    if reads.scored == 0 {
+        return None;
+    }
+
+    let cells: Vec<StratumCell> = entries
+        .into_iter()
+        .map(|entry| StratumCell::new(entry, ploidy))
+        .collect();
+
+    let model = SsrNoiseModel::for_stratum(stratum.repeats);
+    // A number, because `scored` is not zero by the guard above; `slippage_starts` refuses a
+    // `NaN` in any case.
+    let starts = slippage_starts(reads.slipped as f64 / reads.scored as f64);
+    let fitted = fit_by_multistart(&model, &cells, &starts, precision);
+
+    let genotype_frequencies = fitted
+        .genotype_frequencies
+        .get(&ploidy)
+        .expect("the fit climbed frequencies at the one ploidy every cell carries")
+        .clone();
+
+    Some(StratumSlippageFit {
+        model: fitted.best,
+        genotype_frequencies,
+        allele_support: SmallVec::from_slice(model.allele_support()),
+        log_likelihood: fitted.log_likelihood.get(),
+        starts_tried: fitted
+            .starts
+            .into_iter()
+            .map(|outcome| SlippageStart {
+                from: outcome.from,
+                reached: outcome.reached,
+                log_likelihood: outcome.log_likelihood.get(),
+            })
+            .collect(),
+        start_spread: fitted.headline_spread,
+        every_climb_settled: fitted.every_climb_settled,
+        termination: fitted.termination,
+        slipped_reads: reads.slipped,
+        guard_reads: reads.guard,
+        scored_reads: reads.scored,
+        loci: table.loci(),
+    })
+}
+
+/// How a stratum's reads divide, once each entry is weighted by how many loci showed it.
+///
+/// **Three counts and not two, because "moved" and "moved by a whole number of copies" are
+/// different populations** and the difference reaches 58.5% of the moved reads on the strata spec
+/// §5 measures. The model explains only the second, so only the second belongs in the level's
+/// numerator or in the count that gates the two shares.
+struct StratumReads {
+    /// Reads a whole number of copies away from the reference tract length.
+    slipped: u64,
+    /// Reads a length away from it that is not a whole number of copies.
+    guard: u64,
+    /// Reads on the whole-repeat grid, at the reference length or away from it — every read the
+    /// model scores.
+    scored: u64,
+}
+
+/// Count [`StratumReads`] over a table's entries.
+///
+/// No sum can overflow: each is bounded by the locus count times [`MAX_LOCUS_READS`], which the
+/// table's own per-entry and entry-count limits hold at about 3.3 × 10¹⁶.
+fn read_counts(entries: &[StratumEntry]) -> StratumReads {
+    let mut reads = StratumReads {
+        slipped: 0,
+        guard: 0,
+        scored: 0,
+    };
+    for entry in entries {
+        let loci = entry.loci;
+        let guard = u64::from(entry.shape.reads_not_whole_repeat());
+        reads.slipped += (u64::from(entry.shape.reads_off_reference()) - guard) * loci;
+        reads.guard += guard * loci;
+        reads.scored += u64::from(entry.shape.whole_repeat_depth()) * loci;
+    }
+    reads
+}
+
+/// **Every stratum's slippage, fitted from its own loci** — the second of the four fits, and the
+/// one that is a search.
+///
+/// The strata are walked in [`StratumKey`] order, which is a property of what the tables hold
+/// rather than of when a locus arrived, so two runs over the same evidence fit in the same
+/// sequence.
+///
+/// # Errors
+///
+/// [`SsrEstimationError::SlippageNotIdentified`] where a stratum's four starts reached levels
+/// spanning more than [`START_AGREEMENT_LIMIT`]. **That is not "too little data"** — too little
+/// data is a borrow, and it is recorded as one — it is a search that did not settle, and the
+/// number it would otherwise report is where it stopped rather than what the loci say.
+///
+/// A stratum **no read of which sat on the whole-repeat grid** is absent from the result rather
+/// than fitted, for the reason [`fit_slippage`] gives: there is nothing there for the model to
+/// explain, and what a search returns on a flat surface is where its steps stopped. Filling that
+/// gap is the borrowing step's business.
+pub fn fit_slippage_by_stratum(
+    accumulators: &SsrAccumulators,
+    sample: &str,
+    precision: SearchPrecision,
+) -> Result<BTreeMap<StratumKey, StratumSlippageFit>, SsrEstimationError> {
+    let mut fits = BTreeMap::new();
+    for (key, table) in accumulators.strata() {
+        let Some(fit) = fit_slippage(table, key.stratum, key.ploidy, precision) else {
+            continue;
+        };
+        starts_must_agree(&fit, sample, key)?;
+        fits.insert(key, fit);
+    }
+    Ok(fits)
+}
+
+/// Refuse a fit whose starting points did not converge on one answer.
+///
+/// **Separate from the search because only the caller can name whose fit it was.** The search
+/// returns the spread and makes no judgement — how far apart two answers may sit before a fit is
+/// disowned is this path's call, and a message naming neither the sample nor the library locates
+/// nothing on a cohort run of hundreds of samples.
+///
+/// # Errors
+///
+/// [`SsrEstimationError::SlippageNotIdentified`], carrying the spread and how many starts produced
+/// it.
+pub fn starts_must_agree(
+    fit: &StratumSlippageFit,
+    sample: &str,
+    key: StratumKey,
+) -> Result<(), SsrEstimationError> {
+    if fit.start_spread > START_AGREEMENT_LIMIT {
+        return Err(SsrEstimationError::SlippageNotIdentified {
+            sample: sample.to_owned(),
+            read_group: key.read_group,
+            stratum: key.stratum,
+            ploidy: key.ploidy,
+            spread: fit.start_spread,
+            starts: fit.starts_tried.len(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1858,6 +2143,7 @@ mod tests {
             sample: "SL_landrace_07".to_string(),
             read_group: ReadGroupId(3),
             stratum: stratum(2, 6),
+            ploidy: Ploidy::try_new(4).expect("four genome copies"),
             spread: 333.0,
             starts: 4,
         };
@@ -1866,6 +2152,10 @@ mod tests {
         assert!(message.contains("SL_landrace_07"), "{message}");
         assert!(message.contains("read group 3"), "{message}");
         assert!(message.contains("period 2, 6 repeats"), "{message}");
+        assert!(
+            message.contains("ploidy 4"),
+            "one stratum is fitted once per ploidy, so the message names which: {message}"
+        );
         assert!(message.contains("333.0x"), "how far apart: {message}");
         assert!(
             message.contains("across 4 starting points"),
@@ -2216,5 +2506,562 @@ mod tests {
 
         assert_eq!(rate_at(2), 0.0030, "the locus on two genome copies");
         assert_eq!(rate_at(1), 0.0300, "the locus on one");
+    }
+
+    // -----------------------------------------------------------------
+    // The slippage search, per stratum.
+    // -----------------------------------------------------------------
+
+    /// `loci` tracts of ten reads each, of which `losing_reads` show one motif copy fewer than
+    /// the reference. Every locus is identical, so the stratum is one entry standing for all of
+    /// them — which is what a real stratum mostly is, and what makes these fits cheap enough to
+    /// run in a unit test.
+    fn stratum_losing_repeats(loci: u64, losing_reads: u32) -> SsrAccumulators {
+        let reference = b"ATATATATATATATATATAT";
+        let short = b"ATATATATATATATATAT";
+        let mut accumulators = SsrAccumulators::new(diploid());
+        for locus in 0..loci {
+            let mut observations = vec![observation(reference, 0, 10 - losing_reads)];
+            if losing_reads > 0 {
+                observations.push(observation(short, 0, losing_reads));
+            }
+            accumulators.add_locus(&tract(1_000 + locus * 100, reference, b"AT", observations));
+        }
+        accumulators
+    }
+
+    fn only_table(accumulators: &SsrAccumulators) -> (StratumKey, &StratumTable) {
+        let mut strata = accumulators.strata();
+        let one = strata.next().expect("a stratum");
+        assert!(strata.next().is_none(), "exactly one stratum");
+        one
+    }
+
+    /// **A stratum where every read sat at the reference length comes back barely slipping at
+    /// all.** There is nothing for the level to explain, so the search runs it down to its own
+    /// floor rather than settling on some middling value — which is what makes this a check on
+    /// the search and not on the fixture.
+    ///
+    /// **The bound is 1e-3, and what it is set against is the other end of the range.** A search
+    /// that read nothing from its cells does not hand back a starting point — every axis is
+    /// line-searched over its whole range at every sweep — it walks to wherever ties resolve,
+    /// which for this golden section is the **top** of the level's range. Measured on a stratum
+    /// the model cannot score at all, that is 0.5976. So the failure this bound catches is a
+    /// level six hundred times its own size, and the four starting levels (3e-4, 1e-4, 3.3e-5,
+    /// 3e-5) are not what it is guarding against.
+    #[test]
+    fn a_stratum_where_nothing_slipped_is_fitted_at_almost_no_slippage() {
+        let accumulators = stratum_losing_repeats(200, 0);
+        let (key, table) = only_table(&accumulators);
+
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+
+        assert!(
+            fit.model.slip_rate.get() < 1e-3,
+            "nothing slipped, so the level should run down to its floor: {}",
+            fit.model
+        );
+        assert_eq!(fit.slipped_reads, 0);
+        assert_eq!(fit.loci, 200);
+    }
+
+    /// **A stratum where one read in ten lost a repeat is fitted at about one in ten, losing.**
+    /// Both halves matter and they fail differently: a level near 0.1 says the search reads its
+    /// cells, and a gain share below one half says it reads which *way* they moved — the one
+    /// property the whole design exists to protect, and the one the estimator this replaces gets
+    /// backwards.
+    ///
+    /// **The truth here is exactly 0.1** and needs no tolerance argument: with the genotype
+    /// frequencies free, the cheapest explanation of every locus showing nine reads at the
+    /// reference and one a copy short is that every locus is homozygous reference and one read in
+    /// ten slipped down. **The bound is ±2% of the level**, which is twice the 1% resolution the
+    /// coarse search setting resolves a rate to — so it is the search's own step that sets it and
+    /// not a guess. Measured, the fit returns 0.09986, 0.14% below the truth.
+    #[test]
+    fn a_stratum_that_loses_a_repeat_in_one_read_of_ten_is_fitted_at_about_that() {
+        let accumulators = stratum_losing_repeats(500, 1);
+        let (key, table) = only_table(&accumulators);
+
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+
+        let level = fit.model.slip_rate.get();
+        assert!(
+            (0.098..=0.102).contains(&level),
+            "one read in ten sat a copy short: {}",
+            fit.model
+        );
+        assert!(
+            fit.model.gain_share.get() < 0.1,
+            "every read that moved lost a copy, so gains cannot be the commoner direction: {}",
+            fit.model
+        );
+        assert_eq!(
+            fit.slipped_reads, 500,
+            "one of ten reads at each of 500 loci"
+        );
+        assert_eq!(
+            fit.genotype_frequencies.len(),
+            91,
+            "13 allele lengths at ploidy 2"
+        );
+    }
+
+    /// **Every start is reported with where it began, where it ended and what it scored, best
+    /// first** — and the spread across them is reported whatever it says. An answer with no
+    /// spread beside it cannot be told apart from a search that never looked.
+    #[test]
+    fn the_search_reports_all_four_starts_best_scoring_first() {
+        let accumulators = stratum_losing_repeats(500, 1);
+        let (key, table) = only_table(&accumulators);
+
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+
+        assert_eq!(fit.starts_tried.len(), 4, "four starts, all reported");
+        for pair in fit.starts_tried.windows(2) {
+            assert!(
+                pair[0].log_likelihood >= pair[1].log_likelihood,
+                "the starts are ordered best-scoring first: {:?}",
+                fit.starts_tried
+            );
+        }
+        // **The four starting points disagree about all three parameters, not only the level**,
+        // which is the trap the SNP/indel path's inbreeding fit fell into: starts that share one
+        // guess at a nuisance axis agree at the end for that reason alone.
+        for axis in [
+            |model: SlippageModel| model.slip_rate.get(),
+            |model: SlippageModel| model.gain_share.get(),
+            |model: SlippageModel| model.step_decay.get(),
+        ] {
+            let mut values: Vec<f64> = fit.starts_tried.iter().map(|s| axis(s.from)).collect();
+            values.sort_by(f64::total_cmp);
+            values.dedup();
+            assert_eq!(values.len(), 4, "four distinct starting values: {values:?}");
+        }
+        let levels: Vec<f64> = fit
+            .starts_tried
+            .iter()
+            .map(|start| start.from.slip_rate.get())
+            .collect();
+        let widest = levels.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            / levels.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            (widest - 10.0).abs() < 1e-9,
+            "the highest starting level is ten times the lowest — 3x and 0.3x the stratum's own \
+             share of moved reads: {levels:?}"
+        );
+        // **And that share is this stratum's own, not a constant.** The four starts are placed at
+        // 3, 1, 1/3 and 0.3 times it, so the highest is three times the share — 0.3 here, where
+        // one read in ten moved. A search started from a fixed level would still show four
+        // distinct values ten times apart and would be reading nothing from the table.
+        let share = fit.slipped_reads as f64 / fit.scored_reads as f64;
+        assert!(
+            (levels.iter().copied().fold(f64::NEG_INFINITY, f64::max) - 3.0 * share).abs() < 1e-12,
+            "the starts are placed around this stratum's share of moved reads, {share}: {levels:?}"
+        );
+        assert!(
+            fit.start_spread.is_finite() && fit.start_spread >= 1.0,
+            "the spread is a ratio of the highest level reached to the lowest: {}",
+            fit.start_spread
+        );
+        assert_eq!(
+            fit.log_likelihood, fit.starts_tried[0].log_likelihood,
+            "the fit's score is the best start's"
+        );
+    }
+
+    /// **Starts that landed far apart are refused rather than reported**, and the refusal names
+    /// whose fit it was: on a cohort of hundreds of samples, several hundred fits a sample, a
+    /// message naming only the quantity locates nothing.
+    ///
+    /// Built by hand rather than searched for, because what is under test is the judgement and
+    /// not the search: this is the one place the limit is applied, and a fixture that had to find
+    /// a genuinely unidentified stratum would be testing how hard that is to construct.
+    #[test]
+    fn a_fit_whose_starts_landed_far_apart_is_refused_and_says_whose_it_was() {
+        let far_apart = StratumSlippageFit {
+            start_spread: 1.5,
+            ..fitted_at(SlippageModel::try_new(0.02, 0.17, 0.065).expect("a model"))
+        };
+        let key = StratumKey {
+            read_group: ReadGroupId(3),
+            stratum: stratum(2, 6),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        };
+
+        let refused = starts_must_agree(&far_apart, "SL_landrace_07", key)
+            .expect_err("1.5 is beyond the limit");
+        let message = refused.to_string();
+
+        assert!(message.contains("SL_landrace_07"), "the sample: {message}");
+        assert!(message.contains("read group 3"), "the library: {message}");
+        assert!(
+            message.contains("period 2, 6 repeats"),
+            "which stratum: {message}"
+        );
+        assert!(message.contains("1.5"), "how far apart: {message}");
+        assert!(
+            message.contains("did not settle"),
+            "and that this is not too little data: {message}"
+        );
+
+        let close_enough = StratumSlippageFit {
+            start_spread: START_AGREEMENT_LIMIT,
+            ..far_apart.clone()
+        };
+        assert!(
+            starts_must_agree(&close_enough, "SL_landrace_07", key).is_ok(),
+            "the limit itself is agreement, not disagreement"
+        );
+
+        // **And a fit whose inner climbs ran out of passes is not refused**, which is the other
+        // half of the decision this function makes. The surface those climbs walk is concave, so
+        // one that ran out did not find a wrong summit; it ran out of time on the right one. A
+        // stratum here has 66 to 91 genotypes against the sibling path's three, so most real
+        // strata are expected to arrive with this false, and refusing them would end the run.
+        let ran_out = StratumSlippageFit {
+            every_climb_settled: false,
+            start_spread: 1.0,
+            ..far_apart
+        };
+        assert!(
+            starts_must_agree(&ran_out, "SL_landrace_07", key).is_ok(),
+            "a climb that ran out of passes is reported, not refused"
+        );
+    }
+
+    /// A fit with everything but the field a test is about.
+    fn fitted_at(model: SlippageModel) -> StratumSlippageFit {
+        StratumSlippageFit {
+            model,
+            genotype_frequencies: vec![1.0],
+            allele_support: SmallVec::from_slice(&[WholeRepeatOffset(0)]),
+            log_likelihood: -12.0,
+            starts_tried: SmallVec::from_vec(vec![SlippageStart {
+                from: model,
+                reached: model,
+                log_likelihood: -12.0,
+            }]),
+            start_spread: 1.0,
+            every_climb_settled: true,
+            termination: FitTermination {
+                iterations: 3,
+                converged: true,
+            },
+            slipped_reads: 0,
+            guard_reads: 0,
+            scored_reads: 10,
+            loci: 1,
+        }
+    }
+
+    /// **The walk fits every stratum the accumulator holds, under the accumulator's own keys.**
+    /// Two strata of one library here, one of them slipping and one not, so a walk that fitted
+    /// one stratum and copied its answer to the rest would be visible.
+    #[test]
+    fn the_walk_fits_every_stratum_under_its_own_key() {
+        let mut accumulators = stratum_losing_repeats(300, 1);
+        // A second stratum — a mononucleotide run — whose reads never left the reference.
+        for locus in 0..300u64 {
+            accumulators.add_locus(&tract(
+                500_000 + locus * 100,
+                b"AAAAAAAA",
+                b"A",
+                vec![observation(b"AAAAAAAA", 0, 10)],
+            ));
+        }
+
+        let fits =
+            fit_slippage_by_stratum(&accumulators, "SL_landrace_07", SearchPrecision::fast())
+                .expect("both strata settled");
+
+        let keys: Vec<StratumKey> = fits.keys().copied().collect();
+        let from_accumulator: Vec<StratumKey> = accumulators.strata().map(|(key, _)| key).collect();
+        assert_eq!(keys, from_accumulator, "one fit per stratum, same keys");
+
+        let level_at = |period_bases: u8, repeats: u32| {
+            fits[&StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(period_bases, repeats),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            }]
+                .model
+                .slip_rate
+                .get()
+        };
+
+        assert!(
+            level_at(2, 10) > 0.05,
+            "the dinucleotide stratum lost a repeat in one read of ten"
+        );
+        assert!(
+            level_at(1, 8) < 1e-3,
+            "the mononucleotide stratum never left the reference"
+        );
+    }
+
+    /// **A stratum that says nothing is refused by the walk, and the search's own diagnostics are
+    /// what refuse it.** One locus holding one read fifteen copies longer than the reference is
+    /// consistent with almost any slippage: the four starts reach levels 67 times apart, far past
+    /// the [`START_AGREEMENT_LIMIT`] of 1.06, so what the search returned is where it stopped.
+    ///
+    /// **This is also the only fixture here where the inner climbs run out of passes**, and it is
+    /// asserted, because that flag decides nothing on its own and would otherwise be a field
+    /// nobody reads: the fit is returned and the walk does not refuse it for that.
+    ///
+    /// The search is run at a deliberately coarse setting. Not to change the answer — the spread
+    /// is 193 at the ordinary setting — but because a fit whose climbs never settle costs 10,000
+    /// passes per candidate, and this fixture takes 22 seconds at the ordinary setting against 4
+    /// at this one.
+    #[test]
+    fn a_stratum_whose_starts_land_far_apart_is_refused_by_the_walk() {
+        let reference = b"ATATATATATATATATATAT";
+        let far_longer = b"ATATATATATATATATATATATATATATATATATATATATATATATATAT";
+        let coarse = SearchPrecision {
+            tolerance: 0.1,
+            max_axis_steps: 4,
+            max_sweeps: 1,
+        };
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![observation(far_longer, 0, 1)],
+        ));
+
+        let (key, table) = only_table(&accumulators);
+        let fit = fit_slippage(table, key.stratum, key.ploidy, coarse).expect("a scoreable read");
+        assert!(
+            fit.start_spread > START_AGREEMENT_LIMIT,
+            "one read says almost nothing about the level: {}",
+            fit.start_spread
+        );
+        assert!(
+            !fit.every_climb_settled,
+            "the climb over 91 genotypes on one locus runs out of passes"
+        );
+
+        // **This is also the only fixture where the four starts score differently**, so it is the
+        // only place "best-scoring first" and "the answer is the best start's" have any content.
+        // Where every start reaches the same point — which is what the settled fixtures do, and
+        // what the search working looks like — both assertions compare a number with itself.
+        let scores: Vec<f64> = fit
+            .starts_tried
+            .iter()
+            .map(|start| start.log_likelihood)
+            .collect();
+        assert!(
+            scores.first() > scores.last(),
+            "the starts really do disagree here, and are ordered best first: {scores:?}"
+        );
+        assert_eq!(
+            fit.model, fit.starts_tried[0].reached,
+            "the answer is where the best-scoring start ended"
+        );
+        assert_eq!(
+            fit.log_likelihood, scores[0],
+            "and its score is that start's score"
+        );
+        let reached: Vec<f64> = fit
+            .starts_tried
+            .iter()
+            .map(|start| start.reached.slip_rate.get())
+            .collect();
+        let widest = reached.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            / reached.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            (fit.start_spread - widest).abs() < 1e-9,
+            "the spread is the highest level reached over the lowest: {} against {widest}",
+            fit.start_spread
+        );
+        assert!(
+            starts_must_agree(&fit, "SL_landrace_07", key).is_err(),
+            "and a fit that did not settle is refused"
+        );
+
+        let refused = fit_slippage_by_stratum(&accumulators, "SL_landrace_07", coarse)
+            .expect_err("the walk refuses it too, rather than reporting where it stopped");
+        let message = refused.to_string();
+        assert!(message.contains("SL_landrace_07"), "{message}");
+        assert!(message.contains("did not settle"), "{message}");
+    }
+
+    /// **A tract of four copies cannot carry an allele six copies shorter**, so its support is
+    /// clipped at the low end: eleven allele lengths and 66 genotypes, against thirteen and 91
+    /// for a tract of six copies or more. The support is emitted beside the frequencies because
+    /// after a merge it cannot be rebuilt from the stratum — the merged model is built from the
+    /// **lower** of the two repeat counts.
+    #[test]
+    fn a_short_tract_is_fitted_over_a_clipped_support() {
+        let reference = b"ATATATAT";
+        let mut accumulators = SsrAccumulators::new(diploid());
+        for locus in 0..50u64 {
+            accumulators.add_locus(&tract(
+                1_000 + locus * 100,
+                reference,
+                b"AT",
+                vec![observation(reference, 0, 6)],
+            ));
+        }
+
+        let (key, table) = only_table(&accumulators);
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+
+        assert_eq!(
+            fit.allele_support.as_slice(),
+            &[
+                WholeRepeatOffset(-4),
+                WholeRepeatOffset(-3),
+                WholeRepeatOffset(-2),
+                WholeRepeatOffset(-1),
+                WholeRepeatOffset(0),
+                WholeRepeatOffset(1),
+                WholeRepeatOffset(2),
+                WholeRepeatOffset(3),
+                WholeRepeatOffset(4),
+                WholeRepeatOffset(5),
+                WholeRepeatOffset(6),
+            ],
+            "four copies below the reference and six above it"
+        );
+        assert_eq!(
+            fit.genotype_frequencies.len(),
+            66,
+            "eleven allele lengths make 66 unordered pairs"
+        );
+    }
+
+    /// **A stratum on one genome copy is fitted over single alleles, not pairs** — thirteen
+    /// frequencies against a diploid stratum's 91. The ploidy reaches the fit through the key its
+    /// table is stored under, so a fit that assumed two copies would score a haploid locus
+    /// against genotypes it cannot have.
+    #[test]
+    fn a_haploid_stratum_is_fitted_over_single_alleles() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut accumulators = SsrAccumulators::new(Arc::new(PloidyChangesAt {
+            haploid_from: 5_000,
+        }));
+        for locus in 0..50u64 {
+            accumulators.add_locus(&tract(
+                9_000 + locus * 100,
+                reference,
+                b"AT",
+                vec![observation(reference, 0, 6)],
+            ));
+        }
+
+        let (key, table) = only_table(&accumulators);
+        assert_eq!(key.ploidy.get(), 1, "the map puts these loci on one copy");
+
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+
+        assert_eq!(
+            fit.genotype_frequencies.len(),
+            13,
+            "thirteen allele lengths, one copy each"
+        );
+    }
+
+    /// **Reads that moved by a whole number of copies, reads that moved by something else, and
+    /// reads the model can score are three different counts**, and this fixture separates all
+    /// three: 800 loci where nothing moved, and 200 where one read of ten sits a copy short and
+    /// another carries a single-base deletion inside the tract.
+    ///
+    /// Why it matters: the count that gates the direction share and the fall-off is the first of
+    /// the three, and those two are estimated only from whole-copy movement. Pooling the second
+    /// into it overstates the evidence behind them by the stratum's guard share, which spec §5
+    /// measures at up to 58.5% of the moved reads.
+    ///
+    /// **The two entries carry different locus counts on purpose.** Each entry's counts are per
+    /// locus, so a walk that forgot to weigh them by how many loci showed that shape would report
+    /// 1, 1 and 19 here instead of 200, 200 and 9,800.
+    #[test]
+    fn the_reads_that_moved_are_counted_apart_from_the_reads_that_moved_off_the_grid() {
+        let reference = b"ATATATATATATATATATAT";
+        let short_by_a_copy = b"ATATATATATATATATAT";
+        let short_by_a_base = b"ATATATATATATATATATA";
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        for locus in 0..800u64 {
+            accumulators.add_locus(&tract(
+                1_000 + locus * 100,
+                reference,
+                b"AT",
+                vec![observation(reference, 0, 10)],
+            ));
+        }
+        for locus in 0..200u64 {
+            accumulators.add_locus(&tract(
+                500_000 + locus * 100,
+                reference,
+                b"AT",
+                vec![
+                    observation(reference, 0, 8),
+                    observation(short_by_a_copy, 0, 1),
+                    observation(short_by_a_base, 0, 1),
+                ],
+            ));
+        }
+
+        let (key, table) = only_table(&accumulators);
+        assert_eq!(table.entry_count(), 2, "two shapes, unevenly common");
+
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("most reads sat on the whole-repeat grid");
+
+        assert_eq!(fit.slipped_reads, 200, "one whole copy short, at 200 loci");
+        assert_eq!(fit.guard_reads, 200, "one base short, at the same 200 loci");
+        assert_eq!(
+            fit.scored_reads, 9_800,
+            "8,000 reads at 800 loci plus nine of ten at 200 more"
+        );
+        assert_eq!(fit.loci, 1_000);
+    }
+
+    /// **A stratum no read of which sits on the whole-repeat grid is not fitted at all**, and
+    /// that is a guard rather than a tidiness. The model scores only whole-repeat movement, so
+    /// every genotype and every candidate score alike on such a stratum; measured, the search
+    /// then returns a slippage level of **0.5976** — the top of its range — with the four starts
+    /// agreeing to 1.00, so the diagnostic that guards this fit cannot see it. It has as many
+    /// loci as any other stratum, so the borrowing step's floor cannot see it either.
+    #[test]
+    fn a_stratum_no_read_of_which_sits_on_the_grid_is_not_fitted() {
+        let reference = b"ATATATATATATATATATAT";
+        let short_by_a_base = b"ATATATATATATATATATA";
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        for locus in 0..500u64 {
+            accumulators.add_locus(&tract(
+                1_000 + locus * 100,
+                reference,
+                b"AT",
+                vec![observation(short_by_a_base, 0, 10)],
+            ));
+        }
+
+        let (key, table) = only_table(&accumulators);
+        assert_eq!(
+            table.loci(),
+            500,
+            "the stratum is not thin — it is uninformative"
+        );
+
+        assert_eq!(
+            fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast()),
+            None,
+            "nothing here is on the grid the model scores"
+        );
+        assert!(
+            fit_slippage_by_stratum(&accumulators, "SL_landrace_07", SearchPrecision::fast())
+                .expect("no fit means nothing to disagree about")
+                .is_empty(),
+            "and the walk leaves it out rather than reporting a level for it"
+        );
     }
 }
