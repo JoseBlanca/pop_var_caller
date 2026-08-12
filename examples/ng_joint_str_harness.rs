@@ -163,9 +163,8 @@ fn regularised_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
     if x >= 1.0 {
         return 1.0;
     }
-    let front = (a * x.ln() + b * (1.0 - x).ln() + ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b))
-        .exp()
-        / a;
+    let front =
+        (a * x.ln() + b * (1.0 - x).ln() + ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b)).exp() / a;
     if x > (a + 1.0) / (a + b + 2.0) {
         return 1.0 - regularised_incomplete_beta(1.0 - x, b, a);
     }
@@ -273,7 +272,12 @@ type ReadCounts = Vec<u32>;
 /// `ln P(this sample's reads | genotype)`, the multinomial coefficient dropped — it is the
 /// same for every genotype and every candidate, so it cancels out of both the fit and the
 /// comparison.
-fn ln_reads_given_genotype(counts: &[u32], per_allele: &[Vec<f64>], first: usize, second: usize) -> f64 {
+fn ln_reads_given_genotype(
+    counts: &[u32],
+    per_allele: &[Vec<f64>],
+    first: usize,
+    second: usize,
+) -> f64 {
     let mut total = 0.0;
     for (class, count) in counts.iter().enumerate() {
         if *count == 0 {
@@ -607,8 +611,11 @@ fn faces_support(parameters: &Parameters, classes: usize) -> Support {
         let mut point = vec![0.0; classes];
         point[class] = 1.0;
         frequencies.push(point);
-        ln_weights
-            .push((parameters.monomorphic_share * parameters.spectrum[class]).max(1e-300).ln());
+        ln_weights.push(
+            (parameters.monomorphic_share * parameters.spectrum[class])
+                .max(1e-300)
+                .ln(),
+        );
     }
 
     let pair_total: f64 = (0..classes)
@@ -618,8 +625,8 @@ fn faces_support(parameters: &Parameters, classes: usize) -> Support {
     let nodes = beta_nodes(parameters.edge_shape, parameters.edge_shape, EDGE_NODES);
     for first in 0..classes {
         for second in first + 1..classes {
-            let pair = parameters.spectrum[first] * parameters.spectrum[second]
-                / pair_total.max(1e-300);
+            let pair =
+                parameters.spectrum[first] * parameters.spectrum[second] / pair_total.max(1e-300);
             for node in &nodes {
                 let mut point = vec![0.0; classes];
                 point[first] = *node;
@@ -786,7 +793,12 @@ struct Scorer<'a> {
 }
 
 impl<'a> Scorer<'a> {
-    fn new(data: &'a [Vec<ReadCounts>], slippage: Slippage, classes: usize, inbreeding: f64) -> Self {
+    fn new(
+        data: &'a [Vec<ReadCounts>],
+        slippage: Slippage,
+        classes: usize,
+        inbreeding: f64,
+    ) -> Self {
         Self {
             data,
             prepared: Prepared::for_slippage(data, slippage, classes),
@@ -1046,8 +1058,7 @@ fn run_fit(truth: &Truth, loci: usize, seed: u64, candidates: &[Candidate]) {
         truth.slippage.level, truth.slippage.down_share, truth.slippage.fall_off
     );
 
-    let (monomorphic, over_two) =
-        interior_share(truth, 20_000, seed ^ 0x5EED, 2 * truth.samples);
+    let (monomorphic, over_two) = interior_share(truth, 20_000, seed ^ 0x5EED, 2 * truth.samples);
     println!(
         "             of loci, {:.1}% carry one length in the panel and {:.1}% carry three or more",
         100.0 * monomorphic,
@@ -1075,7 +1086,9 @@ fn run_fit(truth: &Truth, loci: usize, seed: u64, candidates: &[Candidate]) {
             score,
             started.elapsed().as_secs_f64(),
         );
-        let points = support(*candidate, &fitted, truth.classes).frequencies.len();
+        let points = support(*candidate, &fitted, truth.classes)
+            .frequencies
+            .len();
         println!("                {points} points of support a locus");
     }
 
@@ -1103,9 +1116,7 @@ fn kappa_sweep(classes: usize, samples: usize, depth: u32, loci: usize) {
         "\nHow monomorphic loci are, swept — {classes} classes, {samples} samples, {depth} reads \
          a locus, {loci} loci"
     );
-    println!(
-        "\n kappa   one length   3+ lengths | slippage level, error against truth 0.0800"
-    );
+    println!("\n kappa   one length   3+ lengths | slippage level, error against truth 0.0800");
     println!("                                  | per-stratum   dirichlet-pts       faces");
     for kappa in [0.05_f64, 0.2, 1.0, 5.0, 50.0] {
         let truth = Truth::default_for(classes, samples, depth, kappa);
@@ -1143,7 +1154,13 @@ fn seed_scatter(truth: &Truth, loci: usize, candidate: Candidate) {
     println!("  seed      level    shorter-share   fall-off");
     for seed in 1..=5_u64 {
         let data = truth.draw(loci, seed * 977);
-        let (fitted, _) = fit(&data, candidate, truth.inbreeding, truth.classes, &starting_points(truth.classes));
+        let (fitted, _) = fit(
+            &data,
+            candidate,
+            truth.inbreeding,
+            truth.classes,
+            &starting_points(truth.classes),
+        );
         println!(
             "  {seed:>4}   {:>8.4}      {:>8.3}   {:>8.3}",
             fitted.slippage.level, fitted.slippage.down_share, fitted.slippage.fall_off
@@ -1158,11 +1175,17 @@ fn seed_scatter(truth: &Truth, loci: usize, candidate: Candidate) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "fit".to_string());
-    let samples: usize = args.next().map_or(20, |a| a.parse().expect("a sample count"));
+    let samples: usize = args
+        .next()
+        .map_or(20, |a| a.parse().expect("a sample count"));
     let depth: u32 = args.next().map_or(6, |a| a.parse().expect("a read depth"));
-    let loci: usize = args.next().map_or(4_000, |a| a.parse().expect("a locus count"));
+    let loci: usize = args
+        .next()
+        .map_or(4_000, |a| a.parse().expect("a locus count"));
     let classes: usize = args.next().map_or(3, |a| a.parse().expect("a class count"));
-    let kappa: f64 = args.next().map_or(0.5, |a| a.parse().expect("a concentration"));
+    let kappa: f64 = args
+        .next()
+        .map_or(0.5, |a| a.parse().expect("a concentration"));
 
     match mode.as_str() {
         "kappa" => kappa_sweep(classes, samples, depth, loci),

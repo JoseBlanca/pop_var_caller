@@ -593,10 +593,42 @@ equal-ancestry and an unequal-ancestry model compared by AIC. It removes about 8
 
 **The tomato panel has exactly the structure that breaks the pooled version.** It is landraces from
 several regions, which is why §5 rejects homozygote excess as a measure of autozygosity — the Wahlund
-effect. **A pooled spectrum used as the contaminant's frequency makes the same error in a different
-place**: a sample from a diverged subpopulation carries alleles the pooled spectrum calls rare, and
-rare alleles turning up in a sample is exactly the contamination signature. Structure would be read as
-contamination.
+effect.
+
+**Measured, 2026-08-12, and the direction is the opposite of what this section used to claim**
+([`../reports/joint_contamination_2026-08-12.md`](../reports/joint_contamination_2026-08-12.md),
+`examples/ng_joint_contamination_harness.rs`). An earlier version said a sample from a diverged
+subpopulation carries alleles the pooled spectrum calls rare, that rare alleles turning up in a sample
+are the contamination signature, and so **structure would be read as contamination**. It is not. Fifty
+samples, four subpopulations, three reads a site:
+
+| | true `α` = 0.010 | 0.030 | 0.100 |
+|---|---:|---:|---:|
+| no structure, pooled frequency | 0.0103 | 0.0325 | 0.1065 |
+| `F_st` = 0.10, pooled | 0.0037 | 0.0209 | 0.0829 |
+| **`F_st` = 0.20, pooled** | **0.0000** | **0.0050** | 0.0584 |
+| `F_st` = 0.20, each sample's own subpopulation frequency | 0.0131 | 0.0347 | 0.1044 |
+
+**Structure does not invent contamination; it hides it.** At `F_st` 0.20 a sample contaminated at 3%
+comes back at 0.5% and one at 1% comes back at exactly zero — both under any 1–3% flagging threshold,
+so **contaminated samples pass as clean**. That is the same direction `verifyBamID2`'s own number goes
+— 2.9% returned for a true 10% — so the claim being corrected contradicted the evidence quoted two
+paragraphs above it.
+
+**The decision is unchanged and the reason for it is now the measured one.** Individual-specific
+frequencies are necessary because without them contamination becomes invisible on a structured panel,
+not because a clean panel would be flagged. **What follows for the pipeline is the opposite of what a
+false-positive story implies**: the thing to watch is a panel that flags nothing, and §3.4.4's
+post-hoc re-estimate is the check that would catch it.
+
+**One warning the measurement adds, and it is about *how* an individual frequency is obtained.** A
+per-subpopulation frequency estimated from that subpopulation's own twelve samples adds about **+0.015
+to every sample's `α`** and puts **41 to 47 of 50 clean samples** over a 1% threshold — worse than the
+pooled frequency on both counts. `verifyBamID2`'s frequencies are a smooth function of an individual's
+principal-component coordinates, fitted across the whole panel, and that is the property to preserve:
+**borrow strength across the panel, never partition it**. A correct individual frequency needs no
+apology — handed the frequency the genotypes were drawn at, a clean panel returns **0 of 50** above 1%
+at every divergence tested — so the whole difficulty is in the estimate.
 
 **Decision: derive the individual-specific frequencies from this cohort, not from an external panel.**
 There is no tomato HGDP; what there is, is the kept loci in every sample, which is the matrix a
@@ -639,6 +671,29 @@ caller does — the same standard [`parameter_prepass_joint_loci.md`](parameter_
 plateaus, so the question is never "how precise" but "precise enough to feel". **Ten times the memory
 for 2.3 times the accuracy of one prior fails that test**, and the middle row is already where their
 own recommendation sits.
+
+**Measured on this route's own estimator, 2026-08-12, and it confirms the ten-thousand figure while
+showing it is tight rather than comfortable**
+([`../reports/joint_contamination_2026-08-12.md`](../reports/joint_contamination_2026-08-12.md)).
+Fifty samples, three reads a site, each sample scored against its own subpopulation's frequency:
+
+| segregating markers | a clean panel's **worst** fitted `α` | a sample truly at 3% |
+|---:|---:|---:|
+| 3,434 | **1.85%** | 2.90% |
+| 13,748 | **0.86%** | 3.00% |
+| 54,735 | 0.53% | 3.20% |
+| 218,943 | 0.21% | 3.08% |
+
+**A contaminated sample's estimate is right from 3,400 markers up.** What more markers buy is the
+**noise floor on the clean samples** — and that floor, not the estimate, is what a flagging threshold
+has to clear. Ten thousand segregating markers puts it at about **1%**, which is the threshold itself.
+
+**So the number to emit beside `α` is the panel's own floor.** Reporting the distribution of fitted
+`α` across the panel costs nothing — every sample is fitted anyway — and it turns a constant threshold
+into a comparison a reader can make: a sample is contaminated when it stands out from that
+distribution, not when it crosses 1%. That is cheaper than the five-times budget increase 55,000
+markers would need, and it is the same reasoning §3.2 uses when it requires the two evidence counts to
+travel beside the rates.
 
 ### 3.4.4 Measure it again from the final calls, and report the two
 
@@ -1225,11 +1280,16 @@ holds, and where the generic budget starts to matter — are
    frequencies?** — OPEN (§3.4.2). `verifyBamID2` defaults to four on human reference panels, and a
    crop panel's structure is not human structure: a landrace collection may need more, and an
    inbred-line panel behaves differently again. *Leaning:* decide it from the panel by the usual
-   scree-plot criterion rather than by inheriting four, and record what was used beside `α`, since a
-   number fitted under too few components is biased in the direction §3.4.2 describes — structure read
-   as contamination. **Settled by:** the components come out of the same matrix relatedness uses
+   scree-plot criterion rather than by inheriting four, and record what was used beside `α`. **A
+   number fitted under too few components is biased *downward*** — §3.4.2's measurement: at an `F_st`
+   of 0.20 a pooled frequency, which is what zero components gives, returns 0.5% for a true 3%. So too
+   few components hides contamination rather than inventing it, and a panel that flags nothing is the
+   symptom. **Settled by:** the components come out of the same matrix relatedness uses
    ([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §6), so this is a plot rather than an
-   experiment.
+   experiment. **One constraint the measurement adds**: whatever produces the individual frequency
+   must borrow strength across the whole panel. A frequency estimated from a subpopulation's own
+   twelve samples puts 41 to 47 of 50 *clean* samples over a 1% threshold, which is worse than using
+   no structure at all.
 5. **Do the short-tract STR strata contribute to contamination after all?** — OPEN (§4.3). *Leaning:*
    possibly, and it does not matter much, since the generic loci supply `α` either way. **Settled by:**
    two per-stratum counts — what fraction of a stratum's loci segregate across the cohort, and what
