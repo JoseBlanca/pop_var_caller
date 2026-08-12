@@ -521,6 +521,18 @@ impl StratumTable {
         Some(ErrorRate::try_new(rate).expect("mismatched bases never outnumber compared ones"))
     }
 
+    /// How many bases of this stratum's reads were compared against the tracts they sit in.
+    ///
+    /// **The warrant behind [`Self::substitution_rate`], and the count that belongs beside it**:
+    /// the rate is a proportion over bases, so bases are what say how sharply it was measured. A
+    /// stratum's locus count says something else entirely — one deep locus can compare more
+    /// bases than a hundred shallow ones.
+    #[inline]
+    #[must_use]
+    pub fn bases_compared(&self) -> u64 {
+        self.bases.compared
+    }
+
     /// Of the reads that differed from the reference tract length, the share that did so by
     /// something other than a whole number of motif copies — **the guard share**, which is what
     /// `GUARD_SHARE_LIMIT` bounds. Above it, what moved this stratum's reads is ordinary indel

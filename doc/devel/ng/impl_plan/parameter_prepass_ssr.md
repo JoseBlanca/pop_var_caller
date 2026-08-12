@@ -392,7 +392,7 @@ has no concavity proof, so it is capped, the best-scoring iterate kept, and the 
 
 ### Milestone E — the four fits, in order
 
-**E1. The substitution rate.**  ☐
+**E1. The substitution rate.**  ✅
 Mismatched bases over bases compared, per stratum. One division, and it needs none of the other
 three, which is why it goes first. Where a stratum holds reads of two different true rates the pooled
 counters return their base-weighted mean, which is the right answer for a model carrying one rate.

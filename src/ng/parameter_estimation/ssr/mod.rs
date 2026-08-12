@@ -52,13 +52,13 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::ng::locus_generation::SampleLocusObservations;
-use crate::ng::parameter_estimation::Estimate;
 use crate::ng::parameter_estimation::generic::accumulators::PloidyMap;
 use crate::ng::parameter_estimation::ssr::locus_offsets::{
     LocusStratum, base_comparison_of, shape_of, stratum_of, tally_of,
 };
 use crate::ng::parameter_estimation::ssr::slippage::SlippageModel;
 use crate::ng::parameter_estimation::ssr::stratum_table::StratumTable;
+use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{DomainError, ErrorRate, Ploidy, ReadGroupId, SsrPeriod};
 
 pub use offset_bucket::{OFFSET_BUCKETS, OFFSET_HALF_RANGE, OffsetBucket, bucket_of};
@@ -501,7 +501,13 @@ pub struct StratumFitSummary {
     /// difference between neighbours and up to 141% at four-fold.
     pub strata_merged: Vec<SmallVec<[Stratum; 2]>>,
     /// The substitution rate this read group's least-slippery strata returned, and how many
-    /// loci stood behind it.
+    /// **bases** stood behind it.
+    ///
+    /// Bases and not loci — the architecture's sketch of this field says loci and is behind the
+    /// code — because the number exists to be read beside the SNP/indel path's rate for the same
+    /// library, whose own warrant counts reads times the sites they covered. Two warrants on
+    /// different scales cannot be compared, and a locus count says the wrong thing anyway: what
+    /// stands behind a per-base rate is bases.
     ///
     /// **Emitted so that step 4's own surface can put it beside the generic path's rate for
     /// the same read group**, which is where the two must agree to a quarter-Phred: where a
@@ -545,13 +551,13 @@ pub struct StratumFitSummary {
 /// produced them — so pooling a haploid locus with a diploid one is invisible while the loci
 /// are being counted. It becomes wrong at the fit: the fit scores each entry against the
 /// genotypes of *one* ploidy, and a pooled table has no ploidy that is true of all of it. The
-/// SNP/indel path keys its own tables the same way for the same reason
-/// (`generic/histogram.rs`), and there a mixed key was the failure that had to be designed
+/// SNP/indel path keys all three of its tables the same way for the same reason
+/// (`generic/accumulators.rs`), and there a mixed key was the failure that had to be designed
 /// out rather than one that had been observed.
 ///
 /// **It costs nothing on today's runs.** Every genome region is currently declared to have
-/// the same ploidy ([`ConstantPloidy`](super::generic::accumulators::ConstantPloidy) is the
-/// only map that exists), so every key carries the same value and the tables are exactly
+/// the same ploidy ([`ConstantPloidy`](super::generic::accumulators::ConstantPloidy) is
+/// production's only map), so every key carries the same value and the tables are exactly
 /// those a two-part key would have built. What it buys is that the first sex chromosome or
 /// mixed-ploidy genome to arrive splits the tables instead of silently merging them.
 ///
@@ -842,7 +848,7 @@ impl SsrAccumulators {
     ///
     /// # Panics
     ///
-    /// If the two shards were handed different ploidy maps. The ploidy is part of the key, so
+    /// If the two shards were not built on the same ploidy map. The ploidy is part of the key, so
     /// the damage is not a pooled table but a **split** one: the same stratum would arrive
     /// under two keys because the two shards disagreed about the genome rather than because
     /// the genome has two ploidies there, and each half would then be fitted on part of its
@@ -853,9 +859,8 @@ impl SsrAccumulators {
         // by different configurations rather than by two equal maps.
         assert!(
             Arc::ptr_eq(&self.ploidy, &other.ploidy),
-            "these two shards were handed different ploidy maps, so a stratum they both saw \
-             would arrive here under two keys and each half would be fitted on part of its \
-             evidence"
+            "these two shards were not built on the same ploidy map, so a stratum they both saw \
+             could arrive here under two keys and each half be fitted on part of its evidence"
         );
 
         for (key, table) in other.by_stratum {
@@ -896,6 +901,67 @@ impl SsrAccumulators {
     pub fn adjustments(&self) -> &SsrAccumulationCounts {
         &self.counts
     }
+}
+
+// ---------------------------------------------------------------------
+// The first of the four fits: the substitution rate, which is a division.
+// ---------------------------------------------------------------------
+
+/// One table's substitution rate with its warrant: mismatched bases over compared bases, how
+/// many bases that was, and that it was measured here rather than taken from somewhere else.
+///
+/// **The count beside the rate is bases and not loci**, and the deciding argument is the
+/// comparison this rate exists to be put into. A stratum's rate is meant to be read against the
+/// SNP/indel path's rate for the same library, where the two must agree wherever a tract barely
+/// slips (`spec/parameter_prepass_ssr.md` §4.5); that path counts an error rate's observations
+/// as *reads times the sites they covered*, which is one base per read per site — this quantity
+/// exactly. A locus count would put the two warrants on different scales, and would say the
+/// wrong thing on its own besides: a hundred loci at three reads each stand behind less of this
+/// rate than one locus at three hundred.
+///
+/// **`None` where nothing was compared, never a zero** — the rule
+/// [`StratumTable::substitution_rate`] states and the reason it returns an `Option`: a stratum
+/// whose reads all matched has a measured rate of zero, and a stratum nothing was compared in
+/// has no rate at all. A zero here would be borrowed from, and later compared against the
+/// SNP/indel path's rate, as though it had been measured.
+///
+/// **Always [`Provenance::FittedHere`], and there is no rung below it for this parameter.** The
+/// borrowing the design defines is over the slippage model — the level and its two shares — not
+/// over the substitution rate, and [`StratumFit::substitution`] is not an `Option`, so a stratum
+/// with loci and no compared bases is a case the design has not ruled on. Nothing observed can
+/// reach it: a read reaches a table only through a complete witness, which compares its bases.
+#[must_use]
+pub fn substitution_rate_of(table: &StratumTable) -> Option<Estimate<ErrorRate>> {
+    table.substitution_rate().map(|value| Estimate {
+        value,
+        provenance: Provenance::FittedHere,
+        observations: table.bases_compared(),
+    })
+}
+
+/// Every stratum's substitution rate, one division per [`StratumKey`] — **the first of the four
+/// fits, and the only one that is not a search** (`spec/parameter_prepass_ssr.md` §4.2).
+///
+/// It goes first because it needs none of the other three: a read's mismatch count is binomial
+/// at this rate whatever tract length the read showed, so the channel scoring *which length a
+/// read showed* and the channel scoring *how its bases read* factorise exactly, and this one
+/// closes in a division (`spec/parameter_prepass_ssr.md` §4.1).
+///
+/// **Nothing is pooled across keys.** Each table's own bases give each key's own rate — libraries
+/// differ in chemistry, which is why they are fitted apart, and tracts differ in how much of
+/// their length is repeat. A rate pooled over a read group's strata would be a plausible number
+/// with no stratum it describes.
+///
+/// A key whose table compared no bases is **absent from the result** rather than present with a
+/// zero, so a consumer that has to distinguish "measured at zero" from "not measured" still can.
+#[must_use]
+pub fn substitution_rates(
+    accumulators: &SsrAccumulators,
+) -> BTreeMap<StratumKey, Estimate<ErrorRate>> {
+    accumulators
+        .strata()
+        .filter_map(|(key, table)| substitution_rate_of(table).map(|rate| (key, rate)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1646,12 +1712,18 @@ mod tests {
         assert_eq!(accumulators.adjustments().reads_with_partial_witness, 5);
     }
 
-    /// **Two shards handed different ploidy maps cannot be merged**: their tables would be
-    /// fitted against different sets of genotypes, and the fit would score a locus against a set
-    /// only one of them was built for.
+    /// **Two shards built on separate ploidy maps cannot be merged, even where the two maps
+    /// agree** — which is what this fixture hands it, two allocations of the same constant map.
+    /// The guard is pointer identity, deliberately: every shard of a real run is handed one
+    /// shared map, so two that differ here were driven by different configurations rather than
+    /// by two equal objects, and equality cannot be asked of a trait object anyway.
+    ///
+    /// What the guard protects against is in `merge`'s own doc: maps that *disagree* file a
+    /// stratum both shards saw under two keys, and each half is then fitted on part of its
+    /// evidence.
     #[test]
-    #[should_panic(expected = "different ploidy maps")]
-    fn merging_two_shards_built_on_different_ploidy_maps_is_refused() {
+    #[should_panic(expected = "not built on the same ploidy map")]
+    fn merging_two_shards_built_on_separate_ploidy_maps_is_refused() {
         let mut first = SsrAccumulators::new(diploid());
         first.add_locus(&dinucleotide(1_000, 5));
 
@@ -1838,5 +1910,311 @@ mod tests {
             message.contains("gain share of slipped reads"),
             "the quantity, in the newtype's own words: {message}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The substitution rate, fitted per stratum.
+    // -----------------------------------------------------------------
+
+    /// A tract whose reads carry a **known** number of mismatched bases: `clean` reads showing
+    /// the reference tract exactly, and `mismatching` reads showing it with the base at
+    /// `changed_at` replaced, so each of those contributes exactly one mismatch and no change of
+    /// length. The compared bases are `(clean + mismatching) × the tract's length`, and the
+    /// mismatched bases are `mismatching`.
+    ///
+    /// **Counted against the motif tiled from the read's first base, not against `reference`**,
+    /// because that is what the accumulator compares against: a read is scored on how far it
+    /// departs from a perfect tract, so a reference that is not itself a perfect tiling would
+    /// charge its own imperfections to every read. The assertion below is over the tiling, so a
+    /// fixture that broke that assumption would fail here rather than quietly report a rate
+    /// neither test intended.
+    fn tract_at_a_known_rate(
+        start: u64,
+        reference: &[u8],
+        motif: &[u8],
+        group: u32,
+        clean: u32,
+        mismatching: u32,
+        changed_at: usize,
+    ) -> SampleLocusObservations {
+        let mut changed = reference.to_vec();
+        // A base the motif cannot show at that position, whatever the motif is, so the read
+        // mismatches there and nowhere else.
+        changed[changed_at] = if reference[changed_at] == b'G' {
+            b'C'
+        } else {
+            b'G'
+        };
+        let tiled = |bases: &[u8]| {
+            bases
+                .iter()
+                .zip(motif.iter().cycle())
+                .filter(|(shown, tiled)| shown != tiled)
+                .count()
+        };
+        assert_eq!(
+            tiled(reference),
+            0,
+            "the clean reads must show a whole tract"
+        );
+        assert_eq!(
+            tiled(&changed),
+            1,
+            "each mismatching read must differ from the tiled motif in exactly one base"
+        );
+
+        tract(
+            start,
+            reference,
+            motif,
+            vec![
+                observation(reference, group, clean),
+                observation(&changed, group, mismatching),
+            ],
+        )
+    }
+
+    /// **The rate a stratum returns is the rate its reads carried**: 30 mismatched bases in
+    /// 10,000 compared comes back as 0.0030, exactly, with the bases as its warrant and marked
+    /// as measured here.
+    ///
+    /// Exactly, and not within a tolerance, because there is nothing here to be approximate
+    /// about: the two counters are integers and the rate is their quotient, which is why this
+    /// fit is a division rather than a search. The maximum-likelihood property of that division
+    /// is proven separately, against a grid of 100,000 rates, in `stratum_table.rs`.
+    ///
+    /// **The 500 reads are also the check that the read cap does not reach the bases.** The cap
+    /// keeps twelve reads a locus for the *shape*; if it also thinned the base counters this
+    /// stratum would report its rate over 240 bases — twelve reads of twenty — rather than
+    /// 10,000, so the warrant beside every rate in a run would be 41.7 times too small.
+    #[test]
+    fn a_stratums_substitution_rate_is_the_rate_its_reads_carried() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract_at_a_known_rate(
+            1_000, reference, b"AT", 0, 470, 30, 1,
+        ));
+
+        let rates = substitution_rates(&accumulators);
+        let key = StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, 10),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        };
+        let fitted = rates.get(&key).expect("that stratum was fitted");
+
+        assert_eq!(
+            fitted.value.get(),
+            0.0030,
+            "30 mismatched bases in 10,000 compared"
+        );
+        assert_eq!(
+            fitted.observations, 10_000,
+            "500 reads of 20 bases, none of them lost to the twelve-read cap on shapes"
+        );
+        assert_eq!(fitted.provenance, Provenance::FittedHere);
+    }
+
+    /// **Each stratum's rate comes from its own bases, and never from the read group's pool.**
+    /// The two strata here are ten-fold apart — 0.0030 and 0.0300 — and a fit that pooled a read
+    /// group's bases would report 0.0107 for both, which is neither and is a plausible enough
+    /// number that nothing downstream would question it.
+    ///
+    /// Tracts differ in how much of their length is repeat and how well reads align inside them,
+    /// so this is not a hypothetical difference: it is the reason the rate is fitted per stratum
+    /// rather than per library.
+    #[test]
+    fn two_strata_of_one_library_keep_their_own_rates() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract_at_a_known_rate(
+            1_000,
+            b"ATATATATATATATATATAT",
+            b"AT",
+            0,
+            470,
+            30,
+            1,
+        ));
+        accumulators.add_locus(&tract_at_a_known_rate(
+            2_000,
+            b"AAAAAAAA",
+            b"A",
+            0,
+            380,
+            120,
+            3,
+        ));
+
+        let rates = substitution_rates(&accumulators);
+        let rate_at = |period_bases: u8, repeats: u32| {
+            rates
+                .get(&StratumKey {
+                    read_group: ReadGroupId(0),
+                    stratum: stratum(period_bases, repeats),
+                    ploidy: Ploidy::try_new(2).expect("two genome copies"),
+                })
+                .expect("that stratum was fitted")
+                .clone()
+        };
+
+        assert_eq!(rate_at(2, 10).value.get(), 0.0030);
+        assert_eq!(rate_at(2, 10).observations, 10_000);
+        assert_eq!(rate_at(1, 8).value.get(), 0.0300);
+        assert_eq!(rate_at(1, 8).observations, 4_000);
+    }
+
+    /// **And each library's rate comes from its own reads**, at one and the same stratum. Two
+    /// tracts of the same period and repeat count, each witnessed by one library, one of the two
+    /// ten times noisier; pooling them would hand both the base-weighted mean and hide a library
+    /// worth re-running.
+    #[test]
+    fn two_libraries_at_one_stratum_keep_their_own_rates() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract_at_a_known_rate(
+            1_000, reference, b"AT", 0, 470, 30, 1,
+        ));
+        accumulators.add_locus(&tract_at_a_known_rate(
+            2_000, reference, b"AT", 1, 200, 300, 1,
+        ));
+
+        let rates = substitution_rates(&accumulators);
+        let rate_of = |group: u32| {
+            rates
+                .get(&StratumKey {
+                    read_group: ReadGroupId(group),
+                    stratum: stratum(2, 10),
+                    ploidy: Ploidy::try_new(2).expect("two genome copies"),
+                })
+                .expect("that library was fitted")
+                .value
+                .get()
+        };
+
+        assert_eq!(rate_of(0), 0.0030);
+        assert_eq!(rate_of(1), 0.0300, "300 mismatches in 10,000 bases");
+    }
+
+    /// **A stratum nothing was compared in has no rate, and is absent rather than zero.** The
+    /// two are different claims — a stratum whose every read matched measures zero — and a zero
+    /// invented here would be borrowed from by the strata around it and, at the end of the run,
+    /// compared against the SNP/indel path's rate as though it had been measured.
+    #[test]
+    fn a_table_with_nothing_compared_yields_no_rate_at_all() {
+        assert_eq!(substitution_rate_of(&StratumTable::default()), None);
+
+        let empty = SsrAccumulators::new(diploid());
+        assert!(substitution_rates(&empty).is_empty());
+    }
+
+    /// **A stratum that holds loci and compared no bases is absent, and that is the case worth
+    /// building**, because an empty accumulator is absent under every implementation ever
+    /// written: it has no strata to walk. Here the table exists and holds a locus, so an
+    /// implementation that answered zero rather than nothing — or that decided on the locus count
+    /// instead of the base count — is visible.
+    ///
+    /// The locus is a tract every read shows as **entirely deleted**: the reads witness the
+    /// tract completely, so they are entered and the locus files a shape, and each of them shows
+    /// no bases, so there is nothing to compare against the motif.
+    #[test]
+    fn a_stratum_with_loci_and_no_compared_bases_is_absent_rather_than_zero() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract(
+            1_000,
+            b"ATATATATATATATATATAT",
+            b"AT",
+            vec![observation(b"", 0, 6)],
+        ));
+
+        let key = StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, 10),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        };
+        let table = accumulators.table_for(key).expect("the locus was filed");
+        assert_eq!(table.loci(), 1, "the stratum holds a locus");
+        assert_eq!(table.bases_compared(), 0, "and compared nothing");
+
+        assert_eq!(substitution_rate_of(table), None);
+        assert!(
+            !substitution_rates(&accumulators).contains_key(&key),
+            "a stratum with no compared bases has no rate, not a rate of zero"
+        );
+    }
+
+    /// **A stratum whose every read matched reports a rate of zero, and reports it as measured.**
+    /// This is the other half of the distinction above, and the half a floor or a
+    /// drop-the-zeroes filter would quietly remove: zero is what a clean stratum measures, and a
+    /// caller that never sees it cannot tell one from a stratum that was never fitted.
+    ///
+    /// **It also pins that thinness is not this fit's business.** 100 compared bases is a
+    /// hundredth of what the fixtures above carry, and the rate still comes back, marked as
+    /// fitted here. Deciding that a stratum has too little evidence — and saying where its number
+    /// then came from — belongs to the borrowing step, which marks what it does; a gate here
+    /// would drop the stratum with nothing recording that it had.
+    #[test]
+    fn a_stratum_whose_reads_all_matched_reports_a_measured_zero() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract(
+            1_000,
+            reference,
+            b"AT",
+            vec![observation(reference, 0, 5)],
+        ));
+
+        let fitted = substitution_rates(&accumulators)
+            .get(&StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, 10),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            })
+            .expect("a clean stratum is still a fitted stratum")
+            .clone();
+
+        assert_eq!(fitted.value.get(), 0.0, "every base matched");
+        assert_eq!(fitted.observations, 100, "five reads of twenty bases");
+        assert_eq!(
+            fitted.provenance,
+            Provenance::FittedHere,
+            "thin evidence is still this stratum's own evidence"
+        );
+    }
+
+    /// **Two ploidies of one stratum keep their own rates**, which is what putting the ploidy in
+    /// the key is for at the fitting end rather than the counting end. The two loci here are the
+    /// same period and repeat count and the same library, ten-fold apart in rate, and differ only
+    /// in how many genome copies they sit on; under a key that dropped the ploidy one of the two
+    /// rates would simply not be reported.
+    #[test]
+    fn two_ploidies_of_one_stratum_keep_their_own_rates() {
+        let reference = b"ATATATATATATATATATAT";
+        let mut accumulators = SsrAccumulators::new(Arc::new(PloidyChangesAt {
+            haploid_from: 5_000,
+        }));
+        accumulators.add_locus(&tract_at_a_known_rate(
+            1_000, reference, b"AT", 0, 470, 30, 1,
+        ));
+        accumulators.add_locus(&tract_at_a_known_rate(
+            9_000, reference, b"AT", 0, 200, 300, 1,
+        ));
+
+        let rates = substitution_rates(&accumulators);
+        assert_eq!(rates.len(), 2, "one stratum at two ploidies is two fits");
+
+        let rate_at = |copies: u8| {
+            rates
+                .get(&StratumKey {
+                    read_group: ReadGroupId(0),
+                    stratum: stratum(2, 10),
+                    ploidy: Ploidy::try_new(copies).expect("one or two genome copies"),
+                })
+                .expect("that ploidy was fitted")
+                .value
+                .get()
+        };
+
+        assert_eq!(rate_at(2), 0.0030, "the locus on two genome copies");
+        assert_eq!(rate_at(1), 0.0300, "the locus on one");
     }
 }
