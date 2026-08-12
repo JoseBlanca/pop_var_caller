@@ -356,7 +356,7 @@ level of zero every locus's reads land on its own alleles. Then agreement with t
 expression re-runs all four.** *Depends:* D1, generic D2's `NoiseModel` trait. *Source:* arch §3,
 spec §4.1, research note §6.4.
 
-**D3. Widen `fit_mixture_weights` past three genotypes.**  ☐
+**D3. Widen `fit_mixture_weights` past three genotypes.**  ✅
 Its declared return type is `SmallVec<[f64; 3]>`, which is the diploid generic path's genotype count.
 A stratum here has up to 91 — thirteen allele lengths at `ALLELE_OFFSET_LIMIT = 6`, fewer where the
 support clips at the low end — so the return type widens to a `Vec<f64>` or becomes generic in its

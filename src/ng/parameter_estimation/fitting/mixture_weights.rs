@@ -23,8 +23,6 @@
 //!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §4.1.
 
-use smallvec::SmallVec;
-
 use crate::ng::types::LogProb;
 
 /// How many passes the climb is allowed before it stops without having settled.
@@ -169,13 +167,24 @@ pub(crate) struct MixtureWeightsFit {
     /// What fraction of the sample's sites each genotype accounts for: one entry per
     /// genotype, non-negative and summing to one.
     ///
+    /// **A `Vec` rather than a fixed-width vector, because a genotype is not the same object
+    /// on the two paths this fit serves.** On the SNP/indel path a genotype is a count of
+    /// alternative copies, so a diploid has three and a tetraploid five. On the STR path it is
+    /// an unordered tuple of allele *lengths*, and a diploid stratum has **between 66 and 91**
+    /// of them — 91 at the full thirteen lengths, 66 at the narrowest stratum the copy floors
+    /// admit, whose support clips at four copies below the reference
+    /// (`arch/parameter_prepass_ssr.md` §3). An inline width of three would be a lie about the
+    /// second path's shape at every call site, and **every one of that path's several hundred
+    /// fits a sample would spill to the heap regardless** — the narrowest is already 22 times
+    /// the inline three.
+    ///
     /// **Named for what the numbers are and not for the role they play in the
     /// arithmetic.** They are the mixture's weights, which is what this file's procedure
     /// is named for, but to a reader of the fit they are genotype frequencies — and the
     /// climb carries a *cell* weight per row of the table as well, which is never the
     /// same quantity. `ScanResult::genotype_frequencies` is this vector filed by ploidy,
     /// under the same name.
-    pub genotype_frequencies: SmallVec<[f64; 3]>,
+    pub genotype_frequencies: Vec<f64>,
     /// The weighted log-likelihood **at `genotype_frequencies`** —
     /// `Σ_cells w · ln Σ_genotypes π·L`.
     /// Computed in a final pass after the climb stopped, so it belongs to the
@@ -228,7 +237,7 @@ pub(crate) struct MixtureWeightsFit {
 pub(crate) fn fit_mixture_weights(
     ln_likelihood_by_cell_and_genotype: GenotypeLikelihoodTable<'_>,
     cell_weights: &[f64],
-) -> SmallVec<[f64; 3]> {
+) -> Vec<f64> {
     let genotypes = ln_likelihood_by_cell_and_genotype.genotypes();
     let uniform = vec![1.0 / genotypes as f64; genotypes];
     climb_mixture_weights(ln_likelihood_by_cell_and_genotype, cell_weights, &uniform)
@@ -284,14 +293,14 @@ fn climb_with_cap(
 
     let total_cell_weight: f64 = cell_weights.iter().sum();
 
-    let mut genotype_frequencies: SmallVec<[f64; 3]> = SmallVec::from_slice(start);
-    let mut next_genotype_frequencies: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
+    let mut genotype_frequencies: Vec<f64> = start.to_vec();
+    let mut next_genotype_frequencies: Vec<f64> = vec![0.0; genotypes];
     // Scratch, loaded and cleared once per cell rather than allocated per cell. The
     // loop below walks every cell of the table — up to 583 on the generic path, which is
     // the cell ladder's capacity rather than a count
     // (`arch/parameter_prepass_generic.md` §4.1) — once per pass, and the profile scan
     // runs one whole climb at each of its 161 rungs.
-    let mut ln_joint: SmallVec<[f64; 3]> = SmallVec::from_elem(0.0, genotypes);
+    let mut ln_joint: Vec<f64> = vec![0.0; genotypes];
 
     let mut passes = 0;
     let mut converged = false;
@@ -888,9 +897,8 @@ mod tests {
         assert!(fitted.iter().all(|&weight| (0.0..=1.0).contains(&weight)));
     }
 
-    /// Nothing here is diploid. A tetraploid has five genotypes, which is past the
-    /// three a `SmallVec<[f64; 3]>` holds inline, so this exercises the spill as well
-    /// as the loop bound.
+    /// Nothing here is diploid. A tetraploid has five genotypes, so this exercises the
+    /// loop bound rather than only the diploid path.
     #[test]
     fn a_tetraploid_table_is_fitted_over_its_own_five_genotypes() {
         // Six cells across, five dosages of the alternative allele down: entry
@@ -1136,7 +1144,7 @@ mod tests {
     /// `Vec<&[f64]>` collected before the loop makes the refill a borrow error
     /// (E0502), so it has to be rebuilt inside it, once per rung.
     #[test]
-    fn a_rung_loop_refills_one_buffer_and_allocates_nothing_per_rung() {
+    fn a_rung_loop_refills_one_likelihood_buffer_rather_than_rebuilding_it() {
         let cell_weights = weights_under(&TRUTH, 1_000.0);
         let mut ln_likelihood = vec![0.0; CELL_GIVEN_GENOTYPE.len() * TRUTH.len()];
 
@@ -1160,6 +1168,100 @@ mod tests {
                 assert!((got - want).abs() < 1e-9, "genotype {genotype}: {got}");
             }
         }
+    }
+
+    /// **The width the STR path actually needs: 45 genotypes**, which is nine allele lengths'
+    /// unordered pairs and `spec/parameter_prepass_ssr.md` §4.2's own worked example. A real
+    /// stratum reaches 91; nine lengths is what the spec argues its examples at, and the
+    /// difference between 3 and 45 is what this test exists for.
+    ///
+    /// **The weights are the exact expected counts under a known truth, not drawn ones**, which
+    /// is what makes the tolerance meaningful rather than arbitrary: with no sampling noise in
+    /// the table the maximum-likelihood point *is* the truth, so anything but recovery is this
+    /// code's fault. The same method the STR path's own harness uses.
+    ///
+    /// **Two starts, and the second is far from the answer.** The surface is concave with the
+    /// component likelihoods held fixed, so every interior start must reach the same summit —
+    /// that is the one property of this climb with a proof behind it.
+    ///
+    /// **Reaching the same answer from two starts does not show the start was read**, and that
+    /// is the trap: on a concave surface "arrived from the skewed start" and "never looked at
+    /// the skewed start" produce identical output, so a climb that validated its argument and
+    /// then ignored it passed every test in this file. The last two lines close it by comparing
+    /// where **one** pass lands from each — before the two have had time to converge.
+    #[test]
+    fn a_forty_five_genotype_table_recovers_its_known_frequencies_from_any_interior_start() {
+        const GENOTYPES: usize = 45;
+
+        // A genotype makes its own cell far likelier than any other, with the rest of its mass
+        // spread evenly — diagonally dominant, so the set is identified, and every column sums
+        // to one so each is a distribution over the cells.
+        let mut cell_given_genotype = vec![0.0; GENOTYPES * GENOTYPES];
+        for genotype in 0..GENOTYPES {
+            for cell in 0..GENOTYPES {
+                cell_given_genotype[cell * GENOTYPES + genotype] = if cell == genotype {
+                    0.80
+                } else {
+                    0.20 / (GENOTYPES - 1) as f64
+                };
+            }
+        }
+
+        // A spread-out truth rather than a flat one: a uniform truth is what a broken climb
+        // returns when it does not move.
+        let unnormalised: Vec<f64> = (0..GENOTYPES).map(|g| (g + 1) as f64).collect();
+        let total: f64 = unnormalised.iter().sum();
+        let truth: Vec<f64> = unnormalised.iter().map(|share| share / total).collect();
+
+        // Each cell weighted by how much of the data a truth-generated sample puts there.
+        let sites = 1_000_000.0;
+        let cell_weights: Vec<f64> = (0..GENOTYPES)
+            .map(|cell| {
+                sites
+                    * (0..GENOTYPES)
+                        .map(|g| truth[g] * cell_given_genotype[cell * GENOTYPES + g])
+                        .sum::<f64>()
+            })
+            .collect();
+
+        let ln_likelihood: Vec<f64> = cell_given_genotype
+            .iter()
+            .map(|likelihood| likelihood.ln())
+            .collect();
+        let table = GenotypeLikelihoodTable::from_natural_logs(&ln_likelihood, GENOTYPES);
+
+        let fitted = fit_mixture_weights(table, &cell_weights);
+        assert_eq!(fitted.len(), GENOTYPES);
+        for (genotype, (&got, &want)) in fitted.iter().zip(&truth).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "genotype {genotype}: {got} against a truth of {want}"
+            );
+        }
+
+        // From an interior point nowhere near the answer — almost all the mass on the last
+        // genotype, whose truth is the largest but still only 4.3% of the sample.
+        let mut skewed = vec![0.001 / (GENOTYPES - 1) as f64; GENOTYPES];
+        skewed[GENOTYPES - 1] = 0.999;
+        let uniform = vec![1.0 / GENOTYPES as f64; GENOTYPES];
+        let from_far = climb_mixture_weights(table, &cell_weights, &skewed);
+        assert!(from_far.converged, "the climb ran out of passes");
+        for (genotype, (&got, &want)) in
+            from_far.genotype_frequencies.iter().zip(&truth).enumerate()
+        {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "from a skewed start, genotype {genotype}: {got} against a truth of {want}"
+            );
+        }
+
+        // One pass, from each start, before either has converged.
+        assert_ne!(
+            climb_with_cap(table, &cell_weights, &uniform, 1).genotype_frequencies,
+            climb_with_cap(table, &cell_weights, &skewed, 1).genotype_frequencies,
+            "one pass from two very different starts landed in the same place, so the climb is \
+             validating the start and then ignoring it"
+        );
     }
 
     /// `ln_sum_exp` is the one place the table's dynamic range is handled, and a table

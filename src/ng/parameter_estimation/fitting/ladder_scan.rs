@@ -32,8 +32,6 @@
 
 use std::collections::BTreeMap;
 
-use smallvec::SmallVec;
-
 use crate::ng::parameter_estimation::fitting::mixture_weights::{
     GenotypeLikelihoodTable, climb_mixture_weights, weighted_log_likelihood,
 };
@@ -71,7 +69,7 @@ pub struct ScanResult<P> {
     /// The same quantity `MixtureWeightsFit::genotype_frequencies` carries and under the
     /// same name, because it is the same numbers: the climb returns them and the scan
     /// files them by ploidy.
-    pub genotype_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    pub genotype_frequencies: BTreeMap<Ploidy, Vec<f64>>,
     /// What makes "the best-scoring iterate" a defined comparison in an alternating
     /// fit. A [`LogProb`] rather than a bare `f64` because comparing is the only thing
     /// it is for, and `LogProb` carries `ln(0)` as `-∞` — the score of a rung nothing
@@ -143,7 +141,7 @@ where
         cells,
         ladder,
         &plans,
-        |rung, plan, table, climbed_by_ploidy: &mut BTreeMap<Ploidy, SmallVec<[f64; 3]>>| {
+        |rung, plan, table, climbed_by_ploidy: &mut BTreeMap<Ploidy, Vec<f64>>| {
             let climbed = climb_mixture_weights(table, &plan.cell_weights, &plan.uniform_start);
             // **A rung whose climb ran out of passes is scored below its own summit**,
             // so the rung beside it can win on that alone and the argmax stops being
@@ -249,7 +247,7 @@ pub fn fit_by_fixed_frequency_scan<M>(
     model: &M,
     cells: &[M::Cell],
     ladder: &[M::NoiseParams],
-    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    genotype_frequencies: &BTreeMap<Ploidy, Vec<f64>>,
 ) -> FixedFrequencyScanResult<M::NoiseParams>
 where
     M: NoiseModel,
@@ -616,10 +614,7 @@ mod tests {
         let diploid = ploidy(2);
         let railed = ScanResult {
             noise: 0.1_f64,
-            genotype_frequencies: BTreeMap::from([(
-                diploid,
-                SmallVec::from_slice(&[0.98, 0.015, 0.005]),
-            )]),
+            genotype_frequencies: BTreeMap::from([(diploid, [0.98, 0.015, 0.005].to_vec())]),
             log_likelihood: LogProb(-1.2e9),
             argmax_at_ladder_end: true,
         };
@@ -1427,8 +1422,8 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// The frequency map the sibling takes, for one ploidy.
-    fn frequencies_at(copies: u8, frequencies: &[f64]) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
-        BTreeMap::from([(ploidy(copies), SmallVec::from_slice(frequencies))])
+    fn frequencies_at(copies: u8, frequencies: &[f64]) -> BTreeMap<Ploidy, Vec<f64>> {
+        BTreeMap::from([(ploidy(copies), frequencies.to_vec())])
     }
 
     /// **The claim E1 exists for: a table generated at a known rung recovers that rung
@@ -1754,16 +1749,14 @@ mod tests {
             })
             .collect();
         let ladder = [0.02_f64, 0.05, 0.10, 0.20];
-        let diploid = SmallVec::from_slice(&[0.50, 0.30, 0.20]);
+        let diploid = [0.50, 0.30, 0.20].to_vec();
 
         let mostly_reference = BTreeMap::from([
-            (ploidy(1), SmallVec::from_slice(&[0.99, 0.01])),
+            (ploidy(1), [0.99, 0.01].to_vec()),
             (ploidy(2), diploid.clone()),
         ]);
-        let evenly_split = BTreeMap::from([
-            (ploidy(1), SmallVec::from_slice(&[0.50, 0.50])),
-            (ploidy(2), diploid),
-        ]);
+        let evenly_split =
+            BTreeMap::from([(ploidy(1), [0.50, 0.50].to_vec()), (ploidy(2), diploid)]);
 
         let strict = fit_by_fixed_frequency_scan(&DosageModel, &cells, &ladder, &mostly_reference);
         let loose = fit_by_fixed_frequency_scan(&DosageModel, &cells, &ladder, &evenly_split);
