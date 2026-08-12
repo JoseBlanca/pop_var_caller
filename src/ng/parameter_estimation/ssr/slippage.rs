@@ -1865,6 +1865,67 @@ mod tests {
         assert_eq!(fitted.termination.iterations, 1);
     }
 
+    /// **The suite's own recovery check: does the search move toward the truth, and settle?**
+    ///
+    /// **This exists because the reporting test above cannot see where the search lands.** Of 21
+    /// mutations of the search, nine passed the whole suite without it — including a golden
+    /// section with its comparison reversed, so the search walks *downhill*; a search that returns
+    /// its starting point untouched; and an axis write that puts the direction split into the
+    /// fall-off. The sharp control catches them and is `#[ignore]`d for its runtime, so the suite
+    /// was relying on a test nobody runs.
+    ///
+    /// **Loose bounds on purpose.** What has to be reachable is the difference between a search
+    /// that moves and one that does not: the starts are handed a level of 0.03, half again the
+    /// truth's 0.0201, and one of them begins at three times that. A search that stood still, or
+    /// walked the wrong way, lands nowhere near. Tightening these would only duplicate the sharp
+    /// control at a hundredth of its resolution.
+    #[test]
+    fn the_search_moves_toward_the_truth_and_says_it_settled() {
+        let model = SsrNoiseModel::for_stratum(RepeatCount(1));
+        let truth = SlippageModel::try_new(0.0201, 0.17, 0.09).expect("three probabilities");
+        let diploid = ploidy(2);
+        // **Every locus at the reference length, two reads deep** — the cheapest fixture that
+        // still identifies how often a read slips, and the cost is what decides the shape of this
+        // test: at three reads with alleles either side it takes five minutes, which is a
+        // benchmark rather than a test. The sharp control is where the other two numbers are
+        // measured, over a wider spectrum and a deeper locus.
+        let alleles = [(WholeRepeatOffset(0), 1.0)];
+        let cells = exact_entry_space(&model, &truth, &alleles, diploid, 2);
+
+        let fitted = fit_by_multistart(
+            &model,
+            &cells,
+            &slippage_starts(0.03),
+            SearchPrecision::fast(),
+        );
+
+        // **The level, and only the level.** Every locus here is the reference length, so no read
+        // is long or short for a reason other than slippage — which is what makes how *often* a
+        // read slips sharply identified and how *far* it slips barely so, on two-read loci where
+        // a second step is a few reads in ten thousand. Asserting the other two here would be
+        // asserting noise; the sharp control is where they are measured.
+        let level = fitted.best.slip_rate.get();
+        assert!(
+            (level / truth.slip_rate.get() - 1.0).abs() < 0.10,
+            "the level came back at {level} against a truth of 0.0201, from starts at 0.09, \
+             0.03, 0.01 and 0.009"
+        );
+
+        // **How the search ended, asserted rather than ignored.** Four of the nine surviving
+        // mutations do not move the answer at all — they only lose the record of how it was
+        // reached, which is the one thing a consumer has to tell a fitted number from a stopped
+        // search.
+        assert!(
+            fitted.termination.converged,
+            "a start ran out of sweeps after {}",
+            fitted.termination.iterations
+        );
+        assert!(
+            fitted.termination.iterations >= 1,
+            "the search reports having run no sweeps at all"
+        );
+    }
+
     /// What one set of slippage parameters scores over the whole table, with the genotype
     /// frequencies climbed at it — a search of one start and no sweeps, which is the cheapest way
     /// to ask the question through exactly the code the search asks it through.

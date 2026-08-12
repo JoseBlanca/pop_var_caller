@@ -121,6 +121,31 @@ grid. A second test, `every_start_is_reported_with_its_score_and_the_spread_acro
 the suite in about 25 s and pins what the search *reports* — every start recorded, best-scoring
 first, the spread measured on the level, and how the search ended.
 
+## ⛦ The follow-up commit, and why it was needed
+
+**The reviewer's mutation table arrived after the step was committed, and it carried the finding
+the report file did not: nine of twenty-one mutations of the search passed the whole suite.** Among
+them a golden section with its comparison reversed — so the search walks *downhill* — a search that
+returns its starting point untouched, and an axis write that puts the direction split into the
+fall-off. The sharp control catches all three; nothing that runs caught any of them, so the step
+had shipped with its only real test switched off.
+
+`the_search_moves_toward_the_truth_and_says_it_settled` closes it: every locus at the reference
+length, two reads deep, starts at 0.09, 0.03, 0.01 and 0.009 against a truth of 0.0201, asserting
+the level to 10% and both termination flags. I reproduced the downhill mutant against it — the
+level rails at 1e-5 and the test fails.
+
+**What it does not assert is the direction split and the fall-off**, and that is deliberate rather
+than a gap: at this fixture every locus is the reference length, so how *often* a read slips is
+sharply identified while how *far* it slips rests on a few reads in ten thousand. Asserting those
+here would be asserting noise. They are measured by the sharp control, over a wider allele spectrum
+and a deeper locus.
+
+**The cost is real and worth stating**: this file's tests went from 27 s to 171 s. Every candidate
+the search tries is a whole climb over the stratum's 36 genotypes, and no cheaper fixture both
+identifies the level and converges — one at two reads with alleles either side neither settles in
+five sweeps nor runs faster.
+
 ## Validation
 
 `cargo fmt --check`, `cargo clippy --lib --all-features -- -D warnings` and
