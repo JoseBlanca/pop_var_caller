@@ -34,6 +34,7 @@
 
 pub mod fitting;
 pub mod generic;
+pub mod joint;
 
 use crate::ng::types::{DomainError, Ploidy};
 

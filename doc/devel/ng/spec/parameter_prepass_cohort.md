@@ -260,7 +260,7 @@ separates them**, so the fitted rate is their sum, and
 > (owner, 2026-08-12). It adds a third signature to the two below: a contaminant allele sits in
 > **few** reads where a real heterozygote's two alleles are balanced — which needs depth to mean
 > anything, since at three reads a site one alternative read is a third. **Not on the STR loci**, where
-> stutter lands on the population's own alleles by construction (§4.1 there).
+> stutter lands on the population's own alleles by construction (§4.3 there).
 
 **The cohort separates them, and the criterion is simple.** Contaminant reads carry *real segregating
 alleles* and land preferentially at sites polymorphic in the panel. Sequencing errors do not — they

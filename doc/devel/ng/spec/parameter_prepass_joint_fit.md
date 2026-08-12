@@ -77,9 +77,9 @@ of them is reached; the first eight are what it adds.
 | observed heterozygosity `Hobs` | the windowed histogram, summed | the kept loci, as a sum of genotype posteriors (§3.2) | yes |
 | homozygous-non-reference rate `π_hom_alt` | the same | the same | yes |
 | **inbreeding** — `F_autozygosity` there, `F_hom_excess` here | runs of homozygosity, per sample | **homozygote excess** against the panel (§5) | **no — two quantities, §5** |
-| the cohort's diversity `Hexp` | — | the fitted per-locus frequencies **directly**, with no division by `1 − F` (§5.3) | yes, and better conditioned |
+| the cohort's diversity `Hexp` | — | the fitted frequency density **directly**, with no division by `1 − F` (§5.3) | yes, and better conditioned |
 | STR diversity | — | the STR kept loci, **reweighted by stratum** ([loci](parameter_prepass_joint_loci.md) §3.3) | yes, once reweighted |
-| the frequency spectrum | — | **it is one of this fit's own parameters** (§2.1) | yes |
+| the frequency spectrum | — | **derived from this fit's own parameter**, the frequency density (§2.1.2) | yes |
 | **contamination `α`** | — **it cannot** ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2) | the generic kept loci, against individual-specific allele frequencies this fit derives (§3.4) | it is only produced here |
 | relatedness, read-group grouping | — | unchanged: [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §6–§7 | yes |
 
@@ -132,24 +132,101 @@ level up.
    implies for that sample — this is [`parameter_prepass.md`](parameter_prepass.md) §3's likelihood,
    with the pooled genotype frequencies replaced by the locus's.
 2. **Sum over the locus's allele frequency itself**, weighted by how common that frequency is across
-   the cohort — that weighting is the **frequency spectrum**, and it is fitted.
+   the cohort — that weighting is the **frequency density**, and it is fitted.
 
 So the free parameters are: the noise rates (per read group, and per stratum on the STR path), the
-spectrum (one weight per possible allele count in the panel), and one number per sample (§5). **None
-of them grows with the number of loci.** A locus contributes evidence and holds no parameter of its
-own.
+four numbers that describe the frequency density (§2.1.2), and two numbers per sample (§5, §3.4).
+**None of them grows with the number of loci.** A locus contributes evidence and holds no parameter
+of its own.
 
 *In the standard vocabulary the per-locus frequency is a latent variable given an estimated prior —
-empirical Bayes. This is also, exactly, how the frequency spectrum is estimated from genotype
-likelihoods without calling genotypes (ANGSD's `realSFS`,* Bioinformatics *2015), which
-[`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4 already adopts for the spectrum
-alone. **Under this route that estimator is not a separate step: it is the inner loop of every fit
-here**, and the spectrum comes out of it as a by-product rather than being computed afterwards.*
+empirical Bayes.*
 
 **What this answers.** [`parameter_prepass.md`](parameter_prepass.md) §4.2 asks whether a prior fitted
 against per-locus weights beats one fitted against pooled weights, and records that the question is
 askable only where the loci keep their identity. This route *is* that arm of the question, on both
 paths at once.
+
+#### 2.1.1 A count in the panel or a frequency in the population — and one of them cannot carry inbreeding
+
+**There are two ways to be uncertain about a locus's allele frequency, they are different models
+rather than two notations, and an earlier draft of this document wrote one and named the other.**
+
+- **A count in the panel.** The panel's `2N` chromosomes carry `c` copies of the allele; `c` is
+  unknown and drawn from a **spectrum of counts**. Given `c` the samples' genotypes are *not*
+  independent — they have to add up to `c` — so the sum over genotype configurations is a
+  convolution across samples. This is ANGSD's `realSFS` (Nielsen et al. 2012; *Bioinformatics* 2015),
+  and its virtue is that the conditional distribution of the genotypes given `c` **contains no
+  frequency at all**, so the spectrum is estimated without committing to any population.
+- **A frequency in the population.** The population the panel came from carries the allele at
+  frequency `f`; `f` is unknown and drawn from a **density**. Given `f` the samples' genotypes *are*
+  independent, and the panel's own count is a consequence rather than a parameter.
+
+**Decision: the frequency, and inbreeding is what forces it.** The cancellation that makes the count
+form work needs each individual's genotype to be a pair of independent draws at `f`, because that is
+what makes a sample's weight `f^j (1−f)^(P−j)` times a combinatorial constant — and only then does
+`f` divide out of the conditional. **An inbreeding coefficient breaks that factorisation**: under
+`F_hom_excess` a diploid heterozygote's weight is `2f(1−f)(1−F)` and each homozygote's carries an
+extra `F·f(1−f)`, which is not of that form, so `f` survives in the conditional and the convolution
+is no longer free of it. That is why the estimators which fit inbreeding from genotype likelihoods
+work with a per-site frequency rather than a per-panel count (ngsF; Vieira et al., *Genome Research*
+2013). §5 makes one inbreeding coefficient per sample a required output of this route, and §3.4 adds
+one contamination fraction per sample which needs to know **which allele** the population carries and
+not only how many copies of it there are. Neither is expressible in the count form.
+
+**What is *not* the reason, and an earlier version of this document said it was.** Nothing is thrown
+away by treating the samples as independent given `f`. The correlation between two samples at a locus
+is *induced* by the shared unknown frequency, and integrating over it keeps all of it — the frequency
+form is an exact likelihood under its own generative story, not an approximation to the count form.
+The two place different priors on the same latent, and the count form is the more flexible of the
+pair: every frequency density induces a spectrum of counts, and not every spectrum of counts comes
+from a frequency density.
+
+#### 2.1.2 The density is fitted with four numbers, not with one weight per allele count
+
+**The real hazard in the frequency form, and it is a hazard the count form does not have.** A weight
+per allele count is a distribution over an almost-observable quantity. A weight per *frequency* on
+the same `2N + 1` grid is not: a frequency reaches the data only through the genotypes it draws, so
+recovering its density means undoing a binomial blur. That is a deconvolution, and an unregularised
+maximum-likelihood deconvolution onto a grid as fine as the sample size collapses onto spikes — the
+classic behaviour of a nonparametric mixing distribution, whose maximiser is discrete with at most as
+many support points as there are distinct data patterns (Lindsay 1983). Fifty samples at three reads
+would not support a hundred and one free weights.
+
+**Decision: a shape with four free numbers, and the grid is quadrature rather than parameters.**
+
+```text
+π(f)  =  p_invariant · [f = 0]
+       + p_fixed_alt · [f = 1]
+       + (1 − p_invariant − p_fixed_alt) · Beta(f; a, b)
+```
+
+- **`p_invariant`** — the share of positions where the population carries only the reference base.
+  It is most of the genome, and giving it a mass of its own rather than leaving the Beta to imitate
+  it is what keeps the Beta describing the sites that actually vary.
+- **`p_fixed_alt`** — the share where the population carries only a non-reference base, which is the
+  reference accession's own private alleles. On a crop reference that is not a rounding term, and it
+  is where `π_hom_alt` (§3.2) mostly comes from.
+- **`a`, `b`** — the Beta's shape over the segregating sites. `a < 1` reproduces the rare-allele
+  pile-up a neutral population has (`π(f) ∝ 1/f`), and letting it be fitted rather than assumed is
+  what allows for a bottlenecked, selfing crop being nothing like neutral.
+
+**The integral over `f` is a fixed Gauss–Jacobi quadrature over `(0, 1)`**, whose node count is a
+numerical accuracy choice and **not a count of parameters** — doubling the nodes costs time and adds
+no freedom. The two masses are exact terms beside it.
+
+**What is emitted.** A consumer asking for "the frequency spectrum" usually means counts, so both are
+emitted and they are named apart: the fitted density `π` — four numbers — and the **panel allele-count
+spectrum it implies**, `spectrum(c) = ∫ π(f) · P(c copies among 2N | f, the fitted F's) df`, which is
+the object [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4 describes and the one a
+caller's prior is built from.
+
+**The alternative is one weight per allele count, fitted in the count form with inbreeding held at
+zero, and it is not adopted.** It would be better conditioned and it cannot produce two of this
+route's required outputs. *Open, and §12 measures it:* whether the four-number shape is flexible
+enough for the tomato panel, checked by fitting a drawn cohort whose true density is deliberately not
+a Beta — a two-subpopulation panel, whose frequency density is bimodal — and reporting what the
+fitted `Hexp` and `spectrum(c)` cost. **Settled by:** §12.9.
 
 ### 2.2 A noisy locus is noisy in every sample, and no per-sample marginal can see that
 
@@ -189,13 +266,30 @@ every position where the copies differ shows alternative reads at every depth. T
 alignments ask for such a population — tomato SRR7279482 and SRR7279483, at **0.42% and 0.49% of
 sites** — and the model refuses, leaving the only class it has for them: *heterozygous*.
 
-**How many loci that is, on the sample where it matters most.** If the fitted share is right the
-population is about **8,400 of two million** kept positions; if instead the share is the
-alternative-read mass a 10% rate had to carry and the true rate is 50%, it is about **1,700**. Against
-either, tomato's least heterozygous sample has **300** genuinely heterozygous positions in two million
-([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.2) — so the artefact
-population is between six and thirty times the quantity being estimated, on exactly the samples this
-caller is aimed at.
+**How many loci that is — measured, and it is thirty times smaller than the fitted share implied.**
+The estimate here was that the population is about **8,400 of two million** kept positions if the
+fitted share is read directly, or about **1,700** if the share is the alternative-read mass a 10%
+rate had to carry. [`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)
+walked eight tomato alignments and found **150 to 590 of two million**, and it says where the factor
+of thirty went. Two quantities were being conflated:
+
+- **0.6% to 3.2% of positions sit in a window carrying about twice the sample's normal coverage.**
+  That is the same order as the fitted share, and it is what the mixture is picking up.
+- **Only 0.3% to 1.2% of those positions read near half**, because a duplication is silent wherever
+  its two copies agree — which is 99% of their length, that 1% being the divergence between the two
+  copies rather than anything the caller sets.
+
+The artefact is the product of the two, and the product is small. **Against the same sample's
+near-half positions in ordinary-coverage windows — 668 per two million on SRR7279482, which is the
+right order for that accession's heterozygosity — the artefact is about a third**, where this
+paragraph previously had it six to thirty times larger.
+
+**The class is still worth carrying and it is no longer the largest term.** It is concentrated 24
+times over where coverage says it should be, it has the sign the model cannot otherwise produce, and
+the fit's only alternative for those positions is to call every sample heterozygous at a
+mid-frequency variant. But the 6,000 error positions and 2,500 noisy-class positions
+[`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.2 counts are each an order of
+magnitude larger than it, and that document is corrected to say so.
 
 **Refusing costs more here than there.** At tomato's
 three reads, calling such a locus homozygous-reference under a 10% rate costs about 180 nats across
@@ -217,6 +311,25 @@ primary signal, and it is also the only one that leaves an introgression alone, 
 so of normal depth. **A site whose window sits near two copies is drawn from a class at about half
 alternative reads**, and the class's weight is fitted as `w` is.
 
+**Its grain is the (locus, sample) pair, where the other two classes' is the locus, and that
+difference is not a detail.** A collapsed paralog is a property of the reference and of the aligner,
+so it mismaps in *every* sample, and *clean* against *noisy* is rightly a property of the locus alone.
+A duplication carried by an individual is a property of **that individual** — it is what a copy-number
+variant is, and it is why the discriminator below is *this sample's* window coverage rather than the
+locus's. So **class membership is per sample and only the class's weight and its alternative-read
+fraction are cohort-level.** Writing it as a third per-locus class beside the other two would make
+every sample share one sample's amplification.
+
+**Measured, and both components are there with the per-sample one the larger.** Eight tomato samples
+on one window grid hold 84 windows that at least one of them reads near two copies; **40 of the 84
+are read that way by exactly one sample and 11 by seven or eight**
+([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)
+§5). The threshold-free form is sharper: at SRR7279482's ten such windows every other sample also
+reads between 1.36 and 2.10 — the reference's own collapse — while at SRR7279501's fifty-two,
+SRR7279481 and SRR7279484 read 2.20 and 2.27 and SRR7279482 and SRR7279540 read 0.82 and 0.76, which
+is one copy. **That is copy number segregating in the panel, and a per-locus class would force one
+accession's amplification onto samples that do not carry it.**
+
 **It must be conditioned on the window, not on the site**, which is the same document's measured
 constraint: per-base coverage at 6× has no power to tell a two-copy carrier at ~12 reads from a
 single-copy sample reading high, and tomato's three reads a site is half that depth. **The cost is a
@@ -225,16 +338,36 @@ windows at a few bytes, single-digit megabytes per sample, plus a small GC curve
 both in its Stage-1 pileup; `src/pileup/` is frozen, so ng builds its own. **Nothing in it needs a
 cohort**, which matters because this caller must also run on one sample.
 
+**And it is a third object the walk has to keep, which is where it is specified.** It is not derivable
+from the records: those hold one binned depth per kept position, and §2.2's own constraint is that a
+per-base depth cannot answer this question. So the summary is
+[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4's, sized beside the
+records and travelling with the same identity, rather than a cost named here and owned nowhere.
+
 **What many samples at one locus add is identification, and it is a bonus rather than the mechanism.**
 A real half-frequency variant leaves about a quarter of the samples in each homozygous class; a
 duplication leaves every sample at a half. So the cohort names *which* loci they are instead of merely
 weighing how many there are.
 
-**Open, and the measurement comes before any more design**: on one tomato sample, the fraction of
-positions that sit in windows near two copies **and** show a near-half alternative fraction. One walk
-over one alignment, no cohort and no truth set, and it is what says whether the class is worth an
-accumulator. *This finding was made on the histogram route and is recorded here because this is the
-route being planned; that route is implemented and is not being changed for it.*
+**Measured, 2026-08-12, and the class is kept**
+([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)).
+On tomato SRR7279482 at 25× depth, **1 position in 8,600** is both in a window carrying about twice
+the sample's normal coverage and reading between 35% and 65% alternative. Inside those windows the
+near-half rate is **1.26%** against **0.033%** in ordinary-coverage windows, a factor of 38 at matched
+read depth, and the joint cell holds **24.8 times** what independence between the two would predict.
+The alternative-fraction distribution inside the two-copy band carries a bump centred on a half that
+the one-copy band does not have — 44 times the mass in 0.4–0.5. All eight samples walked, from 2.5× to
+28.7×, separate the same way.
+
+**One constraint the measurement adds, and it belongs to the summary rather than to the class**: the
+window has to collect about **12,000 aligned bases** before its mean depth tells one copy from two.
+At 25× a 500 bp window does; at 3.6× it does not, and the enrichment falls to 1.3 — no separation at
+all — until the window reaches 5 kb.
+[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4 carries what that means
+for the stored grid.
+
+*This class was first asked for by the histogram route and is recorded here because this is the route
+being planned; that route is implemented and is not being changed for it.*
 
 ---
 
@@ -247,24 +380,62 @@ Free parameters, all cohort-level except the last:
 | parameter | grain | count |
 |---|---|---|
 | clean error rate `ε_clean`, noisy error rate `ε_noisy`, noisy-locus fraction `w` | read group | 3 per read group |
-| the frequency spectrum | cohort | one weight per allele count, `2N + 1` for `N` diploid samples |
+| the frequency density `π` — `p_invariant`, `p_fixed_alt`, `a`, `b` (§2.1.2) | cohort | 4 |
 | homozygote excess `F_hom_excess` | sample | 1 per sample (§5) |
+| contamination `α` | sample | 1 per sample (§3.4) |
 
-**A locus's likelihood**, for a locus whose reference base is known and whose alternative allele the
-gather has chosen ([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §2):
+**A locus's likelihood.** The reference base is a property of the position; **which non-reference base
+segregates is not known and is summed over**, for the reason §3.1.1 gives.
 
 ```text
-                        2N                              class ∈ {clean, noisy}
-P(locus) =  Σ  spectrum(c) ·  Σ    class_weight ·   Π    Σ   genotype_freq(j | c/2N, F) · P(reads | j, ε_class)
-            c                class                sample  j
+                                   ⎧                                                           ⎫
+P(locus) =  Σ    class_weight   ·  ⎪  p_invariant  ·   Π    P(reads | every copy reference)    ⎪
+           class                   ⎪                 sample                                    ⎪
+                                   ⎪                                                           ⎪
+        (class ∈ {clean, noisy})   ⎪ + p_fixed_alt  ·  ⅓ Σ    Π    P(reads | every copy alt)   ⎪
+                                   ⎪                     alt sample                            ⎪
+                                   ⎪                                                           ⎪
+                                   ⎪ + p_segregating · ⅓ Σ   ∫ Beta(f;a,b) ·                   ⎪
+                                   ⎪                      alt                                  ⎪
+                                   ⎪                        Π    Σ  genotype_freq(j | f, F)    ⎪
+                                   ⎪                      sample j    · P(reads | j, ε_class)  ⎪
+                                   ⎩                        df                                 ⎭
 ```
 
 Read outward: a sample's reads at the locus are scored under each genotype `j` and added, weighted by
-what an allele frequency of `c/2N` and that sample's `F_hom_excess` imply about how common that genotype is; the
-samples multiply because given the frequency they are independent; the locus's error rate is drawn
-from one of two classes; and the frequency itself is summed over the fitted spectrum. **The innermost
-sum is [`parameter_prepass.md`](parameter_prepass.md) §3's likelihood unchanged** — the same `p_j`,
-the same `ε/3`, the same ploidy-generic loop bound.
+what a population frequency of `f` and that sample's `F_hom_excess` imply about how common that
+genotype is; the samples multiply because **given the frequency they are independent**; the frequency
+is integrated over the fitted density (§2.1.2); which non-reference base is the segregating one is
+summed over with an equal prior over the three; and the locus's error rate is drawn from one of two
+classes. **The innermost sum is [`parameter_prepass.md`](parameter_prepass.md) §3's likelihood
+unchanged** — the same `p_j`, the same `ε/3`, the same ploidy-generic loop bound.
+
+### 3.1.1 Which base is the alternative one is summed over, never chosen from the data
+
+[`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §2 gives the gather the job of deciding
+each site's allele set: *"it unions what the samples observed, works out which allele is major"*. That
+rule was written for an estimator that reads counts, and **importing it here would bias the rare end
+of the density, which is the end everything downstream reads.**
+
+**Why.** At a position where the population carries only the reference base, the non-reference reads
+are errors, spread over the three other bases. Choosing the observed largest of the three and scoring
+it as one allele's evidence is conditioning on a maximum: with 150 read observations across a
+fifty-sample cohort at `ε = 0.002` a site expects about 0.3 error reads, and the sites that show any
+show them as *the winner of three draws*. The excess is small per site and there are two million
+sites, and it lands entirely on the classes `p_invariant` has to be told apart from — the singleton
+and near-singleton frequencies that `Beta(a, b)` describes, that contamination is measured from
+(§3.4) and that `Hobs` is a sum over (§3.2).
+
+**Decision: sum over the three, with an equal prior.** It costs a factor of three on the segregating
+term alone — the invariant term, which is nearly every locus, carries no allele at all and is
+evaluated once. Nothing in the record changes: the four allele counts are already stored per position
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §2.1), and it is the fit
+that stops picking one of them.
+
+*Two things this does not do.* It does not model **two** segregating non-reference alleles at one
+position; a triallelic site is scored under whichever of the three the sum favours, and the residue
+falls into the noisy class. And it does not remove the same hazard from the STR path, where the
+alleles are lengths and the candidate set is bounded differently (§4.2).
 
 ### 3.2 What is derived rather than fitted
 
@@ -282,6 +453,24 @@ chosen by a rule that never looks at the data**
 ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §1.2). A subsample drawn without
 reference to what is at the position is unbiased for a rate; that is the property the whole route
 rests on, and §12.2 checks it.
+
+**A posterior mean is a rate only where there is data, and at three reads a fifth of the kept loci
+have none worth the name.** A locus at which a sample has no read has a posterior equal to its prior,
+and that prior is `Hexp · (1 − F_hom_excess)` — the model's own prediction of that sample's
+heterozygosity. Such a locus therefore contributes the answer rather than evidence for it. At
+tomato's three reads a site, Poisson arithmetic puts about **5 kept loci in 100 with no read at all
+and 15 in 100 with exactly one**, and a single read barely moves a genotype posterior. **So `Hobs` is
+in part a measurement and in part the model repeating itself, and how much of each depends on the
+sample's depth.**
+
+**What follows, and it is a reporting requirement rather than a fix.** Emit beside each sample's
+`Hobs` and `π_hom_alt` **how many kept loci carried at least one read and at least two**, so that a
+consumer can see how much of the number is data. Nothing about the estimator changes: dropping the
+empty loci would trade a self-consistent estimate for a truncated one, and the loci are the same in
+every sample, so a comparison between samples is unaffected either way. What must not happen is the
+number being read as a count of observed heterozygotes when a fifth of its support saw nothing.
+*This is also why §5.2's opening of the circularity is only half an opening — the same paragraph
+there says which half.*
 
 **Trap: the per-sample route fits these two as free parameters and this one does not.** They are
 therefore not two estimates produced the same way, and a disagreement between the routes is not
@@ -310,10 +499,19 @@ and §2.2's per-locus identification names the offending loci instead of averagi
 truth and every frequency at half, the loop converged to the truth in all 25 worlds tried. The same
 shape applies here, with three blocks instead of two:
 
-1. hold the spectrum and each sample's `F_hom_excess`, and fit each read group's three noise numbers;
-2. hold the noise numbers, and climb to the spectrum (the `realSFS`-style expectation-maximization of §2.1);
+1. hold the frequency density and each sample's `F_hom_excess`, and fit each read group's three noise
+   numbers;
+2. hold the noise numbers, and climb to the density's four numbers (§2.1.2);
 3. hold both, and fit each sample's `F_hom_excess`;
 4. repeat until the fitted values stop moving.
+
+**Two of those blocks can trade against one another, and the measurement has to say by how much.**
+The density's shape and the per-sample inbreeding both control how often a genotype comes out
+heterozygous. They are separately identified in principle — the density is pinned by the distribution
+*across* loci and `F_hom_excess` by which samples are heterozygous *within* a locus of given
+frequency — but at three reads that separation is thin, and at one sample it does not exist at all
+(§6.1). §12.9 profiles the likelihood in the two together and reports the correlation rather than
+assuming it away.
 
 **A flat scan over the noise parameters is not affordable here, and that is the one place the
 procedure genuinely departs from [`parameter_prepass.md`](parameter_prepass.md) §3.1.** That section
@@ -415,8 +613,12 @@ markers, so what governs is **how many markers segregate**, with depth entering 
 with two or more reads separates a heterozygote from a homozygote better than one with a single read.
 `verifyBamID2` runs on **4× genomes**, well below the depth at which any one site is legible.
 
-**How the accuracy moves with the marker count**, as they report it — mean squared error of `α` at
-1%, 2% and 5% contamination:
+**How the accuracy moves with the marker count**, as they report it — their error figure for `α` at
+1%, 2% and 5% contamination. **The units are theirs and are not reproduced here**: a mean squared
+error of 0.69 at a true `α` of 1% would be a root-mean-square error of 83%, which is not a
+measurement anyone would publish, so the column is a relative or rescaled quantity whose definition
+we have not confirmed. **Only the ratios below are used**, and a ratio is safe under any monotone
+rescaling of a squared error.
 
 | markers | 1% | 2% | 5% |
 |---:|---:|---:|---:|
@@ -479,28 +681,82 @@ that there is nowhere to get one during the walk, so the cheaper object was defe
 rejected. **The kept STR loci are that spectrum**, fitted per locus. This route is where that deferral
 comes due.
 
-**Decision: fit the four slippage numbers per (read group × stratum), as today, but weight the
-genotype by the locus's own length spectrum rather than by the stratum's.** The stratification stays —
-slippage depends on repeat count more than on anything else, which is also why the loci are chosen
-per stratum ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3) — and what
-changes is the weighting inside the sum, exactly as on the generic path. The genotype at an STR locus
-is a pair of tract lengths, so the locus's "allele frequency" is a distribution over lengths and the
-spectrum being fitted is over length classes rather than over allele counts.
+**Decision: fit the four slippage numbers per (read group × stratum), as today, and weight the
+genotype by the locus's own length frequencies — which are a latent drawn from a fitted per-stratum
+prior, never a parameter of the locus.** The stratification stays — slippage depends on repeat count
+more than on anything else, which is also why the loci are chosen per stratum
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3) — and what changes is the
+weighting inside the sum, **in exactly the shape §2.1 uses on the generic path**.
+
+### 4.1 The locus's length frequencies are summed over, not fitted — and this is one design with §2.1, not two
+
+**HipSTR fits each locus's allele frequencies inside its loop**
+([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §1.3), and taking that literally would
+reintroduce the failure §2.1 exists to avoid: each locus brings its own new parameter, so the bias
+does not shrink as loci accumulate. **The STR path has already measured what that costs on its own
+data.** With the allele spectrum handed to the fit, a per-read tally is exactly unbiased; with the
+spectrum fitted from the same tally, the slippage level moves **333-fold depending only on where the
+search starts** ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.1) — the signature of a
+quantity that is not identified rather than badly estimated.
+
+**So the two paths carry one design.** On the generic path a locus's allele frequency is a latent
+drawn from a fitted density and integrated away (§2.1.2). Here a locus's **length frequencies** are a
+latent vector drawn from a fitted **Dirichlet** whose mean is the stratum's own length spectrum and
+whose concentration is one further fitted number per stratum:
+
+```text
+locus's length frequencies   ~   Dirichlet( κ_stratum · stratum_spectrum )
+each sample's genotype       ~   a draw of P lengths from those frequencies, with F_hom_excess
+```
+
+**The concentration is the parameter that says how monomorphic loci are, and it is the whole point.**
+A small `κ` makes each locus nearly fixed for one length while the *stratum* still spans many — which
+is what a repeat tract actually looks like across a cohort, and what no per-stratum marginal can
+express, because drawing every chromosome independently from the stratum's spectrum would make one
+locus's samples carry different lengths at random. A large `κ` returns the per-stratum model exactly,
+so **the per-stratum route is a special case of this one** and the comparison between them is a
+comparison of one fitted number rather than of two designs. In the biallelic case a Dirichlet is a
+Beta, so this is the same object §2.1.2 fits on the generic path with the mean and the concentration
+named separately.
+
+**Free parameters per stratum: the four slippage numbers, the length spectrum's shape, and `κ`.**
+None of them is per locus.
+
+### 4.2 Which lengths a locus may carry, and what bounds the sum
+
+A Dirichlet over thirteen length classes cannot be integrated by quadrature the way a Beta over one
+frequency can, so the sum has to be over a **bounded set of configurations** instead. The bound comes
+from what a repeat tract is: across a cohort almost every locus is fixed for one length or segregates
+two neighbouring ones.
+
+**Decision: sum over the monomorphic configurations and the biallelic ones**, with the biallelic
+frequency on the same quadrature the generic path uses, and the candidate lengths being the reference
+tract length together with every length any read in the cohort reported at that locus, one step
+either side. Configurations beyond two segregating lengths are not enumerated; a locus that needs
+them is a locus the guard bucket
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §3.3) is already watching.
+
+**The candidate set is data-dependent, and unlike the generic path's that is defensible here** — a
+length no read reported in the cohort's 150 reads at that locus is genuinely absent, where a base no
+read showed is merely a base that no error happened to produce. *Open, and cheap to settle:* what the
+candidate set's size distribution actually is on tomato, which prices the sum. **Settled by:** one
+pass over the STR records once they exist.
 
 **Two of the per-stratum route's mechanisms are still needed and are unchanged**: a thin stratum
 borrows from its neighbours, and the fitted level is held monotonic along the repeat-count axis
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.3). Nothing about per-locus weighting makes
 a stratum with eleven loci in it fittable.
 
-**How much of the genome's STR loci this route holds is the open question that decides its standing**
-([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §6). If the per-stratum cap
-keeps every locus in most strata, this route holds the same loci as the per-stratum histogram *and*
-remembers which was which — a much stronger position than the generic path's one position in a few
-hundred. **That question is now one call rather than an experiment**, `count_loci_per_stratum` on the
-repeat catalog at the STR path's calling floors, and it is the cheapest thing outstanding in these
-three documents.
+**How much of the genome's STR loci this route holds decided its standing, and the answer is: all of
+them.** Measured on tomato SL4.00 at the calling floors `[8, 6, 6, 6, 5, 4]`
+(`examples/ng_joint_loci_probe.rs`, 2026-08-12): **141 strata holding 462,701 loci**, so a cap set
+above the largest stratum keeps every one of them
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.5). **This route therefore
+holds the same STR loci as the per-stratum histogram *and* remembers which was which** — a far
+stronger position than the generic path's one position in three hundred and ninety-one, and it makes
+§8's second measurement a like-for-like comparison on this path where it is not one on the other.
 
-### 4.1 Contamination is not fitted from the STR loci, and the reason is sharper than "noisier"
+### 4.3 Contamination is not fitted from the STR loci, and the reason is sharper than "noisier"
 
 **Every signature §3.4 uses has an STR analogue on paper**: the alleles are lengths, this route fits a
 per-locus length spectrum, and a contaminant would show a length the sample does not carry, in few
@@ -588,9 +844,20 @@ Homozygote excess coincides with it only when nothing else suppresses heterozygo
 ### 5.1 Decision: fit it, emit it under its own name, and never as a substitute
 
 Fit one `F_hom_excess` per sample here, in step 3 of §3.3's alternation, as the departure from
-Hardy-Weinberg proportions the spectrum predicts. **Emit it as a distinct, differently-named parameter
-from the autozygosity `F_autozygosity`** — never as an alternative value for the same field. A caller must not be
-able to receive one where it expected the other.
+Hardy-Weinberg proportions the fitted density predicts. **Emit it as a distinct, differently-named
+parameter from the autozygosity `F_autozygosity`** — never as an alternative value for the same
+field. A caller must not be able to receive one where it expected the other.
+
+**It is constrained to `[0, 1]`, and the constraint is load-bearing rather than cosmetic.** `F_IS` is
+negative wherever an individual is *more* heterozygous than random mating predicts, and an
+unconstrained fit will go there — which is precisely how the duplicated loci of §2.2 would escape.
+A duplication the reference does not carry shows about half its reads disagreeing at every position
+where the copies differ, in every sample; §2.2's whole argument that they cannot be absorbed
+elsewhere rests on the homozygote excess being unable to move in that direction. A negative
+`F_hom_excess` would let one sample's mismapping be booked as biology, silently and with a plausible
+number. **The constructor refuses a value outside `[0, 1]`** — a fit that wants to leave the interval
+is reporting a modelling failure, and the right response is the diagnostic §5.1 lists rather than the
+number.
 
 **Why fit it at all, given the caller wants the other one:**
 
@@ -604,7 +871,7 @@ able to receive one where it expected the other.
   below, and old inbreeding raises it.
 - **It costs one number per sample inside a fit that is running anyway.**
 
-### 5.2 It is not circular here, and that is new
+### 5.2 Half the circularity opens here, and it is worth being exact about which half
 
 [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.3 and
 [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §3 both carry the same trap: the panel's
@@ -612,16 +879,40 @@ expected heterozygosity is computed as `Hobs/(1 − F_hom_excess)`, so taking `F
 the diversity from it returns whatever was assumed. **That loop is what makes the ratio a diagnostic
 rather than an estimate in the per-sample design.**
 
-**Under this route the loop opens.** Expected heterozygosity comes from the fitted spectrum — the
-per-locus allele frequencies, measured across the panel — and never from `Hobs`. So `Hexp` and `Hobs`
-are two independent quantities and their ratio is a measurement.
+**Under this route half of that loop opens, and it is worth being exact about which half.** Expected
+heterozygosity comes from the fitted frequency density — measured across the panel — and never from
+`Hobs`. So the *diversity* is no longer whatever inbreeding was assumed, which is what §5.3 is about
+and it is a real gain.
+
+**What does not open: `Hobs` is not an independent measurement of the same thing.** It is derived from
+genotype posteriors (§3.2) whose prior is the fitted density *and this sample's own
+`F_hom_excess`* — so at a locus with no reads the posterior is the prior, whose heterozygosity is
+exactly `Hexp · (1 − F_hom_excess)`, and the ratio returns the fitted value by construction. At
+tomato's three reads a site that is about a fifth of the kept loci (§3.2).
+
+**So `1 − Hobs/Hexp` is a restatement of the fitted parameter, not a check on it.** It is emitted
+because a consumer asks for the ratio in those terms, and it is emitted with the two evidence counts
+§3.2 requires. **The check on `F_hom_excess` is the other estimator**, `F_autozygosity` from the
+per-sample walk, which reads a different feature of the data entirely — the ratio and the runs
+disagree in known directions (§5, three causes) and that is what makes the disagreement diagnosable.
+Nothing inside this route checks it against itself.
 
 ### 5.3 What this does to the cohort's diversity
 
 **The diversity stops needing an inbreeding coefficient at all.** [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md)
 §3 computes `Hexp = mean over samples of Hobs/(1 − F)`, which inherits every sample's `F_autozygosity` and its
 uncertainty, and breaks entirely if the runs estimator returned a confident zero. Here `Hexp` is read
-off the fitted spectrum directly. **That is a genuine improvement independent of everything else in
+off the fitted frequency density directly:
+
+```text
+Hexp  =  ∫ π(f) · 2 f (1 − f) df
+```
+
+— the chance that two copies drawn at random **from the population** differ, which is what expected
+heterozygosity means. *It needs no finite-sample correction, and that is a property of having fitted
+a population frequency rather than a panel count: the `2N/(2N − 1)` factor a sample allele-count
+spectrum would need (§2.1.1) is the correction from panel to population, and here there is nothing to
+correct.* **That is a genuine improvement independent of everything else in
 this document**, and it is worth flagging to whoever finishes the comparison: even a route that lost
 on every other axis would still be the better source of this one number.
 
@@ -644,6 +935,30 @@ walk a pure accumulation pass, and the walk's largest object (37 MB per sample o
 human) survives regardless. **That is the honest ceiling on what deleting the per-sample fits could
 ever save.**
 
+### 6.1 What it does at one sample, and why saying so matters
+
+**This caller must also run on one sample**, and the route has a clean answer that no section stated
+before: at `N = 1` the frequency density is still fitted, the integral over `f` is still taken, and
+the likelihood becomes [`parameter_prepass.md`](parameter_prepass.md) §3's per-sample estimator with
+the pooled genotype frequencies replaced by what `π` implies for one individual. **Nothing breaks and
+nothing is a special case in the code.** So this route is a *generalisation* of the per-sample fit
+rather than a cohort-only tool.
+
+**What is lost at one sample is exactly the two things a second sample buys**, and both should be
+emitted as absent rather than as numbers:
+
+- **The per-locus site class.** §2.2's whole mechanism is several samples at one locus disagreeing;
+  with one, the class posterior is the mixture weight and the fit *is* the blind two-class model
+  [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1 already ships. §8's third
+  measurement is the curve that says how many samples it takes to matter.
+- **`F_hom_excess` separately from the density.** One individual's heterozygote deficit and a density
+  concentrated near zero are the same observation, so the pair is not identified. Emit
+  `F_hom_excess` as *not identified* below the sample floor §12.5 measures, never as a fitted zero.
+
+Contamination survives at one sample in principle — its evidence is *within-sample*, the low-fraction
+alternative reads concentrated on segregating positions — but the positions it needs to be told are
+segregating come from the panel, so at `N = 1` there is no panel and it is `NotIdentified` too.
+
 **Linkage, haplotypes, and anything else reading a stretch of genome are out of reach for a different
 reason, and it is a matter of shape rather than of budget.** A uniform thinning throws away exactly
 the close pairs where linkage information lives and keeps unlimited distant ones, which carry none;
@@ -662,27 +977,34 @@ sample's walk ends. **Nothing about the kept loci makes this avoidable**; it is 
 the locus's frequency in the cohort" means. A run that adds one sample later must refit, and the
 parameters every earlier call was made under have changed.
 
-**Memory** is [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §5 — roughly
-60–110 MB of records for a fifty-sample cohort. **This route adds no per-sample object.** What it adds
-is working memory for the fit itself: one posterior over allele counts per locus, `2N + 1` numbers,
-which at fifty diploid samples is 101 values and need not be held for more than one locus at a time.
+**Memory** is [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6. **This
+route adds one per-sample object beyond the records** and it is not free: §2.2's third site class is
+conditioned on a per-sample coverage-by-window summary, which that document now sizes beside the
+records rather than leaving as a sentence here. What the *fit* adds is working memory only: one
+posterior over the frequency quadrature per locus, one number per node, held for one locus at a time.
 
 **Compute, honestly.** One evaluation of §3.1's likelihood over the whole generic set is on the order
-of `loci × samples × (2N+1)` operations — two million by fifty by a hundred and one, about 10¹⁰ — and
-the fit needs tens of iterations of that. **It is embarrassingly parallel over loci** and needs no
-communication between them within an iteration, so it is a matter of cores rather than of
-feasibility. **This is arithmetic, not a measurement**, and §8's last item replaces it. If it
-dominates, the budget is the knob and
+of `loci × samples × genotypes × (1 + 3 · quadrature nodes)` operations — two million by fifty by
+three by about fifty, roughly 10¹⁰ — and the fit needs tens of iterations of that. **Nearly all of it
+is spent on positions where nothing happened**, and that is the lever: at a locus where no sample
+showed a non-reference read, the three-allele sum collapses to one term and every sample's inner sum
+depends only on its depth bin, so the per-sample factors come out of a `(depth bin × genotype)` table
+of 21 × 3 entries built once per candidate. **It is embarrassingly parallel over loci** and needs no
+communication between them within an iteration. **This is arithmetic, not a measurement**, and §8's
+last item replaces it. If it dominates, the budget is the knob and
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4 is how to set it.
 
 **Determinism.** The fit sums over loci in a fixed order and over samples in a fixed order, so no
 parameter varies with thread count. Multiple starting points are enumerated, not sampled.
 
-**Errors.** The ten identity values of
-[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4 must all match across
-samples, and **a mismatch must refuse, not average**. Nine of them say the samples were asked for the
-same loci; the tenth is a digest of the loci each one actually kept, and it is the only one that would
-catch a hash function or a threshold's arithmetic changing underneath two otherwise identical runs.
+**Errors.** The thirteen identity values of
+[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §5 must all match across
+samples, and **a mismatch must refuse, not average**. Seven say the samples were asked for the same
+loci; one is a digest of the loci each one actually kept, and it is the only one that would catch a
+hash function or a threshold's arithmetic changing underneath two otherwise identical runs; the last
+five say in what **units** the evidence was recorded — the depth ladder, the two caps, the stratum
+counts and the window size — and a mismatch in any of those leaves every other value agreeing while
+two samples' rows mean different things.
 
 ---
 
@@ -723,11 +1045,30 @@ Five measurements, in the order they can be made.
    set holds one position in a few hundred, while the STR set may hold every locus (§4). A route that
    is less precise on a four-hundredth of the data is not thereby worse; a route that is *no more*
    precise on all of it is.
-3. **The two-class residual.** §2.2's claim is that fifty samples at one locus separate a mismapped
-   locus from a heterozygous one, and the measurement is already set up: refit HG002's 551,843
-   confident-region loci and see whether heterozygosity comes in below the 1.09× the blind two-class
-   mixture reaches. **This is the measurement most likely to decide the comparison**, because it is the
-   one thing this route can do that no amount of extra data can buy the other.
+3. **The two-class residual, and it needs a cohort — an earlier version of this item asked for it on
+   one sample.** §2.2's claim is that **several samples at one locus** separate a mismapped locus from
+   a heterozygous one: a collapsed paralog raises the alternative-read fraction in every sample at
+   that position, a real heterozygote raises it only in the samples carrying the allele. **At one
+   sample there is nothing to disagree with** — the per-locus class posterior is the blind mixture
+   weight, and the fit reduces to the model it is supposed to beat (§6.1). So *"refit HG002's
+   551,843 confident-region loci and see whether heterozygosity comes in below 1.09×"* cannot move the
+   number it is aimed at, and this item is three arms instead:
+
+   | arm | samples | truth | what it can show |
+   |---|---:|---|---|
+   | **the GIAB trio at 30×** — `benchmarks/giab/per_sample/bam/30x/`, HG002/HG003/HG004, a v4.2.1 benchmark VCF for each | 3 | yes | real mismapping and real error-prone context, graded against truth. Three samples is the mechanism at its weakest useful strength, which is exactly why it is the arm that cannot be argued with |
+   | **a drawn cohort with planted noisy loci**, refitted at 2, 3, 5, 10, 25 and 50 samples on the same drawn loci | 2 → 50 | yes | **where the mechanism starts paying**, which is the number the trio alone cannot give and the one a user needs |
+   | **the tomato cohort** | 63 | no | that it behaves at the real shape — the depth, the sample count and the mismapping a crop reference has |
+
+   **What is reported is the trend in sample count, not a single ratio.** The claim being tested is
+   that the excess falls as samples are added, and a claim of that shape is settled by a curve. The
+   drawn arm is what makes the curve affordable and the trio is what keeps it honest, since a
+   generator only reproduces the mismapping someone built into it (see the framing above).
+
+   **Two things to hold fixed across the arms, or the curve measures something else.** Depth, because
+   the trio is 30× and tomato is three reads and §2.2's excess is itself depth-dependent; and the
+   locus set, because HG002's confident regions are not a uniform thinning of the genome. Report the
+   drawn arm at both depths.
 4. **The least heterozygous samples, separately.** Report every measurement above **split by the
    sample's own heterozygosity**, never pooled over the cohort. The reason is not that the estimate
    gets noisier there — on a proportion's own scale it gets tighter (§3.2) — but that **the failure
@@ -763,11 +1104,11 @@ depth* surviving as that rather than as a blank.
 | what | existing code | how it is reused |
 |---|---|---|
 | the sum over genotypes at one sample's locus | `src/ng/parameter_estimation/generic/noise_model.rs` (`NoiseModel`) | used as the innermost term of §3.1, unchanged. It is already the seam both paths implement |
-| the climb over mixture weights | `src/ng/parameter_estimation/fitting/mixture_weights.rs` | the spectrum is a mixture over allele counts, so the same climb applies with a different component set |
+| the climb over mixture weights | `src/ng/parameter_estimation/fitting/mixture_weights.rs` | the three masses of the frequency density (§2.1.2) are mixture weights, so the same climb applies to them. **The Beta's two shape numbers are not weights** and need their own climb |
 | the two site classes | `src/ng/parameter_estimation/generic/` (`SiteNoise`) | the parameters are the same three; what changes is that the class becomes a per-locus latent variable (§2.2) |
 | alternating between coupled blocks | `src/ng/parameter_estimation/generic/coupled_fit.rs` | the same loop shape and the same termination handling, with three blocks instead of two (§3.3) |
 | provenance and evidence count | `src/ng/parameter_estimation/mod.rs` (`Provenance`, `Estimate`) | used as-is; every parameter here carries both, as in the per-sample route |
-| the frequency spectrum by expectation-maximization | [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4 | **not a separate step under this route** — it is §2.1's inner sum, and the spectrum falls out of the same fit |
+| the frequency spectrum | [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §4 | **not a separate step under this route** — it is §2.1's outer integral, and the panel allele-count spectrum falls out of the same fit (§2.1.2). That section's `realSFS` reference belongs to the count form this route does not use, for the reason §2.1.1 gives |
 
 *The two companion documents carry their own reuse: the depth ladder
 ([`records`](parameter_prepass_joint_records.md) §2.2) and the even spread across a stratum
@@ -816,11 +1157,23 @@ holds, and where the generic budget starts to matter — are
    with the two-class model the main reason for doubt — a mixture's component parameters are where
    multimodality classically appears. **Settled by:** plotting the curve on synthetic data before the
    starting points are fixed.
-3. **How many starting points, and spanning what?** — OPEN. The per-sample route's answer for its own
-   two-state model is nine starts spanning the separation between the states
-   ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.5), chosen after a start that
-   guessed wrong returned a confident zero. The analogous separation here is between the clean and
-   noisy classes. *Leaning:* the same shape of answer; the number needs the curve from question 2.
+3. **How many starting points, and spanning what?** — **PARTLY CLOSED 2026-08-12: spanning the
+   separation between the clean and the noisy class, and it is worth more than any other choice in
+   the fit.** Three starts, ten samples, 40,000 drawn loci, the same data throughout:
+
+   | where the search began | clean error rate | `Hexp` |
+   |---|---:|---:|
+   | the classes far apart — `ε_clean` 5 × 10⁻⁴, `ε_noisy` 2 × 10⁻¹ | **−1.3%** | −0.8% |
+   | a middling start — 6 × 10⁻³ and 2 × 10⁻² | −8.9% | +2.4% |
+   | **the classes close together** — 2 × 10⁻² and 6 × 10⁻² | **−45.8%** | +10.6% |
+
+   **A start that puts the two classes near each other collapses them into one and reports
+   convergence**, which is the failure
+   [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §6.5 records for its own two-state
+   model — measured here rather than inherited, at 46% of the clean rate. Take the best-scoring of
+   several starts. *Still open:* **how many**. Three is what the measurements above used and it was
+   enough for one of them to land well; whether nine is needed, as the per-sample route settled for
+   its own model, wants the profile curve of question 2.
 4. **How many principal components does a tomato panel need for the individual-specific allele
    frequencies?** — OPEN (§3.4.2). `verifyBamID2` defaults to four on human reference panels, and a
    crop panel's structure is not human structure: a landrace collection may need more, and an
@@ -830,25 +1183,45 @@ holds, and where the generic budget starts to matter — are
    as contamination. **Settled by:** the components come out of the same matrix relatedness uses
    ([`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §6), so this is a plot rather than an
    experiment.
-5. **Do the short-tract STR strata contribute to contamination after all?** — OPEN (§4.1). *Leaning:*
+5. **Do the short-tract STR strata contribute to contamination after all?** — OPEN (§4.3). *Leaning:*
    possibly, and it does not matter much, since the generic loci supply `α` either way. **Settled by:**
    two per-stratum counts — what fraction of a stratum's loci segregate across the cohort, and what
    fraction of its stutter products land on a length the cohort segregates at.
+6. **Is a monomorphic mass, a fixed-alternative mass and a Beta enough shape for a domesticated
+   selfing panel?** — **CLOSED 2026-08-12: yes, and a second Beta buys nothing.** Fitted against a
+   drawn cohort whose true density has two bumps — the shape two diverged subpopulations leave, and
+   one a single Beta cannot make — the four-number shape returns `Hexp` **4.9% high**. Giving it a
+   second bump, three more fitted numbers, returns **5.8% high**: no better on the truth the second
+   bump exists for, and the likelihood gain is 10⁻⁶ nats a locus, which an extra parameter always
+   buys. Against a one-bump truth the two are −0.8% and +0.4%. **The noise rates barely feel the
+   misspecification at all** — they read the density as a background, and they move by about two
+   percentage points between the two truths.
+
+   *What this does not license* is calling the emitted density a site-frequency spectrum. Five percent
+   is small for a prior, and on an autogamous panel `1 − F_hom_excess` **is** `Hobs/Hexp`, so it
+   passes into the inbreeding coefficient at full size
+   ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.2). The number to watch is
+   there, not in the caller's genotype prior.
+7. **How far do the density's shape and the per-sample inbreeding trade against each other at three
+   reads?** — OPEN (§3.3). Both control how often a genotype comes out heterozygous, and they are
+   separated only by *where* the variation sits: across loci for one, within a locus for the other.
+   *Leaning:* separable at fifty samples and not at five. **Settled by:** §12.9's profile.
 
 ---
 
 ## 12. How we know it works
 
 *The selection rule's tests are [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md)
-§7 and the records' are [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.
+§7 and the records' are [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §7.
 These are the estimator's.*
 
-1. **The fit recovers known parameters.** Draw allele frequencies from a known spectrum, draw genotypes,
+1. **The fit recovers known parameters.** Draw allele frequencies from a known density, draw genotypes,
    draw reads at known clean and noisy error rates with a known noisy-locus fraction, and fill the
    records directly — no reads, no alignments. The fit must return every drawn value: the three noise
-   numbers per read group, the spectrum, and each sample's homozygote excess. **At `P = 2` and
+   numbers per read group, the density's four, and each sample's homozygote excess. **At `P = 2` and
    `P = 4`**, since the likelihood is written for any ploidy and an untested loop bound is an
-   assumption.
+   assumption. **Draw from the fitted family first and from outside it second** — a fit graded only on
+   data drawn from its own shape reports that its arithmetic is right and nothing about its model.
 2. **The derived rates are unbiased.** §3.2 derives `Hobs` and `π_hom_alt` from posteriors rather than
    fitting them. On the same synthetic draw, both must match the drawn values, and must match what the
    per-sample route fits from the identical genotypes. **This is the test that would catch the kept set
@@ -861,10 +1234,32 @@ These are the estimator's.*
 4. **Adding a false-heterozygote floor moves the two in opposite directions.** Add spurious heterozygous
    sites uniformly at up to five times the real rate. The autozygosity estimate must not move (it is
    measured not to, at that floor) and the homozygote excess must fall.
-5. **The panel is not secretly required to be large.** Run the fit at 2, 5, 10 and 50 samples on the
-   same drawn genomes and report where each parameter stops being estimable. The spectrum has `2N + 1`
-   weights, so at two samples it has five, and a route whose parameters are fitted against it will
-   degrade somewhere. **Where** is what a user needs to be told, and nothing currently says.
+5. **The panel is not secretly required to be large — MEASURED 2026-08-12, and it is required to be
+   larger than anything here had said.** Refit at 1, 2, 5, 10, 25 and 50 samples on the same drawn
+   genomes and report where each parameter stops being estimable.
+
+   | samples | clean rate | noisy rate | noisy-locus share | `F_hom_excess`, truth 0.6 |
+   |---:|---:|---:|---:|---:|
+   | 1 | −35.0% | −62.6% | +474% | 0.530 |
+   | 5 | −21.7% | −59.0% | +383% | 0.607 |
+   | 10 | −8.9% | −29.6% | +73% | 0.640 |
+   | 25 | **−1.4%** | **−0.9%** | **+5.4%** | 0.613 |
+   | 50 | −0.7% | +3.2% | −2.3% | 0.601 |
+
+   **The two-class noise model is what needs the panel, and it needs about twenty-five samples.**
+   Below ten, the noisy class's share comes out four to five times the truth in the same direction at
+   every size — the flat ridge §3.3 warns about, with too little data to pin it, and not scatter.
+   **Inbreeding needs about five**, and at one sample it is not identified at all: 0.097 where the
+   truth is zero and 0.530 where the truth is 0.6, pulled towards the middle from both sides exactly
+   as §6.1 says it must be. *(`Hexp` is deliberately not in this table: at the 40,000 loci the sweep
+   used, its scatter is set by the locus budget rather than by the panel, and the budget is
+   [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3's experiment.)*
+
+   **What it obliges the route to do**: emit `F_hom_excess` as *not identified* at one sample, and
+   emit the noisy class's two numbers with a provenance saying the panel was too small below whatever
+   floor a further sweep settles. A fitted `w` five times the truth is not a degraded prior — it is a
+   background subtraction, and on a sample at tomato's heterozygosity floor the background *is* the
+   answer ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.2).
 6. **Contamination is recovered, and — the test that matters more — an uncontaminated structured panel
    returns zero.** Two synthetic cohorts. In the first, mix a known fraction of one drawn sample's
    reads into another's at 1%, 2% and 5% and require `α` back; that only checks the arithmetic. In the
@@ -881,3 +1276,26 @@ These are the estimator's.*
    show up without a truth set — which is the reason to build it even when no library is suspect.
 8. **The fit is deterministic** — same records, same parameters, independent of thread count and of the
    order samples were walked in.
+9. **The frequency density's shape is enough, or it is measured not to be** (§11 questions 6 and 7).
+   **Run 2026-08-12 for the first half and it closed question 6**: fitted against a drawn cohort whose
+   true density has two bumps, the four-number shape returns `Hexp` 4.9% high and a seven-number shape
+   with a second bump returns 5.8% high, while the noise rates move about two percentage points
+   between the one-bump and two-bump truths. **Keep it as a regression**: it is the only test here
+   that grades the *model* rather than the arithmetic, and it must be re-run whenever the density's
+   shape is touched.
+
+   **The second half is still to run**: profile the likelihood over `F_hom_excess` and the density's
+   mean together at 5, 10 and 50 samples and report the correlation between them; a ridge rather than
+   a peak is what says the pair is not separable at that panel size.
+
+   **And a third thing the first run turned up, which belongs in this list in its own right.**
+   Report every fit **from at least three starting points, with each one's score**, not just the
+   winner. On the identical data the clean error rate came back −1.3%, −8.9% and −45.8% from three
+   starts, and the worst was the one that put the two noise classes close together (§11 question 3).
+   A suite that reports one number per parameter cannot tell a converged fit from a trapped one.
+10. **The alternative allele is summed over and not picked** (§3.1.1). On a drawn cohort that is
+    entirely monomorphic — no real variant anywhere, only sequencing error — the fitted
+    `p_invariant` must come back at 1 within its own error. **A fit that chooses each site's
+    alternative allele as the observed largest of three fails this and passes every other test in
+    this list**, because the bias it introduces is small per site, one-directional, and lands only on
+    the classes this test isolates.

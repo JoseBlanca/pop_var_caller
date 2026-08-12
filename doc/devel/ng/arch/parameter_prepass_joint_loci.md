@@ -1,6 +1,9 @@
 # ng — the joint fit, which loci are kept: types & interfaces
 
-*Status: architecture draft (2026-08-12), companion to the spec
+*Status: **partly built** (2026-08-12) — `loci.rs` exists and holds the generic rule, the
+unambiguous-base mask and the threshold arithmetic, with the properties §6 asks for asserted in its
+own tests. `KeptLoci`, `SelectionIdentity` and `KeptLociDigest` are still the contract below and not
+yet code. Companion to the spec
 [`../spec/parameter_prepass_joint_loci.md`](../spec/parameter_prepass_joint_loci.md) (the design and
 its rationale) and to the shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md)
 (vocabulary) and [`module_layout.md`](module_layout.md) (the `src/ng/` tree). Naming follows
@@ -71,6 +74,40 @@ Building it twice from one `SelectionIdentity` yields equal values, whatever the
 thread count — the property spec §7.1 tests. `ssr_stratum_counts` is over the same `scope` as the
 sample, never over the whole reference (spec §3.3).
 
+### 1.1a `SelectableRegions` and `UnambiguousRuns` — the domain, and its length, as one value
+
+**Built.** The two failures this pair exists to make unrepresentable are the same failure at two
+levels: computing the threshold from one notion of "how much genome is in play" and sweeping over
+another. Under a `--regions` BED the count then comes out of the genome's length; with an
+`N`-masked domain it comes out of the contig's.
+
+```rust
+/// The stretches a run may keep positions from, **and their total length**. One value
+/// carries both, so `threshold_for`'s denominator cannot be stated separately from what
+/// the sweep reads (spec §2, §7.1, §7.3).
+pub struct SelectableRegions { /* sorted, disjoint, non-inverted */ }
+
+impl SelectableRegions {
+    pub fn new(spans: Vec<GenomeRegion>) -> Result<Self, SelectionError>;
+    pub fn spans(&self) -> &[GenomeRegion];
+    pub fn total_length(&self) -> Bp;
+}
+
+/// The runs of `A`/`C`/`G`/`T`, collected as the reference streams past — a
+/// `ReferenceBasesObserver`, so the mask rides on the pass that computes the digests and
+/// costs no second read (spec §2).
+pub struct UnambiguousRuns { /* … */ }
+
+impl UnambiguousRuns {
+    pub fn ambiguous_bases(&self) -> u64;
+    pub fn into_selectable(self) -> Result<SelectableRegions, SelectionError>;
+}
+```
+
+**Contract.** `new` sorts, then refuses an inverted or an overlapping span — a position offered twice
+is a silent double weight in every rate fitted from the set, and no later check would see it.
+`total_length` is the sum of the spans it holds and is never recomputed from a contig table.
+
 ### 1.2 `SelectionIdentity` — the seven values that travel
 
 What a sample carries so the fit can refuse to pool mismatched runs (spec §5.1). **This is the type
@@ -80,7 +117,13 @@ that crosses the machine boundary**, not `KeptLoci`.
 /// Everything that decides which loci a run keeps. Two samples that disagree on any
 /// field selected different loci, so the fit must refuse rather than average
 /// (spec §5.1).
-#[derive(Clone, PartialEq, Eq)]
+///
+/// **`PartialEq` and not `Eq`, and that is forced rather than chosen**: `StrRepeatCriteria`
+/// carries a purity floor and a score floor, which are floats. **Compare them by bit
+/// pattern, not by `==`** — this is an identity check, so "the same value" means the same
+/// bits, and the `f64` `==` that `derive(PartialEq)` generates answers `false` for two
+/// `NaN` floors that came from the same configuration file.
+#[derive(Clone, PartialEq)]
 pub struct SelectionIdentity {
     /// The run's selection seed. A different seed selects a disjoint set and both
     /// look well-formed.
@@ -117,29 +160,52 @@ The seven above say what a run was *asked*. This says what it *produced* (spec �
 §5.2). Its input is fed by the record writer, not by re-running the rule — a digest derived from the
 rule a second time proves only that the rule is deterministic.
 
+**Built, 2026-08-12**, in two types rather than one: the filling half is mutable and the finished
+half is not, which is what lets the finished one be compared and stops a consumer feeding a digest it
+was handed.
+
 ```rust
 /// A witness that two samples really did keep the same loci.
-///
-/// **Fed as records are written**, one call per entry in `KeptLoci::generic` order, so
-/// it digests the array that exists rather than the list that should have been built.
-/// Blocked per megabase so a mismatch names where it happened.
 pub struct KeptLociDigest {
-    whole: [u8; 32],
-    /// One digest per megabase of the analysed regions, in genome order — 800 entries
-    /// on tomato, 6.4 kB.
-    per_block: Vec<u64>,
+    whole: [u8; 16],
+    /// One entry per **occupied** megabase, in genome order — 800 on tomato at a
+    /// two-million budget.
+    per_block: Vec<BlockDigest>,
+}
+
+/// One megabase, named — so a mismatch says where and not only that.
+pub struct BlockDigest { pub contig: ContigId, pub megabase: u32, pub digest: u64 }
+
+/// Fills one as the record writer walks the kept loci.
+pub struct KeptLociDigester { /* … */ }
+
+impl KeptLociDigester {
+    /// Absorb the `index`-th kept locus. Called by the record writer, in index order.
+    pub fn observe(&mut self, index: usize, locus: GenomePosition);
+    /// How many have been absorbed — checked against `KeptLoci::generic().len()`.
+    pub fn observed(&self) -> usize;
+    pub fn finish(self) -> KeptLociDigest;
 }
 
 impl KeptLociDigest {
-    /// Absorb the `i`-th kept locus. Called by the record writer, in index order.
-    pub fn observe(&mut self, index: usize, locus: GenomePosition);
-    pub fn finish(self) -> Self;
+    /// The first megabase two digests disagree on — the whole reason for blocking.
+    pub fn first_disagreement(&self, other: &Self) -> Option<(ContigId, u32)>;
 }
 ```
 
-**Contract.** `observe` must be called exactly once per kept locus, in ascending index order; the
-implementation asserts the index it is handed is the one it expects, so a writer that skips or
-reorders fails loudly rather than producing a plausible digest.
+**Contract.** `observe` must be called exactly once per kept locus, in ascending index order; it
+**panics** when handed any other index, so a writer that skips or reorders fails loudly rather than
+producing a plausible digest.
+
+**Sixteen bytes and MD5, not thirty-two.** This is the digest the same crate already computes for a
+reference's content, and the failure it guards is two cooperating runs of one pipeline disagreeing
+about a list — not an adversary constructing a collision. A second hash family here would be a second
+thing to keep in step for no property anyone can name.
+
+**The per-block entry carries its coordinates.** A bare `u64` per block leaves a reader counting
+entries to find out which megabase entry 412 was, and the blocks are only the *occupied* megabases,
+so that count is not a coordinate. Three fields is 6.4 kB more on tomato and it is the difference
+between "the digests differ" and "they differ on chromosome 3, megabase 41".
 
 ---
 
@@ -158,7 +224,8 @@ reorders fails loudly rather than producing a plausible digest.
 pub fn select_kept_loci(
     identity: &SelectionIdentity,
     catalog: &RepeatCatalog,
-    regions: &AnalysedRegions,
+    analysed: &SelectableRegions,
+    unambiguous: &SelectableRegions,
 ) -> Result<KeptLoci, SelectionError>;
 ```
 
@@ -166,29 +233,75 @@ pub fn select_kept_loci(
 catalog handle it is given. Runs in one forward pass over the catalog and holds `cap` values per
 stratum plus the generic positions.
 
+**Two region sets, and the intersection happens inside.** `analysed` is the run's own territory and
+`unambiguous` is `UnambiguousRuns::into_selectable`'s output for the same reference. Handing the
+caller the job of intersecting them is the failure this module is shaped around: the threshold's
+denominator has to be the same object the sweep walks, and `SelectableRegions::intersect` is what
+keeps the narrowed length travelling with the narrowed spans.
+
+**The generic domain excludes repeat tracts, and so does its denominator.** Spec §2's rule says
+tracts are excluded and separately that the threshold comes from the masked length; those are the
+same length or the realised count falls short by the tract fraction. So the domain is the analysed
+regions, masked, cut by the catalog, and reduced to the `Generic` pieces — and `threshold_for` is
+computed from *that*.
+
+**The STR scope is the analysed regions unmasked.** A tract in the catalog is a stretch of real
+sequence by construction, and cutting the scope at every `N` run would split scope spans without
+changing which tracts they hold.
+
 ### 2.2 The generic rule, exposed on its own
 
 The hash rule is separated from the sweep over regions so a test can ask about one position without
 building a genome's worth (spec §7.1).
 
-```rust
-/// Keep this position? `hash(contig, position, seed) < threshold` (spec §2).
-pub fn keeps_position(contig: ContigId, position: Position, seed: u64, threshold: u64) -> bool;
+**Built**, in `loci.rs`.
 
-/// The threshold that yields about `target` positions out of `analysed_length`.
+```rust
+/// One contig's name absorbed once, so the per-position work is a clone and one `u64`.
+/// **The value is identical to `hash_position`'s**, which its own test pins — the whole
+/// selection rests on those two agreeing.
+pub struct ContigHasher { /* … */ }
+impl ContigHasher {
+    pub fn new(contig_name: &str, seed: u64) -> Self;
+    pub fn hash_position(&self, position: u64) -> u64;
+}
+pub fn hash_position(contig_name: &str, position: u64, seed: u64) -> u64;
+
+/// Keep this position? `hash(contig, position, seed) < threshold` (spec §2).
+pub fn keeps_position(hasher: &ContigHasher, position: Position, threshold: u64) -> bool;
+
+/// The threshold that yields about `target` positions out of `selectable_length`.
 ///
 /// **Computed in 128 bits**: `2^64 · target` overflows a `u64`. Saturates to "keep
-/// everything" when `target >= analysed_length`, which is the right answer rather than
+/// everything" when `target >= selectable_length`, which is the right answer rather than
 /// a case to guard (spec §2).
-pub fn threshold_for(target: u64, analysed_length: Bp) -> u64;
+pub fn threshold_for(target: u64, selectable_length: Bp) -> u64;
+
+/// Every position the rule keeps, ascending. `contig_names` is indexed by `ContigId`,
+/// as the reference's contig table is; a span naming a contig the table does not hold
+/// is an error and never a skip.
+pub fn select_generic_positions(
+    regions: &SelectableRegions,
+    contig_names: &[String],
+    seed: u64,
+    threshold: u64,
+) -> Result<Vec<GenomePosition>, SelectionError>;
 ```
 
-**Decided — the hash is the one the catalog's sampler already uses**, `hash_locus`
-([`src/ng/repeat_catalog/strata.rs:158`](../../../../src/ng/repeat_catalog/strata.rs)), so both halves
-of the selection rest on one uniformity assumption rather than two (spec §2). **It is private and
-keyed by contig name today**; this unit needs it `pub(crate)` and keyed by `ContigId`, which is the
-one change it makes outside its own file. *Impl-time: whether the name→id change alters any existing
-sampler's output — it must not, since the catalog's own tests pin the loci it keeps.*
+**Decided — the same hash construction the catalog's sampler uses**, keyed by the contig's **name**
+as `hash_locus` is ([`src/ng/repeat_catalog/strata.rs:158`](../../../../src/ng/repeat_catalog/strata.rs)),
+so both halves of the selection rest on one uniformity assumption rather than two (spec §2). *An
+earlier draft of this section proposed lifting `hash_locus` to `pub(crate)` and rekeying it by
+`ContigId`. Neither happened, and neither should: an index is a property of the file's contig order,
+where a name is a property of the genome, and the per-position cost that motivated the index is
+removed by `ContigHasher` instead — the name is hashed once per contig and the hasher cloned per
+position.*
+
+**Measured, on real references rather than a fixture** (`examples/ng_joint_loci_probe.rs`): tomato
+returns 2,002,505 positions for a target of 2,000,000 and GRCh38 returns 1,999,981; the gaps are
+geometric to three figures at both; the per-contig counts give chi-square 19.8 on 12 degrees of
+freedom and 127.9 on 127; and a sweep over shards cut at coordinates the rule knows nothing about
+returns an identical vector.
 
 ### 2.3 Errors
 
@@ -196,6 +309,14 @@ sampler's output — it must not, since the catalog's own tests pin the loci it 
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SelectionError {
+    /// A selectable span ends before it starts, or two of them overlap. **Built** — a
+    /// position offered twice is a silent double weight and nothing downstream sees it.
+    InvertedRegion { region: GenomeRegion },
+    OverlappingRegions { first: GenomeRegion, second: GenomeRegion },
+    /// A span names a contig the reference table does not hold. **Built** — skipping it
+    /// silently drops a whole chromosome from the selection, identically in every
+    /// sample, so no cross-sample check could notice.
+    UnknownContig { contig: ContigId },
     /// The run asked the catalog for tracts it was not built to hold. Carries the axis
     /// and both values; the run stops rather than proceeding on a short list, which
     /// would be a wrong per-stratum total nothing downstream could notice (spec §3.3).

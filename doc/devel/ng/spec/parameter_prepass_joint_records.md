@@ -74,6 +74,16 @@ identified by *which* allele a sample's stray reads carry.
 frequency of an allele** ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.1), so
 the allele has to exist as a thing that can have a frequency. "Non-reference" is not one.
 
+**And a fifth, which is a requirement on the *fit* rather than on the record, stated here because
+this is where the temptation is.** All four counts are stored, and the fit **sums over which
+non-reference base is the segregating one** rather than picking the largest
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.1.1). At a position where the
+population carries only the reference base the non-reference reads are errors spread over three
+bases, so choosing the observed largest and scoring it as one allele's evidence is conditioning on a
+maximum — small per site, one-directional, and landing on exactly the rare-frequency classes
+everything downstream reads. **A record that collapsed the four counts to "the alternative one and
+the rest" would make that choice unavoidable**, which is the reason the four are kept apart.
+
 ### 2.2 The depth ladder: twenty bins, five bits
 
 **Depth is stored binned, on the ladder [`parameter_prepass_generic.md`](parameter_prepass_generic.md)
@@ -100,7 +110,7 @@ allele is most of the signal at low coverage, so small counts stay exact and onl
 *Soft, and it is the one number carried across from a different arrangement of the same data:* the
 0.55-against-0.054 measurement was made on **pooled** cells, where many sites share a bin. Here each
 sample-locus record is binned separately. The argument transfers; the measurement does not, and
-§6.3 checks it directly.
+§7.3 checks it directly.
 
 ### 2.3 The encoding, which is what makes this cheap
 
@@ -155,7 +165,7 @@ library's rate with no bound and no pooling arm.
   counters cost** — at 300 base comparisons a locus and an error rate of 0.002 a locus carries about
   0.6 mismatching bases — because it is driven by the error rate, exactly as §2.3's sparse list is.
   Storing the reads instead would be 75 bytes per locus per sample two-bit packed, 3.7 GB across fifty
-  samples at a million loci, against the 60–110 MB of §5.
+  samples at a million loci, against the 60–110 MB of §6.
 
 ### 3.1 The origin is the reference tract length — settled, and measured
 
@@ -218,7 +228,7 @@ is short.
 
 **Four states, not two.** A sample at a kept STR locus may have had no read reach the locus at all;
 reads that reached it but none crossing the whole tract, so none reports a length; or reads that
-crossed it, whether they showed the reference length or another. (The fourth, *never walked*, is §5's
+crossed it, whether they showed the reference length or another. (The fourth, *never walked*, is §6's
 and is a bug rather than data.) The generic set's zero-depth-against-quiet distinction is the last
 pair, not the first.
 
@@ -236,9 +246,100 @@ leaves to the caller).
 
 ---
 
-## 4. What travels once per sample, beside the records
+## 4. The third object: coverage by window, per sample
 
-**Ten values, and the fit must refuse to pool samples that disagree on any of them.**
+**The fit needs one thing the two records cannot hold, and it is not a record at all.**
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 adopts a third class of site
+— a locus the *sample* carries more copies of than the caller assumes — and its discriminator is the
+**local relative coverage**, never the site's own depth. That is a measured constraint rather than a
+preference: per-base coverage at 6× has no power to tell a two-copy carrier at about twelve reads
+from a single-copy sample reading high, and tomato's three reads a site is half that depth.
+
+**So it cannot come out of §2's records.** Those hold one binned depth per kept position, and the
+kept positions are one in a few hundred — a 500 bp window holds one or two of them, which is the
+per-base measurement the constraint rules out. The summary is over **every** position the walk
+visited, not over the kept ones.
+
+**What is stored, per sample:**
+
+- **mean depth in each fixed window of the reference** — 500 bp windows, which over tomato's 782 Mb is
+  1.6 M windows and over GRCh38's 3.1 Gb is 6.2 M. One `f32` or a binned byte each;
+- **the sample's own depth-against-GC curve**, a few hundred numbers, because coverage tracks GC
+  content and an uncorrected window near an extreme of it reads high or low for a reason that has
+  nothing to do with copy number. Production computes both in its Stage-1 pileup
+  ([`../../specs/hidden_paralog_filter.md`](../../specs/hidden_paralog_filter.md) §2); `src/pileup/`
+  is frozen, so ng builds its own.
+
+**Size: 1.6 to 6.2 MB per sample at one byte a window**, which at fifty samples is 80 to 310 MB — the
+same order as the records themselves (§6), and it is the reason this section exists rather than a
+sentence in the fit spec. **It is a real addition to the route's memory bill and §7.8 measures it
+beside the records rather than instead of them.**
+
+**Two properties it inherits.** It is **per sample and needs no cohort**, which matters because this
+caller must also run on one sample; and its window grid is a function of the reference alone, so two
+samples' summaries are comparable by construction — **the window size travels with the identity**
+(§5) for the same reason every other bin width does.
+
+### 4.1 The stored window is 500 bp; the width the fit reads at is the sample's own
+
+**Measured, 2026-08-12** ([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)
+§4). A window's mean depth separates one copy from two only once the window has collected about
+**12,000 aligned bases**, which is depth times width. Enrichment of the joint cell — a two-copy
+window *and* a near-half alternative fraction — over what independence predicts, at 500 bp:
+
+| mean depth | 2.51× | 3.60× | 5.15× | 9.89× | 13.32× | 25.20× | 28.69× |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| enrichment | 1.6× | **1.3×** | 1.5× | 2.5× | 7.7× | 24.0× | 24.9× |
+
+**At 3.6× a 500 bp window's mean depth is scatter**: its two-copy band swells to 9.7% of positions,
+eleven times a deep sample's share, and those positions are no likelier to read near half than any
+others. Widening the window recovers it — the 2.5× sample goes 1.6× at 500 bp, 8.5× at 2 kb, 15.1×
+at 10 kb — and 2.51× at 5 kb (12,550 bases a window) returns what 25.2× at 500 bp (12,600) does.
+**The deep sample gains nothing above the floor**, so this is not an argument for a wider grid.
+
+**So the width is two decisions, not one.**
+
+- **Stored at 500 bp**, as this section prices it. Storing at each sample's own width would break the
+  one property §4 leans on — that two samples' summaries are comparable by construction — and put a
+  per-sample number into a value §5 requires every sample to agree on.
+- **Read at whatever width the sample's depth requires**, by summing adjacent windows in the fit.
+  Summing binned means back to a wider mean needs the per-window position counts, which the summary
+  already has as its denominators. **Summing is exact and free; unsumming is not possible**, which
+  is the whole reason the fine grid is the stored one.
+
+**The tomato archive is the cohort that makes this load-bearing.** At its three reads a site the
+class is invisible at 500 bp and plain at 5 kb, so a fit that read the stored grid directly would
+find no duplications in exactly the samples the class was adopted for.
+
+### 4.2 What the gating measurement returned
+
+The class is kept. On tomato SRR7279482 at 25×, **1 position in 8,600** sits in a window near two
+copies and reads between 35% and 65% alternative; the near-half rate inside those windows is
+**1.26%** against **0.033%** elsewhere. **The population is 150 to 590 positions per two million**
+across the eight samples walked — about a third of the same sample's near-half positions in
+ordinary-coverage windows, and thirty times smaller than
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 assumed before it was
+measured. That does not withdraw the object: it is a real population, concentrated 24 times where
+coverage says it should be, and nothing else in the model can hold it.
+
+**And the summary must be per sample rather than per locus**, which the same run checked: of 84
+windows some sample reads near two copies, **40 are read that way by exactly one of the eight** and
+11 by seven or eight. Both a shared component — the reference's own collapse — and copy number
+segregating in the panel are present, and the segregating one is the larger.
+
+**One thing it did not settle: whether the GC correction helps.** The depth-against-GC curve is real
+on tomato — median window depth runs from 16.2 reads a position at 20% GC to 29.0 at 36%, a factor
+of 1.79 — but correcting for it *lowered* the enrichment on SRR7279482 from 32.6× to 24.8×, by
+adding two-copy windows that carry no near-half signal. The curve stays in the summary, because it
+costs a few hundred numbers and the 1.79-fold range is larger than the signal it would otherwise
+swamp; **whether the fit divides by it is a flag, and the measurement that would settle it is the
+same walk on a genome whose duplications are known.**
+
+---
+
+## 5. What travels once per sample, beside the records
+
+**Thirteen values, and the fit must refuse to pool samples that disagree on any of them.**
 
 Seven identify the loci and are
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §5.1's: the seed, the reference
@@ -254,23 +355,60 @@ agree when a hash function or a threshold's arithmetic has changed underneath th
 **It must be produced by the code that writes the entries**, not by re-running the selection, or it
 witnesses nothing about this file.
 
-**Two more are this document's**, and both are load-bearing rather than informational:
+**Five more are this document's**, and every one of them is load-bearing rather than informational.
+The first two say what was recorded; the last three say **in what units**, and an earlier version of
+this section had none of those three — which left the whole check able to pass while two samples' rows
+meant different things.
 
 - **the per-stratum locus counts** — for every stratum, how many loci the analysed regions hold and how
   many were kept. Without them anything pooled across strata is biased and silently so
   ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3.3);
 - **the per-locus read cap** (§3.4), for the same reason as the other caps: two samples recorded under
-  different caps did not record the same thing.
+  different caps did not record the same thing;
+- **a digest of the depth ladder's edges** (§2.2). The generic record stores a five-bit *code*, not a
+  depth. Two samples binned under different edges hold codes that mean different depths, **and all
+  the other values agree** — the loci were the same, the seed was the same, the digest of the kept
+  loci matches because the loci did match. A code is only a number until something says what ladder
+  it indexes;
+- **the per-position depth cap** — the depth above which a position's reads are subsampled down before
+  anything is recorded. It is the generic path's twin of the STR read cap on the row above, it moves
+  independently of the ladder's own top rung, and a sample recorded at a different one did not record
+  the same evidence;
+- **the coverage-by-window size** (§4), where a window summary exists at all. Windows of different
+  widths are not comparable and a relative copy number computed across two grids is meaningless.
+
+*None of the five needs a new mechanism: they are equality comparisons beside the eight above, and
+they fail in exactly the same silent way.*
 
 ---
 
-## 5. Cross-cutting concerns
+## 6. Cross-cutting concerns
 
-**Memory.** About **1.25 MB per read group** for the generic set at two million positions plus
-30–250 kB of sparse entries, and a couple of megabytes per read group for the STR set. Roughly
-**60–110 MB for a fifty-sample cohort**, held for every sample during the fit. **These are the only
-objects that accumulate across the cohort**; everything else in step 4 is dropped when its sample
-finishes.
+**Memory, and the STR half is now measured rather than guessed.** An earlier version of this section
+priced the STR set at *"a couple of megabytes per read group"* without a locus count behind it. There
+is one now: at the STR path's calling floors, tomato SL4.00 holds **462,701 STR loci** in 141 strata,
+and every one of them is kept because the per-stratum cap never has to fire
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.5,
+`examples/ng_joint_loci_probe.rs`).
+
+| object | per sample, per read group | at fifty samples |
+|---|---:|---:|
+| generic depth array, 2 M positions at five bits | 1.25 MB | 63 MB |
+| generic sparse non-reference entries | 30–250 kB | 1.5–13 MB |
+| STR set at 462,701 loci — offsets, guard, censoring count, base-comparison denominator | ~4–5 MB | 200–250 MB |
+| STR difference list, driven by the error rate | ~0.3 MB | 15 MB |
+| **coverage by window** (§4), per sample and not per read group | 1.6 MB | 80 MB |
+
+**So the STR records are the larger half of the bill, not the smaller** — the opposite of what the
+earlier arithmetic implied, and it follows directly from keeping every STR locus rather than a
+sample of them. Roughly **360–420 MB for a fifty-sample cohort**, held while the fit runs. **These are
+the only objects that accumulate across the cohort**; everything else in step 4 is dropped when its
+sample finishes.
+
+*The row that would change most is the STR one, because it is the one whose per-locus size depends on
+an encoding that is not written yet.* **§7.8 measures it rather than trusting this table**, and if the
+number lands badly the knob is the per-stratum cap — which exists, costs nothing to use, and until
+now had no reason to fire.
 
 **Concurrency.** A region-sharded walk fills the entries for the positions in its own region, and
 merging is concatenation in position order. Nothing needs communication between shards.
@@ -285,7 +423,7 @@ walked in one region and in many produces byte-identical records.
 
 ---
 
-## 6. How we know it works
+## 7. How we know it works
 
 1. **Round-trip.** Write and read back a record set holding every corner: a never-walked position, a
    zero-depth position, a position with reads and none non-reference, a position at the depth cap, and
@@ -313,7 +451,27 @@ walked in one region and in many produces byte-identical records.
    sample carrying two read groups.
 7. **Sharded recording is exact.** The same sample walked in one region and in many must give
    byte-identical records, including the STR read subsample.
-8. **Size is measured, not assumed.** §5's figures are arithmetic. Measure the records at rest on two
-   runs that stress different axes: **HG002 at 300×**, where depth runs past the ladder's cap and the
-   sparse list grows with depth × error rate; and **the whole tomato cohort**, where what grows is the
-   number of samples held at once. Report the two sets separately.
+8. **Size is measured, not assumed.** §6's figures are arithmetic. Measure the objects at rest on two
+   runs that stress different axes: **HG002 at 300×**, where the sparse list grows with depth × error
+   rate; and **the whole tomato cohort**, where what grows is the number of samples held at once.
+   **Report the generic set, the STR set and the window summary separately** — §6 says the STR set is
+   the larger half at 462,701 loci, and a single total would hide it being wrong. *At 300× the
+   per-position depth cap fires long before the ladder's top rung does, so what that arm measures is
+   the sparse list and not the ladder.*
+9. **The five unit values refuse.** Write two record sets identical in every way except one of: the
+   depth ladder's edges, the per-position depth cap, the STR read cap, the per-stratum counts, the
+   coverage window size. Each must be refused, naming which. **This is the test that would have failed
+   before this revision and passed after it**, because the eight identity values that existed then all
+   agree in every one of those five cases (§5).
+10. **The window summary is comparable across samples and is not derivable from the records** (§4).
+    Two samples' summaries must be built on the same grid — the grid being a function of the reference
+    — and a summary built at a different window size must be refused rather than resampled. **Assert
+    also that a window's mean depth differs from the mean over the *kept* positions inside it**, on a
+    fixture where the two diverge: that inequality is the reason the object exists, and an
+    implementation that quietly derived one from the other would pass every other check here.
+11. **Summing windows gives the mean over their union** (§4.1). Ten adjacent windows summed must equal
+    one walk's mean over the same 5 kb, exactly — it is a ratio of two sums the summary already holds.
+    **Plant a short window in the run**, one the analysed regions or the ambiguity mask cut down, and
+    assert that weighting it by its own position count changes the answer: a sum that treated every
+    window as full would agree with the direct mean everywhere else and be wrong only where it
+    matters, which is at every contig end and every region edge.

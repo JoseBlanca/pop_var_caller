@@ -9,10 +9,12 @@ and nothing else. What is recorded at each is
 
 *Types and interfaces: [`../arch/parameter_prepass_joint_loci.md`](../arch/parameter_prepass_joint_loci.md).*
 
-***The STR half of it is built.*** *The repeat catalog ships the per-stratum sampler this document
-asked for ([`repeat_catalog.md`](repeat_catalog.md), `src/ng/repeat_catalog/`), so §3 now records why
-the rule is that one and what using it obliges a consumer to do, rather than proposing it. The generic
-rule (§2) has no code.*
+***Both halves are built.*** *The repeat catalog ships the per-stratum sampler this document asked for
+([`repeat_catalog.md`](repeat_catalog.md), `src/ng/repeat_catalog/`), so §3 records why the rule is
+that one and what using it obliges a consumer to do, rather than proposing it. **The generic rule (§2)
+landed 2026-08-12** in `src/ng/parameter_estimation/joint/loci.rs`, with the unambiguous-base mask §2
+now requires and the measurements in §2 and §4.5 behind it
+(`examples/ng_joint_loci_probe.rs`).*
 
 ***It changes one decision in [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md)***
 *§3 — how STR loci are chosen (§3 below) — and that document carries a note saying so.*
@@ -33,11 +35,12 @@ path, and repeat tracts for the STR path.
 analysed regions, the repeat catalog, a seed, and a couple of caps. It touches no read, so it can be
 built and tested with no alignment file in sight: run it twice and compare the lists.
 
-**Half of it is already built.** The STR side is two calls on the repeat catalog
+**Both sides are built.** The STR side is two calls on the repeat catalog
 ([`repeat_catalog.md`](repeat_catalog.md), `src/ng/repeat_catalog/`), which ships the per-stratum
-sampler; the generic side is a hash rule this document states in full (§2). What is left here is the
-policy — which caps, which seed, what has to travel with a sample, and what the stratification obliges
-a consumer to do afterwards (§3.5).
+sampler; the generic side is the hash rule §2 states in full, in
+`src/ng/parameter_estimation/joint/loci.rs`. What this document holds is the policy — which caps,
+which seed, what has to travel with a sample, and what the stratification obliges a consumer to do
+afterwards (§3.5).
 
 ### 1.1 Goals
 
@@ -64,14 +67,37 @@ a consumer to do afterwards (§3.5).
 **Unchanged from [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §3**, which
 this section summarises rather than restates so that the STR rule beside it can be read in one place.
 
-> keep position `p` if `p` lies in the analysed regions and `hash(contig, p, seed) < threshold`
+> keep position `p` if `p` lies in the analysed regions, carries an unambiguous reference base, and
+> `hash(contig, p, seed) < threshold`
 
 - **The domain is the analysed regions, not the genome.** With no `--regions` BED that is the whole
   reference; with one, it is the reference intersected with the BED. Selecting genome-wide under a BED
   would leave nearly every chosen position unvisited.
-- **The threshold sets the count**, from the analysed length. The hash is a 64-bit value, so it takes
-  `2^64` values and a target of `n` positions out of `analysed_length` is
-  `threshold = 2^64 · n / analysed_length`. **Nothing about that range is measured or discovered — it
+- **And it is narrowed once more, by the reference's own bases — ADDED 2026-08-12, measured.** A
+  position inside an assembly gap is kept by a rule that cannot see it and then covered by no read in
+  any sample. It is worse than wasted budget: the fit derives its per-sample rates as means of
+  genotype posteriors over the kept loci
+  ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.2), and a locus with no reads
+  contributes its **prior** — the model's own prediction — rather than evidence. Every such position
+  is a fixed weight on the answer.
+
+  **Measured** (`examples/ng_joint_loci_probe.rs`), at a two-million-position budget:
+
+  | reference | not `A`/`C`/`G`/`T` | kept positions landing there |
+  |---|---:|---:|
+  | tomato SL4.00 | 44,731 bases (0.01%) | **135** |
+  | GRCh38 with the hs38d1 decoys | 165,046,090 bases (5.31%) | **106,423** (5.32%) |
+
+  **So it is nothing on tomato and one kept position in nineteen on human**, which is why the rule
+  states it rather than leaving it to whoever writes the BED. **It costs no extra read of the
+  reference**: the mask comes off the same forward pass that computes the reference's digests, the
+  seam [`repeat_catalog.md`](repeat_catalog.md) already uses. **The threshold's denominator is the
+  masked length**, not the contig table's total — the same trap the BED sets, one level down, and the
+  arch doc makes the two impossible to state separately.
+- **The threshold sets the count**, from the **selectable** length — the analysed regions after the
+  ambiguous bases are taken out, which is the domain the two points above define together. The hash is
+  a 64-bit value, so it takes `2^64` values and a target of `n` positions out of `selectable_length`
+  is `threshold = 2^64 · n / selectable_length`. **Nothing about that range is measured or discovered — it
   is the output width of the hash we chose**, and the one property it rests on is that the hash
   spreads uniformly across it. Use the same `xxh3` the STR sampler already uses
   (`src/ng/repeat_catalog/strata.rs`, `hash_locus`), so both halves of this document rest on one
@@ -87,8 +113,9 @@ this section summarises rather than restates so that the STR rule beside it can 
 - **Scattered positions, never contiguous blocks.** Sites within a block share a genealogy, so *k*
   positions in one block say less about a genome-wide rate than *k* scattered ones. **What scattering
   does not buy is independence**, and the census-sites document overstated this: at one position in
-  four hundred the gaps are geometric, so about 442,000 of two million kept positions have their
-  neighbour within 100 bases, and in a selfing panel linkage reaches past a kilobase
+  three hundred and ninety-one the gaps are geometric, so — **measured on tomato, not predicted** —
+  **453,445 of 2,002,470 kept positions have their neighbour within 100 bases** and 1,847,538 have one
+  within a kilobase, while in a selfing panel linkage reaches past a kilobase
   ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §1). The rates are
   unaffected — a mean over correlated sites has the same expectation — but the standard errors of §4.2
   are optimistic, and anything distance-dependent needs a clustered budget rather than a bigger
@@ -260,7 +287,7 @@ proportion. It splits cleanly.
   loci the analysed regions hold** and **how many were kept**. STR diversity becomes a mean over
   strata weighted by the true counts. That is one line of arithmetic and **it is silent when
   omitted**, which is why the counts are a stored field
-  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4) rather than a note
+  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §5) rather than a note
   here.
 
 **The true counts are `count_loci_per_stratum`'s** (§3.3), answered over the same `region` and in the
@@ -338,18 +365,27 @@ disagreeing with the reference at 5% rather than 0.19%
 **2,500** more. Against those, a sample at the cohort floor has about **260** heterozygous loci that
 show an alternative read at all.
 
-**And that arithmetic leaves out the largest contributor.** A duplication the reference does not
-carry shows about half its reads disagreeing at every position where the copies differ, in every
-sample; the generic path's fit asks for such a population at **0.42% and 0.49% of sites** on two
+**A third contributor is real and, measured, it is the smallest of the three.** A duplication the
+reference does not carry shows about half its reads disagreeing at every position where the copies
+differ; the generic path's fit asks for such a population at **0.42% and 0.49% of sites** on two
 tomato samples and is refused, because the class that would hold it cannot be widened without eating
 real heterozygotes ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1;
 [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 is what this route does
-instead). That is between **1,700 and 8,400** of two million positions, nearly all of them
-showing an alternative read — more than the 6,000 error positions and the 2,500 noisy ones put
-together, against the same 260.
+instead).
 
-**So at most 3 in every 100 positions carrying an alternative read are really heterozygous, and the
-other 97 are noise.** That is the number to plan for, and it is not a counting problem:
+**An earlier version of this paragraph called it the largest contributor at 1,700 to 8,400 of two
+million positions, and a walk over eight tomato alignments makes it 150 to 590**
+([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)).
+The old figure read the fitted class weight as a count of positions showing an alternative read.
+Those are two quantities: 0.6% to 3.2% of positions sit in a window near two copies, which is what
+the weight measures, but **only 0.3% to 1.2% of those positions read near half**, because a
+duplication is silent wherever its two copies agree.
+
+**So the budget is about 6,000 error positions, 2,500 noisy ones, a few hundred duplicated ones, and
+260 real heterozygotes at the cohort floor. At most 3 in every 100 positions carrying an alternative
+read are really heterozygous, and the other 97 are noise** — the conclusion is unchanged, and it now
+rests on the two terms that were always the large ones. That is the number to plan for, and it is not
+a counting problem:
 
 - **More sites do not fix it.** The signal and the background grow together, so the *ratio* is
   unchanged. Extra loci shrink the sampling error, which was never the binding constraint.
@@ -374,7 +410,111 @@ passes through at full size. What the caller's genotype prior multiplies is `1 �
 different number — but the two run together on an autogamous panel, which is precisely the panel where
 this bias is largest, so the exposure is real whichever of the two a caller is handed.
 
-### 4.3 The experiment: sweep downward, and at the low end
+### 4.3 The sweep, run — and two million positions is a contamination budget, not an estimates budget
+
+**Measured 2026-08-12** (`examples/ng_joint_fit_harness.rs`, fifty samples, three reads a site, a
+fresh draw at each budget, three starting points, best taken). Errors against the drawn truth:
+
+| positions | segregating | clean error rate | noisy error rate | noisy-locus share | `Hexp` |
+|---:|---:|---:|---:|---:|---:|
+| 5,000 | 39 | −1.1% | −2.0% | +15.9% | +14.0% |
+| 20,000 | 149 | −1.4% | +2.8% | −13.3% | −3.5% |
+| 80,000 | 627 | +0.2% | −0.4% | **−1.3%** | −7.0% |
+| 320,000 | 2,614 | −0.4% | −1.3% | −1.0% | **+1.6%** |
+| 1,280,000 | 10,208 | −0.0% | +0.2% | −0.9% | −0.9% |
+
+**The three parameters degrade at completely different rates, which is why §4.3's older wording
+insisted on one row per parameter.**
+
+- **The error rates are finished at five thousand positions** — within about 2%, and 256 times the
+  budget buys another 1%. They are measured from *reads*, and five thousand positions at fifty
+  samples and three reads is three quarters of a million read observations. **Nothing about the site
+  budget is set by them.**
+- **The noisy-locus share needs about eighty thousand.** It is a property of *loci* rather than of
+  reads, so it wants loci: wrong by a sixth at five thousand, within a hundredth at eighty thousand.
+- **The diversity is the slowest, and it tracks the segregating count rather than the budget.** It
+  scatters by several percent until a few thousand sites segregate, and settles near 1% at ten
+  thousand.
+- **Inbreeding needs about twenty thousand.** Against a drawn truth of 0.600 the fit returns 0.563 at
+  five thousand positions and lands within a percentage point at every budget above it; against a
+  truth of zero it returns 0.052 at five thousand and 0.000 above. **The low-budget failure is an
+  inbreeding coefficient invented out of scatter**, and it goes both ways.
+
+*The whole table repeats at an inbreeding of 0.6 with every column within a percentage point of the
+outbred one, so none of these budgets depends on how inbred the panel is.*
+
+**So for everything in this table, three hundred and twenty thousand positions is enough at fifty
+samples — a sixth of the two million.** What keeps the budget at two million is the parameter that
+is *not* in this table: contamination wants about ten thousand segregating markers
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.3), and this panel yields
+10,208 of them at 1.28 M positions. **Two million is a contamination budget.** A run that does not
+need `α` to a couple of percent can have its records six times smaller, and that is now a knob with a
+measured meaning rather than a number nobody had checked.
+
+### 4.3.1 A bigger panel does not buy fewer loci — MEASURED
+
+The same sweep at **two hundred** samples, four times the panel:
+
+| positions | noisy-locus share, 50 samples | at 200 | `Hexp`, 50 | at 200 | clean rate, 50 | at 200 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 5,000 | +15.9% | **+16.0%** | +14.0% | −9.0% | −1.1% | +0.7% |
+| 20,000 | −13.3% | **−12.4%** | −3.5% | +3.3% | −1.4% | −0.0% |
+| 80,000 | −1.3% | +4.5% | −7.0% | −4.0% | +0.2% | +0.5% |
+| 320,000 | −1.0% | −2.8% | +1.6% | +0.4% | −0.4% | −0.2% |
+
+**The noisy-locus share is unmoved by the panel** — +16% at five thousand positions whether the
+cohort holds fifty samples or two hundred, and settling only as the loci accumulate. That is what it
+must do: `w` is *the share of loci that are noisy*, so it is counted in loci and **cannot be bought
+with samples**. §4.4 says the same thing about the other direction, and this is its mirror: **the
+budget buys what loci buy, and the panel buys what samples buy, and neither substitutes for the
+other.**
+
+**What the larger panel does buy** is the read-driven parameters at small budgets: the clean rate
+goes from −1.1% to +0.7% at five thousand positions, and the inbreeding coefficient from 0.052 to
+0.004 against a truth of zero. Both are fitted from reads, and four times the samples is four times
+the reads.
+
+**So the locus budget is set by two things, and a cohort of thousands relieves neither**: the
+noisy-locus share, which needs about eighty thousand positions, and contamination, which needs its
+segregating markers.
+
+### 4.3.2 What a thousand samples does for the marker count: about a seventh — MEASURED
+
+The counts above are sites segregating **in the population**, a property of the truth that does not
+move with the panel. What contamination can actually use is markers segregating **in the panel** —
+where the cohort's own chromosomes differ — and that does grow with the panel, because a bigger
+sample reaches further down the rare tail. **How far it grows is a property of the population's
+low-frequency tail, so it had to be measured rather than argued.**
+
+| panel | of the population's segregating sites, the share the panel sees |
+|---:|---:|
+| 50 samples | 77–82% |
+| 200 | 82–85% |
+| 1,000 | **89–92%** |
+
+**Twenty times the panel buys about fourteen percent more usable markers, not an order of magnitude.**
+Under this truth's density — `Beta(0.3, 1.2)`, the rare-allele pile-up a neutral population has —
+about a quarter of segregating sites sit below a frequency of one in a hundred, and most of those are
+already visible to fifty samples. **So the contamination budget falls by roughly a seventh between
+fifty samples and a thousand, and a cohort of thousands does not make the site budget collapse.**
+
+*An earlier note in this section guessed the other way*, on the reasoning that a panel of two
+thousand reaches alleles at one in four thousand where fifty reaches one in a hundred. That is true
+and it is not the point: what matters is how much *mass* the density puts down there, and under a
+neutral tail it is not much. **On a population with a heavier rare tail — a recent expansion, or a
+much larger effective size — the same measurement would come out differently**, which is a reason to
+re-run it on the real cohort rather than to carry this number as a constant.
+
+*And one refinement of §4.3.1's claim.* At five thousand positions the noisy-locus share is +16% at
+fifty, two hundred **and** a thousand samples, so there the panel buys nothing at all. At twenty
+thousand, a thousand-sample panel does better than a fifty-sample one — −4.0% against −13.3% — so
+samples are not entirely useless to it. **The budget still has to be counted in loci**; what is wrong
+is only the stronger form of the claim.
+
+*And it is at the cohort's own heterozygosity throughout; §4.2's low-heterozygosity case is the
+separate question §6.2 carries.*
+
+### 4.3.3 The experiment as it was specified, for the parts still to run
 
 Refit at 2 M, 500 k, 100 k and 20 k positions on the same drawn data and find **the first budget at
 which the fitted values move by more than a caller could feel**. Two million was chosen for the
@@ -404,13 +544,41 @@ mismapped locus is noisy in *every* sample
 samples at one locus**, not many loci. It does not improve as the budget grows and does not degrade as
 it shrinks. **The budget buys precision for the pooled rates and nothing at all for that.**
 
-### 4.5 The STR cap may turn out to be no cap at all
+### 4.5 The STR cap turns out to be no cap at all — MEASURED 2026-08-12
 
-[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.3 suspects the whole STR
-set may fit with no sampling: there are orders of magnitude fewer STR loci than genome positions, and
-a far larger fraction of them vary. **The mechanism costs nothing either way** — a cap high enough to
-admit every locus keeps every locus, and `sample_loci_per_stratum` is the same call — so this is a
-number to set from §6.1's measurement rather than a design to revisit.
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.3 suspected the whole STR
+set would fit with no sampling: there are orders of magnitude fewer STR loci than genome positions.
+**It does.** At the STR path's calling floors `[8, 6, 6, 6, 5, 4]` with a 30 bp flank and a 100 bp
+satellite cap, tomato SL4.00 holds **462,701 STR loci in 141 strata**
+(`examples/ng_joint_loci_probe.rs`) — under a quarter of the two million generic positions, and a cap
+above the largest stratum keeps every one of them.
+
+| cap | loci kept | strata capped, of 141 |
+|---:|---:|---:|
+| 100 | 8,699 | 68 |
+| 500 | 27,698 | 35 |
+| 1,000 | 41,271 | 21 |
+| 5,000 | 86,688 | 8 |
+| 20,000 | 157,752 | 3 |
+| none | 462,701 | 0 |
+
+**The distribution is what makes a cap look attractive and then unnecessary.** One stratum — period 1
+at 8 repeats — holds 217,812 loci, 47% of the total, and the next two hold another 32%; **68 strata
+hold fewer than a hundred loci each**. So a cap does almost all of its work on three strata, and
+those three are the ones where the parameter is already best determined.
+
+**Three things follow, and the third is the one that matters.**
+
+- **No sampling means no reweighting.** §3.5's per-stratum weights are the correction for keeping
+  equal numbers from unequal strata; keep everything and the strata are represented in proportion by
+  construction. The counts stay a stored field (§3.5) because a *future* run may cap, and because
+  they are free — but the arithmetic they enable does not have to fire.
+- **The thin strata are unchanged by any of this.** Selection was never their problem (§3.6): 68
+  strata below a hundred loci borrow from their neighbouring repeat counts whatever the cap is.
+- **The memory bill moved.** Keeping 462,701 loci in every sample makes the STR records the *larger*
+  half of what the cohort holds, not the smaller
+  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6). **That is the
+  reason to keep the cap mechanism**, and the first reason it has ever had to fire.
 
 ---
 
@@ -485,23 +653,28 @@ and the test that distinguishes the two.
 
 ## 6. Open questions
 
-1. **How many STR strata are there, and how many loci does each hold?** — OPEN, and it is the first
-   thing to settle, because three decisions wait on it: what the cap should be (total loci is
-   `cap × non-empty strata`), whether any sampling is needed at all (§4.3), and how much of the joint
-   fit's comparison against the per-sample route is even a comparison — if every locus is kept, the
-   joint route holds the same STR loci *and* remembers which was which.
+1. **How many STR strata are there, and how many loci does each hold?** — **CLOSED 2026-08-12: 141
+   strata, 462,701 loci on tomato at the calling floors** (§4.5,
+   `examples/ng_joint_loci_probe.rs`). Three decisions waited on it and all three now have an answer.
 
-   **It is now one call rather than an experiment**: `count_loci_per_stratum` at the STR path's
-   calling floors, over the tomato reference. *What is measured already is a different number* — the
-   catalog holds 6.4 M repeats over tomato's 795 MB reference and 23.6 M over GRCh38, but those are
-   rows at the build floors `[5, 5, 4, 4, 4, 3]`, not loci at the calling floors `[8, 6, 6, 6, 5, 4]`
-   after the purity floor, the satellite cap and bundling have been applied. The second number is
-   smaller by an unknown factor and it is the one the cap depends on.
+   - **What the cap should be**: none, for accuracy. A cap set above 217,812 keeps every locus, and
+     the only reason to set one lower is the memory bill §4.5's last point names.
+   - **Whether any sampling is needed at all**: no, so §3's reweighting never has to fire — though
+     its stored counts stay, being free and being what a capped run would need.
+   - **Whether the comparison against the per-sample route is a comparison**: on this path, yes and
+     fully. The joint route holds *the same STR loci* the per-stratum histogram holds and remembers
+     which was which, so §8's second measurement is like-for-like here where it is not on the generic
+     path.
 
-   **If the answer is "they all fit", most of §3 dissolves.** With no cap there is no sampling and no
-   reweighting to remember — the strata are represented in proportion because everything is kept. §3
-   is what happens when they do not fit, and it costs nothing to keep either way (§4.3), but the
-   measurement decides whether it ever fires.
+   *What was measured before was a different number* — the catalog holds 6.4 M repeats over tomato's
+   795 MB reference and 23.6 M over GRCh38, but those are rows at the build floors
+   `[5, 5, 4, 4, 4, 3]`. The calling floors, the purity floor, the satellite cap and bundling take
+   6.4 M down to 462,701: **a factor of about fourteen**, which is the number nothing had.
+
+   **Still open, and it is the human half**: the same count on GRCh38, which the current catalog file
+   cannot answer because it was written in an older header format. It matters for the GIAB arm of
+   [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §8's third measurement and for
+   nothing else.
 2. **Can a sample at 0.149 heterozygotes per kilobase be told apart from the artefact floor?** —
    OPEN, and **the sharpest question in these three documents** (§4.2). At least 97 in every 100
    positions carrying an alternative read there are noise, so the answer turns on how well the panel
@@ -515,10 +688,16 @@ and the test that distinguishes the two.
    **It is not an incidental output on such a panel** (§4.2): `1 − F_hom_excess` is `Hobs/Hexp` where
    that coefficient is near 1, so the heterozygosity is the inbreeding estimate under another name —
    and on an autogamous panel it tracks the `F_autozygosity` the caller's genotype prior multiplies.
-3. **Where does the generic budget start to matter?** — OPEN. §4.3 gives the experiment. *Leaning:*
-   below two million, since the error rate is already pinned to one part in eighty there and a low
-   heterozygosity does not by itself demand more loci (§4.2). What could still force a per-run knob is
-   question 2's answer rather than any counting argument.
+3. **Where does the generic budget start to matter?** — **MEASURED 2026-08-12 at fifty samples: not
+   until well below two million, and each parameter has its own answer** (§4.3). The error rates are
+   within 2% at **five thousand** positions, the noisy-locus share within a hundredth at **eighty
+   thousand**, and the diversity near 1% once a few thousand sites segregate, which takes about
+   **three hundred and twenty thousand**. **The two-million budget is set by contamination alone**,
+   which wants ten thousand segregating markers and gets 10,208 at 1.28 M positions.
+
+   **Still open, and both are cheap**: the same sweep at a larger panel — more samples means more
+   sites segregate somewhere, so the budget should fall further — and the same sweep on a sample at
+   tomato's heterozygosity floor, which is question 2 and a different failure mode entirely.
 4. **What fraction of STR loci vary across a cohort?** — OPEN, and it is the other half of question 1:
    it decides whether a cap set to keep everything actually delivers the ~10,000 varying loci the
    cross-sample statistics want ([`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §5.3).
@@ -546,25 +725,39 @@ asserted. They are not restated here. What follows is this consumer's own.*
 2. **The generic selection is unbiased.** On synthetic data with a known frequency spectrum, the
    spectrum over the chosen positions must match the one over every position, within its own error.
    If the selection ever came to depend on the data, this is where it shows.
-3. **The reweighting undoes the stratification.** STR diversity computed from the kept loci with the
+
+   *Two properties of the rule itself are cheaper to check and are checked on real references
+   instead of a fixture: that the realised count lands within `√target` of the target, and that the
+   gaps between kept positions are geometric. Measured — tomato returns 2,002,505 positions for a
+   target of 2,000,000 with gaps at 41 / 271 / 900 bp against a geometric prediction of 41 / 271 /
+   900; GRCh38 returns 1,999,981 with 155 / 1,019 / 3,385 against 155 / 1,019 / 3,385. The kept
+   positions fall across contigs as their lengths imply: chi-square 19.8 on 12 degrees of freedom on
+   tomato, 127.9 on 127 on GRCh38.*
+3. **No kept position sits on an ambiguous base** (§2). Build the selection over a reference holding
+   an `N` run and require every kept position to be an `A`, `C`, `G` or `T`; **and require the
+   realised count to come from the masked length rather than the contig's**, which is the same
+   arithmetic error the `--regions` case sets and the one an implementation is most likely to make
+   twice. On GRCh38 an unmasked rule puts 106,423 of 2,000,000 positions inside a gap, so a broken
+   mask is visible without a fixture.
+4. **The reweighting undoes the stratification.** STR diversity computed from the kept loci with the
    stored per-stratum weights must match the diversity computed from **every** STR locus, and must
    differ from the unweighted version. The second half is what makes the first half matter, and the
    whole thing is silent when the reweighting is omitted (§3.5).
-4. **A larger cap contains a smaller one.** Selecting at `cap` and at `2·cap` must give nested sets.
+5. **A larger cap contains a smaller one.** Selecting at `cap` and at `2·cap` must give nested sets.
    That is the sampler's property, asserted there; what this document needs from it is that the
    downward budget sweep of §4.1 is a sequence of subsets rather than unrelated draws, so **assert it
    at the two budgets the sweep actually uses**.
-5. **The two sets partition, and neither leaks.** No generic position falls inside a locus the STR
+6. **The two sets partition, and neither leaks.** No generic position falls inside a locus the STR
    criteria keep. Run it with the routing floors moved and confirm both sets change together — the
    partition follows the criteria handed to the catalog rather than a second copy of its rules.
-6. **A run more permissive than the catalog stops.** Ask for a copy floor below `[5, 5, 4, 4, 4, 3]`
+7. **A run more permissive than the catalog stops.** Ask for a copy floor below `[5, 5, 4, 4, 4, 3]`
    at any period, or a flank below 15 bp; the run must fail naming the axis and both values, **not
    proceed on a short list** — which would be a wrong per-stratum total that nothing downstream could
    notice (§3.3).
-7. **A mismatch across samples is refused.** Two samples selected under different seeds, references,
+8. **A mismatch across samples is refused.** Two samples selected under different seeds, references,
    region sets, catalog build settings, routing criteria, target counts **or caps** must produce an
    error and not an average (§5.1).
-8. **The kept-loci digest catches what the seven values cannot** (§5.1). Change the selection's answer
+9. **The kept-loci digest catches what the seven values cannot** (§5.1). Change the selection's answer
    while leaving all seven inputs identical — swap two kept loci, or drop one and add another — and the
    digest must change, the per-megabase digest must name the block, and the fit must refuse. **Then
    check the check**: a digest re-derived by running the selection again passes this test unchanged,
