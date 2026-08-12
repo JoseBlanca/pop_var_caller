@@ -59,7 +59,7 @@ use crate::ng::parameter_estimation::ssr::locus_offsets::{
 };
 use crate::ng::parameter_estimation::ssr::slippage::SlippageModel;
 use crate::ng::parameter_estimation::ssr::stratum_table::StratumTable;
-use crate::ng::types::{DomainError, ErrorRate, ReadGroupId, SsrPeriod};
+use crate::ng::types::{DomainError, ErrorRate, Ploidy, ReadGroupId, SsrPeriod};
 
 pub use offset_bucket::{OFFSET_BUCKETS, OFFSET_HALF_RANGE, OffsetBucket, bucket_of};
 
@@ -536,6 +536,49 @@ pub struct StratumFitSummary {
     pub loci_behind_thickest_fit: u64,
 }
 
+/// What one table of evidence — and the one fit built from it — is *about*: a library, a
+/// stratum, and how many genome copies its loci sit on.
+///
+/// **The ploidy is in the key and not merely carried alongside it**, and that is the one part
+/// of this type worth arguing. A table's entries are the same objects whatever the ploidy — a
+/// shape is a count of reads at each offset, and nothing about it knows how many chromosomes
+/// produced them — so pooling a haploid locus with a diploid one is invisible while the loci
+/// are being counted. It becomes wrong at the fit: the fit scores each entry against the
+/// genotypes of *one* ploidy, and a pooled table has no ploidy that is true of all of it. The
+/// SNP/indel path keys its own tables the same way for the same reason
+/// (`generic/histogram.rs`), and there a mixed key was the failure that had to be designed
+/// out rather than one that had been observed.
+///
+/// **It costs nothing on today's runs.** Every genome region is currently declared to have
+/// the same ploidy ([`ConstantPloidy`](super::generic::accumulators::ConstantPloidy) is the
+/// only map that exists), so every key carries the same value and the tables are exactly
+/// those a two-part key would have built. What it buys is that the first sex chromosome or
+/// mixed-ploidy genome to arrive splits the tables instead of silently merging them.
+///
+/// The field order is the order the fits walk it in: read group, then stratum, then ploidy.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct StratumKey {
+    /// Which library. Slippage is a property of the chemistry, so each library is fitted
+    /// separately.
+    pub read_group: ReadGroupId,
+    /// The motif period and the reference repeat count.
+    pub stratum: Stratum,
+    /// How many genome copies these loci sit on — the set of genotypes the fit will score
+    /// each of this table's entries against.
+    pub ploidy: Ploidy,
+}
+
+impl fmt::Display for StratumKey {
+    /// For the error messages and the summary, which name a fit by all three of these.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "read group {}, {}, ploidy {}",
+            self.read_group, self.stratum, self.ploidy
+        )
+    }
+}
+
 /// Everything the STR path estimates for one sample.
 ///
 /// **No `Default`, deliberately, and the sibling `GenericSampleParameters` has none either.**
@@ -545,9 +588,9 @@ pub struct StratumFitSummary {
 /// [`SsrEstimationError`].
 #[derive(Clone, PartialEq, Debug)]
 pub struct SsrSampleParameters {
-    /// One fit per read group and stratum. Traceable rather than read: a fit that looks wrong
-    /// has to be findable, and nothing downstream is expected to walk this.
-    pub by_stratum: BTreeMap<(ReadGroupId, Stratum), StratumFit>,
+    /// One fit per [`StratumKey`]. Traceable rather than read: a fit that looks wrong has to be
+    /// findable, and nothing downstream is expected to walk this.
+    pub by_stratum: BTreeMap<StratumKey, StratumFit>,
     /// **What a person reads instead.**
     pub summary: BTreeMap<ReadGroupId, StratumFitSummary>,
 }
@@ -683,11 +726,10 @@ pub enum SsrEstimationError {
 }
 
 // ---------------------------------------------------------------------
-// The accumulator: one table per (read group, stratum), filled a locus
-// at a time.
+// The accumulator: one table per StratumKey, filled a locus at a time.
 // ---------------------------------------------------------------------
 
-/// Step 4's STR front door: one [`StratumTable`] per `(read group, stratum)`, and the tally of
+/// Step 4's STR front door: one [`StratumTable`] per [`StratumKey`], and the tally of
 /// everything this unit did to a locus other than enter it as it arrived.
 ///
 /// **One per region shard**, merged when the shards are done. Merging is exact — every table's
@@ -699,10 +741,11 @@ pub enum SsrEstimationError {
 /// **No trait over it**, unlike the fitting seam: nothing generic drives an accumulator, and the
 /// walk knows which object it is filling (`arch/parameter_prepass_ssr.md` §5).
 pub struct SsrAccumulators {
-    by_stratum: BTreeMap<(ReadGroupId, Stratum), StratumTable>,
-    /// How many genome copies a locus sits on. Not read while accumulating — an entry is the
-    /// same whatever the ploidy — but carried here because the fits are keyed on the same
-    /// object and a merge must refuse two shards that were handed different maps.
+    by_stratum: BTreeMap<StratumKey, StratumTable>,
+    /// How many genome copies a locus sits on. **Read for every locus filed**, because it is
+    /// part of the key: an entry looks the same whatever the ploidy, so a table that pooled
+    /// two of them would be wrong only at the fit, where there is no ploidy true of all of it
+    /// ([`StratumKey`]).
     ploidy: Arc<dyn PloidyMap>,
     counts: SsrAccumulationCounts,
 }
@@ -745,6 +788,8 @@ impl SsrAccumulators {
             }
         };
 
+        let ploidy = self.ploidy.ploidy_at(locus.region);
+
         // Counted once for the locus rather than once per read group: it is a property of the
         // locus, and the generator does not attribute those reads to a library.
         self.counts.reads_without_observation += u64::from(locus.reads_without_observation);
@@ -776,7 +821,11 @@ impl SsrAccumulators {
             cap_fired |= entered.subsampled_from().is_some();
 
             self.by_stratum
-                .entry((read_group, stratum))
+                .entry(StratumKey {
+                    read_group,
+                    stratum,
+                    ploidy,
+                })
                 .or_default()
                 .add_locus(entered.shape(), base_comparison_of(locus, read_group));
         }
@@ -793,17 +842,20 @@ impl SsrAccumulators {
     ///
     /// # Panics
     ///
-    /// If the two shards were handed different ploidy maps. Their entries would then have been
-    /// built for different sets of genotypes, and pooling them would score a locus against the
-    /// wrong set — the same guard the SNP/indel path's merge carries, and for the same reason.
+    /// If the two shards were handed different ploidy maps. The ploidy is part of the key, so
+    /// the damage is not a pooled table but a **split** one: the same stratum would arrive
+    /// under two keys because the two shards disagreed about the genome rather than because
+    /// the genome has two ploidies there, and each half would then be fitted on part of its
+    /// evidence. The same guard the SNP/indel path's merge carries, and for the same reason.
     pub fn merge(&mut self, other: Self) {
         // Pointer identity rather than equality, as the sibling path's merge does: a shard's
         // accumulator is built from one shared map, so two shards that disagree here were driven
         // by different configurations rather than by two equal maps.
         assert!(
             Arc::ptr_eq(&self.ploidy, &other.ploidy),
-            "these two shards were handed different ploidy maps, so the fits over their merged \
-             tables would score a locus against a set of genotypes only one of them was built for"
+            "these two shards were handed different ploidy maps, so a stratum they both saw \
+             would arrive here under two keys and each half would be fitted on part of its \
+             evidence"
         );
 
         for (key, table) in other.by_stratum {
@@ -817,24 +869,23 @@ impl SsrAccumulators {
         self.counts.merge(&other.counts);
     }
 
-    /// Every stratum's evidence, in read-group and then stratum order — which is the order the
-    /// fits walk it in, and a property of the contents rather than of when a locus arrived.
+    /// Every stratum's evidence, in [`StratumKey`] order — read group, then stratum, then
+    /// ploidy — which is the order the fits walk it in, and a property of the contents rather
+    /// than of when a locus arrived.
     ///
     /// An iterator rather than the map itself, so that how the tables are stored stays this
     /// unit's business: the same reason `StratumTable` hands out its entries as a list.
-    pub fn strata(&self) -> impl Iterator<Item = (ReadGroupId, Stratum, &StratumTable)> {
-        self.by_stratum
-            .iter()
-            .map(|(&(read_group, stratum), table)| (read_group, stratum, table))
+    pub fn strata(&self) -> impl Iterator<Item = (StratumKey, &StratumTable)> {
+        self.by_stratum.iter().map(|(&key, table)| (key, table))
     }
 
-    /// One stratum's evidence for one read group, or `None` where that pair holds no loci.
+    /// One key's evidence, or `None` where it holds no loci.
     #[must_use]
-    pub fn table_for(&self, read_group: ReadGroupId, stratum: Stratum) -> Option<&StratumTable> {
-        self.by_stratum.get(&(read_group, stratum))
+    pub fn table_for(&self, key: StratumKey) -> Option<&StratumTable> {
+        self.by_stratum.get(&key)
     }
 
-    /// How many `(read group, stratum)` pairs hold any loci at all.
+    /// How many keys hold any loci at all.
     #[must_use]
     pub fn stratum_count(&self) -> usize {
         self.by_stratum.len()
@@ -1187,7 +1238,8 @@ mod tests {
         )
     }
 
-    /// One stratum's table, for a test that knows it is there.
+    /// One stratum's table at the ploidy [`diploid`] gives every locus, for a test that knows
+    /// it is there.
     fn table(
         accumulators: &SsrAccumulators,
         group: u32,
@@ -1195,8 +1247,30 @@ mod tests {
         repeats: u32,
     ) -> &StratumTable {
         accumulators
-            .table_for(ReadGroupId(group), stratum(period_bases, repeats))
-            .expect("a table for that read group and stratum")
+            .table_for(StratumKey {
+                read_group: ReadGroupId(group),
+                stratum: stratum(period_bases, repeats),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            })
+            .expect("a table for that read group, stratum and ploidy")
+    }
+
+    /// Two genome copies below `haploid_from`, one at or above it — the only `PloidyMap` in the
+    /// tests that returns more than one answer, and the only way to reach the mixed-ploidy case
+    /// the key exists for while `ConstantPloidy` is production's only map.
+    struct PloidyChangesAt {
+        haploid_from: u64,
+    }
+
+    impl PloidyMap for PloidyChangesAt {
+        fn ploidy_at(&self, region: GenomeRegion) -> Ploidy {
+            let copies = if region.start.get() >= self.haploid_from {
+                1
+            } else {
+                2
+            };
+            Ploidy::try_new(copies).expect("one or two genome copies")
+        }
     }
 
     /// **Loci reduce to entries, filed by read group and stratum**, and two loci of the same
@@ -1220,6 +1294,48 @@ mod tests {
         );
         assert_eq!(table(&accumulators, 0, 2, 10).loci(), 2);
         assert_eq!(table(&accumulators, 0, 1, 8).loci(), 1);
+    }
+
+    /// **Two loci of the same period and repeat count sitting on different numbers of genome
+    /// copies land in two tables**, not one.
+    ///
+    /// The failure this makes unreachable is silent everywhere else: the entries a haploid
+    /// locus and a diploid one produce are the same kind of object — reads at offsets — so a
+    /// pooled table looks healthy and is only wrong at the fit, which scores every entry
+    /// against the genotypes of a single ploidy. Nothing counts it, nothing errors, and the
+    /// slippage level comes back describing a population that does not exist.
+    ///
+    /// The two loci are otherwise identical — same motif, same reference length, same read
+    /// group, same depth — so the only thing that can separate them is the ploidy map's
+    /// answer. With the ploidy left out of the key both would be one table of two loci.
+    #[test]
+    fn two_ploidies_of_one_stratum_are_two_tables() {
+        let mut accumulators = SsrAccumulators::new(Arc::new(PloidyChangesAt {
+            haploid_from: 5_000,
+        }));
+        accumulators.add_locus(&dinucleotide(1_000, 5));
+        accumulators.add_locus(&dinucleotide(9_000, 5));
+
+        assert_eq!(
+            accumulators.stratum_count(),
+            2,
+            "one stratum at two ploidies is two tables, not one table of two loci"
+        );
+        for (copies, start) in [(2u8, 1_000u64), (1, 9_000)] {
+            let key = StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, 10),
+                ploidy: Ploidy::try_new(copies).expect("one or two genome copies"),
+            };
+            let table = accumulators
+                .table_for(key)
+                .unwrap_or_else(|| panic!("a table at {key}"));
+            assert_eq!(
+                table.loci(),
+                1,
+                "only the locus at {start} sits on {copies} genome copies"
+            );
+        }
     }
 
     /// **A locus covered by two libraries makes one entry in each**, because slippage is a
@@ -1376,11 +1492,11 @@ mod tests {
                 whole.stratum_count(),
                 "cut after {cut} loci"
             );
-            for (read_group, stratum, table) in whole.strata() {
+            for (key, table) in whole.strata() {
                 assert_eq!(
-                    first.table_for(read_group, stratum),
+                    first.table_for(key),
                     Some(table),
-                    "cut after {cut} loci, at read group {read_group}, {stratum}"
+                    "cut after {cut} loci, at {key}"
                 );
             }
             assert_eq!(

@@ -8,6 +8,9 @@
 # the output saying so.
 /target-dhat
 /target-prof
+# The host-native validation run (`cargo` outside the container), kept apart
+# from `/target` so a host check never invalidates the container's cache.
+/target-host
 /tmp/
 /dhat-heap.json
 /flamegraph.svg
