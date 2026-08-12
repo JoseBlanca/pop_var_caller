@@ -425,7 +425,7 @@ says so; a stratum with a million loci and 40 slipped reads keeps its level and 
 with the two provenance lists differing; a period whose every stratum is thin errors.
 *Depends:* E2. *Source:* arch §4.1, §4.2, spec §4.5.
 
-**E4. The monotonicity walk — merge and refit.**  ☐ **Own commit, do not bundle.**
+**E4. The monotonicity walk — merge and refit.**  ✅ **Own commit, do not bundle.**
 Last, because it reads the fitted sequence. Visit each period's strata in repeat-count order; where a
 fitted level falls below its predecessor's, merge the two tables and refit, repeating until the
 sequence rises. **The silent failure this isolates:** a merge **changes the estimate** and does so

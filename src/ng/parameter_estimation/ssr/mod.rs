@@ -1280,6 +1280,170 @@ pub fn starts_must_agree(
 }
 
 // ---------------------------------------------------------------------
+// The monotonicity walk: merge two strata and refit where the fitted
+// sequence dips.
+// ---------------------------------------------------------------------
+
+/// **Hold each period's fitted slippage levels rising with the repeat count, merging and refitting
+/// where they do not** (`spec/parameter_prepass_ssr.md` §4.3).
+///
+/// Slippage genuinely rises with repeat count, so a fitted sequence that dips in the middle —
+/// tracts of 7 copies coming out *less* slippery than tracts of 6 — is reporting the noise in one
+/// stratum rather than a fact about repeats. Where that happens the two strata's tables are pooled
+/// and refitted as one, and both then report the pooled answer, with
+/// [`MergedSlippageFit::merged_over`] naming the set. Pooling can itself dip against the stratum
+/// below, so it repeats until the sequence rises.
+///
+/// **A merge changes the estimate, and does so without failing anything** — which is why every
+/// merged stratum names its set. What the pooled fit returns is the maximum over the **union of
+/// the two tables**, which for two strata of the same shape and similar levels sits between them
+/// near their loci-weighted mean: a 1.5-fold difference between neighbours costs about a quarter
+/// of the level, a two-fold difference about half, a four-fold difference up to 141%. On real
+/// strata slippage rises about 1.3-fold per repeat count, so one merge costs on the order of 15 to
+/// 25%.
+///
+/// **That "sits between them" is a rule of thumb and not a guarantee, and one case breaks it
+/// badly.** Where one of the two strata is one the search cannot fit — measured, a stratum whose
+/// every locus shows two short reads in ten returns 1e-5 against a truth of 0.2, with all four
+/// starts agreeing — the pooled answer can land *outside* the interval of the two levels it
+/// replaces: 0.0599 and 1e-5 pooled to 0.1302. Nothing here can tell that stratum from a genuine
+/// dip, because it arrives with a settled search and a full complement of loci. That is a defect
+/// in the search rather than in this walk, and it is on the checkpoint list.
+///
+/// **The pooled model is built from the lowest repeat count in the merge**, which is the
+/// intersection of the two supports rather than their union: a tract of four copies cannot carry
+/// an allele six copies shorter, so scoring the pooled table against the longer tract's support
+/// would let the fit place mass on allele lengths half its loci cannot have
+/// ([`SsrNoiseModel::for_stratum`](slippage::SsrNoiseModel::for_stratum)).
+///
+/// **It reads the fitted sequence, so it reads only strata that were fitted and thick enough to
+/// have been.** A stratum that borrowed has no level of its own to be out of order; and the locus
+/// floor is applied here as well as in the walk that fits, for the reason [`resolve_slippage`]
+/// applies it twice — this function is public and may be handed a map it did not build. Measured,
+/// a 999-locus stratum fitting at 1e-5 pulls a correctly fitted neighbour from 0.0599 to 0.0327,
+/// which is 1.83-fold against the 15-to-25% a merge is priced at.
+///
+/// # Errors
+///
+/// [`SsrEstimationError::SlippageNotIdentified`] where a **pooled** refit's starts land further
+/// apart than [`START_AGREEMENT_LIMIT`]. The parts each settled before they were pooled, so this
+/// is not expected; it is checked because "every reported level came from a search that settled"
+/// is an invariant of the whole step, and a refit is a new search.
+pub fn merge_until_monotone(
+    accumulators: &SsrAccumulators,
+    fits: BTreeMap<StratumKey, StratumSlippageFit>,
+    sample: &str,
+    precision: SearchPrecision,
+) -> Result<BTreeMap<StratumKey, MergedSlippageFit>, SsrEstimationError> {
+    let mut merged = BTreeMap::new();
+    for period in periods_of(accumulators) {
+        // This period's fitted strata, in repeat-count order.
+        let members: Vec<(StratumKey, &StratumTable, &StratumSlippageFit)> = accumulators
+            .strata()
+            .filter(|(key, table)| {
+                key.read_group == period.read_group
+                    && key.ploidy == period.ploidy
+                    && key.stratum.period == period.period
+                    && thick_enough_to_fit(table.loci())
+            })
+            .filter_map(|(key, table)| fits.get(&key).map(|fit| (key, table, fit)))
+            .collect();
+
+        let mut runs: Vec<MonotoneRun> = Vec::new();
+        for (key, table, fit) in members {
+            let mut run = MonotoneRun {
+                keys: SmallVec::from_slice(&[key]),
+                table: table.clone(),
+                fit: fit.clone(),
+            };
+            // Pool backwards for as long as this run sits below the one before it. Each pooling
+            // refits, and the refitted level can dip again against the run before that.
+            while runs
+                .last()
+                .is_some_and(|previous| run.level() < previous.level())
+            {
+                let previous = runs.pop().expect("just checked");
+                run = previous.pooled_with(run, period.ploidy, precision);
+                starts_must_agree(&run.fit, sample, *run.keys.last().expect("a pooled run"))?;
+            }
+            runs.push(run);
+        }
+
+        for run in runs {
+            let merged_over: SmallVec<[Stratum; 2]> = if run.keys.len() > 1 {
+                run.keys.iter().map(|key| key.stratum).collect()
+            } else {
+                SmallVec::new()
+            };
+            for key in run.keys {
+                merged.insert(
+                    key,
+                    MergedSlippageFit {
+                        fit: run.fit.clone(),
+                        merged_over: merged_over.clone(),
+                    },
+                );
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// One stratum's fit after the monotonicity walk, and the set it was pooled with if it was.
+#[derive(Clone, PartialEq, Debug)]
+pub struct MergedSlippageFit {
+    /// The fit this stratum now reports — its own where nothing was pooled, and the pooled set's
+    /// where something was.
+    ///
+    /// **Every count on it is the pooled set's too**, and one of them changes what happens next:
+    /// `slipped_reads` is the whole set's, so two strata of 2,500 moved reads each arrive at the
+    /// borrowing step holding 5,000 between them and clear a floor neither cleared alone. That is
+    /// the intended reading — after a merge they are one stratum fitted over one table — and it is
+    /// said here because the two numbers a reader compares against that floor are then not the
+    /// ones any single stratum measured.
+    pub fit: StratumSlippageFit,
+    /// The strata pooled to produce it, in repeat-count order. **Empty where this stratum was
+    /// fitted alone**, which is what tells the two apart: a merge is a claim about several strata
+    /// at once and changes every estimate in the set.
+    pub merged_over: SmallVec<[Stratum; 2]>,
+}
+
+/// A run of strata that are being reported as one fit, and the pooled table behind it.
+struct MonotoneRun {
+    /// In ascending repeat count, which is the order they arrive and the order pooling keeps.
+    keys: SmallVec<[StratumKey; 2]>,
+    table: StratumTable,
+    fit: StratumSlippageFit,
+}
+
+impl MonotoneRun {
+    fn level(&self) -> f64 {
+        self.fit.model.slip_rate.get()
+    }
+
+    /// Pool this run with the one after it and refit the two tables as one.
+    ///
+    /// # Panics
+    ///
+    /// If the pooled table cannot be fitted, which it cannot fail to be: it is the union of two
+    /// tables that were each fitted, so it holds entries and reads on the whole-repeat grid.
+    fn pooled_with(mut self, later: Self, ploidy: Ploidy, precision: SearchPrecision) -> Self {
+        self.table.merge(&later.table);
+        self.keys.extend(later.keys);
+        // The lowest repeat count in the set, which is the first: the strata arrive in ascending
+        // order and pooling only ever appends.
+        let lowest = self.keys[0].stratum;
+        let fit = fit_slippage(&self.table, lowest, ploidy, precision)
+            .expect("a pooled table of two fitted strata holds reads on the whole-repeat grid");
+        Self {
+            keys: self.keys,
+            table: self.table,
+            fit,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // The third fit, which is not a fit: borrowing, against two floors.
 // ---------------------------------------------------------------------
 
@@ -3460,6 +3624,450 @@ mod tests {
                 .is_empty(),
             "and the walk leaves it out rather than reporting a level for it"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The monotonicity walk.
+    // -----------------------------------------------------------------
+
+    /// 1,200 tracts of `repeats` motif copies at ten reads each, of which `slipping_loci` show
+    /// **one** read a copy short — so the stratum's slippage level is `slipping_loci / 12,000`:
+    /// 0.02 at 240 loci, 0.04 at 480.
+    ///
+    /// **The level is set by how many loci slip rather than by how many reads slip at each**, and
+    /// that is what keeps these fixtures inside the range real strata occupy. Ten reads a locus
+    /// makes the coarsest per-locus fraction 0.1, and the highest level any measured stratum
+    /// reaches is 0.15 — while **two** short reads in ten is a level of 0.2 with every slip in one
+    /// direction, which the search does not recover (see
+    /// `a_dip_in_the_sequence_is_merged_and_refitted`).
+    fn slipping_stratum(
+        accumulators: &mut SsrAccumulators,
+        at: &mut u64,
+        repeats: u32,
+        slipping_loci: u64,
+    ) -> StratumKey {
+        let reference: Vec<u8> = b"AT".repeat(repeats as usize);
+        let short: Vec<u8> = b"AT".repeat(repeats as usize - 1);
+        for locus in 0..1_200u64 {
+            let observations = if locus < slipping_loci {
+                vec![observation(&reference, 0, 9), observation(&short, 0, 1)]
+            } else {
+                vec![observation(&reference, 0, 10)]
+            };
+            accumulators.add_locus(&tract(*at, &reference, b"AT", observations));
+            *at += 400;
+        }
+        StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, repeats),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        }
+    }
+
+    /// A period whose strata slip at `slipping_loci / 12,000`, in ascending repeat count from 5.
+    fn ladder(levels: &[u64]) -> (SsrAccumulators, BTreeMap<StratumKey, StratumSlippageFit>) {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for (step, &slipping_loci) in levels.iter().enumerate() {
+            let repeats = 5 + u32::try_from(step).expect("a short ladder");
+            slipping_stratum(&mut accumulators, &mut at, repeats, slipping_loci);
+        }
+        let fits =
+            fit_slippage_by_stratum(&accumulators, "SL_landrace_07", SearchPrecision::fast())
+                .expect("every stratum settled");
+        (accumulators, fits)
+    }
+
+    /// **A sequence that already rises passes through untouched** — no merge, and every stratum
+    /// still reports the fit of its own loci, with nothing named.
+    ///
+    /// This is the control that says the walk does not merge by default. A walk that pooled
+    /// everything would also produce a rising sequence, which is why the answer alone cannot say
+    /// whether the rule fired.
+    #[test]
+    fn a_rising_sequence_of_levels_is_left_alone() {
+        // 0.02, 0.04 and 0.06 — the band real strata occupy.
+        let (accumulators, fits) = ladder(&[240, 480, 720]);
+        let before: Vec<f64> = fits.values().map(|fit| fit.model.slip_rate.get()).collect();
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits,
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+
+        let after: Vec<f64> = merged
+            .values()
+            .map(|entry| entry.fit.model.slip_rate.get())
+            .collect();
+        assert_eq!(after, before, "no fit moved");
+        assert!(
+            merged.values().all(|entry| entry.merged_over.is_empty()),
+            "and nothing was pooled with anything"
+        );
+    }
+
+    /// **A sequence that dips is merged and refitted, and both strata say so.** The middle
+    /// stratum here slips at 0.02 where the one below it slips at 0.04 — 240 of its 1,200 loci
+    /// show a short read against the lower stratum's 480 — which cannot be a fact about repeats:
+    /// slippage rises with repeat count. The two are pooled, refitted as one, and both report the
+    /// pooled level, which for two strata of this shape lands between the two they had.
+    ///
+    /// **The stratum above them is untouched**, which is what says the walk merges the dip rather
+    /// than the period.
+    ///
+    /// **The three levels are 0.04, 0.02 and 0.06, and staying in that band is deliberate.** A
+    /// stratum whose every locus shows two short reads in ten — a level of 0.2 with every slip
+    /// losing — is *not* recovered by the search: measured, all four starts collapse to the
+    /// bottom of the range at 1e-5, agreeing to 1.00, on a table whose maximum is at 0.2 by about
+    /// 2,300 nats. Real strata run from 0.0009 to 0.15, so this fixture stays where the search is
+    /// known to work; that the search fails above it is recorded for the checkpoint rather than
+    /// hidden inside a fixture that avoids it.
+    #[test]
+    fn a_dip_in_the_sequence_is_merged_and_refitted() {
+        let (accumulators, fits) = ladder(&[480, 240, 720]);
+        let levels: Vec<f64> = fits.values().map(|fit| fit.model.slip_rate.get()).collect();
+        assert!(
+            levels[1] < levels[0],
+            "the fixture really does dip: {levels:?}"
+        );
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits,
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+        let at = |repeats: u32| {
+            &merged[&StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, repeats),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            }]
+        };
+
+        assert_eq!(
+            at(5).merged_over.as_slice(),
+            &[stratum(2, 5), stratum(2, 6)],
+            "the two that dipped name each other"
+        );
+        assert_eq!(
+            at(6).merged_over.as_slice(),
+            &[stratum(2, 5), stratum(2, 6)]
+        );
+        assert_eq!(
+            at(5).fit.model,
+            at(6).fit.model,
+            "and they report one pooled answer"
+        );
+
+        let pooled = at(5).fit.model.slip_rate.get();
+        assert!(
+            pooled > levels[1] && pooled < levels[0],
+            "the pooled level sits between the two it replaced: {pooled} against {levels:?}"
+        );
+        assert_eq!(
+            at(5).fit.loci,
+            2_400,
+            "and it was fitted over both strata's loci"
+        );
+
+        assert!(
+            at(7).merged_over.is_empty(),
+            "the stratum above the dip is untouched"
+        );
+        assert_eq!(
+            at(7).fit.model.slip_rate.get(),
+            levels[2],
+            "and still reports what it fitted alone"
+        );
+    }
+
+    /// **Two strata that fitted the same level are not merged.** Equal is not a dip: the sequence
+    /// this walk holds is a rising one, and pooling on equality would merge every pair of strata
+    /// that happen to agree — costing them the very thing the merge exists to avoid paying
+    /// needlessly, and stamping both as merged when nothing was wrong with either.
+    #[test]
+    fn two_strata_that_agree_are_not_merged() {
+        let (accumulators, fits) = ladder(&[480, 480]);
+        let levels: Vec<f64> = fits.values().map(|fit| fit.model.slip_rate.get()).collect();
+        assert_eq!(
+            levels[0], levels[1],
+            "the two strata really did fit the same level"
+        );
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits,
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+
+        assert!(
+            merged.values().all(|entry| entry.merged_over.is_empty()),
+            "equal levels are already a rising sequence"
+        );
+    }
+
+    /// **A pooled run that still dips is pooled again.** The middle stratum here is the highest of
+    /// the three and the last is far the lowest, so pooling the last two gives 0.0325 — still
+    /// below the first's 0.04 — and the walk has to pool a second time. A rule that pooled once
+    /// per arriving stratum would leave the sequence dipping, which is the one thing it exists to
+    /// prevent.
+    #[test]
+    fn a_pooling_that_still_dips_is_pooled_again() {
+        let (accumulators, fits) = ladder(&[480, 720, 60]);
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits,
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+
+        for repeats in [5u32, 6, 7] {
+            let entry = &merged[&StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, repeats),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            }];
+            assert_eq!(
+                entry.merged_over.as_slice(),
+                &[stratum(2, 5), stratum(2, 6), stratum(2, 7)],
+                "all three ended in one set"
+            );
+            assert_eq!(entry.fit.loci, 3_600, "fitted over all three strata's loci");
+        }
+    }
+
+    /// **The walk merges inside one library, one ploidy and one motif period, and never across
+    /// them.** Every group here rises on its own, and the fixture is arranged so that dropping any
+    /// one of the three would put a dip in front of the walk: without the period, the
+    /// mononucleotide stratum at 0.06 precedes a dinucleotide one at 0.005; without the ploidy,
+    /// the haploid stratum at 0.04 precedes the diploid one at 0.005; without the library, the
+    /// first library's 0.005 precedes the second's 0.001.
+    #[test]
+    fn the_walk_merges_inside_one_library_ploidy_and_period() {
+        let mut accumulators = SsrAccumulators::new(Arc::new(PloidyChangesAt {
+            haploid_from: 2_000_000,
+        }));
+        let mut at = 1_000u64;
+        let add = |accumulators: &mut SsrAccumulators,
+                   at: &mut u64,
+                   group: u32,
+                   motif: &[u8],
+                   repeats: u32,
+                   slipping: u64| {
+            let reference: Vec<u8> = motif.repeat(repeats as usize);
+            let short: Vec<u8> = motif.repeat(repeats as usize - 1);
+            for locus in 0..1_200u64 {
+                let observations = if locus < slipping {
+                    vec![
+                        observation(&reference, group, 9),
+                        observation(&short, group, 1),
+                    ]
+                } else {
+                    vec![observation(&reference, group, 10)]
+                };
+                accumulators.add_locus(&tract(*at, &reference, motif, observations));
+                *at += 400;
+            }
+        };
+
+        // Diploid, below the ploidy boundary: a mononucleotide stratum at 0.06 and a
+        // dinucleotide one at 0.005, in that key order.
+        add(&mut accumulators, &mut at, 0, b"A", 8, 720);
+        add(&mut accumulators, &mut at, 0, b"AT", 5, 60);
+        // The second library, whose only stratum is lower still.
+        add(&mut accumulators, &mut at, 1, b"AT", 4, 12);
+        // And the same dinucleotide stratum on one genome copy, at 0.04.
+        at = 2_000_000;
+        add(&mut accumulators, &mut at, 0, b"AT", 5, 480);
+
+        let fits =
+            fit_slippage_by_stratum(&accumulators, "SL_landrace_07", SearchPrecision::fast())
+                .expect("every stratum settled");
+        assert_eq!(fits.len(), 4, "four strata, each in a group of its own");
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits,
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+
+        assert!(
+            merged.values().all(|entry| entry.merged_over.is_empty()),
+            "no group has anything to merge, so nothing was merged: {:?}",
+            merged
+                .iter()
+                .map(|(key, entry)| (key.to_string(), entry.merged_over.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **A stratum under the locus floor cannot drag a fitted neighbour into a merge**, even if it
+    /// arrives with a fit in hand. The walk that searches skips it, so in a whole run no such fit
+    /// exists — but this function is public and takes whatever map it is given.
+    ///
+    /// What it would cost is measured: a 999-locus stratum fitting near zero pulls a correctly
+    /// fitted neighbour from 0.0599 to 0.0327, which is 1.83-fold against the 15-to-25% a merge is
+    /// priced at, and stamps the pair as merged.
+    #[test]
+    fn a_stratum_under_the_locus_floor_is_not_merged_with_its_neighbour() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        let thick = slipping_stratum(&mut accumulators, &mut at, 5, 480);
+        // One locus short of the floor, and slipping far less, so it reads as a dip.
+        let thin_key = {
+            let reference = b"ATATATATATATAT";
+            for locus in 0..(MIN_LOCI_TO_FIT - 1) {
+                let observations = if locus < 2 {
+                    vec![
+                        observation(reference, 0, 9),
+                        observation(b"ATATATATATAT", 0, 1),
+                    ]
+                } else {
+                    vec![observation(reference, 0, 10)]
+                };
+                accumulators.add_locus(&tract(at, reference, b"AT", observations));
+                at += 400;
+            }
+            StratumKey {
+                read_group: ReadGroupId(0),
+                stratum: stratum(2, 7),
+                ploidy: Ploidy::try_new(2).expect("two genome copies"),
+            }
+        };
+
+        let mut fits = BTreeMap::new();
+        for (key, table) in accumulators.strata() {
+            fits.insert(
+                key,
+                fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+                    .expect("both hold reads on the grid"),
+            );
+        }
+        assert!(
+            fits[&thin_key].model.slip_rate.get() < fits[&thick].model.slip_rate.get(),
+            "the thin stratum really does read as a dip"
+        );
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits.clone(),
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+
+        assert!(
+            !merged.contains_key(&thin_key),
+            "a stratum under the floor is not part of the fitted sequence at all"
+        );
+        assert!(
+            merged[&thick].merged_over.is_empty(),
+            "so the thick stratum is not merged with it"
+        );
+        assert_eq!(
+            merged[&thick].fit.model, fits[&thick].model,
+            "and reports exactly what it fitted alone"
+        );
+    }
+
+    /// **Two strata that fitted the same level cost exactly nothing to merge**, which is the
+    /// control that separates what a merge costs from what it does. Both strata here slip at one
+    /// read in ten, so pooling them is pooling a table with a copy of itself at twice the loci —
+    /// and the fitted level comes back **identical to the bit**, because the score is a sum over
+    /// entries weighted by loci and doubling every weight scales it without moving its maximum.
+    ///
+    /// So the 15-to-25% a real merge costs is the distance between the two strata's own levels,
+    /// not an artefact of pooling.
+    #[test]
+    fn merging_two_strata_that_agree_costs_exactly_nothing() {
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        let lower = slipping_stratum(&mut accumulators, &mut at, 5, 480);
+        let upper = slipping_stratum(&mut accumulators, &mut at, 6, 480);
+
+        let (_, table) = accumulators
+            .strata()
+            .find(|(key, _)| *key == lower)
+            .expect("the lower stratum");
+        let alone = fit_slippage(table, lower.stratum, lower.ploidy, SearchPrecision::fast())
+            .expect("it holds reads on the grid");
+
+        let mut pooled = table.clone();
+        let (_, upper_table) = accumulators
+            .strata()
+            .find(|(key, _)| *key == upper)
+            .expect("the upper stratum");
+        pooled.merge(upper_table);
+        let together = fit_slippage(
+            &pooled,
+            lower.stratum,
+            lower.ploidy,
+            SearchPrecision::fast(),
+        )
+        .expect("the pooled table holds reads on the grid");
+
+        assert_eq!(
+            together.model, alone.model,
+            "pooling two strata that agree moves nothing"
+        );
+        assert_eq!(together.loci, 2_400, "over twice the loci");
+    }
+
+    /// **A pooled fit is scored against the *lower* stratum's allele lengths.** The support is
+    /// clipped at the low end — a tract of four copies cannot carry an allele six copies shorter —
+    /// so the intersection of the two supports is the shorter tract's, and scoring the pooled
+    /// table against the longer one's would let the fit place mass on lengths half its loci
+    /// cannot have.
+    #[test]
+    fn a_merged_fit_is_scored_against_the_shorter_tracts_alleles() {
+        let (accumulators, fits) = {
+            let mut accumulators = SsrAccumulators::new(diploid());
+            let mut at = 1_000u64;
+            // Four copies, so the support is clipped to eleven lengths; then six, which has all
+            // thirteen. The lower one slips more, so the pair dips and must merge.
+            slipping_stratum(&mut accumulators, &mut at, 4, 720);
+            slipping_stratum(&mut accumulators, &mut at, 6, 240);
+            let fits =
+                fit_slippage_by_stratum(&accumulators, "SL_landrace_07", SearchPrecision::fast())
+                    .expect("both settled");
+            (accumulators, fits)
+        };
+
+        let merged = merge_until_monotone(
+            &accumulators,
+            fits,
+            "SL_landrace_07",
+            SearchPrecision::fast(),
+        )
+        .expect("every pooled refit settled");
+        let pooled = &merged[&StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, 6),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        }];
+
+        assert_eq!(
+            pooled.merged_over.as_slice(),
+            &[stratum(2, 4), stratum(2, 6)],
+            "the fixture really did merge"
+        );
+        assert_eq!(
+            pooled.fit.allele_support.len(),
+            11,
+            "eleven lengths, which is the four-copy stratum's support and not the six-copy one's"
+        );
+        assert_eq!(pooled.fit.genotype_frequencies.len(), 66);
     }
 
     // -----------------------------------------------------------------
