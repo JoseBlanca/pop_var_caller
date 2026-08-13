@@ -199,12 +199,12 @@ pub enum ContaminationEstimate {
     Estimated {
         alpha: Contamination,
         /// How many segregating markers stood behind it. **Reported beside the value**,
-        /// because that is what says how far to trust it (spec §3.4.3).
+        /// because that is what says how far to trust it (spec §3.4.4).
         segregating_markers: u64,
     },
     /// The depth or the marker count could not identify it. **Emitted rather than
     /// substituted by a zero** — a caller told "no contamination" would act on it
-    /// (spec §3.4.3).
+    /// (spec §3.4.4).
     NotIdentified { reason: NotIdentifiedReason },
 }
 ```
@@ -212,6 +212,64 @@ pub enum ContaminationEstimate {
 **Contract.** The search is restricted to `α ≤ ½`: the sequence-only likelihood is symmetric, so a
 sample swap is invisible by construction and an estimate above a half is not a stronger claim but a
 mirror image (spec §3.4.1).
+
+### 1.6 `SequencingBatches` — who was sequenced beside whom, and it comes from the user
+
+**The contaminant is a neighbouring library, not a random member of the species** (spec §3.4.3), so
+the population the contaminant's genotype is drawn against is *the samples that ran together*. That
+grouping is **stated, never inferred**: it is absent from both cohorts' alignments — the tomato
+archive's `@RG` lines carry no `PU` and SRA rewrote the read names to
+`SRR7279481.37559618:TTAGGC:37559618`, keeping the barcode and losing the flowcell — and a pipeline
+that guessed it from what survives would be wrong silently.
+
+```rust
+/// Which read groups were sequenced together, as the run was told.
+pub struct SequencingBatches {
+    /// Every read group of one batch. **Read groups and not samples**: one sample's
+    /// libraries may have run on different flowcells, and the read group is the grain
+    /// the header gives.
+    batches: Vec<BTreeSet<ReadGroupId>>,
+}
+
+impl SequencingBatches {
+    /// Every read group in one batch — **the default**, and the honest statement of what
+    /// a run knows when nobody has said otherwise.
+    pub fn all_together(groups: &ReadGroups) -> Self;
+
+    /// The batching the CLI was given.
+    ///
+    /// # Errors
+    ///
+    /// [`JointFitError::ReadGroupNotBatched`] naming every read group the batching left
+    /// out. **A run that names any batch must name them all**: a user who lists three
+    /// plates and forgets four samples would otherwise get a wrong contaminant prior for
+    /// those four with nothing said.
+    pub fn from_groups(
+        groups: &ReadGroups,
+        batches: Vec<BTreeSet<ReadGroupId>>,
+    ) -> Result<Self, JointFitError>;
+
+    /// The batch this read group belongs to.
+    pub fn batch_of(&self, group: ReadGroupId) -> &BTreeSet<ReadGroupId>;
+
+    /// Whether this is the default. **Travels with `α`** (spec §3.4.3): two runs under
+    /// different batchings produce different numbers and neither is comparable to the
+    /// other, and a number fitted under one batch for the whole cohort is the weaker
+    /// kind.
+    pub fn is_default(&self) -> bool;
+}
+```
+
+**Contract.** A partition: every read group in exactly one batch, checked at construction. The default
+is one batch holding everything, so the type is never optional and no consumer branches on its
+absence.
+
+**Where `PU` fits, and it is a default rather than an answer.** `ReadGroup`
+([`read/input/read_groups.rs`](../../../../src/ng/read/input/read_groups.rs)) reads `ID`, `SM`, `LB`
+and `PL` and has no platform-unit field. Adding one, and seeding the batching from it where a file
+declares it, is worth doing — GIAB's read names carry `HISEQ1:23:H9UD5ADXX:2:…` even though its `PU`
+says `unknown` — but **the user's `--sequenced-together` always wins**, because a declared `PU` is as
+untrustworthy as the `PL` this module already refuses to group by.
 
 ---
 
@@ -230,6 +288,16 @@ pub fn fit_jointly(
     samples: &[SampleRecords],
     config: &JointFitConfig,
 ) -> Result<JointFit, JointFitError>;
+
+/// What the run was asked for, beside the records.
+pub struct JointFitConfig {
+    /// Who was sequenced beside whom (§1.6). `SequencingBatches::all_together` by default.
+    pub batches: SequencingBatches,
+    /// How many principal components stand behind the individual-specific allele
+    /// frequencies — spec §11 question 4, still open.
+    pub components: usize,
+    // … the starting points, the quadrature, the ladder
+}
 ```
 
 **Contract.** Deterministic: loci in `KeptLoci` order and samples in name order, so no parameter
@@ -322,6 +390,11 @@ pub enum JointFitError {
     /// the failure mode the per-sample route's own termination handling exists for.
     #[error("the joint fit did not converge in {passes} passes")]
     DidNotConverge { passes: u32 },
+    /// A batching was given and left read groups out (§1.6). **Naming them is the
+    /// point**: the user forgot a plate, and the alternative is a wrong contaminant
+    /// prior for exactly those samples with nothing said.
+    #[error("{} read groups were not assigned to a sequencing batch: {}", .groups.len(), .groups.join(", "))]
+    ReadGroupNotBatched { groups: Vec<String> },
 }
 ```
 
@@ -332,8 +405,11 @@ pub enum JointFitError {
 - **One entry point taking every sample, no per-sample call.** Fitting against a per-locus frequency
   means a sample's evidence cannot be reduced alone — spec §1.
 - **`HomozygoteExcess` is a new type beside `InbreedingF`.** §1.4; spec §5.1.
+- **Who was sequenced beside whom is an input with a default, never an inference** — §1.6, spec
+  §3.4.3. One batch holding every read group unless the CLI says otherwise; a partial batching is
+  refused rather than completed.
 - **Contamination is an enum, not an `Option<f64>`.** *Not identified* and *zero* are different
-  answers and a caller must not be able to read one as the other — spec §3.4.3.
+  answers and a caller must not be able to read one as the other — spec §3.4.4.
 - **The site class is a per-locus latent variable with cohort-level parameters.** `w` and `ε_noisy`
   stay cohort-level; what changes is that each locus's posterior is computed from every sample's
   evidence — spec §2.2.
@@ -404,7 +480,13 @@ parameters, with no reads and no alignments, and require the fit to return what 
 rates matching the drawn genotypes, which is what catches a biased kept set (spec §12.2); the two
 inbreeding coefficients moving in **opposite** directions under a false-heterozygote floor (§12.4);
 and an uncontaminated but structured panel returning `α ≈ 0`, which a fit using the pooled spectrum
-passes the mixture test and fails this one (§12.6). The panel-size sweep at 2, 5, 10 and 50 samples
+passes the mixture test and fails this one (§12.6). **Measured 2026-08-12 and the assertion needs
+turning round**: the pooled spectrum does not inflate `α` on a structured panel, it *deflates* it — a
+sample truly at 3% comes back at 0.5% at an `F_st` of 0.20 — so the test that catches it is a **spiked**
+structured panel whose contaminated sample must be found, not a clean one whose samples must all read
+zero. A clean structured panel is passed by the broken fit
+(`../reports/joint_contamination_2026-08-12.md` §3). **A fourth assertion belongs beside them**: a
+batching that leaves a read group out is refused and names it (§1.6). The panel-size sweep at 2, 5, 10 and 50 samples
 reports where each parameter stops being estimable — a number the user needs and nothing currently
 states (§12.5).
 

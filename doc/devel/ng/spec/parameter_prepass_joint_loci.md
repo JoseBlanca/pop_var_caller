@@ -446,7 +446,7 @@ outbred one, so none of these budgets depends on how inbred the panel is.*
 **So for everything in this table, three hundred and twenty thousand positions is enough at fifty
 samples — a sixth of the two million.** What keeps the budget at two million is the parameter that
 is *not* in this table: contamination wants about ten thousand segregating markers
-([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.3), and this panel yields
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4), and this panel yields
 10,208 of them at 1.28 M positions. **Two million is a contamination budget.** A run that does not
 need `α` to a couple of percent can have its records six times smaller, and that is now a knob with a
 measured meaning rather than a number nobody had checked.

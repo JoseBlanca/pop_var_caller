@@ -468,7 +468,7 @@ fn null_sweep(samples: usize, depth: u32, loci: usize, groups: usize) {
     }
     println!(
         "\n  A sample flagged here is a clean sample called contaminated. Under a 1% threshold\n  \
-         that is a false positive, and under §3.4.4 it is a run the user is told to repeat."
+         that is a false positive, and under §3.4.5 it is a run the user is told to repeat."
     );
 }
 
@@ -508,7 +508,7 @@ fn spike(samples: usize, depth: u32, loci: usize, groups: usize, fst: f64) {
     }
 }
 
-/// How many loci the estimate needs — the sweep that prices §3.4.3's budget.
+/// How many loci the estimate needs — the sweep that prices §3.4.4's budget.
 fn budget_sweep(samples: usize, depth: u32, groups: usize, fst: f64) {
     println!(
         "\nHow many loci a contamination estimate needs — {samples} samples, {groups} \

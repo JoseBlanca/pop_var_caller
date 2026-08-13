@@ -548,7 +548,7 @@ they differ does it show.
 
 **All three need what only this route has.** The first needs a locus's reads to stay together rather
 than being folded into a genome-wide count — *which is not the same as deciding, locus by locus,
-whether a locus is contaminated; nothing here does that, and §3.4.3 is about what the identification
+whether a locus is contaminated; nothing here does that, and §3.4.4 is about what the identification
 does rest on.* The second and third need to know **which loci the population varies at and which
 allele it carries** — and this route fits exactly that, per locus, as the spectrum of §2.1.
 So the frequencies are not an input to be supplied from outside: they come out of the same fit, over
@@ -618,7 +618,7 @@ paragraphs above it.
 **The decision is unchanged and the reason for it is now the measured one.** Individual-specific
 frequencies are necessary because without them contamination becomes invisible on a structured panel,
 not because a clean panel would be flagged. **What follows for the pipeline is the opposite of what a
-false-positive story implies**: the thing to watch is a panel that flags nothing, and §3.4.4's
+false-positive story implies**: the thing to watch is a panel that flags nothing, and §3.4.5's
 post-hoc re-estimate is the check that would catch it.
 
 **One warning the measurement adds, and it is about *how* an individual frequency is obtained.** A
@@ -637,7 +637,66 @@ principal-component decomposition wants — and the same matrix
 components come free with an object this route holds anyway. *Soft:* how many components a plant panel
 needs is not four by inheritance, and it is set by the panel rather than by us.
 
-### 3.4.3 Depth, marker count, and what that does to the budget
+### 3.4.3 The contaminant is a sample sequenced alongside this one, and who that was is the user's to say
+
+**The two allele frequencies in this estimator are different questions with different sources, and an
+earlier version of this section treated them as one** (owner, 2026-08-13).
+
+- **The sample's own genotype prior** asks what alleles *this* plant is likely to carry. That is
+  ancestry, and §3.4.2's individual-specific frequencies are for it.
+- **The contaminant's genotype prior** asks what alleles the *stray reads* are likely to carry — and
+  the stray reads did not come from a random member of the species. They came from a second plant in
+  the tube or a neighbouring library on the same run. **So the population that matters is the set of
+  samples sequenced together, not the biological population**, and that set is a list rather than
+  something to be inferred.
+
+**That removes the harder half of the problem.** §3.4.2's warning is about how an individual-specific
+frequency is obtained without partitioning the panel; nothing of the kind arises here, because the
+grouping is stated rather than estimated. It also makes the answer stronger: a sequencing batch is a
+few dozen samples, every one of which this fit already holds genotype posteriors for, so the estimator
+can sum over **named candidates** and report which batch-mate the stray reads resemble. A real event
+favours one donor consistently across loci; a spurious estimate favours none. **That is a check the
+scalar `α` cannot make, and it is the form a laboratory can act on.**
+
+**Decision: the batching is a run input with a default, and is never guessed** (owner, 2026-08-13).
+
+- **By default every read group in the run is one batch.** That is the honest statement of what a
+  pipeline knows when nobody has told it otherwise, and it makes the contaminant's prior the whole
+  cohort's allele distribution.
+- **The CLI accepts groups of read groups that were sequenced together**, and the fit uses each
+  sample's own group as the contaminant's population. **Read groups rather than samples**, because one
+  sample's libraries may have run on different flowcells and the read group is the grain the header
+  gives.
+- **A run that names any group must name every read group.** An unlisted read group is refused rather
+  than swept into a default batch: a user who lists three plates and forgets four samples would
+  otherwise get a wrong contaminant prior for those four with nothing said.
+- **The batching used travels with `α`**, because two runs under different batchings produce different
+  numbers and neither is comparable to the other.
+
+**Why it cannot be inferred, and this is measured rather than assumed** (2026-08-12). The grouping is
+not in the alignments of either cohort this project uses:
+
+| | what the header says | what the read names say |
+|---|---|---|
+| tomato archive | `@RG ID SM PL LB` only — no `PU`, and `LB` synthesised per run accession, so every sample is its own library | rewritten by SRA to `SRR7279481.37559618:TTAGGC:37559618` — the barcode survived, the flowcell and lane did not |
+| GIAB HG002 | `PU:unknown` | intact: `HISEQ1:23:H9UD5ADXX:2:1210:8315:21713` — instrument, run, **flowcell `H9UD5ADXX`, lane 2** |
+
+**So one cohort has it in the reads and the other has lost it**, and neither has it where the SAM
+specification puts it. A pipeline that inferred a batching from what survives — shared barcodes, say —
+would be guessing at exactly the point where guessing wrong is silent. *`ReadGroup` carries no
+platform unit today ([`../arch/parameter_prepass_joint_fit.md`](../arch/parameter_prepass_joint_fit.md)
+§1.6); reading `PU` when a file declares one is worth doing, but as a **default the user can
+override**, never as the answer.*
+
+**What this costs the tomato archive is stated rather than hidden.** With every sample in one batch,
+the contaminant's prior is the whole cohort's, which is the pooled frequency — and §3.4.2 measures
+what that does on a structured panel: at an `F_st` of 0.20 a sample truly contaminated at 3% comes
+back at 0.5%. **So contamination on a cohort with no batching information is a weaker number, and it
+is emitted as one** rather than as something comparable to a run where the batches are known.
+
+---
+
+### 3.4.4 Depth, marker count, and what that does to the budget
 
 **Correction to an earlier draft of this section, which said `α` would not be identified at three reads
 a site.** That was the wrong axis. No single site is classified: the information is pooled across
@@ -695,7 +754,7 @@ distribution, not when it crosses 1%. That is cheaper than the five-times budget
 markers would need, and it is the same reasoning §3.2 uses when it requires the two evidence counts to
 travel beside the rates.
 
-### 3.4.4 Measure it again from the final calls, and report the two
+### 3.4.5 Measure it again from the final calls, and report the two
 
 **The better estimate comes free after calling, and it is not a workaround** (owner, 2026-08-12).
 `verifyBamID`'s strongest mode is the one where the intended sample's genotypes are **known** —
@@ -1367,16 +1426,31 @@ These are the estimator's.*
    floor a further sweep settles. A fitted `w` five times the truth is not a degraded prior — it is a
    background subtraction, and on a sample at tomato's heterozygosity floor the background *is* the
    answer ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.2).
-6. **Contamination is recovered, and — the test that matters more — an uncontaminated structured panel
-   returns zero.** Two synthetic cohorts. In the first, mix a known fraction of one drawn sample's
-   reads into another's at 1%, 2% and 5% and require `α` back; that only checks the arithmetic. In the
-   second, **draw two subpopulations with different allele frequencies, contaminate nothing, and
-   require `α` ≈ 0 in every sample.** A fit using the pooled spectrum as the contaminant's frequency
-   fails this and passes the first, which is exactly the failure §3.4.2 exists to prevent and the one
-   `verifyBamID2` measured as 2.9% reported for a true 10%. **Run the second at more than one degree of
-   divergence**, since the bias grows with it and a barely-structured panel would let a broken
-   implementation through.
-7. **The post-hoc estimate agrees with the pre-pass one where nothing is wrong** (§3.4.4). On the
+6. **Contamination is recovered, and the test that catches a broken frequency is a *spiked* structured
+   panel — RUN 2026-08-12, and it turned this item round.** Three cohorts.
+
+   - **Mix a known fraction of one drawn sample's reads into another's** at 1%, 2% and 5% and require
+     `α` back. On an unstructured panel a pooled frequency already passes this — 0.0103, 0.0325 and
+     0.1065 for truths of 0.010, 0.030 and 0.100 — so it checks the arithmetic and nothing else.
+   - **Draw subpopulations with different allele frequencies, contaminate nothing, and require `α` ≈ 0
+     in every sample.** An earlier version of this item called this the test that matters more, on the
+     grounds that a pooled frequency would inflate `α`. **It does not**: measured, a pooled frequency on
+     a clean structured panel returns `α` = 0.0000 in every sample at `F_st` 0.10 and 0.20 — it passes
+     this test perfectly, because it has lost its power rather than its calibration
+     ([`../reports/joint_contamination_2026-08-12.md`](../reports/joint_contamination_2026-08-12.md) §3).
+     Keep it, because a *noisy* frequency does fail it — one estimated from a twelfth of the panel puts
+     41 to 47 of 50 clean samples over 1% — but it is no longer the one that catches the failure §3.4.2
+     is about.
+   - **The one that does: a structured panel with one sample truly contaminated.** At `F_st` 0.20 a
+     pooled frequency returns **0.0050 for a true 0.030** and **0.0000 for a true 0.010**, where the
+     correct per-individual frequency returns 0.0347 and 0.0131. **Run it at more than one degree of
+     divergence**, since the loss grows with it and a barely-structured panel lets a broken
+     implementation through.
+
+   **And a fourth, which is not statistical**: a batching that leaves a read group out must be refused
+   and must name it (§3.4.3), since the alternative is a wrong contaminant prior for exactly the
+   samples the user forgot.
+7. **The post-hoc estimate agrees with the pre-pass one where nothing is wrong** (§3.4.5). On the
    synthetic mixture, re-estimating from the called genotypes must land within the pre-pass estimate's
    own error rather than somewhere else. **This is the only step-4 parameter with a second, stronger
    measurement available**, so it is also the only place a silent modelling error in the route would

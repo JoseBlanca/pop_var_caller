@@ -157,7 +157,7 @@ segregating markers.
 **The two-million-position selection yields about 10,000 segregating markers on a fifty-sample panel**
 ([`joint_fit_estimator_2026-08-12.md`](joint_fit_estimator_2026-08-12.md) §5.6: 10,208 at 1.28 M
 positions). Interpolating this table puts the noise floor there at **about 1%** — the flagging
-threshold itself. **§3.4.3's arithmetic is confirmed, and it is confirmed to be tight rather than
+threshold itself. **§3.4.4's arithmetic is confirmed, and it is confirmed to be tight rather than
 comfortable.**
 
 **Two courses, and the second is cheaper.** Raise the budget — 55,000 segregating markers would want
