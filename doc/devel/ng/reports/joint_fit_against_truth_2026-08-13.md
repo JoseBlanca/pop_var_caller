@@ -250,6 +250,33 @@ position is fitted; above a half the sample is told *not identified* rather than
 evenly filled panel of twenty the numbers run 0.05 at the middle of an axis to 0.19 at its ends, well
 clear of the refusal — `(components + 1) / samples` is the panel's *mean*, not everyone's share.
 
+### On the real tomato panel it returns a number that cannot be true, and the cause is nameable
+
+Run on the 63 accessions over the 52,525 positions the cohort varies at, **the median accession comes
+back at 6.5% contaminated**, and the highest at 12.5%. Sixty-three accessions from a public archive are
+not all one part in fifteen someone else's plant. **That is a floor, not a measurement**, and reporting
+it as contamination would be reporting the estimator's own noise as biology.
+
+**The refusal did fire, once and on the right accession.** `SRS3394702` is told *not identified*, and it
+is the accession sitting furthest out on the panel's leading axis — the same one at −0.426 in the first
+report's structure measurement. So the leverage machinery works; it is not what is producing the floor,
+because the floor is on everybody.
+
+**What is producing it, on the evidence here.** Contamination is identified by *a small share of reads
+carrying an allele the sample should not have* — and a mismapped position produces exactly that, in
+every sample at once. The same fit puts **1 position in 30 in its mismapped class, at a disagreement
+rate of 2.4%**, and nothing excludes those positions from the ones contamination is measured over. A
+panel-wide floor of a few percent is what that would look like. The drawn panels of §6 above had **no
+mismapped positions in them at all**, and their floor was 0.0004 — which is the same statement from the
+other side.
+
+**So the fix is named and it is this route's own mechanism.** The joint fit already computes, for every
+position, the posterior that it belongs to the mismapped class — that is the thing having many samples
+at one position buys, and §5's control shows it is recovered correctly once there are enough samples.
+It is simply not surfaced: `expectation` accumulates it and throws it away. **Weighting the
+contamination markers by it, or dropping the positions it condemns, is the next thing to build**, and
+until it exists no contamination number from real reads should be read as a fraction.
+
 ---
 
 ## 7. What is not here

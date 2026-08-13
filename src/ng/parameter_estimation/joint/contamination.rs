@@ -71,6 +71,24 @@
 //! `verifyBamID2` maximises over `α` **and the intended sample's coordinates together** for
 //! exactly this reason. Until that is done, read `α` as *this sample stands out from the panel*
 //! and not as *this sample is 1.7% contaminated*.
+//!
+//! # ⚠ On real reads there is a panel-wide floor, and mismapped positions are why
+//!
+//! Run on 63 tomato accessions over the 52,525 positions that cohort varies at, **the median
+//! accession comes back at 6.5%** and the highest at 12.5%. Sixty-three archive accessions are
+//! not all one part in fifteen somebody else's plant: that is a floor and not a measurement.
+//!
+//! **A mismapped position produces the contamination signature in every sample at once** — a
+//! small share of reads carrying an allele the sample should not have — and nothing here
+//! excludes them. The same run puts 1 position in 30 in the joint fit's mismapped class at a
+//! disagreement rate of 2.4%, and the drawn panels above, which contain no mismapped positions
+//! at all, floor at 0.0004.
+//!
+//! **The fix is this route's own mechanism and it is one seam away.**
+//! [`fit`](super::fit)'s pass over the positions already computes each position's posterior of
+//! being mismapped — that is what having many samples at one position buys — and then discards
+//! it. Weighting these markers by it, or dropping the positions it condemns, is what is
+//! missing. **Until then a number from real reads ranks samples; it does not measure them.**
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
