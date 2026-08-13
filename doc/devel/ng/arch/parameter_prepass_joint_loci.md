@@ -140,7 +140,10 @@ pub struct SelectionIdentity {
     /// What this run asked the catalog for: copy floors, purity floor, satellite cap,
     /// bundle radius.
     pub ssr_criteria: StrRepeatCriteria,
-    /// The generic target position count.
+    /// The generic target position count. Two samples must agree even though a smaller
+    /// target's positions *are* a subset of a larger one's: the records array holds no
+    /// coordinates, so the same offset means a different locus under a different target
+    /// (spec §4.3.4).
     pub generic_target: u64,
     /// The STR per-stratum cap.
     pub ssr_cap: usize,
@@ -351,7 +354,10 @@ produces a number with no meaning (spec §5).
 - **`PartialEq` is the compatibility check.** No partial matches, because the failure is
   meaninglessness rather than noise — spec §5.
 - **OPEN:** the generic budget's default. Spec §6 question 3 has the experiment; the type takes a
-  `u64` either way, so nothing here waits on it.
+  `u64` either way, so nothing here waits on it. **What 2026-08-13 settles is which way to be wrong**:
+  a run writing records to a file writes the largest census it will plausibly want, because a smaller
+  target's positions are a subset of a larger one's under `keeps_position` and can be taken without
+  reading anything again, while a larger one needs the records rebuilt — spec §4.3.4.
 
 ---
 

@@ -449,7 +449,9 @@ is *not* in this table: contamination wants about ten thousand segregating marke
 ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4), and this panel yields
 10,208 of them at 1.28 M positions. **Two million is a contamination budget.** A run that does not
 need `α` to a couple of percent can have its records six times smaller, and that is now a knob with a
-measured meaning rather than a number nobody had checked.
+measured meaning rather than a number nobody had checked. **§4.3.4 says how that knob is set once and
+turned down later**, and [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4 says
+why the contamination end of it is worth turning *up* now that the records are on disk.
 
 ### 4.3.1 A bigger panel does not buy fewer loci — MEASURED
 
@@ -536,6 +538,35 @@ would report the first and never see the second. **At minimum include a sample d
 kilobase** — tomato's measured floor — **and one an order of magnitude below it** for a selfing line.
 §6 carries it.
 
+### 4.3.4 The budget is a per-run knob, and a small census is contained in a large one — DECIDED 2026-08-13
+
+**Decision (owner): where the records are written to a file, the walk writes the largest census that
+will plausibly be wanted, and every smaller run takes a subset of it without rebuilding anything.**
+
+**Both rules nest, which is what makes that safe.** The generic rule keeps a position when
+`hash(contig, p, seed) < threshold` (§2), and a smaller target is a smaller threshold — so its set is
+contained in the larger one's, position for position. The STR rule keeps the `cap` lowest hashes per
+stratum (§3.2), and a smaller cap keeps a prefix of that same ordering. **Neither needs the file read
+again**: a run wanting fewer loci recomputes the smaller threshold and skips the entries that fail it.
+
+**Only one direction is free.** Shrinking costs nothing. Growing needs the census rebuilt, which
+outside the direct run means one pass over every sample's pileup
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.1). That asymmetry is
+the whole argument for writing large: the generic depth array is five bits a position, so two million
+positions is 1.25 MB per read group and twenty-seven million is about 17 MB, on disk and streamed
+rather than held. Being generous costs megabytes; being stingy costs a pass over every pileup.
+
+**This corrects the reason §5.1 gives for carrying the generic target count**, though not the
+requirement itself. That table says a different target is *"a different set, not a subset of the larger
+one"*, and under §2's threshold rule it plainly is a subset. What still forces two samples to agree is
+the **indexing**: the depth array stores no coordinates and entry *i* is the *i*-th kept position, so
+records written at two targets have different entries at the same offset. The fit must refuse, and the
+value stays on the list.
+
+**No reordering follows from any of this.** Records stay in genome order, which is what the walk
+produces and what a region-sharded merge concatenates. The smaller set is not a contiguous prefix of
+the file and does not need to be: it is found by recomputing the hash the selection already uses.
+
 ### 4.4 One thing the budget does not buy
 
 The joint fit's distinctive advantage — telling a mismapped locus from a heterozygous one, because a
@@ -620,7 +651,7 @@ is pooled — and then an eighth, below, that checks what came back:
 | the **analysed region set** digest | the likeliest to differ by accident, because a BED feels like a runtime convenience. It is not: it defines what population of sites the estimate describes |
 | the catalog's **build settings and scoring weights** | `build_settings()` — the floors, period range and flank the file was built at, plus the two Ruzzo–Tompa weights. They decide which tracts exist to be sampled at all, and the weights are not a filter: a different weighting is a different set of tracts, not a subset of one |
 | the **STR routing criteria** this run asked for | the copy floors, purity floor, satellite cap and bundle radius passed to `str_loci`. Two samples that filtered the same file differently hold different loci |
-| the **generic target count** | a different target is a different set, not a subset of the larger one |
+| the **generic target count** | a smaller target *is* a subset of a larger one under §2's threshold rule (§4.3.4) — what breaks is the indexing, since the depth array holds no coordinates and entry *i* is the *i*-th kept position, so two targets put different loci at the same offset |
 | the **STR per-stratum cap** | a smaller cap *is* a subset of a larger one under §3.2's rule — but of a different size, so two samples still hold different loci |
 
 **The catalog's settings replace "the region-typing parameters" that

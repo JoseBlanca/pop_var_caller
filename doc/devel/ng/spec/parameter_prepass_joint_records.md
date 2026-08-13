@@ -50,9 +50,11 @@ substituted, so the two share the selection rule and nothing about their content
 
 - **It does not choose loci** ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md))
   and does not fit anything ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md)).
-- **It does not decide where the records live between the walk and the fit** — in memory, one file per
-  sample, or folded into whatever the pipeline already writes. What it requires is a property, not a
-  mechanism: **the fit must reach every sample's records without walking the reads again.**
+- **It does not say how the records are framed on disk** — the byte layout of the file is the
+  implementer's. Where they live is no longer open: §6.1 settles it. The requirement that drove that
+  decision is a property rather than a mechanism — **the fit must reach every sample's records without
+  walking the reads again** — and one file per sample beside the pileup is the cheapest thing that has
+  it.
 
 ---
 
@@ -260,7 +262,7 @@ kept positions are one in a few hundred — a 500 bp window holds one or two of 
 per-base measurement the constraint rules out. The summary is over **every** position the walk
 visited, not over the kept ones.
 
-**What is stored, per sample:**
+**What it holds, per sample:**
 
 - **mean depth in each fixed window of the reference** — 500 bp windows, which over tomato's 782 Mb is
   1.6 M windows and over GRCh38's 3.1 Gb is 6.2 M. One `f32` or a binned byte each;
@@ -270,15 +272,41 @@ visited, not over the kept ones.
   ([`../../specs/hidden_paralog_filter.md`](../../specs/hidden_paralog_filter.md) §2); `src/pileup/`
   is frozen, so ng builds its own.
 
-**Size: 1.6 to 6.2 MB per sample at one byte a window**, which at fifty samples is 80 to 310 MB — the
-same order as the records themselves (§6), and it is the reason this section exists rather than a
-sentence in the fit spec. **It is a real addition to the route's memory bill and §7.8 measures it
-beside the records rather than instead of them.**
+**Decision, 2026-08-13 (owner): this summary is never written to disk.** Unlike the records, it is
+recoverable from the per-sample pileup — every position's depth is in there — so storing it would be a
+cached copy of something a later pass can rebuild, and the owner's call is not to keep that copy. It
+is therefore built twice, by whichever code is holding the depths at the time:
+
+- **in the run that goes straight from alignments to a fit**, the walk builds it as it goes, because
+  the walk already has every position's depth in hand;
+- **in the two-phase run** — alignments to a per-sample pileup file, then a cohort call some time
+  later — the fit builds it by reading the pileups. That read costs a full pass over each sample's
+  pileup, which is the price of not storing it (§6.1 prices the same pass for the records, which *are*
+  stored).
+
+**One condition makes the rebuild possible, and it fails quietly if it is missed.** A window's mean
+depth is the sum of depths divided by **the positions in scope**, and scope comes from the reference
+and the analysed regions — never from the positions that happened to carry a read. A window whose
+reads are missing genuinely has a low mean, and that is the truth about it; dividing by the covered
+positions instead makes it read as normal, and it also shifts the sample's median, which every other
+number here is expressed relative to. **So a rebuild from a pileup works only where the analysed
+regions are recoverable from the pileup's own header.** Production's `.psp` header carries that
+provenance; ng's must keep it.
+
+**Size: 1.6 to 6.2 MB per sample at one byte a window**, which at fifty samples is 80 to 310 MB. That
+is now a **resident** cost during the fit and not a stored one, and it is still the same order as the
+records themselves (§6) — which is the reason this section exists rather than a sentence in the fit
+spec. **§7.8 measures it beside the records rather than instead of them.**
 
 **Two properties it inherits.** It is **per sample and needs no cohort**, which matters because this
 caller must also run on one sample; and its window grid is a function of the reference alone, so two
-samples' summaries are comparable by construction — **the window size travels with the identity**
-(§5) for the same reason every other bin width does.
+samples' summaries are comparable by construction.
+
+*The window size still travels in §5's identity, and the decision above weakens what that check is
+for.* No summary is ever written, so the fit builds every sample's at one width in one process and
+there is nothing left to disagree about. The value costs nothing and stays; it is the one member of
+§5's list whose subject has gone, and it should be retired rather than defended if a later revision
+finds no path that can still pool two summaries built at different widths.
 
 ### 4.1 The stored window is 500 bp; the width the fit reads at is the sample's own
 
@@ -376,6 +404,9 @@ meant different things.
   the same evidence;
 - **the coverage-by-window size** (§4), where a window summary exists at all. Windows of different
   widths are not comparable and a relative copy number computed across two grids is meaningless.
+  **This is the weakest of the thirteen since 2026-08-13**, because the summary is no longer written
+  anywhere (§4): the fit builds every sample's itself, at one width, so the disagreement it guards
+  against has no way to arise. It is kept because it costs one comparison.
 
 *None of the five needs a new mechanism: they are equality comparisons beside the eight above, and
 they fail in exactly the same silent way.*
@@ -397,7 +428,7 @@ and every one of them is kept because the per-stratum cap never has to fire
 | generic sparse non-reference entries | 30–250 kB | 1.5–13 MB |
 | STR set at 462,701 loci — offsets, guard, censoring count, base-comparison denominator | ~4–5 MB | 200–250 MB |
 | STR difference list, driven by the error rate | ~0.3 MB | 15 MB |
-| **coverage by window** (§4), per sample and not per read group | 1.6 MB | 80 MB |
+| **coverage by window** (§4), per sample and not per read group — **resident only, never stored** | 1.6 MB | 80 MB |
 
 **So the STR records are the larger half of the bill, not the smaller** — the opposite of what the
 earlier arithmetic implied, and it follows directly from keeping every STR locus rather than a
@@ -410,6 +441,32 @@ an encoding that is not written yet.* **§7.8 measures it rather than trusting t
 number lands badly the knob is the per-stratum cap — which exists, costs nothing to use, and until
 now had no reason to fire.
 
+**Measured, 2026-08-13 — two rows are wrong and two are exact.**
+The writer was driven through real alignments for the first time: 63 tomato accessions over 8 Mb of
+SL4.00, and HG002 at 30× over 6.1 Mb of GRCh38
+([`../reports/joint_records_on_real_alignments_2026-08-13.md`](../reports/joint_records_on_real_alignments_2026-08-13.md),
+`examples/ng_joint_records_walk.rs`), each at two million kept positions.
+
+| row | measured | against the row above |
+|---|---|---|
+| depth array | 1.250 MB at 2 M positions | **exact** |
+| sparse non-reference entries | 9,213 at 2.4× to 331,036 at 30.6×, which is **37 kB to 1.3 MB** at four bytes each | the range describes a shallow sample; it understates 30× fivefold. The mechanism — driven by the error rate, not by variants — holds, and the row needs a depth beside it |
+| STR set | **25.0 bytes a locus a read group**, identical on both genomes, so **11.6 MB** at 462,701 loci and **578 MB** at fifty samples | 2.3 to 2.9 times the row. This is the row the paragraph above predicted would move; the knob named there is the one to reach for |
+| STR difference list | 0.054 mismatching bases a locus at 2.4× and 0.585 at 30×, so 0.2 MB and **2.2 MB** at 462,701 loci | right at three reads a site, ten times low at thirty |
+| coverage by window | 1 byte a window, so **1.56 MB** over tomato and **6.2 MB** over GRCh38 | **exact** |
+
+**One number for the byte format, which §1.2 leaves open.** A sparse entry is **12 bytes in memory**
+against the four this table prices — a position, an allele and a count, none of them packed. Four is
+reachable, since a position needs 21 bits and an allele 3, but only by packing: it is a constraint on
+that format rather than a property the code already has.
+
+**And the difference list was measurable only after it was written.** §3 specifies it and the writer
+was not filling it; it is filled now, for the reads whose tract is the reference's length. A read that
+slipped a whole unit has no base-for-base correspondence with the reference — that is the aligner's
+answer, not the writer's — so it contributes its offset and **nothing to the base-comparison
+denominator**, which keeps the STR error rate a ratio of two quantities counted over the same reads.
+At tomato about 95 reads in 100 are unslipped.
+
 **Concurrency.** A region-sharded walk fills the entries for the positions in its own region, and
 merging is concatenation in position order. Nothing needs communication between shards.
 
@@ -418,8 +475,79 @@ merging is concatenation in position order. Nothing needs communication between 
 is what makes the first expressible. **At an STR locus there is a fourth** — reads reached the locus
 but none crossed the tract (§3) — and it is the one with no field today.
 
+**And the first real walk collapsed the first two, 2026-08-13.** The generic locus generator emits
+nothing at a position no read reached, so silence from the walk was indistinguishable from a region
+the run never opened: **93,150 of 1,999,404 kept positions on a 25× tomato accession came back as
+*never walked*, and every one of them was data.** A bit that can express a state is not the same as a
+walk that produces it. **The walk must therefore say which stretches it covered, whatever it found in
+them** — `RecordWriter::mark_walked`, called for each region handed to the generators; a real depth
+never overwrites the mark and the mark never overwrites a real depth, so the order does not matter.
+The share is **1.4% to 35% of kept positions across the 63 tomato accessions** and 0.5% on HG002 at
+30×, and it is the denominator of every rate the fit reports.
+
 **Determinism.** The read subsample of §3.4 is seeded from the locus's position, so the same sample
 walked in one region and in many produces byte-identical records.
+
+### 6.1 Where the records live, and the two ways they are built — DECIDED 2026-08-13
+
+**Decision (owner): one file per sample, written beside that sample's pileup, never inside it.**
+
+**Why they are stored at all, given the pileup already holds the evidence.** They are a cache: every
+number here can be recomputed from the pileup, so this is a question of cost rather than of
+availability. The cost is that **rebuilding is a full pass, not a seek**. The kept positions are
+scattered — one every 390 bases at two million on tomato — while a pileup block holds about a megabyte
+of records covering thousands of consecutive positions, so every block contains several kept positions
+and a rebuild decompresses the whole file. Caching is worth it because **a sample's records do not
+depend on which other samples are in the cohort**: written once, they serve every future cohort call,
+which is the same argument that justifies the pileup itself. Without the cache, each cohort call pays
+one full pass over every sample's pileup before it can start.
+
+**Why beside the pileup and not inside it.** Three reasons, and the first is this project's own
+history:
+
+- **A derived section inside a large file makes every change to it a rewrite of that file.** The
+  per-sample summary section already lives inside production's `.psp`, and bumping its version meant
+  regenerating every existing `.psp`. What is here will move more often than that summary did: the
+  budget is a per-run knob ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md)
+  §4.3), the selection carries a seed, the depth ladder can be re-cut, the repeat catalog can be
+  rebuilt. Beside the pileup, "rebuild it" means deleting a small file.
+- **More than one census can coexist** — a small one held in memory for the pooled rates and a much
+  larger one streamed for contamination — as more than one file. Inside the pileup they compete for
+  one section.
+- **It is the clearer contract for whoever runs this.** A file that can be deleted and regenerated says
+  what it is; a section inside the pileup means regenerating it costs a rewrite of the pileup.
+
+**Two ways it is built, and they must be one builder.**
+
+1. **During the walk**, in both kinds of run. The walk visits every position anyway and deciding
+   whether a position is kept is a hash test, so building the records there is nearly free. In the run
+   that goes straight to a fit, the records stay in memory; in the two-phase run, the same walk that
+   writes the pileup also writes the records file.
+2. **From an existing pileup**, which is the regeneration path rather than the normal one. It serves
+   three cases: pileups written before this file existed, a records file lost or built at knobs that
+   have since changed, and — the case that justifies writing the code — **wanting a larger census than
+   the one on disk**, without going back to the alignments.
+
+**Reading a pileup back immediately after writing it is not one of the two.** It costs a full
+decompression pass over a file the walk has just finished producing, and buys nothing.
+
+**The hazard the second path introduces, and how it is closed.** Once both exist they must produce the
+same records from the same sample, or a cohort's parameters depend on which path happened to run, and
+nothing in the output would show it. Two things close it: **the walk-time builder is fed from the same
+stream of loci that the pileup writer consumes**, downstream of every read filter and depth cap the
+pileup applies, so it cannot see reads the pileup will drop; and §7.12 asserts that one sample built
+both ways gives byte-identical files.
+
+**Staleness.** The records file names the pileup it was built from: a digest of that pileup's header —
+reference, analysed regions, read filters, command line — together with its record count. **Never
+modification time.** On a mismatch the fit rebuilds silently when the pileup is available, and fails
+naming the field that differs when it is not. That is the same shape as §5's refusal, pointed at a
+different object.
+
+**Size on disk.** About 6 MB per read group at a two-million-position census, and about 20–26 MB at
+the twenty-seven-million-position one that contamination would use — roughly 1.5 GB across the
+sixty-three-accession tomato cohort, read sequentially rather than held
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4).
 
 ---
 
@@ -475,3 +603,24 @@ walked in one region and in many produces byte-identical records.
     assert that weighting it by its own position count changes the answer: a sum that treated every
     window as full would agree with the direct mean everywhere else and be wrong only where it
     matters, which is at every contig end and every region edge.
+12. **The two builders agree, byte for byte** (§6.1). Build one sample's records during the walk and
+    build them again from the pileup that same walk wrote, and compare the files. **This is the test
+    that decides whether the pileup really holds everything the records need**, and it fails on
+    exactly the fields that turn out not to be recoverable rather than on all of them, so run it on a
+    fixture carrying every corner §7.1 lists — including a repeat tract, whose per-read length is the
+    field most likely to be missing.
+13. **A stale records file is refused or rebuilt, and never used** (§6.1). Write records, then change
+    the pileup they name — a different analysed-region set is the cheapest way — and assert that the
+    fit rebuilds when the pileup is there and fails naming the field when it is not. Assert also that
+    touching the pileup's modification time alone changes nothing, since the check must not key on it.
+14. **A smaller census is a subset of a larger one, and the fit says so**
+    ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3). Build records at the
+    large budget, take the subset a smaller target selects, and assert it equals records built at that
+    smaller target directly — same positions, same values. **This is what makes "write large once" safe**,
+    and if it ever fails, every run that took a subset instead of rebuilding was reading a different set
+    of loci than it thought.
+15. **The rebuilt coverage summary equals the walk's** (§4). Build the window summary during a walk and
+    again from the pileup that walk wrote, and assert they match. **Plant a window inside the analysed
+    regions that no read reached**: it is the one the two paths disagree about if the rebuild takes its
+    denominator from the covered positions rather than from the reference and the analysed regions, and
+    it is the failure that also moves the sample's median and so every other window with it.

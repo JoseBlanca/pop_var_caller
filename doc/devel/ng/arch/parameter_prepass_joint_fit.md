@@ -430,7 +430,11 @@ pub enum JointFitError {
 - **Nothing here reads the windowed histogram.** The autozygosity coefficient is unreachable from
   scattered loci and stays in the walk — spec §6.
 - **OPEN:** whether contamination is a fourth block inside the alternation or a step after it
-  (spec §3.4); nothing in these types turns on it.
+  (spec §3.4); nothing in these types turns on it. **2026-08-13 tilts it towards "after"**: spec
+  §3.4.4 now re-fits `α` alone over a census far larger than the other blocks see, streamed a locus at
+  a time across every sample's file, with each sample's principal-component coordinates held at what
+  the small census gave. A block that reads a different set of loci from its neighbours is easier to
+  reason about outside the alternation than inside it, and the cost is one extra sweep.
 
 ---
 

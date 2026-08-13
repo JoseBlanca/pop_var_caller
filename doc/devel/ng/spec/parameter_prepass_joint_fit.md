@@ -792,6 +792,34 @@ distribution, not when it crosses 1%. That is cheaper than the five-times budget
 markers would need, and it is the same reasoning §3.2 uses when it requires the two evidence counts to
 travel beside the rates.
 
+**REVISITED 2026-08-13, and the "do not size the budget for contamination" decision above no longer
+holds as stated.** What it rejected was *ten times the resident memory*, on the assumption that every
+sample's records are held at once. Since the records are now written to a file per sample
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.1), a larger census for
+contamination costs **disk and one sequential read** instead — about 17 MB per read group of depth
+codes at twenty-seven million positions, roughly 1.5 GB across the sixty-three-accession tomato cohort.
+That is the budget the bottom row of the table above needs, at this panel's density of about one
+usable marker per 125 kept positions, and it takes the floor on a clean sample from about 1% to 0.21%.
+
+**How it is computed without holding anything.** The per-sample files are all in genome order over the
+same loci, so a merge across samples yields one locus at a time with only that locus's evidence
+resident — the same shape the cohort caller already reads its per-sample files in. In that pass, each
+sample carries one running log-likelihood per candidate `α` on a grid: memory is samples × grid
+entries, a few tens of thousands of numbers, and it does not grow with the census.
+
+**Only `α` moves to the large census; the coordinates do not.** §3.4.2 fits the intended sample's and
+the contaminant's positions in a principal-component space beside `α` — eight numbers a sample, and
+the table above shows a contaminated sample's estimate is already right from 3,400 markers. So those
+eight are fitted on the small census where the rest of the model runs, held fixed, and **`α` alone is
+re-fitted on the large one**, which is where the noise floor lives.
+
+**What has to be checked before this is built**, and it is one measurement rather than an argument: run
+the contamination harness with the coordinates fixed from a small census and `α` re-fitted on a large
+one, and confirm the clean panel's floor still falls the way the table above says it does when
+everything is fitted together. If the two-step version loses the gain, the fallback is to run the
+whole contamination block as a final pass after §3.3's alternation has converged, which costs one more
+sweep over the large census and no accuracy.
+
 ### 3.4.5 Measure it again from the final calls, and report the two
 
 **The better estimate comes free after calling, and it is not a workaround** (owner, 2026-08-12).
@@ -1182,6 +1210,25 @@ conditioned on a per-sample coverage-by-window summary, which that document now 
 records rather than leaving as a sentence here. What the *fit* adds is working memory only: one
 posterior over the frequency quadrature per locus, one number per node, held for one locus at a time.
 
+**The resident bill scales with the cohort, and a cohort of thousands breaks it — OPEN, 2026-08-13.**
+At two million positions a sample's records are about 6 MB, so a thousand samples is 6 GB and five
+thousand is 30 GB. **No budget knob fixes that**, because the cost is per sample rather than per locus.
+The way out is that **nothing here needs every sample**. The population-level parameters — the
+per-locus allele frequencies, the diversity, the inbreeding coefficient, the error rates, the share of
+noisy loci — are properties of a population measured from a panel, and a panel of a few hundred is
+enough: the same sweep run at fifty, two hundred and a thousand samples shows the read-driven
+parameters improving between fifty and two hundred, and the count of usable markers rising only about
+14% between fifty and a thousand
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3.1, §4.3.2). Contamination is
+the opposite kind of number — per sample, one at a time, given the frequencies — so it streams (§3.4.4).
+
+**Proposed, and not measured: bound the fit's resident set by a subsample of *samples*, chosen the same
+data-blind way the loci are, and compute every remaining sample's per-sample parameters in a pass
+afterwards.** Memory then stops depending on cohort size along either axis — loci bounded by the
+budget, samples bounded by the subsample. **What nobody has measured is how large the subsample has to
+be**, and it is the same shape of experiment as §4.3's site-budget sweep in the loci document, run
+along the sample axis instead. §11 carries it.
+
 **Compute, honestly.** One evaluation of §3.1's likelihood over the whole generic set is on the order
 of `loci × samples × genotypes × (1 + 3 · quadrature nodes)` operations — two million by fifty by
 three by about fifty, roughly 10¹⁰ — and the fit needs tens of iterations of that. **Nearly all of it
@@ -1410,6 +1457,22 @@ holds, and where the generic budget starts to matter — are
    reads?** — OPEN (§3.3). Both control how often a genotype comes out heterozygous, and they are
    separated only by *where* the variation sits: across loci for one, within a locus for the other.
    *Leaning:* separable at fifty samples and not at five. **Settled by:** §12.9's profile.
+8. **How many samples does the fit actually need at once?** — OPEN, raised 2026-08-13 (§7). A thousand
+   samples' records are 6 GB and five thousand are 30 GB, so a cohort of that size cannot be held, and
+   the proposal is to fit the population-level parameters on a data-blind subsample of samples and
+   compute the per-sample ones in a streaming pass afterwards. *Leaning:* a few hundred is enough —
+   the measured sweeps show the read-driven parameters settling between fifty and two hundred samples
+   and the usable-marker count rising only 14% between fifty and a thousand
+   ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3.1, §4.3.2). **Settled
+   by:** the site-budget sweep of that document's §4.3, run along the sample axis — refit at 1,000,
+   200, 100 and 50 samples drawn from one cohort and report each parameter's error against the drawn
+   truth, one row per parameter, beside what the subsample cost at rest.
+9. **Does re-fitting `α` alone on a larger census keep the noise floor it promises?** — OPEN, raised
+   2026-08-13 (§3.4.4). The two-step scheme fixes each sample's principal-component coordinates on the
+   small census and re-fits only `α` on the large one. *Leaning:* it holds, because a contaminated
+   sample's estimate is already right from 3,400 markers and what the extra markers buy is the floor on
+   clean samples. **Settled by:** the contamination harness, run two-step against all-at-once on the
+   same drawn panel, comparing the worst clean sample's fitted `α`.
 
 ---
 

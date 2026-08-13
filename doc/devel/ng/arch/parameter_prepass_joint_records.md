@@ -244,8 +244,9 @@ summary built at a different `window_bp` is refused, not converted (spec §7.10)
 **Settled, 2026-08-12** — the object is built. Fit spec §2.2's gating measurement returned 1 position
 in 8,600 in a two-copy window reading near half, a near-half rate of 1.26% inside those windows
 against 0.033% outside, and 24.8 times what independence would give
-(`../reports/duplicated_locus_probe_2026-08-12.md`). `coverage_window` is `None` only where a run
-chose not to build the summary, never because the class was not there.
+(`../reports/duplicated_locus_probe_2026-08-12.md`). `coverage_window` is `None` where a run chose not
+to build the summary and **where a `SampleRecords` has just been read from a file** (§2.2, spec §4:
+the summary is never serialized) — never because the class was not there.
 
 ---
 
@@ -307,13 +308,37 @@ record set and its digest cannot disagree.
 
 ### 2.2 Getting records to the fit
 
-**Where they live is a non-goal** (spec §1.2); the requirement is that the fit reaches every sample's
-without walking reads again. So the type is serializable and says nothing about where it is put.
+**Decided 2026-08-13 (spec §6.1): one file per sample, written beside that sample's pileup and never
+inside it.** The requirement is unchanged — the fit reaches every sample's records without walking
+reads again — but where they live is no longer open, so this section carries the shape rather than
+deferring it.
 
 ```rust
 pub fn write_records(records: &SampleRecords, out: impl Write) -> Result<(), RecordError>;
 pub fn read_records(input: impl Read) -> Result<SampleRecords, RecordError>;
 ```
+
+**The coverage-by-window summary is not in that stream.** It is recoverable from the pileup and the
+owner's decision is not to keep a copy (spec §4), so `write_records` omits it and `read_records`
+returns a `SampleRecords` whose `coverage_window` is `None`. Whoever runs the fit fills it: from the
+walk in the direct run, and from a pass over the pileups in the two-phase one. **The type keeps the
+field** — it is what the fit reads — and only the serialized form drops it.
+
+**Two producers, one builder.** The walk-time producer is `RecordWriter` (§2.1). The second reads an
+existing pileup and drives the same `RecordWriter` through the same locus stream, so there is one
+implementation of what a record means and two sources of loci. It exists for pileups written before
+this file did, for a records file lost or built at knobs since changed, and above all for **growing** a
+census, which is the one direction that cannot be served by subsetting an existing file
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3.4).
+
+**What the file names, so a stale one cannot be used.** Beside the thirteen identity values of §1.5 it
+carries the identity of the pileup it was built from: a digest of that pileup's header — reference,
+analysed regions, read filters, command line — and its record count. **Not modification time.** On a
+mismatch the caller rebuilds when the pileup is reachable and refuses naming the field when it is not.
+
+**CLI surface.** The pileup run writes the records file as a side effect; a subcommand builds one from
+an existing pileup. Nothing else needs a knob: the census size travels in the identity, and a run
+wanting fewer loci subsets what is there rather than asking for a different file.
 
 **NOT BUILT — and what is built instead.** The encoding that carries the *content* is in the types:
 `PackedDepthCodes` is the five-bit array and its round trip is asserted at every bit offset, the
@@ -361,7 +386,13 @@ make a property of the sample look like a property of the file.
   ladder digest is the one that matters most, because a depth code without its ladder is a number.
 - **The coverage-by-window summary is a third object, not a field of a record** — §1.6; spec §4.
   Per sample rather than per read group, and it accumulates across the cohort like the records do,
-  which is why spec §6 sizes it in the same table.
+  which is why spec §6 sizes it in the same table. **It is never serialized** (2026-08-13): it is
+  rebuildable from the pileup, so it is built by the walk in a direct run and by a pass over the
+  pileups otherwise — resident cost, not stored cost.
+- **The records are a cache of the pileup, and the pileup is the source of truth** — spec §6.1.
+  Everything in a records file can be recomputed from the sample's pileup; it is kept because
+  recomputing means a full decompression pass, and because the file serves every future cohort call
+  rather than one.
 - **OPEN:** the recorded offset range (±4) and the span the fit may place allele mass on (±6) are
   **two constants, not one** — spec §3.2. `OffsetCounts`'s width must not be read as the fit's allele
   span.
@@ -389,7 +420,12 @@ make a property of the sample look like a property of the file.
 - **Impl-time:** where `AlleleCount` stops being exact and starts binning — a `pub const` with units
   and source in its doc comment (spec §2.2).
 - **Impl-time:** the wire format of `write_records`. **Not Parquet by reflex** — the catalog's reasons
-  for it were columnar range queries, which nothing here does.
+  for it were columnar range queries, which nothing here does. It must be readable **sequentially in
+  genome order across samples at once**, since that is how contamination reads a large census
+  ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4) — one locus's evidence
+  from every sample, never a whole sample resident.
+- **Impl-time:** how a records file names the pileup it came from (§2.2). The contract is a header
+  digest plus a record count, compared for equality; which digest is an implementation choice.
 
 ---
 
@@ -401,3 +437,8 @@ state; the difference list separating a flank substitution from an interior one 
 one read twice; the four STR states including the one with no field; and read groups folding exactly
 on a two-group sample. **Sizes are measured rather than asserted**, on HG002 at 300× and on the whole
 tomato cohort, reported separately (spec §7.8).
+
+**One test does need an alignment file, and it is the one that validates the whole two-phase design**:
+build a sample's records during a walk and again from the pileup that walk wrote, and compare the
+files byte for byte (spec §7.12). It is what shows the pileup really holds everything a record needs,
+and it fails on precisely the fields that do not survive the round trip.

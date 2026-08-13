@@ -1,0 +1,929 @@
+//! What the joint route's records actually cost, and what a cohort of them says.
+//!
+//! Everything measured for this route so far was measured against truths the measuring
+//! program made up itself. This one drives the real writer —
+//! `parameter_estimation::joint::records::RecordWriter` — through real alignments, and it
+//! answers three questions the specifications assert without evidence:
+//!
+//! 1. **What do the records weigh?** `parameter_prepass_joint_records.md` §6 prices them by
+//!    arithmetic and §7.8 says to measure instead. The generic depth array, the sparse list of
+//!    non-reference observations, the STR set and the coverage-by-window summary are reported
+//!    **separately**, because a single total would hide any one of them being wrong.
+//! 2. **Does the coverage-by-window summary come out where §4 says it does?** It is built in
+//!    the same walk, by `parameter_estimation::joint::coverage`, and its size and its
+//!    short-window list are printed rather than assumed.
+//! 3. **How much population structure does the cohort have?** Handed more than one alignment,
+//!    the program holds every sample's records at once — which is the state the fit runs in —
+//!    and asks how far apart the samples are. That decides which row of
+//!    `parameter_prepass_joint_fit.md` §3.4.2 a cohort sits in, and so how much the
+//!    contamination work matters.
+//!
+//! # The structure measurement, and its control
+//!
+//! Allele frequencies estimated from a panel are pulled towards the panel's average, and how
+//! badly depends on how diverged the panel is. On a panel with no divergence a contamination
+//! estimate comes back exact; at `F_st` 0.20 a genuinely 3%-contaminated accession comes back
+//! at 0.5% and passes as clean (`joint_contamination_2026-08-12.md`). So the number wanted
+//! here is the cohort's own divergence.
+//!
+//! **Divergence is measured against a null that runs the identical pipeline.** Each sample's
+//! reads at a position are re-drawn from a binomial at the cohort's own allele frequency and
+//! that sample's own depth — which destroys every trace of structure and keeps the depths,
+//! the missingness and the frequencies exactly. The same principal-component decomposition
+//! and the same split-and-measure then run on the re-drawn data. Whatever the null returns is
+//! what read sampling alone manufactures at this depth and this sample count; the excess over
+//! it is the structure.
+//!
+//! Without that control the measurement has the shape of the failure recorded in
+//! `joint_route_research_narrative_2026-08-13.md` §7: a number that looks like an answer and
+//! is an artefact of the estimator.
+//!
+//! ```text
+//! ng_joint_records_walk <reference.fa> <catalog.parquet> <regions.bed> <generic-target> \
+//!     <alignment> [alignment...]
+//! ```
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use pop_var_caller::fasta::ContigList;
+use pop_var_caller::ng::locus_generation::pileup::{PileupGenerator, PileupGeneratorConfig};
+use pop_var_caller::ng::locus_generation::ssr::{SsrGenerator, SsrGeneratorConfig};
+use pop_var_caller::ng::locus_generation::{
+    GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
+};
+use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::joint::coverage::{
+    CoverageAccumulator, CoverageGrid,
+};
+use pop_var_caller::ng::parameter_estimation::joint::loci::{
+    CatalogBuildSettings, ReferenceDigest, RegionSetDigest, SelectableRegions, SelectionIdentity,
+    UnambiguousRuns, select_kept_loci,
+};
+use pop_var_caller::ng::parameter_estimation::joint::records::{
+    DepthCap, DepthCode, ReadCap, RecordWriter, SampleRecords,
+};
+use pop_var_caller::ng::read::ReadFilterConfig;
+use pop_var_caller::ng::read::input::SampleReads;
+use pop_var_caller::ng::read::input::read_groups::build_read_groups;
+use pop_var_caller::ng::read::input::reference::OpenReference;
+use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
+use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
+use pop_var_caller::ng::reference_info::{
+    ReferenceInfo, ReferenceSource, read_reference_info_observing,
+};
+use pop_var_caller::ng::region_typing::{
+    GenomeRegions, RegionKind, TypedRegion, TypedRegionConfig,
+};
+use pop_var_caller::ng::repeat_catalog::{
+    ReadScope, RepeatCatalog, RepeatCatalogError, StrRepeatCriteria,
+};
+use pop_var_caller::ng::types::{Bp, ContigId};
+use pop_var_caller::regions::ContigBounds;
+
+/// The stored coverage window, and the one the identity makes every sample agree on.
+const WINDOW_BP: Bp = Bp(500);
+
+/// The seed the locus selection is drawn with. One number, shared by every sample, and part
+/// of what the fit refuses to pool across.
+const SEED: u64 = 42;
+
+fn main() {
+    let usage = "usage: <reference.fa> <catalog.parquet> <regions.bed> <generic-target> \
+                 <alignment> [alignment...]";
+    let mut args = std::env::args().skip(1);
+    let fasta = PathBuf::from(args.next().expect(usage));
+    let catalog_path = PathBuf::from(args.next().expect(usage));
+    let bed = PathBuf::from(args.next().expect(usage));
+    let generic_target: u64 = args.next().expect(usage).parse().expect("a position count");
+    let alignments: Vec<PathBuf> = args.map(PathBuf::from).collect();
+    assert!(!alignments.is_empty(), "{usage}");
+
+    let started = Instant::now();
+
+    // ---- the reference, and where it is sequence at all --------------------------------
+    let mut callable = UnambiguousRuns::default();
+    let info = Arc::new(
+        read_reference_info_observing(
+            ReferenceSource::Fasta {
+                fasta: fasta.clone(),
+                fai: None,
+            },
+            &mut callable,
+        )
+        .expect("the reference reads"),
+    );
+    let contigs = Arc::new(info.contig_list());
+    let index = WindowedRefSeq::read_index(&fasta).expect("the .fai beside the reference reads");
+    let unambiguous = callable
+        .into_selectable()
+        .expect("maximal runs of A/C/G/T are disjoint");
+    println!(
+        "reference        {} — {} contigs, read in {:.1} s",
+        fasta.display(),
+        contigs.entries.len(),
+        started.elapsed().as_secs_f64()
+    );
+
+    // ---- the analysed regions, and the catalog ------------------------------------------
+    let bounds: Vec<ContigBounds> = contigs
+        .entries
+        .iter()
+        .map(|entry| ContigBounds {
+            name: &entry.name,
+            length: u32::try_from(entry.length).expect("a contig shorter than 4 Gb"),
+        })
+        .collect();
+    let analysed = SelectableRegions::new(
+        GenomeRegions::from_bed_path(&bed, &bounds)
+            .expect("the BED resolves against this reference's contigs")
+            .iter()
+            .collect(),
+    )
+    .expect("a BED's merged spans are disjoint");
+    let catalog = RepeatCatalog::open_checking_against_reference(&catalog_path, &info)
+        .expect("the catalog is this reference's");
+    let criteria = StrRepeatCriteria::from(&TypedRegionConfig::default());
+
+    let identity = SelectionIdentity {
+        seed: SEED,
+        reference: ReferenceDigest::of(&info).expect("the reference has a digest"),
+        analysed_regions: RegionSetDigest::of(&analysed),
+        catalog_built_under: CatalogBuildSettings::of(&catalog),
+        ssr_criteria: criteria.clone(),
+        generic_target,
+        // No stratum is capped here: the tomato catalog's largest holds far fewer loci than
+        // this, so the cap never fires and every STR locus is kept.
+        ssr_cap: 1_000_000,
+    };
+
+    let kept = select_kept_loci(&identity, &catalog, &analysed, &unambiguous)
+        .expect("the catalog serves these criteria");
+    println!(
+        "analysed regions {} — {} spans, {} bases",
+        bed.display(),
+        analysed.spans().len(),
+        analysed.total_length().get()
+    );
+    println!(
+        "kept loci        {} generic positions (target {generic_target}), {} STR loci in {} \
+         strata, {:.1} s",
+        kept.generic().len(),
+        kept.ssr_stratum_counts().total(),
+        kept.ssr_stratum_counts().iter_sorted().len(),
+        started.elapsed().as_secs_f64()
+    );
+
+    // The walk, the coverage denominator and the selection all run over the same stretch of
+    // genome: the analysed regions with the ambiguous runs cut out.
+    let masked = analysed.intersect(&unambiguous);
+    let typed: Vec<TypedRegion> = catalog
+        .genome_segments(&criteria, ReadScope::Regions(masked.spans()))
+        .expect("the BED's spans name contigs this catalog holds")
+        .map(|item| item.expect("the catalog reads through the whole of the BED"))
+        .collect();
+    let generic_domain = SelectableRegions::new(
+        typed
+            .iter()
+            .filter(|region| region.kind == RegionKind::Generic)
+            .map(|region| region.region)
+            .collect(),
+    )
+    .expect("typed regions are disjoint");
+    let grid = CoverageGrid::over(&generic_domain, WINDOW_BP);
+    println!(
+        "coverage grid    {} windows of {} bp over {} generic bases",
+        grid.len(),
+        WINDOW_BP.get(),
+        generic_domain.total_length().get()
+    );
+
+    // ---- one walk per sample -------------------------------------------------------------
+    let mut cohort: Vec<SampleRecords> = Vec::new();
+    for alignment in &alignments {
+        let at = Instant::now();
+        let records = walk_one(
+            &fasta,
+            &info,
+            &contigs,
+            &index,
+            alignment,
+            &typed,
+            &generic_domain,
+            &grid,
+            &kept,
+            &identity,
+        );
+        println!(
+            "\n=== {} — {:.1} s",
+            records.sample,
+            at.elapsed().as_secs_f64()
+        );
+        report_sizes(&records);
+        cohort.push(records);
+    }
+
+    // ---- do they pool at all? --------------------------------------------------------------
+    println!("\n--- the identity check, which is what lets these be pooled ---");
+    let first = &cohort[0];
+    let mut refused = 0;
+    for other in &cohort[1..] {
+        if let Some(field) = first.identity.first_disagreement(&other.identity) {
+            println!(
+                "  {} disagrees with {} on {field}",
+                other.sample, first.sample
+            );
+            refused += 1;
+        }
+    }
+    println!(
+        "  {} of {} samples agree on all thirteen values",
+        cohort.len() - refused,
+        cohort.len()
+    );
+
+    if cohort.len() >= 8 {
+        structure(&cohort, kept.generic().len());
+    } else {
+        println!(
+            "\n--- structure: skipped, {} samples is too few to decompose ---",
+            cohort.len()
+        );
+    }
+
+    println!(
+        "\ntotal            {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// One sample: one walk, filling the records and the coverage summary together.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a walk needs all of it, and a config struct \
+                                              would only move the list"
+)]
+fn walk_one(
+    fasta: &Path,
+    info: &Arc<ReferenceInfo>,
+    contigs: &Arc<ContigList>,
+    index: &Arc<noodles_fasta::fai::Index>,
+    alignment: &Path,
+    typed: &[TypedRegion],
+    generic_domain: &SelectableRegions,
+    grid: &CoverageGrid,
+    kept: &pop_var_caller::ng::parameter_estimation::joint::loci::KeptLoci,
+    identity: &SelectionIdentity,
+) -> SampleRecords {
+    let read_groups = build_read_groups(&[alignment.to_path_buf()])
+        .expect("the header declares read groups");
+    let sample = match read_groups.read_groups_per_sample() {
+        [only] => only.clone(),
+        other => panic!(
+            "{} holds {} samples; this walk is per sample",
+            alignment.display(),
+            other.len()
+        ),
+    };
+    let reference = OpenReference::new(Arc::clone(info));
+    let sample_reads = SampleReads::open(
+        &sample,
+        &read_groups,
+        &reference,
+        ReadFilterConfig::default(),
+        true,
+    )
+    .expect("the alignment file opens against this reference");
+
+    // Owned captures, because the generator outlives this function's borrows and keeps the
+    // maker to mint a fresh view of the reference whenever it evicts one.
+    let accessor = {
+        let fasta = fasta.to_path_buf();
+        let contigs = Arc::clone(contigs);
+        let index = Arc::clone(index);
+        move || {
+            WindowedRefSeq::with_shared_index(
+                fasta.clone(),
+                Arc::clone(&contigs),
+                Arc::clone(&index),
+            )
+        }
+    };
+    #[allow(
+        clippy::arc_with_non_send_sync,
+        reason = "file-backed and single-threaded, as in real_alignments.rs"
+    )]
+    let shared = Arc::new(accessor());
+    let generic_generator = PileupGenerator::new(
+        Arc::clone(&shared),
+        accessor.clone(),
+        LeftAlignPreparer::with_default_normalizer(accessor()),
+        PileupGeneratorConfig::default(),
+    )
+    .expect("the generic generator builds against this reference");
+    let bundle = Bp(TypedRegionConfig::default().criteria.bundle_threshold);
+    let ssr_generator = SsrGenerator::with_default_aligner(
+        Arc::clone(&shared),
+        {
+            let shared = Arc::clone(&shared);
+            move || Arc::clone(&shared)
+        },
+        SsrGeneratorConfig {
+            flank_bp: bundle,
+            ..SsrGeneratorConfig::default()
+        },
+        bundle,
+    )
+    .expect("flank within the bundle threshold");
+    let generators = GeneratorSet::new(
+        GeneratorSlot::Generator(Box::new(ssr_generator)),
+        GeneratorSlot::Generator(Box::new(generic_generator)),
+        GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
+    );
+
+    // The coverage denominator and the GC content come from the reference over the same
+    // generic stretch the walk covers, not from what the walk emitted: a window whose reads
+    // are missing has a low mean depth, and that is the truth about it.
+    let mut coverage = CoverageAccumulator::new(grid.clone());
+    let reader = accessor();
+    let mut bases = Vec::new();
+    for span in generic_domain.spans() {
+        reader
+            .fetch_into(span.contig, span.start.get(), span.len(), &mut bases)
+            .expect("a generic span reads from the reference");
+        coverage.observe_reference(*span, &bases);
+    }
+
+    let contig_of = |name: &str| {
+        contigs
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .map(|i| ContigId(i as u32))
+    };
+    let mut writer = RecordWriter::new(
+        sample.sample.to_string(),
+        kept,
+        sample.read_groups.clone(),
+        &contig_of,
+        identity.clone(),
+        DepthBinEdges::new(),
+        ReadCap(pop_var_caller::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
+        // Nothing subsamples a generic position's reads yet, and a cap of "none" has to be
+        // written down as such: two samples walked under different caps did not record the
+        // same evidence, and a value that meant "whatever this build did" would pass the
+        // check while meaning nothing.
+        DepthCap(u32::MAX),
+    );
+
+    // **Every generic stretch handed to the walk is walked**, whether or not a read reached
+    // it. Without saying so, a position no read reached is indistinguishable from a region the
+    // run never opened, because the generic generator emits no locus where there is no read.
+    for region in typed
+        .iter()
+        .filter(|region| region.kind == RegionKind::Generic)
+    {
+        writer.mark_walked(region.region);
+    }
+
+    let regions: Vec<Result<TypedRegion, RepeatCatalogError>> =
+        typed.iter().cloned().map(Ok).collect();
+    let mut stream =
+        SampleLocusObservationsIterator::new(regions.into_iter(), sample_reads, generators);
+    let mut generic_loci = 0_u64;
+    let mut ssr_loci = 0_u64;
+    for locus in &mut stream {
+        let locus = locus.expect("the walk runs to completion on a well-formed alignment");
+        match locus.kind {
+            LocusKind::Generic => {
+                generic_loci += 1;
+                coverage.add_depths(
+                    locus.region.contig,
+                    locus.region.start,
+                    &locus.num_obs_along_locus(),
+                );
+            }
+            LocusKind::Ssr(_) => ssr_loci += 1,
+            _ => {}
+        }
+        writer.add_locus(&locus);
+    }
+    println!(
+        "  walked         {generic_loci} generic loci, {ssr_loci} STR loci; median window depth \
+         {:.2} reads a position, {} windows summed to reach 12,000 aligned bases",
+        coverage.median_depth(),
+        (12_000.0 / (f64::from(coverage.median_depth()) * WINDOW_BP.get() as f64))
+            .ceil()
+            .max(1.0)
+    );
+    writer.finish(Some(coverage.finish()))
+}
+
+/// What one sample's records weigh, each object on its own line.
+///
+/// **Separately and not as a total**, because `parameter_prepass_joint_records.md` §6 claims
+/// the STR set is the larger half and a single number would hide that being wrong.
+fn report_sizes(records: &SampleRecords) {
+    let positions = records
+        .generic
+        .values()
+        .next()
+        .map_or(0, |g| g.depth().len());
+    let depth_bytes: usize = records
+        .generic
+        .values()
+        .map(|g| g.depth().as_bytes().len())
+        .sum();
+    let sparse_entries: usize = records
+        .generic
+        .values()
+        .map(|g| g.non_reference().len())
+        .sum();
+    let sparse_bytes = sparse_entries
+        * std::mem::size_of::<
+            pop_var_caller::ng::parameter_estimation::joint::records::AlleleObservation,
+        >();
+
+    let ssr_loci = records.ssr.values().next().map_or(0, |s| s.len());
+    let ssr_dense_bytes: usize = records
+        .ssr
+        .values()
+        .map(|s| {
+            s.len()
+                * (std::mem::size_of::<
+                    pop_var_caller::ng::parameter_estimation::joint::records::OffsetCounts,
+                >() + std::mem::size_of::<u16>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<bool>())
+        })
+        .sum();
+    let guard_entries: usize = records.ssr.values().map(|s| s.guard().len()).sum();
+    let difference_entries: usize = records.ssr.values().map(|s| s.differences().len()).sum();
+    let difference_bytes = difference_entries
+        * std::mem::size_of::<
+            pop_var_caller::ng::parameter_estimation::joint::records::TractDifference,
+        >();
+
+    // The three states the depth array must keep apart.
+    let mut never_walked = 0_u64;
+    let mut zero_depth = 0_u64;
+    let mut covered = 0_u64;
+    if let Some(first) = records.generic.values().next() {
+        for code in first.depth().iter() {
+            match code {
+                DepthCode::NeverWalked => never_walked += 1,
+                DepthCode::Binned(bin) if bin.0 == 0 => zero_depth += 1,
+                DepthCode::Binned(_) => covered += 1,
+            }
+        }
+    }
+
+    let mb = |bytes: usize| bytes as f64 / 1e6;
+    println!(
+        "  read groups    {}, {positions} kept generic positions, {ssr_loci} kept STR loci",
+        records.generic.len()
+    );
+    println!(
+        "  generic depth  {:.3} MB ({:.2} bits a position a read group)",
+        mb(depth_bytes),
+        8.0 * depth_bytes as f64 / (positions.max(1) * records.generic.len()) as f64
+    );
+    println!(
+        "  generic sparse {:.3} MB, {sparse_entries} entries ({:.1} per 1,000 positions)",
+        mb(sparse_bytes),
+        1_000.0 * sparse_entries as f64 / positions.max(1) as f64
+    );
+    println!(
+        "  STR dense      {:.3} MB over {ssr_loci} loci ({:.1} bytes a locus a read group)",
+        mb(ssr_dense_bytes),
+        ssr_dense_bytes as f64 / (ssr_loci.max(1) * records.ssr.len().max(1)) as f64
+    );
+    println!(
+        "  STR guard      {guard_entries} entries; difference list {:.3} MB, \
+         {difference_entries} entries",
+        mb(difference_bytes)
+    );
+    if let Some(coverage) = &records.coverage {
+        println!(
+            "  coverage       {:.3} MB over {} windows of {} bp",
+            coverage.len() as f64 / 1e6,
+            coverage.len(),
+            coverage.window_bp().get()
+        );
+    }
+    println!(
+        "  states         {never_walked} never walked, {zero_depth} walked at zero depth, \
+         {covered} with reads"
+    );
+    println!(
+        "  TOTAL          {:.3} MB held for this sample",
+        mb(depth_bytes + sparse_bytes + ssr_dense_bytes + difference_bytes)
+            + records
+                .coverage
+                .as_ref()
+                .map_or(0.0, |c| c.len() as f64 / 1e6)
+    );
+}
+
+// ---------------------------------------------------------------------
+// How far apart are the samples?
+// ---------------------------------------------------------------------
+
+/// One position the cohort is decomposed on: the alternative allele it segregates, and each
+/// sample's reads there.
+struct Marker {
+    /// Alternative reads and total depth, per sample.
+    alt: Vec<u16>,
+    depth: Vec<u16>,
+    /// The cohort's allele frequency, from the samples that have data.
+    frequency: f64,
+}
+
+/// A position enters the decomposition only if this many samples put a read on it.
+const MIN_SAMPLES_WITH_DATA: usize = 8;
+/// …and only if the cohort's own alternative frequency is inside this band. Outside it the
+/// position carries almost no information about who differs from whom, and the standardising
+/// divisor blows up.
+const MIN_FREQUENCY: f64 = 0.05;
+
+fn structure(cohort: &[SampleRecords], positions: usize) {
+    println!("\n--- how far apart the samples are ---");
+    let started = Instant::now();
+    let markers = markers(cohort, positions);
+    println!(
+        "  markers        {} of {positions} kept positions segregate with at least \
+         {MIN_SAMPLES_WITH_DATA} samples covered and frequency in {MIN_FREQUENCY}–{:.2} ({:.1} s)",
+        markers.len(),
+        1.0 - MIN_FREQUENCY,
+        started.elapsed().as_secs_f64()
+    );
+    if markers.len() < 100 {
+        println!("  too few markers to decompose");
+        return;
+    }
+
+    let measured = decompose(&markers, cohort.len(), None);
+    // The control: the same depths, the same missingness, the same allele frequencies, and no
+    // structure whatever. Anything the pipeline returns here it manufactures.
+    let mut rng = 0x2545_F491_4F6C_DD1D_u64;
+    let null_markers = redraw(&markers, &mut rng);
+    let null = decompose(&null_markers, cohort.len(), None);
+
+    println!("\n  {:<28}{:>14}{:>14}", "", "measured", "no structure");
+    for axis in 0..6.min(measured.eigenvalues.len()) {
+        println!(
+            "  principal axis {:<13}{:>13.2}%{:>13.2}%",
+            axis + 1,
+            100.0 * measured.share[axis],
+            100.0 * null.share[axis]
+        );
+    }
+    println!(
+        "  {:<28}{:>14.4}{:>14.4}",
+        "F_st, split on axis 1", measured.fst, null.fst
+    );
+    println!(
+        "  {:<28}{:>14.4}{:>14.4}",
+        "F_st, random split", measured.fst_random, null.fst_random
+    );
+    println!(
+        "\n  structure above the null: {:+.4} in F_st on the leading split",
+        measured.fst - null.fst
+    );
+
+    // Which samples sit where, so a split that is one accession against the rest is visible
+    // as such rather than reported as divergence.
+    let mut order: Vec<usize> = (0..cohort.len()).collect();
+    order.sort_by(|&a, &b| {
+        measured.axis1[a]
+            .partial_cmp(&measured.axis1[b])
+            .expect("no NaN on the axis")
+    });
+    println!("\n  samples along axis 1, most negative first");
+    for chunk in order.chunks(4) {
+        let line: Vec<String> = chunk
+            .iter()
+            .map(|&s| format!("{} {:+.3}", cohort[s].sample, measured.axis1[s]))
+            .collect();
+        println!("    {}", line.join("   "));
+    }
+    println!(
+        "\n  {} of {} samples on the negative side of axis 1",
+        measured.axis1.iter().filter(|v| **v < 0.0).count(),
+        cohort.len()
+    );
+}
+
+/// The positions worth decomposing on, with each sample's reads at them.
+fn markers(cohort: &[SampleRecords], positions: usize) -> Vec<Marker> {
+    let samples = cohort.len();
+    // Per position, each sample's four allele counts. Built one position at a time would be
+    // a binary search per sample per position; instead each sample's sparse list is swept
+    // once into a per-position column.
+    let mut alt_counts = vec![[0_u32; 5]; positions];
+    let mut per_sample_alt: Vec<Vec<u16>> = vec![vec![0; positions]; samples];
+    let mut per_sample_depth: Vec<Vec<u16>> = vec![vec![0; positions]; samples];
+
+    // First sweep: which non-reference allele the cohort carries at each position.
+    for records in cohort {
+        for group in records.generic.values() {
+            for observation in group.non_reference() {
+                alt_counts[observation.index as usize][observation.allele.code() as usize] +=
+                    observation.reads;
+            }
+        }
+    }
+    let major: Vec<u8> = alt_counts
+        .iter()
+        .map(|counts| {
+            counts
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, n)| **n)
+                .map(|(allele, _)| allele as u8)
+                .unwrap_or(0)
+        })
+        .collect();
+
+    // Second sweep: each sample's reads on that allele, and its depth.
+    for (s, records) in cohort.iter().enumerate() {
+        for group in records.generic.values() {
+            for (index, code) in group.depth().iter().enumerate() {
+                if let DepthCode::Binned(bin) = code {
+                    // The stored code is a bin, and the fit reads it as one. A bin's lower
+                    // edge is exact below depth 9, which is where a three-read cohort lives.
+                    let depth = u32::from(bin.0).min(u32::from(u16::MAX));
+                    per_sample_depth[s][index] =
+                        per_sample_depth[s][index].saturating_add(depth as u16);
+                }
+            }
+            for observation in group.non_reference() {
+                if observation.allele.code() == major[observation.index as usize] {
+                    per_sample_alt[s][observation.index as usize] = per_sample_alt[s]
+                        [observation.index as usize]
+                        .saturating_add(observation.reads.min(u32::from(u16::MAX)) as u16);
+                }
+            }
+        }
+    }
+
+    let mut markers = Vec::new();
+    for index in 0..positions {
+        let covered = (0..samples)
+            .filter(|&s| per_sample_depth[s][index] > 0)
+            .count();
+        if covered < MIN_SAMPLES_WITH_DATA {
+            continue;
+        }
+        let mut sum = 0.0;
+        for s in 0..samples {
+            if per_sample_depth[s][index] > 0 {
+                sum += f64::from(per_sample_alt[s][index]) / f64::from(per_sample_depth[s][index]);
+            }
+        }
+        let frequency = sum / covered as f64;
+        if !(MIN_FREQUENCY..=1.0 - MIN_FREQUENCY).contains(&frequency) {
+            continue;
+        }
+        markers.push(Marker {
+            alt: (0..samples).map(|s| per_sample_alt[s][index]).collect(),
+            depth: (0..samples).map(|s| per_sample_depth[s][index]).collect(),
+            frequency,
+        });
+    }
+    markers
+}
+
+struct Decomposition {
+    eigenvalues: Vec<f64>,
+    share: Vec<f64>,
+    axis1: Vec<f64>,
+    fst: f64,
+    fst_random: f64,
+}
+
+fn decompose(markers: &[Marker], samples: usize, _unused: Option<()>) -> Decomposition {
+    // The covariance between two samples, over the markers both have reads at.
+    //
+    // **The diagonal is not computed and not used.** A sample against itself carries its own
+    // read-sampling noise, which is not shared with anyone and would dominate a shallow
+    // cohort's leading axis; every off-diagonal cell is free of it because two samples' reads
+    // are drawn independently.
+    let mut covariance = vec![0.0_f64; samples * samples];
+    let mut pairs = vec![0.0_f64; samples * samples];
+    for marker in markers {
+        let p = marker.frequency;
+        let scale = (p * (1.0 - p)).sqrt();
+        if scale <= 0.0 {
+            continue;
+        }
+        let z: Vec<Option<f64>> = (0..samples)
+            .map(|s| {
+                (marker.depth[s] > 0)
+                    .then(|| (f64::from(marker.alt[s]) / f64::from(marker.depth[s]) - p) / scale)
+            })
+            .collect();
+        for a in 0..samples {
+            let Some(za) = z[a] else { continue };
+            for b in (a + 1)..samples {
+                let Some(zb) = z[b] else { continue };
+                covariance[a * samples + b] += za * zb;
+                pairs[a * samples + b] += 1.0;
+            }
+        }
+    }
+    for a in 0..samples {
+        for b in (a + 1)..samples {
+            let cell = if pairs[a * samples + b] > 0.0 {
+                covariance[a * samples + b] / pairs[a * samples + b]
+            } else {
+                0.0
+            };
+            covariance[a * samples + b] = cell;
+            covariance[b * samples + a] = cell;
+        }
+    }
+    // The diagonal stands in as the mean of the row's own off-diagonals, which is the value a
+    // noise-free self-comparison would take under one shared axis of variation.
+    for a in 0..samples {
+        let mut sum = 0.0;
+        for b in 0..samples {
+            if a != b {
+                sum += covariance[a * samples + b];
+            }
+        }
+        covariance[a * samples + a] = sum / (samples - 1) as f64;
+    }
+
+    let (values, vectors) = jacobi_eigen(&covariance, samples);
+    let total: f64 = values.iter().map(|v| v.abs()).sum();
+    let share: Vec<f64> = values.iter().map(|v| v.abs() / total.max(1e-12)).collect();
+    let axis1: Vec<f64> = (0..samples).map(|s| vectors[s * samples]).collect();
+
+    // Split on the leading axis and measure how far the two halves' allele frequencies sit
+    // apart; then do the same on a split that knows nothing, which is the floor a split
+    // chosen by the data has to beat.
+    let leading: Vec<bool> = axis1.iter().map(|v| *v < 0.0).collect();
+    let mut random = vec![false; samples];
+    for (s, slot) in random.iter_mut().enumerate() {
+        *slot = s % 2 == 0;
+    }
+    Decomposition {
+        eigenvalues: values,
+        share,
+        fst: hudson_fst(markers, &leading),
+        fst_random: hudson_fst(markers, &random),
+        axis1,
+    }
+}
+
+/// Hudson's `F_st` between the two groups a boolean split names, as a ratio of averages.
+///
+/// A group's allele frequency at a position is the mean of its members' own read fractions,
+/// so a deep sample and a shallow one count the same — which is what makes the number about
+/// the plants rather than about the sequencing.
+fn hudson_fst(markers: &[Marker], left: &[bool]) -> f64 {
+    let mut numerator = 0.0_f64;
+    let mut denominator = 0.0_f64;
+    for marker in markers {
+        let mut sums = [0.0_f64; 2];
+        let mut counts = [0.0_f64; 2];
+        for (s, depth) in marker.depth.iter().enumerate() {
+            if *depth == 0 {
+                continue;
+            }
+            let side = usize::from(!left[s]);
+            sums[side] += f64::from(marker.alt[s]) / f64::from(*depth);
+            counts[side] += 1.0;
+        }
+        if counts[0] < 2.0 || counts[1] < 2.0 {
+            continue;
+        }
+        let p1 = sums[0] / counts[0];
+        let p2 = sums[1] / counts[1];
+        // Sampled chromosomes, two per diploid with data.
+        let n1 = 2.0 * counts[0];
+        let n2 = 2.0 * counts[1];
+        numerator +=
+            (p1 - p2).powi(2) - p1 * (1.0 - p1) / (n1 - 1.0) - p2 * (1.0 - p2) / (n2 - 1.0);
+        denominator += p1 * (1.0 - p2) + p2 * (1.0 - p1);
+    }
+    if denominator <= 0.0 {
+        0.0
+    } else {
+        numerator / denominator
+    }
+}
+
+/// The same cohort with every trace of structure removed: each sample's alternative reads are
+/// re-drawn from a binomial at the position's own cohort frequency and that sample's own
+/// depth.
+fn redraw(markers: &[Marker], state: &mut u64) -> Vec<Marker> {
+    markers
+        .iter()
+        .map(|marker| {
+            let alt: Vec<u16> = marker
+                .depth
+                .iter()
+                .map(|depth| {
+                    let mut drawn = 0_u16;
+                    for _ in 0..*depth {
+                        if uniform(state) < marker.frequency {
+                            drawn += 1;
+                        }
+                    }
+                    drawn
+                })
+                .collect();
+            Marker {
+                alt,
+                depth: marker.depth.clone(),
+                frequency: marker.frequency,
+            }
+        })
+        .collect()
+}
+
+fn uniform(state: &mut u64) -> f64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    (*state >> 11) as f64 / (1_u64 << 53) as f64
+}
+
+/// Eigenvalues and eigenvectors of a small symmetric matrix, by cyclic Jacobi rotations.
+///
+/// Returned sorted by descending eigenvalue; `vectors[s * n + k]` is sample `s`'s coordinate
+/// on axis `k`.
+fn jacobi_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut a = matrix.to_vec();
+    let mut v = vec![0.0; n * n];
+    for i in 0..n {
+        v[i * n + i] = 1.0;
+    }
+    for _ in 0..100 {
+        let off: f64 = (0..n)
+            .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+            .map(|(i, j)| a[i * n + j].powi(2))
+            .sum();
+        if off < 1e-18 {
+            break;
+        }
+        for p in 0..n {
+            for q in (p + 1)..n {
+                if a[p * n + q].abs() < 1e-15 {
+                    continue;
+                }
+                let theta = (a[q * n + q] - a[p * n + p]) / (2.0 * a[p * n + q]);
+                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = t * c;
+                for k in 0..n {
+                    let akp = a[k * n + p];
+                    let akq = a[k * n + q];
+                    a[k * n + p] = c * akp - s * akq;
+                    a[k * n + q] = s * akp + c * akq;
+                }
+                for k in 0..n {
+                    let apk = a[p * n + k];
+                    let aqk = a[q * n + k];
+                    a[p * n + k] = c * apk - s * aqk;
+                    a[q * n + k] = s * apk + c * aqk;
+                }
+                for k in 0..n {
+                    let vkp = v[k * n + p];
+                    let vkq = v[k * n + q];
+                    v[k * n + p] = c * vkp - s * vkq;
+                    v[k * n + q] = s * vkp + c * vkq;
+                }
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&i, &j| {
+        a[j * n + j]
+            .abs()
+            .partial_cmp(&a[i * n + i].abs())
+            .expect("no NaN in a covariance matrix")
+    });
+    let values: Vec<f64> = order.iter().map(|&i| a[i * n + i]).collect();
+    let mut vectors = vec![0.0; n * n];
+    for (k, &i) in order.iter().enumerate() {
+        for s in 0..n {
+            vectors[s * n + k] = v[s * n + i];
+        }
+    }
+    (values, vectors)
+}
+
+/// Unused today, kept because the STR half of the report will want it.
+#[allow(dead_code)]
+fn per_read_group(records: &SampleRecords) -> BTreeMap<String, usize> {
+    records
+        .generic
+        .iter()
+        .map(|(group, g)| (format!("{group:?}"), g.non_reference().len()))
+        .collect()
+}

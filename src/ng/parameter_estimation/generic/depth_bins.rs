@@ -301,6 +301,27 @@ impl DepthBinEdges {
         self.bin_tops.len()
     }
 
+    /// The depth a site in this bin is scored at, when nothing finer is available.
+    ///
+    /// **The histogram route never calls this**, because each of its cells carries the mean
+    /// of the exact depths that fell in it and that mean is strictly better — reading a bin's
+    /// midpoint in its place lands the fitted error rate 5.2 rungs low
+    /// ([`crate::ng::parameter_estimation::generic::histogram`]). The joint route has no such
+    /// mean: it stores one five-bit code per position per sample and the exact depth is gone
+    /// by the time anything is fitted, so the midpoint is all there is. **Below depth 9 the
+    /// ladder is exact and this returns the depth itself**, and at three reads a site that is
+    /// where 97 positions in 100 land.
+    #[must_use]
+    pub fn representative_depth(&self, bin: DepthBin) -> f64 {
+        let top = self.bin_tops[usize::from(bin.0)];
+        let bottom = if bin.0 == 0 {
+            0
+        } else {
+            self.bin_tops[usize::from(bin.0) - 1] + 1
+        };
+        0.5 * (f64::from(bottom) + f64::from(top))
+    }
+
     /// Every bin, in order.
     ///
     /// It exists so that a caller walking the ladder does not write `DepthBin(bin as

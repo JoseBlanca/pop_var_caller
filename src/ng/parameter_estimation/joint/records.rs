@@ -76,7 +76,7 @@ impl ObservedAllele {
         }
     }
 
-    fn code(self) -> u8 {
+    pub fn code(self) -> u8 {
         match self {
             Self::A => 0,
             Self::C => 1,
@@ -254,6 +254,33 @@ pub struct GenericRecords {
 }
 
 impl GenericRecords {
+    /// Records assembled from the two halves directly — **the door a reader comes in
+    /// through, and the one a test that draws its own evidence uses.**
+    ///
+    /// # Panics
+    ///
+    /// When the sparse entries are not sorted by position, or name a position the depth array
+    /// does not have. Both would leave the fit reading one position's reads at another's, and
+    /// neither has a symptom.
+    pub fn from_parts(depth: PackedDepthCodes, non_reference: Vec<AlleleObservation>) -> Self {
+        assert!(
+            non_reference
+                .windows(2)
+                .all(|pair| pair[0].index <= pair[1].index),
+            "the sparse entries arrive in position order, and the fit walks them with a cursor"
+        );
+        assert!(
+            non_reference
+                .last()
+                .is_none_or(|entry| (entry.index as usize) < depth.len()),
+            "a sparse entry names a position the depth array does not have"
+        );
+        Self {
+            depth,
+            non_reference,
+        }
+    }
+
     pub fn never_walked(positions: usize) -> Self {
         Self {
             depth: PackedDepthCodes::never_walked(positions),
@@ -882,6 +909,39 @@ impl RecordWriter {
         }
     }
 
+    /// This stretch of genome was walked, whatever the walk found in it.
+    ///
+    /// **Without this the three states of §1.1 collapse to two on real data.** The generic
+    /// locus generator emits a locus only where a read reached, so a position no read reached
+    /// produces nothing and would keep [`DepthCode::NeverWalked`] — which is the code for a
+    /// bug, a region the run never opened. Measured on tomato SRR7279482 at 25×, that is
+    /// 93,150 of 1,999,404 kept positions, 1 in 21, every one of them data being reported as
+    /// a defect.
+    ///
+    /// Call it for each region handed to the walk, before or after the loci from it: a real
+    /// depth overwrites a zero and a zero never overwrites a real depth.
+    pub fn mark_walked(&mut self, region: GenomeRegion) {
+        let zero = DepthCode::Binned(self.edges.bin_for(0));
+        let first = self.generic_loci.partition_point(|kept| {
+            (kept.contig.get(), kept.position.get()) < (region.contig.get(), region.start.get())
+        });
+        for index in first..self.generic_loci.len() {
+            let kept = self.generic_loci[index];
+            if kept.contig != region.contig || kept.position.get() > region.end.get() {
+                break;
+            }
+            for group in &self.read_groups {
+                let records = self
+                    .generic
+                    .entry(*group)
+                    .or_insert_with(|| GenericRecords::never_walked(self.generic_loci.len()));
+                if records.depth.get(index) == DepthCode::NeverWalked {
+                    records.depth.set(index, zero);
+                }
+            }
+        }
+    }
+
     fn add_generic(&mut self, locus: &SampleLocusObservations) {
         // **Depth is per read group, not pooled.** `num_obs_along_locus` sums the sample's
         // observations, which is the wrong grain for a record keyed by read group — and it
@@ -1000,8 +1060,42 @@ impl RecordWriter {
                     reads,
                 });
             }
+            // **The difference list, and the one case it can be built from.** A read whose
+            // tract is the reference's length lines up with it base for base, so a mismatch is
+            // read off directly. A read that slipped does not: which of its bases sits over
+            // which reference base is the aligner's answer and not this writer's, and inventing
+            // one would put a whole tract's worth of manufactured mismatches into the error
+            // rate. Such a read contributes its length to the offsets and **nothing to the
+            // denominator**, so the rate stays a ratio of two quantities counted over the same
+            // reads.
+            if observation.bases.len() as i64 != reference_length {
+                continue;
+            }
             records.bases_compared[index] +=
                 u32::from(reads) * u32::try_from(observation.bases.len()).unwrap_or(u32::MAX);
+            // **One entry per read, not one per distinct sequence.** The walk has already
+            // folded reads carrying the same bases into a single observation with a count, and
+            // collapsing them here too would lose the fact this channel exists for: that two
+            // reads carried the *same* interruption, which is what makes an interruption an
+            // allele rather than an error.
+            for (offset, (read_base, reference_base)) in observation
+                .bases
+                .iter()
+                .zip(locus.reference_bases.iter())
+                .enumerate()
+            {
+                if read_base.eq_ignore_ascii_case(reference_base) {
+                    continue;
+                }
+                for copy in 0..reads {
+                    records.differences.push(TractDifference {
+                        locus: index as u32,
+                        read: u8::try_from(copy).unwrap_or(u8::MAX),
+                        offset: i16::try_from(offset).unwrap_or(i16::MAX),
+                        base: ObservedAllele::of_base(*read_base),
+                    });
+                }
+            }
         }
         // Reads that reached the locus and produced no observation at all.
         if locus.reads_without_observation > 0 {
@@ -1518,6 +1612,161 @@ mod tests {
             DepthCode::NeverWalked,
             "never reached is a bug, and must not read as zero depth"
         );
+    }
+
+    /// **The generic locus generator emits nothing at a position no read reached**, so on real
+    /// data the previous test's middle case never arises: an uncovered position keeps the
+    /// never-walked sentinel, which is the code for a bug. Measured on tomato SRR7279482 at
+    /// 25× that is 93,150 kept positions in 1,999,404. Marking the walked stretch is what
+    /// separates the two again.
+    #[test]
+    fn marking_a_walked_stretch_turns_silence_into_zero_depth() {
+        let mut writer = writer_over(&[10, 20, 30], &[0]);
+        writer.mark_walked(GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(25),
+        });
+        writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 4)]));
+        let records = writer.finish(None);
+
+        let generic = &records.generic[&ReadGroupId(0)];
+        let edges = DepthBinEdges::new();
+        assert_eq!(
+            generic.at(0).0,
+            DepthCode::Binned(edges.bin_for(4)),
+            "a real depth is never overwritten by the mark"
+        );
+        assert_eq!(
+            generic.at(1).0,
+            DepthCode::Binned(edges.bin_for(0)),
+            "inside the walked stretch and no read reached it: data"
+        );
+        assert_eq!(
+            generic.at(2).0,
+            DepthCode::NeverWalked,
+            "outside every walked stretch: still a bug"
+        );
+    }
+
+    #[test]
+    fn marking_after_the_loci_arrive_gives_the_same_answer() {
+        let mut writer = writer_over(&[10, 20, 30], &[0]);
+        writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 4)]));
+        writer.mark_walked(GenomeRegion {
+            contig: ContigId(0),
+            start: Position(1),
+            end: Position(25),
+        });
+        let records = writer.finish(None);
+        let generic = &records.generic[&ReadGroupId(0)];
+        assert_eq!(
+            generic.at(0).0,
+            DepthCode::Binned(DepthBinEdges::new().bin_for(4))
+        );
+        assert_eq!(
+            generic.at(1).0,
+            DepthCode::Binned(DepthBinEdges::new().bin_for(0))
+        );
+    }
+
+    // ---- the writer at a repeat tract ---------------------------------------
+
+    /// A twelve-base `AT` tract, kept, with the writer over it.
+    fn ssr_writer() -> RecordWriter {
+        use crate::ng::region_typing::segment_criteria::SsrSegment;
+        use crate::ng::repeat_catalog::strata::StratumSampler;
+
+        let segment = SsrSegment::new(
+            "c0".into(),
+            100,
+            111,
+            crate::ng::types::Motif::new(b"AT").expect("a two-base motif"),
+            1.0,
+        )
+        .expect("a well-formed tract");
+        let mut sampler = StratumSampler::new(16, 0);
+        sampler.offer(2, 6, segment);
+        let (counts, sample) = sampler.finish();
+        let loci = KeptLoci::from_parts(Vec::new(), sample, counts);
+        RecordWriter::new(
+            "sample".to_string(),
+            &loci,
+            vec![ReadGroupId(0)],
+            &|_| Some(ContigId(0)),
+            selection_identity(),
+            DepthBinEdges::new(),
+            ReadCap(100),
+            DepthCap(124),
+        )
+    }
+
+    fn ssr_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(100),
+                end: Position(111),
+            },
+            reference_bases: b"ATATATATATAT".to_vec().into_boxed_slice(),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Ssr(crate::ng::locus_generation::SsrDetail {
+                motif: crate::ng::types::Motif::new(b"AT").expect("a two-base motif"),
+                left_flank: Box::new([]),
+                right_flank: Box::new([]),
+            }),
+        }
+    }
+
+    /// Spec §7.3: two reads carrying the **same** interior substitution must come back as two
+    /// entries at one offset — not one entry, and not a count of two. The walk has already
+    /// folded identical reads into one observation with a count, so the writer has to unfold
+    /// them again or the channel says nothing it was built to say.
+    #[test]
+    fn two_reads_carrying_one_interruption_are_two_entries_at_one_offset() {
+        let mut writer = ssr_writer();
+        writer.add_locus(&ssr_locus(vec![observation(b"ATATGTATATAT", 0, 2)]));
+        let records = writer.finish(None);
+        let ssr = &records.ssr[&ReadGroupId(0)];
+
+        assert_eq!(
+            ssr.differences().len(),
+            2,
+            "two reads, one interruption each"
+        );
+        assert_eq!(ssr.differences()[0].offset, 4);
+        assert_eq!(ssr.differences()[1].offset, 4);
+        assert_ne!(
+            ssr.differences()[0].read,
+            ssr.differences()[1].read,
+            "an allele on two reads, not one read seen twice"
+        );
+        assert_eq!(ssr.differences()[0].base, ObservedAllele::G);
+    }
+
+    /// A read whose tract slipped a whole unit has no base-for-base correspondence with the
+    /// reference, so it contributes its offset and **nothing to the denominator**. If it did,
+    /// the STR error rate would be a ratio of two quantities counted over different reads.
+    #[test]
+    fn a_slipped_read_contributes_a_length_and_no_base_comparison() {
+        let mut writer = ssr_writer();
+        writer.add_locus(&ssr_locus(vec![
+            observation(b"ATATATATAT", 0, 3),
+            observation(b"ATATATATATAT", 0, 5),
+        ]));
+        let records = writer.finish(None);
+        let ssr = &records.ssr[&ReadGroupId(0)];
+
+        assert_eq!(ssr.offsets(0).at(-1), 3, "one unit short");
+        assert_eq!(ssr.offsets(0).at(0), 5);
+        assert_eq!(
+            ssr.bases_compared(0),
+            5 * 12,
+            "only the five reads at the reference length were compared"
+        );
+        assert!(ssr.differences().is_empty());
     }
 
     #[test]
