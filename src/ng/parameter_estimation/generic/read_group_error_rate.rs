@@ -26,8 +26,6 @@
 
 use std::collections::BTreeMap;
 
-use smallvec::SmallVec;
-
 use crate::ng::parameter_estimation::fitting::ladder_scan::fit_by_fixed_frequency_scan;
 use crate::ng::parameter_estimation::generic::SiteNoise;
 use crate::ng::parameter_estimation::generic::histogram::{Cell, DepthAltHistogram};
@@ -127,7 +125,7 @@ pub struct ReadGroupErrorRateFit {
 #[must_use]
 pub fn fit_read_group_error_rates(
     read_group_histograms: &BTreeMap<(ReadGroupId, Ploidy), DepthAltHistogram<u64>>,
-    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    genotype_frequencies: &BTreeMap<Ploidy, Vec<f64>>,
     ladder: &[ErrorRate],
     site_noise: Option<SiteNoise>,
 ) -> BTreeMap<ReadGroupId, ReadGroupErrorRateFit> {
@@ -230,10 +228,10 @@ mod tests {
         Ploidy::try_new(copies).expect("a positive copy number")
     }
 
-    fn frequencies(entries: &[(u8, &[f64])]) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
+    fn frequencies(entries: &[(u8, &[f64])]) -> BTreeMap<Ploidy, Vec<f64>> {
         entries
             .iter()
-            .map(|&(copies, set)| (ploidy(copies), SmallVec::from_slice(set)))
+            .map(|&(copies, set)| (ploidy(copies), set.to_vec()))
             .collect()
     }
 

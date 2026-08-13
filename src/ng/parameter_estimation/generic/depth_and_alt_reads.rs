@@ -14,7 +14,8 @@
 use smallvec::SmallVec;
 
 use crate::ng::locus_generation::SampleLocusObservations;
-use crate::ng::types::{GenomeRegion, ReadGroupId};
+use crate::ng::parameter_estimation::subsample::{SelectionWalk, seed_at};
+use crate::ng::types::ReadGroupId;
 
 use super::depth_bins::DepthBinEdges;
 use super::histogram::DepthAndAltReads;
@@ -313,35 +314,6 @@ impl CountedSite {
     }
 }
 
-/// The random stream a site's subsample is drawn from: **a function of where the site
-/// is, and of nothing else**.
-///
-/// That is what makes a region-sharded walk and a single-threaded one keep the same
-/// reads, so `merge` stays exact and a fitted rate does not move with the thread count.
-/// Seeding from a shared stream, or from anything carrying the walk's history, would
-/// make the evidence at a capped site a fact about the scheduling rather than about the
-/// data — the same fault the pileup's own read sampler was rewritten to remove.
-///
-/// **Spelled out here rather than taken from a hashing crate**, for that sampler's
-/// reason: this decides which reads a fit sees, so it is a format, and it may not change
-/// silently with a dependency bump or a compiler version. `ahash` and `DefaultHasher`
-/// are both free to seed themselves per process.
-fn seed_at(region: GenomeRegion) -> u64 {
-    // splitmix64's mixing constants. The contig and the start are folded separately so
-    // that position 1 of contig 2 and position 2 of contig 1 are different streams.
-    let mut seed = region.contig.0 as u64;
-    seed = splitmix64(seed ^ 0x9e37_79b9_7f4a_7c15);
-    seed = splitmix64(seed ^ region.start.0);
-    seed
-}
-
-/// splitmix64's finaliser — a bijection, so distinct inputs stay distinct.
-fn splitmix64(mut state: u64) -> u64 {
-    state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    state ^ (state >> 31)
-}
-
 /// How many of `successes` survive when `draws` of `population` are kept — a
 /// hypergeometric draw, exactly.
 ///
@@ -368,63 +340,6 @@ fn hypergeometric_draw(seed: u64, population: u32, successes: u32, draws: u32) -
     SelectionWalk::new(seed, population, draws).keep_from(successes)
 }
 
-/// A partly-walked selection sample: how much of the population is still to be passed
-/// over, and how many places in the kept set are still open.
-///
-/// **Resumable, which is the point.** One site's alternative reads are walked group by
-/// group through a single walk, so the per-group kept counts sum to exactly what one
-/// call over all of them would have returned — that is what
-/// [`count_whole_site_by_library`] rests on, and it holds by construction rather than by
-/// two implementations agreeing.
-struct SelectionWalk {
-    state: u64,
-    remaining_population: u64,
-    remaining_draws: u64,
-}
-
-impl SelectionWalk {
-    fn new(seed: u64, population: u32, draws: u32) -> Self {
-        Self {
-            state: seed,
-            remaining_population: u64::from(population),
-            remaining_draws: u64::from(draws),
-        }
-    }
-
-    /// Walk the next `successes` items of the population and return how many were kept.
-    fn keep_from(&mut self, successes: u32) -> u32 {
-        let mut kept = 0u32;
-        for done in 0..successes {
-            if self.remaining_draws == 0 {
-                // The kept set is full; the rest of the population is passed over.
-                self.remaining_population -= u64::from(successes - done);
-                return kept;
-            }
-            if self.remaining_draws == self.remaining_population {
-                // Every item still in the running is kept, so every success still to be
-                // walked is kept. **The count is the remaining successes, not the
-                // remaining draws** — those are equal only when every item left is a
-                // success, and taking the draws would have inflated the alternative
-                // count at exactly the deep, allele-rich sites where the cap fires.
-                let left = successes - done;
-                self.remaining_draws -= u64::from(left);
-                self.remaining_population -= u64::from(left);
-                return kept + left;
-            }
-            self.state = splitmix64(self.state);
-            // The modulo's bias is `2^64 mod remaining_population` out of `2^64` — at
-            // most one part in 10^15 for any depth a pileup can produce, which is far
-            // below the sampling noise the draw is made of.
-            if self.state % self.remaining_population < self.remaining_draws {
-                kept += 1;
-                self.remaining_draws -= 1;
-            }
-            self.remaining_population -= 1;
-        }
-        kept
-    }
-}
-
 /// Add one observation's support, refusing to wrap.
 ///
 /// The release profile leaves `overflow-checks` off, so a wrapped depth would come back
@@ -441,7 +356,7 @@ fn add_support(running: u32, support: u32, what: &str) -> u32 {
 mod tests {
     use super::*;
     use crate::ng::locus_generation::{LocusKind, LocusLen, ReadWitness, SequenceObservation};
-    use crate::ng::types::{ContigId, Position};
+    use crate::ng::types::{ContigId, GenomeRegion, Position};
 
     fn group(id: u32) -> ReadGroupId {
         ReadGroupId(id)
@@ -876,47 +791,6 @@ mod tests {
             (variance - expected_variance).abs() < 1.6,
             "variance {variance} against {expected_variance}"
         );
-    }
-
-    /// **`SelectionWalk`'s one contract, over the whole domain rather than at a
-    /// fixture.** Walking the successes in pieces must give exactly what walking them at
-    /// once gives — that is what `count_whole_site_by_library` rests on when it splits a
-    /// site's alternative reads between libraries, and the two fast paths are where a
-    /// resumed walk's state can be left wrong without any *single* call looking odd.
-    ///
-    /// It is here because the fixtures could not reach it: deleting the population
-    /// decrement in the all-kept arm — leaving every later group drawing against a
-    /// population one too high — left the whole suite green. That arm fires exactly
-    /// where the design says the damage lands, at the deep allele-rich sites where the
-    /// cap bites, and nothing would have panicked: the entry's attribution still sums to
-    /// its own total, so `add_attributed_site`'s cross-check passes.
-    #[test]
-    fn a_resumed_walk_sums_to_a_single_call_over_every_split() {
-        for population in [1u32, 2, 3, 5, 8, 124, 125, 200, 500] {
-            for draws in [0u32, 1, 2, 3, population / 2, population - 1, population] {
-                if draws > population {
-                    continue;
-                }
-                for successes in 0..=population.min(40) {
-                    for seed in [1u64, 7, 0xdead_beef, u64::MAX] {
-                        let whole =
-                            SelectionWalk::new(seed, population, draws).keep_from(successes);
-                        assert!(whole <= draws.min(successes));
-                        for cut in 0..=successes {
-                            let mut walk = SelectionWalk::new(seed, population, draws);
-                            let first = walk.keep_from(cut);
-                            let rest = walk.keep_from(successes - cut);
-                            assert_eq!(
-                                first + rest,
-                                whole,
-                                "population {population}, draws {draws}, \
-                                 successes {successes}, cut after {cut}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
     }
 
     /// The two degenerate ends are exact rather than drawn: a site with no alternative

@@ -464,7 +464,7 @@ fn rungs_of(fit: &CoupledFit, ladder: &[ErrorRate]) -> BTreeMap<ReadGroupId, usi
 }
 
 /// A finished fit's genotype frequencies, in the shape the site-noise block reads.
-fn frequencies_of(fit: &CoupledFit) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
+fn frequencies_of(fit: &CoupledFit) -> BTreeMap<Ploidy, Vec<f64>> {
     fit.rates
         .iter()
         .map(|(&ploidy, estimate)| {
@@ -625,7 +625,7 @@ fn fit_by_alternation(
 #[derive(Clone, PartialEq, Debug)]
 struct ScoredIterate {
     rungs: BTreeMap<ReadGroupId, usize>,
-    genotype_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    genotype_frequencies: BTreeMap<Ploidy, Vec<f64>>,
     /// The whole-sample table's weighted log-likelihood at this iterate's rates **and** its
     /// frequencies.
     score: f64,
@@ -827,7 +827,7 @@ fn noise_from(
 fn climb_frequencies(
     cells_of_ploidy: &BTreeMap<Ploidy, Vec<Cell>>,
     noise: &SampleLibraryNoise,
-) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
+) -> BTreeMap<Ploidy, Vec<f64>> {
     let model = SubstitutionNoiseModel;
     let mut ln_likelihood_row_major: Vec<f64> = Vec::new();
     let mut cell_weights: Vec<f64> = Vec::new();
@@ -923,7 +923,7 @@ const SITE_NOISE_SHARE_TOLERANCE: f64 = 1e-12;
 pub(super) fn fit_site_noise(
     cells: &[Cell],
     libraries: &SampleLibraryNoise,
-    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    genotype_frequencies: &BTreeMap<Ploidy, Vec<f64>>,
     ladder: &[ErrorRate],
 ) -> SiteNoiseFit {
     assert!(!ladder.is_empty(), "a scan needs at least one rung to try");
@@ -982,7 +982,7 @@ pub(super) fn fit_site_noise(
 fn marginal_over_genotypes(
     cells: &[Cell],
     libraries: &SampleLibraryNoise,
-    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    genotype_frequencies: &BTreeMap<Ploidy, Vec<f64>>,
     noisy_rate: Option<f64>,
 ) -> Vec<f64> {
     let mut per_genotype = Vec::new();
@@ -1085,7 +1085,7 @@ fn score_at_share(clean: &[f64], noisy: &[f64], weights: &[f64], share: f64) -> 
 fn whole_sample_score(
     cells: &[Cell],
     noise: &SampleLibraryNoise,
-    genotype_frequencies: &BTreeMap<Ploidy, SmallVec<[f64; 3]>>,
+    genotype_frequencies: &BTreeMap<Ploidy, Vec<f64>>,
 ) -> LogProb {
     fit_by_fixed_frequency_scan(
         &SubstitutionNoiseModel,
@@ -1496,7 +1496,7 @@ mod tests {
             .keys()
             .map(|&group| (group, rung_of(&fit, &world.ladder, group.get())))
             .collect();
-        let reported_frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = fit
+        let reported_frequencies: BTreeMap<Ploidy, Vec<f64>> = fit
             .rates
             .iter()
             .map(|(&ploidy, estimate)| {
@@ -1556,7 +1556,7 @@ mod tests {
             rungs, start,
             "the round has to have moved the rates, or there is nothing to tell apart"
         );
-        let frequencies: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = capped
+        let frequencies: BTreeMap<Ploidy, Vec<f64>> = capped
             .rates
             .iter()
             .map(|(&ploidy, estimate)| {
@@ -2567,9 +2567,9 @@ mod tests {
         ladder[nearest_rung(&ladder, rate)].get()
     }
 
-    fn frequencies_of(values: [f64; 3]) -> BTreeMap<Ploidy, SmallVec<[f64; 3]>> {
-        let mut out: BTreeMap<Ploidy, SmallVec<[f64; 3]>> = BTreeMap::new();
-        out.insert(ploidy(2), SmallVec::from_slice(&values));
+    fn frequencies_of(values: [f64; 3]) -> BTreeMap<Ploidy, Vec<f64>> {
+        let mut out: BTreeMap<Ploidy, Vec<f64>> = BTreeMap::new();
+        out.insert(ploidy(2), values.to_vec());
         out
     }
 
