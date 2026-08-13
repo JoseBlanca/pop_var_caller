@@ -13,10 +13,10 @@
 //!
 //! **Under construction.** [`loci`] settles which loci every sample keeps, [`records`] what
 //! each writes down there, [`coverage`] fills the window summary they travel with, [`fit`] is
-//! the estimator — **the ordinary-position half of it** — and [`contamination`] is the share of
-//! a sample's reads that came from another individual, which no per-sample route can produce at
-//! all. **The repeat-tract half and the duplicated-stretch class are not in it yet**, and each
-//! module's own docs say what it does and does not do.
+//! the estimator — the ordinary positions, and positions a sample carries more copies of than
+//! the reference does — and [`contamination`] is the share of a sample's reads that came from
+//! another individual, which no per-sample route can produce at all. **The repeat-tract half is
+//! not in it yet**, and each module's own docs say what it does and does not do.
 
 pub mod contamination;
 pub mod coverage;

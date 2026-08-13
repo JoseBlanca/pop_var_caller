@@ -712,6 +712,15 @@ impl CoverageByWindow {
         &self.gc_curve
     }
 
+    /// **The sample's own median window depth — the scale every relative reading is against.**
+    ///
+    /// A duplicated stretch is *twice this sample's normal*, never an absolute depth, so
+    /// anything asking whether a window holds one copy or two divides by this first.
+    #[must_use]
+    pub fn median_depth(&self) -> f32 {
+        self.median_depth
+    }
+
     /// This window's mean depth, in reads a position.
     pub fn mean_depth(&self, window: usize) -> f32 {
         f32::from(self.depth[window]) * self.median_depth / WINDOW_DEPTH_SCALE

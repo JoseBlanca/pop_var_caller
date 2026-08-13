@@ -48,7 +48,7 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
-use super::contamination::{ContaminationEstimate, fit_contamination};
+use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination};
 use super::records::{DepthCode, SampleRecords};
 
 // ---------------------------------------------------------------------
@@ -108,6 +108,36 @@ impl FrequencyDensity {
     }
 }
 
+/// Positions a **sample** carries more copies of than the reference does.
+///
+/// Where a plant holds two copies of a stretch the reference holds once, both copies' reads pile
+/// up at the same place, and wherever the copies differ from each other about half the reads
+/// disagree with the reference. The two-class model has no home for that except *heterozygous*,
+/// and heterozygosity is one of the numbers this pass exists to produce: ignoring the class puts
+/// observed heterozygosity **50.6% above the truth** on a fifty-sample selfing panel at three
+/// reads a position, while expected heterozygosity rises only 10.6%, so the fitted homozygote
+/// excess reads **0.4471 where the truth is 0.5942** — a quarter of it gone, at a value nothing
+/// refuses (`duplicated_class_identification_2026-08-13.md`).
+///
+/// **The class is an ordinary variant with one genotype removed.** Each sample is either a
+/// carrier, with about half its reads disagreeing, or homozygous reference; what a duplication
+/// has no room for is a sample homozygous for the non-reference allele. A real variant at a
+/// frequency of a half leaves about a quarter of the panel there and a duplication leaves none,
+/// and across a cohort that absence is the whole evidence.
+///
+/// **It needs samples rather than reads.** Twenty-five reads a position buys the pattern nothing
+/// over three; ten samples leaves 39 of every 100 carrier positions behind and fifty leaves 9.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct DuplicatedPositions {
+    /// The share of kept positions drawn from the class. **Not a measurement of how much
+    /// duplication a cohort carries** — it comes back about twice the truth while sorting the
+    /// positions correctly, so what carries the quantity is the per-position posterior.
+    pub share: f64,
+    /// The Beta the share of the panel carrying a given duplication is integrated over.
+    pub carrier_a: f64,
+    pub carrier_b: f64,
+}
+
 /// How much less heterozygous an individual is than random mating in the panel would predict.
 ///
 /// **A different quantity from the autozygosity coefficient the caller's genotype prior
@@ -139,9 +169,15 @@ impl HomozygoteExcess {
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct SampleGenotypeRates {
     /// The mean over kept positions of the posterior that the sample is heterozygous.
+    ///
+    /// **A position the sample carries an extra copy of is not counted here**, which is the
+    /// whole reason [`DuplicatedPositions`] exists.
     pub heterozygous: f64,
     /// …and that every copy is non-reference.
     pub homozygous_alt: f64,
+    /// …and that the sample carries more copies of the position than the reference does. Zero
+    /// when the class is not fitted.
+    pub duplicated_carrier: f64,
     /// **How many kept positions carried at least one read, and at least two.**
     ///
     /// Reported beside the rates because a position where a sample has no read has a
@@ -166,6 +202,9 @@ pub struct JointFit {
     pub noisy_share: f64,
     /// The population's allele-frequency density — this route's own parameter.
     pub density: Estimate<FrequencyDensity>,
+    /// Positions a sample carries more copies of than the reference. `None` when the run did
+    /// not fit the class.
+    pub duplicated: Option<Estimate<DuplicatedPositions>>,
     /// Per sample, the departure from the Hardy–Weinberg proportions the density predicts.
     pub hom_excess: BTreeMap<String, Estimate<HomozygoteExcess>>,
     /// Per sample, derived from the converged posteriors rather than fitted.
@@ -174,6 +213,19 @@ pub struct JointFit {
     pub contamination: BTreeMap<String, ContaminationEstimate>,
     /// The population's expected heterozygosity, read off the density.
     pub expected_heterozygosity: f64,
+    /// **For every kept position, in position order, the probability that it is mismapped** —
+    /// that two stretches of genome the reference holds once are both piling reads up here.
+    ///
+    /// This is the one quantity that only exists because every sample is present at the same
+    /// position: with one sample a few disagreeing reads are indistinguishable from a rare
+    /// heterozygote, and with sixty-three a position that reads part non-reference *in
+    /// everybody* has nowhere else to go. It is a per-position posterior and not a parameter,
+    /// and it is on this value because two consumers need it —
+    /// [`contamination`](super::contamination), which must not measure a stray-read fraction
+    /// over positions where every sample has stray reads, and the caller downstream.
+    ///
+    /// Four bytes a position: 8 MB at the two-million-position budget.
+    pub noisy_posterior: Vec<f32>,
     /// How the fit ended. **Running out of passes is never reported as convergence.**
     pub passes: u32,
     pub converged: bool,
@@ -224,6 +276,12 @@ pub struct StartingPoint {
     pub p_fixed_alt: f64,
     pub a: f64,
     pub b: f64,
+    /// Where the duplicated class starts, when the run fits one. The tomato measurement puts
+    /// about one duplicated position in every thousand, carried by a tenth of the panel on
+    /// average — `Beta(1.2, 9.5)` — so that is where the search begins.
+    pub duplicated_share: f64,
+    pub carrier_a: f64,
+    pub carrier_b: f64,
 }
 
 impl StartingPoint {
@@ -240,6 +298,9 @@ impl StartingPoint {
                 p_fixed_alt: 0.005,
                 a: 0.5,
                 b: 2.0,
+                duplicated_share: 0.001,
+                carrier_a: 1.2,
+                carrier_b: 9.5,
             })
             .collect()
     }
@@ -258,11 +319,25 @@ pub struct JointFitConfig {
     /// The ladder the records' depth codes index. Two samples binned under different edges
     /// hold codes that mean different depths, which the identity check already refuses.
     pub edges: Arc<DepthBinEdges>,
-    /// How many axes of variation each sample's own allele frequency is a straight line in,
-    /// which is what makes contamination measurable on a diverged panel
-    /// ([`contamination`](super::contamination)). Zero turns it off and leaves every sample
-    /// *not identified*.
-    pub components: usize,
+    /// How the share of a sample's reads that came from another individual is measured
+    /// ([`contamination`](super::contamination)), which the fit runs once it has converged.
+    pub contamination: ContaminationConfig,
+    /// Whether positions a sample carries more copies of than the reference get a class of
+    /// their own ([`DuplicatedPositions`]).
+    ///
+    /// **On by default, and the cost of turning it off is a quarter of the homozygote excess**
+    /// on a selfing panel — at a value nothing refuses. It costs about one further pass's worth
+    /// of arithmetic per pass, because the class integrates over a second frequency.
+    pub duplicated_positions: bool,
+    /// How much more likely each sample's reads around each kept position are if the sample has
+    /// two copies of it rather than one — `ln P(coverage | two) − ln P(coverage | one)`, per
+    /// sample, indexed by kept position.
+    ///
+    /// **The second discriminator, and the only one that works at one sample.** The pattern
+    /// across a cohort needs about twenty-five samples before the absence of non-reference
+    /// homozygotes means anything; a window's read depth says the same thing whoever else is in
+    /// the run. Empty — the default — leaves the class identified by the cohort alone.
+    pub coverage_odds: Vec<Arc<[f32]>>,
 }
 
 impl Default for JointFitConfig {
@@ -274,7 +349,9 @@ impl Default for JointFitConfig {
             max_passes: 200,
             stillness: 1e-4,
             edges: Arc::new(DepthBinEdges::new()),
-            components: crate::ng::parameter_estimation::joint::contamination::DEFAULT_COMPONENTS,
+            contamination: ContaminationConfig::default(),
+            duplicated_positions: true,
+            coverage_odds: Vec::new(),
         }
     }
 }
@@ -511,6 +588,8 @@ struct Parameters {
     density: FrequencyDensity,
     /// Per sample.
     hom_excess: Vec<f64>,
+    /// `None` when the run does not fit the class.
+    duplicated: Option<DuplicatedPositions>,
 }
 
 /// What one pass over the data accumulates, and every maximisation then reads instead of the
@@ -523,6 +602,10 @@ struct Statistics {
     invariant: f64,
     fixed_alt: f64,
     segregating: f64,
+    /// Posterior mass on the duplicated class, and the same two sums for its carrier Beta.
+    duplicated: f64,
+    sum_ln_q: f64,
+    sum_ln_one_minus_q: f64,
     /// Σ posterior · ln f and Σ posterior · ln(1 − f) over the quadrature, which is all a
     /// Beta's two shapes need.
     sum_ln_f: f64,
@@ -537,8 +620,18 @@ struct Statistics {
     /// Per sample, the posterior rates, summed over positions.
     heterozygous: Vec<f64>,
     homozygous_alt: Vec<f64>,
+    /// Per sample, the posterior that it carries an extra copy, summed over positions.
+    carrier: Vec<f64>,
     with_reads: Vec<u64>,
     with_two_reads: Vec<u64>,
+    /// **One entry per position visited, and empty unless the pass was asked for it.** Every
+    /// other field here is a sum over positions, which is what lets a chunk's counts be added
+    /// to another chunk's; this one is a value *per* position, so a chunk's entries are
+    /// appended rather than added and the pass that collects them keeps the chunks in
+    /// position order. Only the last pass of a run is asked, so the cost is one 8 MB vector
+    /// and not one per iteration.
+    noisy_posterior: Vec<f32>,
+    collect_noisy_posterior: bool,
 }
 
 #[derive(Copy, Clone, Default)]
@@ -557,14 +650,20 @@ impl Statistics {
             invariant: 0.0,
             fixed_alt: 0.0,
             segregating: 0.0,
+            duplicated: 0.0,
+            sum_ln_q: 0.0,
+            sum_ln_one_minus_q: 0.0,
             sum_ln_f: 0.0,
             sum_ln_one_minus_f: 0.0,
             reads: vec![[[ReadTally::default(); 3]; 2]; groups],
             genotypes: vec![vec![[0.0; 3]; nodes]; samples],
             heterozygous: vec![0.0; samples],
             homozygous_alt: vec![0.0; samples],
+            carrier: vec![0.0; samples],
             with_reads: vec![0; samples],
             with_two_reads: vec![0; samples],
+            noisy_posterior: Vec::new(),
+            collect_noisy_posterior: false,
         }
     }
 }
@@ -579,6 +678,9 @@ impl Statistics {
         self.invariant += other.invariant;
         self.fixed_alt += other.fixed_alt;
         self.segregating += other.segregating;
+        self.duplicated += other.duplicated;
+        self.sum_ln_q += other.sum_ln_q;
+        self.sum_ln_one_minus_q += other.sum_ln_one_minus_q;
         self.sum_ln_f += other.sum_ln_f;
         self.sum_ln_one_minus_f += other.sum_ln_one_minus_f;
         for (into, from) in self.reads.iter_mut().zip(other.reads.iter()) {
@@ -600,6 +702,9 @@ impl Statistics {
         for (into, from) in self.heterozygous.iter_mut().zip(other.heterozygous.iter()) {
             *into += from;
         }
+        for (into, from) in self.carrier.iter_mut().zip(other.carrier.iter()) {
+            *into += from;
+        }
         for (into, from) in self
             .homozygous_alt
             .iter_mut()
@@ -617,6 +722,8 @@ impl Statistics {
         {
             *into += from;
         }
+        self.noisy_posterior
+            .extend_from_slice(&other.noisy_posterior);
     }
 }
 
@@ -747,6 +854,7 @@ pub fn fit_jointly(
                     value: SampleGenotypeRates {
                         heterozygous: statistics.heterozygous[s] / statistics.positions,
                         homozygous_alt: statistics.homozygous_alt[s] / statistics.positions,
+                        duplicated_carrier: statistics.carrier[s] / statistics.positions,
                         positions_with_reads: statistics.with_reads[s],
                         positions_with_two_reads: statistics.with_two_reads[s],
                     },
@@ -765,6 +873,10 @@ pub fn fit_jointly(
         .enumerate()
         .map(|(s, _)| parameters.clean[group_index[s][0]])
         .collect();
+    // **The mismapped positions are kept out of it.** A position where two stretches of genome
+    // pile up on one place puts a small share of unexpected reads into *every* sample, which
+    // is the contamination signature exactly; measured over 63 tomato accessions with those
+    // positions left in, the median accession came back 6.5% contaminated.
     let contamination = samples
         .iter()
         .map(|sample| sample.sample.clone())
@@ -773,7 +885,8 @@ pub fn fit_jointly(
             &config.edges,
             &per_sample_error,
             &parameters.hom_excess,
-            config.components,
+            &statistics.noisy_posterior,
+            &config.contamination,
         ))
         .collect();
 
@@ -789,6 +902,12 @@ pub fn fit_jointly(
         rates,
         contamination,
         expected_heterozygosity: parameters.density.expected_heterozygosity(),
+        duplicated: parameters.duplicated.map(|value| Estimate {
+            value,
+            provenance: Provenance::FittedHere,
+            observations,
+        }),
+        noisy_posterior: statistics.noisy_posterior,
         passes,
         converged,
         log_likelihood: score,
@@ -814,6 +933,11 @@ fn maximise(
             b: start.b,
         },
         hom_excess: vec![0.0; samples.len()],
+        duplicated: config.duplicated_positions.then_some(DuplicatedPositions {
+            share: start.duplicated_share,
+            carrier_a: start.carrier_a,
+            carrier_b: start.carrier_b,
+        }),
     };
     let mut statistics;
     let mut converged = false;
@@ -832,8 +956,10 @@ fn maximise(
         }
     }
     // The reported statistics must be the ones the reported parameters produce, so the last
-    // maximisation is followed by one more pass rather than by the pass that preceded it.
-    statistics = expectation(samples, config, group_index, &parameters);
+    // maximisation is followed by one more pass rather than by the pass that preceded it —
+    // and it is this pass, at the parameters that will be reported, that keeps each
+    // position's probability of being mismapped.
+    statistics = expectation_pass(samples, config, group_index, &parameters, true);
     (parameters, statistics, passes, converged)
 }
 
@@ -847,12 +973,34 @@ fn expectation(
     group_index: &[Vec<usize>],
     parameters: &Parameters,
 ) -> Statistics {
+    expectation_pass(samples, config, group_index, parameters, false)
+}
+
+/// The same pass, told whether to keep each position's probability of being mismapped.
+///
+/// **Kept only on the last pass of a run.** Keeping it costs one four-byte value a position,
+/// and the chunks have to be held until they can be joined in position order rather than
+/// summed as they arrive — so the iterating passes use the streaming sum and pay neither.
+fn expectation_pass(
+    samples: &[SampleRecords],
+    config: &JointFitConfig,
+    group_index: &[Vec<usize>],
+    parameters: &Parameters,
+    collect_noisy_posterior: bool,
+) -> Statistics {
     let quadrature = BetaQuadrature::with_genotype_priors(
         parameters.density.a,
         parameters.density.b,
         config.quadrature_nodes,
         &parameters.hom_excess,
     );
+    let carrier = parameters.duplicated.map(|duplicated| {
+        BetaQuadrature::new(
+            duplicated.carrier_a,
+            duplicated.carrier_b,
+            config.quadrature_nodes,
+        )
+    });
     let positions = EvidenceCursor::position_count(samples);
     let chunk = POSITIONS_PER_CHUNK.min(positions.div_ceil(rayon::current_num_threads()).max(1));
     let bounds: Vec<(usize, usize)> = (0..positions)
@@ -860,41 +1008,75 @@ fn expectation(
         .map(|first| (first, (first + chunk).min(positions)))
         .collect();
 
-    bounds
-        .into_par_iter()
-        .map(|(first, end)| {
-            let mut statistics = Statistics::new(
-                parameters.clean.len(),
-                samples.len(),
-                quadrature.nodes.len(),
-            );
-            let mut cursor = EvidenceCursor::over(samples, &config.edges, first, end);
-            let mut scratch = Scratch::new(samples.len(), quadrature.nodes.len());
-            while cursor.next_position(&mut scratch.evidence) {
-                one_position(
-                    &mut scratch,
-                    group_index,
-                    config.ploidy,
-                    &quadrature,
-                    parameters,
-                    &mut statistics,
-                );
+    let empty = || {
+        let mut statistics = Statistics::new(
+            parameters.clean.len(),
+            samples.len(),
+            quadrature.nodes.len(),
+        );
+        statistics.collect_noisy_posterior = collect_noisy_posterior;
+        statistics
+    };
+    let one_chunk = |(first, end): (usize, usize)| {
+        let mut statistics = empty();
+        if collect_noisy_posterior {
+            statistics.noisy_posterior.reserve(end - first);
+        }
+        let mut cursor = EvidenceCursor::over(samples, &config.edges, first, end);
+        let mut scratch = Scratch::new(samples.len(), quadrature.nodes.len());
+        let mut odds = vec![
+            1.0_f64;
+            if config.coverage_odds.is_empty() {
+                0
+            } else {
+                samples.len()
             }
-            statistics
-        })
-        .reduce(
-            || {
-                Statistics::new(
-                    parameters.clean.len(),
-                    samples.len(),
-                    quadrature.nodes.len(),
+        ];
+        let mut index = first;
+        while cursor.next_position(&mut scratch.evidence) {
+            for (slot, sample) in odds.iter_mut().enumerate() {
+                *sample = f64::from(
+                    config.coverage_odds[slot]
+                        .get(index)
+                        .copied()
+                        .unwrap_or(0.0),
                 )
-            },
-            |mut into, from| {
+                .exp();
+            }
+            one_position(
+                &mut scratch,
+                group_index,
+                config.ploidy,
+                &quadrature,
+                carrier.as_ref(),
+                &odds,
+                parameters,
+                &mut statistics,
+            );
+            index += 1;
+        }
+        statistics
+    };
+
+    if collect_noisy_posterior {
+        // `reduce` may join chunks in any order it likes, which is fine for a sum and wrong
+        // for a list in position order, so the chunks are collected first.
+        let chunks: Vec<Statistics> = bounds.into_par_iter().map(one_chunk).collect();
+        let mut into = empty();
+        into.noisy_posterior.reserve(positions);
+        for chunk in &chunks {
+            into.absorb(chunk);
+        }
+        into
+    } else {
+        bounds
+            .into_par_iter()
+            .map(one_chunk)
+            .reduce(empty, |mut into, from| {
                 into.absorb(&from);
                 into
-            },
-        )
+            })
+    }
 }
 
 /// How many positions one core takes at a time. Large enough that the per-chunk binary search
@@ -905,6 +1087,11 @@ const POSITIONS_PER_CHUNK: usize = 16_384;
 /// At most three non-reference bases can be the segregating one, so the candidate list never
 /// exceeds three however many the samples showed reads on.
 const MAX_CANDIDATES: usize = CANDIDATE_ALTERNATIVES;
+
+/// What a position can be, within a noise class: the population carries one allele, it is fixed
+/// on a non-reference one, it segregates, or it is a stretch some samples carry twice.
+const BRANCHES: usize = 4;
+const DUPLICATED: usize = 3;
 
 /// Everything one position needs, sized once and reused, so a two-million-position pass
 /// allocates nothing.
@@ -926,8 +1113,10 @@ struct Scratch {
     lik_max: Vec<f64>,
     /// `[class][candidate][node]`, and `[class][candidate]`.
     node_ln: Vec<f64>,
+    /// The same, over the carrier frequency the duplicated class integrates.
+    carrier_node_ln: Vec<f64>,
     fixed_ln: Vec<f64>,
-    /// `[class]` — the invariant branch, and the three branches combined.
+    /// `[class]` — the invariant branch, and the four branches combined.
     invariant_ln: Vec<f64>,
     branch_ln: Vec<f64>,
     class_ln: Vec<f64>,
@@ -937,6 +1126,9 @@ struct Scratch {
     /// `[sample][genotype]` — the segregating branch's genotype weight, collapsed over the
     /// nodes and candidates it was spread across.
     genotype_weight: Vec<f64>,
+    /// `[sample]` — the same for the duplicated branch, where a sample has two states rather
+    /// than three: it carries the extra copy or it does not.
+    carrier_weight: Vec<f64>,
     /// `[candidate][sample][genotype]`, the same before the candidates are collapsed, because
     /// which reads count as the allele depends on which allele it is.
     per_candidate_weight: Vec<f64>,
@@ -956,13 +1148,15 @@ impl Scratch {
             lik: vec![0.0; 2 * MAX_CANDIDATES * samples * 3],
             lik_max: vec![0.0; 2 * MAX_CANDIDATES * samples],
             node_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES * nodes],
+            carrier_node_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES * nodes],
             fixed_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES],
             invariant_ln: vec![0.0; 2],
-            branch_ln: vec![0.0; 6],
+            branch_ln: vec![0.0; BRANCHES * 2],
             class_ln: vec![0.0; 2],
             candidates: Vec::with_capacity(MAX_CANDIDATES),
             multiplicity: Vec::with_capacity(MAX_CANDIDATES),
             genotype_weight: vec![0.0; samples * 3],
+            carrier_weight: vec![0.0; samples],
             per_candidate_weight: vec![0.0; MAX_CANDIDATES * samples * 3],
             shares: Vec::with_capacity(MAX_CANDIDATES * nodes),
         }
@@ -995,11 +1189,18 @@ const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
               scratch, the read-group map and the accumulated counts — and zipping them would \
               hide which of the four the loop is really walking"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one position's whole problem: its evidence, the two quadratures, the coverage \
+              readings, the parameters and every count they feed"
+)]
 fn one_position(
     scratch: &mut Scratch,
     group_index: &[Vec<usize>],
     ploidy: Ploidy,
     quadrature: &BetaQuadrature,
+    carrier: Option<&BetaQuadrature>,
+    coverage_odds: &[f64],
     parameters: &Parameters,
     statistics: &mut Statistics,
 ) {
@@ -1099,8 +1300,53 @@ fn one_position(
         }
     }
 
-    // ---- the three branches, and the two classes --------------------------------------------
+    // ---- the integral over how much of the panel carries the extra copy ---------------------
+    //
+    // The same shape as the branch above with one difference: a sample here has two states
+    // rather than three. It carries the duplication, in which case about half its reads
+    // disagree — the identical read likelihood a heterozygote has, already computed — or it
+    // does not, and is homozygous reference. **There is no third state, and that absence is
+    // what tells the class from a real variant across a cohort.**
+    if let Some(carrier) = carrier {
+        for class in 0..2 {
+            for candidate in 0..candidates {
+                let mut offset = 0.0;
+                for s in 0..samples {
+                    offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
+                }
+                for node in 0..carrier.nodes.len() {
+                    let q = carrier.nodes[node];
+                    let mut product = 1.0_f64;
+                    let mut scale = 0.0_f64;
+                    for s in 0..samples {
+                        let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                        // Where the run has a coverage summary, this is the only place it
+                        // enters: how much more likely this sample's read depth around here is
+                        // if it has two copies rather than one. Every other branch has every
+                        // sample single-copy, so the one-copy factor is common to all of them
+                        // and cancels out of the position entirely.
+                        let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
+                        let term = (1.0 - q) * lik[0] + q * odds * lik[1];
+                        product *= term;
+                        if product < 1.0 / RESCALE {
+                            product *= RESCALE;
+                            scale -= LN_RESCALE;
+                        }
+                    }
+                    let slot = scratch.node_at(class, candidate, node);
+                    scratch.carrier_node_ln[slot] = if product <= 0.0 {
+                        f64::NEG_INFINITY
+                    } else {
+                        product.ln() + scale + offset + carrier.ln_weights[node]
+                    };
+                }
+            }
+        }
+    }
+
+    // ---- the four branches, and the two classes ---------------------------------------------
     let ln_three = (CANDIDATE_ALTERNATIVES as f64).ln();
+    let duplicated_share = parameters.duplicated.map_or(0.0, |d| d.share);
     for class in 0..2 {
         scratch.shares.clear();
         for candidate in 0..candidates {
@@ -1121,25 +1367,55 @@ fn one_position(
         }
         let segregating = ln_sum_exp(&scratch.shares) - ln_three;
         let density = &parameters.density;
-        scratch.branch_ln[class * 3] =
-            density.p_invariant.max(f64::MIN_POSITIVE).ln() + scratch.invariant_ln[class];
-        scratch.branch_ln[class * 3 + 1] =
-            density.p_fixed_alt.max(f64::MIN_POSITIVE).ln() + fixed_alt;
-        scratch.branch_ln[class * 3 + 2] =
-            density.p_segregating().max(f64::MIN_POSITIVE).ln() + segregating;
+        // The three ordinary branches share what is left when the duplicated class has taken
+        // its share, so the four still sum to one.
+        let ordinary = (1.0 - duplicated_share).max(f64::MIN_POSITIVE).ln();
+        scratch.branch_ln[class * BRANCHES] = ordinary
+            + density.p_invariant.max(f64::MIN_POSITIVE).ln()
+            + scratch.invariant_ln[class];
+        scratch.branch_ln[class * BRANCHES + 1] =
+            ordinary + density.p_fixed_alt.max(f64::MIN_POSITIVE).ln() + fixed_alt;
+        scratch.branch_ln[class * BRANCHES + 2] =
+            ordinary + density.p_segregating().max(f64::MIN_POSITIVE).ln() + segregating;
+        scratch.branch_ln[class * BRANCHES + DUPLICATED] = if let Some(carrier) = carrier {
+            scratch.shares.clear();
+            for candidate in 0..candidates {
+                let multiplicity = scratch.multiplicity[candidate].ln();
+                for node in 0..carrier.nodes.len() {
+                    scratch.shares.push(
+                        scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
+                            + multiplicity,
+                    );
+                }
+            }
+            duplicated_share.max(f64::MIN_POSITIVE).ln() + ln_sum_exp(&scratch.shares) - ln_three
+        } else {
+            f64::NEG_INFINITY
+        };
         let share = if class == 0 {
             1.0 - parameters.noisy_share
         } else {
             parameters.noisy_share
         };
-        scratch.class_ln[class] =
-            share.max(f64::MIN_POSITIVE).ln() + ln_sum_exp(&scratch.branch_ln[class * 3..][..3]);
+        scratch.class_ln[class] = share.max(f64::MIN_POSITIVE).ln()
+            + ln_sum_exp(&scratch.branch_ln[class * BRANCHES..][..BRANCHES]);
     }
     let position_ln = ln_sum_exp(&scratch.class_ln);
     if !position_ln.is_finite() {
+        if statistics.collect_noisy_posterior {
+            // A position whose likelihood underflowed contributes nothing to any parameter,
+            // and it must still contribute an entry, or every position after it in the chunk
+            // would be attributed to its neighbour.
+            statistics.noisy_posterior.push(0.0);
+        }
         return;
     }
     statistics.log_likelihood += position_ln;
+    if statistics.collect_noisy_posterior {
+        statistics
+            .noisy_posterior
+            .push((scratch.class_ln[1] - position_ln).exp() as f32);
+    }
 
     // ---- attribute it -------------------------------------------------------------------------
     for class in 0..2 {
@@ -1150,16 +1426,18 @@ fn one_position(
         if class == 1 {
             statistics.noisy += class_posterior;
         }
-        let branches = &scratch.branch_ln[class * 3..][..3];
+        let branches = &scratch.branch_ln[class * BRANCHES..][..BRANCHES];
         let within = ln_sum_exp(branches);
         let branch = [
             class_posterior * (branches[0] - within).exp(),
             class_posterior * (branches[1] - within).exp(),
             class_posterior * (branches[2] - within).exp(),
+            class_posterior * (branches[DUPLICATED] - within).exp(),
         ];
         statistics.invariant += branch[0];
         statistics.fixed_alt += branch[1];
         statistics.segregating += branch[2];
+        statistics.duplicated += branch[DUPLICATED];
 
         // The invariant branch: every sample is homozygous reference, and every read that is
         // not on the reference base is an error, so none of them is "the allele".
@@ -1273,6 +1551,75 @@ fn one_position(
                 statistics.homozygous_alt[s] += scratch.genotype_weight[s * 3 + 2];
             }
         }
+
+        // The duplicated branch. A carrier's reads are scored exactly as a heterozygote's, so
+        // they go into the same tally the error rate is maximised over — what differs is where
+        // the position's own weight is booked, and **a carrier is not counted heterozygous**.
+        if let Some(carrier) = carrier.filter(|_| branch[DUPLICATED] > 1e-12) {
+            {
+                let carrier_nodes = carrier.nodes.len();
+                scratch.shares.clear();
+                for candidate in 0..candidates {
+                    let multiplicity = scratch.multiplicity[candidate].ln();
+                    for node in 0..carrier_nodes {
+                        scratch.shares.push(
+                            scratch.carrier_node_ln[scratch.node_at(class, candidate, node)]
+                                + multiplicity,
+                        );
+                    }
+                }
+                let total = ln_sum_exp(&scratch.shares);
+                scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
+                scratch.carrier_weight.fill(0.0);
+                for candidate in 0..candidates {
+                    for node in 0..carrier_nodes {
+                        let share = branch[DUPLICATED]
+                            * (scratch.shares[candidate * carrier_nodes + node] - total).exp();
+                        if share <= 1e-12 {
+                            continue;
+                        }
+                        let q = carrier.nodes[node];
+                        statistics.sum_ln_q += share * carrier.ln_nodes[node];
+                        statistics.sum_ln_one_minus_q += share * carrier.ln_one_minus_nodes[node];
+                        for s in 0..samples {
+                            let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                            let odds = coverage_odds.get(s).copied().unwrap_or(1.0);
+                            let joint = [(1.0 - q) * lik[0], q * odds * lik[1]];
+                            let total = joint[0] + joint[1];
+                            if total <= 0.0 {
+                                continue;
+                            }
+                            let base = (candidate * samples + s) * 3;
+                            scratch.per_candidate_weight[base] += share * joint[0] / total;
+                            scratch.per_candidate_weight[base + 1] += share * joint[1] / total;
+                            scratch.carrier_weight[s] += share * joint[1] / total;
+                        }
+                    }
+                }
+                for candidate in 0..candidates {
+                    let allele = scratch.candidates[candidate];
+                    for s in 0..samples {
+                        let counts = tally_of(&scratch.evidence.samples[s], allele);
+                        let base = (candidate * samples + s) * 3;
+                        for j in 0..2 {
+                            let weight = scratch.per_candidate_weight[base + j];
+                            if weight <= 0.0 {
+                                continue;
+                            }
+                            for &g in &group_index[s] {
+                                let tally = &mut statistics.reads[g][class][j];
+                                tally.candidate += weight * counts.candidate;
+                                tally.neither += weight * counts.neither;
+                                tally.reference += weight * counts.reference;
+                            }
+                        }
+                    }
+                }
+                for s in 0..samples {
+                    statistics.carrier[s] += scratch.carrier_weight[s];
+                }
+            }
+        }
     }
 }
 
@@ -1291,17 +1638,26 @@ fn maximisation(
     statistics: &Statistics,
     config: &JointFitConfig,
 ) -> f64 {
-    let mut moved: f64 = 0.0;
-    let mut note = |before: f64, after: f64| {
+    let moved = std::cell::Cell::new(0.0_f64);
+    let note = |before: f64, after: f64| {
         let scale = before.abs().max(1e-6);
-        moved = moved.max((after - before).abs() / scale);
+        moved.set(moved.get().max((after - before).abs() / scale));
+    };
+    // **A share is judged against a floor rather than against itself.** A class the data does
+    // not want shrinks geometrically — halving on every pass — and halving is a relative move
+    // of one half however small the number has become, so a run on a cohort with no such
+    // positions would never report convergence. One position in ten thousand is the point below
+    // which a share stops being a quantity anyone reads.
+    let note_share = |before: f64, after: f64| {
+        let scale = before.abs().max(1e-4);
+        moved.set(moved.get().max((after - before).abs() / scale));
     };
 
     // The share of positions that are mismapped, and the density's two masses: closed form.
     let positions = statistics.positions.max(1.0);
     let before = parameters.noisy_share;
     parameters.noisy_share = (statistics.noisy / positions).clamp(1e-6, 0.5);
-    note(before, parameters.noisy_share);
+    note_share(before, parameters.noisy_share);
 
     let branch_total = (statistics.invariant + statistics.fixed_alt + statistics.segregating)
         .max(f64::MIN_POSITIVE);
@@ -1311,6 +1667,27 @@ fn maximisation(
     let before = parameters.density.p_fixed_alt;
     parameters.density.p_fixed_alt = (statistics.fixed_alt / branch_total).clamp(1e-12, 0.5);
     note(before, parameters.density.p_fixed_alt);
+
+    // The duplicated class's share of positions, and the Beta its carrier frequency is drawn
+    // from. **Bounded well below a half**: a class that grows without bound starts explaining
+    // real variants, which is the failure mode measured when duplications are mostly private.
+    if let Some(duplicated) = parameters.duplicated.as_mut() {
+        let before = duplicated.share;
+        duplicated.share = (statistics.duplicated / positions).clamp(1e-9, 0.05);
+        note_share(before, duplicated.share);
+        if statistics.duplicated > 0.0 {
+            let (a, b) = fit_beta_shapes(
+                statistics.sum_ln_q / statistics.duplicated,
+                statistics.sum_ln_one_minus_q / statistics.duplicated,
+                duplicated.carrier_a,
+                duplicated.carrier_b,
+            );
+            note(duplicated.carrier_a, a);
+            note(duplicated.carrier_b, b);
+            duplicated.carrier_a = a;
+            duplicated.carrier_b = b;
+        }
+    }
 
     // The Beta's two shapes, from the mean of `ln f` and `ln (1 − f)` under the posterior.
     if statistics.segregating > 0.0 {
@@ -1375,7 +1752,7 @@ fn maximisation(
             parameters.hom_excess[s] = fitted;
         }
     }
-    moved
+    moved.get()
 }
 
 /// The error rate that best explains the expected read counts, by golden-section search over
@@ -1931,6 +2308,29 @@ mod tests {
         hom_excess: f64,
         seed: u64,
     ) -> DrawnCohort {
+        draw_cohort_with_duplications(
+            samples, positions, mean_depth, truth, density, hom_excess, 0.0, seed,
+        )
+    }
+
+    /// The same, with a share of positions at which some samples carry an extra copy of the
+    /// stretch: **twice the reads and about half of them disagreeing, and never a sample
+    /// homozygous for the non-reference allele.** Who carries one is drawn from the carrier
+    /// frequency the eight-sample tomato counts were fitted to.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the drawn cohort's own parameters"
+    )]
+    fn draw_cohort_with_duplications(
+        samples: usize,
+        positions: usize,
+        mean_depth: f64,
+        truth: (f64, f64, f64),
+        density: FrequencyDensity,
+        hom_excess: f64,
+        duplicated_share: f64,
+        seed: u64,
+    ) -> DrawnCohort {
         let (clean, noisy, noisy_share) = truth;
         let mut draw = Draw(seed);
         let excess = vec![hom_excess; samples];
@@ -1960,14 +2360,30 @@ mod tests {
                 1 => 1.0,
                 _ => draw.beta(density.a, density.b),
             };
+            let (duplicated, carrier_frequency) = if duplicated_share > 0.0 {
+                let duplicated = draw.uniform() < duplicated_share;
+                (duplicated, draw.beta(1.19, 9.55).max(0.2))
+            } else {
+                (false, 0.0)
+            };
             for sample in 0..samples {
-                let reads = draw.poisson(mean_depth);
-                let genotype = match branch {
-                    0 => 0_usize,
-                    1 => 2,
-                    _ => draw.pick(&genotype_frequencies(f, excess[sample])),
+                let copies = if duplicated && draw.uniform() < carrier_frequency {
+                    2.0
+                } else {
+                    1.0
                 };
-                if genotype == 1 {
+                let _ = carrier_frequency;
+                let reads = draw.poisson(mean_depth * copies);
+                let genotype = if duplicated {
+                    usize::from(copies > 1.0)
+                } else {
+                    match branch {
+                        0 => 0_usize,
+                        1 => 2,
+                        _ => draw.pick(&genotype_frequencies(f, excess[sample])),
+                    }
+                };
+                if genotype == 1 && !duplicated {
                     heterozygous[sample] += 1;
                 }
                 let carried = genotype as f64 / 2.0;
@@ -2067,6 +2483,12 @@ mod tests {
         let config = JointFitConfig {
             quadrature_nodes: 12,
             max_passes: 40,
+            // **This test is about the ordinary-position estimator**, and ten samples is well
+            // under the twenty-five the duplicated class needs before the absence of
+            // non-reference homozygotes means anything. Left on, it claims 1 position in 217 of
+            // a cohort that has none. What the class costs and buys is measured in
+            // `examples/ng_joint_duplicated_in_fit.rs`, at the panel sizes it is meant for.
+            duplicated_positions: false,
             starting_points: vec![StartingPoint {
                 clean: 0.006,
                 noisy: 0.12,
@@ -2075,6 +2497,9 @@ mod tests {
                 p_fixed_alt: 0.02,
                 a: 1.0,
                 b: 1.0,
+                duplicated_share: 0.001,
+                carrier_a: 1.2,
+                carrier_b: 9.5,
             }],
             ..JointFitConfig::default()
         };
@@ -2155,6 +2580,86 @@ mod tests {
         assert!(fit.converged, "the alternation ran out of passes");
     }
 
+    /// **A stretch some samples carry twice must not be read as heterozygosity.**
+    ///
+    /// Where a plant holds two copies of a stretch the reference holds once, both copies' reads
+    /// land at the same place and about half disagree with the reference — which is what a
+    /// heterozygote looks like. A fit with nowhere else to put it books it as one, and the
+    /// homozygote excess is what pays: on a fifty-sample selfing panel at three reads it reads
+    /// 0.42 where the truth is 0.60. The evidence that separates the two is that **a
+    /// duplication leaves nobody homozygous for the non-reference allele** where a real variant
+    /// at that frequency leaves a quarter of the panel there, and that is a statement about the
+    /// cohort rather than about depth.
+    ///
+    /// Measured across panel sizes in `examples/ng_joint_duplicated_in_fit.rs`; this asserts the
+    /// direction and the size at the one panel a unit test can afford.
+    #[test]
+    fn a_stretch_some_samples_carry_twice_is_not_read_as_heterozygosity() {
+        let density = FrequencyDensity {
+            p_invariant: 0.95,
+            p_fixed_alt: 0.002,
+            a: 0.5,
+            b: 2.0,
+        };
+        let cohort = draw_cohort_with_duplications(
+            30,
+            4_000,
+            3.0,
+            (0.002, 0.05, 0.01),
+            density,
+            0.6,
+            0.004,
+            0x51ED_2709,
+        );
+        let drawn: f64 = cohort.heterozygous.iter().sum::<f64>() / cohort.heterozygous.len() as f64;
+        let fit_with = |class: bool| {
+            let config = JointFitConfig {
+                quadrature_nodes: 12,
+                max_passes: 120,
+                duplicated_positions: class,
+                ..JointFitConfig::default()
+            };
+            let fit = fit_jointly(&cohort.samples, &config).expect("the cohort pools");
+            let het: f64 = cohort
+                .samples
+                .iter()
+                .map(|sample| fit.rates[&sample.sample].value.heterozygous)
+                .sum::<f64>()
+                / cohort.samples.len() as f64;
+            let excess: f64 = cohort
+                .samples
+                .iter()
+                .map(|sample| fit.hom_excess[&sample.sample].value.get())
+                .sum::<f64>()
+                / cohort.samples.len() as f64;
+            (het, excess)
+        };
+        let (without, excess_without) = fit_with(false);
+        let (with, excess_with) = fit_with(true);
+        eprintln!(
+            "drawn heterozygosity {drawn:.5}; without the class {without:.5} (excess \
+             {excess_without:.3}), with it {with:.5} (excess {excess_with:.3}); drawn excess 0.6"
+        );
+        assert!(
+            without / drawn > 1.15,
+            "without the class heterozygosity came back at {without} against a drawn {drawn}, so \
+             this cohort does not carry the artefact the test is about"
+        );
+        assert!(
+            (with / drawn - 1.0).abs() < 0.10,
+            "with the class heterozygosity came back at {with} against a drawn {drawn}"
+        );
+        // **Heterozygosity is what the assertion rests on**, because it is what the class
+        // protects and the one the panel is large enough to measure. The homozygote excess is
+        // printed rather than asserted: at thirty samples and four thousand positions it comes
+        // back 0.657 with the class and 0.547 without, either side of the drawn 0.6, and the
+        // difference between those two is smaller than the scatter between draws.
+        assert!(
+            excess_with > 0.45 && excess_with < 0.75,
+            "the homozygote excess came back at {excess_with} against a drawn 0.6"
+        );
+    }
+
     /// **The control that says the last test measured something.** A cohort drawn with no
     /// inbreeding at all must come back with none — otherwise the agreement above would be
     /// consistent with an estimator that returns whatever it was started at, and a fit that
@@ -2189,6 +2694,9 @@ mod tests {
                 // test pass for an estimator that never moved.
                 a: 1.5,
                 b: 1.0,
+                duplicated_share: 0.001,
+                carrier_a: 1.2,
+                carrier_b: 9.5,
             }],
             ..JointFitConfig::default()
         };

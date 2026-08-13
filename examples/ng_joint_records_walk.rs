@@ -55,7 +55,9 @@ use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationEstimate;
+use pop_var_caller::ng::parameter_estimation::joint::contamination::{
+    ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
+};
 use pop_var_caller::ng::parameter_estimation::joint::coverage::{
     CoverageAccumulator, CoverageGrid,
 };
@@ -271,7 +273,35 @@ fn main() {
         println!("\nkept positions   {path}");
     }
 
-    fit_the_cohort(&cohort);
+    // **The second discriminator for the duplicated class, and the only one that works at
+    // three samples.** A plant carrying two copies of a stretch the reference holds once
+    // collects twice the reads around it. The cohort pattern — a position where the carriers
+    // are all at a half and nobody is homozygous for the non-reference allele — needs about
+    // twenty-five samples before that absence means anything; a window's depth says the same
+    // thing whoever else is in the run. This turns each sample's coverage summary into
+    // `ln P(this depth | two copies) − ln P(this depth | one)` at every kept position.
+    // **Off unless asked for**, because the GC correction below is missing: on tomato, where
+    // coverage runs from 16.2 reads a base at 20% GC to 29.0 at 36%, an uncorrected reading is
+    // mostly GC content. On the human trio's benchmark regions at 300 reads a position it is
+    // the only discriminator there is, three samples being far below the twenty-five the
+    // cohort pattern needs.
+    let coverage_odds = if std::env::var("COVERAGE_DISCRIMINATOR").is_ok() {
+        let odds = coverage_odds(&cohort, &grid, kept.generic());
+        let loud = odds
+            .first()
+            .map_or(0, |sample| sample.iter().filter(|o| **o > 0.0).count());
+        println!(
+            "\ncoverage odds    built for {} samples; {loud} of {} positions read more like two \
+             copies than one in the first sample",
+            odds.len(),
+            kept.generic().len()
+        );
+        odds
+    } else {
+        Vec::new()
+    };
+
+    fit_the_cohort(&cohort, coverage_odds);
 
     println!(
         "\ntotal            {:.1} s",
@@ -286,11 +316,15 @@ fn main() {
 /// position stay apart, where the population's frequency density lands, and what each sample's
 /// heterozygosity comes out at with the count of positions that actually carried a read beside
 /// it.
-fn fit_the_cohort(cohort: &[SampleRecords]) {
+fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) {
     println!("\n--- the joint fit, ordinary positions ---");
     let at = Instant::now();
     let config = JointFitConfig {
         quadrature_nodes: 12,
+        coverage_odds,
+        // The shipped default, unless the run says otherwise — a run comparing contamination
+        // against an earlier one wants the rest of the fit held still.
+        duplicated_positions: std::env::var("DUPLICATED_CLASS").as_deref() != Ok("0"),
         ..JointFitConfig::default()
     };
     let fit = match fit_jointly(cohort, &config) {
@@ -327,6 +361,14 @@ fn fit_the_cohort(cohort: &[SampleRecords]) {
         fit.density.value.a,
         fit.density.value.b
     );
+    match &fit.duplicated {
+        Some(duplicated) => println!(
+            "  positions a sample carries an extra copy of {:.5}; the share of the panel carrying \
+             one is Beta({:.3}, {:.3})",
+            duplicated.value.share, duplicated.value.carrier_a, duplicated.value.carrier_b
+        ),
+        None => println!("  the duplicated class was not fitted"),
+    }
     println!(
         "  the population's expected heterozygosity {:.5} ({:.3} per kilobase)",
         fit.expected_heterozygosity,
@@ -393,6 +435,154 @@ fn fit_the_cohort(cohort: &[SampleRecords]) {
             println!("      {name:<24}{alpha:>8.4}   supplies {leverage:.3} of its own frequency");
         }
     }
+
+    // **What excluding the mismapped positions is worth, on this cohort.** A position where two
+    // stretches of genome the reference holds once both pile reads up puts a small share of
+    // unexpected reads into every sample at once, which is the contamination signature exactly.
+    // The fit says how likely each position is to be one; the arms below are that judgement
+    // used and ignored, crossed with the three readings of where a sample stands on the panel's
+    // axes while its own fraction is searched for. The drawn control that says which arm to
+    // believe is `examples/ng_joint_contamination_control.rs`.
+    let condemned = fit.noisy_posterior.iter().filter(|p| **p > 0.5).count();
+    println!(
+        "\n  {condemned} of {} positions are more likely mismapped than not",
+        fit.noisy_posterior.len()
+    );
+    let error: Vec<f64> = cohort
+        .iter()
+        .map(|sample| {
+            let group = *sample.generic.keys().next().expect("a read group");
+            fit.noise[&group].value.clean
+        })
+        .collect();
+    let excess: Vec<f64> = cohort
+        .iter()
+        .map(|sample| fit.hom_excess[&sample.sample].value.get())
+        .collect();
+    println!(
+        "\n  {:<44}{:>10}{:>10}{:>10}{:>10}",
+        "", "markers", "median", "highest", "lowest"
+    );
+    for keep_mismapped in [true, false] {
+        for own in [
+            OwnCoordinates::AsRead,
+            OwnCoordinates::UndoneByAlpha,
+            OwnCoordinates::MaximisedFreely,
+        ] {
+            let at = Instant::now();
+            let settings = ContaminationConfig {
+                max_noisy_posterior: if keep_mismapped { 1.0 } else { 0.5 },
+                weight_by_posterior: !keep_mismapped,
+                own_coordinates: own,
+                ..ContaminationConfig::default()
+            };
+            let estimates = fit_contamination(
+                cohort,
+                &config.edges,
+                &error,
+                &excess,
+                &fit.noisy_posterior,
+                &settings,
+            );
+            let mut values: Vec<f64> = estimates
+                .iter()
+                .filter_map(|estimate| match estimate {
+                    ContaminationEstimate::Estimated { alpha, .. } => Some(*alpha),
+                    ContaminationEstimate::NotIdentified { .. } => None,
+                })
+                .collect();
+            values.sort_by(f64::total_cmp);
+            if values.is_empty() {
+                continue;
+            }
+            let markers = estimates
+                .iter()
+                .find_map(|estimate| match estimate {
+                    ContaminationEstimate::Estimated { markers, .. } => Some(*markers),
+                    ContaminationEstimate::NotIdentified { .. } => None,
+                })
+                .unwrap_or(0);
+            println!(
+                "  {:<44}{markers:>10}{:>10.4}{:>10.4}{:>10.4}   {:.0} s",
+                format!(
+                    "{}, {}",
+                    if keep_mismapped {
+                        "every position"
+                    } else {
+                        "mismapped dropped"
+                    },
+                    match own {
+                        OwnCoordinates::AsRead => "coordinates as read",
+                        OwnCoordinates::UndoneByAlpha => "coordinates undone by α",
+                        OwnCoordinates::MaximisedFreely => "coordinates free",
+                    }
+                ),
+                values[values.len() / 2],
+                values.last().copied().unwrap_or(0.0),
+                values.first().copied().unwrap_or(0.0),
+                at.elapsed().as_secs_f64(),
+            );
+        }
+    }
+}
+
+/// `ln P(this sample's depth around here | it has two copies) − ln P(… | one copy)`, per sample
+/// per kept position.
+///
+/// **A window's mean depth is read against this sample's own median**, never an absolute depth,
+/// and windows are summed until they hold the 12,000 aligned bases the classification needs —
+/// one window at 25× and ten at 2.5×.
+///
+/// ⚠ **The GC correction is missing, and it is not a small omission.** Coverage varies with GC
+/// content by a factor of 1.79 across tomato's range, which is larger than the doubling being
+/// looked for, so the reading below is that variation plus the copy number rather than the copy
+/// number. `CoverageByWindow` keeps the sample's depth-against-GC curve but not each window's own
+/// GC content, so the correction cannot be applied from the stored summary; the report proposes
+/// storing it.
+///
+/// The scatter a relative coverage reading has at `copies` copies is
+/// `√(copies² × 0.194² + copies × 313 / aligned bases)`, fitted to two points measured across
+/// eight tomato accessions (`duplicated_locus_probe_2026-08-12.md` §4).
+fn coverage_odds(
+    cohort: &[SampleRecords],
+    grid: &CoverageGrid,
+    kept: &[pop_var_caller::ng::types::GenomePosition],
+) -> Vec<Arc<[f32]>> {
+    let mut out = Vec::with_capacity(cohort.len());
+    for sample in cohort {
+        let Some(coverage) = sample.coverage.as_ref() else {
+            return Vec::new();
+        };
+        let span = coverage.windows_to_sum();
+        let aligned =
+            f64::from(coverage.median_depth()) * coverage.window_bp().get() as f64 * span as f64;
+        let sd = |copies: f64| {
+            (copies * copies * 0.194 * 0.194 + copies * 313.0 / aligned.max(1.0)).sqrt()
+        };
+        // One relative reading per window, so a position only costs a lookup.
+        let mut per_window = vec![0.0_f32; coverage.len()];
+        for slot in 0..coverage.len() {
+            let first = slot.saturating_sub(span / 2);
+            let last = (first + span).min(coverage.len());
+            let mean = f64::from(coverage.mean_depth_over(first..last));
+            let expected = f64::from(coverage.median_depth()).max(1e-6);
+            let reading = (mean / expected).clamp(0.02, 8.0);
+            let ln_normal = |copies: f64| {
+                let s = sd(copies);
+                -0.5 * ((reading - copies) / s).powi(2) - s.ln()
+            };
+            per_window[slot] = (ln_normal(2.0) - ln_normal(1.0)) as f32;
+        }
+        let odds: Vec<f32> = kept
+            .iter()
+            .map(|position| {
+                grid.slot_of(position.contig, position.position)
+                    .map_or(0.0, |slot| per_window[slot])
+            })
+            .collect();
+        out.push(Arc::from(odds));
+    }
+    out
 }
 
 /// One sample: one walk, filling the records and the coverage summary together.

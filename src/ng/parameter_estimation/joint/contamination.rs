@@ -51,44 +51,50 @@
 //!
 //! # What this finds, and what it does not — measured 2026-08-13
 //!
-//! On forty samples in four subpopulations at `F_st` 0.20 and three reads a position, with one
-//! sample contaminated at 3%:
+//! On forty samples in four subpopulations at `F_st` 0.20 and three reads a position, 400,000
+//! positions, one sample contaminated at 3% and one position in thirty mismapped:
 //!
-//! | | 12,000 varying positions | 60,000 |
-//! |---|---:|---:|
-//! | the contaminated sample | 0.0166 | 0.0163 |
-//! | the worst of the thirty-nine clean ones | 0.0032 | 0.0004 |
+//! | | that sample | median of the 39 clean | worst of them |
+//! |---|---:|---:|---:|
+//! | every position a marker, depth read as the middle of its bin | 0.0251 | 0.0081 | 0.0144 |
+//! | **mismapped positions dropped, depth summed over its bin** | **0.0102** | **0.0000** | **0.0003** |
 //!
-//! **It finds the sample and it understates the fraction.** The separation is what a threshold
-//! needs and it improves with positions — forty times the noise floor at 60,000 — but the value
-//! itself sits at about half the truth and **does not move with more positions**, so it is a
-//! bias rather than noise.
+//! **It finds the sample and it understates the fraction.** Thirty times the worst clean sample,
+//! which is what a threshold needs — and 0.0102 for a truth of 0.030, which does not move with
+//! more markers, so it is a bias rather than noise.
 //!
-//! **The cause is named in the specification and is not implemented here.** The contaminated
-//! sample's own coordinates are estimated from its own reads, which the contamination has
-//! already pulled towards the panel average; its fitted frequency therefore sits closer to the
-//! contaminant's than it should, and the difference the estimator lives on shrinks.
-//! `verifyBamID2` maximises over `α` **and the intended sample's coordinates together** for
-//! exactly this reason. Until that is done, read `α` as *this sample stands out from the panel*
-//! and not as *this sample is 1.7% contaminated*.
+//! The two exclusions are what took the floor from 0.0081 to zero, and they are the two things
+//! this module does that a straight reading of `verifyBamID2` would not:
 //!
-//! # ⚠ On real reads there is a panel-wide floor, and mismapped positions are why
+//! - **A position the fit judges more likely mismapped than not is not a marker.** Two stretches
+//!   of genome the reference holds once, both piling reads up in one place, put a small share of
+//!   unexpected reads into *every* sample — the contamination signature exactly. On 63 tomato
+//!   accessions **two markers in five** were such positions — 20,767 of 52,525.
+//! - **A sample's reads are scored against every depth its stored code could stand for.** The
+//!   count of disagreeing reads is exact and the depth is a five-bit code standing for a range, so
+//!   a heterozygote's read share lands away from a half by up to a sixth for a reason that is not
+//!   the sample — and a read share away from a half is what a fraction is made of. A drawn panel
+//!   with nobody contaminated and nothing mismapped returned **0.025 at ten reads a position** and
+//!   **0.0013 at three**, where the ladder is exact; summing over the range returns exactly zero
+//!   at both.
 //!
-//! Run on 63 tomato accessions over the 52,525 positions that cohort varies at, **the median
-//! accession comes back at 6.5%** and the highest at 12.5%. Sixty-three archive accessions are
-//! not all one part in fifteen somebody else's plant: that is a floor and not a measurement.
+//! **Together, on the 63 tomato accessions**: the median accession read **0.0684** contaminated
+//! with neither exclusion, 0.0300 with the depth summed over, 0.0091 with the mismapped positions
+//! dropped, and **0.0000 with both** — the worst accession 0.0090.
 //!
-//! **A mismapped position produces the contamination signature in every sample at once** — a
-//! small share of reads carrying an allele the sample should not have — and nothing here
-//! excludes them. The same run puts 1 position in 30 in the joint fit's mismapped class at a
-//! disagreement rate of 2.4%, and the drawn panels above, which contain no mismapped positions
-//! at all, floor at 0.0004.
+//! # What is measured and not adopted: maximising over the sample's own coordinates
 //!
-//! **The fix is this route's own mechanism and it is one seam away.**
-//! [`fit`](super::fit)'s pass over the positions already computes each position's posterior of
-//! being mismapped — that is what having many samples at one position buys — and then discards
-//! it. Weighting these markers by it, or dropping the positions it condemns, is what is
-//! missing. **Until then a number from real reads ranks samples; it does not measure them.**
+//! `verifyBamID2` maximises over the fraction and the intended sample's coordinates together,
+//! because contamination drags a sample towards the panel average and the frequency fitted at its
+//! observed coordinates therefore sits closer to the contaminant's than the truth.
+//! [`OwnCoordinates`] carries three readings and the measurement is in
+//! `contamination_floor_and_duplicated_class_2026-08-13.md` §6: undoing the drag moves a drawn 3%
+//! sample from 0.0115 to 0.0166 **and the worst clean sample from 0.0008 to 0.0046**, so the
+//! separation falls from 14× to 3.6×. The attenuation and the floor move together. **The default
+//! is the coordinates as read**, and `α` still says *this sample stands out from the panel* rather
+//! than *this sample is 1.2% contaminated* — but the panel it stands out from now sits at zero.
+
+use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
@@ -100,6 +106,75 @@ use super::records::{DepthCode, SampleRecords};
 /// argument** — how many a plant panel needs is set by the panel. It is a parameter for that
 /// reason.
 pub const DEFAULT_COMPONENTS: usize = 4;
+
+/// How contamination is measured. **Every field except `components` exists because a measured
+/// default was wrong**, so each carries the number that changed it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct ContaminationConfig {
+    /// How many axes of variation each sample's own allele frequency is a straight line in.
+    /// Zero leaves every sample scored against one panel-wide frequency, which on a diverged
+    /// panel returns 0.005 for a sample truly contaminated at 3%.
+    pub components: usize,
+    /// **A position more likely than this to be mismapped is not a marker.**
+    ///
+    /// The probability comes from [`fit`](super::fit), which computes it for every position
+    /// and for which it is the whole point of holding the cohort at once. Left in, those
+    /// positions put a small share of unexpected reads into every sample at once — the
+    /// contamination signature exactly — and on the 63 tomato accessions they took the
+    /// median accession from 0.9% to 6.5%.
+    pub max_noisy_posterior: f64,
+    /// Whether a surviving marker's contribution is further weighted by its own probability
+    /// of being ordinary, rather than counted in full.
+    pub weight_by_posterior: bool,
+    /// **Where the sample is taken to stand on the panel's axes while `α` is searched for.**
+    pub own_coordinates: OwnCoordinates,
+    /// Whether a sample's reads are scored against every depth its stored code could stand for,
+    /// rather than against the middle of that range.
+    ///
+    /// Above eight reads a position the record keeps a range and not a number, while the count
+    /// of disagreeing reads is exact — so a heterozygote's read share lands away from a half by
+    /// up to a sixth for a reason that is not the sample, and that is what a contamination
+    /// fraction is made of. On a drawn panel with nobody contaminated and no mismapped
+    /// positions the median sample came back at 0.0013 at three reads a position and 0.025 at
+    /// ten.
+    pub integrate_over_depth_bin: bool,
+}
+
+/// What a sample's own place on the panel's axes of variation is taken to be, while its
+/// contamination fraction is searched for.
+///
+/// **The sample's coordinates are read off its own reads, and contamination has already moved
+/// them.** A stray read comes from whoever else was on the plate, whose expected genotype is
+/// the panel's average — which is the origin of these axes — so a fraction `α` of stray reads
+/// drags the sample a fraction `α` of the way to the origin. The frequency the fitted line
+/// then predicts for it sits closer to the contaminant's than the truth, and the difference
+/// between *what this sample should carry* and *what a stray read carries* is the entire
+/// signal. A sample drawn at 3% came back at 1.66%, and the shortfall did not move when the
+/// marker count was quintupled, so it is a bias and not noise.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum OwnCoordinates {
+    /// As the decomposition read them off this sample's own reads, contamination and all.
+    AsRead,
+    /// **Divided by `1 − α`, which undoes exactly the drag `α` causes.** One number, no
+    /// freedom: at the true `α` the sample is put back where it would have stood uncontaminated,
+    /// and at `α = 0` nothing moves.
+    UndoneByAlpha,
+    /// Each axis searched freely beside `α`, within three standard deviations of where the
+    /// panel put the sample — the literal reading of *maximise over both*.
+    MaximisedFreely,
+}
+
+impl Default for ContaminationConfig {
+    fn default() -> Self {
+        Self {
+            components: DEFAULT_COMPONENTS,
+            max_noisy_posterior: 0.5,
+            weight_by_posterior: true,
+            own_coordinates: OwnCoordinates::AsRead,
+            integrate_over_depth_bin: true,
+        }
+    }
+}
 
 /// How much of its own fitted frequency a sample may supply before its estimate is refused.
 ///
@@ -117,6 +192,18 @@ struct Marker {
     /// Reads on the cohort's most common non-reference allele, per sample.
     alternative: Vec<u32>,
     depth: Vec<u32>,
+    /// The lowest and highest depth each sample's stored code stands for.
+    ///
+    /// **The alternative count is exact and the depth is not**, because the records keep one
+    /// five-bit code per position and above eight reads that code covers a range. Scoring a
+    /// heterozygote's reads against the middle of its range puts its read share away from a
+    /// half by up to a sixth for a reason that has nothing to do with the sample — and a read
+    /// share away from a half is exactly what a contamination fraction is. Measured on a drawn
+    /// panel with nobody contaminated and no mismapped positions: **the median sample comes
+    /// back at 0.0013 at three reads a position, where the ladder is exact, and at 0.025 at
+    /// ten and at thirty, where it is not.**
+    depth_low: Vec<u32>,
+    depth_high: Vec<u32>,
     /// The panel-wide frequency, with the error rate inverted out of the read share.
     pooled: f64,
     /// The posterior mean number of alternative copies, per sample, under a prior at `pooled`.
@@ -124,6 +211,10 @@ struct Marker {
     /// **A raw read fraction is far too noisy to decompose at three reads a position**; the
     /// prior is what makes it usable, and it is the same bootstrap `PCAngsd` starts from.
     dosage: Vec<f64>,
+    /// How much of this position is believed to be an ordinary position rather than a
+    /// mismapped one — one minus [`fit`](super::fit)'s posterior. One when the fit was never
+    /// asked.
+    cleanliness: f64,
 }
 
 /// A position enters only if this many samples put a read on it.
@@ -185,12 +276,17 @@ impl std::fmt::Display for NotIdentifiedReason {
 /// `error_rate` is per sample — the rate at which a read misreads a base, which the fit has
 /// already produced — and `hom_excess` how much less heterozygous each sample is than random
 /// mating in the panel predicts.
+/// `noisy_posterior` is [`fit`](super::fit)'s probability, for every kept position in position
+/// order, that the position is mismapped. **An empty slice says the fit was never asked**, and
+/// then every position is treated as ordinary — which on real reads returns a floor rather
+/// than a measurement.
 pub fn fit_contamination(
     samples: &[SampleRecords],
     edges: &DepthBinEdges,
     error_rate: &[f64],
     hom_excess: &[f64],
-    components: usize,
+    noisy_posterior: &[f32],
+    config: &ContaminationConfig,
 ) -> Vec<ContaminationEstimate> {
     let count = samples.len();
     if count < 2 {
@@ -202,7 +298,7 @@ pub fn fit_contamination(
         ];
     }
     let mean_error = error_rate.iter().sum::<f64>() / count as f64;
-    let markers = markers(samples, edges, mean_error);
+    let markers = markers(samples, edges, mean_error, noisy_posterior, config);
     if markers.len() < 100 {
         return vec![
             ContaminationEstimate::NotIdentified {
@@ -212,12 +308,26 @@ pub fn fit_contamination(
         ];
     }
 
-    let components = components.min(count.saturating_sub(2)).max(1);
+    let components = config.components.min(count.saturating_sub(2)).max(1);
     let coordinates = ancestry_coordinates(&markers, count, components);
     let leverage = coordinate_leverage(&coordinates, components);
-    let frequencies = fitted_frequencies(&markers, &coordinates, components);
+    let lines = fitted_lines(&markers, &coordinates, components);
+    // How far a coordinate may be moved when it is refitted: the panel's own spread along
+    // that axis, so the search is in the units the axis happens to have.
+    let spread: Vec<f64> = (0..components)
+        .map(|axis| {
+            let mean = coordinates.iter().map(|c| c[axis]).sum::<f64>() / coordinates.len() as f64;
+            (coordinates
+                .iter()
+                .map(|c| (c[axis] - mean) * (c[axis] - mean))
+                .sum::<f64>()
+                / coordinates.len() as f64)
+                .sqrt()
+        })
+        .collect();
 
     (0..count)
+        .into_par_iter()
         .map(|sample| {
             if leverage[sample] > MAX_LEVERAGE {
                 return ContaminationEstimate::NotIdentified {
@@ -227,10 +337,13 @@ pub fn fit_contamination(
             ContaminationEstimate::Estimated {
                 alpha: fit_alpha(
                     &markers,
-                    &frequencies,
-                    sample,
+                    &lines,
+                    &coordinates[sample],
+                    &spread,
                     hom_excess[sample],
                     error_rate[sample],
+                    config,
+                    sample,
                 ),
                 markers: markers.len() as u64,
                 leverage: leverage[sample],
@@ -240,7 +353,13 @@ pub fn fit_contamination(
 }
 
 /// The positions the cohort varies at, with each sample's reads and its dosage there.
-fn markers(samples: &[SampleRecords], edges: &DepthBinEdges, error: f64) -> Vec<Marker> {
+fn markers(
+    samples: &[SampleRecords],
+    edges: &DepthBinEdges,
+    error: f64,
+    noisy_posterior: &[f32],
+    config: &ContaminationConfig,
+) -> Vec<Marker> {
     let count = samples.len();
     let positions = samples
         .first()
@@ -273,12 +392,18 @@ fn markers(samples: &[SampleRecords], edges: &DepthBinEdges, error: f64) -> Vec<
 
     let mut alternative = vec![vec![0_u32; positions]; count];
     let mut depth = vec![vec![0_u32; positions]; count];
+    let mut depth_low = vec![vec![0_u32; positions]; count];
+    let mut depth_high = vec![vec![0_u32; positions]; count];
     for (s, sample) in samples.iter().enumerate() {
         for group in sample.generic.values() {
             for (index, code) in group.depth().iter().enumerate() {
                 if let DepthCode::Binned(bin) = code {
+                    let range = edges.depth_range(bin);
+                    let (low, high) = (*range.start(), *range.end());
                     depth[s][index] = depth[s][index]
                         .saturating_add(edges.representative_depth(bin).round() as u32);
+                    depth_low[s][index] = depth_low[s][index].saturating_add(low);
+                    depth_high[s][index] = depth_high[s][index].saturating_add(high);
                 }
             }
             for observation in group.non_reference() {
@@ -292,6 +417,18 @@ fn markers(samples: &[SampleRecords], edges: &DepthBinEdges, error: f64) -> Vec<
 
     let mut out = Vec::new();
     for index in 0..positions {
+        // A mismapped position reads part non-reference in every sample at once, which is
+        // both what makes it look like a segregating marker and what makes every sample look
+        // contaminated at it. It is condemned before anything else is asked of it.
+        let noisy = noisy_posterior.get(index).copied().unwrap_or(0.0) as f64;
+        if noisy > config.max_noisy_posterior {
+            continue;
+        }
+        let cleanliness = if config.weight_by_posterior {
+            1.0 - noisy
+        } else {
+            1.0
+        };
         let covered = (0..count).filter(|&s| depth[s][index] > 0).count();
         if covered < MIN_SAMPLES_WITH_DATA {
             continue;
@@ -335,8 +472,11 @@ fn markers(samples: &[SampleRecords], edges: &DepthBinEdges, error: f64) -> Vec<
         out.push(Marker {
             alternative: (0..count).map(|s| alternative[s][index]).collect(),
             depth: (0..count).map(|s| depth[s][index]).collect(),
+            depth_low: (0..count).map(|s| depth_low[s][index]).collect(),
+            depth_high: (0..count).map(|s| depth_high[s][index]).collect(),
             pooled,
             dosage,
+            cleanliness,
         });
     }
     out
@@ -405,17 +545,18 @@ fn coordinate_leverage(coordinates: &[Vec<f64>], components: usize) -> Vec<f64> 
         .collect()
 }
 
-/// One allele frequency per sample per position, from a straight line in the coordinates.
+/// The straight line each position's allele frequency is, in the panel's axes of variation:
+/// an intercept and one slope per axis, per position.
+///
+/// **The line and not the frequencies it evaluates to**, because a sample's own coordinates
+/// are one of the things maximised over — see [`fit_alpha`] — and moving a coordinate has to
+/// move that sample's frequency at every position.
 ///
 /// **The slopes are shrunk.** A position whose slopes are indistinguishable from noise keeps
 /// only its intercept — the panel-wide frequency — so modelling structure is never worse than
 /// not modelling it. Unshrunk, the same fit returned 0.0443 where the truth was 0.030, and on an
 /// unbalanced panel it walked to the search boundary.
-fn fitted_frequencies(
-    markers: &[Marker],
-    coordinates: &[Vec<f64>],
-    components: usize,
-) -> Vec<Vec<f64>> {
+fn fitted_lines(markers: &[Marker], coordinates: &[Vec<f64>], components: usize) -> Vec<Vec<f64>> {
     let samples = coordinates.len();
     let width = components + 1;
     let design: Vec<Vec<f64>> = (0..samples)
@@ -485,15 +626,19 @@ fn fitted_frequencies(
                     .sum();
                 beta[0] = mean - centre / samples as f64;
             }
-            design
-                .iter()
-                .map(|row| {
-                    let fitted: f64 = row.iter().zip(&beta).map(|(x, b)| x * b).sum();
-                    (fitted / 2.0).clamp(1e-4, 1.0 - 1e-4)
-                })
-                .collect()
+            beta
         })
         .collect()
+}
+
+/// What a straight line says one sample's allele frequency is, at the coordinates it is
+/// standing on. The line is in copies out of two, so a frequency is half of it.
+fn frequency_at(line: &[f64], coordinates: &[f64]) -> f64 {
+    let mut copies = line[0];
+    for (slope, coordinate) in line[1..].iter().zip(coordinates) {
+        copies += slope * coordinate;
+    }
+    (copies / 2.0).clamp(1e-4, 1.0 - 1e-4)
 }
 
 /// One sample's contamination fraction.
@@ -501,35 +646,119 @@ fn fitted_frequencies(
 /// **The two-genotype mixture, reading sequence only**: a read comes from this sample's own
 /// genotype with probability `1 − α` and from the contaminant's with probability `α`, and
 /// neither genotype is known, so both are summed over.
+///
+/// Where the sample is taken to stand while `α` is searched for is [`OwnCoordinates`], which
+/// is where the bias in the fraction lives.
+#[allow(clippy::too_many_arguments, reason = "one sample's whole problem")]
 fn fit_alpha(
     markers: &[Marker],
-    frequencies: &[Vec<f64>],
-    sample: usize,
+    lines: &[Vec<f64>],
+    coordinates: &[f64],
+    spread: &[f64],
     hom_excess: f64,
     error: f64,
+    config: &ContaminationConfig,
+    sample: usize,
 ) -> f64 {
-    let score = |alpha: f64| -> f64 {
-        markers
+    // A sample at three reads a position has no read at a good share of the markers, and a
+    // marker it has no read at contributes the same zero to every candidate `α`. Dropping
+    // them once is worth several hundred passes over the list.
+    let covered: Vec<usize> = (0..markers.len())
+        .filter(|&m| markers[m].depth[sample] > 0)
+        .collect();
+    let components = coordinates.len().min(spread.len());
+    let mut at = coordinates[..components].to_vec();
+
+    let score = |alpha: f64, at: &[f64]| -> f64 {
+        covered
             .iter()
-            .zip(frequencies)
-            .map(|(marker, per_sample)| {
-                ln_marker(
-                    marker.alternative[sample],
-                    marker.depth[sample],
-                    per_sample[sample],
-                    marker.pooled,
-                    hom_excess,
-                    error,
-                    alpha,
-                )
+            .map(|&m| {
+                let marker = &markers[m];
+                marker.cleanliness
+                    * ln_marker(
+                        marker.alternative[sample],
+                        if config.integrate_over_depth_bin {
+                            marker.depth_low[sample]..=marker.depth_high[sample]
+                        } else {
+                            marker.depth[sample]..=marker.depth[sample]
+                        },
+                        frequency_at(&lines[m], at),
+                        marker.pooled,
+                        hom_excess,
+                        error,
+                        alpha,
+                    )
             })
             .sum()
     };
+
+    // Undoing the drag has no search of its own: the coordinates are a function of the `α`
+    // being scored, so the same one-dimensional search answers both.
+    let undone = |alpha: f64, into: &mut Vec<f64>| {
+        into.clear();
+        into.extend(
+            coordinates[..components]
+                .iter()
+                .map(|c| c / (1.0 - alpha).max(0.5)),
+        );
+    };
+
+    let mut alpha = match config.own_coordinates {
+        OwnCoordinates::AsRead | OwnCoordinates::MaximisedFreely => {
+            golden(0.0, 0.5, |a| score(a, &at))
+        }
+        OwnCoordinates::UndoneByAlpha => {
+            let mut trial = Vec::with_capacity(components);
+            golden(0.0, 0.5, |a| {
+                undone(a, &mut trial);
+                score(a, &trial)
+            })
+        }
+    };
+    match config.own_coordinates {
+        OwnCoordinates::AsRead => {}
+        OwnCoordinates::UndoneByAlpha => undone(alpha, &mut at),
+        OwnCoordinates::MaximisedFreely => {
+            // Alternating: one axis at a time given `α`, then `α` again, three times round.
+            let mut trial = at.clone();
+            for _ in 0..3 {
+                for axis in 0..components {
+                    let reach = 3.0 * spread[axis];
+                    if reach <= 0.0 {
+                        continue;
+                    }
+                    let centre = coordinates[axis];
+                    at[axis] = golden(centre - reach, centre + reach, |x| {
+                        trial.copy_from_slice(&at);
+                        trial[axis] = x;
+                        score(alpha, &trial)
+                    });
+                }
+                alpha = golden(0.0, 0.5, |a| score(a, &at));
+            }
+        }
+    }
+    // The bracket never reaches zero, and zero is the answer that matters most: a clean sample
+    // must be able to come back clean rather than at the smallest value the search can express.
+    let at_zero = match config.own_coordinates {
+        OwnCoordinates::UndoneByAlpha => coordinates[..components].to_vec(),
+        _ => at.clone(),
+    };
+    if score(0.0, &at_zero) >= score(alpha, &at) {
+        0.0
+    } else {
+        alpha
+    }
+}
+
+/// The largest value of a one-dimensional score on `[low, high]`, by golden section. Thirty
+/// steps take a bracket of a half down to two parts in ten million.
+fn golden(low: f64, high: f64, mut score: impl FnMut(f64) -> f64) -> f64 {
     const PHI: f64 = 0.618_033_988_749_895;
-    let (mut low, mut high) = (0.0_f64, 0.5_f64);
+    let (mut low, mut high) = (low, high);
     let (mut c, mut d) = (high - PHI * (high - low), low + PHI * (high - low));
     let (mut fc, mut fd) = (score(c), score(d));
-    for _ in 0..40 {
+    for _ in 0..30 {
         if fc > fd {
             high = d;
             d = c;
@@ -544,10 +773,7 @@ fn fit_alpha(
             fd = score(d);
         }
     }
-    let best = if fc > fd { c } else { d };
-    // The bracket never reaches zero, and zero is the answer that matters most: a clean sample
-    // must be able to come back clean rather than at the smallest value the search can express.
-    if score(0.0) >= score(best) { 0.0 } else { best }
+    if fc > fd { c } else { d }
 }
 
 /// `ln P(this sample's reads here | α)`, both genotypes summed over.
@@ -560,21 +786,27 @@ fn fit_alpha(
 /// ancestry (spec §3.4.3). Scoring both against the sample's own frequency inflates `α` on a
 /// diverged panel: a contaminant from a different group carries alleles the sample's own
 /// frequency calls rare, and rare alleles turning up is the contamination signature.
+#[allow(clippy::too_many_arguments, reason = "one marker's whole likelihood")]
 fn ln_marker(
     alternative: u32,
-    depth: u32,
+    depths: std::ops::RangeInclusive<u32>,
     own_frequency: f64,
     batch_frequency: f64,
     hom_excess: f64,
     error: f64,
     alpha: f64,
 ) -> f64 {
-    if depth == 0 {
+    if *depths.end() == 0 {
         return 0.0;
     }
     let priors = genotype_priors(own_frequency, hom_excess);
     // The contaminant is somebody else, so it carries no inbreeding of this sample's.
     let contaminant = genotype_priors(batch_frequency, 0.0);
+    // **The depth is summed over rather than read off.** The record keeps a five-bit code, so
+    // above eight reads what is known is a range; every depth in it that could have produced
+    // the alternative reads seen is given equal weight. Below nine the range is one value and
+    // this is the plain binomial.
+    let widest = (*depths.end() - *depths.start() + 1) as usize;
     let mut terms = [f64::NEG_INFINITY; 9];
     for own in 0..3 {
         for other in 0..3 {
@@ -583,8 +815,15 @@ fn ln_marker(
                 continue;
             }
             let p = (1.0 - alpha) * read_share(own, error) + alpha * read_share(other, error);
+            let mut total = 0.0;
+            for depth in depths.clone() {
+                if depth < alternative {
+                    continue;
+                }
+                total += binomial(alternative, depth, p);
+            }
             terms[own * 3 + other] =
-                weight.ln() + binomial(alternative, depth, p).max(f64::MIN_POSITIVE).ln();
+                weight.ln() + (total / widest as f64).max(f64::MIN_POSITIVE).ln();
         }
     }
     ln_sum_exp(&terms)
@@ -771,8 +1010,8 @@ mod tests {
     #[test]
     fn the_mixture_is_flat_where_the_two_genotypes_agree() {
         // Both plants homozygous reference: no share of reads from the other one shows.
-        let clean = ln_marker(0, 20, 0.001, 0.001, 0.0, 0.002, 0.0);
-        let contaminated = ln_marker(0, 20, 0.001, 0.001, 0.0, 0.002, 0.2);
+        let clean = ln_marker(0, 20..=20, 0.001, 0.001, 0.0, 0.002, 0.0);
+        let contaminated = ln_marker(0, 20..=20, 0.001, 0.001, 0.0, 0.002, 0.2);
         assert!(
             (clean - contaminated).abs() < 0.05,
             "contamination is invisible where the two plants carry the same allele"
@@ -783,8 +1022,8 @@ mod tests {
     fn a_small_share_of_stray_reads_scores_better_contaminated_than_clean() {
         // Two reads in fifty on the other allele, at a position where the allele is common:
         // too few for a heterozygote, too many for the error rate.
-        let clean = ln_marker(2, 50, 0.3, 0.3, 0.0, 0.002, 0.0);
-        let contaminated = ln_marker(2, 50, 0.3, 0.3, 0.0, 0.002, 0.04);
+        let clean = ln_marker(2, 50..=50, 0.3, 0.3, 0.0, 0.002, 0.0);
+        let contaminated = ln_marker(2, 50..=50, 0.3, 0.3, 0.0, 0.002, 0.04);
         assert!(
             contaminated > clean,
             "clean {clean}, contaminated {contaminated}"
@@ -984,12 +1223,37 @@ mod tests {
     fn a_contaminated_sample_in_a_diverged_panel_is_found_and_stands_clear() {
         let samples = 40;
         let panel = structured_panel(samples, 12_000, 3.0, 4, 0.20, Some((0, 0.03)), 0x51ED2709);
+        // All three readings of where the sample stands, so the one that ships is a choice
+        // between measured numbers rather than the only one that was tried.
+        for arm in [
+            OwnCoordinates::AsRead,
+            OwnCoordinates::UndoneByAlpha,
+            OwnCoordinates::MaximisedFreely,
+        ] {
+            let alpha = alphas(&fit_contamination(
+                &panel,
+                &DepthBinEdges::new(),
+                &vec![0.002; samples],
+                &vec![0.0; samples],
+                &[],
+                &ContaminationConfig {
+                    own_coordinates: arm,
+                    ..ContaminationConfig::default()
+                },
+            ));
+            eprintln!(
+                "{arm:?}: spiked at 0.030 came back {:.4}; worst of the 39 clean {:.4}",
+                alpha[0],
+                alpha[1..].iter().copied().fold(0.0_f64, f64::max)
+            );
+        }
         let estimates = fit_contamination(
             &panel,
             &DepthBinEdges::new(),
             &vec![0.002; samples],
             &vec![0.0; samples],
-            4,
+            &[],
+            &ContaminationConfig::default(),
         );
         let alpha = alphas(&estimates);
         let spiked = alpha[0];
@@ -1022,7 +1286,8 @@ mod tests {
             &DepthBinEdges::new(),
             &vec![0.002; samples],
             &vec![0.0; samples],
-            4,
+            &[],
+            &ContaminationConfig::default(),
         );
         let alpha = alphas(&estimates);
         let worst = alpha.iter().copied().fold(0.0_f64, f64::max);
