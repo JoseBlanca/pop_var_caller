@@ -37,7 +37,7 @@ use crate::ng::parameter_estimation::fitting::multistart::SearchableNoise;
 use crate::ng::parameter_estimation::fitting::{NoiseModel, WeightedCell};
 use crate::ng::types::{DomainError, Ploidy, checked_probability};
 
-use super::stratum_table::StratumCell;
+use super::stratum_table::{LocusShape, StratumCell};
 use super::{
     ALLELE_OFFSET_LIMIT, OFFSET_BUCKETS, RepeatCount, WholeRepeatOffset, allele_support, bucket_of,
 };
@@ -493,11 +493,7 @@ impl NoiseModel for SsrNoiseModel {
         let reads_by_bucket = shape.reads_by_bucket();
         // Common to every genotype, so it cannot move a fit — kept because it is what makes the
         // sums-to-one gate an identity. See the doc comment.
-        let ln_arrangements = ln_factorial(shape.whole_repeat_depth())
-            - reads_by_bucket
-                .iter()
-                .map(|&reads| ln_factorial(u32::from(reads)))
-                .sum::<f64>();
+        let ln_arrangements = ln_shape_arrangements(shape);
 
         // One row per allele length, built once per cell rather than once per genotype: a diploid
         // stratum has 13 lengths and 91 genotypes, so this is 13 walks of the slip kernel instead
@@ -600,6 +596,27 @@ fn genotype_count(alleles: usize, copies: usize) -> usize {
     usize::try_from(count).unwrap_or_else(|_| {
         panic!("{alleles} allele lengths at ploidy {copies} make {count} genotypes")
     })
+}
+
+/// **In how many orders the reads of a shape could have arrived** — `ln(n! / Π n_b!)` over the
+/// whole-repeat buckets — which is the part of a shape's likelihood that no genotype and no
+/// slippage parameter can change.
+///
+/// **Two callers, and the second is why this is a function rather than four lines inside the
+/// scoring rule.** `append_genotype_likelihoods` adds it to every genotype's entry, where it
+/// cancels out of the mixture and cannot move a fit; what it buys there is that the rule sums to
+/// one over the shapes at a given depth, which is the first of the design's three algebraic gates.
+/// [`unexplained_locus_share`](super::unexplained_locus_share) **subtracts it**, because a
+/// diagnostic comparing one locus against another has no mixture for it to cancel in, and it
+/// grows with how many distinct lengths a locus shows — which is the very thing that diagnostic
+/// looks for.
+pub fn ln_shape_arrangements(shape: LocusShape) -> f64 {
+    ln_factorial(shape.whole_repeat_depth())
+        - shape
+            .reads_by_bucket()
+            .iter()
+            .map(|&reads| ln_factorial(u32::from(reads)))
+            .sum::<f64>()
 }
 
 /// `ln n!`, through `ln Γ(n + 1)` — the same helper and the same route the sibling path's noise

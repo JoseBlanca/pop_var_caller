@@ -439,7 +439,7 @@ strata merged cost **exactly** nothing, which is the control the harness runs; a
 non-monotone synthetic sequence must trigger the merge rather than being accepted, while a monotone
 one must pass through untouched. *Depends:* E3. *Source:* arch §4.1, spec §4.3, research note §6.6.
 
-**E5. The summary, which is the part a person reads.**  ☐
+**E5. The summary, which is the part a person reads.**  ✅
 Several hundred fits per sample against the generic path's four, so the diagnostics **aggregate**
 rather than accumulate: how many strata were fitted in place, borrowed and merged, and which; how
 many kept their level but borrowed their two shares, which is a different claim from a borrow and is

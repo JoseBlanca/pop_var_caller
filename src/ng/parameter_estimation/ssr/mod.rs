@@ -52,14 +52,15 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::ng::locus_generation::SampleLocusObservations;
-use crate::ng::parameter_estimation::fitting::FitTermination;
+use crate::ng::parameter_estimation::fitting::mixture_weights::ln_sum_exp;
 use crate::ng::parameter_estimation::fitting::multistart::{SearchPrecision, fit_by_multistart};
+use crate::ng::parameter_estimation::fitting::{FitTermination, NoiseModel};
 use crate::ng::parameter_estimation::generic::accumulators::PloidyMap;
 use crate::ng::parameter_estimation::ssr::locus_offsets::{
     LocusStratum, base_comparison_of, shape_of, stratum_of, tally_of,
 };
 use crate::ng::parameter_estimation::ssr::slippage::{
-    SlippageModel, SsrNoiseModel, slippage_starts,
+    SlippageModel, SsrNoiseModel, ln_shape_arrangements, slippage_starts,
 };
 use crate::ng::parameter_estimation::ssr::stratum_table::{
     StratumCell, StratumEntry, StratumTable,
@@ -474,6 +475,13 @@ pub struct StratumFit {
     /// **Reported, never acted on.** Dropping the loci that score badly is threshold-then-count
     /// — the bias this whole step exists to remove — and it would take real long alleles before
     /// it took artefacts, since both sit where the model has least mass.
+    ///
+    /// **Zero where the stratum has no fit of its own**, because there is then no fitted model to
+    /// score its loci against: a borrowed model brings three parameters and no allele
+    /// frequencies, and scoring against invented ones would report a diagnostic about the
+    /// invention. [`Self::genotypes`] is empty and [`Self::slippage`]'s provenance reads
+    /// `Borrowed` in exactly that case, which is what tells a zero that was measured from one
+    /// that was never asked.
     pub unexplained_locus_share: f64,
     /// Every starting point the search tried, best-scoring first.
     pub starts_tried: SmallVec<[SlippageStart; 4]>,
@@ -484,11 +492,28 @@ pub struct StratumFit {
     /// the same answer. A stratum of 100,000 loci clears [`MIN_LOCI_TO_FIT`] a hundred times
     /// over and still puts about five reads behind the fall-off's gaining arm, at the level
     /// measured below four repeats.
+    ///
+    /// **Read like [`Self::fitted_over`] beside it, and neither list is ever empty**: this
+    /// stratum where the two shares are its own, whoever lent them where they are not, the whole
+    /// set where a merge fired. So a reader is never left to work out whether an empty list means
+    /// *its own* or *not recorded*, and the two lists differing is exactly the claim a stratum
+    /// makes when it keeps the level it measured and borrows the shares it could not.
+    ///
+    /// **Naming itself is not the same as having measured them.** A stratum whose period held
+    /// nobody able to lend keeps the shares it fitted on however few reads moved, so this names
+    /// itself while [`Self::slipped_reads`] sits below [`MIN_SLIPPED_READS_TO_FIT_SHARES`] — the
+    /// third state spec §4.5 expects wherever a whole period sits at the bottom of the repeat
+    /// range, and the one [`StratumFitSummary::strata_with_unmeasured_shares`] counts.
     pub shares_fitted_over: SmallVec<[Stratum; 2]>,
     /// Reads that showed a length other than the reference tract's. **The count that decides
     /// whether the two shares are measurable at all**, and the one a consumer needs to tell a
     /// level of 0.0003 standing on 4 slipped reads from one standing on 4,000 — which nothing
     /// downstream could otherwise do.
+    ///
+    /// **After a merge this is the pooled set's count and not this stratum's**, which is the
+    /// intended reading — the strata in a set are one stratum fitted over one table — but it makes
+    /// this the one number in the record measured over a different population from
+    /// [`Self::not_whole_repeat_share`] beside it, which is always this stratum's own table.
     pub slipped_reads: u64,
 }
 
@@ -585,8 +610,21 @@ pub struct StratumFitSummary {
     pub low_slippage_substitution: Option<Estimate<ErrorRate>>,
     /// Fits whose starting points landed further apart than [`START_AGREEMENT_LIMIT`] in the
     /// level — the diagnostic the several starts exist to produce.
+    ///
+    /// **Zero on every run that reached this summary through this module's own walk**, and that
+    /// is the invariant rather than a dead field: [`fit_slippage_by_stratum`] and
+    /// [`merge_until_monotone`] both raise [`SsrEstimationError::SlippageNotIdentified`] on the
+    /// first fit whose starts land further apart than that. It is counted because this summary
+    /// can also be built over fits a caller made itself — and a reader who sees a number here is
+    /// being told exactly that, which is worth knowing about a set of parameters.
     pub strata_with_disagreeing_starts: u32,
-    /// The worst of those, and by what ratio.
+    /// The **widest** spread any of this read group's fits showed, and the stratum that showed
+    /// it — whether or not it crossed [`START_AGREEMENT_LIMIT`].
+    ///
+    /// **Not "the worst of those above the limit", which is what the architecture sketches and
+    /// what the field beside it would leave permanently empty.** What a reader wants from four
+    /// starting points is how far the worst of them landed from the others; a run where that is
+    /// 1.002 and one where it is 1.059 both pass, and only one of them is comfortable.
     pub worst_start_disagreement: Option<(Stratum, f64)>,
     /// Strata above [`GUARD_SHARE_LIMIT`] — the ones this noise model does not describe.
     pub strata_above_guard_limit: u32,
@@ -604,6 +642,46 @@ pub struct StratumFitSummary {
     pub loci_behind_thinnest_fit: u64,
     /// And behind the **thickest**.
     pub loci_behind_thickest_fit: u64,
+    /// Fits whose climb over the genotype frequencies ran out of passes at some candidate rather
+    /// than reaching stillness.
+    ///
+    /// **Not an error, and expected to be most of them on real strata** — which is why it is a
+    /// count here rather than a failure at the fit. The surface the climb walks is concave, so a
+    /// climb that ran out did not find a wrong summit; it ran out of time on the right one. A
+    /// diploid stratum here has between 66 and 91 genotypes, most heading to a frequency of zero,
+    /// against the three the SNP/indel path's cap was measured on — and that ceiling is diploid
+    /// only: the walk is over unordered tuples, so the same two supports give 1,001 and 1,820 at
+    /// four genome copies. What it costs is that a candidate can score below its own summit and
+    /// let a neighbouring candidate win on that alone, so it is reported: a read group where every
+    /// fit ran out is one whose levels are worth less than a read group where none did.
+    ///
+    /// Not in the architecture's sketch of this type. Nor is the field below it.
+    pub strata_with_unsettled_climbs: u32,
+    /// Fits whose **outer** search over the three slippage parameters ran out of sweeps rather
+    /// than settling.
+    ///
+    /// **A different question from the field above, and the one `fitting/` says is the consumer's
+    /// business**: that one is the climb over the genotype frequencies inside each candidate,
+    /// which walks a concave surface; this one has no convergence proof at all, which is why the
+    /// search is capped and its best-scoring iterate kept. Whether a level is where a search
+    /// settled or where it was stopped is not derivable from anything else in these parameters.
+    ///
+    /// Not in the architecture's sketch of this type, which counts neither: both counters were
+    /// built by the search and read by nothing until the summary existed.
+    pub strata_with_unsettled_searches: u32,
+    /// Strata reporting the two shares they measured on **fewer moved reads than
+    /// [`MIN_SLIPPED_READS_TO_FIT_SHARES`] asks**, because no stratum in their period had enough
+    /// to lend.
+    ///
+    /// **A third state, and the honest answer rather than a failure** (spec §4.5): every stratum
+    /// at the bottom of the repeat range is expected to miss that floor — at a level of 0.091% it
+    /// takes about 880,000 loci at five reads each — so a period where nobody clears it is the
+    /// common case. Counted apart from [`Self::strata_with_borrowed_shares`] because the claim is
+    /// different: those two took a neighbour's measurement, these kept their own and it stands on
+    /// too little.
+    ///
+    /// Not in the architecture's sketch of this type either.
+    pub strata_with_unmeasured_shares: u32,
 }
 
 /// What one table of evidence — and the one fit built from it — is *about*: a library, a
@@ -1564,6 +1642,24 @@ pub struct StratumSlippage {
     pub slipped_reads: u64,
 }
 
+impl StratumSlippage {
+    /// **Whether this stratum is reporting the two shares it measured on fewer moved reads than
+    /// [`MIN_SLIPPED_READS_TO_FIT_SHARES`] asks** — the third state
+    /// [`Self::shares_fitted_over`] describes, which is nobody in its period having had enough
+    /// moved reads to lend.
+    ///
+    /// **A method rather than the two-field test written out where it is read**, because the two
+    /// fields are not a state a reader would assemble unprompted: an empty lender list reads as
+    /// *these are its own*, and it takes the read count beside it to say that its own is not the
+    /// same as measured. The summary counts these apart from the strata that borrowed, and a run
+    /// at the bottom of the repeat range is expected to fill that counter.
+    #[inline]
+    #[must_use]
+    pub fn keeps_unmeasured_shares(&self) -> bool {
+        self.shares_fitted_over.is_empty() && self.slipped_reads < MIN_SLIPPED_READS_TO_FIT_SHARES
+    }
+}
+
 /// **Resolve every stratum's slippage against the two floors**, borrowing from neighbouring
 /// repeat counts at the same period where a stratum cannot answer for itself
 /// (`spec/parameter_prepass_ssr.md` §4.3, §4.5).
@@ -1867,6 +1963,437 @@ fn nearest(
             observations: one.scored_reads,
         }),
         (None, None) => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// What a stratum leaves behind, and the summary a person reads instead
+// of several hundred of them.
+// ---------------------------------------------------------------------
+
+/// **The share of a stratum's loci whose shape its own fitted model calls very unlikely**, per
+/// read and weighed by loci (`spec/parameter_prepass_ssr.md` §4.6).
+///
+/// A stratum's four numbers are pooled over hundreds of thousands of loci on the assumption that
+/// each is one tract of that period and repeat count. Some are not: a duplication the reference
+/// does not carry collects two paralogous tracts' reads at one locus, a minority of reads mismaps
+/// in from a similar tract elsewhere, a long tract is unstable within the individual, an
+/// interruption anchors part of the reads differently. This is the number that says how much of a
+/// stratum behaves like that.
+///
+/// **Per read, and that is the whole of why this is not a floor on the shape's likelihood.** A
+/// shape's likelihood is a product over its reads, so a locus at twelve reads scores far lower
+/// than one at three whatever the model thinks of either, and a fixed floor on the total would
+/// flag the deepest loci of every stratum by arithmetic. What is divided by is the **scored**
+/// depth — the reads the product actually runs over, which is the reads on the whole-repeat grid.
+///
+/// **The score is the fit's own, with one term taken out of it: how many orders the reads could
+/// have arrived in.** Each locus's shape is scored under the fitted slippage parameters and mixed
+/// over the genotypes at the fitted frequencies, exactly as the search did — but a shape's
+/// likelihood carries `ln(n! / Π n_b!)` beside the reads' own probabilities, and while that term
+/// cancels out of a mixture it does not cancel out of a comparison between one locus and a
+/// threshold. **It grows with how many distinct lengths a locus shows, which is the very thing
+/// this diagnostic looks for**: measured, it pays +0.23 a read to an ordinary locus of one length
+/// and +1.07 to a locus showing four, so the canonical collapsed duplication would have arrived
+/// with nine tenths of the evidence against it cancelled. What is left after subtracting it is the
+/// mean log-probability of a read — which is what "per read" means. Nothing is re-fitted and no
+/// coordinate is kept.
+///
+/// **[`UNEXPLAINED_SHAPE_LN_LIMIT`] is set against this convention**, and Milestone H's
+/// measurement is what fixes its value; the two conventions differ by up to about 1.1 nats a read
+/// on a twelve-read locus, so a limit calibrated against one is not a limit for the other.
+///
+/// **Reported, never acted on.** Dropping the loci that score badly is threshold-then-count, the
+/// bias this whole step exists to remove, and it would take real long alleles before it took
+/// artefacts, since both sit where the model has least mass.
+///
+/// **A locus whose every read fell in the guard bucket counts in the denominator and never in the
+/// numerator.** The model scores only whole-repeat movement, so such a locus is an empty product
+/// — a likelihood of one — which is a locus with nothing to say about which alleles it carries
+/// rather than one that refutes them all. Charging it here would report the guard share a second
+/// time under another name.
+///
+/// **It is not the guard share.** That one counts *reads* moving by a non-whole number of copies,
+/// pooled over the stratum: an aberrant locus can move every read by whole copies, and one locus
+/// in a thousand behaving strangely is invisible in a stratum-wide ratio. The two answer *is this
+/// model right for these tracts* against *are these all the tracts this model was told they
+/// were*.
+///
+/// # Panics
+///
+/// If the fit's frequencies do not match the genotypes its own allele support and `ploidy` make —
+/// a fit assembled from parts that do not belong together, which would otherwise score every
+/// locus against a mixture over a prefix of the genotypes.
+#[must_use]
+pub fn unexplained_locus_share(
+    table: &StratumTable,
+    fit: &StratumSlippageFit,
+    ploidy: Ploidy,
+) -> f64 {
+    let model = fit.noise_model();
+    assert_eq!(
+        fit.genotype_frequencies.len(),
+        model.genotypes(ploidy),
+        "a fit holding {} frequencies scored against the {} genotypes of a stratum of {} \
+         reference copies at ploidy {ploidy}",
+        fit.genotype_frequencies.len(),
+        model.genotypes(ploidy),
+        fit.model_repeats
+    );
+
+    // Two scratch buffers, loaded and cleared once per entry rather than allocated per entry:
+    // a diploid stratum holds up to 91 genotypes and a table tens of thousands of entries.
+    let mut scratch = MixtureScratch::for_fit(fit);
+    let mut unexplained_loci: u64 = 0;
+    let mut loci: u64 = 0;
+
+    for entry in table.entries() {
+        loci += entry.loci;
+        if scratch
+            .log_likelihood_per_read(entry, fit, &model, ploidy)
+            .is_some_and(|per_read| per_read < UNEXPLAINED_SHAPE_LN_LIMIT)
+        {
+            unexplained_loci += entry.loci;
+        }
+    }
+
+    if loci == 0 {
+        return 0.0;
+    }
+    // Both counts are locus counts, which `u64` holds exactly to 2^53 — far past any genome's.
+    unexplained_loci as f64 / loci as f64
+}
+
+/// The two buffers scoring one entry needs, kept across a table's entries.
+struct MixtureScratch {
+    ln_likelihood_by_genotype: Vec<f64>,
+    ln_joint: Vec<f64>,
+}
+
+impl MixtureScratch {
+    fn for_fit(fit: &StratumSlippageFit) -> Self {
+        Self {
+            ln_likelihood_by_genotype: Vec::with_capacity(fit.genotype_frequencies.len()),
+            ln_joint: Vec::with_capacity(fit.genotype_frequencies.len()),
+        }
+    }
+
+    /// **What the fitted model makes of one locus, per read** — the mixture over the fitted
+    /// genotype frequencies, with the arrangement count taken out, divided by the reads the model
+    /// actually scored.
+    ///
+    /// `None` where no read of the locus sits on the whole-repeat grid: the model scores only
+    /// whole-repeat movement, so the shape is an empty product and its likelihood is one whatever
+    /// the alleles are. That is a locus with nothing to say rather than one that refutes
+    /// everything, and its caller counts it in the denominator alone.
+    ///
+    /// `−∞` is a legal answer and says no genotype the fit gives weight to could have produced
+    /// the shape — the extreme of what the diagnostic looks for rather than a case to skip.
+    fn log_likelihood_per_read(
+        &mut self,
+        entry: StratumEntry,
+        fit: &StratumSlippageFit,
+        model: &SsrNoiseModel,
+        ploidy: Ploidy,
+    ) -> Option<f64> {
+        let scored_reads = entry.shape.whole_repeat_depth();
+        if scored_reads == 0 {
+            return None;
+        }
+        let arrangements = ln_shape_arrangements(entry.shape);
+        let cell = StratumCell::new(entry, ploidy);
+        self.ln_likelihood_by_genotype.clear();
+        model.append_genotype_likelihoods(
+            &cell,
+            &fit.model,
+            ploidy,
+            &mut self.ln_likelihood_by_genotype,
+        );
+        self.ln_joint.clear();
+        self.ln_joint.extend(
+            fit.genotype_frequencies
+                .iter()
+                .zip(&self.ln_likelihood_by_genotype)
+                .map(|(frequency, ln_likelihood)| frequency.ln() + ln_likelihood),
+        );
+        Some((ln_sum_exp(&self.ln_joint) - arrangements) / f64::from(scored_reads))
+    }
+}
+
+/// **Everything the STR path estimates for one sample**: one record per stratum, and the summary
+/// a person reads instead of several hundred of them (`spec/parameter_prepass_ssr.md` §4.4).
+///
+/// The four fits each answer for one stratum at a time; this is where their answers are put
+/// together into the record a reader opens when a number looks wrong, and aggregated into the one
+/// they read when nothing does. **A flag nobody reads is how a badly-fitted parameter reaches a
+/// caller**, which is why the summary exists at all.
+///
+/// **What it is handed, and the one contract that matters: `slippage` must be the answer the
+/// borrowing gave, and the borrowing must have run over the fits the pooling produced.** The
+/// three parameters, their provenance and the fit behind them are taken from `slippage`
+/// unchanged; `merges` supplies only the *names* of the strata a pooling covered, which is the
+/// half of a merge that a resolved slippage cannot carry — what it holds is one stratum's model,
+/// not the set that model was measured over. So the composition this reads is fit → pool → borrow,
+/// which is also the only one the two functions' types allow: [`merge_until_monotone`] takes fits
+/// and returns fits, while [`resolve_slippage`] takes fits and returns something else. **Handing
+/// in a resolved map built before the pooling reports levels the pooling has since changed**, and
+/// where both maps answer for a stratum this refuses that rather than reporting it.
+///
+/// **Every stratum the accumulator holds gets a record**, including the ones that borrowed
+/// everything and the ones nothing could be fitted from: a stratum missing from the output is a
+/// stratum a reader cannot ask about.
+///
+/// # Panics
+///
+/// If a stratum the accumulator holds has no resolved slippage; [`resolve_slippage`] answers for
+/// every key it is given, so that is a caller pairing an accumulator with a map built from a
+/// different one, and the alternative to failing is a sample reported with strata silently
+/// missing. Likewise if a stratum's resolved fit and its merge disagree about the model, which is
+/// the pre-pooling map above.
+///
+/// And if a stratum has no substitution rate. **That one is not unreachable**: a stratum every
+/// locus of which is witnessed only by reads showing the tract entirely deleted files its shapes
+/// and compares no bases, so [`substitution_rate_of`] answers `None` — a case
+/// [`StratumFit::substitution`] has no room for and the design has not ruled on. Failing loudly is
+/// the conservative reading of a gap, not a decision that it cannot happen.
+#[must_use]
+pub fn assemble_sample_parameters(
+    accumulators: &SsrAccumulators,
+    substitutions: &BTreeMap<StratumKey, Estimate<ErrorRate>>,
+    slippage: &BTreeMap<StratumKey, StratumSlippage>,
+    merges: &BTreeMap<StratumKey, MergedSlippageFit>,
+) -> SsrSampleParameters {
+    let mut by_stratum = BTreeMap::new();
+    let mut underway: BTreeMap<ReadGroupId, SummaryUnderway> = BTreeMap::new();
+
+    for (key, table) in accumulators.strata() {
+        let resolved = slippage.get(&key).unwrap_or_else(|| {
+            panic!("no slippage was resolved for {key}, which the accumulator holds a table for")
+        });
+        let substitution = substitutions
+            .get(&key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no substitution rate was fitted for {key}, which holds {} loci over {} \
+                     compared bases",
+                    table.loci(),
+                    table.bases_compared()
+                )
+            })
+            .clone();
+        let merged_over = merges.get(&key).map_or(&[][..], |merged| {
+            // The resolved answer must have been built from this pooled fit, or the record would
+            // name a set that never produced the level beside it. One comparison per stratum.
+            if let Some(own) = resolved.own_fit.as_ref() {
+                assert_eq!(
+                    own.model, merged.fit.model,
+                    "{key} resolved to a model its own merge did not produce, so the slippage \
+                     map was built before the pooling"
+                );
+            }
+            merged.merged_over.as_slice()
+        });
+
+        let fit = stratum_fit(key, table, resolved, merged_over, substitution);
+        underway
+            .entry(key.read_group)
+            .or_default()
+            .take_in(key, resolved, merged_over, &fit);
+        by_stratum.insert(key, fit);
+    }
+
+    SsrSampleParameters {
+        by_stratum,
+        summary: underway
+            .into_iter()
+            .map(|(read_group, underway)| (read_group, underway.finish()))
+            .collect(),
+    }
+}
+
+/// One stratum's record, from the four answers about it.
+///
+/// **The two provenance lists are filled here and nowhere else**, and they say more than the
+/// resolved slippage's two do: those are empty where a number is the stratum's own, while these
+/// name the strata the number's loci actually came from — itself, its lenders, or the whole set
+/// where a merge fired. A consumer reading a record has the stratum in hand either way; a
+/// consumer reading a cohort's records side by side does not.
+fn stratum_fit(
+    key: StratumKey,
+    table: &StratumTable,
+    slippage: &StratumSlippage,
+    merged_over: &[Stratum],
+    substitution: Estimate<ErrorRate>,
+) -> StratumFit {
+    // Where a number of this stratum's own came from: the stratum itself, or every stratum in the
+    // set where a pooling produced it.
+    let measured_here: SmallVec<[Stratum; 2]> = if merged_over.is_empty() {
+        SmallVec::from_slice(&[key.stratum])
+    } else {
+        SmallVec::from_slice(merged_over)
+    };
+    let named = |borrowed: &SmallVec<[Stratum; 2]>| {
+        if borrowed.is_empty() {
+            measured_here.clone()
+        } else {
+            borrowed.clone()
+        }
+    };
+
+    let (genotypes, unexplained, starts_tried) = slippage.own_fit.as_ref().map_or_else(
+        || (Vec::new(), 0.0, SmallVec::new()),
+        |own| {
+            (
+                genotypes_of(own, key.ploidy),
+                unexplained_locus_share(table, own, key.ploidy),
+                own.starts_tried.clone(),
+            )
+        },
+    );
+
+    StratumFit {
+        stratum: key.stratum,
+        slippage: slippage.slippage.clone(),
+        substitution,
+        genotypes,
+        not_whole_repeat_share: table.not_whole_repeat_share(),
+        unexplained_locus_share: unexplained,
+        starts_tried,
+        fitted_over: named(&slippage.fitted_over),
+        shares_fitted_over: named(&slippage.shares_fitted_over),
+        slipped_reads: slippage.slipped_reads,
+    }
+}
+
+/// One read group's summary while it is being built, with the two things a fold needs that the
+/// summary itself does not carry.
+#[derive(Default)]
+struct SummaryUnderway {
+    summary: StratumFitSummary,
+    /// The lowest **fitted** slippage level seen so far, and it is `None` until one has been —
+    /// which is not the same as zero, and zero is a level a stratum can genuinely report.
+    lowest_fitted_level: Option<f64>,
+    /// Whether any stratum of this read group was fitted from its own loci. Seeds the thinnest
+    /// and thickest locus counts, which a fold that started them at zero would report as zero
+    /// for the thinnest and a fold that started them at `u64::MAX` would report as the maximum
+    /// for a read group with no fits at all.
+    any_fit: bool,
+    /// The merge sets already recorded, with the ploidy each was pooled at — the same set arrives
+    /// once per stratum in it, and two ploidies of one period can pool the same repeat counts.
+    sets_seen: Vec<(Ploidy, SmallVec<[Stratum; 2]>)>,
+}
+
+impl SummaryUnderway {
+    /// Fold one stratum into this read group's summary.
+    ///
+    /// **The counters read the resolved slippage rather than the record built from it**, because
+    /// the record deliberately names a stratum as its own lender and the resolved answer says
+    /// plainly whether anything was borrowed.
+    fn take_in(
+        &mut self,
+        key: StratumKey,
+        slippage: &StratumSlippage,
+        merged_over: &[Stratum],
+        fit: &StratumFit,
+    ) {
+        let summary = &mut self.summary;
+        match slippage.slippage.provenance {
+            Provenance::FittedHere => summary.strata_fitted_here += 1,
+            Provenance::Borrowed => summary.strata_borrowed += 1,
+            // Neither rung exists on this path: a period with nothing to borrow from raises
+            // `NoFittableStratumAtPeriod` rather than defaulting, because a slippage level spans
+            // twenty-two-fold across repeat counts and any constant would be wrong for most
+            // strata.
+            Provenance::Defaulted | Provenance::Supplied => {}
+        }
+        if slippage.slippage.provenance == Provenance::FittedHere
+            && !slippage.shares_fitted_over.is_empty()
+        {
+            summary.strata_with_borrowed_shares += 1;
+        }
+        if slippage.keeps_unmeasured_shares() {
+            summary.strata_with_unmeasured_shares += 1;
+        }
+
+        // **Over the strata thick enough to speak, and not over every stratum**: the guard share
+        // is a ratio over the reads that moved, so a stratum of one locus with one moved read
+        // reports 1.0. Most of a genome's 338 strata per read group are thin, so a maximum taken
+        // over all of them is a near-certain 1.0 from a stratum nobody would act on, and the field
+        // exists to point a reader at the strata this model does not describe.
+        //
+        // Thickness and not a fit, which is the other tempting cut: the stratum that most needs
+        // flagging — one no read of which sits on the whole-repeat grid — is exactly the one
+        // `fit_slippage` refuses, so counting only fitted strata would leave a guard share of 1.0
+        // unreported.
+        if thick_enough_to_fit(slippage.loci) {
+            let guard_share = fit.not_whole_repeat_share;
+            if guard_share > GUARD_SHARE_LIMIT {
+                summary.strata_above_guard_limit += 1;
+            }
+            if summary
+                .worst_guard_share
+                .is_none_or(|(_, worst)| guard_share > worst)
+            {
+                summary.worst_guard_share = Some((key.stratum, guard_share));
+            }
+        }
+
+        // A merge is a claim about several strata at once, so it is named once rather than once
+        // per member — and the same repeat counts pooled at two ploidies are two claims.
+        if !merged_over.is_empty() {
+            let set: SmallVec<[Stratum; 2]> = SmallVec::from_slice(merged_over);
+            if !self.sets_seen.contains(&(key.ploidy, set.clone())) {
+                self.sets_seen.push((key.ploidy, set.clone()));
+                summary.strata_merged.push(set);
+            }
+        }
+
+        let Some(own) = slippage.own_fit.as_ref() else {
+            return;
+        };
+        if !own.every_climb_settled {
+            summary.strata_with_unsettled_climbs += 1;
+        }
+        if !own.termination.converged {
+            summary.strata_with_unsettled_searches += 1;
+        }
+        if own.start_spread > START_AGREEMENT_LIMIT {
+            summary.strata_with_disagreeing_starts += 1;
+        }
+        if summary
+            .worst_start_disagreement
+            .is_none_or(|(_, worst)| own.start_spread > worst)
+        {
+            summary.worst_start_disagreement = Some((key.stratum, own.start_spread));
+        }
+        if summary
+            .worst_unexplained_locus_share
+            .is_none_or(|(_, worst)| fit.unexplained_locus_share > worst)
+        {
+            summary.worst_unexplained_locus_share =
+                Some((key.stratum, fit.unexplained_locus_share));
+        }
+
+        // The fit's own locus count, which after a pooling is the whole set's — what stood behind
+        // the fit rather than what the stratum holds.
+        if self.any_fit {
+            summary.loci_behind_thinnest_fit = summary.loci_behind_thinnest_fit.min(own.loci);
+            summary.loci_behind_thickest_fit = summary.loci_behind_thickest_fit.max(own.loci);
+        } else {
+            summary.loci_behind_thinnest_fit = own.loci;
+            summary.loci_behind_thickest_fit = own.loci;
+            self.any_fit = true;
+        }
+
+        let level = slippage.slippage.value.slip_rate.get();
+        if self.lowest_fitted_level.is_none_or(|lowest| level < lowest) {
+            self.lowest_fitted_level = Some(level);
+            summary.low_slippage_substitution = Some(fit.substitution.clone());
+        }
+    }
+
+    fn finish(self) -> StratumFitSummary {
+        self.summary
     }
 }
 
@@ -4919,5 +5446,1141 @@ mod tests {
             Provenance::FittedHere,
             "and the haploid stratum at the same repeat count kept its own fit"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The record a stratum leaves behind, and the summary over them.
+    // -----------------------------------------------------------------
+
+    /// `loci` tracts of ten reads each, one of which sits a motif copy short — plus two kinds of
+    /// planted locus:
+    ///
+    /// - `aberrant`: reads at **three** lengths, four copies either side of the reference. No
+    ///   pair of alleles reaches all three, so the only explanation the model has left is
+    ///   slippage, and every one of those reads moved by a whole number of copies — which is the
+    ///   shape a duplication the reference does not carry produces, and the one the guard share
+    ///   cannot see.
+    /// - `off_grid`: every read a base short of a whole number of copies, so no read sits on the
+    ///   whole-repeat grid and the model scores none of them.
+    fn stratum_with_planted_loci(loci: u64, aberrant: u64, off_grid: u64) -> SsrAccumulators {
+        let at_reference: Vec<u8> = b"AT".repeat(10);
+        let a_copy_short: Vec<u8> = b"AT".repeat(9);
+        let four_copies_short: Vec<u8> = b"AT".repeat(6);
+        let four_copies_long: Vec<u8> = b"AT".repeat(14);
+        let ragged: Vec<u8> = b"ATATATATATATATATATA".to_vec();
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        let mut file = |accumulators: &mut SsrAccumulators, reads: Vec<SequenceObservation>| {
+            accumulators.add_locus(&tract(at, &at_reference, b"AT", reads));
+            at += 400;
+        };
+        for _ in 0..loci {
+            file(
+                &mut accumulators,
+                vec![
+                    observation(&at_reference, 0, 9),
+                    observation(&a_copy_short, 0, 1),
+                ],
+            );
+        }
+        for _ in 0..aberrant {
+            file(
+                &mut accumulators,
+                vec![
+                    observation(&at_reference, 0, 3),
+                    observation(&four_copies_short, 0, 3),
+                    observation(&four_copies_long, 0, 3),
+                ],
+            );
+        }
+        for _ in 0..off_grid {
+            file(&mut accumulators, vec![observation(&ragged, 0, 10)]);
+        }
+        accumulators
+    }
+
+    /// A stratum fitted from its own loci, and the entry-by-entry scores behind it.
+    fn fitted(accumulators: &SsrAccumulators) -> (StratumKey, &StratumTable, StratumSlippageFit) {
+        let (key, table) = only_table(accumulators);
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+        (key, table, fit)
+    }
+
+    /// What the fitted model makes of one entry, per read — the quantity the diagnostic compares
+    /// against its limit, through the same code path so the two cannot drift.
+    fn entry_log_likelihood_per_read(
+        entry: StratumEntry,
+        fit: &StratumSlippageFit,
+        ploidy: Ploidy,
+    ) -> Option<f64> {
+        MixtureScratch::for_fit(fit).log_likelihood_per_read(entry, fit, &fit.noise_model(), ploidy)
+    }
+
+    /// **A stratum whose shapes its own fit explains reports nothing unexplained**, and exactly
+    /// zero rather than nearly zero: every locus here is the same shape, the fit puts the level
+    /// where that shape is likeliest, and no locus is left over.
+    #[test]
+    fn a_stratum_its_own_fit_explains_reports_nothing_unexplained() {
+        let accumulators = stratum_with_planted_loci(1_000, 0, 0);
+        let (key, table, fit) = fitted(&accumulators);
+
+        assert_eq!(unexplained_locus_share(table, &fit, key.ploidy), 0.0);
+    }
+
+    /// **A planted locus the model cannot explain is seen here and is invisible to the guard
+    /// share**, which is the reason for a second diagnostic rather than a threshold on the first.
+    ///
+    /// The five planted loci show reads at three lengths, four motif copies either side of the
+    /// reference: a diploid genotype offers two lengths, so whichever pair the fit chooses, three
+    /// reads have to have slipped four copies — measured, that scores −5.23 a read against the
+    /// −3.00 limit, while the ordinary loci score −0.33. **Every one of those reads moved by a
+    /// whole number of copies**, so the guard share stays at exactly zero however many are
+    /// planted.
+    #[test]
+    fn loci_the_fitted_model_cannot_explain_are_seen_where_the_guard_share_is_blind() {
+        let accumulators = stratum_with_planted_loci(1_000, 5, 0);
+        let (key, table, fit) = fitted(&accumulators);
+
+        let share = unexplained_locus_share(table, &fit, key.ploidy);
+        assert!(
+            (share - 5.0 / 1_005.0).abs() < 1e-12,
+            "the five planted loci and no others: {share}"
+        );
+        assert_eq!(
+            table.not_whole_repeat_share(),
+            0.0,
+            "every planted read moved by a whole number of copies, so the guard share is blind \
+             to all five"
+        );
+    }
+
+    /// **Plant enough of them and the diagnostic goes quiet, because the fit has absorbed them**
+    /// — which is not a defect in this measure but the thing spec §4.6 warns about, seen from
+    /// the outside.
+    ///
+    /// Measured: at 5 planted loci in 1,005 the share is 5/1,005 and each planted locus scores
+    /// −5.23 a read against the ordinary loci's −0.33; at 100 in 1,100 the share is **zero**,
+    /// because the planted locus now scores −2.48.
+    ///
+    /// **What absorbs them is the noise parameters, and not — as it first appears — the genotype
+    /// frequencies.** The fit hands the planted shape a genotype at *both* densities: a (0, +6)
+    /// pair at a frequency of 0.00498 with 5 planted and 0.0910 with 100, each of them the planted
+    /// share, which the test asserts. So of the 24.7 nats the planted locus gains between the two
+    /// runs, its genotype's frequency supplies 2.9 — about one eighth. The rest comes from the
+    /// fall-off going 0.043 to 0.467 and the level from 0.10118 to 0.12198: **a fall-off that flat
+    /// makes a read four copies from its allele cheap, and it is the whole stratum's fall-off,
+    /// fitted over all 1,100 loci.** The contamination has moved into the parameters instead of
+    /// standing out from them, which is the damage spec §4.6 describes. **That is why Milestone H
+    /// measures what such loci cost rather than trusting this number to find them.**
+    #[test]
+    fn a_class_of_loci_the_fit_absorbs_stops_being_unexplained() {
+        let (rare_key, rare_table, rare_fit) = {
+            let accumulators = stratum_with_planted_loci(1_000, 5, 0);
+            let (key, table, fit) = fitted(&accumulators);
+            (key, table.clone(), fit)
+        };
+        let common = stratum_with_planted_loci(1_000, 100, 0);
+        let (common_key, common_table, common_fit) = fitted(&common);
+
+        assert!(
+            (unexplained_locus_share(&rare_table, &rare_fit, rare_key.ploidy) - 5.0 / 1_005.0)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(
+            unexplained_locus_share(common_table, &common_fit, common_key.ploidy),
+            0.0,
+            "twenty times as many of exactly the same locus, and none of them is unexplained"
+        );
+
+        // The genotype is given to the planted shape at both densities, at the share the fixture
+        // planted — so it is not the genotype frequencies that separate the two runs.
+        let planted_genotype = |fit: &StratumSlippageFit, ploidy| {
+            genotypes_of(fit, ploidy)
+                .into_iter()
+                .find(|genotype| genotype.alleles() == [WholeRepeatOffset(0), WholeRepeatOffset(6)])
+                .expect("the support reaches six copies either way")
+                .frequency()
+        };
+        assert!(
+            (planted_genotype(&rare_fit, rare_key.ploidy) - 5.0 / 1_005.0).abs() < 1e-3,
+            "five planted loci in 1,005 get a genotype of their own"
+        );
+        assert!(
+            (planted_genotype(&common_fit, common_key.ploidy) - 100.0 / 1_100.0).abs() < 1e-3,
+            "and so do a hundred in 1,100"
+        );
+
+        // What does separate them: a fall-off eleven times flatter, which is what makes a read
+        // four copies from its allele cheap — and it belongs to the whole stratum.
+        assert!(
+            common_fit.model.step_decay.get() > 10.0 * rare_fit.model.step_decay.get(),
+            "the fall-off carries the absorption: {} against {}",
+            common_fit.model.step_decay.get(),
+            rare_fit.model.step_decay.get()
+        );
+        assert!(
+            common_fit.model.slip_rate.get() > rare_fit.model.slip_rate.get(),
+            "and the level rises too: {} against {}",
+            common_fit.model.slip_rate.get(),
+            rare_fit.model.slip_rate.get()
+        );
+    }
+
+    /// **A deep locus is not flagged for being deep**, which is the whole of why the rule is per
+    /// read.
+    ///
+    /// A shape's likelihood is a product over its reads, so a floor on the total is a floor on
+    /// depth. This stratum's loci come in four classes at twelve reads each and the fit explains
+    /// all of them — nothing here is unexplained — yet **every one of its 1,000 loci scores below
+    /// the −3.00 limit on the undivided total**, from −4.37 for the commonest class to −12.52 for
+    /// the rarest. Per read the same four run from −0.36 to −1.04, all of them comfortable. **A
+    /// rule without the division would report the whole of a well-fitted stratum as
+    /// unexplainable**, and it would do so on twelve-read loci at any level of slippage.
+    ///
+    /// The two classes that cost most per read are the two **heterozygous** ones, at −1.04 and
+    /// −0.98 against the homozygotes' −0.36 and −0.42: a heterozygous locus spreads its reads over
+    /// two allele lengths, so no single bucket probability is near one. That is a fact about
+    /// twelve reads rather than about the fit, and it is the reason the limit has to be set by
+    /// measurement rather than by argument.
+    #[test]
+    fn the_unexplained_share_is_per_read_so_depth_alone_never_flags_a_locus() {
+        let accumulators = mixed_genotype_stratum(1_000, 12);
+        let (key, table, fit) = fitted(&accumulators);
+
+        assert_eq!(
+            unexplained_locus_share(table, &fit, key.ploidy),
+            0.0,
+            "the fit explains every class of locus in this stratum"
+        );
+
+        let mut loci_below_on_the_total = 0;
+        let mut worst_per_read = f64::INFINITY;
+        for entry in table.entries() {
+            let per_read = entry_log_likelihood_per_read(entry, &fit, key.ploidy)
+                .expect("every locus here has reads on the whole-repeat grid");
+            let total = per_read * f64::from(entry.shape.whole_repeat_depth());
+            if total < UNEXPLAINED_SHAPE_LN_LIMIT {
+                loci_below_on_the_total += entry.loci;
+            }
+            worst_per_read = worst_per_read.min(per_read);
+        }
+        assert_eq!(
+            loci_below_on_the_total, 1_000,
+            "a rule on the undivided total would call every locus of this stratum unexplained"
+        );
+        assert!(
+            worst_per_read > UNEXPLAINED_SHAPE_LN_LIMIT,
+            "and per read the worst of them is comfortable: {worst_per_read}"
+        );
+    }
+
+    /// Four classes of locus at `depth` reads each — a stratum with genotypes rather than one
+    /// shape repeated, so that the fitted frequencies spread over several genotypes and no single
+    /// shape carries all the mass.
+    fn mixed_genotype_stratum(loci: u64, depth: u32) -> SsrAccumulators {
+        let at_reference: Vec<u8> = b"AT".repeat(10);
+        let a_copy_short: Vec<u8> = b"AT".repeat(9);
+        let two_copies_short: Vec<u8> = b"AT".repeat(8);
+        let reads = |share: u32| (depth * share).div_ceil(12);
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for locus in 0..loci {
+            let observations = match locus % 10 {
+                // Homozygous for the reference, one read in twelve slipped.
+                0..=3 => vec![
+                    observation(&at_reference, 0, depth - reads(1)),
+                    observation(&a_copy_short, 0, reads(1)),
+                ],
+                // One copy of each of the two commonest lengths.
+                4..=6 => vec![
+                    observation(&at_reference, 0, depth - reads(6)),
+                    observation(&a_copy_short, 0, reads(5)),
+                    observation(&two_copies_short, 0, reads(1)),
+                ],
+                // Homozygous a copy short.
+                7..=8 => vec![
+                    observation(&a_copy_short, 0, depth - reads(1)),
+                    observation(&two_copies_short, 0, reads(1)),
+                ],
+                // The rarest class: two copies apart, one locus in ten.
+                _ => vec![
+                    observation(&at_reference, 0, depth - reads(6)),
+                    observation(&two_copies_short, 0, reads(6)),
+                ],
+            };
+            accumulators.add_locus(&tract(at, &at_reference, b"AT", observations));
+            at += 400;
+        }
+        accumulators
+    }
+
+    /// **A locus no read of which sits on the whole-repeat grid counts in the denominator and
+    /// never in the numerator.** The model scores only whole-repeat movement, so such a locus is
+    /// an empty product — a likelihood of one — which is a locus with nothing to say about which
+    /// alleles it carries rather than one that refutes them all. Charging it here would report
+    /// the guard share a second time under another name.
+    ///
+    /// Fifteen of them beside the five loci the model genuinely cannot explain: the share is
+    /// 5/1,020 and not 5/1,005.
+    #[test]
+    fn a_locus_the_model_scores_no_read_of_counts_in_the_denominator_alone() {
+        let accumulators = stratum_with_planted_loci(1_000, 5, 15);
+        let (key, table, fit) = fitted(&accumulators);
+
+        assert_eq!(table.loci(), 1_020, "every locus is in the table");
+        let share = unexplained_locus_share(table, &fit, key.ploidy);
+        assert!(
+            (share - 5.0 / 1_020.0).abs() < 1e-12,
+            "the fifteen off-grid loci are in the denominator and none of them is unexplained: \
+             {share}"
+        );
+        assert!(
+            table.not_whole_repeat_share() > 0.0,
+            "and the guard share is what does see them"
+        );
+
+        assert_eq!(
+            unexplained_locus_share(&StratumTable::default(), &fit, key.ploidy),
+            0.0,
+            "a stratum with no loci at all has no unexplained ones, rather than all of them"
+        );
+    }
+
+    /// **What a locus is divided by is the reads the model scored, not the reads it holds** — and
+    /// the two differ only where one locus mixes reads on the whole-repeat grid with reads off it,
+    /// which no other fixture here does.
+    ///
+    /// The planted loci carry six reads at three whole-repeat lengths four copies apart and six
+    /// more a base short of any whole number of copies. The model scores the first six and the
+    /// likelihood is a product over those; dividing by all twelve would halve the distance to the
+    /// limit, which the second assertion measures: the same score over the whole depth sits above
+    /// −3.00 and the locus would go unreported.
+    #[test]
+    fn a_locus_is_divided_by_the_reads_the_model_scored_and_not_by_its_depth() {
+        let at_reference: Vec<u8> = b"AT".repeat(10);
+        let a_copy_short: Vec<u8> = b"AT".repeat(9);
+        let four_copies_short: Vec<u8> = b"AT".repeat(6);
+        let four_copies_long: Vec<u8> = b"AT".repeat(14);
+        let ragged: Vec<u8> = b"ATATATATATATATATATA".to_vec();
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for _ in 0..1_000 {
+            accumulators.add_locus(&tract(
+                at,
+                &at_reference,
+                b"AT",
+                vec![
+                    observation(&at_reference, 0, 9),
+                    observation(&a_copy_short, 0, 1),
+                ],
+            ));
+            at += 400;
+        }
+        for _ in 0..5 {
+            accumulators.add_locus(&tract(
+                at,
+                &at_reference,
+                b"AT",
+                vec![
+                    observation(&at_reference, 0, 2),
+                    observation(&four_copies_short, 0, 2),
+                    observation(&four_copies_long, 0, 2),
+                    observation(&ragged, 0, 6),
+                ],
+            ));
+            at += 400;
+        }
+        let (key, table, fit) = fitted(&accumulators);
+
+        let share = unexplained_locus_share(table, &fit, key.ploidy);
+        assert!(
+            (share - 5.0 / 1_005.0).abs() < 1e-12,
+            "the five mixed loci and no others: {share}"
+        );
+
+        let mixed = table
+            .entries()
+            .into_iter()
+            .find(|entry| entry.shape.reads_not_whole_repeat() == 6)
+            .expect("the planted class");
+        let per_scored_read = entry_log_likelihood_per_read(mixed, &fit, key.ploidy)
+            .expect("six of its reads sit on the grid");
+        assert!(per_scored_read < UNEXPLAINED_SHAPE_LN_LIMIT);
+        assert_eq!(mixed.shape.depth(), 12);
+        assert!(
+            per_scored_read * 6.0 / 12.0 > UNEXPLAINED_SHAPE_LN_LIMIT,
+            "over the whole depth the same locus would clear the limit: {per_scored_read}"
+        );
+    }
+
+    /// **A stratum whose loci the fit puts no mass on is wholly unexplained**, which is the far end
+    /// of this diagnostic's range and the one that proves the genotype *frequencies* are read
+    /// rather than only the genotypes' likelihoods.
+    ///
+    /// Every read of the second stratum here sits four copies short of the reference while the fit
+    /// handed to it keeps all its mass on the reference-length genotype — so every locus has to be
+    /// explained as four slips at once, and every locus is. The summary then names it as the worst
+    /// of the two, which is the other thing this pins: with the fold reading the smaller share
+    /// instead, the clean stratum would be reported as this read group's worst.
+    #[test]
+    fn a_stratum_the_fits_frequencies_cannot_reach_is_wholly_unexplained_and_is_named() {
+        let clean: Vec<u8> = b"AT".repeat(5);
+        let reference: Vec<u8> = b"AT".repeat(10);
+        let four_copies_short: Vec<u8> = b"AT".repeat(6);
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract(at, &clean, b"AT", vec![observation(&clean, 0, 4)]));
+            at += 200;
+        }
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract(
+                at,
+                &reference,
+                b"AT",
+                vec![observation(&four_copies_short, 0, 4)],
+            ));
+            at += 200;
+        }
+        let fits: BTreeMap<StratumKey, StratumSlippageFit> = [
+            (key_at(5), fit_over(5, 0.01, 0.20, 1_200, 9_000)),
+            (key_at(10), fit_over(10, 0.01, 0.20, 1_200, 9_000)),
+        ]
+        .into_iter()
+        .collect();
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("both are thick enough to fit");
+        let parameters = assembled(&accumulators, &resolved);
+
+        assert_eq!(
+            parameters.by_stratum[&key_at(5)].unexplained_locus_share,
+            0.0,
+            "its reads sit where the fit's one genotype says they should"
+        );
+        assert_eq!(
+            parameters.by_stratum[&key_at(10)].unexplained_locus_share,
+            1.0,
+            "and not one locus of the other is reachable from that genotype"
+        );
+        assert_eq!(
+            parameters.summary[&ReadGroupId(0)].worst_unexplained_locus_share,
+            Some((stratum(2, 10), 1.0)),
+            "the summary names the worse of the two, not the better"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Assembling the record, and the summary over a read group's records.
+    // -----------------------------------------------------------------
+
+    /// A hand-built fit whose genotype frequencies are the shape the stratum's **own** support
+    /// makes, with all the mass on the reference-length genotype.
+    ///
+    /// [`fit_at`] cannot serve here: it carries one frequency, and a record assembled from it is
+    /// refused by [`genotypes_of`] — which is the check that a fit's frequencies and the support
+    /// they are indexed by belong together.
+    fn fit_over(
+        repeats: u32,
+        level: f64,
+        gain_share: f64,
+        loci: u64,
+        slipped: u64,
+    ) -> StratumSlippageFit {
+        fit_over_at(
+            Ploidy::try_new(2).expect("two genome copies"),
+            repeats,
+            level,
+            gain_share,
+            loci,
+            slipped,
+        )
+    }
+
+    /// The same, at a stated ploidy — because the genotype count is `C(A + P − 1, P)` and a fit
+    /// built for two genome copies is refused by a haploid stratum's record.
+    fn fit_over_at(
+        ploidy: Ploidy,
+        repeats: u32,
+        level: f64,
+        gain_share: f64,
+        loci: u64,
+        slipped: u64,
+    ) -> StratumSlippageFit {
+        let model = SsrNoiseModel::for_stratum(RepeatCount(repeats));
+        let support: Vec<WholeRepeatOffset> = model.allele_support().to_vec();
+        let mut frequencies = vec![0.0; model.genotypes(ploidy)];
+        let mut at = 0usize;
+        model.for_each_genotype(ploidy, |genotype| {
+            if genotype
+                .iter()
+                .all(|&allele| support[allele] == WholeRepeatOffset(0))
+            {
+                frequencies[at] = 1.0;
+            }
+            at += 1;
+        });
+
+        // Ten reads a locus, so a fixture asking for 9,000 moved reads out of 1,200 loci is not
+        // asking for more reads to have moved than were ever scored.
+        assert!(
+            slipped <= loci * 10,
+            "a fixture that moved more reads than it holds"
+        );
+        StratumSlippageFit {
+            genotype_frequencies: frequencies,
+            model_repeats: RepeatCount(repeats),
+            loci,
+            slipped_reads: slipped,
+            scored_reads: loci * 10,
+            ..fitted_at(SlippageModel::try_new(level, gain_share, 0.065).expect("a model"))
+        }
+    }
+
+    /// Assemble a sample's parameters from an accumulator and a resolved map, with no merges.
+    fn assembled(
+        accumulators: &SsrAccumulators,
+        resolved: &BTreeMap<StratumKey, StratumSlippage>,
+    ) -> SsrSampleParameters {
+        assemble_sample_parameters(
+            accumulators,
+            &substitution_rates(accumulators),
+            resolved,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// **A record names the strata its numbers' loci actually came from — itself where they are
+    /// its own.** The resolved slippage leaves both lists empty in that case, because it is
+    /// answering about one stratum with the stratum in hand; a record is read beside several
+    /// hundred others, where an empty list would leave a reader to work out whether it meant
+    /// *its own* or *not recorded*.
+    #[test]
+    fn a_record_names_the_strata_its_numbers_came_from() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_over(5, 0.01, 0.20, 1_200, 9_000))),
+            (6, 4, None),
+            (7, 1_200, Some(fit_over(7, 0.04, 0.30, 1_200, 9_000))),
+        ]);
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("two of the three could be fitted");
+        let parameters = assembled(&accumulators, &resolved);
+
+        let own = &parameters.by_stratum[&key_at(5)];
+        assert_eq!(own.slippage.provenance, Provenance::FittedHere);
+        assert_eq!(own.fitted_over.as_slice(), &[stratum(2, 5)]);
+        assert_eq!(
+            own.shares_fitted_over.as_slice(),
+            &[stratum(2, 5)],
+            "9,000 moved reads is its own measurement"
+        );
+        assert_eq!(
+            own.genotypes.len(),
+            78,
+            "twelve allele lengths at a five-copy tract, which is 78 unordered pairs"
+        );
+        assert_eq!(
+            own.substitution.observations,
+            1_200 * 4 * 10,
+            "1,200 loci of four reads across a ten-base tract"
+        );
+        assert_eq!(own.stratum, stratum(2, 5));
+
+        let borrowed = &parameters.by_stratum[&key_at(6)];
+        assert_eq!(borrowed.slippage.provenance, Provenance::Borrowed);
+        assert_eq!(
+            borrowed.fitted_over.as_slice(),
+            &[stratum(2, 5), stratum(2, 7)],
+            "both lenders are named"
+        );
+        assert_eq!(
+            borrowed.shares_fitted_over.as_slice(),
+            &[stratum(2, 5), stratum(2, 7)]
+        );
+        assert!(
+            borrowed.genotypes.is_empty(),
+            "a borrowed model brings three parameters and no allele frequencies"
+        );
+        assert_eq!(
+            borrowed.unexplained_locus_share, 0.0,
+            "and nothing scored its loci, which its empty genotypes and its provenance say"
+        );
+        assert!(borrowed.starts_tried.is_empty());
+        assert_eq!(
+            own.starts_tried.len(),
+            1,
+            "where a stratum was fitted, its starts travel with the record"
+        );
+
+        let summary = &parameters.summary[&ReadGroupId(0)];
+        assert_eq!(summary.strata_fitted_here, 2);
+        assert_eq!(summary.strata_borrowed, 1);
+        assert_eq!(
+            summary.strata_with_borrowed_shares, 0,
+            "a stratum that borrowed everything is not also one that borrowed its shares — those \
+             are the strata reporting a level of their own"
+        );
+    }
+
+    /// **A stratum that kept the level it measured and borrowed the two shares it could not says
+    /// so in two lists that differ** — the third claim of the three, and the common one at the
+    /// bottom of the repeat range.
+    #[test]
+    fn a_stratum_that_kept_its_level_and_borrowed_its_shares_says_so_in_two_lists() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_over(5, 0.01, 0.20, 1_200, 9_000))),
+            (6, 1_200, Some(fit_over(6, 0.02, 0.90, 1_200, 40))),
+        ]);
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("both are thick enough to fit");
+        let parameters = assembled(&accumulators, &resolved);
+
+        let kept = &parameters.by_stratum[&key_at(6)];
+        assert_eq!(kept.slippage.provenance, Provenance::FittedHere);
+        assert_eq!(kept.slippage.value.slip_rate.get(), 0.02, "its own level");
+        assert!(
+            (kept.slippage.value.gain_share.get() - 0.20).abs() < 1e-12,
+            "and its neighbour's direction share: {}",
+            kept.slippage.value
+        );
+        assert_eq!(kept.fitted_over.as_slice(), &[stratum(2, 6)]);
+        assert_eq!(kept.shares_fitted_over.as_slice(), &[stratum(2, 5)]);
+        assert_eq!(kept.slipped_reads, 40);
+
+        let summary = &parameters.summary[&ReadGroupId(0)];
+        assert_eq!(summary.strata_fitted_here, 2);
+        assert_eq!(summary.strata_borrowed, 0);
+        assert_eq!(
+            summary.strata_with_borrowed_shares, 1,
+            "counted apart from a whole borrow, because it reports a level of its own"
+        );
+        assert_eq!(summary.strata_with_unmeasured_shares, 0);
+    }
+
+    /// **A merge is one claim about several strata, so the summary names it once** however many
+    /// strata report it, and every one of their records names the whole set.
+    #[test]
+    fn a_merge_is_named_once_and_every_stratum_in_it_names_the_set() {
+        let pooled = fit_over(5, 0.03, 0.25, 2_400, 18_000);
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(pooled.clone())),
+            (6, 1_200, Some(pooled.clone())),
+            (7, 5_000, Some(fit_over(7, 0.05, 0.30, 5_000, 9_000))),
+        ]);
+        let set: SmallVec<[Stratum; 2]> = SmallVec::from_slice(&[stratum(2, 5), stratum(2, 6)]);
+        let merges: BTreeMap<StratumKey, MergedSlippageFit> = [key_at(5), key_at(6)]
+            .into_iter()
+            .map(|key| {
+                (
+                    key,
+                    MergedSlippageFit {
+                        fit: pooled.clone(),
+                        merged_over: set.clone(),
+                    },
+                )
+            })
+            .collect();
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("every stratum is thick enough to fit");
+
+        let parameters = assemble_sample_parameters(
+            &accumulators,
+            &substitution_rates(&accumulators),
+            &resolved,
+            &merges,
+        );
+
+        for repeats in [5, 6] {
+            let record = &parameters.by_stratum[&key_at(repeats)];
+            assert_eq!(
+                record.fitted_over.as_slice(),
+                &[stratum(2, 5), stratum(2, 6)],
+                "the pooled answer came from both tables, and both records say so"
+            );
+            assert_eq!(
+                record.shares_fitted_over.as_slice(),
+                &[stratum(2, 5), stratum(2, 6)]
+            );
+            assert_eq!(
+                record.genotypes.len(),
+                78,
+                "scored against the shorter tract's support, which is the pooled model's"
+            );
+        }
+        assert_eq!(
+            parameters.by_stratum[&key_at(7)].fitted_over.as_slice(),
+            &[stratum(2, 7)],
+            "the stratum outside the merge names only itself"
+        );
+
+        let summary = &parameters.summary[&ReadGroupId(0)];
+        assert_eq!(
+            summary.strata_merged.len(),
+            1,
+            "one merge, not one per stratum in it: {:?}",
+            summary.strata_merged
+        );
+        assert_eq!(
+            summary.strata_merged[0].as_slice(),
+            &[stratum(2, 5), stratum(2, 6)]
+        );
+        assert_eq!(summary.strata_fitted_here, 3);
+        assert_eq!(
+            summary.loci_behind_thinnest_fit, 2_400,
+            "the thinnest fit here stood on both pooled tables — a number no stratum's own locus \
+             count carries, and the smaller of the two only because the third stratum holds 5,000"
+        );
+        assert_eq!(summary.loci_behind_thickest_fit, 5_000);
+    }
+
+    /// **The same repeat counts pooled at two ploidies are two claims, and the summary keeps them
+    /// apart** — as it must, because a merge names strata and a stratum is not a key: the same
+    /// pair of repeat counts exists once per ploidy the genome carries.
+    ///
+    /// The haploid half also puts the record through a genotype walk that is not the diploid one:
+    /// twelve allele lengths at a five-copy tract make **twelve** genotypes at one genome copy
+    /// against 78 at two, so a record assembled at a fixed ploidy is refused by the fit it holds.
+    #[test]
+    fn a_merge_at_two_ploidies_is_two_claims() {
+        let haploid = Ploidy::try_new(1).expect("one genome copy");
+        let diploid_copies = Ploidy::try_new(2).expect("two genome copies");
+        let mut accumulators = SsrAccumulators::new(Arc::new(PloidyChangesAt {
+            haploid_from: 500_000,
+        }));
+        for (repeats, mut at) in [(5u32, 1_000u64), (6, 200_000)] {
+            let reference: Vec<u8> = b"AT".repeat(repeats as usize);
+            for _ in 0..1_200 {
+                accumulators.add_locus(&tract(
+                    at,
+                    &reference,
+                    b"AT",
+                    vec![observation(&reference, 0, 4)],
+                ));
+                at += 100;
+            }
+            let mut haploid_at = 500_000 + u64::from(repeats) * 200_000;
+            for _ in 0..1_200 {
+                accumulators.add_locus(&tract(
+                    haploid_at,
+                    &reference,
+                    b"AT",
+                    vec![observation(&reference, 0, 4)],
+                ));
+                haploid_at += 100;
+            }
+        }
+
+        let key = |repeats: u32, ploidy: Ploidy| StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, repeats),
+            ploidy,
+        };
+        let set: SmallVec<[Stratum; 2]> = SmallVec::from_slice(&[stratum(2, 5), stratum(2, 6)]);
+        let mut fits = BTreeMap::new();
+        let mut merges = BTreeMap::new();
+        for ploidy in [diploid_copies, haploid] {
+            let pooled = fit_over_at(ploidy, 5, 0.03, 0.25, 2_400, 18_000);
+            for repeats in [5, 6] {
+                fits.insert(key(repeats, ploidy), pooled.clone());
+                merges.insert(
+                    key(repeats, ploidy),
+                    MergedSlippageFit {
+                        fit: pooled.clone(),
+                        merged_over: set.clone(),
+                    },
+                );
+            }
+        }
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("every stratum is thick enough to fit");
+        let parameters = assemble_sample_parameters(
+            &accumulators,
+            &substitution_rates(&accumulators),
+            &resolved,
+            &merges,
+        );
+
+        assert_eq!(
+            parameters.summary[&ReadGroupId(0)].strata_merged.len(),
+            2,
+            "one merge per ploidy, though both name the same two strata"
+        );
+        assert_eq!(
+            parameters.by_stratum[&key(5, haploid)].genotypes.len(),
+            12,
+            "a haploid genotype is one allele length, and the support holds twelve"
+        );
+        assert_eq!(
+            parameters.by_stratum[&key(5, diploid_copies)]
+                .genotypes
+                .len(),
+            78
+        );
+    }
+
+    /// **The summary reports the substitution rate of the read group's least slippery stratum
+    /// that fitted its own level**, which is the operand step 4's own surface puts beside the
+    /// SNP/indel path's rate for the same library: where a tract barely slips, the two noise
+    /// models describe the same thing.
+    ///
+    /// **Three strata, and the quiet one is in the middle** — so a rule that took the first
+    /// stratum, the last, the thickest or the highest slippage level reports a rate of zero, and
+    /// only the least slippery one returns a rate at all. The two noisy strata mismatch nothing;
+    /// the quiet one has one of its four reads a locus carrying a single mismatched base.
+    #[test]
+    fn the_summary_reports_the_least_slippery_fitted_stratums_substitution_rate() {
+        let slippery: Vec<u8> = b"AT".repeat(5);
+        let quiet: Vec<u8> = b"AT".repeat(7);
+        let also_slippery: Vec<u8> = b"AT".repeat(9);
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for _ in 0..2_000 {
+            accumulators.add_locus(&tract(
+                at,
+                &slippery,
+                b"AT",
+                vec![observation(&slippery, 0, 4)],
+            ));
+            at += 200;
+        }
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract_at_a_known_rate(at, &quiet, b"AT", 0, 3, 1, 0));
+            at += 200;
+        }
+        for _ in 0..1_500 {
+            accumulators.add_locus(&tract(
+                at,
+                &also_slippery,
+                b"AT",
+                vec![observation(&also_slippery, 0, 4)],
+            ));
+            at += 200;
+        }
+        let fits: BTreeMap<StratumKey, StratumSlippageFit> = [
+            (key_at(5), fit_over(5, 0.05, 0.20, 2_000, 9_000)),
+            (key_at(7), fit_over(7, 0.001, 0.20, 1_200, 9_000)),
+            (key_at(9), fit_over(9, 0.02, 0.20, 1_500, 9_000)),
+        ]
+        .into_iter()
+        .collect();
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("all three are thick enough to fit");
+        let parameters = assembled(&accumulators, &resolved);
+
+        let reported = parameters.summary[&ReadGroupId(0)]
+            .low_slippage_substitution
+            .clone()
+            .expect("a read group with a fitted stratum has one");
+        assert!(
+            (reported.value.get() - 1.0 / 56.0).abs() < 1e-12,
+            "the quiet stratum's rate: one of its four reads a locus carries one mismatched \
+             base, across a fourteen-base tract: {}",
+            reported.value.get()
+        );
+        assert_eq!(
+            reported.observations,
+            1_200 * 4 * 14,
+            "and its warrant is bases compared, not loci"
+        );
+        assert_eq!(reported.provenance, Provenance::FittedHere);
+    }
+
+    /// **The summary carries what stood behind the thinnest and the thickest fit**, and a stratum
+    /// that borrowed stands behind neither: nothing was fitted from its loci.
+    #[test]
+    fn the_summary_holds_the_loci_behind_the_thinnest_and_the_thickest_fit() {
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(fit_over(5, 0.01, 0.20, 1_200, 9_000))),
+            (6, 4, None),
+            (7, 5_000, Some(fit_over(7, 0.04, 0.30, 5_000, 9_000))),
+        ]);
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("two of the three could be fitted");
+        let summary = assembled(&accumulators, &resolved).summary[&ReadGroupId(0)].clone();
+
+        assert_eq!(summary.loci_behind_thinnest_fit, 1_200);
+        assert_eq!(summary.loci_behind_thickest_fit, 5_000);
+        assert_eq!(summary.strata_fitted_here, 2);
+        assert_eq!(summary.strata_borrowed, 1);
+    }
+
+    /// **A climb that ran out of passes, a search that ran out of sweeps, and shares nobody could
+    /// lend are three different things and the summary counts them apart.** None is an error: the
+    /// climb walks a concave surface, so running out means running out of time on the right
+    /// summit; the outer search has no such proof, which is why *it* being capped is the fact
+    /// `fitting/` says a consumer has to be told; and a period where no stratum measured 4,000
+    /// moved reads is the common case at the bottom of the repeat range, where each stratum keeps
+    /// the shares it measured because there is nothing better.
+    /// **Three strata and two unsettled climbs**, so a rule counting the settled ones instead
+    /// answers 1 and is caught; and the one whose starts landed 1.5-fold apart is neither of the
+    /// other two, so the widest spread and the counter above it both have a stratum to name that
+    /// the fixture does not hand them by default.
+    #[test]
+    fn the_summary_counts_a_climb_that_ran_out_and_shares_nobody_could_lend() {
+        let mut unsettled = fit_over(5, 0.01, 0.20, 1_200, 40);
+        unsettled.every_climb_settled = false;
+        let mut capped = fit_over(6, 0.02, 0.30, 1_200, 40);
+        capped.every_climb_settled = false;
+        capped.termination = FitTermination {
+            iterations: 20,
+            converged: false,
+        };
+        capped.start_spread = 1.5;
+        let (accumulators, fits) = period_of(&[
+            (5, 1_200, Some(unsettled)),
+            (6, 1_200, Some(capped)),
+            (7, 1_200, Some(fit_over(7, 0.03, 0.30, 1_200, 40))),
+        ]);
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("all three are thick enough to fit");
+        let parameters = assembled(&accumulators, &resolved);
+        let summary = &parameters.summary[&ReadGroupId(0)];
+
+        assert_eq!(
+            summary.strata_with_unsettled_climbs, 2,
+            "two of the three, so counting the settled ones would answer 1"
+        );
+        assert_eq!(
+            summary.strata_with_unsettled_searches, 1,
+            "only one of those two also ran its outer search out of sweeps"
+        );
+        assert_eq!(
+            summary.strata_with_disagreeing_starts, 1,
+            "a map a caller fitted itself can carry a fit this module's own walk would refuse"
+        );
+        assert_eq!(
+            summary.worst_start_disagreement,
+            Some((stratum(2, 6), 1.5)),
+            "the widest spread, not the narrowest"
+        );
+        assert_eq!(
+            summary.strata_with_unmeasured_shares, 3,
+            "40 moved reads each, and none had a neighbour with 4,000 to lend"
+        );
+        assert_eq!(
+            summary.strata_with_borrowed_shares, 0,
+            "nothing was borrowed — that is the point of counting the two apart"
+        );
+        for repeats in [5, 6, 7] {
+            let record = &parameters.by_stratum[&key_at(repeats)];
+            assert_eq!(
+                record.shares_fitted_over.as_slice(),
+                &[stratum(2, repeats)],
+                "the shares are its own, however few reads stand behind them"
+            );
+            assert!(record.slipped_reads < MIN_SLIPPED_READS_TO_FIT_SHARES);
+        }
+    }
+
+    /// **The summary counts the strata this noise model does not describe, and names the worst —
+    /// over the strata thick enough to speak.** Above [`GUARD_SHARE_LIMIT`] the fitted slippage is
+    /// mostly mis-modelled ordinary indel, so a reader has to be told which strata those are
+    /// without opening several hundred records.
+    ///
+    /// **Three strata here and each is a different answer.** The thick ragged one is the finding:
+    /// every read of it moved by something other than a whole copy, and it is exactly the stratum
+    /// [`fit_slippage`] refuses, so a rule that counted only fitted strata would report nothing.
+    /// The **four-locus** ragged one is the noise the rule has to exclude: its guard share is 1.0
+    /// too, and on a real genome most of a read group's strata are that thin — a maximum taken
+    /// over all of them would be a near-certain 1.0 from a stratum nobody would act on.
+    #[test]
+    fn the_summary_counts_the_strata_this_model_does_not_describe() {
+        let clean: Vec<u8> = b"AT".repeat(5);
+        let reference: Vec<u8> = b"AT".repeat(7);
+        let ragged: Vec<u8> = b"ATATATATATATA".to_vec();
+        let thin_reference: Vec<u8> = b"AT".repeat(9);
+        let thin_ragged: Vec<u8> = b"ATATATATATATATATA".to_vec();
+        let at_the_limit: Vec<u8> = b"AT".repeat(11);
+        let at_the_limit_short: Vec<u8> = b"AT".repeat(10);
+        let at_the_limit_ragged: Vec<u8> = b"ATATATATATATATATATATA".to_vec();
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract(at, &clean, b"AT", vec![observation(&clean, 0, 4)]));
+            at += 200;
+        }
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract(
+                at,
+                &reference,
+                b"AT",
+                vec![observation(&ragged, 0, 4)],
+            ));
+            at += 200;
+        }
+        for _ in 0..4 {
+            accumulators.add_locus(&tract(
+                at,
+                &thin_reference,
+                b"AT",
+                vec![observation(&thin_ragged, 0, 4)],
+            ));
+            at += 200;
+        }
+        // Ten reads a locus differ from the reference tract length and exactly one of them by a
+        // non-whole number of copies: a guard share of 0.1, which is the limit itself.
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract(
+                at,
+                &at_the_limit,
+                b"AT",
+                vec![
+                    observation(&at_the_limit, 0, 2),
+                    observation(&at_the_limit_short, 0, 9),
+                    observation(&at_the_limit_ragged, 0, 1),
+                ],
+            ));
+            at += 200;
+        }
+        let fits: BTreeMap<StratumKey, StratumSlippageFit> =
+            [(key_at(5), fit_over(5, 0.01, 0.20, 1_200, 9_000))]
+                .into_iter()
+                .collect();
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("one stratum could be fitted, which the others borrow from");
+        let parameters = assembled(&accumulators, &resolved);
+        let summary = &parameters.summary[&ReadGroupId(0)];
+
+        assert_eq!(
+            parameters.by_stratum[&key_at(9)].not_whole_repeat_share,
+            1.0,
+            "the thin stratum's own record still carries its guard share"
+        );
+        assert_eq!(
+            parameters.by_stratum[&key_at(11)].not_whole_repeat_share,
+            GUARD_SHARE_LIMIT,
+            "and one stratum sits exactly at the limit"
+        );
+        assert_eq!(
+            summary.strata_above_guard_limit, 1,
+            "the thick ragged stratum: not the four-locus one beside it, and not the one sitting \
+             exactly at the limit, which is not above it"
+        );
+        assert_eq!(
+            summary.worst_guard_share,
+            Some((stratum(2, 7), 1.0)),
+            "every read of that stratum moved by something other than a whole copy"
+        );
+    }
+
+    /// **Two libraries make two summaries and nothing crosses between them**, because slippage is
+    /// a property of the chemistry: a library fitted at 0.5 must not lend its numbers, or its
+    /// counters, to one fitted at 0.01.
+    #[test]
+    fn two_libraries_get_two_summaries() {
+        let reference: Vec<u8> = b"AT".repeat(5);
+        let longer: Vec<u8> = b"AT".repeat(6);
+        let mut accumulators = SsrAccumulators::new(diploid());
+        let mut at = 1_000u64;
+        for _ in 0..1_200 {
+            accumulators.add_locus(&tract(
+                at,
+                &reference,
+                b"AT",
+                vec![observation(&reference, 0, 4)],
+            ));
+            accumulators.add_locus(&tract(
+                at + 100,
+                &longer,
+                b"AT",
+                vec![observation(&longer, 0, 4)],
+            ));
+            accumulators.add_locus(&tract(
+                at + 200,
+                &reference,
+                b"AT",
+                vec![observation(&reference, 1, 4)],
+            ));
+            at += 400;
+        }
+        let library = |group: u32, repeats: u32| StratumKey {
+            read_group: ReadGroupId(group),
+            stratum: stratum(2, repeats),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        };
+        let fits: BTreeMap<StratumKey, StratumSlippageFit> = [
+            (library(0, 5), fit_over(5, 0.01, 0.20, 1_200, 9_000)),
+            (library(0, 6), fit_over(6, 0.02, 0.20, 1_200, 40)),
+            (library(1, 5), fit_over(5, 0.50, 0.20, 1_200, 9_000)),
+        ]
+        .into_iter()
+        .collect();
+        let resolved = resolve_slippage(&accumulators, fits, "SL_landrace_07")
+            .expect("every stratum is thick enough to fit");
+        let parameters = assembled(&accumulators, &resolved);
+
+        assert_eq!(parameters.summary.len(), 2);
+        assert_eq!(parameters.summary[&ReadGroupId(0)].strata_fitted_here, 2);
+        assert_eq!(parameters.summary[&ReadGroupId(1)].strata_fitted_here, 1);
+        assert_eq!(
+            parameters.summary[&ReadGroupId(1)].strata_with_borrowed_shares,
+            0,
+            "the second library's stratum measured its own shares, and the first library's \
+             thin stratum is none of its business"
+        );
+        assert_eq!(
+            parameters.by_stratum[&library(1, 5)]
+                .slippage
+                .value
+                .slip_rate
+                .get(),
+            0.50
+        );
+    }
+
+    /// **A stratum the accumulator holds and the resolved map does not answer for stops the
+    /// run**, naming it. The alternative is a sample reported with strata silently missing, which
+    /// nothing downstream could question.
+    #[test]
+    #[should_panic(expected = "no slippage was resolved")]
+    fn a_stratum_nothing_resolved_is_refused_rather_than_dropped() {
+        let (accumulators, _) = period_of(&[(5, 1_200, None)]);
+        let _ = assembled(&accumulators, &BTreeMap::new());
+    }
+
+    /// **And so does a stratum with no substitution rate**, which is the case
+    /// [`substitution_rate_of`] leaves as `None`: a tract every read shows as entirely deleted
+    /// files a shape and compares no bases. Nothing observed reaches it — a read reaches a table
+    /// only through a complete witness, which compares its bases — so the alternative to failing
+    /// is a record carrying an invented zero into the comparison with the SNP/indel path's rate.
+    #[test]
+    #[should_panic(expected = "no substitution rate was fitted")]
+    fn a_stratum_with_no_compared_bases_is_refused_rather_than_given_a_zero() {
+        let reference: Vec<u8> = b"AT".repeat(10);
+        let mut accumulators = SsrAccumulators::new(diploid());
+        accumulators.add_locus(&tract(
+            1_000,
+            &reference,
+            b"AT",
+            vec![observation(b"", 0, 6)],
+        ));
+        let key = StratumKey {
+            read_group: ReadGroupId(0),
+            stratum: stratum(2, 10),
+            ploidy: Ploidy::try_new(2).expect("two genome copies"),
+        };
+        let resolved: BTreeMap<StratumKey, StratumSlippage> = [(
+            key,
+            StratumSlippage {
+                slippage: Estimate {
+                    value: SlippageModel::try_new(0.01, 0.2, 0.065).expect("a model"),
+                    provenance: Provenance::Borrowed,
+                    observations: 400,
+                },
+                fitted_over: SmallVec::from_slice(&[stratum(2, 9)]),
+                shares_fitted_over: SmallVec::from_slice(&[stratum(2, 9)]),
+                own_fit: None,
+                loci: 1,
+                slipped_reads: 0,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        let _ = assembled(&accumulators, &resolved);
     }
 }
