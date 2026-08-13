@@ -2240,10 +2240,15 @@ mod tests {
         )
         .expect("one sample is a cohort of one");
         assert_eq!(fit.hom_excess["s0"].provenance, Provenance::Defaulted);
-        assert!(matches!(
-            fit.contamination["s0"],
-            ContaminationEstimate::NotIdentified { .. }
-        ));
+        assert!(
+            matches!(
+                fit.contamination["s0"],
+                ContaminationEstimate::NotIdentified {
+                    reason: super::super::contamination::NotIdentifiedReason::NoPanel
+                }
+            ),
+            "with one sample there is no panel to be surprised by, and saying so is the point"
+        );
         let clean = fit.noise[&ReadGroupId(0)].value.clean;
         assert!(
             (clean / cohort.clean - 1.0).abs() < 0.35,

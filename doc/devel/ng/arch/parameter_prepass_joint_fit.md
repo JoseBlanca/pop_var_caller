@@ -305,25 +305,29 @@ varies with thread count and multiple starting points are enumerated rather than
 The identity check runs first and completely — a run that would fail on the fiftieth sample fails
 before the first likelihood evaluation.
 
-**`&[SampleRecords]` is the fifty-sample signature, and it does not survive a thousand — OPEN,
-2026-08-13.** It requires every sample's whole evidence resident, which is 6 GB at a thousand samples
-and 30 GB at five thousand (spec §7, §11 question 10). What the estimator actually consumes is
-narrower: the generic records of every sample, and then — after those are dropped — one stratum's
-tracts of every sample, one stratum at a time (spec §4, §4.1). **So the parameter is a source the fit
-asks sections of**, satisfied both by an in-memory `SampleRecords` and by a `SampleRecordsFile`
-(records arch §2.2), rather than a slice of whole values:
+**`&[SampleRecords]` was the fifty-sample signature and it does not survive a thousand — CHANGED
+2026-08-13.** A slice of whole record sets requires every sample's whole evidence resident, which is
+6 GB at a thousand samples and 30 GB at five thousand (spec §7, §11 question 10). What the estimator
+actually consumes is narrower: every sample's generic records, and then — after those are dropped —
+every sample's tracts for one band of strata, a band at a time (spec §4, §4.1). **So the parameter is
+the cohort, which lends sections for the length of a call and cannot be made to hand one over**
+(records arch §2.2):
 
 ```rust
 pub fn fit_jointly(
-    samples: &mut [impl JointRecordSource],
+    records: &mut CohortRecords,
     config: &JointFitConfig,
 ) -> Result<JointFit, JointFitError>;
 ```
 
-**Why this is open rather than decided:** the trait's methods follow from question 10's answer about
-what else is streamed — a fit that also reads locus-major wants a different unit again, and settling
-the source's shape before that measurement would fix the wrong one. What is already decided is that it
-cannot be a slice of whole record sets.
+`CohortRecords` is built from every sample's `SampleRecords` — resident ones in the run that never
+writes a file, file-backed ones otherwise — and this signature does not distinguish the two, which is
+the point. The identity check across samples happens when it is built, before any section is decoded.
+
+**What is still open** is whether the fit also reads locus-major within the generic half, which
+question 10 measures. That would add a call to `CohortRecords`, not change the ones here: the unit of
+lending would become a range of loci across every sample instead of a whole section, and the scoped
+shape is what makes that additive rather than a redesign.
 
 ### 2.2 The likelihood, as the shared seam already shapes it
 

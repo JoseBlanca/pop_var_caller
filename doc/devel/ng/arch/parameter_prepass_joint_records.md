@@ -21,31 +21,47 @@ and a writer.
 
 ## 1. Types
 
-### 1.1 `SampleRecords` — the whole input to the parameters fit
+### 1.1 `SampleRecords` — one sample's evidence, however it is being held
 
-One sample's evidence at the kept loci, plus the values the parameters fit checks before pooling. The two paths
-are separate maps because they hold different things, and both are keyed by read group because that
-is the grain the genome walk fills them at.
+**One type for both kinds of run.** A run that goes straight from alignments to a fit holds every
+section in memory; a run reading a file fills a section when it is asked for and drops it after. That
+is the *only* difference between them, so it is a property of the value rather than a second type —
+and the parameters fit is written once, against calls that behave the same either way.
 
 ```rust
 pub struct SampleRecords {
     pub sample: SampleName,
-    /// Indexed by position in `KeptLoci::generic`; carries no coordinates (spec §2.3).
-    pub generic: BTreeMap<ReadGroupId, GenericRecords>,
-    pub ssr: BTreeMap<ReadGroupId, SsrRecords>,
-    /// The thirteen values the parameters fit refuses to pool across (spec §5).
+    /// The thirteen values the parameters fit refuses to pool across (spec §5), and the
+    /// digest of the loci actually kept. **Outside the sections**: they are compared
+    /// across every sample before anything large is decoded.
     pub identity: RecordIdentity,
+    /// Resident, or backed by a file and loaded on demand. Not public: what a caller may
+    /// do with a section is §2.2's scoped access, and a field would let it keep one.
+    sections: Sections,
 }
 ```
 
-**Contract.** A sample's counts at a position are the sum of its read groups' — exact, so the parameters fit may
-fold freely. `BTreeMap` and not `HashMap`, so a fit that iterates is deterministic.
+**Contract.** A sample's counts at a position are the sum of its read groups' — exact, so the
+parameters fit may fold freely. Sections are enumerated in a fixed order (read groups by id, strata by
+their stratum key), so a fit that iterates is deterministic.
 
-**This is the whole-sample value, and it is the right shape for the run that never writes a file**
-— fifty samples, everything resident, no sections. **It is the wrong shape at a thousand**, where the
-generic half and each repeat-tract stratum are held at different times (§2.2, spec §6.2). Both shapes
-exist on purpose: this struct is what a genome walk produces and what a small cohort fits from, and
-`SampleRecordsFile` is what a large one reads.
+**What was here before, and why it is gone.** An earlier version of this section held
+`generic: BTreeMap<ReadGroupId, GenericRecords>` and `ssr: BTreeMap<ReadGroupId, SsrRecords>` as public
+fields, and a companion `SampleRecordsFile` for the run that could not hold them. Two shapes for one
+object made the fit two code paths, and public maps made *"hold one section at a time"* a convention
+rather than a property — nothing stopped a caller keeping every stratum it had ever asked for. **The
+storage stays exactly as §1.2 and §1.4 describe it**; what changed is that no caller reaches it
+directly.
+
+*Rejected, and it is worth saying why because it is the natural first idea:* one flat collection of
+per-locus records, `Vec<CensusRecord>` with an enum for the two kinds. **A Rust enum is as wide as its
+widest variant**, and the repeat-tract variant carries nine two-byte offset buckets before its other
+fields — so each of the two million ordinary positions would pay about 20 bytes where five bits is what
+it needs, some 40 MB a read group against the packed array's 1.25 MB. Boxing the variants trades the
+width for a pointer and an allocation per locus. And one collection in genome order interleaves the two
+halves, so reading one stratum would mean walking all of it. **`CensusRecord` survives one level up**,
+as the item the genome walk emits and the fit iterates (§2.2.1), where the uniformity is worth having and
+the storage is not paying for it.
 
 ### 1.2 `GenericRecords` — a dense array and a sparse list
 
@@ -327,41 +343,81 @@ pub fn write_records(records: &SampleRecords, out: impl Write) -> Result<(), Rec
 pub fn read_records(input: impl Read) -> Result<SampleRecords, RecordError>;
 ```
 
-**Reading is by section, not whole-file — 2026-08-13 (spec §6.2).** The parameters fit holds the
-generic half and the repeat-tract half at different times, and reads one stratum at a time within the
-second, so a reader that returns everything at once cannot express what the fit does. `SampleRecords`
-stays as the in-memory value the direct run builds; what a file offers is a handle.
+**Reading is by section, and a section is borrowed for the length of a call — 2026-08-13 (spec §6.2).**
+The parameters fit holds the generic half and the repeat-tract half at different times, and one band of
+strata at a time within the second. **Returning a section would make that a convention**: a caller
+could keep every one it had asked for, and a file-backed value would grow into the whole file it was
+supposed to avoid. So access is scoped, and holding two sections is not expressible.
+
+**The unit is one stratum across every sample, not one sample's stratum.** A tract's length frequencies
+are fitted from every sample with reads there (fit spec §4.1), so the fit needs sample 1 to *N* at
+stratum *k* together and none of them afterwards. That puts the scoped call on the cohort rather than
+on one sample:
 
 ```rust
-/// A records file, open and checked, with nothing decoded yet.
-pub struct SampleRecordsFile { /* … */ }
+/// Every sample's records, however each one is held.
+pub struct CohortRecords { /* Vec<SampleRecords>, in sample-name order */ }
 
-impl SampleRecordsFile {
-    pub fn open(input: impl Read + Seek) -> Result<Self, RecordError>;
-    /// Available before any section is read — this is what the fit compares across samples,
-    /// and a mismatch must be found before anything large is decoded.
-    pub fn identity(&self) -> &RecordIdentity;
+impl CohortRecords {
+    /// Opens or adopts each sample's records and checks the thirteen identity values
+    /// across all of them **before any section is decoded** (spec §5).
+    pub fn new(samples: Vec<SampleRecords>) -> Result<Self, RecordError>;
+
     pub fn read_groups(&self) -> &[ReadGroupId];
     pub fn strata(&self) -> &[Stratum];
 
-    pub fn generic(&mut self, group: ReadGroupId) -> Result<GenericRecords, RecordError>;
-    /// One stratum's tracts for one read group. The unit the STR fit consumes.
-    pub fn ssr(&mut self, group: ReadGroupId, stratum: Stratum)
-        -> Result<SsrRecords, RecordError>;
+    /// Every sample's generic records for one read group, for the length of the call.
+    pub fn with_generic<R>(
+        &mut self,
+        group: ReadGroupId,
+        f: impl FnOnce(&[&GenericRecords]) -> R,
+    ) -> Result<R, RecordError>;
+
+    /// Every sample's tracts for a **band** of strata, for the length of the call.
+    pub fn with_strata<R>(
+        &mut self,
+        group: ReadGroupId,
+        strata: &[Stratum],
+        f: impl FnOnce(&[&SsrRecords]) -> R,
+    ) -> Result<R, RecordError>;
 }
 ```
 
-**Contract.** Each call decodes **its own bytes and no others** — a directory at the head of the file
-gives every section's extent, and spec §7.16 asserts the byte count rather than only the values,
-because an implementation that decodes the whole file and returns a slice satisfies every value
-comparison and delivers none of the memory this shape exists for. The identity and the kept-loci
-digest live outside the sections, since they are checked first.
+**Why a band and not one stratum.** Of tomato's 141 strata, 68 hold fewer than a hundred tracts each
+and are fitted by borrowing from their neighbouring repeat counts rather than alone
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3.6), so the fit will sometimes
+want a stratum and its neighbours together. Those are the thin ones — a band of three costs almost
+nothing — but a signature taking a single stratum would have to be widened once code depended on it.
+
+**Contract.** A call decodes **its own bytes and no others**; spec §7.16 asserts the byte count and not
+only the values, because an implementation that decodes the whole file and hands back a slice satisfies
+every value comparison and delivers none of the memory this exists for. A file-backed sample drops what
+it loaded when the call returns; a resident one lends what it already holds and drops nothing. **Peak
+memory is samples × the largest band**: at a per-stratum cap of 5,000 tracts and about ten bytes a
+tract, 50 kB a sample, so 50 MB across a thousand.
 
 **`SsrRecords` becomes per (read group × stratum) rather than per read group.** Today it holds vectors
 indexed by a locus's position in the whole kept set; a section holds one stratum's slice of that, so
-the index is stratum-local and the stratum's first index travels in the directory. **That is the one
-type change this decision forces**, and it is the reason it is recorded here rather than left to
-implementation.
+the index is stratum-local and the stratum's first index travels in the file's directory. **That is the
+one storage-type change this decision forces**, and it is the reason it is recorded here rather than
+left to implementation.
+
+### 2.2.1 `CensusRecord` — the item both paths iterate
+
+The two halves store different things and are read through different calls, but a genome walk emits one
+locus at a time and a fit consumes one locus at a time, and at *that* level they are the same shape.
+
+```rust
+/// One locus's evidence for one read group, as the walk emits it and the fit reads it.
+pub enum CensusRecord<'a> {
+    Generic { index: u32, depth: DepthCode, non_reference: &'a [AlleleObservation] },
+    Ssr { index: u32, stratum: Stratum, tract: &'a SsrLocus },
+}
+```
+
+**Contract.** This is an **iteration item, never a stored one** — it borrows from a section that is
+already decoded, so a two-million-entry sequence of them exists only as a cursor. §1.1 says what
+storing them instead would cost.
 
 **The coverage-by-window summary is not in that stream.** It is recoverable from the pileup and the
 owner's decision is not to keep a copy (spec §4), so `write_records` omits it and `read_records`
@@ -434,10 +490,21 @@ make a property of the sample look like a property of the file.
   which is why spec §6 sizes it in the same table. **It is never serialized** (2026-08-13): it is
   rebuildable from the pileup, so it is built by the genome walk in a direct run and by a pass over the
   pileups otherwise — resident cost, not stored cost.
-- **A records file is read in sections and `SsrRecords` is keyed by stratum** — §2.2; spec §6.2. The
-  generic half and the repeat-tract half are never resident together, because the second consumes one
-  number per sample from the first and returns nothing; and a stratum is fitted alone. **The type has
-  to say so**, or the estimator's shape is not expressible against it.
+- **One `SampleRecords` for both kinds of run, differing only in whether its sections are resident** —
+  §1.1. A second type for the file case would make the parameters fit two code paths for one object.
+- **Sections are borrowed for the length of a call, never returned** — §2.2. The estimator holds the
+  generic half and the repeat-tract half at different times and one band of strata within the second;
+  an accessor that handed a section back would make that a convention a caller could ignore, and a
+  file-backed value would grow into the file it exists to avoid.
+- **The scoped call is on the cohort, and its unit is one stratum across every sample** — §2.2. A
+  tract's length frequencies are fitted from every sample with reads there, so per-sample access would
+  be the wrong grain; and it takes a **band** of strata, because 68 of tomato's 141 are fitted by
+  borrowing from their neighbours.
+- **`SsrRecords` is keyed by stratum** — §2.2; spec §6.2. The generic half and the repeat-tract half
+  are never resident together, because the second consumes one number per sample from the first and
+  returns nothing.
+- **`CensusRecord` is an iteration item, not a stored one** — §1.1, §2.2.1. Stored, its enum width
+  would put about 20 bytes on each of two million ordinary positions where five bits is what they need.
 - **The records are a cache of the pileup, and the pileup is the source of truth** — spec §6.1.
   Everything in a records file can be recomputed from the sample's pileup; it is kept because
   recomputing means a full decompression pass, and because the file serves every future cohort call

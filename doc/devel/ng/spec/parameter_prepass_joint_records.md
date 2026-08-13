@@ -649,6 +649,18 @@ each section — the generic records per read group, and the repeat-tract record
 stratum) — so a reader can take one section without decoding the rest. The thirteen identity values and
 the kept-loci digest stay outside the sections, since they are checked before anything is read.
 
+**And "one section at a time" has to be enforced by the interface rather than left to whoever writes
+the fit.** A reader that *returns* a section lets its caller keep every section it ever asked for, at
+which point a run reading a file has quietly reassembled the whole file in memory — the outcome this
+section exists to prevent, arrived at without anybody deciding to. So a section is lent for the length
+of a call and cannot be retained; the architecture document carries the shape
+([`../arch/parameter_prepass_joint_records.md`](../arch/parameter_prepass_joint_records.md) §2.2), and
+§7.16 is the test. **The unit lent is one band of strata across *every* sample**, because a tract's
+length frequencies are fitted from every sample with reads there — per-sample access would be the wrong
+grain — and a *band* rather than a single stratum because 68 of tomato's 141 strata hold fewer than a
+hundred tracts and are fitted by borrowing from their neighbouring repeat counts
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3.6).
+
 **What it buys, and the measured limit on it.** Peak resident becomes the largest single section
 rather than the sum: at two million positions the generic half is 1.25 MB per read group and the whole
 repeat-tract set is 4–5 MB. **But one stratum — period 1 at 8 repeats — holds 217,812 of tomato's
