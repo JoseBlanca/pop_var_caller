@@ -16,7 +16,8 @@ step traits) and [`module_layout.md`](module_layout.md) (the `src/ng/` tree). Na
 verbs for functions, newtypes for domain scalars. Signatures are illustrative; the **contract** is
 the deliverable. Every "why" is the spec's — this doc does not re-argue them.*
 
-**Scope: the STR path only** — one accumulator, keyed by `(read group, motif period, repeat count)`,
+**Scope: the STR path only** — one accumulator, keyed by `(read group, motif period, repeat count,
+ploidy)` (the ploidy was added 2026-08-12; §2 and §4 record why),
 and the four numbers fitted from it. The generic histograms, the two censuses and the cohort gather
 are separate units.
 
@@ -385,6 +386,11 @@ pub fn shape_of(
     read_group: ReadGroupId,
     cap: u32,
 ) -> LocusShape;
+// Built as: `shape_of(tally: OffsetTally, at: GenomeRegion) -> Option<EnteredShape>`. The read
+// group and the cap are applied by `tally_of` before this is reached, so what arrives is already
+// one library's offsets; `None` is a library that witnessed no length at this locus, which the
+// caller passes over rather than filing; and `EnteredShape` carries the depth the cap thinned
+// from, which the accumulator reports and a bare shape cannot.
 
 /// The composition channel for one locus: bases compared and bases mismatched, over the
 /// complete witnesses of one read group.
@@ -504,10 +510,17 @@ pub struct StratumFit {
 pub const UNEXPLAINED_SHAPE_LN_LIMIT: f64 = -3.0;
 
 pub struct SlippageStart { pub start: SlippageModel, pub reached: SlippageModel, pub log_likelihood: f64 }
+// Built with `from` rather than `start`, so a reader of `start.start` is never asked to work out
+// which of the two is the noun.
 
 /// Everything the STR path estimates for one sample.
 pub struct SsrSampleParameters {
     pub by_stratum: BTreeMap<(ReadGroupId, Stratum), StratumFit>,
+    // Built as: `BTreeMap<StratumKey, StratumFit>`, where `StratumKey` is that pair **plus the
+    // ploidy** the loci sit on (owner's call, 2026-08-12). An entry is the same object whatever
+    // the ploidy — a count of reads at each offset knows nothing about chromosomes — so a table
+    // pooling two of them looks healthy and is wrong only at the fit, which scores every entry
+    // against the genotypes of one ploidy. The accumulator's own key gained it at the same time.
     /// **The thing a person reads.** Several hundred fits per sample make a per-stratum
     /// record a file nobody opens (spec §4.4).
     pub summary: BTreeMap<ReadGroupId, StratumFitSummary>,
@@ -525,7 +538,9 @@ this path needs:
 
 ```rust
 impl NoiseModel for SsrNoiseModel {
-    type Cell = LocusShape;
+    type Cell = LocusShape;   // built as: StratumCell — one table entry with the ploidy its loci
+                              // sit at, and how many loci showed that shape. A bare shape carries
+                              // neither, and the fit weighs a row by its *loci*.
     type NoiseParams = SlippageModel;
 
     /// How likely each genotype makes this locus's shape, at these slippage parameters.
@@ -561,6 +576,14 @@ full 13. So the count is a per-stratum quantity bounded by 91, and **the return 
 a `Vec<f64>` or be generic in its inline capacity**. One line, and it belongs in the shared module
 rather than being copied here. *(The spec works its examples at nine lengths and 45 genotypes, which
 is the same arithmetic at a narrower support.)*
+
+> **Done, 2026-08-12.** `fit_mixture_weights` returns `Vec<f64>` and the likelihoods arrive as one
+> row-major `GenotypeLikelihoodTable`. Two things this section did not anticipate came with it.
+> **The bound of 91 is diploid-only**: the walk is over unordered `P`-tuples, `C(A + P − 1, P)`, so
+> the same two supports give 1,001 and 1,820 at four copies. And **the pass cap the generic path
+> asserts on is reached routinely here**: 91 genotypes, most heading to a frequency of zero, take
+> far longer to still than three, so on this path an unsettled climb is reported and counted rather
+> than asserted.
 
 **Does not transfer — `fit_by_profile_scan`.** It steps a ladder end to end because nobody had shown
 the profile curve has a single hump. Two things stop it here, both in spec §4.2: a flat scan over
@@ -638,6 +661,9 @@ that never looked, which is the failure the generic path's runs model produced a
 /// Step 4's STR front door: one table per (read group, stratum).
 pub struct SsrAccumulators {
     by_stratum: BTreeMap<(ReadGroupId, Stratum), StratumTable>,
+    // Built as: `BTreeMap<StratumKey, StratumTable>` — that pair **and the ploidy**, read from
+    // the map for every locus filed rather than carried and never asked (owner's call,
+    // 2026-08-12). See `SsrSampleParameters` in §2.
     ploidy: Arc<dyn PloidyMap>,
     counts: SsrAccumulationCounts,
 }
@@ -645,6 +671,9 @@ pub struct SsrAccumulators {
 impl SsrAccumulators {
     /// One per **region shard**.
     pub fn new(read_groups: &[ReadGroupId], ploidy: Arc<dyn PloidyMap>) -> Self;
+    // Built as: `new(ploidy)`. The read-group list is not an input — the libraries a locus was
+    // witnessed by are taken from the observations themselves, because a declared list is a
+    // second place for a read group to be missing from.
 
     /// Add one locus. **Borrows** — the caller keeps it and passes it on unchanged. A
     /// locus whose `kind` is not `LocusKind::Ssr` is ignored; one whose reference tract is
@@ -780,6 +809,14 @@ pub struct StratumFitSummary {
     /// two must agree to a quarter-Phred (spec §4.5). This unit cannot make the
     /// comparison — it never sees the generic half — so it emits the operand.
     pub low_slippage_substitution: Option<(ErrorRate, u64)>,
+    // Built as: `Option<Estimate<ErrorRate>>`, and the count in it is **bases compared, not
+    // loci**. The number exists to be read beside the generic path's rate for the same library,
+    // and that path counts an error rate's observations as reads times the sites they covered —
+    // one base per read per site, this quantity exactly. Two warrants on different scales cannot
+    // be compared, and a locus count says the wrong thing on its own besides: a hundred loci at
+    // three reads stand behind less of a per-base rate than one locus at three hundred. An
+    // `Estimate` rather than a bare pair because the comparison is only meaningful against a rate
+    // that was *fitted*, and the provenance is what says which.
     /// The merged sets, named — a merge is a claim about two strata at once.
     pub strata_merged: Vec<SmallVec<[Stratum; 2]>>,
     /// Fits whose starting points disagreed by more than `START_AGREEMENT_LIMIT` in the
@@ -899,8 +936,12 @@ Every row read before it was written.
   stratum (§5, spec §8.6). **Settled by:** the exact-bias harness, which fits both against one truth.
 - **Impl-time confirmation.** `MIN_LOCI_TO_FIT`, and the resolution against which "starting points
   disagreed" is judged.
-- **A change this unit forces on the shared module**, and it is not optional: `fit_mixture_weights`
-  returns `SmallVec<[f64; 3]>`, which cannot hold a stratum's genotype count (§3).
+- ~~**A change this unit forces on the shared module**, and it is not optional:
+  `fit_mixture_weights` returns `SmallVec<[f64; 3]>`, which cannot hold a stratum's genotype
+  count (§3).~~ **Done, 2026-08-12** — and it took a *third* change the seam had not anticipated:
+  `SearchableNoise`, the trait saying what a path's parameter **space** is as against how a cell is
+  scored, without which the multi-start search would have stepped a share in `(0, 1)` and a rate
+  spanning orders of magnitude on the same linear scale.
 - `OPEN:` **whether the slippage model needs a second class of locus**, for tracts that are not the
   tract their stratum thinks they are — a duplication the reference does not carry, a mismapped
   minority, a somatically unstable tract (spec §4.6, §8.12). **Nothing is designed for it here and
