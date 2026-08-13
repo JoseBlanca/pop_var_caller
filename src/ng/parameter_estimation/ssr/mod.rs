@@ -3865,6 +3865,71 @@ mod tests {
         (accumulators, fits)
     }
 
+    /// **A stratum carrying two alleles is fitted correctly at a slippage level of 0.2**, where a
+    /// stratum whose every locus shows the same read split is not — and the difference between
+    /// the two is the whole of why the second one fails.
+    ///
+    /// **What the fit has to choose between is two readings of one pattern.** Eight reads at one
+    /// length and two a copy short is either *the locus is homozygous and a fifth of its reads
+    /// slipped*, or *the locus carries two alleles a copy apart and nothing slipped* — the second
+    /// costs `ln(C(10,2)/2¹⁰)` a locus, which over 1,200 identical loci is a real second summit at
+    /// the bottom of the level axis. Where every locus shows the same intermediate split, nothing
+    /// separates the two, and the search settles on the wrong summit at 1e-5.
+    ///
+    /// **What separates them is the spread of splits across loci**, which is what a real stratum
+    /// has: a heterozygous locus throws about half its reads each way, a homozygous one throws
+    /// nearly all of them one way, and slippage shifts both by the same fraction. Here 60% of the
+    /// loci are homozygous for the reference and 40% carry a one-copy-shorter allele, at the same
+    /// 0.2. Measured, the level axis then has one summit — the score climbs from −7,679 at 1e-5 to
+    /// −2,772 at 0.2 with no dip — and the fit returns 0.19840.
+    ///
+    /// So the recovery this asserts reaches **twice the highest level any measured stratum
+    /// carries** (spec §4: 0.0009 to 0.15), and the failure recorded on
+    /// `a_dip_in_the_sequence_is_merged_and_refitted` needs a stratum unlike any real one.
+    #[test]
+    fn a_stratum_carrying_two_alleles_is_fitted_at_a_high_slippage_level() {
+        let at_0 = b"ATATATATATATATATATAT";
+        let at_1 = b"ATATATATATATATATAT";
+        let at_2 = b"ATATATATATATATAT";
+
+        let mut accumulators = SsrAccumulators::new(diploid());
+        for locus in 0..1_200u64 {
+            let observations = if locus < 720 {
+                // Homozygous for the reference: two reads in ten slipped a copy short.
+                vec![observation(at_0, 0, 8), observation(at_1, 0, 2)]
+            } else {
+                // One copy of each length, five reads off each, one read off each slipping.
+                vec![
+                    observation(at_0, 0, 4),
+                    observation(at_1, 0, 5),
+                    observation(at_2, 0, 1),
+                ]
+            };
+            accumulators.add_locus(&tract(1_000 + locus * 400, at_0, b"AT", observations));
+        }
+
+        let (key, table) = only_table(&accumulators);
+        assert_eq!(
+            table.entry_count(),
+            2,
+            "two kinds of locus, as a real stratum has"
+        );
+
+        let fit = fit_slippage(table, key.stratum, key.ploidy, SearchPrecision::fast())
+            .expect("a stratum whose reads sat on the whole-repeat grid");
+
+        assert!(
+            (fit.model.slip_rate.get() - 0.2).abs() < 0.01,
+            "a fifth of the reads slipped, off whichever allele they came from: {}",
+            fit.model
+        );
+        assert!(
+            fit.model.gain_share.get() < 0.1,
+            "and every one of them lost a copy: {}",
+            fit.model
+        );
+    }
+
     /// **A sequence that already rises passes through untouched** — no merge, and every stratum
     /// still reports the fit of its own loci, with nothing named.
     ///
