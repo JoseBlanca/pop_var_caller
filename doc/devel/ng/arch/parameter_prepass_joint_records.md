@@ -1,4 +1,4 @@
-# ng — the joint fit, what is recorded at each kept locus: types & interfaces
+# ng — the joint parameters fit, what is recorded at each kept locus: types & interfaces
 
 *Status: architecture draft (2026-08-12), companion to the spec
 [`../spec/parameter_prepass_joint_records.md`](../spec/parameter_prepass_joint_records.md) (the
@@ -21,11 +21,11 @@ and a writer.
 
 ## 1. Types
 
-### 1.1 `SampleRecords` — the whole input to the fit
+### 1.1 `SampleRecords` — the whole input to the parameters fit
 
-One sample's evidence at the kept loci, plus the values the fit checks before pooling. The two paths
+One sample's evidence at the kept loci, plus the values the parameters fit checks before pooling. The two paths
 are separate maps because they hold different things, and both are keyed by read group because that
-is the grain the walk fills them at.
+is the grain the genome walk fills them at.
 
 ```rust
 pub struct SampleRecords {
@@ -33,13 +33,19 @@ pub struct SampleRecords {
     /// Indexed by position in `KeptLoci::generic`; carries no coordinates (spec §2.3).
     pub generic: BTreeMap<ReadGroupId, GenericRecords>,
     pub ssr: BTreeMap<ReadGroupId, SsrRecords>,
-    /// The thirteen values the fit refuses to pool across (spec §5).
+    /// The thirteen values the parameters fit refuses to pool across (spec §5).
     pub identity: RecordIdentity,
 }
 ```
 
-**Contract.** A sample's counts at a position are the sum of its read groups' — exact, so the fit may
+**Contract.** A sample's counts at a position are the sum of its read groups' — exact, so the parameters fit may
 fold freely. `BTreeMap` and not `HashMap`, so a fit that iterates is deterministic.
+
+**This is the whole-sample value, and it is the right shape for the run that never writes a file**
+— fifty samples, everything resident, no sections. **It is the wrong shape at a thousand**, where the
+generic half and each repeat-tract stratum are held at different times (§2.2, spec §6.2). Both shapes
+exist on purpose: this struct is what a genome walk produces and what a small cohort fits from, and
+`SampleRecordsFile` is what a large one reads.
 
 ### 1.2 `GenericRecords` — a dense array and a sparse list
 
@@ -53,7 +59,7 @@ pub struct GenericRecords {
     /// Entry `i` is the `i`-th kept position's depth code, five bits, packed.
     depth: PackedDepthCodes,
     /// Only where a read was not on the reference base. **Sorted by `index`**, so the
-    /// fit walks both halves in one pass.
+    /// parameters fit walks both halves in one pass.
     non_reference: Vec<AlleleObservation>,
 }
 
@@ -111,7 +117,7 @@ pub struct SsrRecords {
     /// Reads that reached a locus and crossed no whole tract — a censored lower bound
     /// (spec §3).
     covering_not_crossing: Vec<u16>,
-    /// Whether the walk reached this locus at all. **The STR half's answer to the
+    /// Whether the genome walk reached this locus at all. **The STR half's answer to the
     /// generic half's never-walked sentinel**, and it has to be its own field: the
     /// other four vectors are all zero both for a locus never walked and for one
     /// walked with no read, and only the first is a bug (spec §6).
@@ -144,12 +150,12 @@ being dropped or wrapping.
 **`SsrLocusState` is what a consumer asks**, rather than reading the vectors and re-deriving the four
 states — never walked, walked with no read, reached but not crossed, crossed — each time. The guard's
 one-in-ten threshold is a query on the same type (`guard_is_over_threshold`) and **not** a write-time
-error: a locus over it is well-formed data the fit should decline to fit, and refusing the write would
+error: a locus over it is well-formed data the parameters fit should decline to fit, and refusing the write would
 make a property of the sample look like a property of the file.
 
 ### 1.5 `RecordIdentity` — the thirteen values
 
-What travels with a sample so the fit can refuse to pool two runs that did not record the same thing.
+What travels with a sample so the parameters fit can refuse to pool two runs that did not record the same thing.
 Seven say which loci were *asked for*, one says which came back, and **five say in what units the
 evidence was written down** — the group an earlier version of this section did not have, which left
 the whole check able to pass while two samples' rows meant different things (spec §5).
@@ -189,18 +195,18 @@ bit pattern (`loci.rs` §1.2).
 
 ### 1.6 `CoverageByWindow` — the third object, and the one that is not a record
 
-**The fit's duplicated-site class is conditioned on the sample's local relative coverage, and that
+**The parameters fit's duplicated-site class is conditioned on the sample's local relative coverage, and that
 cannot be derived from §1.2's records**: those hold one binned depth per kept position, and the kept
 positions are one in a few hundred, so a 500 bp window holds one or two of them — the per-base
 measurement the class's own constraint rules out (fit spec §2.2, records spec §4).
 
 ```rust
 /// One sample's depth over fixed windows of the reference, plus the GC curve that
-/// corrects it. **Over every position the walk visited, not over the kept ones.**
+/// corrects it. **Over every position the genome walk visited, not over the kept ones.**
 pub struct CoverageByWindow {
     /// The grid, a function of the reference alone — so two samples' summaries are
     /// comparable by construction. Travels in `RecordIdentity` (§1.5). **Always the
-    /// stored 500 bp**; the width the fit reads at is its own decision (spec §4.1).
+    /// stored 500 bp**; the width the parameters fit reads at is its own decision (spec §4.1).
     window_bp: Bp,
     /// The sample's median window depth, in reads a position. The one number that
     /// makes `depth`'s bytes mean something, and it is per sample deliberately: what
@@ -215,7 +221,7 @@ pub struct CoverageByWindow {
     depth: Vec<u8>,
     /// Windows holding fewer than `window_bp` walked positions, as
     /// `(window index, positions)` — the ends of contigs, and anything the analysed
-    /// regions or the ambiguity mask cut into. **The fit needs these to sum adjacent
+    /// regions or the ambiguity mask cut into. **The parameters fit needs these to sum adjacent
     /// windows** (spec §4.1): a wider mean is `Σ depth × positions / Σ positions`, and
     /// a short window weighted as if it were full pulls the wider mean towards it.
     /// Sparse because nearly every window is full, exactly as §1.2's non-reference
@@ -236,7 +242,7 @@ lets the caller run on one sample. **A window's mean depth is not the mean over 
 inside it**, and spec §7.10 asserts that inequality because an implementation that quietly derived one
 from the other would pass every other check.
 
-**The fit sums, the walk does not.** Adjacent windows are summed at read time up to the width the
+**The parameters fit sums, the genome walk does not.** Adjacent windows are summed at read time up to the width the
 sample's depth requires — about 12,000 aligned bases, so 500 bp at 25× and 5 kb at 2.5× (spec §4.1).
 The type therefore exposes the denominators rather than only the means, and offers no resampling: a
 summary built at a different `window_bp` is refused, not converted (spec §7.10).
@@ -252,9 +258,9 @@ the summary is never serialized) — never because the class was not there.
 
 ## 2. Interfaces
 
-### 2.1 Filling records during the walk
+### 2.1 Filling records during the genome walk
 
-The writer is handed the same locus stream the histogram accumulators are handed, so one walk fills
+The writer is handed the same locus stream the histogram accumulators are handed, so one genome walk fills
 both routes and the comparison between them is over identical evidence. It knows which loci are kept
 and ignores the rest.
 
@@ -275,7 +281,7 @@ impl RecordWriter {
         depth_cap: DepthCap,
     ) -> Self;
 
-    /// Record this locus if it is a kept one. **Borrows and does not take**, so the walk
+    /// Record this locus if it is a kept one. **Borrows and does not take**, so the genome walk
     /// passes the locus on to the histogram accumulators untouched and one pass fills
     /// both routes.
     pub fn add_locus(&mut self, locus: &SampleLocusObservations);
@@ -298,7 +304,7 @@ never had. The writer derives per-group depth from the observations itself, hono
 **`contig_of` because a kept STR locus is an `SsrSegment`**, which names its contig by string where
 a locus names it by index. One closure at construction resolves the whole selection once.
 
-**No `merge` yet.** A region-sharded walk fills disjoint index ranges and merging is concatenation,
+**No `merge` yet.** A region-sharded genome walk fills disjoint index ranges and merging is concatenation,
 but nothing in this build shards, and a merge with no caller is a merge with no test that could fail.
 
 **Contract.** Every kept locus gets an entry whether or not a read reached it — the entry is the
@@ -306,10 +312,10 @@ denominator. A locus in a region never visited keeps `DepthCode::NeverWalked`, s
 survive a write and a read. **`add_locus` is the only place the kept-loci digest is fed**, so a
 record set and its digest cannot disagree.
 
-### 2.2 Getting records to the fit
+### 2.2 Getting records to the parameters fit
 
 **Decided 2026-08-13 (spec §6.1): one file per sample, written beside that sample's pileup and never
-inside it.** The requirement is unchanged — the fit reaches every sample's records without walking
+inside it.** The requirement is unchanged — the parameters fit reaches every sample's records without walking
 reads again — but where they live is no longer open, so this section carries the shape rather than
 deferring it.
 
@@ -318,13 +324,49 @@ pub fn write_records(records: &SampleRecords, out: impl Write) -> Result<(), Rec
 pub fn read_records(input: impl Read) -> Result<SampleRecords, RecordError>;
 ```
 
+**Reading is by section, not whole-file — 2026-08-13 (spec §6.2).** The parameters fit holds the
+generic half and the repeat-tract half at different times, and reads one stratum at a time within the
+second, so a reader that returns everything at once cannot express what the fit does. `SampleRecords`
+stays as the in-memory value the direct run builds; what a file offers is a handle.
+
+```rust
+/// A records file, open and checked, with nothing decoded yet.
+pub struct SampleRecordsFile { /* … */ }
+
+impl SampleRecordsFile {
+    pub fn open(input: impl Read + Seek) -> Result<Self, RecordError>;
+    /// Available before any section is read — this is what the fit compares across samples,
+    /// and a mismatch must be found before anything large is decoded.
+    pub fn identity(&self) -> &RecordIdentity;
+    pub fn read_groups(&self) -> &[ReadGroupId];
+    pub fn strata(&self) -> &[Stratum];
+
+    pub fn generic(&mut self, group: ReadGroupId) -> Result<GenericRecords, RecordError>;
+    /// One stratum's tracts for one read group. The unit the STR fit consumes.
+    pub fn ssr(&mut self, group: ReadGroupId, stratum: Stratum)
+        -> Result<SsrRecords, RecordError>;
+}
+```
+
+**Contract.** Each call decodes **its own bytes and no others** — a directory at the head of the file
+gives every section's extent, and spec §7.16 asserts the byte count rather than only the values,
+because an implementation that decodes the whole file and returns a slice satisfies every value
+comparison and delivers none of the memory this shape exists for. The identity and the kept-loci
+digest live outside the sections, since they are checked first.
+
+**`SsrRecords` becomes per (read group × stratum) rather than per read group.** Today it holds vectors
+indexed by a locus's position in the whole kept set; a section holds one stratum's slice of that, so
+the index is stratum-local and the stratum's first index travels in the directory. **That is the one
+type change this decision forces**, and it is the reason it is recorded here rather than left to
+implementation.
+
 **The coverage-by-window summary is not in that stream.** It is recoverable from the pileup and the
 owner's decision is not to keep a copy (spec §4), so `write_records` omits it and `read_records`
-returns a `SampleRecords` whose `coverage_window` is `None`. Whoever runs the fit fills it: from the
+returns a `SampleRecords` whose `coverage_window` is `None`. Whoever runs the parameters fit fills it: from the
 walk in the direct run, and from a pass over the pileups in the two-phase one. **The type keeps the
-field** — it is what the fit reads — and only the serialized form drops it.
+field** — it is what the parameters fit reads — and only the serialized form drops it.
 
-**Two producers, one builder.** The walk-time producer is `RecordWriter` (§2.1). The second reads an
+**Two producers, one builder.** The genome walk-time producer is `RecordWriter` (§2.1). The second reads an
 existing pileup and drives the same `RecordWriter` through the same locus stream, so there is one
 implementation of what a record means and two sources of loci. It exists for pileups written before
 this file did, for a records file lost or built at knobs since changed, and above all for **growing** a
@@ -365,7 +407,7 @@ pub enum RecordError {
 ```
 
 **The guard threshold is not an error here.** A locus over one non-whole-repeat read in ten is
-well-formed data the *fit* should decline to fit (spec §3.3); encoding it as a write failure would
+well-formed data the *parameters fit* should decline to fit (spec §3.3); encoding it as a write failure would
 make a property of the sample look like a property of the file.
 
 ---
@@ -387,14 +429,18 @@ make a property of the sample look like a property of the file.
 - **The coverage-by-window summary is a third object, not a field of a record** — §1.6; spec §4.
   Per sample rather than per read group, and it accumulates across the cohort like the records do,
   which is why spec §6 sizes it in the same table. **It is never serialized** (2026-08-13): it is
-  rebuildable from the pileup, so it is built by the walk in a direct run and by a pass over the
+  rebuildable from the pileup, so it is built by the genome walk in a direct run and by a pass over the
   pileups otherwise — resident cost, not stored cost.
+- **A records file is read in sections and `SsrRecords` is keyed by stratum** — §2.2; spec §6.2. The
+  generic half and the repeat-tract half are never resident together, because the second consumes one
+  number per sample from the first and returns nothing; and a stratum is fitted alone. **The type has
+  to say so**, or the estimator's shape is not expressible against it.
 - **The records are a cache of the pileup, and the pileup is the source of truth** — spec §6.1.
   Everything in a records file can be recomputed from the sample's pileup; it is kept because
   recomputing means a full decompression pass, and because the file serves every future cohort call
   rather than one.
-- **OPEN:** the recorded offset range (±4) and the span the fit may place allele mass on (±6) are
-  **two constants, not one** — spec §3.2. `OffsetCounts`'s width must not be read as the fit's allele
+- **OPEN:** the recorded offset range (±4) and the span the parameters fit may place allele mass on (±6) are
+  **two constants, not one** — spec §3.2. `OffsetCounts`'s width must not be read as the parameters fit's allele
   span.
 
 ---
@@ -404,7 +450,7 @@ make a property of the sample look like a property of the file.
 | this doc | existing code | how they meet |
 |---|---|---|
 | `DepthBin`, the ladder behind `DepthCode` | [`generic/depth_bins.rs:106,141`](../../../../src/ng/parameter_estimation/generic/depth_bins.rs) | reused unchanged; **do not mint a second ladder** |
-| `RecordWriter::add_locus` | `GenericAccumulators::add_locus` ([`generic/accumulators.rs:278`](../../../../src/ng/parameter_estimation/generic/accumulators.rs)) | same signature and same borrow, so one walk feeds both routes |
+| `RecordWriter::add_locus` | `GenericAccumulators::add_locus` ([`generic/accumulators.rs:278`](../../../../src/ng/parameter_estimation/generic/accumulators.rs)) | same signature and same borrow, so one genome walk feeds both routes |
 | `RecordWriter::merge` | `GenericAccumulators::merge` ([`generic/accumulators.rs:392`](../../../../src/ng/parameter_estimation/generic/accumulators.rs)) | same contract: shard, then fold |
 | what the writer is fed | `SampleLocusObservations` ([`locus_generation/mod.rs:40`](../../../../src/ng/locus_generation/mod.rs)) | taken as-is: `region`, `observations`, and the no-observation scalar |
 | `ReadGroupId` | [`src/ng/types.rs:199`](../../../../src/ng/types.rs) | used as-is |
@@ -439,6 +485,6 @@ on a two-group sample. **Sizes are measured rather than asserted**, on HG002 at 
 tomato cohort, reported separately (spec §7.8).
 
 **One test does need an alignment file, and it is the one that validates the whole two-phase design**:
-build a sample's records during a walk and again from the pileup that walk wrote, and compare the
+build a sample's records during a genome walk and again from the pileup that genome walk wrote, and compare the
 files byte for byte (spec §7.12). It is what shows the pileup really holds everything a record needs,
 and it fails on precisely the fields that do not survive the round trip.

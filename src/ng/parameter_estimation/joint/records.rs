@@ -848,6 +848,20 @@ pub struct RecordWriter {
     sample: String,
 }
 
+/// How many of `reads` survive when a position's `depth` reads are thinned down to `cap`.
+///
+/// **Proportional and rounded to nearest, never a draw.** A region-sharded walk and a
+/// single-threaded one must produce byte-identical records, and a share needs no seed to do
+/// that. Rounding to nearest keeps a single stray read at a very deep position rather than
+/// discarding it, which matters because those reads are what the error rate is fitted from.
+fn thin_to_cap(reads: u32, depth: u32, cap: u32) -> u32 {
+    if depth <= cap || depth == 0 {
+        return reads;
+    }
+    let scaled = f64::from(reads) * f64::from(cap) / f64::from(depth);
+    (scaled.round() as u32).min(cap).max(u32::from(reads > 0))
+}
+
 impl RecordWriter {
     #[allow(
         clippy::too_many_arguments,
@@ -991,14 +1005,22 @@ impl RecordWriter {
             // **Every read group gets an entry at every walked position**, whether or not it
             // put a read there: the entry is the denominator, and a group with no read here
             // saw zero, which is data and not the absence of it.
+            //
+            // **The depth cap is applied here and nowhere else** (§5). Above it the reads are
+            // thinned to it, keeping the fractions they showed, because the stored code is a
+            // bin and the ladder's top bin is the last one there is: a sample at 300 reads a
+            // position whose reads were *not* thinned records a depth of about 111 beside an
+            // undiminished count of alternative reads, which charges it a negative number of
+            // reference reads and inflates every rate fitted from it.
             for (group, depth) in &depths {
                 let records = self
                     .generic
                     .entry(*group)
                     .or_insert_with(|| GenericRecords::never_walked(self.generic_loci.len()));
+                let capped = depth[offset].min(self.depth_cap.0);
                 records
                     .depth
-                    .set(index, DepthCode::Binned(self.edges.bin_for(depth[offset])));
+                    .set(index, DepthCode::Binned(self.edges.bin_for(capped)));
             }
             if !single_base {
                 continue;
@@ -1014,13 +1036,24 @@ impl RecordWriter {
                     // and the fit scores it as the fifth rather than guessing a base.
                     ObservedAllele::Other
                 };
+                // **Thinned by the same ratio as the depth**, so the fractions the reads showed
+                // survive the cap exactly. Deterministic rather than a draw: a region-sharded
+                // walk and a single-threaded one must produce byte-identical records, and a
+                // proportional share needs no seed to do that.
+                let group_depth = depths
+                    .get(&observation.read_group)
+                    .map_or(0, |depth| depth[offset]);
+                let reads = thin_to_cap(observation.num_obs, group_depth, self.depth_cap.0);
+                if reads == 0 {
+                    continue;
+                }
                 self.pending
                     .entry(observation.read_group)
                     .or_default()
                     .push(AlleleObservation {
                         index: index as u32,
                         allele,
-                        reads: observation.num_obs,
+                        reads,
                     });
             }
         }

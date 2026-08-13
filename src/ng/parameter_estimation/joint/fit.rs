@@ -42,6 +42,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
@@ -280,7 +282,7 @@ impl Default for JointFitConfig {
             ploidy: Ploidy::try_new(2).expect("two is a ploidy"),
             quadrature_nodes: 16,
             starting_points: StartingPoint::spanning_the_class_separation(),
-            max_passes: 60,
+            max_passes: 200,
             stillness: 1e-4,
             edges: Arc::new(DepthBinEdges::new()),
         }
@@ -336,21 +338,43 @@ struct EvidenceCursor<'a> {
 }
 
 impl<'a> EvidenceCursor<'a> {
-    fn new(samples: &'a [SampleRecords], edges: &'a DepthBinEdges) -> Self {
-        let positions = samples
+    fn position_count(samples: &[SampleRecords]) -> usize {
+        samples
             .first()
             .and_then(|s| s.generic.values().next())
-            .map_or(0, |g| g.depth().len());
+            .map_or(0, |g| g.depth().len())
+    }
+
+    /// A cursor over `first..end` only — **what lets one pass over the positions be split
+    /// across cores.** Each sample's sparse list is binary-searched once to find where the
+    /// chunk begins, and walked with a cursor from there, so a chunk costs one search per
+    /// sample rather than one per position.
+    fn over(
+        samples: &'a [SampleRecords],
+        edges: &'a DepthBinEdges,
+        first: usize,
+        end: usize,
+    ) -> Self {
         let at = samples
             .iter()
-            .map(|sample| vec![0; sample.generic.len()])
+            .map(|sample| {
+                sample
+                    .generic
+                    .values()
+                    .map(|records| {
+                        records
+                            .non_reference()
+                            .partition_point(|entry| (entry.index as usize) < first)
+                    })
+                    .collect()
+            })
             .collect();
         Self {
             samples,
             edges,
             at,
-            positions,
-            next: 0,
+            positions: end,
+            next: first,
         }
     }
 
@@ -551,6 +575,57 @@ impl Statistics {
             homozygous_alt: vec![0.0; samples],
             with_reads: vec![0; samples],
             with_two_reads: vec![0; samples],
+        }
+    }
+}
+
+impl Statistics {
+    /// Add another chunk's counts. **Every field is a sum over positions**, which is what lets
+    /// the pass be split across cores at all.
+    fn absorb(&mut self, other: &Self) {
+        self.log_likelihood += other.log_likelihood;
+        self.positions += other.positions;
+        self.noisy += other.noisy;
+        self.invariant += other.invariant;
+        self.fixed_alt += other.fixed_alt;
+        self.segregating += other.segregating;
+        self.sum_ln_f += other.sum_ln_f;
+        self.sum_ln_one_minus_f += other.sum_ln_one_minus_f;
+        for (into, from) in self.reads.iter_mut().zip(other.reads.iter()) {
+            for (into, from) in into.iter_mut().zip(from.iter()) {
+                for (into, from) in into.iter_mut().zip(from.iter()) {
+                    into.candidate += from.candidate;
+                    into.neither += from.neither;
+                    into.reference += from.reference;
+                }
+            }
+        }
+        for (into, from) in self.genotypes.iter_mut().zip(other.genotypes.iter()) {
+            for (into, from) in into.iter_mut().zip(from.iter()) {
+                for (into, from) in into.iter_mut().zip(from.iter()) {
+                    *into += from;
+                }
+            }
+        }
+        for (into, from) in self.heterozygous.iter_mut().zip(other.heterozygous.iter()) {
+            *into += from;
+        }
+        for (into, from) in self
+            .homozygous_alt
+            .iter_mut()
+            .zip(other.homozygous_alt.iter())
+        {
+            *into += from;
+        }
+        for (into, from) in self.with_reads.iter_mut().zip(other.with_reads.iter()) {
+            *into += from;
+        }
+        for (into, from) in self
+            .with_two_reads
+            .iter_mut()
+            .zip(other.with_two_reads.iter())
+        {
+            *into += from;
         }
     }
 }
@@ -767,358 +842,449 @@ fn maximise(
 }
 
 /// One pass over every position: the posteriors, and every count the maximisations need.
+///
+/// **Split across cores by position.** Positions are independent given the parameters, and a
+/// chunk's counts add to another chunk's, so the pass is a map and a sum.
 fn expectation(
     samples: &[SampleRecords],
     config: &JointFitConfig,
     group_index: &[Vec<usize>],
     parameters: &Parameters,
 ) -> Statistics {
-    let ploidy = config.ploidy;
-    let quadrature = BetaQuadrature::new(
+    let quadrature = BetaQuadrature::with_genotype_priors(
         parameters.density.a,
         parameters.density.b,
         config.quadrature_nodes,
+        &parameters.hom_excess,
     );
-    let nodes = quadrature.nodes.len();
-    let mut statistics = Statistics::new(parameters.clean.len(), samples.len(), nodes);
-    let mut cursor = EvidenceCursor::new(samples, &config.edges);
-    let mut evidence = PositionEvidence {
-        samples: vec![SampleAtPosition::default(); samples.len()],
-        observed_alternatives: Vec::new(),
-    };
+    let positions = EvidenceCursor::position_count(samples);
+    let chunk = POSITIONS_PER_CHUNK.min(positions.div_ceil(rayon::current_num_threads()).max(1));
+    let bounds: Vec<(usize, usize)> = (0..positions)
+        .step_by(chunk)
+        .map(|first| (first, (first + chunk).min(positions)))
+        .collect();
 
-    // Scratch, reused across positions so a two-million-position pass allocates nothing.
-    let class_share = [1.0 - parameters.noisy_share, parameters.noisy_share];
-    let mut per_sample_genotype = vec![[0.0_f64; 3]; samples.len()];
-    let mut branch_terms: Vec<f64> = Vec::new();
-
-    while cursor.next_position(&mut evidence) {
-        statistics.positions += 1.0;
-        for (s, sample) in evidence.samples.iter().enumerate() {
-            if sample.depth >= 1.0 {
-                statistics.with_reads[s] += 1;
-            }
-            if sample.depth >= 2.0 {
-                statistics.with_two_reads[s] += 1;
-            }
-        }
-
-        // Candidate alleles: the ones some sample showed a read on, plus however many of the
-        // three are left, all of which give the identical term.
-        let observed = &evidence.observed_alternatives;
-        let unobserved = CANDIDATE_ALTERNATIVES.saturating_sub(observed.len());
-        // The term an unobserved allele gives, computed once. Any base code no read fell on
-        // will do; code 4 is `Other` and is never a candidate, so it is safe to borrow as the
-        // stand-in only if it is also unread — instead the first code not in `observed` is
-        // used, which always exists while `unobserved > 0`.
-        let stand_in = (0..4).find(|code| !observed.contains(code));
-
-        branch_terms.clear();
-        // For each class, the three branches, and the posterior bookkeeping under it.
-        let mut per_class: Vec<ClassTerms> = Vec::with_capacity(2);
-        for class in 0..2 {
-            let rate_of = |group: usize| {
-                if class == 0 {
-                    parameters.clean[group]
-                } else {
-                    parameters.noisy[group]
-                }
-            };
-            per_class.push(class_terms(
-                &evidence,
-                group_index,
-                ploidy,
-                &rate_of,
-                &quadrature,
-                &parameters.density,
-                &parameters.hom_excess,
-                observed,
-                stand_in,
-                unobserved,
-                &mut per_sample_genotype,
-            ));
-            branch_terms.push(class_share[class].ln() + per_class[class].total);
-        }
-        let position_ln = ln_sum_exp(&branch_terms);
-        statistics.log_likelihood += position_ln;
-        if !position_ln.is_finite() {
-            continue;
-        }
-
-        for (class, terms) in per_class.iter().enumerate() {
-            let class_posterior = (branch_terms[class] - position_ln).exp();
-            if class == 1 {
-                statistics.noisy += class_posterior;
-            }
-            terms.accumulate(
-                class,
-                class_posterior,
-                &evidence,
-                group_index,
-                &quadrature,
-                &mut statistics,
+    bounds
+        .into_par_iter()
+        .map(|(first, end)| {
+            let mut statistics = Statistics::new(
+                parameters.clean.len(),
+                samples.len(),
+                quadrature.nodes.len(),
             );
+            let mut cursor = EvidenceCursor::over(samples, &config.edges, first, end);
+            let mut scratch = Scratch::new(samples.len(), quadrature.nodes.len());
+            while cursor.next_position(&mut scratch.evidence) {
+                one_position(
+                    &mut scratch,
+                    group_index,
+                    config.ploidy,
+                    &quadrature,
+                    parameters,
+                    &mut statistics,
+                );
+            }
+            statistics
+        })
+        .reduce(
+            || {
+                Statistics::new(
+                    parameters.clean.len(),
+                    samples.len(),
+                    quadrature.nodes.len(),
+                )
+            },
+            |mut into, from| {
+                into.absorb(&from);
+                into
+            },
+        )
+}
+
+/// How many positions one core takes at a time. Large enough that the per-chunk binary search
+/// into each sample's sparse list disappears against the work, small enough that a cohort of
+/// fifty still fills every core.
+const POSITIONS_PER_CHUNK: usize = 16_384;
+
+/// At most three non-reference bases can be the segregating one, so the candidate list never
+/// exceeds three however many the samples showed reads on.
+const MAX_CANDIDATES: usize = CANDIDATE_ALTERNATIVES;
+
+/// Everything one position needs, sized once and reused, so a two-million-position pass
+/// allocates nothing.
+struct Scratch {
+    evidence: PositionEvidence,
+    samples: usize,
+    nodes: usize,
+    /// `[class][candidate][sample][genotype]` — `ln P(reads | genotype)`, and the same thing
+    /// exponentiated after its own per-sample maximum is taken out.
+    ///
+    /// **This is the whole reason the program can be run.** The read likelihoods depend on the
+    /// genotype and the error rate but **not on the allele frequency**, so they are computed
+    /// once per candidate and reused across every quadrature node — which is the fix the
+    /// previous session had to make to its repeat-tract program after it turned out to take
+    /// hours (`joint_route_research_narrative_2026-08-13.md` §7).
+    ell: Vec<f64>,
+    lik: Vec<f64>,
+    /// `[class][candidate][sample]` — the maximum taken out of `lik`.
+    lik_max: Vec<f64>,
+    /// `[class][candidate][node]`, and `[class][candidate]`.
+    node_ln: Vec<f64>,
+    fixed_ln: Vec<f64>,
+    /// `[class]` — the invariant branch, and the three branches combined.
+    invariant_ln: Vec<f64>,
+    branch_ln: Vec<f64>,
+    class_ln: Vec<f64>,
+    /// The candidate alleles this position sums over, and how many alleles each stands for.
+    candidates: Vec<usize>,
+    multiplicity: Vec<f64>,
+    /// `[sample][genotype]` — the segregating branch's genotype weight, collapsed over the
+    /// nodes and candidates it was spread across.
+    genotype_weight: Vec<f64>,
+    /// `[candidate][sample][genotype]`, the same before the candidates are collapsed, because
+    /// which reads count as the allele depends on which allele it is.
+    per_candidate_weight: Vec<f64>,
+    shares: Vec<f64>,
+}
+
+impl Scratch {
+    fn new(samples: usize, nodes: usize) -> Self {
+        Self {
+            evidence: PositionEvidence {
+                samples: vec![SampleAtPosition::default(); samples],
+                observed_alternatives: Vec::with_capacity(MAX_CANDIDATES),
+            },
+            samples,
+            nodes,
+            ell: vec![0.0; 2 * MAX_CANDIDATES * samples * 3],
+            lik: vec![0.0; 2 * MAX_CANDIDATES * samples * 3],
+            lik_max: vec![0.0; 2 * MAX_CANDIDATES * samples],
+            node_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES * nodes],
+            fixed_ln: vec![f64::NEG_INFINITY; 2 * MAX_CANDIDATES],
+            invariant_ln: vec![0.0; 2],
+            branch_ln: vec![0.0; 6],
+            class_ln: vec![0.0; 2],
+            candidates: Vec::with_capacity(MAX_CANDIDATES),
+            multiplicity: Vec::with_capacity(MAX_CANDIDATES),
+            genotype_weight: vec![0.0; samples * 3],
+            per_candidate_weight: vec![0.0; MAX_CANDIDATES * samples * 3],
+            shares: Vec::with_capacity(MAX_CANDIDATES * nodes),
         }
     }
-    statistics
+
+    fn ell_at(&self, class: usize, candidate: usize, sample: usize) -> usize {
+        ((class * MAX_CANDIDATES + candidate) * self.samples + sample) * 3
+    }
+
+    fn max_at(&self, class: usize, candidate: usize, sample: usize) -> usize {
+        (class * MAX_CANDIDATES + candidate) * self.samples + sample
+    }
+
+    fn node_at(&self, class: usize, candidate: usize, node: usize) -> usize {
+        (class * MAX_CANDIDATES + candidate) * self.nodes + node
+    }
 }
 
-/// What one class contributes at one position, and everything the accumulation needs to
-/// attribute it.
-struct ClassTerms {
-    /// `ln` of the three branches added together, weighted by the density's masses.
-    total: f64,
-    ln_invariant: f64,
-    ln_fixed_alt: f64,
-    ln_segregating: f64,
-    /// Per candidate allele and per node, the segregating branch's own weight, and each
-    /// sample's genotype posterior there. Held so the accumulation does not recompute it.
-    segregating: Vec<SegregatingTerm>,
-    /// Which allele stands for the unobserved ones, and how many there are.
-    stand_in: Option<usize>,
-    unobserved: usize,
-    /// The candidate alleles, in the order `segregating` holds them.
-    candidates: Vec<usize>,
-    /// Per candidate, the fixed-alternative branch's own log-term.
-    fixed_by_candidate: Vec<f64>,
-}
+/// The scale a running product is multiplied back up by when it is about to underflow, and its
+/// logarithm. Sixty-three samples' likelihoods multiplied together will underflow a `f64`
+/// several times over; rescaling keeps the product in range with **one logarithm per node
+/// instead of one per sample**, which is a sixty-fold saving in the innermost loop.
+const RESCALE: f64 = 1e150;
+const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
 
-struct SegregatingTerm {
-    node: usize,
-    ln_weight: f64,
-    /// Per sample, the three genotype posteriors at this node.
-    genotypes: Vec<[f64; 3]>,
-}
-
+/// One position: its likelihood, and its contribution to every accumulated count.
 #[allow(
-    clippy::too_many_arguments,
-    reason = "the likelihood's own operands, and a struct \
-                                              holding them would only move the list"
+    clippy::needless_range_loop,
+    reason = "the sample index addresses four parallel arrays at once — the evidence, the \
+              scratch, the read-group map and the accumulated counts — and zipping them would \
+              hide which of the four the loop is really walking"
 )]
-fn class_terms(
-    evidence: &PositionEvidence,
+fn one_position(
+    scratch: &mut Scratch,
     group_index: &[Vec<usize>],
     ploidy: Ploidy,
-    rate_of: &dyn Fn(usize) -> f64,
     quadrature: &BetaQuadrature,
-    density: &FrequencyDensity,
-    hom_excess: &[f64],
-    observed: &[usize],
-    stand_in: Option<usize>,
-    unobserved: usize,
-    scratch: &mut [[f64; 3]],
-) -> ClassTerms {
-    // A sample's rate is its read groups' — one per sample here, and where a sample has more
-    // the first is used for the position's own arithmetic while every group's reads are
-    // tallied separately for its own maximisation. (A multi-library sample is 157 of the 1,707
-    // in the archive survey.)
-    let rate = |s: usize| rate_of(group_index[s][0]);
-
-    // ---- the invariant branch: every copy is the reference base, in every sample --------
-    let mut ln_invariant = 0.0;
-    for (s, sample) in evidence.samples.iter().enumerate() {
-        ln_invariant += ln_reads_given_all_reference(sample, rate(s));
-    }
-
-    // ---- the candidates ------------------------------------------------------------------
-    let mut candidates: Vec<usize> = observed.to_vec();
-    if unobserved > 0 && let Some(code) = stand_in {
-        candidates.push(code);
-    }
-    let multiplicity = |index: usize| {
-        if index < observed.len() {
-            1.0
-        } else {
-            unobserved as f64
+    parameters: &Parameters,
+    statistics: &mut Statistics,
+) {
+    let samples = scratch.samples;
+    let nodes = scratch.nodes;
+    statistics.positions += 1.0;
+    for s in 0..samples {
+        let depth = scratch.evidence.samples[s].depth;
+        if depth >= 1.0 {
+            statistics.with_reads[s] += 1;
         }
-    };
-
-    // ---- the fixed-alternative branch ---------------------------------------------------
-    let mut fixed_by_candidate = Vec::with_capacity(candidates.len());
-    let mut fixed_terms = Vec::with_capacity(candidates.len());
-    for (index, &allele) in candidates.iter().enumerate() {
-        let mut term = 0.0;
-        for (s, sample) in evidence.samples.iter().enumerate() {
-            term += ln_reads_given_genotype(sample, ploidy.get(), ploidy, allele, rate(s));
+        if depth >= 2.0 {
+            statistics.with_two_reads[s] += 1;
         }
-        fixed_by_candidate.push(term);
-        fixed_terms.push(term + multiplicity(index).ln());
     }
-    let ln_fixed_alt = ln_sum_exp(&fixed_terms) - (CANDIDATE_ALTERNATIVES as f64).ln();
 
-    // ---- the segregating branch ----------------------------------------------------------
-    let mut segregating = Vec::new();
-    let mut segregating_terms = Vec::new();
-    for (index, &allele) in candidates.iter().enumerate() {
-        for (node, (&f, &weight)) in quadrature
-            .nodes
-            .iter()
-            .zip(quadrature.weights.iter())
-            .enumerate()
-        {
-            let mut term = weight.ln();
-            let mut genotypes = Vec::with_capacity(evidence.samples.len());
-            for (s, sample) in evidence.samples.iter().enumerate() {
-                let prior = genotype_frequencies(f, hom_excess[s]);
-                let mut row = [f64::NEG_INFINITY; 3];
-                for (j, slot) in row.iter_mut().enumerate() {
-                    *slot = prior[j].max(f64::MIN_POSITIVE).ln()
-                        + ln_reads_given_genotype(sample, j as u8, ploidy, allele, rate(s));
+    // ---- which alleles the position sums over ---------------------------------------------
+    //
+    // The three non-reference bases, with the ones no sample showed a read on folded into one
+    // term counted as many times as there are of them: they give the identical likelihood.
+    scratch.candidates.clear();
+    scratch.multiplicity.clear();
+    for &code in &scratch.evidence.observed_alternatives {
+        scratch.candidates.push(code);
+        scratch.multiplicity.push(1.0);
+    }
+    let unobserved = CANDIDATE_ALTERNATIVES.saturating_sub(scratch.candidates.len());
+    if unobserved > 0 {
+        let stand_in = (0..4)
+            .find(|code| !scratch.candidates.contains(code))
+            .expect("with an unobserved allele left there is a base no read fell on");
+        scratch.candidates.push(stand_in);
+        scratch.multiplicity.push(unobserved as f64);
+    }
+    let candidates = scratch.candidates.len();
+
+    // ---- the read likelihoods, once per candidate and reused across every node -------------
+    for class in 0..2 {
+        let mut invariant = 0.0;
+        for s in 0..samples {
+            let rate = class_rate(parameters, class, group_index[s][0]);
+            invariant += ln_reads_given_all_reference(&scratch.evidence.samples[s], rate);
+        }
+        scratch.invariant_ln[class] = invariant;
+
+        for candidate in 0..candidates {
+            let allele = scratch.candidates[candidate];
+            let mut fixed = 0.0;
+            for s in 0..samples {
+                let rate = class_rate(parameters, class, group_index[s][0]);
+                let sample = &scratch.evidence.samples[s];
+                let base = scratch.ell_at(class, candidate, s);
+                let mut largest = f64::NEG_INFINITY;
+                for j in 0..3 {
+                    let value = ln_reads_given_genotype(sample, j as u8, ploidy, allele, rate);
+                    scratch.ell[base + j] = value;
+                    largest = largest.max(value);
                 }
-                let total = ln_sum_exp(&row);
-                term += total;
-                let mut posterior = [0.0; 3];
-                for (j, slot) in posterior.iter_mut().enumerate() {
-                    *slot = (row[j] - total).exp();
+                fixed += scratch.ell[base + 2];
+                let slot = scratch.max_at(class, candidate, s);
+                scratch.lik_max[slot] = largest;
+                for j in 0..3 {
+                    scratch.lik[base + j] = (scratch.ell[base + j] - largest).exp();
                 }
-                scratch[s] = posterior;
-                genotypes.push(posterior);
             }
-            segregating_terms.push(term + multiplicity(index).ln());
-            segregating.push(SegregatingTerm {
-                node,
-                ln_weight: term,
-                genotypes,
-            });
+            scratch.fixed_ln[class * MAX_CANDIDATES + candidate] = fixed;
         }
     }
-    let ln_segregating = ln_sum_exp(&segregating_terms) - (CANDIDATE_ALTERNATIVES as f64).ln();
 
-    let branches = [
-        density.p_invariant.max(f64::MIN_POSITIVE).ln() + ln_invariant,
-        density.p_fixed_alt.max(f64::MIN_POSITIVE).ln() + ln_fixed_alt,
-        density.p_segregating().max(f64::MIN_POSITIVE).ln() + ln_segregating,
-    ];
-    ClassTerms {
-        total: ln_sum_exp(&branches),
-        ln_invariant: branches[0],
-        ln_fixed_alt: branches[1],
-        ln_segregating: branches[2],
-        segregating,
-        stand_in,
-        unobserved,
-        candidates,
-        fixed_by_candidate,
+    // ---- the integral over the position's own allele frequency ------------------------------
+    for class in 0..2 {
+        for candidate in 0..candidates {
+            let mut offset = 0.0;
+            for s in 0..samples {
+                offset += scratch.lik_max[scratch.max_at(class, candidate, s)];
+            }
+            for node in 0..nodes {
+                let mut product = 1.0_f64;
+                let mut scale = 0.0_f64;
+                for s in 0..samples {
+                    let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
+                    let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                    let term = prior[0] * lik[0] + prior[1] * lik[1] + prior[2] * lik[2];
+                    product *= term;
+                    if product < 1.0 / RESCALE {
+                        product *= RESCALE;
+                        scale -= LN_RESCALE;
+                    }
+                }
+                let slot = scratch.node_at(class, candidate, node);
+                scratch.node_ln[slot] = if product <= 0.0 {
+                    f64::NEG_INFINITY
+                } else {
+                    product.ln() + scale + offset + quadrature.ln_weights[node]
+                };
+            }
+        }
     }
-}
 
-impl ClassTerms {
-    #[allow(clippy::too_many_arguments, reason = "the accumulation's own operands")]
-    fn accumulate(
-        &self,
-        class: usize,
-        class_posterior: f64,
-        evidence: &PositionEvidence,
-        group_index: &[Vec<usize>],
-        quadrature: &BetaQuadrature,
-        statistics: &mut Statistics,
-    ) {
-        if class_posterior <= 0.0 {
-            return;
+    // ---- the three branches, and the two classes --------------------------------------------
+    let ln_three = (CANDIDATE_ALTERNATIVES as f64).ln();
+    for class in 0..2 {
+        scratch.shares.clear();
+        for candidate in 0..candidates {
+            scratch.shares.push(
+                scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
+                    + scratch.multiplicity[candidate].ln(),
+            );
         }
-        let branches = [self.ln_invariant, self.ln_fixed_alt, self.ln_segregating];
-        let total = ln_sum_exp(&branches);
-        if !total.is_finite() {
-            return;
+        let fixed_alt = ln_sum_exp(&scratch.shares) - ln_three;
+        scratch.shares.clear();
+        for candidate in 0..candidates {
+            let multiplicity = scratch.multiplicity[candidate].ln();
+            for node in 0..nodes {
+                scratch
+                    .shares
+                    .push(scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity);
+            }
         }
-        let branch = |b: usize| class_posterior * (branches[b] - total).exp();
-        statistics.invariant += branch(0);
-        statistics.fixed_alt += branch(1);
-        statistics.segregating += branch(2);
+        let segregating = ln_sum_exp(&scratch.shares) - ln_three;
+        let density = &parameters.density;
+        scratch.branch_ln[class * 3] =
+            density.p_invariant.max(f64::MIN_POSITIVE).ln() + scratch.invariant_ln[class];
+        scratch.branch_ln[class * 3 + 1] =
+            density.p_fixed_alt.max(f64::MIN_POSITIVE).ln() + fixed_alt;
+        scratch.branch_ln[class * 3 + 2] =
+            density.p_segregating().max(f64::MIN_POSITIVE).ln() + segregating;
+        let share = if class == 0 {
+            1.0 - parameters.noisy_share
+        } else {
+            parameters.noisy_share
+        };
+        scratch.class_ln[class] =
+            share.max(f64::MIN_POSITIVE).ln() + ln_sum_exp(&scratch.branch_ln[class * 3..][..3]);
+    }
+    let position_ln = ln_sum_exp(&scratch.class_ln);
+    if !position_ln.is_finite() {
+        return;
+    }
+    statistics.log_likelihood += position_ln;
 
-        // The invariant branch: every sample is homozygous reference, and every read on a
-        // non-reference base is an error. The candidate allele is undefined there, so its
-        // reads all count as "neither".
-        let weight = branch(0);
-        if weight > 0.0 {
-            for (s, sample) in evidence.samples.iter().enumerate() {
+    // ---- attribute it -------------------------------------------------------------------------
+    for class in 0..2 {
+        let class_posterior = (scratch.class_ln[class] - position_ln).exp();
+        if class_posterior <= 1e-12 {
+            continue;
+        }
+        if class == 1 {
+            statistics.noisy += class_posterior;
+        }
+        let branches = &scratch.branch_ln[class * 3..][..3];
+        let within = ln_sum_exp(branches);
+        let branch = [
+            class_posterior * (branches[0] - within).exp(),
+            class_posterior * (branches[1] - within).exp(),
+            class_posterior * (branches[2] - within).exp(),
+        ];
+        statistics.invariant += branch[0];
+        statistics.fixed_alt += branch[1];
+        statistics.segregating += branch[2];
+
+        // The invariant branch: every sample is homozygous reference, and every read that is
+        // not on the reference base is an error, so none of them is "the allele".
+        if branch[0] > 1e-12 {
+            for s in 0..samples {
+                let sample = &scratch.evidence.samples[s];
+                let neither = sample.non_reference() - sample.on[4];
+                let reference = (sample.depth - sample.non_reference()).max(0.0);
                 for &g in &group_index[s] {
                     let tally = &mut statistics.reads[g][class][0];
-                    tally.neither += weight * (sample.non_reference() - sample.on[4]);
-                    tally.reference += weight * (sample.depth - sample.non_reference()).max(0.0);
+                    tally.neither += branch[0] * neither;
+                    tally.reference += branch[0] * reference;
                 }
             }
         }
 
         // The fixed-alternative branch: every sample carries two copies of the candidate.
-        let fixed = branch(1);
-        if fixed > 0.0 {
-            let per_candidate = self.candidate_shares(&self.fixed_by_candidate);
-            for (index, share) in per_candidate.iter().enumerate() {
-                let allele = self.candidates[index];
-                for (s, sample) in evidence.samples.iter().enumerate() {
-                    let counts = tally_of(sample, allele);
+        if branch[1] > 1e-12 {
+            scratch.shares.clear();
+            for candidate in 0..candidates {
+                scratch.shares.push(
+                    scratch.fixed_ln[class * MAX_CANDIDATES + candidate]
+                        + scratch.multiplicity[candidate].ln(),
+                );
+            }
+            let total = ln_sum_exp(&scratch.shares);
+            for candidate in 0..candidates {
+                let share = branch[1] * (scratch.shares[candidate] - total).exp();
+                if share <= 1e-12 {
+                    continue;
+                }
+                let allele = scratch.candidates[candidate];
+                for s in 0..samples {
+                    let counts = tally_of(&scratch.evidence.samples[s], allele);
                     for &g in &group_index[s] {
                         let tally = &mut statistics.reads[g][class][2];
-                        tally.candidate += fixed * share * counts.candidate;
-                        tally.neither += fixed * share * counts.neither;
-                        tally.reference += fixed * share * counts.reference;
+                        tally.candidate += share * counts.candidate;
+                        tally.neither += share * counts.neither;
+                        tally.reference += share * counts.reference;
                     }
-                    statistics.homozygous_alt[s] += fixed * share;
+                    statistics.homozygous_alt[s] += share;
                 }
             }
         }
 
-        // The segregating branch: a candidate, a node, and each sample's genotype posterior.
-        let segregating = branch(2);
-        if segregating > 0.0 {
-            let ln_weights: Vec<f64> = self.segregating.iter().map(|t| t.ln_weight).collect();
-            let shares = self.candidate_shares(&ln_weights);
-            for (slot, term) in self.segregating.iter().enumerate() {
-                let share = segregating * shares[slot];
-                if share <= 0.0 {
-                    continue;
+        // The segregating branch. The genotype weights are collapsed over the nodes before the
+        // read counts are touched: which reads are "the allele" depends on the candidate and
+        // not on the node, so the inner loop over read groups runs once per candidate rather
+        // than once per candidate per node.
+        if branch[2] > 1e-12 {
+            scratch.shares.clear();
+            for candidate in 0..candidates {
+                let multiplicity = scratch.multiplicity[candidate].ln();
+                for node in 0..nodes {
+                    scratch.shares.push(
+                        scratch.node_ln[scratch.node_at(class, candidate, node)] + multiplicity,
+                    );
                 }
-                statistics.sum_ln_f += share * quadrature.ln_nodes[term.node];
-                statistics.sum_ln_one_minus_f += share * quadrature.ln_one_minus_nodes[term.node];
-                let allele = self.candidates[slot / quadrature.nodes.len()];
-                for (s, sample) in evidence.samples.iter().enumerate() {
-                    let counts = tally_of(sample, allele);
-                    let posterior = term.genotypes[s];
-                    for (j, p) in posterior.iter().enumerate() {
-                        let w = share * p;
+            }
+            let total = ln_sum_exp(&scratch.shares);
+            scratch.per_candidate_weight[..candidates * samples * 3].fill(0.0);
+            scratch.genotype_weight.fill(0.0);
+            for candidate in 0..candidates {
+                for node in 0..nodes {
+                    let share =
+                        branch[2] * (scratch.shares[candidate * nodes + node] - total).exp();
+                    if share <= 1e-12 {
+                        continue;
+                    }
+                    statistics.sum_ln_f += share * quadrature.ln_nodes[node];
+                    statistics.sum_ln_one_minus_f += share * quadrature.ln_one_minus_nodes[node];
+                    for s in 0..samples {
+                        let prior = &quadrature.priors[(node * samples + s) * 3..][..3];
+                        let lik = &scratch.lik[scratch.ell_at(class, candidate, s)..][..3];
+                        let joint = [prior[0] * lik[0], prior[1] * lik[1], prior[2] * lik[2]];
+                        let total = joint[0] + joint[1] + joint[2];
+                        if total <= 0.0 {
+                            continue;
+                        }
+                        let base = (candidate * samples + s) * 3;
+                        for j in 0..3 {
+                            let weight = share * joint[j] / total;
+                            scratch.per_candidate_weight[base + j] += weight;
+                            scratch.genotype_weight[s * 3 + j] += weight;
+                            statistics.genotypes[s][node][j] += weight;
+                        }
+                    }
+                }
+            }
+            for candidate in 0..candidates {
+                let allele = scratch.candidates[candidate];
+                for s in 0..samples {
+                    let counts = tally_of(&scratch.evidence.samples[s], allele);
+                    let base = (candidate * samples + s) * 3;
+                    for j in 0..3 {
+                        let weight = scratch.per_candidate_weight[base + j];
+                        if weight <= 0.0 {
+                            continue;
+                        }
                         for &g in &group_index[s] {
                             let tally = &mut statistics.reads[g][class][j];
-                            tally.candidate += w * counts.candidate;
-                            tally.neither += w * counts.neither;
-                            tally.reference += w * counts.reference;
+                            tally.candidate += weight * counts.candidate;
+                            tally.neither += weight * counts.neither;
+                            tally.reference += weight * counts.reference;
                         }
-                        statistics.genotypes[s][term.node][j] += w;
                     }
-                    statistics.heterozygous[s] += share * posterior[1];
-                    statistics.homozygous_alt[s] += share * posterior[2];
                 }
+            }
+            for s in 0..samples {
+                statistics.heterozygous[s] += scratch.genotype_weight[s * 3 + 1];
+                statistics.homozygous_alt[s] += scratch.genotype_weight[s * 3 + 2];
             }
         }
     }
+}
 
-    /// How the branch's mass divides between candidate alleles (and quadrature nodes, where
-    /// the term list holds both), from their own log-terms — with the unobserved alleles'
-    /// term counted as many times as there are of them.
-    fn candidate_shares(&self, ln_terms: &[f64]) -> Vec<f64> {
-        let per_candidate = ln_terms.len() / self.candidates.len().max(1);
-        let with_multiplicity: Vec<f64> = ln_terms
-            .iter()
-            .enumerate()
-            .map(|(slot, term)| {
-                let index = slot / per_candidate.max(1);
-                let observed = self.candidates.len() - usize::from(self.stand_in.is_some());
-                let multiplicity = if index < observed {
-                    1.0
-                } else {
-                    self.unobserved as f64
-                };
-                term + multiplicity.max(1.0).ln()
-            })
-            .collect();
-        let total = ln_sum_exp(&with_multiplicity);
-        if !total.is_finite() {
-            return vec![0.0; ln_terms.len()];
-        }
-        with_multiplicity
-            .iter()
-            .map(|term| (term - total).exp())
-            .collect()
+fn class_rate(parameters: &Parameters, class: usize, group: usize) -> f64 {
+    if class == 0 {
+        parameters.clean[group]
+    } else {
+        parameters.noisy[group]
     }
 }
 
@@ -1202,10 +1368,16 @@ fn maximisation(
         parameters.density.b,
         config.quadrature_nodes,
     );
-    for (s, counts) in statistics.genotypes.iter().enumerate() {
-        let fitted = maximise_hom_excess(counts, &quadrature, parameters.hom_excess[s]);
-        note(parameters.hom_excess[s], fitted);
-        parameters.hom_excess[s] = fitted;
+    // **At one sample the homozygote excess is not identified and is not moved.** Nothing
+    // separates "this individual is inbred" from "the population's frequencies are what they
+    // are" when there is one individual, so a fit that searched it anyway would wander without
+    // converging and hand back a plausible number. `fit_jointly` marks it as not fitted.
+    if statistics.genotypes.len() >= 2 {
+        for (s, counts) in statistics.genotypes.iter().enumerate() {
+            let fitted = maximise_hom_excess(counts, &quadrature, parameters.hom_excess[s]);
+            note(parameters.hom_excess[s], fitted);
+            parameters.hom_excess[s] = fitted;
+        }
     }
     moved
 }
@@ -1335,12 +1507,37 @@ fn fit_beta_shapes(mean_ln_f: f64, mean_ln_one_minus: f64, a0: f64, b0: f64) -> 
 /// function, so the nodes are placed by the density itself.
 struct BetaQuadrature {
     nodes: Vec<f64>,
+    /// The rule's weights, summing to one. **The pass reads `ln_weights`**; these are what the
+    /// tests integrate a known Beta with, which is the only check that the rule is the right
+    /// rule rather than merely a consistent one.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by this module's own tests")
+    )]
     weights: Vec<f64>,
+    ln_weights: Vec<f64>,
     ln_nodes: Vec<f64>,
     ln_one_minus_nodes: Vec<f64>,
+    /// `[node][sample][genotype]` — how common each genotype is at that node's frequency for
+    /// that sample's own inbreeding. **Computed once for the whole pass**, because it depends
+    /// on nothing that varies from position to position, and it sits in the innermost loop.
+    priors: Vec<f64>,
 }
 
 impl BetaQuadrature {
+    /// The rule, plus the genotype priors every position will read.
+    fn with_genotype_priors(a: f64, b: f64, count: usize, hom_excess: &[f64]) -> Self {
+        let mut rule = Self::new(a, b, count);
+        rule.priors = Vec::with_capacity(rule.nodes.len() * hom_excess.len() * 3);
+        for &f in &rule.nodes {
+            for &excess in hom_excess {
+                rule.priors
+                    .extend_from_slice(&genotype_frequencies(f, excess));
+            }
+        }
+        rule
+    }
+
     fn new(a: f64, b: f64, count: usize) -> Self {
         // Mapping `f = (1 + x)/2` turns the Beta's weight into the Jacobi weight
         // `(1 − x)^(b−1) (1 + x)^(a−1)`.
@@ -1354,11 +1551,17 @@ impl BetaQuadrature {
         let weights: Vec<f64> = w.iter().map(|w| w / total).collect();
         let ln_nodes = nodes.iter().map(|f| f.ln()).collect();
         let ln_one_minus_nodes = nodes.iter().map(|f| (1.0 - f).ln()).collect();
+        let ln_weights = weights
+            .iter()
+            .map(|w| w.max(f64::MIN_POSITIVE).ln())
+            .collect();
         Self {
             nodes,
             weights,
+            ln_weights,
             ln_nodes,
             ln_one_minus_nodes,
+            priors: Vec::new(),
         }
     }
 }

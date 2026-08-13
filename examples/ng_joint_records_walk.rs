@@ -58,6 +58,7 @@ use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges
 use pop_var_caller::ng::parameter_estimation::joint::coverage::{
     CoverageAccumulator, CoverageGrid,
 };
+use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
     CatalogBuildSettings, ReferenceDigest, RegionSetDigest, SelectableRegions, SelectionIdentity,
     UnambiguousRuns, select_kept_loci,
@@ -253,10 +254,105 @@ fn main() {
         );
     }
 
+    // The kept positions themselves, where a run asks for them. **This is what makes a
+    // comparison against a benchmark VCF exact**: the fit's rates are means over these
+    // positions and no others, so the truth has to be counted over the same list.
+    if let Ok(path) = std::env::var("KEPT_POSITIONS_TSV") {
+        let mut out = String::new();
+        for position in kept.generic() {
+            out.push_str(&format!(
+                "{}\t{}\n",
+                contigs.entries[position.contig.get() as usize].name,
+                position.position.get()
+            ));
+        }
+        std::fs::write(&path, out).expect("the kept-positions path is writable");
+        println!("\nkept positions   {path}");
+    }
+
+    fit_the_cohort(&cohort);
+
     println!(
         "\ntotal            {:.1} s",
         started.elapsed().as_secs_f64()
     );
+}
+
+/// Fit every parameter from the records just built, and print what came back.
+///
+/// **These are real reads, so there is no truth here** beyond what a benchmark VCF supplies
+/// separately. What the run shows is the shape of the answer — whether the two classes of
+/// position stay apart, where the population's frequency density lands, and what each sample's
+/// heterozygosity comes out at with the count of positions that actually carried a read beside
+/// it.
+fn fit_the_cohort(cohort: &[SampleRecords]) {
+    println!("\n--- the joint fit, ordinary positions ---");
+    let at = Instant::now();
+    let config = JointFitConfig {
+        quadrature_nodes: 12,
+        ..JointFitConfig::default()
+    };
+    let fit = match fit_jointly(cohort, &config) {
+        Ok(fit) => fit,
+        Err(error) => {
+            println!("  refused: {error}");
+            return;
+        }
+    };
+    println!(
+        "  {} passes, {}, log-likelihood {:.0}, {:.1} s",
+        fit.passes,
+        if fit.converged {
+            "converged"
+        } else {
+            "RAN OUT OF PASSES"
+        },
+        fit.log_likelihood,
+        at.elapsed().as_secs_f64()
+    );
+    for (group, estimate) in &fit.noise {
+        println!(
+            "  read group {group:?}: a read misreads at {:.5} at an ordinary position and \
+             {:.4} at a mismapped one",
+            estimate.value.clean, estimate.value.noisy
+        );
+    }
+    println!(
+        "  positions mismapped {:.4}; carrying only the reference {:.4}, only a non-reference \
+         base {:.5}; the rest segregate with Beta({:.3}, {:.3})",
+        fit.noisy_share,
+        fit.density.value.p_invariant,
+        fit.density.value.p_fixed_alt,
+        fit.density.value.a,
+        fit.density.value.b
+    );
+    println!(
+        "  the population's expected heterozygosity {:.5} ({:.3} per kilobase)",
+        fit.expected_heterozygosity,
+        1_000.0 * fit.expected_heterozygosity
+    );
+    println!(
+        "\n  {:<26}{:>10}{:>12}{:>14}{:>14}",
+        "sample", "het/kb", "hom-alt/kb", "less het by", "positions read"
+    );
+    let mut names: Vec<&String> = fit.rates.keys().collect();
+    names.sort();
+    for name in names {
+        let rates = &fit.rates[name].value;
+        println!(
+            "  {:<26}{:>10.3}{:>12.3}{:>14.3}{:>13.1}%",
+            name,
+            1_000.0 * rates.heterozygous,
+            1_000.0 * rates.homozygous_alt,
+            fit.hom_excess[name].value.get(),
+            100.0 * rates.positions_with_reads as f64
+                / cohort[0]
+                    .generic
+                    .values()
+                    .next()
+                    .map_or(1.0, |g| g.depth().len() as f64)
+        );
+    }
 }
 
 /// One sample: one walk, filling the records and the coverage summary together.
@@ -277,8 +373,8 @@ fn walk_one(
     kept: &pop_var_caller::ng::parameter_estimation::joint::loci::KeptLoci,
     identity: &SelectionIdentity,
 ) -> SampleRecords {
-    let read_groups = build_read_groups(&[alignment.to_path_buf()])
-        .expect("the header declares read groups");
+    let read_groups =
+        build_read_groups(&[alignment.to_path_buf()]).expect("the header declares read groups");
     let sample = match read_groups.read_groups_per_sample() {
         [only] => only.clone(),
         other => panic!(
@@ -371,11 +467,11 @@ fn walk_one(
         identity.clone(),
         DepthBinEdges::new(),
         ReadCap(pop_var_caller::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
-        // Nothing subsamples a generic position's reads yet, and a cap of "none" has to be
-        // written down as such: two samples walked under different caps did not record the
-        // same evidence, and a value that meant "whatever this build did" would pass the
-        // check while meaning nothing.
-        DepthCap(u32::MAX),
+        // **The ladder's own top.** The stored code is a bin and the ladder's last bin is the
+        // last there is, so a position deeper than that is thinned down to it before anything
+        // is recorded — otherwise a 300× sample records a depth of about 111 beside an
+        // undiminished count of alternative reads.
+        DepthCap(DepthBinEdges::new().max_depth()),
     );
 
     // **Every generic stretch handed to the walk is walked**, whether or not a read reached

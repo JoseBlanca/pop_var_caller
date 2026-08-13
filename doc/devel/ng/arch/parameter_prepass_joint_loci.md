@@ -1,4 +1,4 @@
-# ng — the joint fit, which loci are kept: types & interfaces
+# ng — the joint parameters fit, which loci are kept: types & interfaces
 
 *Status: **partly built** (2026-08-12) — `loci.rs` exists and holds the generic rule, the
 unambiguous-base mask and the threshold arithmetic, with the properties §6 asks for asserted in its
@@ -57,7 +57,7 @@ they are produced by one pass over one set of inputs and checked for agreement a
 /// walked on different machines (spec §1). Nothing here is written to a sample's
 /// records — [`SelectionIdentity`] is (spec §5.1).
 pub struct KeptLoci {
-    /// The generic set, ascending in genome order. The fit indexes records by
+    /// The generic set, ascending in genome order. The parameters fit indexes records by
     /// position in this vector, so **the order is part of the contract**, not an
     /// artifact of how it was built.
     generic: Vec<GenomePosition>,
@@ -110,12 +110,12 @@ is a silent double weight in every rate fitted from the set, and no later check 
 
 ### 1.2 `SelectionIdentity` — the seven values that travel
 
-What a sample carries so the fit can refuse to pool mismatched runs (spec §5.1). **This is the type
+What a sample carries so the parameters fit can refuse to pool mismatched runs (spec §5.1). **This is the type
 that crosses the machine boundary**, not `KeptLoci`.
 
 ```rust
 /// Everything that decides which loci a run keeps. Two samples that disagree on any
-/// field selected different loci, so the fit must refuse rather than average
+/// field selected different loci, so the parameters fit must refuse rather than average
 /// (spec §5.1).
 ///
 /// **`PartialEq` and not `Eq`, and that is forced rather than chosen**: `StrRepeatCriteria`
@@ -151,7 +151,7 @@ pub struct SelectionIdentity {
 ```
 
 **Contract.** `PartialEq` **is** the compatibility check — there is no tolerance and no partial
-match, because a set difference is meaningless rather than noisy (spec §5). The fit compares every
+match, because a set difference is meaningless rather than noisy (spec §5). The parameters fit compares every
 sample's against the first and fails on the first disagreement, naming the field.
 
 **OPEN (impl-time):** `ReferenceDigest` and `RegionSetDigest` are named here as the types
@@ -335,7 +335,7 @@ pub enum SelectionError {
 }
 ```
 
-**Fatal, never a warning.** Both mismatch variants stop the fit; averaging over mismatched sets
+**Fatal, never a warning.** Both mismatch variants stop the parameters fit; averaging over mismatched sets
 produces a number with no meaning (spec §5).
 
 ---
@@ -394,6 +394,6 @@ Tests live beside the code in `joint/loci.rs`'s `#[cfg(test)] mod tests`. **The 
 identity rather than a fixture**: build the selection twice, once whole and once from region shards
 at several thread counts, and compare — spec §7.1, which no fixture file is needed for. The
 `--regions` case is the one most likely to be written against the contig table by reflex, so it is
-asserted by name. The digest's own test plants a wrong position in an otherwise correct walk and
+asserted by name. The digest's own test plants a wrong position in an otherwise correct genome walk and
 requires the block digest to name the megabase, then requires a rule-derived digest to **pass** that
 same test — the check that the check is the right one (spec §7.8).

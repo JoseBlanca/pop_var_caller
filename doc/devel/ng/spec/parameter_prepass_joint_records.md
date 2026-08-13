@@ -1,12 +1,12 @@
-# ng — the joint fit: what is recorded at each kept locus
+# ng — the joint parameters fit: what is recorded at each kept locus
 
 *Design spec, 2026-08-10. **No code yet — this settles the design.** One of three documents covering
-the **joint fit**, ng step 4's second route to every parameter it emits; read
+the **joint parameters fit**, ng step 4's second route to every parameter it emits; read
 [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) first — it says what the route is,
 what it produces and why it exists. This one settles **what each sample records at a kept locus, and
 how it is encoded**. Which loci are kept is
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md); the mathematics that reads these
-records is the fit document.*
+records is the parameters fit document.*
 
 *Types and interfaces: [`../arch/parameter_prepass_joint_records.md`](../arch/parameter_prepass_joint_records.md).*
 
@@ -18,14 +18,27 @@ carries a note saying so.*
 
 ## 1. What this is, and why it is its own module
 
-**The fit reads nothing but these records, so what is missing from them cannot be recovered later.**
-The walk visits every locus once; a field not written then would need a second traversal of the reads,
-which is the one thing this whole step is built to avoid.
+**Two words carry this document, and both are named here rather than assumed.**
+
+- **The genome walk** — one pass over **one sample's** alignments, visiting each locus of the genome in turn
+  and gathering what that sample's reads say there. It is where a record is filled. One sample, one
+  genome walk, and each sample is walked separately.
+- **The parameters fit** — the estimation of the parameters the caller will run on, done **once for the whole
+  cohort and before any variant is called**: how often a read shows the wrong base, how heterozygous
+  each sample is, how inbred, how diverse the population is, how often a repeat tract gains or loses a
+  copy, and how much of each sample's DNA came from a different plant. It reads every sample's records
+  at once. **It is not the variant caller** — it is what the variant caller is later handed.
+
+**Everything the parameters fit learns about a sample's reads comes from these records**, so what is missing from
+them cannot be recovered later. The genome walk visits every locus once; a field not written then would need
+a second traversal of the reads, which is the one thing this whole step is built to avoid. *(The one
+exception is the window summary of §4, and it proves the rule: it is not in the records, so a run that
+did not build it during the genome walk has to go back over the sample's pileup for it.)*
 
 **It is a module of its own because it defines the types that hold this information, and two other
-modules stand on them.** The walk fills a record as it finishes each kept locus; the fit reads every
-sample's records and computes from nothing else. Neither has to know what the other does: the walk
-needs no likelihood, and the fit needs no knowledge of how a record is packed — the same division the
+modules stand on them.** The genome walk fills a record as it finishes each kept locus; the parameters fit reads every
+sample's records and computes from them. Neither has to know what the other does: the genome walk
+needs no likelihood, and the parameters fit needs no knowledge of how a record is packed — the same division the
 code already draws between `parameter_estimation::generic`, which shapes the data, and
 `parameter_estimation::fitting`, which does the mathematics. **Because the types are the whole of it,
 it can be built before either user exists**, and tested by filling a record, writing it out, reading
@@ -38,10 +51,13 @@ substituted, so the two share the selection rule and nothing about their content
 
 ### 1.1 Goals
 
-1. **Hold everything the fit needs and nothing it does not**, with §2's and §3's lists being the
+1. **Hold everything the parameters fit needs and nothing it does not**, with §2's and §3's lists being the
    contract.
-2. **Stay small enough to keep for every sample at once**, since the whole cohort's records are
-   resident during the fit.
+2. **Be readable in parts, so the cohort's records never have to be resident all at once.** An
+   earlier version of this goal said the opposite — *stay small enough to keep every sample's whole
+   record set in memory* — which holds at fifty samples and fails at a thousand. What has to fit is
+   **one section at a time**: the generic half, or one repeat-tract stratum. §6.2 says what that
+   obliges the layout to do.
 3. **Distinguish "no data" from "data saying nothing"** — a locus never walked, a locus walked with no
    coverage, and a locus with reads that all matched are three different things and only the first is a
    bug.
@@ -52,7 +68,7 @@ substituted, so the two share the selection rule and nothing about their content
   and does not fit anything ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md)).
 - **It does not say how the records are framed on disk** — the byte layout of the file is the
   implementer's. Where they live is no longer open: §6.1 settles it. The requirement that drove that
-  decision is a property rather than a mechanism — **the fit must reach every sample's records without
+  decision is a property rather than a mechanism — **the parameters fit must reach every sample's records without
   walking the reads again** — and one file per sample beside the pileup is the cheapest thing that has
   it.
 
@@ -72,12 +88,12 @@ Three reasons are already recorded
 an allele they do not share; the reference is not always the major allele; and contamination is
 identified by *which* allele a sample's stray reads carry.
 
-**The joint fit adds a fourth, and it is structural.** The quantity being fitted at a locus is **the
+**The joint parameters fit adds a fourth, and it is structural.** The quantity being fitted at a locus is **the
 frequency of an allele** ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.1), so
 the allele has to exist as a thing that can have a frequency. "Non-reference" is not one.
 
-**And a fifth, which is a requirement on the *fit* rather than on the record, stated here because
-this is where the temptation is.** All four counts are stored, and the fit **sums over which
+**And a fifth, which is a requirement on the *parameters fit* rather than on the record, stated here because
+this is where the temptation is.** All four counts are stored, and the parameters fit **sums over which
 non-reference base is the segregating one** rather than picking the largest
 ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.1.1). At a position where the
 population carries only the reference base the non-reference reads are errors spread over three
@@ -125,7 +141,7 @@ sample-locus record is binned separately. The argument transfers; the measuremen
 
 **The positions are never stored**, because they are reproducible from
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §2's rule: every sample and the
-fit derive the identical list. Storing coordinates instead would cost about five bytes each, 10 MB
+parameters fit derive the identical list. Storing coordinates instead would cost about five bytes each, 10 MB
 before any data was recorded.
 
 **The depth array alone reconstructs every quiet position exactly**: depth `n` with no sparse entry
@@ -141,10 +157,10 @@ groups is addition of raw counts at one place, exact and free; the reverse is no
 **What it costs is a multiplier equal to the read groups per sample: 1 for 1,550 of the 1,707 samples**
 in the tomato archive survey, 2 or 3 for nearly all the rest.
 
-**And it is what lets the joint fit avoid a compromise the other route makes.**
+**And it is what lets the joint parameters fit avoid a compromise the other route makes.**
 [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §1 keeps the per-library breakdown only
 for sites with at most four alternative reads, because a histogram key holding it everywhere would be
-large. A record holds it everywhere at every depth, so the fit scores each read against its own
+large. A record holds it everywhere at every depth, so the parameters fit scores each read against its own
 library's rate with no bound and no pooling arm.
 
 ---
@@ -183,7 +199,7 @@ comparison of the same quantity.
 ### 3.2 Two widths
 
 - **The recorded range is ±4.** Narrow is fine.
-- **The allele lengths the fit may place mass on reach ±6.** That is the load-bearing one, because it
+- **The allele lengths the parameters fit may place mass on reach ±6.** That is the load-bearing one, because it
   is what lets an end bucket be attributed to a distant allele rather than to a far slip.
 
 **Narrow is fine only because the end buckets are scored by their marginal**: "at least four repeats
@@ -199,7 +215,7 @@ likelihood splits exactly into *how many reads were non-whole-repeat* times *how
 the offsets*. Nothing about the slippage parameters is estimated from it.
 
 **It has a threshold**: one non-whole-repeat read in ten of the reads that differ from the reference
-tract length. Above that, the locus is not something this noise model describes and the fit should say
+tract length. Above that, the locus is not something this noise model describes and the parameters fit should say
 so rather than fit it.
 
 **Record what it caught, not only how many**, by the same sparse mechanism as the difference list: a
@@ -212,7 +228,7 @@ explain it.
 
 [`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.1 caps how many of a locus's reads are
 entered and subsamples uniformly down to it, seeding the draw from the locus's position so that a
-region-sharded walk and a single-threaded one keep the same reads. **The record uses the same cap and
+region-sharded genome walk and a single-threaded one keep the same reads. **The record uses the same cap and
 the same seeding**, because if the two routes cap differently the comparison between them confounds
 the cap with the route. At tomato's three reads a locus neither cap fires; at HG002's 300× both would.
 
@@ -222,7 +238,7 @@ the cap with the route. At tomato's three reads a locus neither cap fires; at HG
 - **the stratum** — the (motif period, reference repeat count) pair — a column of the catalog
   [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3.3 makes an input, so it
   costs nothing per sample and is not re-derived here. It is what that document selects on and what
-  the fit fits within.
+  the parameters fit fits within.
 
 **Encoding follows §2.3's shape**: a dense binned count of spanning reads per locus, plus a sparse list
 of the non-zero offsets. At three reads a locus nearly every read sits at offset 0, so the sparse list
@@ -243,14 +259,14 @@ than a read is never crossed, in every sample at every depth, so it runs along r
 the slippage numbers are fitted within — and a stratum unobservable with this read length must not
 look like one that was merely unlucky with coverage. **What to record is open**; the cheapest form is
 one count of covering-but-not-crossing reads per locus beside the offsets, which distinguishes the
-states without asking the fit to score a lower bound (which [`locus_generation_ssr.md`](locus_generation_ssr.md)
+states without asking the parameters fit to score a lower bound (which [`locus_generation_ssr.md`](locus_generation_ssr.md)
 leaves to the caller).
 
 ---
 
 ## 4. The third object: coverage by window, per sample
 
-**The fit needs one thing the two records cannot hold, and it is not a record at all.**
+**The parameters fit needs one thing the two records cannot hold, and it is not a record at all.**
 [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 adopts a third class of site
 — a locus the *sample* carries more copies of than the caller assumes — and its discriminator is the
 **local relative coverage**, never the site's own depth. That is a measured constraint rather than a
@@ -259,7 +275,7 @@ from a single-copy sample reading high, and tomato's three reads a site is half 
 
 **So it cannot come out of §2's records.** Those hold one binned depth per kept position, and the
 kept positions are one in a few hundred — a 500 bp window holds one or two of them, which is the
-per-base measurement the constraint rules out. The summary is over **every** position the walk
+per-base measurement the constraint rules out. The summary is over **every** position the genome walk
 visited, not over the kept ones.
 
 **What it holds, per sample:**
@@ -277,10 +293,10 @@ recoverable from the per-sample pileup — every position's depth is in there �
 cached copy of something a later pass can rebuild, and the owner's call is not to keep that copy. It
 is therefore built twice, by whichever code is holding the depths at the time:
 
-- **in the run that goes straight from alignments to a fit**, the walk builds it as it goes, because
-  the walk already has every position's depth in hand;
+- **in the run that goes straight from alignments to a fit**, the genome walk builds it as it goes, because
+  the genome walk already has every position's depth in hand;
 - **in the two-phase run** — alignments to a per-sample pileup file, then a cohort call some time
-  later — the fit builds it by reading the pileups. That read costs a full pass over each sample's
+  later — the parameters fit builds it by reading the pileups. That read costs a full pass over each sample's
   pileup, which is the price of not storing it (§6.1 prices the same pass for the records, which *are*
   stored).
 
@@ -294,8 +310,8 @@ regions are recoverable from the pileup's own header.** Production's `.psp` head
 provenance; ng's must keep it.
 
 **Size: 1.6 to 6.2 MB per sample at one byte a window**, which at fifty samples is 80 to 310 MB. That
-is now a **resident** cost during the fit and not a stored one, and it is still the same order as the
-records themselves (§6) — which is the reason this section exists rather than a sentence in the fit
+is now a **resident** cost during the parameters fit and not a stored one, and it is still the same order as the
+records themselves (§6) — which is the reason this section exists rather than a sentence in the parameters fit
 spec. **§7.8 measures it beside the records rather than instead of them.**
 
 **Two properties it inherits.** It is **per sample and needs no cohort**, which matters because this
@@ -303,12 +319,12 @@ caller must also run on one sample; and its window grid is a function of the ref
 samples' summaries are comparable by construction.
 
 *The window size still travels in §5's identity, and the decision above weakens what that check is
-for.* No summary is ever written, so the fit builds every sample's at one width in one process and
+for.* No summary is ever written, so the parameters fit builds every sample's at one width in one process and
 there is nothing left to disagree about. The value costs nothing and stays; it is the one member of
 §5's list whose subject has gone, and it should be retired rather than defended if a later revision
 finds no path that can still pool two summaries built at different widths.
 
-### 4.1 The stored window is 500 bp; the width the fit reads at is the sample's own
+### 4.1 The stored window is 500 bp; the width the parameters fit reads at is the sample's own
 
 **Measured, 2026-08-12** ([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)
 §4). A window's mean depth separates one copy from two only once the window has collected about
@@ -330,7 +346,7 @@ at 10 kb — and 2.51× at 5 kb (12,550 bases a window) returns what 25.2× at 5
 - **Stored at 500 bp**, as this section prices it. Storing at each sample's own width would break the
   one property §4 leans on — that two samples' summaries are comparable by construction — and put a
   per-sample number into a value §5 requires every sample to agree on.
-- **Read at whatever width the sample's depth requires**, by summing adjacent windows in the fit.
+- **Read at whatever width the sample's depth requires**, by summing adjacent windows in the parameters fit.
   Summing binned means back to a wider mean needs the per-window position counts, which the summary
   already has as its denominators. **Summing is exact and free; unsumming is not possible**, which
   is the whole reason the fine grid is the stored one.
@@ -360,14 +376,14 @@ on tomato — median window depth runs from 16.2 reads a position at 20% GC to 2
 of 1.79 — but correcting for it *lowered* the enrichment on SRR7279482 from 32.6× to 24.8×, by
 adding two-copy windows that carry no near-half signal. The curve stays in the summary, because it
 costs a few hundred numbers and the 1.79-fold range is larger than the signal it would otherwise
-swamp; **whether the fit divides by it is a flag, and the measurement that would settle it is the
-same walk on a genome whose duplications are known.**
+swamp; **whether the parameters fit divides by it is a flag, and the measurement that would settle it is the
+same genome walk on a genome whose duplications are known.**
 
 ---
 
 ## 5. What travels once per sample, beside the records
 
-**Thirteen values, and the fit must refuse to pool samples that disagree on any of them.**
+**Thirteen values, and the parameters fit must refuse to pool samples that disagree on any of them.**
 
 Seven identify the loci and are
 [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §5.1's: the seed, the reference
@@ -405,7 +421,7 @@ meant different things.
 - **the coverage-by-window size** (§4), where a window summary exists at all. Windows of different
   widths are not comparable and a relative copy number computed across two grids is meaningless.
   **This is the weakest of the thirteen since 2026-08-13**, because the summary is no longer written
-  anywhere (§4): the fit builds every sample's itself, at one width, so the disagreement it guards
+  anywhere (§4): the parameters fit builds every sample's itself, at one width, so the disagreement it guards
   against has no way to arise. It is kept because it costs one comparison.
 
 *None of the five needs a new mechanism: they are equality comparisons beside the eight above, and
@@ -432,9 +448,14 @@ and every one of them is kept because the per-stratum cap never has to fire
 
 **So the STR records are the larger half of the bill, not the smaller** — the opposite of what the
 earlier arithmetic implied, and it follows directly from keeping every STR locus rather than a
-sample of them. Roughly **360–420 MB for a fifty-sample cohort**, held while the fit runs. **These are
+sample of them. Roughly **360–420 MB for a fifty-sample cohort**, held while the parameters fit runs. **These are
 the only objects that accumulate across the cohort**; everything else in step 4 is dropped when its
 sample finishes.
+
+**That total is what a run holds when it holds everything, which §6.2 says it need not.** The column
+above is the right one for a fifty-sample cohort taking the simple path; at a thousand samples the
+number that matters is the largest single section, because the generic half is dropped before the
+repeat-tract half is read and the strata are read one at a time.
 
 *The row that would change most is the STR one, because it is the one whose per-locus size depends on
 an encoding that is not written yet.* **§7.8 measures it rather than trusting this table**, and if the
@@ -467,7 +488,7 @@ answer, not the writer's — so it contributes its offset and **nothing to the b
 denominator**, which keeps the STR error rate a ratio of two quantities counted over the same reads.
 At tomato about 95 reads in 100 are unslipped.
 
-**Concurrency.** A region-sharded walk fills the entries for the positions in its own region, and
+**Concurrency.** A region-sharded genome walk fills the entries for the positions in its own region, and
 merging is concatenation in position order. Nothing needs communication between shards.
 
 **Errors.** Three states must be distinguishable after a write and a read: **never walked** (a bug),
@@ -475,15 +496,15 @@ merging is concatenation in position order. Nothing needs communication between 
 is what makes the first expressible. **At an STR locus there is a fourth** — reads reached the locus
 but none crossed the tract (§3) — and it is the one with no field today.
 
-**And the first real walk collapsed the first two, 2026-08-13.** The generic locus generator emits
-nothing at a position no read reached, so silence from the walk was indistinguishable from a region
+**And the first real genome walk collapsed the first two, 2026-08-13.** The generic locus generator emits
+nothing at a position no read reached, so silence from the genome walk was indistinguishable from a region
 the run never opened: **93,150 of 1,999,404 kept positions on a 25× tomato accession came back as
 *never walked*, and every one of them was data.** A bit that can express a state is not the same as a
-walk that produces it. **The walk must therefore say which stretches it covered, whatever it found in
+genome walk that produces it. **The genome walk must therefore say which stretches it covered, whatever it found in
 them** — `RecordWriter::mark_walked`, called for each region handed to the generators; a real depth
 never overwrites the mark and the mark never overwrites a real depth, so the order does not matter.
 The share is **1.4% to 35% of kept positions across the 63 tomato accessions** and 0.5% on HG002 at
-30×, and it is the denominator of every rate the fit reports.
+30×, and it is the denominator of every rate the parameters fit reports.
 
 **Determinism.** The read subsample of §3.4 is seeded from the locus's position, so the same sample
 walked in one region and in many produces byte-identical records.
@@ -519,9 +540,9 @@ history:
 
 **Two ways it is built, and they must be one builder.**
 
-1. **During the walk**, in both kinds of run. The walk visits every position anyway and deciding
+1. **During the genome walk**, in both kinds of run. The genome walk visits every position anyway and deciding
    whether a position is kept is a hash test, so building the records there is nearly free. In the run
-   that goes straight to a fit, the records stay in memory; in the two-phase run, the same walk that
+   that goes straight to a fit, the records stay in memory; in the two-phase run, the same genome walk that
    writes the pileup also writes the records file.
 2. **From an existing pileup**, which is the regeneration path rather than the normal one. It serves
    three cases: pileups written before this file existed, a records file lost or built at knobs that
@@ -529,18 +550,18 @@ history:
    the one on disk**, without going back to the alignments.
 
 **Reading a pileup back immediately after writing it is not one of the two.** It costs a full
-decompression pass over a file the walk has just finished producing, and buys nothing.
+decompression pass over a file the genome walk has just finished producing, and buys nothing.
 
 **The hazard the second path introduces, and how it is closed.** Once both exist they must produce the
 same records from the same sample, or a cohort's parameters depend on which path happened to run, and
-nothing in the output would show it. Two things close it: **the walk-time builder is fed from the same
+nothing in the output would show it. Two things close it: **the genome walk-time builder is fed from the same
 stream of loci that the pileup writer consumes**, downstream of every read filter and depth cap the
 pileup applies, so it cannot see reads the pileup will drop; and §7.12 asserts that one sample built
 both ways gives byte-identical files.
 
 **Staleness.** The records file names the pileup it was built from: a digest of that pileup's header —
 reference, analysed regions, read filters, command line — together with its record count. **Never
-modification time.** On a mismatch the fit rebuilds silently when the pileup is available, and fails
+modification time.** On a mismatch the parameters fit rebuilds silently when the pileup is available, and fails
 naming the field that differs when it is not. That is the same shape as §5's refusal, pointed at a
 different object.
 
@@ -548,6 +569,59 @@ different object.
 the twenty-seven-million-position one that contamination would use — roughly 1.5 GB across the
 sixty-three-accession tomato cohort, read sequentially rather than held
 ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4).
+
+### 6.2 The file is read in sections, because the parameters fit is — DECIDED 2026-08-13
+
+**Decision (owner): the file is laid out so that the generic half and each repeat-tract stratum can be
+read on their own, and the reader decodes only what it is asked for.** Nothing about a records file
+should require a program to hold a whole sample's evidence to use any of it.
+
+**Two facts about the estimator make this possible, and neither is a hope.**
+
+- **The two halves are fitted one after the other, not together.** The repeat-tract half consumes
+  exactly one number per sample from the generic half — that sample's homozygote excess, which weights
+  a genotype drawn from a locus's length frequencies
+  ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §4.1) — and hands nothing back:
+  contamination is fitted on the generic loci alone (§4.3 there), and so are the noise classes, the
+  frequency density and the homozygote excess itself (§3.3 there). **So the generic records can be
+  dropped before a single repeat-tract record is read.**
+- **Within the repeat-tract half, a stratum is fitted on its own.** The four slippage numbers are per
+  (read group × stratum), the concentration that says how monomorphic a stratum's loci are is per
+  stratum, and the length spectrum a locus's frequencies are drawn from is that stratum's own. What
+  crosses strata is sums of counts — the substitution denominator, the per-stratum weights — and a sum
+  is accumulated as each stratum goes past rather than held.
+
+**What the layout must therefore carry:** a directory at the head of the file giving the byte extent of
+each section — the generic records per read group, and the repeat-tract records per (read group ×
+stratum) — so a reader can take one section without decoding the rest. The thirteen identity values and
+the kept-loci digest stay outside the sections, since they are checked before anything is read.
+
+**What it buys, and the measured limit on it.** Peak resident becomes the largest single section
+rather than the sum: at two million positions the generic half is 1.25 MB per read group and the whole
+repeat-tract set is 4–5 MB. **But one stratum — period 1 at 8 repeats — holds 217,812 of tomato's
+462,701 kept tracts, 47% of them**
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.5), so reading a stratum at a
+time cuts the repeat-tract peak by about half and not by the 141 strata there are. **The per-stratum
+cap is what turns this into a bound rather than an improvement**, and that document called the memory
+bill *"the first reason the cap has ever had to fire"*; this is the shape of the run where it fires.
+
+**What the cap should be is not settled, and memory is no longer the thing that decides it.** A tract
+costs about ten bytes a read group, so even a cap of 20,000 puts the largest section at 200 kB a
+sample — 200 MB across a thousand samples, which is affordable, and every smaller cap more so. **So
+the cap is set by what the estimator needs, and that is measured only from above**: the per-tract fit
+recovered a slippage level of 0.0803 against a truth of 0.0800 at **6,000 tracts** in a stratum at
+three reads a site, and the comparisons against the per-stratum model ran at **1,200 to 1,500 tracts**
+with twenty samples ([`../reports/joint_str_estimator_2026-08-12.md`](../reports/joint_str_estimator_2026-08-12.md)).
+Nobody has swept downwards, so **where it starts to hurt is unknown**, and a cap above a few thousand
+buys nothing anyone has measured. [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md)
+§6 question 1 carries the sweep that would settle it.
+
+**Sectioning is one of three levers and bounds one of three axes.** It bounds *which object* is
+resident. Reading every sample's file in genome order together bounds *how many loci* are resident,
+and fitting on a subsample of samples bounds *how many samples* are
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §11, question 10). A cohort of
+thousands needs all three; a cohort of fifty needs none of them, and can take the run that never
+writes a file at all.
 
 ---
 
@@ -598,29 +672,34 @@ sixty-three-accession tomato cohort, read sequentially rather than held
     fixture where the two diverge: that inequality is the reason the object exists, and an
     implementation that quietly derived one from the other would pass every other check here.
 11. **Summing windows gives the mean over their union** (§4.1). Ten adjacent windows summed must equal
-    one walk's mean over the same 5 kb, exactly — it is a ratio of two sums the summary already holds.
+    one genome walk's mean over the same 5 kb, exactly — it is a ratio of two sums the summary already holds.
     **Plant a short window in the run**, one the analysed regions or the ambiguity mask cut down, and
     assert that weighting it by its own position count changes the answer: a sum that treated every
     window as full would agree with the direct mean everywhere else and be wrong only where it
     matters, which is at every contig end and every region edge.
-12. **The two builders agree, byte for byte** (§6.1). Build one sample's records during the walk and
-    build them again from the pileup that same walk wrote, and compare the files. **This is the test
+12. **The two builders agree, byte for byte** (§6.1). Build one sample's records during the genome walk and
+    build them again from the pileup that same genome walk wrote, and compare the files. **This is the test
     that decides whether the pileup really holds everything the records need**, and it fails on
     exactly the fields that turn out not to be recoverable rather than on all of them, so run it on a
     fixture carrying every corner §7.1 lists — including a repeat tract, whose per-read length is the
     field most likely to be missing.
 13. **A stale records file is refused or rebuilt, and never used** (§6.1). Write records, then change
     the pileup they name — a different analysed-region set is the cheapest way — and assert that the
-    fit rebuilds when the pileup is there and fails naming the field when it is not. Assert also that
+    parameters fit rebuilds when the pileup is there and fails naming the field when it is not. Assert also that
     touching the pileup's modification time alone changes nothing, since the check must not key on it.
-14. **A smaller census is a subset of a larger one, and the fit says so**
+14. **A smaller census is a subset of a larger one, and the parameters fit says so**
     ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3). Build records at the
     large budget, take the subset a smaller target selects, and assert it equals records built at that
     smaller target directly — same positions, same values. **This is what makes "write large once" safe**,
     and if it ever fails, every run that took a subset instead of rebuilding was reading a different set
     of loci than it thought.
-15. **The rebuilt coverage summary equals the walk's** (§4). Build the window summary during a walk and
-    again from the pileup that walk wrote, and assert they match. **Plant a window inside the analysed
+15. **The rebuilt coverage summary equals the genome walk's** (§4). Build the window summary during a genome walk and
+    again from the pileup that genome walk wrote, and assert they match. **Plant a window inside the analysed
     regions that no read reached**: it is the one the two paths disagree about if the rebuild takes its
     denominator from the covered positions rather than from the reference and the analysed regions, and
     it is the failure that also moves the sample's median and so every other window with it.
+16. **Reading one section touches only that section** (§6.2). Ask a records file for one stratum's
+    tracts and assert two things: the values match what a whole-file read gives for that stratum, and
+    **the bytes actually read are the section's own**, which a counting reader makes checkable. The
+    second half is the one worth writing — an implementation that decodes everything and then returns
+    a slice passes the first half and delivers none of the memory this section exists for.

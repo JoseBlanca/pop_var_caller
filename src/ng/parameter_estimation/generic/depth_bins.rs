@@ -314,6 +314,14 @@ impl DepthBinEdges {
     #[must_use]
     pub fn representative_depth(&self, bin: DepthBin) -> f64 {
         let top = self.bin_tops[usize::from(bin.0)];
+        // **The top bin answers the cap and not its own midpoint.** A site above the cap has
+        // been subsampled down to it before it was recorded, so at a deep sample every site in
+        // that bin sits exactly on the cap; taking the midpoint instead understates a 300×
+        // sample's depth by a tenth while its alternative counts are undiminished, which
+        // charges it reference reads it never had.
+        if usize::from(bin.0) + 1 == self.bin_tops.len() {
+            return f64::from(top);
+        }
         let bottom = if bin.0 == 0 {
             0
         } else {

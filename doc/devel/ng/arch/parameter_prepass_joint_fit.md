@@ -1,4 +1,4 @@
-# ng — the joint fit, the estimator: types & interfaces
+# ng — the joint parameters fit, the estimator: types & interfaces
 
 *Status: architecture draft (2026-08-12), companion to the spec
 [`../spec/parameter_prepass_joint_fit.md`](../spec/parameter_prepass_joint_fit.md) (the design and its
@@ -18,7 +18,7 @@ else.*
 (`module_layout.md`: *parameter_estimation/* owns `fitting/`, `generic/`, `ssr/` — this route is a
 fourth sub-unit and not a top-level split).
 
-**It runs once, after every sample's walk.** That is a scheduling fact the driver owns, and the only
+**It runs once, after every sample's genome walk.** That is a scheduling fact the driver owns, and the only
 shape it imposes here is that the entry point takes *every* sample's records at once and returns one
 value — there is no per-sample entry point, because there is no per-sample answer (spec §1).
 
@@ -31,7 +31,7 @@ value — there is no per-sample entry point, because there is no per-sample ans
 ```rust
 /// Every parameter this route produces, for the whole cohort, in one value.
 ///
-/// **Per-sample entries are maps keyed by sample**, not a parallel vector: the fit's
+/// **Per-sample entries are maps keyed by sample**, not a parallel vector: the parameters fit's
 /// output outlives the order the samples were walked in, and a caller looks a sample
 /// up by name.
 pub struct JointFit {
@@ -96,7 +96,7 @@ pub struct SiteClassNoise {
 /// **Conditioned on the window's relative copy number, never on the site's own depth**:
 /// per-base coverage at 6× cannot tell a two-copy carrier from a sample reading high,
 /// so the discriminator is the window (spec §2.2). The window summary it reads is
-/// `records.rs`'s third object, not something this fit derives.
+/// `records.rs`'s third object, not something this parameters fit derives.
 pub struct DuplicatedSiteClass {
     pub weight: f64,
     pub alternative_fraction: f64,
@@ -104,7 +104,7 @@ pub struct DuplicatedSiteClass {
 ```
 
 **OPEN:** `DuplicatedSiteClass` is `PROPOSED` in the spec and gated on one measurement (spec §2.2's
-closing paragraph). The type is stated so the fit's shape does not have to change when it lands; an
+closing paragraph). The type is stated so the parameters fit's shape does not have to change when it lands; an
 implementation may ship with it always `None`.
 
 ### 1.3 `FrequencyDensity` — four numbers, and the spectrum it implies
@@ -305,6 +305,26 @@ varies with thread count and multiple starting points are enumerated rather than
 The identity check runs first and completely — a run that would fail on the fiftieth sample fails
 before the first likelihood evaluation.
 
+**`&[SampleRecords]` is the fifty-sample signature, and it does not survive a thousand — OPEN,
+2026-08-13.** It requires every sample's whole evidence resident, which is 6 GB at a thousand samples
+and 30 GB at five thousand (spec §7, §11 question 10). What the estimator actually consumes is
+narrower: the generic records of every sample, and then — after those are dropped — one stratum's
+tracts of every sample, one stratum at a time (spec §4, §4.1). **So the parameter is a source the fit
+asks sections of**, satisfied both by an in-memory `SampleRecords` and by a `SampleRecordsFile`
+(records arch §2.2), rather than a slice of whole values:
+
+```rust
+pub fn fit_jointly(
+    samples: &mut [impl JointRecordSource],
+    config: &JointFitConfig,
+) -> Result<JointFit, JointFitError>;
+```
+
+**Why this is open rather than decided:** the trait's methods follow from question 10's answer about
+what else is streamed — a fit that also reads locus-major wants a different unit again, and settling
+the source's shape before that measurement would fix the wrong one. What is already decided is that it
+cannot be a slice of whole record sets.
+
 ### 2.2 The likelihood, as the shared seam already shapes it
 
 **The innermost sum is `NoiseModel::append_genotype_likelihoods`, unchanged**
@@ -333,7 +353,7 @@ carries no allele at all (spec §3.1.1). **There is no `alt: ObservedAllele` par
 not be one** — a signature that took the allele would push the choice up to whoever builds
 `LocusEvidence`, which is where the maximum-of-three bias enters.
 
-**Contract.** `LocusEvidence` borrows every sample's record at one locus and owns nothing; the fit
+**Contract.** `LocusEvidence` borrows every sample's record at one locus and owns nothing; the parameters fit
 holds one locus at a time, so the working set is one number per frequency quadrature node rather than the cohort (spec §7).
 
 ### 2.3 How the maximum is found
@@ -388,7 +408,7 @@ pub enum JointFitError {
     NotIdentifiable { parameter: &'static str, samples: usize },
     /// The alternation ran out of passes. **Never reported as convergence**, which is
     /// the failure mode the per-sample route's own termination handling exists for.
-    #[error("the joint fit did not converge in {passes} passes")]
+    #[error("the joint parameters fit did not converge in {passes} passes")]
     DidNotConverge { passes: u32 },
     /// A batching was given and left read groups out (§1.6). **Naming them is the
     /// point**: the user forgot a plate, and the alternative is a wrong contaminant
@@ -426,9 +446,9 @@ pub enum JointFitError {
 - **The route runs at one sample and says what it cannot fit there.** `HomozygoteExcess` and
   contamination come back `NotIdentifiable`; everything else is fitted, and the likelihood is the
   per-sample estimator — spec §6.1.
-- **The spectrum is a parameter of this fit, not a later step** — spec §2.1.
+- **The spectrum is a parameter of this parameters fit, not a later step** — spec §2.1.
 - **Nothing here reads the windowed histogram.** The autozygosity coefficient is unreachable from
-  scattered loci and stays in the walk — spec §6.
+  scattered loci and stays in the genome walk — spec §6.
 - **OPEN:** whether contamination is a fourth block inside the alternation or a step after it
   (spec §3.4); nothing in these types turns on it. **2026-08-13 tilts it towards "after"**: spec
   §3.4.4 now re-fits `α` alone over a census far larger than the other blocks see, streamed a locus at
@@ -479,7 +499,7 @@ pub enum JointFitError {
 
 Tests live in `joint/fit.rs`'s `#[cfg(test)] mod tests`, and — as with the per-sample route — **the
 oracle is a world whose truth is known rather than a fixture**: fill records directly from drawn
-parameters, with no reads and no alignments, and require the fit to return what was drawn (spec
+parameters, with no reads and no alignments, and require the parameters fit to return what was drawn (spec
 §12.1). Three assertions are the ones a plausible-but-wrong implementation would fail: the derived
 rates matching the drawn genotypes, which is what catches a biased kept set (spec §12.2); the two
 inbreeding coefficients moving in **opposite** directions under a false-heterozygote floor (§12.4);

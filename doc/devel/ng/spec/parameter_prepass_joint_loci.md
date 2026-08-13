@@ -1,6 +1,6 @@
-# ng — the joint fit: which loci are kept
+# ng — the joint parameters fit: which loci are kept
 
-*Design spec, 2026-08-10, revised 2026-08-11. One of three documents covering the **joint fit**, ng
+*Design spec, 2026-08-10, revised 2026-08-11. One of three documents covering the **joint parameters fit**, ng
 step 4's second route to every parameter it emits; read
 [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) first — it says what the route is,
 what it produces and why it exists. This one settles **which loci every sample keeps evidence at**,
@@ -23,8 +23,12 @@ now requires and the measurements in §2 and §4.5 behind it
 
 ## 1. What this is, in one paragraph
 
-**The joint fit reads a small set of loci at which every sample kept its raw evidence, instead of the
-per-sample summaries the other route builds.** For that to work at all, every sample has to keep
+**The joint parameters fit reads a small set of loci at which every sample kept its raw evidence, instead of the
+per-sample summaries the other route builds.** *The **parameters fit** is the estimation of the parameters the
+caller will run on — error rates, heterozygosity, inbreeding, the population's diversity, repeat
+slippage, contamination — done once over the whole cohort **before any variant is called**; it is not
+the variant caller. To **walk** a sample is to pass over its alignments once, visiting each locus in
+turn.* For that to work at all, every sample has to keep
 evidence at *the same* loci — and the samples are walked separately, on different machines, at
 different times, with no sample able to see what any other chose. So the set cannot be negotiated or
 handed round. **This document is the rule that lets each sample arrive at the identical set on its
@@ -75,7 +79,7 @@ this section summarises rather than restates so that the STR rule beside it can 
   would leave nearly every chosen position unvisited.
 - **And it is narrowed once more, by the reference's own bases — ADDED 2026-08-12, measured.** A
   position inside an assembly gap is kept by a rule that cannot see it and then covered by no read in
-  any sample. It is worse than wasted budget: the fit derives its per-sample rates as means of
+  any sample. It is worse than wasted budget: the parameters fit derives its per-sample rates as means of
   genotype posteriors over the kept loci
   ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.2), and a locus with no reads
   contributes its **prior** — the model's own prediction — rather than evidence. Every such position
@@ -256,7 +260,7 @@ built from a different reference selects a *different* set. The catalog is there
 `open_checking_against_reference`, which compares its per-contig MD5s against digests **recomputed
 from the FASTA in this run** — nothing is trusted because it was written down — and names the contig
 that differs rather than the genome. What travels with a sample's records is the file's build settings
-(§5.1), so the fit refuses to pool across two samples that read different catalogs.
+(§5.1), so the parameters fit refuses to pool across two samples that read different catalogs.
 
 ### 3.4 It stays identical in every sample
 
@@ -374,7 +378,7 @@ real heterozygotes ([`parameter_prepass_generic.md`](parameter_prepass_generic.m
 instead).
 
 **An earlier version of this paragraph called it the largest contributor at 1,700 to 8,400 of two
-million positions, and a walk over eight tomato alignments makes it 150 to 590**
+million positions, and a genome walk over eight tomato alignments makes it 150 to 590**
 ([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)).
 The old figure read the fitted class weight as a count of positions showing an alternative read.
 Those are two quantities: 0.6% to 3.2% of positions sit in a window near two copies, which is what
@@ -435,7 +439,7 @@ insisted on one row per parameter.**
 - **The diversity is the slowest, and it tracks the segregating count rather than the budget.** It
   scatters by several percent until a few thousand sites segregate, and settles near 1% at ten
   thousand.
-- **Inbreeding needs about twenty thousand.** Against a drawn truth of 0.600 the fit returns 0.563 at
+- **Inbreeding needs about twenty thousand.** Against a drawn truth of 0.600 the parameters fit returns 0.563 at
   five thousand positions and lands within a percentage point at every budget above it; against a
   truth of zero it returns 0.052 at five thousand and 0.000 above. **The low-budget failure is an
   inbreeding coefficient invented out of scatter**, and it goes both ways.
@@ -540,7 +544,7 @@ kilobase** — tomato's measured floor — **and one an order of magnitude below
 
 ### 4.3.4 The budget is a per-run knob, and a small census is contained in a large one — DECIDED 2026-08-13
 
-**Decision (owner): where the records are written to a file, the walk writes the largest census that
+**Decision (owner): where the records are written to a file, the genome walk writes the largest census that
 will plausibly be wanted, and every smaller run takes a subset of it without rebuilding anything.**
 
 **Both rules nest, which is what makes that safe.** The generic rule keeps a position when
@@ -560,16 +564,16 @@ rather than held. Being generous costs megabytes; being stingy costs a pass over
 requirement itself. That table says a different target is *"a different set, not a subset of the larger
 one"*, and under §2's threshold rule it plainly is a subset. What still forces two samples to agree is
 the **indexing**: the depth array stores no coordinates and entry *i* is the *i*-th kept position, so
-records written at two targets have different entries at the same offset. The fit must refuse, and the
+records written at two targets have different entries at the same offset. The parameters fit must refuse, and the
 value stays on the list.
 
-**No reordering follows from any of this.** Records stay in genome order, which is what the walk
+**No reordering follows from any of this.** Records stay in genome order, which is what the genome walk
 produces and what a region-sharded merge concatenates. The smaller set is not a contiguous prefix of
 the file and does not need to be: it is found by recomputing the hash the selection already uses.
 
 ### 4.4 One thing the budget does not buy
 
-The joint fit's distinctive advantage — telling a mismapped locus from a heterozygous one, because a
+The joint parameters fit's distinctive advantage — telling a mismapped locus from a heterozygous one, because a
 mismapped locus is noisy in *every* sample
 ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2) — comes from having **many
 samples at one locus**, not many loci. It does not improve as the budget grows and does not degrade as
@@ -615,7 +619,7 @@ those three are the ones where the parameter is already best determined.
 
 ## 5. Cross-cutting concerns
 
-**Concurrency.** The generic rule is a pure function of position, so a region-sharded walk needs no
+**Concurrency.** The generic rule is a pure function of position, so a region-sharded genome walk needs no
 communication: each shard selects within its own region and merging is concatenation in position
 order. **The STR rule is order-independent by construction** (§3.2), so a sharded enumeration of the
 catalog needs none either: each shard keeps the lowest `cap` hashes it saw per stratum, and merging is
@@ -633,13 +637,13 @@ measured at 30 s over tomato's 795 MB reference and 110 s over GRCh38, inside th
 it to select is a hash and a heap push per surviving locus, in one forward pass.
 
 **Errors.** A run whose catalog differs from another's has different loci in it, so the two samples did
-not select the same set. That is not a degraded estimate but a meaningless one, and the fit must be
+not select the same set. That is not a degraded estimate but a meaningless one, and the parameters fit must be
 able to refuse rather than average. **The catalog's own staleness is caught before that** — its
 per-contig MD5s are checked against digests recomputed from the FASTA when it is opened (§3.3) — so
 what §5.1 guards is the different failure: two samples that read compatible files and asked them
 different questions.
 
-### 5.1 What must travel with a sample so the fit can check
+### 5.1 What must travel with a sample so the parameters fit can check
 
 Seven values identifying what was asked for, checked for agreement across every sample before anything
 is pooled — and then an eighth, below, that checks what came back:
@@ -669,7 +673,7 @@ addition and fail in exactly the same silent way.
 **All seven check the question, and none of them checks the answer.** They say two runs were *asked*
 for the same loci. They cannot see a hash function that changed between versions, a threshold computed
 in 64 bits on one machine and 128 on another, a catalog read in a different order by a sampler whose
-order-independence has regressed, or a walk that filled its array from the wrong end — every one of
+order-independence has regressed, or a genome walk that filled its array from the wrong end — every one of
 those leaves all seven agreeing and the kept sets different.
 
 **So an eighth value travels, and it is the only direct one: a digest of the loci actually kept,
@@ -690,6 +694,29 @@ and the test that distinguishes the two.
 
    - **What the cap should be**: none, for accuracy. A cap set above 217,812 keeps every locus, and
      the only reason to set one lower is the memory bill §4.5's last point names.
+
+     **REOPENED 2026-08-13, and it is now the only part of this question still open.** The memory
+     reason has arrived: reading one stratum at a time bounds what the parameters fit holds, and the
+     bound *is* the cap
+     ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.2). What the cap
+     should be is **measured only from above**: the per-tract estimator recovered a slippage level of
+     0.0803 against a truth of 0.0800 at **6,000 tracts** in one stratum at three reads a site, and
+     the comparisons against the per-stratum model ran at **1,200 to 1,500 tracts** at twenty samples
+     ([`../reports/joint_str_estimator_2026-08-12.md`](../reports/joint_str_estimator_2026-08-12.md)).
+     **Nothing has been run below about a thousand**, so the floor is unknown; and a tract costs about
+     ten bytes a read group, so memory does not choose between 5,000 and 20,000 — at a thousand samples
+     those are 50 MB and 200 MB for the largest section. *Leaning:* a cap of a few thousand, inside
+     the measured range, since above it the extra tracts buy nothing anyone has measured and below it
+     nobody has looked. **Settled by:** the same sweep §4.3 runs on the generic budget, run on one fat
+     stratum — refit at 20,000 / 5,000 / 1,000 / 250 tracts on one drawn truth and report **each of
+     the four slippage numbers and the concentration separately** against it, because they degrade at
+     different rates exactly as the generic parameters do. **Run it on a fat stratum and on a thin
+     one**: the 68 strata below a hundred tracts already borrow from their neighbouring repeat counts
+     (§3.6), so the sweep also says where borrowing has to start.
+
+     *One consequence of capping that is easy to forget:* §3.5's per-stratum reweighting exists for
+     runs that sample, and a capped run samples. The stored counts it needs are already there, but the
+     arithmetic that has never had to fire would begin to.
    - **Whether any sampling is needed at all**: no, so §3's reweighting never has to fire — though
      its stored counts stay, being free and being what a capped run would need.
    - **Whether the comparison against the per-sample route is a comparison**: on this path, yes and
@@ -746,7 +773,7 @@ refusal when a reader is too permissive — belong to
 asserted. They are not restated here. What follows is this consumer's own.*
 
 1. **Every sample selects the same loci.** Run the selection over samples with different coverage,
-   different read lengths, and a region-sharded walk at several thread counts; the set must be
+   different read lengths, and a region-sharded genome walk at several thread counts; the set must be
    identical every time, and identical to the set computed directly from the seven values of §5.1.
    **Include a `--regions` case**: the generic positions must all lie inside the BED and their count
    must come from the region set's length rather than the genome's — the arithmetic most likely to be
@@ -790,6 +817,6 @@ asserted. They are not restated here. What follows is this consumer's own.*
    error and not an average (§5.1).
 9. **The kept-loci digest catches what the seven values cannot** (§5.1). Change the selection's answer
    while leaving all seven inputs identical — swap two kept loci, or drop one and add another — and the
-   digest must change, the per-megabase digest must name the block, and the fit must refuse. **Then
+   digest must change, the per-megabase digest must name the block, and the parameters fit must refuse. **Then
    check the check**: a digest re-derived by running the selection again passes this test unchanged,
    which is why §5.1 requires it to be computed where the records are written.
