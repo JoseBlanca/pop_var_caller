@@ -168,6 +168,83 @@ that distribution rather than when it crosses a constant.
 
 ---
 
+## 5a. Fitting the individual frequencies rather than being handed them — added 2026-08-13
+
+§3's third column is an oracle. This section replaces it with the method: each sample gets coordinates
+from a decomposition of the cohort's own genotype dosages, and at each locus the allele frequency is
+fitted as a straight line in those coordinates across **all** samples. No groups, no assignment. Four
+axes, and a **shrinkage** that pulls each locus's slopes towards zero by how much of that locus's
+dosage spread the line actually explains — a locus whose slopes are indistinguishable from noise keeps
+only its intercept, which is the pooled frequency.
+
+### What it buys
+
+Fifty samples in four equal subpopulations at `F_st` 0.20, three reads a site, 80,000 loci. One sample
+contaminated; the largest estimate among the other forty-nine is the noise floor it has to clear.
+
+| true `α` | pooled | 4 axes, fitted | 4 axes, shrunk | true group (oracle) |
+|---:|---|---|---|---|
+| 0.010 | **0.0000** / floor 0.0000 | 0.0262 / 0.0342 | **0.0146** / 0.0196 | 0.0112 / 0.0055 |
+| 0.030 | **0.0022** / 0.0000 | 0.0443 / 0.0265 | **0.0320** / 0.0141 | 0.0305 / 0.0055 |
+| 0.100 | 0.0570 / 0.0000 | 0.1188 / 0.0214 | **0.1018** / 0.0105 | 0.1011 / 0.0055 |
+
+**It turns a blind estimate into a detectable one.** At a true 3% the pooled frequency returns 0.0022,
+which is indistinguishable from its own clean samples; the fitted frequency returns 0.0320 against a
+floor of 0.0141, which is 2.3 times it. The oracle returns 0.0305 against 0.0055, so **the fitted
+version reaches the oracle's estimate and pays for it in floor**.
+
+**Shrinkage is not optional.** Without it the estimate is 0.0443 for a true 0.030 — half again too
+high — and on the unbalanced panel below it degenerates entirely.
+
+**The floor is not a budget knob.** It falls from 0.0154 at 20,000 loci to 0.0141 at 80,000 while the
+oracle's falls 0.0078 to 0.0055. So most of the floor is the cost of *fitting* the frequencies, and
+more markers will not buy it back.
+
+### The unbalanced panel, and the failure is the opposite of the one predicted
+
+Subpopulations of 40, 5, 3 and 2 samples at `F_st` 0.20, 20,000 loci, **nobody contaminated**. The
+worst spurious `α` in each group:
+
+| group size | 40 | 5 | 3 | **2** |
+|---|---:|---:|---:|---:|
+| pooled | 0.0045 | 0.0000 | 0.0000 | 0.0000 |
+| 4 axes, fitted | 0.0144 | 0.0389 | 0.0662 | **0.2346** |
+| 4 axes, shrunk | 0.0136 | 0.0078 | 0.0133 | **0.0311** |
+| true group (oracle) | 0.0069 | 0.0098 | 0.0037 | 0.0000 |
+
+**A clean sample in the group of two is reported as 23% contaminated**, and with the contaminated
+sample placed there the unshrunk fit runs to the search boundary at 0.5000 — no estimate at all.
+Shrinkage brings 23% down to 3.1%, which is still three times what the group of forty gets.
+
+**The mechanism is not the one I predicted, and the prediction was backwards.** I expected a small
+group to fail to get an axis and fall back towards the panel average, which by §4 would *under*state
+its contamination. The opposite happens: a small group sits at the **extreme** of an axis, which is
+where a straight line is most sensitive to it, so its own noisy dosages bend the line towards
+themselves. Its "expected" frequency is largely its own echo, and by §3's mechanism a noisy frequency
+*manufactures* contamination.
+
+### One number says whose estimate to trust, and it is free
+
+How much of its own fitted frequency a sample supplies — its **leverage** — depends only on the
+coordinates, not on any locus. It is therefore **one number per sample for the whole run, computable
+before a single locus is fitted**, and it tracks the damage:
+
+| group size | 40 | 5 | 3 | **2** |
+|---|---:|---:|---:|---:|
+| how much of its own frequency it supplies | 0.027 | 0.307 | 0.429 | **0.857** |
+| spurious `α` without shrinkage | 0.0144 | 0.0389 | 0.0662 | 0.2346 |
+
+A fair share, with four axes and fifty samples, would be 0.100. The lone pair supplies **0.857** — the
+line at that sample's position is that sample — and collects 23% spurious contamination.
+
+**So the design rule is the one ng uses everywhere else: refuse rather than guess.** Compute the
+leverage, and where a sample supplies more than about half of its own frequency, emit its
+contamination as *not identified* rather than as a number. It costs nothing, it needs no threshold on
+the data, and it converts the failure this section measures from a silently wrong estimate into an
+absent one.
+
+---
+
 ## 6. What this cannot say
 
 - **The drawn contaminant is from the sample's own subpopulation** — the second plant in the tube.
@@ -175,9 +252,14 @@ that distribution rather than when it crosses a constant.
   measured.
 - **`by-group` is not `verifyBamID2`.** That method fits each individual's frequency as a smooth
   function of its principal-component coordinates, borrowing across the whole panel; `by-group`
-  partitions. So §3's second column prices the *partitioning* failure, and says nothing about how well
-  principal components would recover a frequency. What it does establish — §3's third column — is that
-  a correct individual frequency is enough, so the remaining question is entirely about estimating one.
+  partitions. So §3's second column prices the *partitioning* failure. **§5a is the real method** and
+  answers what partitioning could not.
+- **The coordinates come from one pass, not from an iteration.** `PCAngsd` refines dosages and
+  coordinates against each other until they settle; this fits dosages once under a pooled prior and
+  decomposes them once. Whether iterating lowers §5a's noise floor is untested.
+- **Four axes on four subpopulations is a generous case.** How many axes a real landrace panel needs
+  is a judgement from its own scree plot, and eight axes was measurably worse here (0.0230 to 0.0369
+  floor against four axes' 0.0141) — more axes mean more leverage for everybody.
 - **No real reads, and no real structure.** Balding–Nichols is a model of divergence, not a tomato
   panel. What `F_st` the 63 tomato accessions actually have is unmeasured and would set which row of
   §4 they sit in.

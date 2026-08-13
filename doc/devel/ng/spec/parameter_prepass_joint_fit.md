@@ -630,6 +630,44 @@ principal-component coordinates, fitted across the whole panel, and that is the 
 apology — handed the frequency the genotypes were drawn at, a clean panel returns **0 of 50** above 1%
 at every divergence tested — so the whole difficulty is in the estimate.
 
+**Measured 2026-08-13: what fitting them actually buys, and the one number that says whose to
+trust** ([`../reports/joint_contamination_2026-08-12.md`](../reports/joint_contamination_2026-08-12.md)
+§5a). Fifty samples, four subpopulations at `F_st` 0.20, three reads a site, 80,000 loci, one sample
+contaminated at 3%:
+
+| | that sample | worst of the other 49 |
+|---|---:|---:|
+| pooled frequency | **0.0022** | 0.0000 |
+| fitted per sample, four axes, shrunk | **0.0320** | 0.0141 |
+| each sample's true subpopulation frequency (unattainable) | 0.0305 | 0.0055 |
+
+**It turns a blind estimate into a detectable one** — 2.3 times its own noise floor, where the pooled
+frequency cannot separate the contaminated sample from the clean ones at all. It reaches the
+unattainable estimate and pays in floor, and **that floor is not a budget knob**: it falls only from
+0.0154 to 0.0141 between 20,000 and 80,000 loci, so it is the cost of fitting the frequencies rather
+than of having too few markers.
+
+**Shrink each locus's slopes.** A locus whose slopes are indistinguishable from noise must keep only
+its intercept — the pooled frequency — so that modelling structure is never worse than not modelling
+it. Unshrunk, the same fit returns 0.0443 for that true 0.030, and on an unbalanced panel it
+degenerates to the search boundary.
+
+**And the unbalanced panel is where this needs a guard.** With subpopulations of 40, 5, 3 and 2 and
+**nobody contaminated**, the worst spurious `α` runs 0.0136, 0.0078, 0.0133, **0.0311** across the four
+groups — and 0.2346 in the group of two without shrinkage. **The failure is the opposite of the
+intuitive one**: a small group does not fail to get an axis and fall back to the panel average, it
+sits at an axis's *extreme*, where a straight line is most sensitive to it, so its own noisy dosages
+bend the line towards themselves and its frequency becomes its own echo. By the mechanism above, a
+noisy frequency manufactures contamination.
+
+**Decision: emit each sample's leverage, and refuse an estimate above it.** How much of its own fitted
+frequency a sample supplies depends only on the coordinates, so it is **one number per sample for the
+whole run, computable before a single locus is fitted**. It tracks the damage exactly — 0.027, 0.307,
+0.429, **0.857** across those four groups, against a fair share of `(components + 1) / samples` = 0.100
+— so a sample supplying more than about half of its own frequency gets `NotIdentified` rather than a
+number. That is the same refusal this route makes everywhere else, it costs nothing, and it turns a
+silently wrong estimate into an absent one.
+
 **Decision: derive the individual-specific frequencies from this cohort, not from an external panel.**
 There is no tomato HGDP; what there is, is the kept loci in every sample, which is the matrix a
 principal-component decomposition wants — and the same matrix

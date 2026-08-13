@@ -145,6 +145,12 @@ struct Truth {
     inbreeding: f64,
     /// The contamination fraction of each sample; all zero in the test that matters.
     contamination: Vec<f64>,
+    /// How many samples each subpopulation holds. `None` splits them evenly.
+    ///
+    /// **The unequal case is the one to watch**: the axes of a decomposition go to the
+    /// largest groups first, so a small divergent set can fail to get one and fall back to
+    /// something near the panel average.
+    group_sizes: Option<Vec<usize>>,
 }
 
 impl Truth {
@@ -158,6 +164,28 @@ impl Truth {
             error: 0.002,
             inbreeding: 0.5,
             contamination: vec![0.0; samples],
+            group_sizes: None,
+        }
+    }
+
+    /// Which subpopulation each sample belongs to.
+    fn group_of(&self) -> Vec<usize> {
+        match &self.group_sizes {
+            None => (0..self.samples)
+                .map(|i| i * self.groups / self.samples)
+                .collect(),
+            Some(sizes) => {
+                let mut out = Vec::with_capacity(self.samples);
+                for (group, count) in sizes.iter().enumerate() {
+                    out.extend(std::iter::repeat_n(group, *count));
+                }
+                assert_eq!(
+                    out.len(),
+                    self.samples,
+                    "the group sizes must cover the panel"
+                );
+                out
+            }
         }
     }
 
@@ -173,9 +201,7 @@ impl Truth {
 
     fn draw(&self, seed: u64) -> Panel {
         let mut rng = Rng(seed);
-        let group_of: Vec<usize> = (0..self.samples)
-            .map(|i| i * self.groups / self.samples)
-            .collect();
+        let group_of = self.group_of();
         let mut data = Vec::with_capacity(self.loci);
         let mut true_frequencies = Vec::with_capacity(self.loci);
         let mut segregating = 0_usize;
@@ -267,6 +293,21 @@ enum Frequencies {
     /// The frequencies the genotypes were actually drawn at. **No fit can have these**; the
     /// arm exists to separate a frequency that is wrong from one that is right and noisy.
     TrueByGroup,
+    /// One frequency per **sample** per locus, fitted as a straight line in the samples'
+    /// ancestry coordinates. **The thing being measured**: no groups, no assignment, and
+    /// every locus's line fitted from the whole panel.
+    PcRegression {
+        components: usize,
+        /// Shrink each locus's slopes towards zero — towards the pooled frequency —
+        /// by how much of that locus's dosage spread the line actually explains.
+        ///
+        /// **A line fitted from fifty samples is itself an estimate**, and an error in the
+        /// frequency inflates `α`: contamination is the parameter that absorbs reads which
+        /// do not fit the genotype the prior expected, so a frequency that is noisily wrong
+        /// manufactures some. Shrinking trades that noise for a little of the pooled
+        /// frequency's bias, and §5 measures which is worth more.
+        shrink: bool,
+    },
 }
 
 /// The allele frequency each sample's genotype is scored against, per locus.
@@ -275,6 +316,10 @@ enum Frequencies {
 /// estimator inverts the error rate out of the alternative-read share, which is what a
 /// spectrum fitted over the same loci converges to.
 fn estimate_frequencies(panel: &Panel, which: Frequencies, error: f64) -> Vec<Vec<f64>> {
+    if let Frequencies::PcRegression { components, shrink } = which {
+        return pc_regression_frequencies(panel, error, components, shrink);
+    }
+    let samples = panel.data[0].len();
     let mut out = Vec::with_capacity(panel.data.len());
     for row in &panel.data {
         let mut per_group = vec![(0_u64, 0_u64); panel.groups.max(1)];
@@ -293,7 +338,7 @@ fn estimate_frequencies(panel: &Panel, which: Frequencies, error: f64) -> Vec<Ve
             let share = alt as f64 / depth as f64;
             ((share - error) / (1.0 - 2.0 * error)).clamp(1e-4, 1.0 - 1e-4)
         };
-        out.push(match which {
+        let per_group: Vec<f64> = match which {
             Frequencies::Pooled => vec![invert(all_alt, all_depth); panel.groups.max(1)],
             Frequencies::ByGroup => per_group
                 .iter()
@@ -303,9 +348,348 @@ fn estimate_frequencies(panel: &Panel, which: Frequencies, error: f64) -> Vec<Ve
                 .iter()
                 .map(|f| f.clamp(1e-4, 1.0 - 1e-4))
                 .collect(),
-        });
+            Frequencies::PcRegression { .. } => unreachable!("handled above"),
+        };
+        out.push(
+            (0..samples)
+                .map(|sample| per_group[panel.group_of[sample]])
+                .collect(),
+        );
     }
     out
+}
+
+/// One expected allele frequency per sample per locus, fitted as a straight line in the
+/// samples' own ancestry coordinates.
+///
+/// **This is the thing being measured**, and it has three steps.
+///
+/// 1. **A dosage per sample per locus** — the posterior mean number of alternative copies
+///    under a pooled-frequency prior. At three reads a site a raw read fraction is far too
+///    noisy to decompose; the prior is what makes it usable, and it is the same bootstrap
+///    `PCAngsd` starts from.
+/// 2. **Coordinates**, from the eigenvectors of the samples' own similarity matrix, on
+///    Patterson-normalised dosages. A few numbers per sample and nothing else is kept: no
+///    thresholds on the axes, no groups.
+/// 3. **A straight line per locus**, `dosage ≈ b₀ + Σ bₖ·coordinateₖ`, fitted across **all**
+///    samples. Each sample's own frequency is that line's height at its own coordinates,
+///    halved. So a sample alone at one end of an axis borrows the *slope* — measured from
+///    the whole panel — rather than any neighbour's allele counts.
+fn pc_regression_frequencies(
+    panel: &Panel,
+    error: f64,
+    components: usize,
+    shrink: bool,
+) -> Vec<Vec<f64>> {
+    let loci = panel.data.len();
+    let samples = panel.data[0].len();
+    let (dosage, pooled, coordinates) = dosages_and_coordinates(panel, error, components);
+    let _ = (loci, samples);
+    pc_lines(&dosage, &pooled, &coordinates, components, shrink)
+}
+
+/// Steps 1 and 2 of [`pc_regression_frequencies`], kept separate because the **leverage**
+/// each sample has on the fitted lines depends only on the coordinates — and it is one
+/// number per sample for the whole run, not one per locus.
+fn dosages_and_coordinates(
+    panel: &Panel,
+    error: f64,
+    components: usize,
+) -> (Vec<Vec<f64>>, Vec<f64>, Vec<Vec<f64>>) {
+    let loci = panel.data.len();
+    let samples = panel.data[0].len();
+
+    // ---- 1. dosages ----------------------------------------------------------------
+    let mut dosage = vec![vec![0.0_f64; samples]; loci];
+    let mut pooled = vec![0.0_f64; loci];
+    for (locus, row) in panel.data.iter().enumerate() {
+        let (mut alt, mut depth) = (0_u64, 0_u64);
+        for observation in row {
+            alt += u64::from(observation.alternative);
+            depth += u64::from(observation.depth);
+        }
+        let share = if depth == 0 {
+            0.0
+        } else {
+            alt as f64 / depth as f64
+        };
+        let frequency = ((share - error) / (1.0 - 2.0 * error)).clamp(1e-3, 1.0 - 1e-3);
+        pooled[locus] = frequency;
+        // Hardy-Weinberg prior at the pooled frequency; inbreeding is left out here
+        // deliberately, since the dosages only have to order the samples along an axis.
+        let priors = [
+            (1.0 - frequency) * (1.0 - frequency),
+            2.0 * frequency * (1.0 - frequency),
+            frequency * frequency,
+        ];
+        for (sample, observation) in row.iter().enumerate() {
+            let mut weights = [0.0_f64; 3];
+            for (copies, weight) in weights.iter_mut().enumerate() {
+                let p = match copies {
+                    0 => error,
+                    1 => 0.5,
+                    _ => 1.0 - error,
+                };
+                *weight = priors[copies]
+                    * ln_binomial(observation.alternative, observation.depth, p).exp();
+            }
+            let total: f64 = weights.iter().sum();
+            dosage[locus][sample] = if total > 0.0 {
+                (weights[1] + 2.0 * weights[2]) / total
+            } else {
+                2.0 * frequency
+            };
+        }
+    }
+
+    // ---- 2. coordinates ------------------------------------------------------------
+    // The samples' similarity matrix, on dosages centred and scaled the way a population
+    // structure analysis scales them — dividing by sqrt(p(1-p)) so a rare allele's
+    // contribution is not swamped by a common one.
+    let mut gram = vec![vec![0.0_f64; samples]; samples];
+    for locus in 0..loci {
+        let mean = 2.0 * pooled[locus];
+        let scale = (pooled[locus] * (1.0 - pooled[locus])).sqrt().max(1e-6);
+        let centred: Vec<f64> = (0..samples)
+            .map(|s| (dosage[locus][s] - mean) / scale)
+            .collect();
+        for i in 0..samples {
+            for j in i..samples {
+                gram[i][j] += centred[i] * centred[j];
+            }
+        }
+    }
+    for i in 0..samples {
+        for j in 0..i {
+            gram[i][j] = gram[j][i];
+        }
+    }
+    let coordinates = leading_eigenvectors(&gram, components);
+    (dosage, pooled, coordinates)
+}
+
+/// Step 3: a line per locus.
+fn pc_lines(
+    dosage: &[Vec<f64>],
+    pooled: &[f64],
+    coordinates: &[Vec<f64>],
+    components: usize,
+    shrink: bool,
+) -> Vec<Vec<f64>> {
+    let loci = dosage.len();
+    let samples = coordinates.len();
+    let width = components + 1;
+    let mut out = Vec::with_capacity(loci);
+    for locus in 0..loci {
+        // Normal equations for `dosage ~ 1 + coordinates`, over all samples.
+        let mut xtx = vec![vec![0.0_f64; width]; width];
+        let mut xty = vec![0.0_f64; width];
+        for sample in 0..samples {
+            let mut design = vec![1.0_f64; width];
+            for k in 0..components {
+                design[k + 1] = coordinates[sample][k];
+            }
+            for a in 0..width {
+                for b in 0..width {
+                    xtx[a][b] += design[a] * design[b];
+                }
+                xty[a] += design[a] * dosage[locus][sample];
+            }
+        }
+        // A ridge term, small beside the 50 samples on the diagonal, so a locus whose
+        // dosages are constant cannot make the system singular.
+        for (a, row) in xtx.iter_mut().enumerate() {
+            row[a] += 1e-6;
+        }
+        let mut beta = solve(xtx, xty).unwrap_or_else(|| {
+            let mut fallback = vec![0.0; width];
+            fallback[0] = 2.0 * pooled[locus];
+            fallback
+        });
+        if shrink && components > 0 {
+            // The positive-part James-Stein factor: how much of the dosage spread the line
+            // explains, against how much noise alone would explain. A locus whose slopes
+            // are indistinguishable from noise keeps only its intercept, which is the
+            // pooled frequency — so shrinking never does worse than not modelling
+            // structure at that locus.
+            let mean: f64 = dosage[locus].iter().sum::<f64>() / samples as f64;
+            let mut explained = 0.0;
+            let mut residual = 0.0;
+            for sample in 0..samples {
+                let mut fitted = beta[0];
+                for k in 0..components {
+                    fitted += beta[k + 1] * coordinates[sample][k];
+                }
+                explained += (fitted - mean) * (fitted - mean);
+                residual += (dosage[locus][sample] - fitted) * (dosage[locus][sample] - fitted);
+            }
+            let noise = residual / (samples - width) as f64;
+            let factor = if explained > 0.0 {
+                (1.0 - components as f64 * noise / explained).max(0.0)
+            } else {
+                0.0
+            };
+            for slope in beta.iter_mut().skip(1) {
+                *slope *= factor;
+            }
+            // The intercept moves back to the panel mean by whatever the slopes gave up.
+            let mut centre = 0.0;
+            for sample in 0..samples {
+                for k in 0..components {
+                    centre += beta[k + 1] * coordinates[sample][k];
+                }
+            }
+            beta[0] = mean - centre / samples as f64;
+        }
+        out.push(
+            (0..samples)
+                .map(|sample| {
+                    let mut fitted = beta[0];
+                    for k in 0..components {
+                        fitted += beta[k + 1] * coordinates[sample][k];
+                    }
+                    (fitted / 2.0).clamp(1e-4, 1.0 - 1e-4)
+                })
+                .collect(),
+        );
+    }
+    out
+}
+
+/// **How much of its own fitted allele frequency each sample supplies.**
+///
+/// The line at every locus is fitted against the same coordinates, so this is one number per
+/// sample for the whole run rather than one per locus, and it can be computed before a single
+/// locus is touched. It runs from `(components + 1) / samples` — a sample pulling its fair
+/// share — up towards 1, where the line at that sample's position is determined by that
+/// sample alone and its "expected" frequency is really its own noisy reading.
+///
+/// **This is the number that says whose contamination estimate to trust.** An accession sitting
+/// alone at the end of an axis has a fitted frequency that is mostly its own echo, and §5's
+/// mechanism then applies: a noisy frequency manufactures contamination.
+fn coordinate_leverage(coordinates: &[Vec<f64>], components: usize) -> Vec<f64> {
+    let samples = coordinates.len();
+    let width = components + 1;
+    let design = |sample: usize| -> Vec<f64> {
+        let mut row = vec![1.0_f64; width];
+        for k in 0..components {
+            row[k + 1] = coordinates[sample][k];
+        }
+        row
+    };
+    let mut xtx = vec![vec![0.0_f64; width]; width];
+    for sample in 0..samples {
+        let row = design(sample);
+        for a in 0..width {
+            for b in 0..width {
+                xtx[a][b] += row[a] * row[b];
+            }
+        }
+    }
+    for (a, row) in xtx.iter_mut().enumerate() {
+        row[a] += 1e-9;
+    }
+    (0..samples)
+        .map(|sample| {
+            let row = design(sample);
+            solve(xtx.clone(), row.clone())
+                .map(|z| row.iter().zip(&z).map(|(x, z)| x * z).sum())
+                .unwrap_or(1.0)
+        })
+        .collect()
+}
+
+/// The `wanted` eigenvectors of largest eigenvalue of a small symmetric matrix, by cyclic
+/// Jacobi rotation. The matrix is one row per sample, so 50 by 50 — this is nothing.
+fn leading_eigenvectors(matrix: &[Vec<f64>], wanted: usize) -> Vec<Vec<f64>> {
+    let n = matrix.len();
+    let mut a: Vec<Vec<f64>> = matrix.to_vec();
+    let mut v: Vec<Vec<f64>> = (0..n)
+        .map(|i| (0..n).map(|j| if i == j { 1.0 } else { 0.0 }).collect())
+        .collect();
+    for _ in 0..60 {
+        let mut off = 0.0;
+        for i in 0..n {
+            for j in i + 1..n {
+                off += a[i][j] * a[i][j];
+            }
+        }
+        if off < 1e-12 {
+            break;
+        }
+        for p in 0..n {
+            for q in p + 1..n {
+                if a[p][q].abs() < 1e-14 {
+                    continue;
+                }
+                let theta = 0.5 * (a[q][q] - a[p][p]) / a[p][q];
+                let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                let c = 1.0 / (t * t + 1.0).sqrt();
+                let s = t * c;
+                for k in 0..n {
+                    let (akp, akq) = (a[k][p], a[k][q]);
+                    a[k][p] = c * akp - s * akq;
+                    a[k][q] = s * akp + c * akq;
+                }
+                for k in 0..n {
+                    let (apk, aqk) = (a[p][k], a[q][k]);
+                    a[p][k] = c * apk - s * aqk;
+                    a[q][k] = s * apk + c * aqk;
+                }
+                for k in 0..n {
+                    let (vkp, vkq) = (v[k][p], v[k][q]);
+                    v[k][p] = c * vkp - s * vkq;
+                    v[k][q] = s * vkp + c * vkq;
+                }
+            }
+        }
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|x, y| a[*y][*y].partial_cmp(&a[*x][*x]).expect("no NaN"));
+    (0..n)
+        .map(|sample| {
+            order
+                .iter()
+                .take(wanted)
+                .map(|axis| v[sample][*axis])
+                .collect()
+        })
+        .collect()
+}
+
+/// Gaussian elimination with partial pivoting, for the `(components + 1)`-wide normal
+/// equations. `None` where the system is singular.
+fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for column in 0..n {
+        let pivot = (column..n).max_by(|x, y| {
+            a[*x][column]
+                .abs()
+                .partial_cmp(&a[*y][column].abs())
+                .expect("no NaN")
+        })?;
+        if a[pivot][column].abs() < 1e-12 {
+            return None;
+        }
+        a.swap(column, pivot);
+        b.swap(column, pivot);
+        for row in column + 1..n {
+            let factor = a[row][column] / a[column][column];
+            for k in column..n {
+                a[row][k] -= factor * a[column][k];
+            }
+            b[row] -= factor * b[column];
+        }
+    }
+    let mut x = vec![0.0; n];
+    for row in (0..n).rev() {
+        let mut total = b[row];
+        for k in row + 1..n {
+            total -= a[row][k] * x[k];
+        }
+        x[row] = total / a[row][row];
+    }
+    Some(x)
 }
 
 fn genotype_priors(frequency: f64, inbreeding: f64) -> [f64; 3] {
@@ -367,14 +751,13 @@ fn fit_alpha(
     inbreeding: f64,
     error: f64,
 ) -> f64 {
-    let group = panel.group_of[sample];
     let score = |alpha: f64| -> f64 {
         panel
             .data
             .iter()
             .zip(frequencies)
-            .map(|(row, per_group)| {
-                ln_locus(row[sample], per_group[group], inbreeding, error, alpha)
+            .map(|(row, per_sample)| {
+                ln_locus(row[sample], per_sample[sample], inbreeding, error, alpha)
             })
             .sum::<f64>()
     };
@@ -436,6 +819,53 @@ impl Fitted {
 // The runs
 // ---------------------------------------------------------------------
 
+/// The arms every run reports, in one place so the header and the cells cannot drift apart.
+fn arms() -> Vec<Frequencies> {
+    vec![
+        Frequencies::Pooled,
+        Frequencies::PcRegression {
+            components: 4,
+            shrink: false,
+        },
+        Frequencies::PcRegression {
+            components: 4,
+            shrink: true,
+        },
+        Frequencies::PcRegression {
+            components: 8,
+            shrink: true,
+        },
+        Frequencies::TrueByGroup,
+    ]
+}
+
+fn arm_name(which: Frequencies) -> String {
+    match which {
+        Frequencies::Pooled => "pooled".to_string(),
+        Frequencies::ByGroup => "by-group".to_string(),
+        Frequencies::TrueByGroup => "true group".to_string(),
+        Frequencies::PcRegression { components, shrink } => {
+            format!("{components} axes{}", if shrink { ", shrunk" } else { "" })
+        }
+    }
+}
+
+fn arm_header() -> String {
+    arms()
+        .into_iter()
+        .map(|which| format!("{:>21}", format!("{}: fitted / others", arm_name(which))))
+        .collect::<Vec<_>>()
+        .join(" |")
+}
+
+fn arm_header_wide() -> String {
+    arms()
+        .into_iter()
+        .map(|which| format!("{:>24}", format!("{}: mean max flagged", arm_name(which))))
+        .collect::<Vec<_>>()
+        .join(" |")
+}
+
 /// **The measurement that matters**: a clean panel, swept over how diverged its
 /// subpopulations are.
 fn null_sweep(samples: usize, depth: u32, loci: usize, groups: usize) {
@@ -443,28 +873,21 @@ fn null_sweep(samples: usize, depth: u32, loci: usize, groups: usize) {
         "\nA clean panel — every sample's true contamination is zero.\n\
          {samples} samples in {groups} subpopulations, {depth} reads a site, {loci} loci."
     );
-    println!(
-        "\n  F_st |      pooled: mean     max  flagged |    by-group: mean     max  flagged \
-         | true group: mean     max  flagged"
-    );
+    println!("\n  F_st |{}", arm_header_wide());
     for fst in [0.0_f64, 0.02, 0.05, 0.10, 0.20] {
         let truth = Truth::clean(samples, depth, loci, groups, fst);
         let panel = truth.draw(4242);
         let mut cells = Vec::new();
-        for which in [
-            Frequencies::Pooled,
-            Frequencies::ByGroup,
-            Frequencies::TrueByGroup,
-        ] {
+        for which in arms() {
             let fitted = Fitted::of(&panel, which, truth.inbreeding, truth.error);
             cells.push(format!(
-                "{:>10.4} {:>7.4} {:>8}",
+                "{:>8.4} {:>7.4} {:>7}",
                 fitted.mean(),
                 fitted.max(),
                 format!("{}/{}", fitted.flagged(0.01), samples)
             ));
         }
-        println!("  {fst:>4.2} | {}", cells.join(" | "));
+        println!("  {fst:>4.2} |{}", cells.join(" |"));
     }
     println!(
         "\n  A sample flagged here is a clean sample called contaminated. Under a 1% threshold\n  \
@@ -479,10 +902,7 @@ fn spike(samples: usize, depth: u32, loci: usize, groups: usize, fst: f64) {
         "\nOne contaminated sample among {samples}, {groups} subpopulations at F_st {fst:.2}, \
          {depth} reads a site, {loci} loci."
     );
-    println!(
-        "\n  true alpha |    pooled: fitted  others' max |  by-group: fitted  others' max \
-         | true group: fitted  others' max"
-    );
+    println!("\n  true alpha |{}", arm_header());
     for alpha in [0.01_f64, 0.03, 0.10] {
         let mut truth = Truth::clean(samples, depth, loci, groups, fst);
         truth.contamination[0] = alpha;
@@ -492,19 +912,15 @@ fn spike(samples: usize, depth: u32, loci: usize, groups: usize, fst: f64) {
             "the spiked sample is the one that was spiked"
         );
         let mut cells = Vec::new();
-        for which in [
-            Frequencies::Pooled,
-            Frequencies::ByGroup,
-            Frequencies::TrueByGroup,
-        ] {
+        for which in arms() {
             let fitted = Fitted::of(&panel, which, truth.inbreeding, truth.error);
             cells.push(format!(
-                "{:>16.4} {:>12.4}",
+                "{:>10.4} {:>10.4}",
                 fitted.alphas[0],
                 fitted.alphas[1..].iter().copied().fold(0.0_f64, f64::max)
             ));
         }
-        println!("  {alpha:>10.3} | {}", cells.join(" | "));
+        println!("  {alpha:>10.3} | {}", cells.join(" |"));
     }
 }
 
@@ -555,6 +971,78 @@ fn budget_sweep(samples: usize, depth: u32, groups: usize, fst: f64) {
     }
 }
 
+/// **The case the owner raised**: subpopulations of wildly different size, and the
+/// contaminated sample sitting in the smallest of them.
+///
+/// A decomposition gives its leading axes to the largest groups, so the two samples off on
+/// their own are the ones whose ancestry a truncated set of axes can miss — and by §4's
+/// measurement, a sample whose frequency falls back towards the panel average is a sample
+/// whose contamination is underestimated.
+fn unbalanced(depth: u32, loci: usize, fst: f64) {
+    let sizes = vec![40_usize, 5, 3, 2];
+    let samples: usize = sizes.iter().sum();
+    println!(
+        "\nUnbalanced subpopulations {sizes:?} — {samples} samples at F_st {fst:.2}, {depth} reads \
+         a site, {loci} loci.\n  The contaminated sample is the last one, which sits in the group \
+         of {}.",
+        sizes[sizes.len() - 1]
+    );
+    println!("\n  true alpha |{}", arm_header());
+    for alpha in [0.03_f64, 0.10] {
+        let mut truth = Truth::clean(samples, depth, loci, sizes.len(), fst);
+        truth.group_sizes = Some(sizes.clone());
+        *truth.contamination.last_mut().expect("a sample") = alpha;
+        let panel = truth.draw(4242);
+        let spiked = samples - 1;
+        let mut cells = Vec::new();
+        for which in arms() {
+            let fitted = Fitted::of(&panel, which, truth.inbreeding, truth.error);
+            let others = fitted.alphas[..spiked]
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max);
+            cells.push(format!("{:>10.4} {:>10.4}", fitted.alphas[spiked], others));
+        }
+        println!("  {alpha:>10.3} | {}", cells.join(" |"));
+    }
+
+    println!("\n  And the same panel with nobody contaminated, by group:");
+    let mut truth = Truth::clean(samples, depth, loci, sizes.len(), fst);
+    truth.group_sizes = Some(sizes.clone());
+    let panel = truth.draw(4242);
+    let group_of = truth.group_of();
+    for which in arms() {
+        let fitted = Fitted::of(&panel, which, truth.inbreeding, truth.error);
+        let mut by_group = vec![0.0_f64; sizes.len()];
+        for (sample, alpha) in fitted.alphas.iter().enumerate() {
+            by_group[group_of[sample]] = by_group[group_of[sample]].max(*alpha);
+        }
+        let cells: Vec<String> = by_group.iter().map(|a| format!("{a:>8.4}")).collect();
+        println!(
+            "    {:>14}  worst in each group: {}",
+            arm_name(which),
+            cells.join(" ")
+        );
+    }
+
+    println!(
+        "\n  How much of its own fitted frequency each group supplies (its leverage).\n           A fair share would be {:.3}; 1.000 means the line at that sample is that sample.",
+        5.0 / samples as f64
+    );
+    let (_, _, coordinates) = dosages_and_coordinates(&panel, truth.error, 4);
+    let leverage = coordinate_leverage(&coordinates, 4);
+    let mut worst = vec![0.0_f64; sizes.len()];
+    for (sample, value) in leverage.iter().enumerate() {
+        worst[group_of[sample]] = worst[group_of[sample]].max(*value);
+    }
+    let cells: Vec<String> = worst.iter().map(|h| format!("{h:>8.3}")).collect();
+    println!(
+        "    {:>14}  worst in each group: {}",
+        "4 axes",
+        cells.join(" ")
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "null".to_string());
@@ -570,6 +1058,7 @@ fn main() {
 
     match mode.as_str() {
         "spike" => spike(samples, depth, loci, groups, fst),
+        "unbalanced" => unbalanced(depth, loci, fst),
         "budget" => budget_sweep(samples, depth, groups, fst),
         _ => null_sweep(samples, depth, loci, groups),
     }
