@@ -25,7 +25,7 @@ measurement asks for:
 |---|---:|---:|---:|---|
 | the GIAB benchmark trio, on the 100 regions all three share | 3 | 449,489 | ~300 reads a position | **yes** — a benchmark VCF per sample |
 | the tomato bench cohort | 63 | 1,999,404 | 2.4 to 30.6 | no |
-| a drawn cohort, refitted at 2, 3, 5, 10, 25 and 50 of its samples | 2 → 50 | 200,000–400,000 | 3, 8 | yes, by construction |
+| a drawn cohort, refitted at 2, 3, 5, 10, 25 and 50 of its samples | 2 → 50 | 200,000–400,000 | 3, 8, 30 | yes, by construction |
 
 ---
 
