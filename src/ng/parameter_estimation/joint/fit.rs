@@ -48,6 +48,7 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
+use super::contamination::{ContaminationEstimate, fit_contamination};
 use super::records::{DepthCode, SampleRecords};
 
 // ---------------------------------------------------------------------
@@ -150,23 +151,6 @@ pub struct SampleGenotypeRates {
     /// heterozygotes when a fifth of their support saw nothing.
     pub positions_with_reads: u64,
     pub positions_with_two_reads: u64,
-}
-
-/// The fraction of a sample's reads that came from another individual — or a reason there is
-/// no number.
-///
-/// **An enum and not an `Option<f64>`**: *not identified* and *zero* are different answers and
-/// a caller told "no contamination" would act on it (spec §3.4.4).
-#[derive(Clone, PartialEq, Debug)]
-pub enum ContaminationEstimate {
-    Estimated {
-        alpha: f64,
-        /// How many segregating positions stood behind it — what says how far to trust it.
-        segregating_markers: u64,
-    },
-    NotIdentified {
-        reason: &'static str,
-    },
 }
 
 /// Every parameter this route produces, for the whole cohort, in one value.
@@ -274,6 +258,11 @@ pub struct JointFitConfig {
     /// The ladder the records' depth codes index. Two samples binned under different edges
     /// hold codes that mean different depths, which the identity check already refuses.
     pub edges: Arc<DepthBinEdges>,
+    /// How many axes of variation each sample's own allele frequency is a straight line in,
+    /// which is what makes contamination measurable on a diverged panel
+    /// ([`contamination`](super::contamination)). Zero turns it off and leaves every sample
+    /// *not identified*.
+    pub components: usize,
 }
 
 impl Default for JointFitConfig {
@@ -285,6 +274,7 @@ impl Default for JointFitConfig {
             max_passes: 200,
             stillness: 1e-4,
             edges: Arc::new(DepthBinEdges::new()),
+            components: crate::ng::parameter_estimation::joint::contamination::DEFAULT_COMPONENTS,
         }
     }
 }
@@ -766,19 +756,25 @@ pub fn fit_jointly(
             )
         })
         .collect();
-    // **Not fitted here, and saying so is the point.** Contamination needs an allele
-    // frequency specific to the individual rather than the pooled one this density gives, and
-    // that is unimplemented (spec §3.4.2). A zero would be read as "this sample is clean".
+    // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
+    // the converged error rates and the converged homozygote excess, and nothing it produces
+    // feeds back into them — a sample's stray reads are a property of the tube it was in
+    // rather than of the population, so the density has no business being told about them.
+    let per_sample_error: Vec<f64> = samples
+        .iter()
+        .enumerate()
+        .map(|(s, _)| parameters.clean[group_index[s][0]])
+        .collect();
     let contamination = samples
         .iter()
-        .map(|sample| {
-            (
-                sample.sample.clone(),
-                ContaminationEstimate::NotIdentified {
-                    reason: "individual-specific allele frequencies are not implemented",
-                },
-            )
-        })
+        .map(|sample| sample.sample.clone())
+        .zip(fit_contamination(
+            samples,
+            &config.edges,
+            &per_sample_error,
+            &parameters.hom_excess,
+            config.components,
+        ))
         .collect();
 
     Ok(JointFit {

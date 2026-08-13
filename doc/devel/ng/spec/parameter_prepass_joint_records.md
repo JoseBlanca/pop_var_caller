@@ -122,8 +122,34 @@ third goal needs, and
 [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §7 already requires the
 distinction without having anywhere to put it.
 
-**Allele counts are not binned the same way.** The difference between 0, 1 and 2 reads supporting an
-allele is most of the signal at low coverage, so small counts stay exact and only the tail is binned.
+**Allele counts are not binned at all — DECIDED 2026-08-13.** The
+code stores an exact count.
+
+**The reason they are exact is what the counts look like, and it holds at every depth this caller has
+to run at.** The entries in the sparse list are overwhelmingly **counts of one, two or three reads** —
+a miscall at a position the sample is homozygous for — and every ladder of the *"exact at the bottom,
+widening at the top"* shape above keeps those exact. **The tail a ladder compresses is where an allele
+count almost never is**, so binning saves close to nothing however deep the run.
+
+*How the list grows with depth, since the shallow figure is the one this document quoted before and it
+is not the general case.* A position needs an entry once any read miscalls, so the share of positions
+carrying one is about `1 − (1 − ε)^depth`, and at a per-base error rate near 2 in 1,000:
+
+| a sample's depth | 3× | 50× | 100× |
+|---|---:|---:|---:|
+| entries per two million positions | ~12,000 | ~190,000 | ~360,000 |
+| the sparse list against the 1.25 MB depth array | a twentieth | a third | **larger** |
+
+**So at 100× the exceptions are the bigger half of the generic record**, not the rounding error the
+tomato archive makes them look like — and binning the count still does not help, because the extra
+entries a deep sample brings are the shallow sample's counts of one and two, only more of them.
+**What bounds the list at high depth is the per-position depth cap** (§5), which subsamples a
+position's reads before anything is recorded; §7.8's 300× arm exists to measure this list rather than
+the ladder, and says so.
+
+**And it keeps a fourteenth value off §5's list.** Every bin width has to travel with the sample, or
+two samples' rows mean different things. An exact count means the same thing everywhere and needs no
+such guarantee — which is the second reason not to bin a field whose binning would save so little.
 
 *Soft, and it is the one number carried across from a different arrangement of the same data:* the
 0.55-against-0.054 measurement was made on **pooled** cells, where many sites share a bin. Here each
@@ -266,17 +292,44 @@ leaves to the caller).
 
 ## 4. The third object: coverage by window, per sample
 
-**The parameters fit needs one thing the two records cannot hold, and it is not a record at all.**
-[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 adopts a third class of site
-— a locus the *sample* carries more copies of than the caller assumes — and its discriminator is the
-**local relative coverage**, never the site's own depth. That is a measured constraint rather than a
-preference: per-base coverage at 6× has no power to tell a two-copy carrier at about twelve reads
-from a single-copy sample reading high, and tomato's three reads a site is half that depth.
+**A position where half the reads disagree with the reference looks like a heterozygote, and some of
+them are not.** If a plant carries two copies of a stretch of genome that the reference holds only
+once, both copies' reads align to the same place. Wherever the two copies differ from each other, half
+the reads show one base and half show the other — which is what a heterozygote looks like, at a
+position where the plant is nothing of the kind. **The model's only home for such a position is
+*heterozygous*, so each one inflates the heterozygosity this whole pass exists to measure.**
+[`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2 gives them a class of their
+own; this section is the evidence that class is recognised by.
 
-**So it cannot come out of §2's records.** Those hold one binned depth per kept position, and the
-kept positions are one in a few hundred — a 500 bp window holds one or two of them, which is the
-per-base measurement the constraint rules out. The summary is over **every** position the genome walk
-visited, not over the kept ones.
+**Nothing at the position itself tells the two apart.** Both show an even split of two bases, at
+whatever depth the sample runs at. What differs is the stretch around it: a doubled stretch collects
+two copies' reads, so **the read depth over it is about twice what the rest of that sample's genome
+gives**. That is the whole of the signal, and it is why the quantity has to be a depth averaged over a
+window rather than the position's own depth — at six reads a position, one copy against two is six
+reads against twelve, and the scatter in a single position's count is larger than the gap. Tomato's
+three reads a site is half that again. The window has to be wide enough to have collected about
+12,000 aligned bases before the doubling is legible at all (§4.1).
+
+**And the comparison has to be against the sample's own coverage, not an absolute depth.** Two
+measurements on tomato say why. Across one panel the samples run from 2.5 to 28.7 reads a site, so no
+fixed number means "doubled" in all of them. And within a single sample, median window depth runs from
+16.2 reads a position at 20% GC content to 29.0 at 36% — a factor of **1.79**, which is larger than
+the doubling being looked for, so a window at an extreme of GC content reads high for a reason that
+has nothing to do with copy number. Hence *relative*: each window's depth is divided by what this
+sample's own coverage, at this window's own GC content, would predict.
+
+*Whether this object is required at all is open, and the question is not this document's.* The cohort
+carries a second signal for the same loci — a real half-frequency variant leaves about a quarter of the
+samples in each homozygous class, a duplication leaves every sample at a half — and if that suffices,
+the summary becomes optional and a two-phase run stops having to read every pileup a second time to
+rebuild it. [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §11 question 11 carries
+it, with the measurement that would settle it. **Until then this object is specified as required**,
+because the alternative is unmeasured and this one is not.
+
+**None of that can come out of §2's records, which is why this is a third object and not a field.**
+They hold one binned depth per kept position, and the kept positions are one in a few hundred — a
+500 bp window holds one or two of them, which is the per-position measurement just ruled out. The
+summary is over **every** position the genome walk visited, not over the kept ones.
 
 **What it holds, per sample:**
 

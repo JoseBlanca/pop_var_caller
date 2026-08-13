@@ -16,6 +16,7 @@
 //! [`fit`] is the estimator — **the ordinary-position half of it**. The repeat-tract half,
 //! contamination and the duplicated-stretch class are not in it yet, and its own docs say so.
 
+pub mod contamination;
 pub mod coverage;
 pub mod fit;
 pub mod loci;

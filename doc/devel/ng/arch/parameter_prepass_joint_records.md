@@ -68,7 +68,10 @@ pub struct AlleleObservation {
     /// Index into `KeptLoci::generic` — the position's only identity.
     pub index: u32,
     pub allele: ObservedAllele,
-    pub reads: AlleleCount,
+    /// **Exact, not binned** (spec §2.2): nearly every entry is a miscall of one to three
+    /// reads, so a ladder's compressed tail stays empty at any depth, and binning would
+    /// cost a fourteenth bin width in `RecordIdentity` for nothing.
+    pub reads: u32,
 }
 
 /// A, C, G, T, or anything else — an indel or a spanning deletion (spec §2.1).
@@ -463,8 +466,11 @@ make a property of the sample look like a property of the file.
 
 - **Impl-time:** `PackedDepthCodes`'s representation (5-bit packing over `Vec<u8>`, or `bitvec`). The
   contract is five bits per entry, index-addressable.
-- **Impl-time:** where `AlleleCount` stops being exact and starts binning — a `pub const` with units
-  and source in its doc comment (spec §2.2).
+- ~~**Impl-time:** where `AlleleCount` stops being exact and starts binning.~~ **CLOSED 2026-08-13:
+  it never starts.** The count is exact (spec §2.2). Almost every entry in the sparse list is one,
+  two or three reads — a miscall — so the tail a ladder would compress is empty at any depth, and
+  binning would buy a fourteenth bin width in `RecordIdentity` for nothing. `AlleleCount` was a name
+  in this document that the code never needed; the field is a plain count.
 - **Impl-time:** the wire format of `write_records`. **Not Parquet by reflex** — the catalog's reasons
   for it were columnar range queries, which nothing here does. It must be readable **sequentially in
   genome order across samples at once**, since that is how contamination reads a large census

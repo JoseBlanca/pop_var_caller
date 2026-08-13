@@ -349,6 +349,18 @@ A real half-frequency variant leaves about a quarter of the samples in each homo
 duplication leaves every sample at a half. So the cohort names *which* loci they are instead of merely
 weighing how many there are.
 
+**Whether that bonus could be the mechanism is open, and it matters beyond tidiness — raised by the
+owner, 2026-08-13.** A real half-frequency variant produces *every sample heterozygous* with
+probability 0.5⁵⁰, so on a fifty-sample panel the pattern alone is close to decisive, with no coverage
+summary anywhere in it. If it holds, the window summary of
+[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4 becomes optional rather
+than required, and with it the obligation for the parameters fit to read every sample's pileup a second
+time in a two-phase run. **Two things argue it does not hold on its own**, and they are why this is a
+question and not a decision: at three reads a site, telling *half the reads* from *all the reads*
+within one sample is weak, so the pattern is diluted exactly where the tomato archive sits; and the
+duplication is often carried by one accession — 40 of the 84 doubled windows are read that way by
+exactly one of eight — so the evidence is one sample's, not fifty's. §11 question 11 carries it.
+
 **Measured, 2026-08-12, and the class is kept**
 ([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)).
 On tomato SRR7279482 at 25× depth, **1 position in 8,600** is both in a window carrying about twice
@@ -674,6 +686,38 @@ principal-component decomposition wants — and the same matrix
 [`parameter_prepass_cohort.md`](parameter_prepass_cohort.md) §6 already builds for relatedness. So the
 components come free with an object this route holds anyway. *Soft:* how many components a plant panel
 needs is not four by inheritance, and it is set by the panel rather than by us.
+
+**Built 2026-08-13** — `src/ng/parameter_estimation/joint/contamination.rs`, reading the records rather
+than a harness's own panel, with the shrinkage and the leverage refusal above. **Two things the
+implementation settled that this section had left implicit.**
+
+**The two genotypes are drawn against two different frequencies, and it is not a detail.** The
+sample's own genotype is drawn at *its* frequency — the line fitted at its own coordinates — because
+that is a statement about its ancestry. **The contaminant's is drawn at the frequency of whoever was
+sequenced beside it**, which by default is the whole panel (§3.4.3), because a neighbouring library on
+a plate is not chosen for ancestry. Scoring both against the sample's own frequency is the obvious
+reading of §3.4.1's "two-genotype mixture" and it is wrong in the expensive direction, on forty samples
+in four subpopulations at `F_st` 0.20 with one contaminated at 3%:
+
+| the contaminant's genotype drawn at | that sample | worst of the 39 clean | a clean panel's mean |
+|---|---:|---:|---:|
+| **the panel's frequency** — correct | 0.0166 | 0.0032 | **0.0004** |
+| the sample's own frequency | 0.0481 | 0.0195 | 0.0099 |
+
+A contaminant from a different subpopulation carries alleles the *sample's own* frequency calls rare,
+and rare alleles turning up is the contamination signature — so the wrong reading manufactures about
+1% of contamination in every clean sample, which is the threshold itself.
+
+**It finds the sample and it understates the fraction, and the second half is a bias.** With the
+correct prior the contaminated sample comes back at 0.0166 against a truth of 0.030, and the value
+**does not move with more positions** — 0.0163 at 60,000 against 0.0166 at 12,000 — while the noise
+floor on the clean samples does, from 0.0032 to 0.0004. So the separation a threshold needs improves
+with the budget and the magnitude does not. **The cause is the one thing of `verifyBamID2`'s that is
+not yet built**: it maximises over `α` *and the intended sample's own coordinates together*, and here
+those coordinates are estimated from the sample's own reads, which the contamination has already
+pulled towards the panel average — so its fitted frequency sits closer to the contaminant's than it
+should and the difference the estimator lives on shrinks. **Until that lands, `α` is to be read as
+*this sample stands out from the panel* rather than as a fraction.**
 
 ### 3.4.3 The contaminant is a sample sequenced alongside this one, and who that was is the user's to say
 
@@ -1547,6 +1591,29 @@ holds, and where the generic budget starts to matter — are
     that. **Report peak resident for the generic half and the largest stratum apart from each other**,
     since the free levers make the total meaningless — a run that never holds both has no total to
     report.
+11. **Can the duplicated class be identified from the cohort pattern alone, with no coverage summary?**
+    — OPEN, raised 2026-08-13 (owner). §2.2 files the cohort pattern as a bonus: a real half-frequency
+    variant leaves about a quarter of the samples in each homozygous class, a duplication leaves every
+    sample at a half, and a real variant gives the second pattern with probability 0.5⁵⁰ on fifty
+    samples. **What hangs on it is not the class but the object**: if the pattern suffices, the window
+    summary is optional, and in a two-phase run the parameters fit no longer has to read every sample's
+    pileup a second time to rebuild it
+    ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4).
+
+    **What ignoring the class instead would cost, which is the other end of the same question:** on
+    tomato SRR7279482 the artefact is about a **third** of that sample's near-half positions — the same
+    order as the mismapping class whose absence put HG002's fitted heterozygosity at **1.41 times** the
+    benchmark's count. *And `Hobs` is not the only thing that moves*: such a locus enters the frequency
+    spectrum as a mid-frequency variant, so `Hexp` is read off an inflated spectrum too (§5.3).
+    **Whether the two inflations cancel in `1 − Hobs/Hexp` is unknown**, and that is what decides
+    whether ignoring the class is survivable. Nothing here has measured it.
+
+    *Leaning:* the pattern helps and does not suffice alone at three reads a site, where telling *half
+    the reads* from *all the reads* within one sample is weak, and where 40 of 84 doubled windows are
+    carried by one accession of eight, so the evidence is one sample's rather than fifty's. **Settled
+    by:** one drawn panel fitted three ways — with the coverage summary, with a third class identified
+    only by the cohort pattern, and with no third class at all — reporting `Hobs`, `Hexp` and the
+    inbreeding coefficient separately, at three reads a site and at twenty-five.
 
 ---
 

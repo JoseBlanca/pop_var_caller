@@ -55,6 +55,7 @@ use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::joint::contamination::ContaminationEstimate;
 use pop_var_caller::ng::parameter_estimation::joint::coverage::{
     CoverageAccumulator, CoverageGrid,
 };
@@ -352,6 +353,45 @@ fn fit_the_cohort(cohort: &[SampleRecords]) {
                     .next()
                     .map_or(1.0, |g| g.depth().len() as f64)
         );
+    }
+
+    // **Judged against the cohort's own spread, not against a constant.** What a threshold has
+    // to clear is the noise floor on the clean samples, and that floor is a property of this
+    // panel's depth, marker count and structure rather than a number anyone can quote in
+    // advance — so the panel's own distribution is printed beside each value.
+    println!("\n  contamination — the share of a sample's reads from another plant");
+    let mut estimated: Vec<(&String, f64, f64)> = Vec::new();
+    let mut refused = 0;
+    let mut markers = 0;
+    for (name, estimate) in &fit.contamination {
+        match estimate {
+            ContaminationEstimate::Estimated {
+                alpha,
+                markers: count,
+                leverage,
+            } => {
+                markers = *count;
+                estimated.push((name, *alpha, *leverage));
+            }
+            ContaminationEstimate::NotIdentified { reason } => {
+                println!("    {name:<24} not identified — {reason}");
+                refused += 1;
+            }
+        }
+    }
+    estimated.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("no NaN"));
+    println!(
+        "    {} of {} samples estimated over {markers} varying positions, {refused} refused",
+        estimated.len(),
+        fit.contamination.len()
+    );
+    if !estimated.is_empty() {
+        let values: Vec<f64> = estimated.iter().map(|e| e.1).collect();
+        let median = values[values.len() / 2];
+        println!("    the panel's own spread: median {median:.4}, and these are the highest");
+        for (name, alpha, leverage) in estimated.iter().take(8) {
+            println!("      {name:<24}{alpha:>8.4}   supplies {leverage:.3} of its own frequency");
+        }
     }
 }
 

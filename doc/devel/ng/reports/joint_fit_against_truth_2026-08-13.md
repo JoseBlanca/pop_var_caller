@@ -196,12 +196,69 @@ candidate — though not a sufficient one — for part of §3's 1.26.
 
 ---
 
-## 6. What is not here
+## 6. Contamination, which the tomato panel's divergence made urgent
 
-- **The other route is not run beside this one.** §8's first two measurements ask for both routes'
-  accumulators filled from one draw and their errors reported with the evidence count behind each.
-  That is the next thing to build, and until it exists none of the numbers above is a *comparison*.
-- **Contamination, the duplicated-stretch class, and the repeat-tract half** are not in the estimator.
+The first report measured this cohort's divergence at `F_st` 0.44 across its leading split. At that
+divergence a single allele frequency for the whole panel does not merely lose precision: a sample
+genuinely 3% contaminated comes back at half a percent and passes as clean. So contamination needs
+**each sample's own allele frequency at each position**, and it is now built —
+`parameter_estimation::joint::contamination`, fitting each position's frequency as a straight line in
+the panel's own axes of variation, using every sample, with the slopes shrunk so that a position whose
+structure is indistinguishable from noise keeps only the panel-wide frequency.
+
+### What the implementation settled that the design had left implicit
+
+**The two genotypes are drawn against two different frequencies.** The sample's own genotype is drawn
+at *its* frequency, because that is a statement about its ancestry. The contaminant's is drawn at the
+frequency of **whoever was sequenced beside it** — by default the whole panel — because a neighbouring
+library on a plate is not chosen for ancestry. Scoring both against the sample's own frequency is the
+obvious reading, and it is wrong in the expensive direction. Forty samples, four subpopulations at
+`F_st` 0.20, three reads a position, one sample contaminated at 3%:
+
+| the contaminant's genotype drawn at | that sample | worst of the 39 clean | a clean panel's mean |
+|---|---:|---:|---:|
+| **the panel's frequency** — correct | 0.0166 | 0.0032 | **0.0004** |
+| the sample's own frequency | 0.0481 | 0.0195 | 0.0099 |
+
+A contaminant from a different subpopulation carries alleles the *sample's own* frequency calls rare,
+and rare alleles turning up is the contamination signature — so the wrong reading manufactures about
+**1% of contamination in every clean sample**, which is the flagging threshold itself.
+
+### It finds the sample, and it understates the fraction
+
+| | 12,000 varying positions | 60,000 |
+|---|---:|---:|
+| the sample contaminated at 3% | 0.0166 | 0.0163 |
+| the worst of the thirty-nine clean ones | 0.0032 | 0.0004 |
+
+**The separation improves with the budget and the value does not.** Forty times the noise floor at
+60,000 positions, which is what a threshold needs — and 0.0163 for a truth of 0.030, which does not
+move, so it is a bias rather than noise.
+
+**The cause is the one part of `verifyBamID2` not yet built.** It maximises over `α` *and the intended
+sample's own coordinates together*; here those coordinates are estimated from the sample's own reads,
+which the contamination has already pulled towards the panel average, so its fitted frequency sits
+closer to the contaminant's than it should and the difference the estimator lives on shrinks. **Until
+that lands, `α` says *this sample stands out from the panel*, not *this sample is 1.7% contaminated*.**
+
+### The refusal
+
+A sample sitting alone at the end of an axis has a fitted frequency that is mostly its own echo, and a
+noisy frequency manufactures contamination. How much of its own frequency a sample supplies depends
+only on the coordinates, so it is one number per sample for the whole run, computable before a single
+position is fitted; above a half the sample is told *not identified* rather than given a number. On an
+evenly filled panel of twenty the numbers run 0.05 at the middle of an axis to 0.19 at its ends, well
+clear of the refusal — `(components + 1) / samples` is the panel's *mean*, not everyone's share.
+
+---
+
+## 7. What is not here
+
+- **The other route is not run beside this one** — and per the owner, 2026-08-13, that comparison is
+  not wanted: the per-sample histogram route is likely to be dropped because it cannot produce the
+  population's diversity or a contamination fraction at all.
+- **The duplicated-stretch class and the repeat-tract half** are not in the estimator.
+- **The joint maximisation over the contaminated sample's own coordinates** — §6's bias.
 - **The fit runs out of passes on the trio** — 200 without settling, where the tomato cohort settles in
   29. The best-scoring iterate is what is returned and it is marked as not converged, but a
   three-sample fit wandering is itself a symptom of the frequency density being weakly constrained
