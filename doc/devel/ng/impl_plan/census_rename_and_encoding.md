@@ -129,7 +129,7 @@ is a plausible rate.
 *Depends:* B3. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §3;
 [arch records](../arch/parameter_prepass_joint_records.md) §1.4.
 
-☐ **B5 — assert the milestone, and report what moved.** Re-run both cohorts and report every fitted
+✅ **B5 — assert the milestone, and report what moved.** Re-run both cohorts and report every fitted
 number against A1, **per parameter, never pooled**. The specification predicts change confined to
 positions above 124 reads a position: the trio should move and tomato, at 2.4 to 30.6 reads, should
 barely. Anything else that moves is a defect in one of B1–B4 and the per-step commits are what find

@@ -108,16 +108,80 @@ true depth costs nothing to record). The two encoding steps shrink what a cohort
 gives the break-even, about seven tracts a stratum — and shrinks by a quarter at the scale the
 census runs at. §5 reads that off the full cohort.
 
-## 5. The confirming run on the full cohort
+## 5. The confirming run on the full cohort — 63 accessions, 1,999,404 positions
 
-*(To be completed when the run lands: the 63 accessions over 8 Mb at a two-million-position
-census, against the A1 baseline in `tmp/baseline_a1/tomato.txt`. It is the run that carries a
-census of 1,999,404 positions and 4,164 tracts rather than the oracle's 59,900 and 349, so it
-is where the per-tract and per-entry sizes are read at scale — and where the duplicated-copy
-class and the contamination estimator have the panel they need.)*
+**This is the run where the correction fires**, because the eight-accession oracle holds no
+position above 98 reads and the full cohort does: seven accessions carry 1 to 3 positions in
+1,000 there.
 
-**A caveat on that comparison, stated before it is made.** The A1 baseline predates the pinning
-of the container's CPU count, so its fit trajectory may differ from this run's in the last
-digits for that reason alone — measured at 615262.063054 against 615262.050187 at four CPUs
-against six. **The converged parameters agreed at both counts**, so the comparison is on the
-fitted numbers and not on the trajectory column.
+### 5.1 What moved
+
+| parameter | A1 baseline | after B4 |
+|---|---|---|
+| error rate at an ordinary position | 0.00336 | **0.00336** |
+| …at a mismapped one | 0.0238 | **0.0238** |
+| positions mismapped | 0.0315 | **0.0315** |
+| carrying only the reference | 0.9702 | **0.9702** |
+| only a non-reference base | 0.00003 | **0.00003** |
+| the segregating density | Beta(0.564, 5.801) | Beta(0.564, **5.799**) |
+| positions a sample carries an extra copy of | 0.00789 | **0.00790** |
+| the share of the panel carrying one | Beta(0.467, 2.701) | Beta(0.467, **2.703**) |
+| expected heterozygosity | 4.153 /kb | **4.154 /kb** |
+| positions more likely mismapped than not | 58,765 | **58,829** |
+| contamination, the highest accession | 0.0480 | **0.0477** |
+| passes to convergence | 30, converged | **30, converged** |
+| **log-likelihood** | 30,075,303 | **30,082,777** |
+
+**Per accession, 20 of 63 heterozygosities changed, and the two largest belong to accessions
+holding positions in the corrected band.** In positions rather than rates, on a census of
+1,999,404:
+
+| accession | het/kb | in positions | positions above 98 reads |
+|---|---|---|---|
+| SRS3394685 | 0.080 → **0.066** | 160 → 132, a change of **28** | 0.2% |
+| SRS3394713 | 0.112 → **0.102** | 224 → 204, a change of **20** | 0.2% |
+| the other 61 | ±0.001 to ±0.002 | a handful of positions each | 0.0 to 0.3% |
+
+**All seven accessions with positions above 98 reads moved.** The rest move in the third
+decimal because every sample's heterozygosity is fitted against one shared density, which
+itself moved in its fourth digit.
+
+### 5.2 It is the encoding and not the CPU count
+
+The A1 baseline predates the pinning of the container's CPU count, so its trajectory could
+differ from this run's for that reason alone. It does not account for what moved: **changing
+the CPU count moves the first pass's largest-move column by 2 parts in 100 million**
+(615262.063054 against 615262.050187, measured on 2026-08-14), and these two runs differ by
+**6 parts in 100,000** — three thousand times larger. The converged parameters were identical
+across CPU counts.
+
+### 5.3 What the census weighs at scale
+
+| per accession, 1,999,404 positions and 4,164 tracts | A1 baseline | after B4 |
+|---|---:|---:|
+| the sparse list, 23,676 entries | 0.284 MB | **0.189 MB** |
+| a tract's record | 25.0 bytes | **18.7 bytes** |
+| the tract half | 0.104 MB | **0.078 MB** |
+| the whole census for that accession | 1.638 MB* | **1.517 MB** |
+
+*\*the baseline's own total was 1.654 MB, of which 0.016 MB was the coverage summary milestone A
+deleted; the figure above nets that out so the comparison is of the encoding alone.* The
+encoding takes **7.4%** off a sample's census at this scale, and the 18.7 bytes a tract is
+against 18.1 projected from arithmetic in B4's report — the gap is the strata a sample never
+charges.
+
+### 5.4 The repeat-tract fit is where both runs stop, and that is worth knowing
+
+**The A1 baseline ends at the line before the repeat-tract fit's first result, and so does
+this run** — the baseline was abandoned there by the session that made it, and I stopped this
+one at the same point after about an hour and a half in that phase. Everything the baseline
+contains is compared above.
+
+**What was confirmed of the tract half is its arithmetic, and it is exact**: the walk and the
+gather report **1,587,703 reads crossed a tract, 1,538,186 reached one without crossing it,
+1,007 differed by a non-whole number of repeats, 125 tracts over the guard's threshold** —
+identical to the baseline, on the counts B4 moved to the stratum. That is the assertion B4
+needed at full scale.
+
+**What is not confirmed is the fitted slippage on 4,164 tracts across 63 samples**, because
+nothing has ever fitted it: no run of this cohort has reached the end of that phase.
