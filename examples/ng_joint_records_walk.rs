@@ -1056,9 +1056,27 @@ fn report_sizes(records: &SampleCensusEvidence) {
         mb(ssr_dense_bytes),
         ssr_dense_bytes as f64 / (ssr_loci.max(1) * records.ssr.len().max(1)) as f64
     );
+    // **How close the read a difference sits on comes to the byte that holds it.** The read is
+    // numbered within the locus, and the per-locus read cap is 1,000 where the field holds 255,
+    // so a deep tract can report several reads as one — which is the confusion the field exists
+    // to prevent. This says whether it is happening rather than leaving it to be assumed.
+    let highest_read = records
+        .ssr
+        .values()
+        .flat_map(|s| s.differences().iter())
+        .map(|difference| difference.read)
+        .max()
+        .unwrap_or(0);
+    let at_the_ceiling = records
+        .ssr
+        .values()
+        .flat_map(|s| s.differences().iter())
+        .filter(|difference| difference.read == u8::MAX)
+        .count();
     println!(
         "  STR guard      {guard_entries} entries; difference list {:.3} MB, \
-         {difference_entries} entries",
+         {difference_entries} entries; highest read {highest_read}, {at_the_ceiling} at the \
+         byte's ceiling",
         mb(difference_bytes)
     );
     println!(

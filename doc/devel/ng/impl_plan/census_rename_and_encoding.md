@@ -145,7 +145,7 @@ it.
 original scope; it is here because the review that milestone A required found it, it is a wrong
 answer rather than an untidiness, and leaving it in a list of open items is how it gets lost.
 
-☐ **C1 — a repeat tract's mismatching bases are attributed to the wrong reads.** When several reads
+✅ **C1 — a repeat tract's mismatching bases are attributed to the wrong reads.** When several reads
 cross a tract, `CensusWriter::add_ssr` numbers each mismatch's read from zero **within one
 observation** rather than within the locus, and the walk folds reads carrying identical bases into
 one observation. So two reads that differ from the reference in different places are both written

@@ -428,9 +428,20 @@ pub struct GuardObservation {
 pub struct TractDifference {
     /// Index into the STR selection.
     pub locus: u32,
-    /// Which of this locus's reads carried it, in the locus's own read order.
+    /// Which of this locus's reads carried it, numbered from zero within the locus and the
+    /// read group, over the reads whose tract was the reference's length — the ones a
+    /// mismatch can be read off at all.
+    ///
     /// **Two entries at one offset on one read is a different observation from the same two
-    /// on two reads**, and a read-blind encoding passes every other check in the suite.
+    /// on two reads**, and a read-blind encoding passes every other check in the suite. The
+    /// numbering therefore has to run across the whole locus: the walk folds reads carrying
+    /// identical bases into one observation, so a counter restarting at each observation gave
+    /// two reads that differ in different places the same number.
+    ///
+    /// **A byte saturates at 255, and the per-locus read cap is 1,000.** Every read numbered
+    /// 255 or above is written as 255, so a locus with more than 255 compared reads in one
+    /// read group can report several reads as one — the confusion this field exists to
+    /// prevent, at the deep end of the range the caller commits to.
     pub read: u8,
     /// How far into the tract the mismatching base sat, in bases from its first: `0..len`,
     /// and nothing else.
@@ -1157,6 +1168,17 @@ impl CensusWriter {
         let period = detail.motif.period().max(1) as i64;
         let reference_length = locus.region.len() as i64;
         let stratum = self.ssr_stratum_of[index];
+        // **How many of this read group's reads at this locus have been numbered already.**
+        // The read a difference sits on is numbered within the *locus*, not within the
+        // observation it arrived in: the walk folds reads carrying identical bases into one
+        // observation, so a counter that restarted at each observation gave two reads that
+        // differ from the reference in different places the same number, and a consumer
+        // grouping by it saw one bad read where the truth is an allele on two reads.
+        //
+        // It advances over the reads that were **compared** — the unslipped ones that reach
+        // the difference loop below — because those are the only reads that can carry a
+        // difference, and every number spent elsewhere is headroom lost from a byte.
+        let mut numbered: BTreeMap<ReadGroupId, u32> = BTreeMap::new();
 
         for observation in &locus.observations {
             let records = self
@@ -1203,6 +1225,9 @@ impl CensusWriter {
             // collapsing them here too would lose the fact this channel exists for: that two
             // reads carried the *same* interruption, which is what makes an interruption an
             // allele rather than an error.
+            let numbered_here = numbered.entry(observation.read_group).or_insert(0);
+            let first_read = *numbered_here;
+            *numbered_here += u32::from(reads);
             for (offset, (read_base, reference_base)) in observation
                 .bases
                 .iter()
@@ -1212,10 +1237,10 @@ impl CensusWriter {
                 if read_base.eq_ignore_ascii_case(reference_base) {
                     continue;
                 }
-                for copy in 0..reads {
+                for copy in 0..u32::from(reads) {
                     records.differences.push(TractDifference {
                         locus: index as u32,
-                        read: u8::try_from(copy).unwrap_or(u8::MAX),
+                        read: u8::try_from(first_read + copy).unwrap_or(u8::MAX),
                         offset: i16::try_from(offset).unwrap_or(i16::MAX),
                         base: ObservedAllele::of_base(*read_base),
                     });
@@ -2234,6 +2259,86 @@ mod tests {
             "an allele on two reads, not one read seen twice"
         );
         assert_eq!(ssr.differences()[0].base, ObservedAllele::G);
+    }
+
+    /// **The defect the milestone-A review found, and the one distinction this field exists to
+    /// make.** Two reads differing from the reference in *different* places used to come back
+    /// as read 0 twice, because the read was numbered within one observation and the walk folds
+    /// reads carrying identical bases into one observation. A consumer grouping by read then
+    /// saw one read with two interruptions — a bad read — where the truth is two reads with one
+    /// each, which is two errors. The fixture beside this one (two reads, *one* interruption)
+    /// sits in the single regime where the two numberings agree.
+    #[test]
+    fn two_reads_carrying_different_interruptions_are_two_reads_and_not_one() {
+        let mut writer = ssr_writer();
+        writer.add_locus(&ssr_locus(vec![
+            observation(b"ATATGTATATAT", 0, 1),
+            observation(b"ATATATGTATAT", 0, 1),
+        ]));
+        let evidence = writer.finish();
+        let ssr = &evidence.ssr[&ReadGroupId(0)];
+
+        assert_eq!(
+            ssr.differences().len(),
+            2,
+            "one interruption on each of two reads"
+        );
+        assert_eq!(
+            ssr.differences()[0].offset,
+            4,
+            "the first read's G sits at the fifth base of the tract"
+        );
+        assert_eq!(
+            ssr.differences()[1].offset,
+            6,
+            "the second read's at the seventh"
+        );
+        let mut reads: Vec<u8> = ssr.differences().iter().map(|d| d.read).collect();
+        reads.sort_unstable();
+        reads.dedup();
+        assert_eq!(reads.len(), 2, "two reads, not one read seen twice");
+    }
+
+    /// The numbering runs across the whole locus, so a read in the second observation is not
+    /// read 0 again — and reads folded into one observation still get one number each.
+    #[test]
+    fn a_locus_numbers_its_reads_from_zero_once_and_not_once_an_observation() {
+        let mut writer = ssr_writer();
+        writer.add_locus(&ssr_locus(vec![
+            // Two reads sharing an interruption at the fifth base, then one carrying its own
+            // at the seventh, then a clean read.
+            observation(b"ATATGTATATAT", 0, 2),
+            observation(b"ATATATGTATAT", 0, 1),
+            observation(b"ATATATATATAT", 0, 4),
+        ]));
+        let evidence = writer.finish();
+        let ssr = &evidence.ssr[&ReadGroupId(0)];
+
+        let at_offset = |offset: i16| {
+            let mut reads: Vec<u8> = ssr
+                .differences()
+                .iter()
+                .filter(|d| d.offset == offset)
+                .map(|d| d.read)
+                .collect();
+            reads.sort_unstable();
+            reads
+        };
+        assert_eq!(
+            at_offset(4),
+            vec![0, 1],
+            "the shared interruption, two reads"
+        );
+        assert_eq!(
+            at_offset(6),
+            vec![2],
+            "the third read of the locus, not the first of its observation"
+        );
+        assert_eq!(
+            ssr.bases_compared(AT_SIX_REPEATS),
+            7 * 12,
+            "all seven reads were compared, clean ones included"
+        );
     }
 
     /// A read whose tract slipped a whole unit has no base-for-base correspondence with the
