@@ -189,6 +189,42 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-14 — a whole explanation hung on a project word used to mean something else
+
+Asked to explain a defect, a reply opened by naming the wrong actor and never said which
+object it was talking about:
+
+> ❌ "**What the caller writes down at a repeat tract.** A repeat tract is a stretch like
+> `ATATATATATAT` …"
+>
+> Owner: *"who's the caller here, we're not calling genotypes here. Are we talking about
+> the data store for the fit or about a different thing. I still don't get the context"*
+
+> ✅ "**The census is a store of evidence, and this is one of the things in it.** Before any
+> variant is called, one pass over each sample's reads writes down what that sample showed at
+> a fixed set of positions — the same positions in every sample. That store is what the
+> parameters fit reads, and nothing in it calls a genotype. At each repeat tract in it, a
+> sample keeps two things …"
+
+Three failures, and the first is new:
+
+1. **A word this project already owns was used for something else.** *The caller* means the
+   variant caller here, and the whole point of the parameters fit is that it runs **before**
+   any calling. So the first two words placed the reader in the wrong half of the pipeline
+   and every sentence after inherited it. **New rule: before using an agent noun — the
+   caller, the writer, the walk, the fit — check it names the thing that actually does the
+   action in this sentence.** A word that is right elsewhere in the project is not thereby
+   right here.
+2. **The object was never named.** The reply described a field, a promise and a broken test
+   without once saying they live in *the census*, which is the one noun that would have
+   located all three. The owner had to ask *"the data store for the fit or a different
+   thing"* — a question the first sentence should have answered.
+3. **It was the second attempt.** The first was refused for exactly this
+   (*"I don't understand what you're talking about"*), and the rewrite fixed the vocabulary
+   of the *details* — repeat tract, motif, mismatching base — while leaving the frame wrong.
+   **Re-explaining is where the frame goes unchecked**, because the writer is concentrating
+   on the part that was queried.
+
 ### 2026-08-14 — a decision offered as a trade, with the two sides in different units
 
 A switch had to be defaulted on or off. The reply gave both sides in one sentence:

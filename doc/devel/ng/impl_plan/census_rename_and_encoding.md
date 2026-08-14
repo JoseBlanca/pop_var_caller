@@ -159,12 +159,16 @@ which milestone B's own oracle forbids while B is running.
 [census_rename_a2_2026-08-14.md](../../reports/reviews/census_rename_a2_2026-08-14.md) finding B1,
 which carries a test that fails against the code as it stands.
 
-☐ **C2 — settle whether a mismatch outside the tract is recorded at all.** `TractDifference::offset`
-is documented as negative in the sequence before the tract and past the end in the sequence after
-it; the writer only ever compares a read against the tract itself, so no code path can produce
-either. **The owner decides which way it goes** — teach the writer the flanks, or narrow the doc —
-and the test that stands for this property today asserts two hand-written values against each other
-and calls no production code, so it must be replaced either way.
+✅ **C2 — a mismatch outside the tract is not recorded, and the documentation says so.**
+`TractDifference::offset` was documented as negative in the sequence before the tract and past the
+end in the sequence after it, while the writer only ever compared a read against the tract itself.
+**Settled 2026-08-14 (owner): the promise is withdrawn, and the reason is what the sequence either
+side of a tract is for.** It sits in the locus only because the aligner needs it to anchor a read;
+it is ordinary non-repetitive sequence and is not part of the locus, so what happens there belongs
+to the generic path at the positions it already keeps. Landed **before** milestone B rather than
+after, because it is a doc comment and a test and changes no recorded value. The test that stood
+for the property asserted a hand-written `-2` was below zero and called no production code; it is
+replaced by one that drives the writer.
 *Depends:* —. *Source:* the same review, finding B2.
 
 > **Checkpoint C:** two defects the census's own tests could not see, fixed. Pause for review.

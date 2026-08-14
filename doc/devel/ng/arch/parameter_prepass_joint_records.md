@@ -235,8 +235,11 @@ pub struct TractDifference {
     /// **Two entries at one offset on one read is a different observation from the same
     /// two on two reads** — a read-blind encoding passes every other check (spec §7.3).
     pub read: u8,
-    /// Signed offset from the tract start: negative in the left flank, `0..len` inside,
-    /// beyond `len` in the right flank.
+    /// How far into the tract the mismatching base sat, in bases from its first —
+    /// `0..len`, and nothing else. **The sequence either side is not recorded here
+    /// (owner, 2026-08-14)**: it is in the locus only so the aligner can anchor a read,
+    /// it is ordinary non-repetitive sequence, and the generic half of the census
+    /// already keeps the positions it covers.
     pub offset: i16,
     pub base: ObservedAllele,
 }

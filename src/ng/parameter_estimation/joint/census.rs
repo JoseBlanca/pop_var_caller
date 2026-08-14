@@ -407,8 +407,17 @@ pub struct TractDifference {
     /// **Two entries at one offset on one read is a different observation from the same two
     /// on two reads**, and a read-blind encoding passes every other check in the suite.
     pub read: u8,
-    /// Signed offset from the tract start: negative in the left flank, `0..len` inside the
-    /// tract, at or beyond `len` in the right flank.
+    /// How far into the tract the mismatching base sat, in bases from its first: `0..len`,
+    /// and nothing else.
+    ///
+    /// **The sequence either side of the tract is not recorded here — DECIDED 2026-08-14
+    /// (owner).** It is present in the locus only because the aligner needs it to anchor a
+    /// read, and it is ordinary non-repetitive sequence: what happens there is the generic
+    /// half of the census's business, at the positions it already keeps. So the STR half
+    /// compares a read against the tract and against nothing else, and an earlier version of
+    /// this comment promising negative offsets described a state no code path produced.
+    ///
+    /// Signed because reading it as a plain index would hide a later change of mind.
     pub offset: i16,
     pub base: ObservedAllele,
 }
@@ -1262,23 +1271,35 @@ mod tests {
         assert_eq!(reads_carrying(&scattered), 1);
     }
 
+    /// **The sequence either side of a tract is not this half's business** (owner,
+    /// 2026-08-14): it sits in the locus only so the aligner can anchor a read, and the
+    /// generic half of the census already keeps the ordinary positions it covers. So every
+    /// mismatch recorded here lands inside the tract, at its own distance from the tract's
+    /// first base.
+    ///
+    /// The test this replaced asserted that a hand-written `-2` was below zero and called no
+    /// code at all, standing in for a property the writer could not produce.
     #[test]
-    fn a_flank_difference_and_an_interior_one_come_back_apart() {
-        let tract_length = 12_i16;
-        let flank = TractDifference {
-            locus: 0,
-            read: 0,
-            offset: -2,
-            base: ObservedAllele::T,
-        };
-        let interior = TractDifference {
-            locus: 0,
-            read: 0,
-            offset: 4,
-            base: ObservedAllele::T,
-        };
-        assert!(flank.offset < 0);
-        assert!((0..tract_length).contains(&interior.offset));
+    fn a_mismatch_is_recorded_at_its_own_distance_into_the_tract_and_never_outside_it() {
+        // A twelve-base `AT` tract, and one read whose ninth base is a G.
+        let mut writer = ssr_writer();
+        writer.add_locus(&ssr_locus(vec![observation(b"ATATATATGTAT", 0, 1)]));
+        let evidence = writer.finish();
+        let ssr = &evidence.ssr[&ReadGroupId(0)];
+
+        assert_eq!(ssr.differences().len(), 1);
+        assert_eq!(
+            ssr.differences()[0].offset,
+            8,
+            "the ninth base of the tract, counted from its first"
+        );
+        assert_eq!(ssr.differences()[0].base, ObservedAllele::G);
+        assert!(
+            ssr.differences()
+                .iter()
+                .all(|difference| (0..12).contains(&difference.offset)),
+            "nothing outside the tract is recorded, so no offset is negative or past its end"
+        );
     }
 
     #[test]
