@@ -13,13 +13,18 @@
 //!
 //! **Under construction.** [`loci`] settles which loci every sample keeps, [`records`] what
 //! each writes down there, [`coverage`] fills the window summary they travel with, [`fit`] is
-//! the estimator — the ordinary positions, and positions a sample carries more copies of than
-//! the reference does — and [`contamination`] is the share of a sample's reads that came from
-//! another individual, which no per-sample route can produce at all. **The repeat-tract half is
-//! not in it yet**, and each module's own docs say what it does and does not do.
+//! the estimator over ordinary positions — including the class for positions a sample carries
+//! more copies of than the reference does — [`ssr_fit`] the estimator over repeat tracts, and
+//! [`contamination`] the share of a sample's reads that came from another individual, which no
+//! per-sample route can produce at all. Each module's own docs say what it does and does not do.
+//!
+//! **The two halves of the estimator run in that order and depend on each other in one direction
+//! only**: [`ssr_fit`] takes each sample's homozygote excess from [`fit`] and gives nothing back,
+//! so a run may drop the ordinary-position records before it reads a single tract.
 
 pub mod contamination;
 pub mod coverage;
 pub mod fit;
 pub mod loci;
 pub mod records;
+pub mod ssr_fit;

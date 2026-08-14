@@ -48,10 +48,21 @@
 //! inbreeding coefficient is **supplied**, as the spec has it arriving from the
 //! ordinary-position path, so nothing here says whether it could be fitted jointly.
 //!
+//! ## How few tracts a stratum can hold
+//!
+//! The `size` mode answers a different question from the rest: a later design reads one
+//! stratum at a time to bound memory, so it has to cap how many tracts a stratum keeps. It
+//! refits the same drawn truth at 20,000 / 5,000 / 1,000 / 250 / 100 / 50 tracts, several
+//! draws apiece, and reports **all five fitted numbers separately** — the four slippage and
+//! shape numbers plus the stratum's own length spectrum. They degrade at different rates, so
+//! a pooled figure would call a size adequate after one of them had already gone.
+//!
 //! ```text
-//! ng_joint_str_harness [fit|faces-truth|kappa|classes|seeds] [samples] [depth] [loci] [classes] [kappa]
+//! ng_joint_str_harness [fit|faces-truth|kappa|classes|seeds|size|library|borrow|borrow-edge]
+//!     [samples] [depth] [loci] [classes] [kappa]
 //! ```
 
+use rayon::prelude::*;
 use std::time::Instant;
 
 // ---------------------------------------------------------------------
@@ -575,21 +586,26 @@ fn dirichlet_point_support(parameters: &Parameters, classes: usize) -> Support {
         .iter()
         .map(|q| (parameters.kappa * q).max(1e-3))
         .collect();
-    let mut frequencies = Vec::with_capacity(QMC_POINTS);
-    for point in 0..QMC_POINTS {
-        let mut remaining = 1.0;
-        let mut piece = Vec::with_capacity(classes);
-        for stick in 0..classes - 1 {
-            let a = alpha[stick];
-            let b: f64 = alpha[stick + 1..].iter().sum();
-            let u = van_der_corput(point + 1, BASES[stick.min(BASES.len() - 1)]);
-            let share = beta_quantile(u, a, b);
-            piece.push(remaining * share);
-            remaining *= 1.0 - share;
-        }
-        piece.push(remaining);
-        frequencies.push(piece);
-    }
+    // Across points in parallel: they are independent of each other, and at a few hundred
+    // tracts this Beta-quantile map — not the sweep over tracts — is where the time goes.
+    // `collect` keeps them in order, so the answer is the serial one.
+    let frequencies: Vec<Vec<f64>> = (0..QMC_POINTS)
+        .into_par_iter()
+        .map(|point| {
+            let mut remaining = 1.0;
+            let mut piece = Vec::with_capacity(classes);
+            for stick in 0..classes - 1 {
+                let a = alpha[stick];
+                let b: f64 = alpha[stick + 1..].iter().sum();
+                let u = van_der_corput(point + 1, BASES[stick.min(BASES.len() - 1)]);
+                let share = beta_quantile(u, a, b);
+                piece.push(remaining * share);
+                remaining *= 1.0 - share;
+            }
+            piece.push(remaining);
+            piece
+        })
+        .collect();
     Support {
         ln_weights: vec![-(QMC_POINTS as f64).ln(); frequencies.len()],
         frequencies,
@@ -736,7 +752,7 @@ impl Prepared {
         Self {
             slippage,
             loci: data
-                .iter()
+                .par_iter()
                 .map(|panel| LocusLikelihoods::of(panel, &per_allele, &genotypes))
                 .collect(),
         }
@@ -758,12 +774,15 @@ fn objective(
 ) -> f64 {
     let support = support(candidate, parameters, classes);
     let genotypes = genotype_pairs(classes);
-    prepared
+    // Across loci in parallel, but **summed back in locus order**: a parallel float sum
+    // reorders the additions run to run, and this program's whole output is a difference
+    // between one fit and another.
+    let per_locus: Vec<f64> = prepared
         .loci
-        .iter()
+        .par_iter()
         .map(|locus| ln_locus(locus, &support, &genotypes, inbreeding))
-        .sum::<f64>()
-        / prepared.loci.len() as f64
+        .collect();
+    per_locus.iter().sum::<f64>() / per_locus.len() as f64
 }
 
 // ---------------------------------------------------------------------
@@ -1172,6 +1191,514 @@ fn seed_scatter(truth: &Truth, loci: usize, candidate: Candidate) {
     );
 }
 
+// ---------------------------------------------------------------------
+// How few tracts a stratum can hold
+// ---------------------------------------------------------------------
+
+/// The five numbers one fit recovers, each kept apart from the others.
+///
+/// **Five, not one.** They are fitted together but they are not learned at the same rate: the
+/// slippage level is carried by every read, the fall-off only by the reads that slip twice,
+/// and the concentration only by how unlike each other the loci are. Averaging them into one
+/// accuracy figure would report a tract count as adequate once the fastest-learned number had
+/// arrived, whatever the others were doing.
+struct FittedNumbers {
+    /// How often a read reports a length other than its allele's.
+    level: f64,
+    /// Of the reads that slip, the share showing a shorter tract.
+    shorter_share: f64,
+    /// How fast two-repeat slips fall off against one-repeat slips.
+    fall_off: f64,
+    /// How monomorphic the tracts in the stratum are. Small is monomorphic.
+    kappa: f64,
+    /// The share of chromosomes at the stratum's commonest length — one number standing for
+    /// the whole length spectrum, and the one with the most data behind it.
+    commonest_length_share: f64,
+}
+
+impl FittedNumbers {
+    fn of(parameters: &Parameters, classes: usize) -> Self {
+        Self {
+            level: parameters.slippage.level,
+            shorter_share: parameters.slippage.down_share,
+            fall_off: parameters.slippage.fall_off,
+            kappa: parameters.kappa,
+            commonest_length_share: parameters.spectrum[classes / 2],
+        }
+    }
+
+    fn truth_of(truth: &Truth) -> Self {
+        Self {
+            level: truth.slippage.level,
+            shorter_share: truth.slippage.down_share,
+            fall_off: truth.slippage.fall_off,
+            kappa: truth.kappa,
+            commonest_length_share: truth.spectrum[truth.classes / 2],
+        }
+    }
+
+    fn as_row(&self) -> [f64; 5] {
+        [
+            self.level,
+            self.shorter_share,
+            self.fall_off,
+            self.kappa,
+            self.commonest_length_share,
+        ]
+    }
+}
+
+const NUMBER_NAMES: [&str; 5] = [
+    "slippage level",
+    "shorter-share",
+    "fall-off",
+    "concentration",
+    "commonest length",
+];
+
+/// Mean and spread of one number over the draws at one tract count.
+struct Across {
+    mean: f64,
+    /// Standard deviation over the draws, in the number's own units.
+    spread: f64,
+    lowest: f64,
+    highest: f64,
+}
+
+fn across(values: &[f64]) -> Across {
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance =
+        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len().max(2) - 1) as f64;
+    Across {
+        mean,
+        spread: variance.sqrt(),
+        lowest: values.iter().copied().fold(f64::INFINITY, f64::min),
+        highest: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    }
+}
+
+/// Refit the same truth at falling tract counts, several draws apiece.
+///
+/// **Several draws, because at a few hundred tracts the scatter between draws is most of the
+/// answer** — one draw would report whichever way that draw happened to land.
+fn stratum_size_sweep(samples: usize, depth: u32, only: usize, classes: usize, kappa: f64) {
+    // Fewer draws where each fit is expensive and the scatter is small anyway; more where the
+    // scatter is the thing being measured. **Smallest first**, so the counts whose answer is
+    // in doubt land before the ones that only confirm the top of the range.
+    const PLAN: [(usize, u64); 6] = [
+        (50, 12),
+        (100, 12),
+        (250, 12),
+        (1_000, 8),
+        (5_000, 5),
+        (20_000, 3),
+    ];
+    const CANDIDATE: Candidate = Candidate::DirichletPoints;
+
+    {
+        let truth = Truth::default_for(classes, samples, depth, kappa);
+        let true_values = FittedNumbers::truth_of(&truth).as_row();
+        println!(
+            "\n=== {samples} samples, {depth} reads a sample at a tract, {classes} length \
+             classes, concentration {kappa:.2}, F {:.2}",
+            truth.inbreeding
+        );
+        println!(
+            "    truth: level {:.4}, shorter-share {:.3}, fall-off {:.3}, concentration {:.3}, \
+             commonest length {:.3}",
+            true_values[0], true_values[1], true_values[2], true_values[3], true_values[4]
+        );
+        println!("    fitted by the Dirichlet-over-points description of a locus\n");
+
+        for (tracts, draws) in PLAN {
+            // A single tract count can be asked for on its own, so a long run can be taken in
+            // pieces and a lost piece re-run without repeating the rest.
+            if only != 0 && tracts != only {
+                continue;
+            }
+            let mut rows: Vec<[f64; 5]> = Vec::new();
+            let started = Instant::now();
+            for draw in 1..=draws {
+                let data = truth.draw(tracts, draw * 977 + 13);
+                let (fitted, _) = fit(
+                    &data,
+                    CANDIDATE,
+                    truth.inbreeding,
+                    classes,
+                    &starting_points(classes),
+                );
+                let row = FittedNumbers::of(&fitted, classes).as_row();
+                println!(
+                    "  draw  tracts {tracts:>6}  seed {draw:>2}   level {:.4}   shorter-share \
+                     {:.3}   fall-off {:.3}   concentration {:.3}   commonest length {:.3}",
+                    row[0], row[1], row[2], row[3], row[4]
+                );
+                rows.push(row);
+            }
+            print!("  {tracts:>6} tracts, {draws:>2} draws |");
+            for (number, name) in NUMBER_NAMES.iter().enumerate() {
+                let values: Vec<f64> = rows.iter().map(|row| row[number]).collect();
+                let summary = across(&values);
+                let truth_value = true_values[number];
+                print!(
+                    " {name} {:+.1}% ± {:.1}% [{:+.1}, {:+.1}] |",
+                    100.0 * (summary.mean - truth_value) / truth_value,
+                    100.0 * summary.spread / truth_value,
+                    100.0 * (summary.lowest - truth_value) / truth_value,
+                    100.0 * (summary.highest - truth_value) / truth_value,
+                );
+            }
+            println!(" {:.0} s", started.elapsed().as_secs_f64());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// The same draw, fitted by this program and by the library
+// ---------------------------------------------------------------------
+
+/// Fit one drawn stratum twice — here and in
+/// `ng::parameter_estimation::joint::ssr_fit` — and print the two answers side by side.
+///
+/// **This is the test that says the library estimator was lifted out of this program rather
+/// than written again.** Two implementations of one model are two things to keep agreeing, and
+/// the only way to know they still do is to hand them the same draw. They are not expected to
+/// agree bit for bit: the library sums the genotype prior's identical-by-descent and
+/// independent-draw halves separately, so that a sample may carry its own homozygote excess,
+/// and that reorders a few additions.
+fn library_agreement(truth: &Truth, loci: usize, seed: u64) {
+    use pop_var_caller::ng::parameter_estimation::joint::ssr_fit;
+
+    println!(
+        "\nThe same draw, fitted twice — {} classes, {} samples, {} reads a locus, {loci} \
+         tracts, concentration {:.3}",
+        truth.classes, truth.samples, truth.depth, truth.kappa
+    );
+
+    let data = truth.draw(loci, seed);
+
+    let started = Instant::now();
+    let (here, _) = fit(
+        &data,
+        Candidate::DirichletPoints,
+        truth.inbreeding,
+        truth.classes,
+        &starting_points(truth.classes),
+    );
+    let here_seconds = started.elapsed().as_secs_f64();
+
+    // The same counts, in the library's shape. A sample with no read at a tract is left out
+    // there rather than carried as a row of zeros, which is what the library does with a real
+    // cohort at three reads a site.
+    let span = (truth.classes as i32 - 1) / 2;
+    let tracts: Vec<ssr_fit::TractReads> = data
+        .iter()
+        .map(|panel| ssr_fit::TractReads {
+            samples: panel
+                .iter()
+                .enumerate()
+                .filter(|(_, counts)| counts.iter().any(|reads| *reads > 0))
+                .map(|(sample, counts)| ssr_fit::SampleTractReads {
+                    sample: sample as u32,
+                    by_group: vec![(0, counts.clone())],
+                })
+                .collect(),
+        })
+        .collect();
+    let evidence = ssr_fit::StratumEvidence {
+        stratum: ssr_fit::Stratum {
+            period: 2,
+            reference_repeats: 10,
+        },
+        tracts,
+        read_span: span,
+        groups: 1,
+        tracts_over_guard_threshold: 0,
+        reads_reaching_not_crossing: 0,
+        guard_reads: 0,
+    };
+    let config = ssr_fit::SsrFitConfig {
+        allele_span: span,
+        ..ssr_fit::SsrFitConfig::default()
+    };
+    let started = Instant::now();
+    let there = ssr_fit::fit_stratum(&evidence, &vec![truth.inbreeding; truth.samples], &config)
+        .expect("the drawn stratum carries reads");
+    let there_seconds = started.elapsed().as_secs_f64();
+    let there_slippage = there.slippage[0].expect("the one group carries reads");
+
+    let rows: [(&str, f64, f64, f64); 4] = [
+        (
+            "slippage level",
+            here.slippage.level,
+            there_slippage.level,
+            truth.slippage.level,
+        ),
+        (
+            "shorter-share",
+            here.slippage.down_share,
+            there_slippage.shorter_share,
+            truth.slippage.down_share,
+        ),
+        (
+            "fall-off",
+            here.slippage.fall_off,
+            there_slippage.fall_off,
+            truth.slippage.fall_off,
+        ),
+        (
+            "concentration",
+            here.kappa,
+            there.concentration,
+            truth.kappa,
+        ),
+    ];
+    println!("\n  number             harness      library    difference        truth");
+    for (name, harness, library, truth_value) in rows {
+        println!(
+            "  {name:<16} {harness:>10.6}  {library:>10.6}  {:>12.2e}  {truth_value:>10.6}",
+            (library - harness).abs() / harness.abs().max(1e-12)
+        );
+    }
+    for class in 0..truth.classes {
+        println!(
+            "  spectrum[{class}]      {:>10.6}  {:>10.6}  {:>12.2e}  {:>10.6}",
+            here.spectrum[class],
+            there.length_spectrum[class],
+            (there.length_spectrum[class] - here.spectrum[class]).abs()
+                / here.spectrum[class].abs().max(1e-12),
+            truth.spectrum[class],
+        );
+    }
+    println!("\n  harness {here_seconds:.1} s, library {there_seconds:.1} s");
+}
+
+// ---------------------------------------------------------------------
+// When a thin stratum should borrow from its neighbours
+// ---------------------------------------------------------------------
+
+/// One drawn stratum in the library's shape.
+fn to_evidence(
+    data: &[Vec<ReadCounts>],
+    classes: usize,
+    period: u8,
+    reference_repeats: u64,
+) -> pop_var_caller::ng::parameter_estimation::joint::ssr_fit::StratumEvidence {
+    use pop_var_caller::ng::parameter_estimation::joint::ssr_fit as lib;
+    lib::StratumEvidence {
+        stratum: lib::Stratum {
+            period,
+            reference_repeats,
+        },
+        tracts: data
+            .iter()
+            .map(|panel| lib::TractReads {
+                samples: panel
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, counts)| counts.iter().any(|reads| *reads > 0))
+                    .map(|(sample, counts)| lib::SampleTractReads {
+                        sample: sample as u32,
+                        by_group: vec![(0, counts.clone())],
+                    })
+                    .collect(),
+            })
+            .collect(),
+        read_span: (classes as i32 - 1) / 2,
+        groups: 1,
+        tracts_over_guard_threshold: 0,
+        reads_reaching_not_crossing: 0,
+        guard_reads: 0,
+    }
+}
+
+/// **Where borrowing starts paying**: refit a thin stratum on its own tracts and again with
+/// its two neighbouring repeat counts pooled in, and compare the total error of each.
+///
+/// The two arms fail in opposite ways and that is the whole question. A thin stratum's own
+/// answer is centred on the truth and moves a long way from draw to draw; a borrowed answer is
+/// steady and sits on its neighbours' value instead of its own, because **slippage genuinely
+/// rises with repeat count — roughly 1.3-fold a count**
+/// (`parameter_prepass_ssr.md` §4.3). So the neighbours here are drawn at 1.3 times and 1/1.3
+/// times the thin stratum's own slippage level, which is what makes the borrowed arm's
+/// displacement real rather than assumed.
+///
+/// **The statistic is the root-mean-square error against the truth**, over the draws — one
+/// number that adds the two failures together, where a mean error alone would call the noisy
+/// arm perfect and a spread alone would call the displaced arm perfect.
+/// With `at_the_edge`, both neighbours sit at **shorter** repeat counts instead of one either
+/// side — which is what a stratum at the end of the repeat-count range actually faces, and
+/// where the two displacements no longer cancel.
+fn borrowing_crossover(
+    samples: usize,
+    depth: u32,
+    only: usize,
+    classes: usize,
+    kappa: f64,
+    at_the_edge: bool,
+) {
+    use pop_var_caller::ng::parameter_estimation::joint::ssr_fit as lib;
+
+    /// How many tracts each neighbouring repeat count brings.
+    const NEIGHBOUR_TRACTS: usize = 600;
+    /// How far apart adjacent repeat counts' slippage levels are.
+    const PER_REPEAT_COUNT: f64 = 1.3;
+
+    // Either side, or both below.
+    let (first_ratio, second_ratio, first_repeats, second_repeats) = if at_the_edge {
+        (
+            1.0 / PER_REPEAT_COUNT,
+            1.0 / (PER_REPEAT_COUNT * PER_REPEAT_COUNT),
+            9_u64,
+            8_u64,
+        )
+    } else {
+        (1.0 / PER_REPEAT_COUNT, PER_REPEAT_COUNT, 9, 11)
+    };
+
+    println!(
+        "\nWhen a thin stratum should borrow — {classes} classes, {samples} samples, {depth} \
+         reads a tract, concentration {kappa:.2}{}",
+        if at_the_edge {
+            ", at the end of the repeat-count range"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  the thin stratum's own level is 0.0800; the neighbours it can reach are drawn at \
+         {:.4} and {:.4}, and each brings {NEIGHBOUR_TRACTS} tracts",
+        0.08 * first_ratio,
+        0.08 * second_ratio,
+    );
+
+    let base = Truth::default_for(classes, samples, depth, kappa);
+    let neighbour_truth = |ratio: f64| {
+        let mut truth = base.clone();
+        truth.slippage.level = base.slippage.level * ratio;
+        truth
+    };
+    let true_values = [
+        base.slippage.level,
+        base.slippage.down_share,
+        base.slippage.fall_off,
+        base.kappa,
+        base.spectrum[classes / 2],
+    ];
+
+    let config = |floor: usize| lib::SsrFitConfig {
+        allele_span: (classes as i32 - 1) / 2,
+        borrowing_floor: floor,
+        refusal_floor: 1,
+        ..lib::SsrFitConfig::default()
+    };
+    let excess = vec![base.inbreeding; samples];
+
+    println!(
+        "\n  {:>7}{:>7}  {:>28}  {:>28}",
+        "tracts", "draws", "fitted on its own", "with its neighbours pooled in"
+    );
+    println!(
+        "  {:>7}{:>7}  {:>28}  {:>28}",
+        "", "", "mean err ± spread  (rmse)", "mean err ± spread  (rmse)"
+    );
+    // `only` picks one tract count; zero runs every one of them.
+    for (tracts, draws) in [
+        (50_usize, 8_u64),
+        (100, 8),
+        (250, 8),
+        (500, 6),
+        (1_000, 5),
+        (2_500, 4),
+    ]
+    .into_iter()
+    .filter(|(tracts, _)| only == 0 || *tracts == only)
+    {
+        let started = Instant::now();
+        let mut alone_rows: Vec<[f64; 5]> = Vec::new();
+        let mut borrowed_rows: Vec<[f64; 5]> = Vec::new();
+        for draw in 1..=draws {
+            let seed = draw * 8_191;
+            let thin = to_evidence(&base.draw(tracts, seed), classes, 2, 10);
+            let shorter = to_evidence(
+                &neighbour_truth(first_ratio).draw(NEIGHBOUR_TRACTS, seed ^ 0xA5),
+                classes,
+                2,
+                first_repeats,
+            );
+            let longer = to_evidence(
+                &neighbour_truth(second_ratio).draw(NEIGHBOUR_TRACTS, seed ^ 0x5A),
+                classes,
+                2,
+                second_repeats,
+            );
+
+            let alone = lib::fit_stratum(&thin, &excess, &config(0)).expect("reads were drawn");
+            alone_rows.push(numbers_of(&alone, classes));
+
+            let outcomes = lib::fit_strata(
+                &[thin, shorter, longer],
+                &excess,
+                &config(NEIGHBOUR_TRACTS * 2),
+            );
+            let lib::StratumOutcome::Fitted(borrowed) = &outcomes[0] else {
+                panic!("the thin stratum should have been fitted from borrowed tracts");
+            };
+            borrowed_rows.push(numbers_of(borrowed, classes));
+        }
+
+        for (number, name) in NUMBER_NAMES.iter().enumerate() {
+            let truth_value = true_values[number];
+            let cell = |rows: &[[f64; 5]]| {
+                let values: Vec<f64> = rows.iter().map(|row| row[number]).collect();
+                let summary = across(&values);
+                let squared: f64 = values
+                    .iter()
+                    .map(|v| (v - truth_value).powi(2))
+                    .sum::<f64>()
+                    / values.len() as f64;
+                format!(
+                    "{:>+7.1}% ± {:>5.1}%  ({:>5.1}%)",
+                    100.0 * (summary.mean - truth_value) / truth_value,
+                    100.0 * summary.spread / truth_value,
+                    100.0 * squared.sqrt() / truth_value,
+                )
+            };
+            println!(
+                "  {:>7}{:>7}  {name:<17}{}  {}",
+                if number == 0 {
+                    tracts.to_string()
+                } else {
+                    String::new()
+                },
+                if number == 0 {
+                    draws.to_string()
+                } else {
+                    String::new()
+                },
+                cell(&alone_rows),
+                cell(&borrowed_rows),
+            );
+        }
+        println!("          {:.0} s", started.elapsed().as_secs_f64());
+    }
+}
+
+/// The five numbers a library fit returns, in the order [`NUMBER_NAMES`] gives.
+fn numbers_of(
+    fitted: &pop_var_caller::ng::parameter_estimation::joint::ssr_fit::StratumFit,
+    classes: usize,
+) -> [f64; 5] {
+    let slippage = fitted.slippage[0].expect("the one group carries reads");
+    [
+        slippage.level,
+        slippage.shorter_share,
+        slippage.fall_off,
+        fitted.concentration,
+        fitted.length_spectrum[classes / 2],
+    ]
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().unwrap_or_else(|| "fit".to_string());
@@ -1188,6 +1715,13 @@ fn main() {
         .map_or(0.5, |a| a.parse().expect("a concentration"));
 
     match mode.as_str() {
+        "library" => {
+            let truth = Truth::default_for(classes, samples, depth, kappa);
+            library_agreement(&truth, loci, 11);
+        }
+        "borrow" => borrowing_crossover(samples, depth, loci, classes, kappa, false),
+        "borrow-edge" => borrowing_crossover(samples, depth, loci, classes, kappa, true),
+        "size" => stratum_size_sweep(samples, depth, loci, classes, kappa),
         "kappa" => kappa_sweep(classes, samples, depth, loci),
         "classes" => {
             for classes in [3_usize, 5] {

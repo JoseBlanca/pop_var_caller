@@ -80,8 +80,9 @@ route's do — a parameter that fell back rather than being fitted here says so
 pub struct SiteClassNoise {
     pub clean: ErrorRate,
     pub noisy: SiteNoise,
-    /// `None` where the run has no coverage-by-window summary to condition it on, or
-    /// where the class was fitted at zero weight.
+    /// `None` where neither discriminator applies — under about twenty-five samples and
+    /// under about twenty-five reads a position — or where the class was fitted at zero
+    /// weight. **Absent, never a fitted zero** (spec §6.1).
     pub duplicated: Option<DuplicatedSiteClass>,
 }
 
@@ -93,10 +94,12 @@ pub struct SiteClassNoise {
 /// carried by an individual (spec §2.2). So only these two numbers are cohort-level;
 /// **membership is decided per sample**, from that sample's window coverage.
 ///
-/// **Conditioned on the window's relative copy number, never on the site's own depth**:
-/// per-base coverage at 6× cannot tell a two-copy carrier from a sample reading high,
-/// so the discriminator is the window (spec §2.2). The window summary it reads is
-/// `census.rs`'s third object, not something this parameters fit derives.
+/// **Never conditioned on one position's alternative-read fraction** — a duplicated
+/// position and a heterozygous one both read about half (spec §2.2). It is conditioned
+/// on the cohort's genotype composition above about twenty-five samples, and on the
+/// position's own depth against the sample's median above about twenty-five reads a
+/// position. **There is no coverage-by-window summary** as of 2026-08-14; both
+/// discriminators come out of `census.rs`'s own records.
 pub struct DuplicatedSiteClass {
     pub weight: f64,
     pub alternative_fraction: f64,

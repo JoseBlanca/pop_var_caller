@@ -415,7 +415,21 @@ out of hundreds, while merging depth 1 with depth 5 would discard most of what t
 Binning instead of full resolution cuts the memory nearly ninefold (§9) for an answer that moves by 0.054 rungs.
 
 **Settled, and measured rather than argued: the ladder is exact integers to 8, then geometrically
-widening bins to a cap of 124 — twenty bins in all.** An earlier version of this paragraph called
+widening bins at about 1.28 a bin — and EXTENDED 2026-08-14 from twenty bins topping out at 124 to
+thirty topping out at about 1,500.**
+
+*Why it was extended, and it is not this route's reason.* The joint route reads a single stored code as
+a copy-number signal — a duplicated position carries about twice the sample's median — and at a top rung
+of 124 that signal died from 76 reads a position and was gone by 98, inside the depth range the caller
+commits to ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4.1). Five bits
+hold 32 codes and twenty bins plus the never-walked sentinel used 21, so ten spare rungs at the same
+ratio carry the ceiling to about 1,500 for no extra storage in that route's array.
+
+**What it costs here is the cell table**, which is the sum of `top + 1` over the bins: **583 cells at
+twenty bins and about 6,800 at thirty**, per read group per sample. That is this route's bill and not
+the other's, and it is the reason the two ladders can stop being one if this route survives — the
+sharing exists so the two routes cannot bin differently, and a route that is being dropped has no
+comparison to protect. An earlier version of this paragraph called
 the bin count *soft*, "arithmetic rather than measurement". It is neither soft nor arithmetic: **the
 edges are a correctness parameter.** Across twenty worlds the adopted ladder's asymptotic bias is
 0.054 rungs of the error-rate ladder and 0.3% in each genotype frequency; the same cap at sixteen

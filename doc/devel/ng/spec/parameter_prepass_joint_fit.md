@@ -302,70 +302,53 @@ straight off that spectrum (§5.3), and `Hobs` is a mean of genotype posteriors 
 at every one of those loci. The homozygote excess cannot vent it either, being bounded below by zero
 where these loci demand the opposite sign.
 
-**Decision, revised 2026-08-13: a third class of site, identified by the genotypes it has no room for
-across the cohort, and by local relative coverage as well wherever the run has it.** It is never the
-alternative-read fraction at one locus in one sample: a duplicated locus and a heterozygous one both
-read about half alternative, so one sample's read counts cannot separate them. Two things can.
+**Decision, revised 2026-08-14: a third class of site, and what tells it from a heterozygote is not a
+rule but two terms in its own likelihood.** The class is a component of the mixture like the other two:
+every position gets a posterior over the three, and nothing assigns a position to one. What the
+duplicated component predicts, and what its likelihood therefore multiplies at every position, is
 
-- **The cohort's genotype composition, which every run has.** A duplication's carriers are all at a
-  half and none is homozygous for the non-reference allele; a real variant at the same frequency puts
-  some samples there. This is the default discriminator and it carries most of the benefit, measured
-  below.
-- **Local relative coverage, where the run has a coverage-by-window summary**
-  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). A duplication
-  collects two copies' reads. Production settled the same question for the same artefact:
-  [`../../specs/hidden_paralog_filter.md`](../../specs/hidden_paralog_filter.md) §2 makes coverage the
-  primary signal, and it is the one that leaves an introgression alone, being single-copy and so of
-  normal depth. **It is the only discriminator that works below about twenty-five samples, and the
-  only one at all at a single sample.**
+- **a read composition near a half** — which alone cannot separate it from a heterozygote, and never
+  could; and
+- **a depth about twice that sample's own median**, two copies' reads having landed there.
+
+Beside them, the cohort supplies the third piece: a duplication's carriers are all at a half and **none
+is homozygous for the non-reference allele**, where a real variant at the same frequency puts some
+samples there. That is not a separate mechanism either — it is what the likelihood of the whole
+cohort's genotypes at one locus already says.
+
+**Two measured floors say where each term has power, and neither is a threshold anywhere in the code.**
+With three samples the missing homozygote means little and with fifty it is nearly decisive: the
+inbreeding coefficient comes back 0.5807 against a truth of 0.5942, where a fit with no third class
+returns 0.4471 and heterozygosity 50.6% high. At three reads a position a depth of 3 against 6 barely
+separates, and at 25 the position's own depth reaches 10.8-fold enrichment with 2.8 wrong calls in 100
+against 44 in 100 at 2.5 reads. **The likelihood consults neither number**; it multiplies the terms,
+and a flat term contributes nothing.
+
+**Where the floors are used is the output.** Below about twenty-five samples *and* about twenty-five
+reads a position neither term carries information, so the fitted weight is not identified and is
+emitted as **not identified** rather than as a number — the treatment §6.1 already gives the homozygote
+excess at one sample. A fitted zero there is what `CLAUDE.md`'s range principle forbids while *absent*
+is what it allows.
+
+**The per-sample coverage-by-window summary is removed** (owner, 2026-08-14;
+[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). It discriminated better
+than the position's own depth at the shallow end — 14-fold against 1.14 at 2.5 reads a position, read
+at the width that depth requires — and it cost a genome-wide accumulator, a GC curve fitted per sample,
+denominators from the reference and the analysed regions, and a second full pass over every pileup in a
+two-phase run. **What it bought was a corner where calling is marginal anyway**: above twenty-five
+samples the cohort pattern does the work for nothing, and above twenty-five reads a position the
+position's own depth does. It also never worked end to end — as specified it could not apply its own GC
+correction — and the one real-data test with a truth set returned a class weight of zero.
+
+**What made the second discriminator viable is a change to the ladder, not to the model.** At twenty
+bins topping out at 124 reads, a doubled position stopped sitting above an ordinary one from 76 reads a
+position and was written identically from 98 — inside the range this caller commits to. The ladder now
+runs to about 1,500 in the same five bits, and the depth recorded is the position's true depth rather
+than the subsampled one
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §2.2).
 
 The class's weight is fitted as `w` is, and a site the run believes is in the class is drawn from a
 component at about half alternative reads.
-
-**The strongest argument against the coverage discriminator, and it is not about noise — owner,
-2026-08-13, from the production caller's hidden-paralog work.** *Signal and need are anti-correlated.*
-
-- **Two copies** — the reference's one plus one the reference does not hold — is the case that matters,
-  because that is the one reading 50/50 and therefore the one the model has nowhere to put but
-  *heterozygous*. It is also the case coverage is **worst** at: the depth signal is 2× against 1×, and
-  separating those needs a window that has collected about 12,000 aligned bases (§4.1 of the records
-  document), which at three reads a site is 4 kb of genome and assumes the duplication spans it.
-- **Three or more copies** gives a clean depth signal — 3× against 1× — but the alternative-read
-  fraction moves to about a third or two thirds, **outside the 35–65% band a false heterozygote lives
-  in**. Those sites are not being called heterozygous in the first place.
-
-So the discriminator sharpens exactly as the artefact stops needing discriminating. **This is the
-reason the coverage-by-window summary is a candidate for removal rather than a settled input**, and
-§11 question 12 carries the measurement that would settle it.
-
-**And the anti-correlation argument was tested, 2026-08-13 — the coverage discriminator survives it**
-([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).
-*A revision of this section on the morning of that day read the enrichment series at **500 bp** and
-concluded there was no separation at tomato's depth. That was the wrong row.* The design reads the
-summary at whatever width the sample's depth requires by summing adjacent windows
-([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4.1), which at 2.5 reads a
-position is 5 kb. Both series, over the same eight accessions:
-
-| accession mean depth | 2.5× | 2.7× | 3.6× | 5.2× | 9.9× | 13.3× | 25.2× | 28.7× |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| window read at 500 bp | 1.6× | 1.6× | 1.3× | 1.5× | 2.5× | 7.7× | 24.0× | 24.9× |
-| **window read at the width the depth requires** | **14.0×** | **14.4×** | **6.6×** | **7.9×** | **9.6×** | **16.0×** | **21.3×** | **23.4×** |
-| the position's own read count | 1.14× | 1.01× | 0.63× | 1.00× | 1.65× | 3.21× | 10.8× | 10.8× |
-
-**So the shallow end is where the summary earns its place, not where it fails** — 14-fold against
-1.1-fold at 2.5 reads a position — and it is the shallow end where the decision is made, because a
-deep cohort has other ways to see a duplication. The anti-correlation argument stands as an argument
-about *what coverage can see*; what it does not survive is the claim that widening cannot recover the
-two-copy case at low depth.
-
-**Why the position's own read count is not the discriminator, in one number.** It is not that its
-enrichment is low; it is that its **precision** is hopeless where it matters. At 2.5 reads a position
-it calls **44 in every 100** of the positions it scores "about two copies", against 2.8 in 100 for the
-window. That is not a threshold wanting tuning: a position needs four reads before it can show a
-near-half fraction at all, and among positions with four or more, five and six reads are the two
-commonest values there are — which is exactly what *twice the median* means at that depth. §2.2's
-constraint that the discriminator is local relative coverage and never the site's own depth is
-therefore measured rather than argued.
 
 **Its grain is the (locus, sample) pair, where the other two classes' is the locus, and that
 difference is not a detail.** A collapsed paralog is a property of the reference and of the aligner,
@@ -386,48 +369,11 @@ SRR7279481 and SRR7279484 read 2.20 and 2.27 and SRR7279482 and SRR7279540 read 
 is one copy. **That is copy number segregating in the panel, and a per-locus class would force one
 accession's amplification onto samples that do not carry it.**
 
-**It must be conditioned on the window, not on the site**, which is the same document's measured
-constraint: per-base coverage at 6× has no power to tell a two-copy carrier at ~12 reads from a
-single-copy sample reading high, and tomato's three reads a site is half that depth. **The cost is a
-per-sample coverage-by-window summary, GC-corrected** — 500 bp windows over tomato's 800 Mb is 1.6 M
-windows at a few bytes, single-digit megabytes per sample, plus a small GC curve. Production computes
-both in its Stage-1 pileup; `src/pileup/` is frozen, so ng builds its own. **Nothing in it needs a
-cohort**, which matters because this caller must also run on one sample.
-
-**The coverage summary is an input this route uses when it has one, not an object it demands —
-REVISED 2026-08-13.** It is not derivable from the records: those hold one binned depth per kept
-position, and a per-position depth cannot answer this question. So the summary is
-[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4's, rather than a cost
-named here and owned nowhere. **What changed is the default**: the run that goes from alignments
-straight to a fit builds it for free while walking, and keeps it; the two-phase run does not spend a
-second full pass over every sample's pileup rebuilding it unless the cohort is under about
-twenty-five samples, the panel is outbred, or the run asks. On a fifty-sample selfing cohort that pass
-is worth about two percentage points on `Hobs` and one on the inbreeding coefficient over the cohort
-pattern alone — against a fit with no third class at all, which is not survivable at any panel size.
-
-**What many samples at one locus add is most of the identification — MEASURED 2026-08-13**
-([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
-The evidence is a genotype the class has no room for: a duplication's carrier is homozygous on both
-its chromosomes and its reads disagree only because half of them came from a stretch the reference
-does not hold, **so no sample is ever homozygous for the non-reference allele**. A real variant does
-produce those samples, and inbreeding is what makes them common. On a fifty-sample selfing panel a fit
-given only that pattern — no coverage reading anywhere — finds **every duplication that five or more
-samples carry (59 of 64)** and 2 of the 37 carried by fewer, while wrongly calling **1 real variant in
-400** duplicated.
-
-**What governs the pattern is the number of carriers, not the allele frequency.** It is tempting to
-say a real half-frequency variant leaves every sample heterozygous with probability 0.5⁵⁰ and conclude
-the pattern is decisive; the duplications that matter are not at a frequency of a half, they are
-carried by anything from one sample to fifty, and the pattern's power collapses below about five
-carriers. **What it does not need is reads**: twenty-five reads a position buys it nothing over three,
-because the evidence is which genotypes appear across the panel rather than how sharply any one of
-them is read.
-
-**And what it misses is what matters least, which is not a coincidence.** A duplication few samples
-carry inflates expected heterozygosity nearly as hard as it inflates the observed one, so it largely
-cancels out of their ratio; one the whole panel carries contributes **nothing** to the expected
-heterozygosity and a heterozygote in every sample to the observed one. The blind spot and the harm sit
-in different places.
+**It must not be conditioned on one position's alternative-read fraction**, which is the constraint
+that has survived every revision: a duplicated position and a heterozygous one both read about half
+alternative. What changed on 2026-08-14 is what it *is* conditioned on. A per-sample coverage-by-window
+summary was specified here and is now removed; the two discriminators are the cohort's genotype
+composition and the position's own depth, and the decision above says which applies where.
 
 **What the class is worth, and what it costs where there is nothing to find — MEASURED 2026-08-13
 inside the estimator itself**
@@ -1422,13 +1368,12 @@ emitted as absent rather than as numbers:
   [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1 already ships. §8's third
   measurement is the curve that says how many samples it takes to matter.
 
-  **The duplicated class is the exception, and only if the coverage summary is kept.** Its cohort
-  discriminator — no sample homozygous for the non-reference allele — has no power at all at one
-  sample, but its coverage discriminator has exactly as much as it ever had, being a comparison within
-  the one sample's own genome. So a single-sample run keeps the third class **if and only if** it
-  keeps the coverage-by-window summary, which is the run that walks alignments and therefore builds it
-  for free ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). A
-  single-sample run that has thrown the summary away emits the class as absent, not as zero.
+  **The duplicated class is the exception, and what carries it at one sample is depth.** Its cohort
+  discriminator — no sample homozygous for the non-reference allele — has no power at all here. Its
+  other one does: the position's own depth against the sample's median is a comparison inside the one
+  sample's own genome, and it discriminates from about twenty-five reads a position (§2.2). **So a
+  single sample at 30× or better keeps the class, and a single shallow sample emits it as absent
+  rather than as zero.**
 - **`F_hom_excess` separately from the density.** One individual's heterozygote deficit and a density
   concentrated near zero are the same observation, so the pair is not identified. Emit
   `F_hom_excess` as *not identified* below the sample floor §12.5 measures, never as a fitted zero.
@@ -1455,11 +1400,11 @@ sample's genome walk ends. **Nothing about the kept loci makes this avoidable**;
 the locus's frequency in the cohort" means. A run that adds one sample later must refit, and the
 parameters every earlier call was made under have changed.
 
-**Memory** is [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6. **This
-route adds one per-sample object beyond the records** and it is not free: §2.2's third site class is
-conditioned on a per-sample coverage-by-window summary, which that document now sizes beside the
-records rather than leaving as a sentence here. What the *parameters fit* adds is working memory only: one
-posterior over the frequency quadrature per locus, one number per node, held for one locus at a time.
+**Memory** is [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6, and
+**this route adds no per-sample object beyond the records** — a revision until 2026-08-14 added a
+coverage-by-window summary at 1.6 to 6.2 MB a sample, and removing it is most of what that change
+bought. What the *parameters fit* adds is working memory only: one posterior over the frequency
+quadrature per locus, one number per node, held for one locus at a time.
 
 **The resident bill scales with the cohort, and a cohort of thousands breaks it — OPEN, 2026-08-13.**
 At two million positions a sample's records are about 6 MB, so a thousand samples is 6 GB and five
@@ -1796,36 +1741,13 @@ holds, and where the generic budget starts to matter — are
     since the free levers make the total meaningless — a run that never holds both has no total to
     report.
 11. **Can the duplicated class be identified from the cohort pattern alone, with no coverage summary?**
-    — **CLOSED 2026-08-13: yes from about twenty-five samples up, no below**
-    ([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
-    One drawn fifty-sample cohort, fitted three ways — the class recognised from local relative
-    coverage, from the cohort's genotype composition alone, and not at all.
-
-    **Ignoring the class does not cancel out of `1 − Hobs/Hexp`.** On a selfing panel at three reads a
-    position it puts `Hobs` **50.6%** above the truth and `Hexp` **10.6%** above it, so the inbreeding
-    coefficient reads **0.4471 where the truth is 0.5942** — a quarter of it gone, silently, with the
-    two error rates and the noisy share all within a percentage point.
-
-    **The cohort pattern alone recovers nearly all of it, and it needs samples rather than reads.**
-    The coefficient reads 0.5807 against 0.5942 with `Hobs` 3.0% high, against 0.5855 and 1.3% for
-    coverage. Counted as wrong genotypes it leaves 113 of 1,255 where coverage leaves 5, and calls 2
-    of 822 real variants duplicated. Twenty-five reads a position buys the pattern nothing over three;
-    **panel size is what governs** — `Hobs` 3.0% high at fifty samples, 6.8% at twenty-five, 21.2% at
-    ten.
-
-    **Decision: drop the requirement, keep the capability** (§2.2, and
-    [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). The class is
-    always identified from the cohort pattern; the coverage summary becomes an input used when the run
-    has it, which is free in the run that walks alignments. The two-phase run does not rebuild it by
-    default, and does when the cohort is under about twenty-five samples, when the panel is outbred, or
-    when asked.
-
-    **Three things would change that, and the report's §6 has the rest.** On an **outbred** panel the
-    pattern finds only the duplications every sample carries, because its evidence is the absence of
-    samples homozygous for the non-reference allele and inbreeding is what makes those common. Where
-    duplications are overwhelmingly **private** — a spread the eight-accession counts rule out, but
-    only eight accessions say so — the pattern reverses failure mode and calls 80 of 847 real variants
-    duplicated where coverage calls 1. And **at one sample the pattern has no power at all** (§6.1).
+    — **CLOSED 2026-08-13, and superseded 2026-08-14.** Yes from about twenty-five samples up: the
+    pattern returns the inbreeding coefficient at 0.5807 against a truth of 0.5942 where a fit with no
+    third class returns 0.4471, and observed heterozygosity 3.0% high against 50.6%. Below that it
+    fades — 6.8% high at twenty-five samples, 21.2% at ten — and at one sample it has no power at all.
+    **The summary it was weighed against has since been removed entirely** (§2.2, and
+    [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4), so what covers the
+    small-cohort and single-sample cases is the position's own depth, not a window.
 12. **Does the locus's own read count do what the coverage-by-window summary does?** — **CLOSED
     2026-08-13: no, and the gap is widest at tomato's own depth**
     ([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).

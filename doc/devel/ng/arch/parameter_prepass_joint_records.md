@@ -35,10 +35,6 @@ pub struct SampleCensusEvidence {
     /// digest of the loci actually kept. **Outside the sections**: they are compared
     /// across every sample before anything large is decoded.
     pub terms: RecordingTerms,
-    /// The sample's depth over fixed windows of the reference (§1.6). **Never
-    /// serialized** (spec §4): present in the run that walked the alignments, `None`
-    /// after a read from a file until whoever runs the parameters fit fills it.
-    pub coverage: Option<CoverageByWindow>,
     /// Resident, or backed by a file and read on demand — §1.1a. Not public: what a
     /// caller may do with a section is §2.2's scoped access, and a field would let it
     /// keep one.
@@ -159,10 +155,13 @@ pub struct AlleleObservation {
     /// Index into `CensusLoci::generic` — the position's only identity.
     pub index: u32,
     pub allele: ObservedAllele,
-    /// **Exact, not binned** (spec §2.2): nearly every entry is a miscall of one to three
-    /// reads, so a ladder's compressed tail stays empty at any depth, and binning would
-    /// cost a fourteenth bin width in `RecordingTerms` for nothing.
-    pub reads: u32,
+    /// **Exact, not binned, and one byte** (spec §2.2). Nearly every entry is a miscall of
+    /// one to three reads, so a ladder's compressed tail stays empty at any depth and
+    /// binning would cost a fourteenth bin width in `RecordingTerms` for nothing. The
+    /// width is safe because the genome walk thins a position's counts by the same ratio
+    /// it thins the depth, so `DepthCap` bounds this exactly — and `DepthCap` refuses a
+    /// value a byte cannot hold.
+    pub reads: u8,
 }
 
 /// A, C, G, T, or anything else — an indel or a spanning deletion (spec §2.1).
@@ -208,18 +207,24 @@ pub struct SsrEvidence {
     /// Spanning reads at each whole-repeat offset from the reference tract length,
     /// ±4 with saturating ends.
     offsets: Vec<OffsetCounts>,
-    /// Reads that reached a locus and crossed no whole tract — a censored lower bound
-    /// (spec §3).
-    covering_not_crossing: Vec<u16>,
+    /// Reads that reached a tract in this stratum and crossed none of it — **one count for
+    /// the whole stratum, not one per locus** (spec §3). The estimator summed the per-locus
+    /// version the moment it read it, and the loss runs along repeat count, which is what a
+    /// stratum is.
+    covering_not_crossing: u32,
     /// Whether the genome walk reached this locus at all. **The STR half's answer to the
     /// generic half's never-walked sentinel**, and it has to be its own field: the
     /// other four vectors are all zero both for a locus never walked and for one
     /// walked with no read, and only the first is a bug (spec §6).
-    walked: Vec<bool>,
+    /// A bit per locus, not a byte: `Vec<bool>` spent 0.46 MB a read group on tomato to
+    /// carry 58 kB of information.
+    walked: BitVec,
     /// Reads differing by a non-whole number of copies, with what they were.
     guard: Vec<GuardObservation>,
-    /// Per locus, the denominator the STR error rate is fitted against.
-    bases_compared: Vec<u32>,
+    /// The denominator the STR substitution rate is fitted against — **per stratum**, which
+    /// is the grain that rate is fitted at (spec §3). Per locus it was 1.85 MB a read group
+    /// on tomato that nothing read.
+    bases_compared: u64,
     differences: Vec<TractDifference>,
 }
 
@@ -299,66 +304,23 @@ to arise. A term describing an object the file does not contain is worse than no
 each one as guarding something in the file. If summaries are ever stored, the width comes back
 **attached to the summary**, not to evidence that does not hold one.
 
-### 1.6 `CoverageByWindow` — the third object, and the one that is not a record
+### 1.6 `CoverageByWindow` — REMOVED 2026-08-14
 
-**The parameters fit's duplicated-site class is conditioned on the sample's local relative coverage, and that
-cannot be derived from §1.2's records**: those hold one binned depth per kept position, and the kept
-positions are one in a few hundred, so a 500 bp window holds one or two of them — the per-base
-measurement the class's own constraint rules out (fit spec §2.2, records spec §4).
+**The type is gone and so is the object.** It held one sample's mean read depth over fixed 500 bp
+windows, the sample's depth-against-GC curve and each window's GC fraction, and it existed so that the
+duplicated-copy class could be conditioned on the coverage around a position rather than on the
+position itself. Spec §4 says why it went and what replaced it: the cohort's genotype composition above
+about twenty-five samples, and **the position's own depth against the sample's median** above about
+twenty-five reads a position — the second of which is already in `GenericEvidence` and needed only
+§2.2's ladder extended to reach past 76 reads a position.
 
-```rust
-/// One sample's depth over fixed windows of the reference, plus the GC curve that
-/// corrects it. **Over every position the genome walk visited, not over the kept ones.**
-pub struct CoverageByWindow {
-    /// The grid, a function of the reference alone — so two samples' summaries are
-    /// comparable by construction. Travels in `RecordingTerms` (§1.5). **Always the
-    /// stored 500 bp**; the width the parameters fit reads at is its own decision (spec §4.1).
-    window_bp: Bp,
-    /// The sample's median window depth, in reads a position. The one number that
-    /// makes `depth`'s bytes mean something, and it is per sample deliberately: what
-    /// the class reads is coverage *relative to this sample*.
-    median_depth: f32,
-    /// Mean depth per window, in reference order, as `round(32 × mean / median_depth)`
-    /// saturating at 255. Resolution is 3% of the sample's own median and the range
-    /// reaches 8 times it — a byte is enough only because the quantity is a ratio.
-    /// **Storing the mean itself in a byte would not do**: at three reads a position
-    /// the difference between one copy and two is the difference between 3 and 6.
-    /// 1.6 M windows on tomato, 6.2 M on GRCh38 — 1.6 to 6.2 MB per sample (spec §6).
-    depth: Vec<u8>,
-    /// Windows holding fewer than `window_bp` walked positions, as
-    /// `(window index, positions)` — the ends of contigs, and anything the analysed
-    /// regions or the ambiguity mask cut into. **The parameters fit needs these to sum adjacent
-    /// windows** (spec §4.1): a wider mean is `Σ depth × positions / Σ positions`, and
-    /// a short window weighted as if it were full pulls the wider mean towards it.
-    /// Sparse because nearly every window is full, exactly as §1.2's non-reference
-    /// entries are.
-    short_windows: Vec<(u32, u16)>,
-    /// Depth against GC content, a few hundred numbers. Coverage tracks GC, and an
-    /// uncorrected window at an extreme of it reads high for a reason that has nothing
-    /// to do with copy number: on tomato the median window depth runs from 16.2 reads
-    /// a position at 20% GC to 29.0 at 36%, a factor of 1.79.
-    gc_curve: Vec<f32>,
-}
-```
+**Nothing else in this document referred to it**, which is the cleanest evidence that it was a
+subsystem rather than a field: no other type held one, no interface passed one, and the only signature
+that mentioned it was `CensusWriter::finish`.
 
-**Contract.** Per sample and **not** per read group — copy number is a property of the individual, not
-of a library, and eight tomato samples on one grid confirm it: of 84 windows some sample reads near
-two copies, 40 are read that way by exactly one of them (spec §4.2). Needs no cohort, which is what
-lets the caller run on one sample. **A window's mean depth is not the mean over the kept positions
-inside it**, and spec §7.10 asserts that inequality because an implementation that quietly derived one
-from the other would pass every other check.
-
-**The parameters fit sums, the genome walk does not.** Adjacent windows are summed at read time up to the width the
-sample's depth requires — about 12,000 aligned bases, so 500 bp at 25× and 5 kb at 2.5× (spec §4.1).
-The type therefore exposes the denominators rather than only the means, and offers no resampling: a
-summary built at a different `window_bp` is refused, not converted (spec §7.10).
-
-**Settled, 2026-08-12** — the object is built. Fit spec §2.2's gating measurement returned 1 position
-in 8,600 in a two-copy window reading near half, a near-half rate of 1.26% inside those windows
-against 0.033% outside, and 24.8 times what independence would give
-(`../reports/duplicated_locus_probe_2026-08-12.md`). `SampleCensusEvidence::coverage` is `None` where a
-run chose not to build the summary and **where the value has just been read from a file** (§2.2, spec
-§4: the summary is never serialized) — never because the class was not there.
+**`coverage.rs` is now dead code** — `src/ng/parameter_estimation/joint/coverage.rs`, about 560 lines,
+built during the walk and read by nothing. Delete it with this change rather than leaving it to be
+found.
 
 ---
 
@@ -392,7 +354,7 @@ impl CensusWriter {
     /// both routes.
     pub fn add_locus(&mut self, locus: &SampleLocusObservations);
 
-    pub fn finish(self, coverage: Option<CoverageByWindow>) -> SampleCensusEvidence;
+    pub fn finish(self) -> SampleCensusEvidence;
 }
 ```
 
@@ -511,12 +473,6 @@ pub enum LocusEvidence<'a> {
 already decoded, so a two-million-entry sequence of them exists only as a cursor. §1.1 says what
 storing them instead would cost.
 
-**The coverage-by-window summary is not in that stream.** It is recoverable from the pileup and the
-owner's decision is not to keep a copy (spec §4), so `write_records` omits it and `read_records`
-returns a `SampleCensusEvidence` whose `coverage` is `None`. Whoever runs the parameters fit fills it: from the
-walk in the direct run, and from a pass over the pileups in the two-phase one. **The type keeps the
-field** — it is what the parameters fit reads — and only the serialized form drops it.
-
 **Two producers, one builder.** The genome walk-time producer is `CensusWriter` (§2.1). The second reads an
 existing pileup and drives the same `CensusWriter` through the same locus stream, so there is one
 implementation of what a record means and two sources of loci. It exists for pileups written before
@@ -539,7 +495,7 @@ wanting fewer loci subsets what is there rather than asking for a different file
 
 **NOT BUILT — and what is built instead.** The encoding that carries the *content* is in the types:
 `PackedDepthCodes` is the five-bit array and its round trip is asserted at every bit offset, the
-sparse lists are plain vectors, and `CoverageByWindow` stores the byte it means to store. What is
+sparse lists are plain vectors. What is
 missing is only the framing that puts them in a file, plus a wire form for `SelectionTerms` —
 which holds `StrRepeatCriteria` and `ScanParams`, so its codec reaches into two other modules'
 private fields. **The likely shape when it is written is a per-field digest table rather than the
@@ -578,29 +534,15 @@ make a property of the sample look like a property of the file.
   censoring runs along repeat count — spec §3.
 - **`ReadCap` is a newtype, not a `usize`.** It travels in `RecordingTerms` and is compared for
   equality; a bare integer beside the other counts there is transposable. **`DepthCap` is a second
-  newtype for the same reason** and is not the same number.
+  newtype for the same reason** and is not the same number. **It also refuses a value above
+  `u8::MAX`**, because it is the bound on `AlleleObservation::reads` (§1.2): the walk thins a
+  position's counts by the same ratio it thins the depth, so a cap a byte cannot hold would saturate
+  the counts silently while the depth field said otherwise (spec §2.2).
 - **Five values say in what *units* the evidence was recorded, not only which loci** — §1.5. The
   ladder digest is the one that matters most, because a depth code without its ladder is a number.
-- **The coverage-by-window summary is a third object, not a field of a record** — §1.6; spec §4.
-  Per sample rather than per read group, and it accumulates across the cohort like the records do,
-  which is why spec §6 sizes it in the same table. **It is never serialized** (2026-08-13): it is
-  rebuildable from the pileup, so it is built by the genome walk in a direct run and by a pass over the
-  pileups otherwise — resident cost, not stored cost.
-- **One `SampleCensusEvidence` for both kinds of run, differing only in whether its sections are resident** —
-  §1.1. A second type for the file case would make the parameters fit two code paths for one object.
-- **Sections are borrowed for the length of a call, never returned** — §2.2. The estimator holds the
-  generic half and the repeat-tract half at different times and one band of strata within the second;
-  an accessor that handed a section back would make that a convention a caller could ignore, and a
-  file-backed value would grow into the file it exists to avoid.
-- **The scoped call is on the cohort, and its unit is one stratum across every sample** — §2.2. A
-  tract's length frequencies are fitted from every sample with reads there, so per-sample access would
-  be the wrong grain; and it takes a **band** of strata, because 68 of tomato's 141 are fitted by
-  borrowing from their neighbours.
-- **`SsrEvidence` is keyed by stratum** — §2.2; spec §6.2. The generic half and the repeat-tract half
-  are never resident together, because the second consumes one number per sample from the first and
-  returns nothing.
-- **`LocusEvidence` is an iteration item, not a stored one** — §1.1, §2.2.1. Stored, its enum width
-  would put about 20 bytes on each of two million ordinary positions where five bits is what they need.
+- **There is no third object** — §1.6; spec §4. A per-sample coverage-by-window summary was specified
+  until 2026-08-14 and is removed: the duplicated-copy class is conditioned on the cohort's genotype
+  composition and on the position's own depth, both of which the records already carry.
 - **The records are a cache of the pileup, and the pileup is the source of truth** — spec §6.1.
   Everything in a records file can be recomputed from the sample's pileup; it is kept because
   recomputing means a full decompression pass, and because the file serves every future cohort call

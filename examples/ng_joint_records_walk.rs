@@ -61,14 +61,15 @@ use pop_var_caller::ng::parameter_estimation::joint::contamination::{
 use pop_var_caller::ng::parameter_estimation::joint::coverage::{
     CoverageAccumulator, CoverageGrid,
 };
-use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
+use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFit, JointFitConfig, fit_jointly};
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
-    CatalogBuildSettings, ReferenceDigest, RegionSetDigest, SelectableRegions, SelectionIdentity,
-    UnambiguousRuns, select_kept_loci,
+    CatalogBuildSettings, KeptLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
+    SelectionIdentity, UnambiguousRuns, select_kept_loci,
 };
 use pop_var_caller::ng::parameter_estimation::joint::records::{
     DepthCap, DepthCode, ReadCap, RecordWriter, SampleRecords,
 };
+use pop_var_caller::ng::parameter_estimation::joint::ssr_fit;
 use pop_var_caller::ng::read::ReadFilterConfig;
 use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;
@@ -301,7 +302,12 @@ fn main() {
         Vec::new()
     };
 
-    fit_the_cohort(&cohort, coverage_odds);
+    // **The ordinary-position half runs once and its answer is handed on.** The repeat-tract
+    // half needs each sample's homozygote excess from it and gives nothing back, so re-fitting
+    // to obtain that would be 883 seconds of the tomato cohort's time spent twice.
+    if let Some(fit) = fit_the_cohort(&cohort, coverage_odds) {
+        fit_the_tracts(&cohort, &kept, &contigs, &fit);
+    }
 
     println!(
         "\ntotal            {:.1} s",
@@ -316,7 +322,7 @@ fn main() {
 /// position stay apart, where the population's frequency density lands, and what each sample's
 /// heterozygosity comes out at with the count of positions that actually carried a read beside
 /// it.
-fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) {
+fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) -> Option<JointFit> {
     println!("\n--- the joint fit, ordinary positions ---");
     let at = Instant::now();
     let config = JointFitConfig {
@@ -331,7 +337,7 @@ fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) {
         Ok(fit) => fit,
         Err(error) => {
             println!("  refused: {error}");
-            return;
+            return None;
         }
     };
     println!(
@@ -524,6 +530,8 @@ fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) {
             );
         }
     }
+
+    Some(fit)
 }
 
 /// `ln P(this sample's depth around here | it has two copies) − ln P(… | one copy)`, per sample
@@ -583,6 +591,176 @@ fn coverage_odds(
         out.push(Arc::from(odds));
     }
     out
+}
+
+/// Fit the repeat tracts, stratum by stratum, from the same records.
+///
+/// **This half runs after the ordinary-position one and takes one thing from it**: each
+/// sample's homozygote excess, which weights the genotype drawn from a tract's own length
+/// frequencies. It gives nothing back.
+///
+/// `SLIPPAGE_PER_READ_GROUP=1` fits the three slippage numbers separately for every read group,
+/// which is the grain spec §4 names. The default pools every read group into one set, because
+/// a cohort of sixty-three single-read-group samples would otherwise ask 189 numbers of a
+/// stratum holding a few dozen tracts.
+fn fit_the_tracts(
+    cohort: &[SampleRecords],
+    kept: &KeptLoci,
+    contigs: &ContigList,
+    fit: &JointFit,
+) {
+    println!("\n--- the joint fit, repeat tracts ---");
+
+    let by_name: BTreeMap<&str, usize> = contigs
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.name.as_str(), index))
+        .collect();
+    let contig_of = |name: &str| {
+        by_name
+            .get(name)
+            .map(|index| ContigId(u32::try_from(*index).expect("a contig index")))
+    };
+    let strata = ssr_fit::strata_of_kept_loci(kept, &contig_of);
+
+    // One slippage group per read group is the specified grain; pooling them is what a cohort
+    // this thin can afford, and which was used is printed rather than assumed.
+    let per_read_group = std::env::var("SLIPPAGE_PER_READ_GROUP").is_ok_and(|v| v == "1");
+    let mut slippage_group_of: BTreeMap<_, u32> = BTreeMap::new();
+    for sample in cohort {
+        for group in sample.ssr.keys() {
+            let next = if per_read_group {
+                slippage_group_of.len() as u32
+            } else {
+                0
+            };
+            slippage_group_of.entry(*group).or_insert(next);
+        }
+    }
+    println!(
+        "  {} read groups in {} slippage group{}",
+        slippage_group_of.len(),
+        slippage_group_of
+            .values()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        if per_read_group {
+            "s, one each"
+        } else {
+            ", pooled"
+        }
+    );
+
+    let homozygote_excess: Vec<f64> = cohort
+        .iter()
+        .map(|sample| {
+            fit.hom_excess
+                .get(&sample.sample)
+                .map_or(0.0, |estimate| estimate.value.get())
+        })
+        .collect();
+
+    let at = Instant::now();
+    let evidence = ssr_fit::gather_strata(cohort, &strata, &slippage_group_of);
+    println!(
+        "  {} strata over {} tracts, gathered in {:.1} s",
+        evidence.len(),
+        strata.len(),
+        at.elapsed().as_secs_f64()
+    );
+    let over_guard: u64 = evidence.iter().map(|s| s.tracts_over_guard_threshold).sum();
+    let not_crossed: u64 = evidence.iter().map(|s| s.reads_reaching_not_crossing).sum();
+    let guard_reads: u64 = evidence.iter().map(|s| s.guard_reads).sum();
+    let spanning: u64 = evidence.iter().map(|s| s.spanning_reads()).sum();
+    println!(
+        "  {spanning} reads crossed a tract; {not_crossed} reached one without crossing it; \
+         {guard_reads} differed by a non-whole number of repeats; {over_guard} tracts were over \
+         the guard's threshold and left out"
+    );
+
+    // The lengths the fit may place allele mass on. The specification's ±6 is the default; a
+    // narrower span costs a third of the run's time and is what a first pass over a cohort can
+    // afford, so which was used is printed rather than left to be guessed.
+    let allele_span: i32 = std::env::var("SSR_ALLELE_SPAN")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(ssr_fit::ALLELE_SPAN);
+    // `SSR_BORROWING_FLOOR=0` fits every stratum on its own tracts alone, which is the arm that
+    // says what borrowing changed rather than only what it produced.
+    let borrowing_floor: usize = std::env::var("SSR_BORROWING_FLOOR")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(ssr_fit::DEFAULT_BORROWING_FLOOR);
+    let config = ssr_fit::SsrFitConfig {
+        allele_span,
+        borrowing_floor,
+        ..ssr_fit::SsrFitConfig::default()
+    };
+    println!("  allele mass may sit within ±{allele_span} repeats of the reference length");
+    let at = Instant::now();
+    let outcomes = ssr_fit::fit_strata(&evidence, &homozygote_excess, &config);
+    println!(
+        "  fitted in {:.1} s, borrowing below {} tracts and refusing below {}",
+        at.elapsed().as_secs_f64(),
+        config.borrowing_floor,
+        config.refusal_floor
+    );
+
+    let held: BTreeMap<_, &ssr_fit::StratumEvidence> =
+        evidence.iter().map(|e| (e.stratum, e)).collect();
+    println!(
+        "\n  {:<8}{:>8}{:>10}{:>9}{:>9}{:>9}{:>9}{:>8}  borrowed from",
+        "motif", "repeats", "tracts", "reads", "level", "shorter", "fall-off", "conc.",
+    );
+    for outcome in &outcomes {
+        match outcome {
+            ssr_fit::StratumOutcome::Fitted(fitted) => {
+                let own = held[&fitted.stratum];
+                // One set of slippage numbers a group; with the groups pooled there is one,
+                // and with them apart the first fitted group stands for the row.
+                let slippage = fitted
+                    .slippage
+                    .iter()
+                    .flatten()
+                    .next()
+                    .expect("a fitted stratum has at least one group with reads");
+                println!(
+                    "  {:<8}{:>8}{:>10}{:>9}{:>9.4}{:>9.3}{:>9.3}{:>8.3}  {}",
+                    fitted.stratum.period,
+                    fitted.stratum.reference_repeats,
+                    own.tracts_with_reads(),
+                    own.spanning_reads(),
+                    slippage.level,
+                    slippage.shorter_share,
+                    slippage.fall_off,
+                    fitted.concentration,
+                    if fitted.borrowed.is_empty() {
+                        "on its own".to_string()
+                    } else {
+                        format!(
+                            "{} strata, {} tracts",
+                            fitted.borrowed.len(),
+                            fitted.tracts_fitted
+                        )
+                    }
+                );
+            }
+            ssr_fit::StratumOutcome::Refused {
+                stratum,
+                tracts,
+                reason,
+            } => {
+                println!(
+                    "  {:<8}{:>8}{:>10}{:>9}   refused: {reason:?}",
+                    stratum.period,
+                    stratum.reference_repeats,
+                    tracts,
+                    held[stratum].spanning_reads(),
+                );
+            }
+        }
+    }
 }
 
 /// One sample: one walk, filling the records and the coverage summary together.
