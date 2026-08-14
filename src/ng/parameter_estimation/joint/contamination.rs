@@ -302,7 +302,7 @@ pub fn fit_contamination(
     // cohort before reaching here.
     let cap = samples
         .first()
-        .map_or(DepthCap(u32::MAX), |sample| sample.terms.depth_cap);
+        .map_or(DepthCap::MAX, |sample| sample.terms.depth_cap);
     let markers = markers(samples, edges, cap, mean_error, noisy_posterior, config);
     if markers.len() < 100 {
         return vec![
@@ -379,7 +379,7 @@ fn markers(
         for group in sample.generic.values() {
             for observation in group.non_reference() {
                 totals[observation.index as usize][usize::from(observation.allele.code())] +=
-                    observation.reads;
+                    u32::from(observation.reads);
             }
         }
     }
@@ -420,7 +420,8 @@ fn markers(
             for observation in group.non_reference() {
                 let index = observation.index as usize;
                 if observation.allele.code() == major[index] {
-                    alternative[s][index] = alternative[s][index].saturating_add(observation.reads);
+                    alternative[s][index] =
+                        alternative[s][index].saturating_add(u32::from(observation.reads));
                 }
             }
         }
@@ -1166,7 +1167,8 @@ mod tests {
                     sparse[s].push(AlleleObservation {
                         index: index as u32,
                         allele: ObservedAllele::C,
-                        reads: alternative,
+                        reads: u8::try_from(alternative)
+                            .expect("a drawn count fits the census's one-byte field"),
                     });
                 }
             }
@@ -1190,7 +1192,7 @@ mod tests {
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(1_000),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
-            depth_cap: DepthCap(124),
+            depth_cap: DepthCap::new(124),
         };
         (0..samples)
             .map(|s| SampleCensusEvidence {

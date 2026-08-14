@@ -116,7 +116,7 @@ consumer that keeps reading the old meaning produces a wrong rate rather than an
 the trio, where 999 in 1,000 positions previously sat at exactly the cap.
 *Depends:* B1. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §2.2, §4.1.
 
-☐ **B3 — the allele count becomes one byte, and `DepthCap` refuses a value above `u8::MAX`.**
+✅ **B3 — the allele count becomes one byte, and `DepthCap` refuses a value above `u8::MAX`.**
 **Own commit, do not bundle** — a saturating count is a wrong allele fraction, not a panic. Assert
 the refusal at construction and assert that a position at the cap round-trips.
 *Depends:* B2. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §2.1, §2.2;

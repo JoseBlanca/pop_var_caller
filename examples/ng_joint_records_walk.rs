@@ -92,7 +92,7 @@ const SEED: u64 = 42;
 /// ladder's top rung, which made one number of two: the ladder now reaches about 1,500 and
 /// this does not follow it, because what the cap buys is a bound on the sparse list of
 /// non-reference reads and what the ladder buys is reach for the position's own depth.
-const DEPTH_CAP: DepthCap = DepthCap(124);
+const DEPTH_CAP: DepthCap = DepthCap::new(124);
 
 fn main() {
     let usage = "usage: <reference.fa> <catalog.parquet> <regions.bed> <generic-target> \
@@ -308,7 +308,7 @@ fn depth_ladder_occupancy(cohort: &[SampleCensusEvidence]) {
         "sample", "exact (0–8)", "a range (9+)", "above the cap", "no reads"
     );
     for sample in cohort {
-        let cap = sample.terms.depth_cap.0;
+        let cap = sample.terms.depth_cap.get();
         let (mut exact, mut ranged, mut capped, mut unwalked) = (0_u64, 0_u64, 0_u64, 0_u64);
         for records in sample.generic.values() {
             for code in records.depth().iter() {
@@ -469,7 +469,7 @@ fn fit_the_cohort(
                 let mut counts = vec![0_u32; kept.len()];
                 for group in sample.generic.values() {
                     for observation in group.non_reference() {
-                        counts[observation.index as usize] += observation.reads;
+                        counts[observation.index as usize] += u32::from(observation.reads);
                     }
                 }
                 counts
@@ -1168,7 +1168,7 @@ fn markers(cohort: &[SampleCensusEvidence], positions: usize) -> Vec<Marker> {
         for group in records.generic.values() {
             for observation in group.non_reference() {
                 alt_counts[observation.index as usize][observation.allele.code() as usize] +=
-                    observation.reads;
+                    u32::from(observation.reads);
             }
         }
     }
@@ -1200,7 +1200,7 @@ fn markers(cohort: &[SampleCensusEvidence], positions: usize) -> Vec<Marker> {
                 if observation.allele.code() == major[observation.index as usize] {
                     per_sample_alt[s][observation.index as usize] = per_sample_alt[s]
                         [observation.index as usize]
-                        .saturating_add(observation.reads.min(u32::from(u16::MAX)) as u16);
+                        .saturating_add(u16::from(observation.reads));
                 }
             }
         }

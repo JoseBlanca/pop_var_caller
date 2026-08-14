@@ -1319,12 +1319,12 @@ fn maximise(
 /// Read from the first sample rather than passed in, because the recording-terms check has
 /// already refused a cohort whose samples disagree on it, and because it belongs to the
 /// evidence rather than to the run: it is what turns a stored depth into the units the allele
-/// counts beside it were thinned into. An empty cohort answers a cap nothing can exceed, so
-/// the clamp is a no-op where there is nothing to clamp.
+/// counts beside it were thinned into. An empty cohort answers the widest cap a one-byte
+/// count can hold, which clamps nothing because there is nothing to clamp.
 fn depth_cap_of(samples: &[SampleCensusEvidence]) -> DepthCap {
     samples
         .first()
-        .map_or(DepthCap(u32::MAX), |sample| sample.terms.depth_cap)
+        .map_or(DepthCap::MAX, |sample| sample.terms.depth_cap)
 }
 
 /// One pass over every position: the posteriors, and every count the maximisations need.
@@ -2849,7 +2849,8 @@ mod tests {
                             2 => ObservedAllele::G,
                             _ => ObservedAllele::T,
                         },
-                        reads: *count,
+                        reads: u8::try_from(*count)
+                            .expect("a drawn count fits the census's one-byte field"),
                     });
                 }
             }
@@ -2861,7 +2862,7 @@ mod tests {
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(100),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
-            depth_cap: DepthCap(124),
+            depth_cap: DepthCap::new(124),
         };
         let records = (0..samples)
             .map(|s| SampleCensusEvidence {
@@ -3215,7 +3216,7 @@ mod tests {
             b: 2.0,
         };
         let mut cohort = draw_cohort(3, 50, 4.0, (0.002, 0.05, 0.01), density, 0.0, 7);
-        cohort.samples[1].terms.depth_cap = DepthCap(60);
+        cohort.samples[1].terms.depth_cap = DepthCap::new(60);
         let error = fit_jointly(&cohort.samples, &JointFitConfig::default())
             .expect_err("the samples did not record the same evidence");
         match error {

@@ -255,7 +255,16 @@ pub struct AlleleObservation {
     /// Index into the generic selection — the position's only identity.
     pub index: u32,
     pub allele: ObservedAllele,
-    pub reads: u32,
+    /// **Exact, not binned, and one byte.** Nearly every entry is a miscall of one to three
+    /// reads, so the tail a ladder would compress is empty at any depth and binning would
+    /// buy a fourteenth bin width in [`RecordingTerms`] for nothing.
+    ///
+    /// **One byte is safe because [`DepthCap`] bounds it exactly**: a count cannot exceed
+    /// its position's depth, the walk thins a position's counts by the same ratio it thins
+    /// the depth, and the cap refuses a value a byte cannot hold. An entry is an index, an
+    /// allele and a count — six bytes here against about nine with a wider count, which at
+    /// 100× is a megabyte a read group.
+    pub reads: u8,
 }
 
 /// One read group's generic evidence: a dense array of depths and a sparse list of what was
@@ -572,10 +581,44 @@ pub struct ReadCap(pub u32);
 /// this* reads the depth, and one dividing a count by a depth must first put the depth into
 /// the counts' own units — which is [`denominator_for`](Self::denominator_for), and nothing
 /// else records it.
+///
+/// **It refuses a value a byte cannot hold** ([`new`](Self::new)), because it is the bound on
+/// [`AlleleObservation::reads`]: the counts are thinned to it, so a cap above 255 would let
+/// them saturate silently while the depth field beside them said otherwise. Nothing else
+/// stops the two drifting apart — the cap is a run-time value — so the constructor is where
+/// the relationship is a property rather than a comment.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct DepthCap(pub u32);
+pub struct DepthCap(u32);
 
 impl DepthCap {
+    /// The largest cap the record's one-byte count can hold, and the value a fit with no
+    /// sample at all falls back to.
+    pub const MAX: Self = Self(u8::MAX as u32);
+
+    /// A cap of `cap` reads a position.
+    ///
+    /// # Panics
+    ///
+    /// Above `u8::MAX`, which is the whole point: [`AlleleObservation::reads`] is one byte
+    /// and this cap is what bounds it. `const fn`, so a cap written as a constant is refused
+    /// while the run is being built rather than while it is walking a genome — the same move
+    /// the ladder's own five-bit assertion makes.
+    #[must_use]
+    pub const fn new(cap: u32) -> Self {
+        assert!(
+            cap <= u8::MAX as u32,
+            "a per-position depth cap above 255 cannot bound a one-byte allele count: the \
+             counts would saturate silently while the depth beside them said otherwise"
+        );
+        Self(cap)
+    }
+
+    /// The depth above which a position's reads are subsampled.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
     /// The depths the allele counts at a position were counted out of, given the depths its
     /// stored code stands for.
     ///
@@ -705,7 +748,7 @@ impl SampleCensusEvidence {
         let mut counts = [0_u32; 5];
         for records in self.generic.values() {
             for observation in records.at(index).1 {
-                counts[observation.allele.code() as usize] += observation.reads;
+                counts[observation.allele.code() as usize] += u32::from(observation.reads);
             }
         }
         counts
@@ -753,12 +796,31 @@ pub struct CensusWriter {
 /// single-threaded one must produce byte-identical records, and a share needs no seed to do
 /// that. Rounding to nearest keeps a single stray read at a very deep position rather than
 /// discarding it, which matters because those reads are what the error rate is fitted from.
-fn thin_to_cap(reads: u32, depth: u32, cap: u32) -> u32 {
-    if depth <= cap || depth == 0 {
-        return reads;
-    }
-    let scaled = f64::from(reads) * f64::from(cap) / f64::from(depth);
-    (scaled.round() as u32).min(cap).max(u32::from(reads > 0))
+///
+/// **It returns the byte the record stores**, which is safe for the reason [`DepthCap`]
+/// exists: a count cannot exceed its position's depth, the surviving share cannot exceed the
+/// cap, and the cap cannot exceed 255. The conversion says so rather than truncating — a
+/// truncated count is a wrong allele fraction and has no symptom.
+///
+/// # Panics
+///
+/// When the surviving count will not fit in a byte, which means an allele carried more reads
+/// than the position it sits at held.
+fn thin_to_cap(reads: u32, depth: u32, cap: DepthCap) -> u8 {
+    let cap = cap.get();
+    let surviving = if depth <= cap || depth == 0 {
+        reads
+    } else {
+        let scaled = f64::from(reads) * f64::from(cap) / f64::from(depth);
+        (scaled.round() as u32).min(cap).max(u32::from(reads > 0))
+    };
+    u8::try_from(surviving).unwrap_or_else(|_| {
+        panic!(
+            "{surviving} reads on one allele where the position held {depth} and the cap is \
+             {cap}: a count cannot exceed the depth it was thinned to, and the record holds \
+             one byte"
+        )
+    })
 }
 
 impl CensusWriter {
@@ -942,7 +1004,7 @@ impl CensusWriter {
                 let group_depth = depths
                     .get(&observation.read_group)
                     .map_or(0, |depth| depth[offset]);
-                let reads = thin_to_cap(observation.num_obs, group_depth, self.depth_cap.0);
+                let reads = thin_to_cap(observation.num_obs, group_depth, self.depth_cap);
                 if reads == 0 {
                     continue;
                 }
@@ -1371,7 +1433,7 @@ mod tests {
             ssr_stratum_counts: StratumCounts::default(),
             read_cap: ReadCap(100),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
-            depth_cap: DepthCap(124),
+            depth_cap: DepthCap::new(124),
         }
     }
 
@@ -1408,7 +1470,7 @@ mod tests {
         assert_eq!(base.first_disagreement(&ladder), Some("depth ladder edges"));
 
         let mut depth_cap = base.clone();
-        depth_cap.depth_cap = DepthCap(60);
+        depth_cap.depth_cap = DepthCap::new(60);
         assert_eq!(
             base.first_disagreement(&depth_cap),
             Some("per-position depth cap")
@@ -1479,7 +1541,7 @@ mod tests {
     #[test]
     fn a_position_above_the_cap_keeps_its_own_depth_and_thins_only_the_counts() {
         // Forty reads at a cap of twenty: a quarter of them on a non-reference base.
-        let mut writer = writer_over_capped(&[10], &[0], DepthCap(20));
+        let mut writer = writer_over_capped(&[10], &[0], DepthCap::new(20));
         writer.add_locus(&generic_locus(
             10,
             b"A",
@@ -1512,7 +1574,7 @@ mod tests {
         );
 
         // What a consumer must do, and the only thing that recovers the fraction.
-        let denominator = DepthCap(20).denominator_for(edges.depth_range(bin));
+        let denominator = DepthCap::new(20).denominator_for(edges.depth_range(bin));
         assert_eq!(denominator, 20..=20, "min(depth, cap) is the cap here");
         assert!(
             (f64::from(alleles[0].reads) / f64::from(*denominator.start()) - 0.25).abs() < 1e-12,
@@ -1524,7 +1586,7 @@ mod tests {
     /// this module sits in — so this is what says the clamp is not simply always firing.
     #[test]
     fn a_position_below_the_cap_is_its_own_denominator() {
-        let mut writer = writer_over_capped(&[10], &[0], DepthCap(20));
+        let mut writer = writer_over_capped(&[10], &[0], DepthCap::new(20));
         writer.add_locus(&generic_locus(
             10,
             b"A",
@@ -1540,7 +1602,7 @@ mod tests {
             panic!("a walked position is not never-walked")
         };
         assert_eq!(
-            DepthCap(20).denominator_for(edges.depth_range(bin)),
+            DepthCap::new(20).denominator_for(edges.depth_range(bin)),
             6..=6,
             "below the cap the denominator is the depth itself, exactly"
         );
@@ -1552,30 +1614,98 @@ mod tests {
     /// from nearest to downwards leaves every other test in the module passing.
     #[test]
     fn a_thinned_share_rounds_to_nearest_and_never_loses_the_last_read() {
-        assert_eq!(thin_to_cap(7, 20, 20), 7, "at the cap, nothing is thinned");
         assert_eq!(
-            thin_to_cap(7, 10, 20),
+            thin_to_cap(7, 20, DepthCap::new(20)),
+            7,
+            "at the cap, nothing is thinned"
+        );
+        assert_eq!(
+            thin_to_cap(7, 10, DepthCap::new(20)),
             7,
             "below the cap, nothing is thinned"
         );
-        assert_eq!(thin_to_cap(0, 0, 20), 0, "no depth, no reads");
         assert_eq!(
-            thin_to_cap(20, 40, 20),
+            thin_to_cap(0, 0, DepthCap::new(20)),
+            0,
+            "no depth, no reads"
+        );
+        assert_eq!(
+            thin_to_cap(20, 40, DepthCap::new(20)),
             10,
             "half the depth keeps half the reads, so the fraction survives"
         );
-        assert_eq!(thin_to_cap(3, 8, 5), 2, "1.875 rounds to 2, not down to 1");
-        assert_eq!(thin_to_cap(2, 9, 5), 1, "1.111 rounds to 1, not up to 2");
         assert_eq!(
-            thin_to_cap(1, 400, 20),
+            thin_to_cap(3, 8, DepthCap::new(5)),
+            2,
+            "1.875 rounds to 2, not down to 1"
+        );
+        assert_eq!(
+            thin_to_cap(2, 9, DepthCap::new(5)),
+            1,
+            "1.111 rounds to 1, not up to 2"
+        );
+        assert_eq!(
+            thin_to_cap(1, 400, DepthCap::new(20)),
             1,
             "a single stray read at 400x is kept rather than rounded away — those reads \
              are what the error rate is fitted from"
         );
         assert_eq!(
-            thin_to_cap(400, 400, 20),
+            thin_to_cap(400, 400, DepthCap::new(20)),
             20,
             "and no thinned count ever exceeds the cap"
+        );
+    }
+
+    /// **The refusal that makes the one-byte count safe** (spec §2.1, §2.2). The cap is a
+    /// run-time value and the count is a byte, and nothing but this stops the two drifting
+    /// apart: a cap of 300 would let a position's counts be thinned to 300 and written as
+    /// 44, with the depth beside them saying 300 and no symptom anywhere.
+    #[test]
+    #[should_panic(expected = "cannot bound a one-byte allele count")]
+    fn a_cap_a_byte_cannot_hold_is_refused_at_construction() {
+        let _ = DepthCap::new(u8::MAX as u32 + 1);
+    }
+
+    #[test]
+    fn the_largest_cap_a_byte_holds_is_accepted() {
+        // The boundary from the other side: 255 is a cap, 256 is not, and `MAX` is the first.
+        assert_eq!(DepthCap::new(255).get(), 255);
+        assert_eq!(DepthCap::MAX, DepthCap::new(u8::MAX as u32));
+    }
+
+    /// A position sitting exactly at the cap keeps every read it showed: the count that
+    /// fills the byte is the one the cap allows, so the widest count the encoding can meet
+    /// is written and read back unchanged rather than wrapping to nothing.
+    #[test]
+    fn a_position_at_the_cap_round_trips_at_the_widest_count_the_byte_holds() {
+        let cap = DepthCap::MAX;
+        let mut writer = writer_over_capped(&[10], &[0], cap);
+        writer.add_locus(&generic_locus(
+            10,
+            b"A",
+            vec![observation(b"G", 0, cap.get())],
+        ));
+        let evidence = writer.finish();
+        let (depth, alleles) = evidence.generic[&ReadGroupId(0)].at(0);
+
+        let edges = DepthBinEdges::for_census();
+        let DepthCode::Binned(bin) = depth else {
+            panic!("a walked position is not never-walked")
+        };
+        assert!(
+            edges.depth_range(bin).contains(&cap.get()),
+            "the position held exactly the cap, and its code says so"
+        );
+        assert_eq!(
+            alleles[0].reads,
+            u8::MAX,
+            "255 reads on one allele is the widest count a byte holds, and it survives whole"
+        );
+        assert_eq!(
+            evidence.allele_counts(0)[ObservedAllele::G.code() as usize],
+            u32::from(u8::MAX),
+            "and it folds across read groups without being truncated on the way"
         );
     }
 
@@ -1619,7 +1749,7 @@ mod tests {
 
     /// A selection of three positions on one contig, and a writer over it.
     fn writer_over(positions: &[u64], groups: &[u32]) -> CensusWriter {
-        writer_over_capped(positions, groups, DepthCap(124))
+        writer_over_capped(positions, groups, DepthCap::new(124))
     }
 
     /// The same, at a chosen per-position cap. **A cap below the ladder's ceiling is the only
@@ -1755,7 +1885,7 @@ mod tests {
             selection_terms(),
             DepthBinEdges::for_census(),
             ReadCap(100),
-            DepthCap(124),
+            DepthCap::new(124),
         )
     }
 

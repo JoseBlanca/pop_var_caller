@@ -248,7 +248,8 @@ fn draw(
                         2 => ObservedAllele::G,
                         _ => ObservedAllele::T,
                     },
-                    reads: *count,
+                    reads: u8::try_from(*count)
+                        .expect("a drawn count fits the census's one-byte field"),
                 });
             }
         }
@@ -272,7 +273,7 @@ fn draw(
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(1_000),
         depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
-        depth_cap: DepthCap(u32::MAX),
+        depth_cap: DepthCap::MAX,
     };
     let records = (0..samples)
         .map(|s| SampleCensusEvidence {
