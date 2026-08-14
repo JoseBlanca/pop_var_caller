@@ -231,10 +231,17 @@ pub struct SsrEvidence {
 #[derive(Copy, Clone)]
 pub struct TractDifference {
     pub locus: u32,
-    /// Which of this locus's reads carried it, in the locus's own read order.
+    /// Which of this locus's reads carried it, in the locus's own read order — numbered
+    /// across the whole locus, not within one of the observations the walk folds identical
+    /// reads into.
     /// **Two entries at one offset on one read is a different observation from the same
     /// two on two reads** — a read-blind encoding passes every other check (spec §7.3).
-    pub read: u8,
+    /// **Two bytes, not one — WIDENED 2026-08-14 (owner).** A locus enters up to 1,000 reads
+    /// (`ReadCap`) and a byte stops at 255: on the human benchmark trio, about 265 crossing
+    /// reads a tract a sample, **one mismatch in five came back numbered 255**, each a read
+    /// that could no longer be told from the others there. Four bytes an entry, on a list
+    /// the error rate fills rather than the variants.
+    pub read: u16,
     /// How far into the tract the mismatching base sat, in bases from its first —
     /// `0..len`, and nothing else. **The sequence either side is not recorded here
     /// (owner, 2026-08-14)**: it is in the locus only so the aligner can anchor a read,
@@ -531,8 +538,11 @@ make a property of the sample look like a property of the file.
 - **`DepthCode` wraps `DepthBin` and adds one sentinel; the ladder stays in `generic/`.** Five bits
   for twenty bins plus *never walked* — spec §2.2. A second ladder here would silently uncouple the
   two routes' binning.
-- **The difference list carries `read`.** Without it an interruption cannot be told from two errors,
-  and no other assertion in the suite notices — spec §3, §6.3.
+- **The difference list carries `read`, and it is two bytes wide.** Without it an interruption cannot
+  be told from two errors, and no other assertion in the suite notices — spec §3, §6.3. The width
+  follows from the read cap rather than from the field: a locus enters up to 1,000 reads, so a byte
+  reported one mismatch in five as a read it could not distinguish on the human benchmark trio
+  (owner, 2026-08-14).
 - **`covering_not_crossing` is a field, not an inference.** The state has no field today and the
   censoring runs along repeat count — spec §3.
 - **`ReadCap` is a newtype, not a `usize`.** It travels in `RecordingTerms` and is compared for

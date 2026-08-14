@@ -78,10 +78,35 @@ byte differently, spending it again at every observation. What the fix does is m
 numbering mean what the field says it means, and at that point the byte is visibly too narrow
 at the deep end.
 
-`TractDifference::read`'s doc comment now says this plainly rather than promising a numbering it
-cannot deliver. **Widening the field is a change to
-[arch §1.4](../../ng/arch/parameter_prepass_joint_records.md), which this plan may not edit**, so
-it is raised with the owner rather than taken.
+### 4.1 Settled the same day: the field is two bytes — DECIDED 2026-08-14 (owner)
+
+**`TractDifference::read` is a `u16`.** It reaches 65,535 where a locus enters at most 1,000
+reads, so the numbering cannot collapse at any depth this record is written under.
+
+**Measured on the trio after the widening**: the highest read a mismatch sits on is **350, 367
+and 387** in the three samples, and **nothing is at the field's ceiling** — those are the reads
+that were being written as 255. On tomato the highest is unchanged at 3 to 35.
+
+**What it costs, measured on both oracles.** An entry goes from 8 bytes to 12, so a sample's
+whole census grows by about a percent at the deep end and by nothing at the shallow one:
+
+| | difference list | the whole census for that sample |
+|---|---:|---:|
+| HG004, 1,129 entries | 0.009 → **0.014 MB** | 0.432 → **0.437 MB** |
+| HG002, 583 entries | 0.005 → **0.007 MB** | 0.286 → **0.288 MB** |
+| tomato, deepest of eight | 0.002 → **0.003 MB** | 0.108 → **0.109 MB** |
+
+**No fitted number moved** on either oracle; the only lines that differ are the sizes.
+
+**One consequence for a document this plan may not edit.** Spec §6's measured difference-list
+sizes — 0.2 MB at 2.4 reads a position and 2.2 MB at 30× across tomato's 462,701 tracts — were
+taken at 8 bytes an entry. At 12 they become **0.3 MB and 3.3 MB a read group**. The arch
+document's §1.4 and §3 have been corrected to say `u16` and why; the spec's two figures are for
+the owner to fold in.
+
+A test pins the property rather than the width: `three_hundred_reads_at_one_tract_are_three_hundred_reads`
+gives one tract three hundred reads each carrying an interruption and asserts they come back
+numbered 0 to 299.
 
 ## 5. Nothing reads the difference list yet, so no fitted number can move
 
@@ -97,7 +122,7 @@ returns — which is why the plan puts it after milestone B's oracle rather than
 |---|---|
 | `cargo fmt --check` | clean |
 | `cargo check --all-targets` | 0 errors |
-| `cargo test --lib ng::parameter_estimation::joint::census` | `34 passed; 0 failed` (32 before) |
-| `cargo test --lib` | `3,583 passed; 0 failed; 11 ignored` (3,581 before) |
+| `cargo test --lib ng::parameter_estimation::joint::census` | `35 passed; 0 failed` (32 before) |
+| `cargo test --lib` | `3,584 passed; 0 failed; 11 ignored` (3,581 before) |
 | the 88-second tomato oracle | no line differs but the new diagnostic |
 | the 74-second trio oracle | no line differs but the new diagnostic |

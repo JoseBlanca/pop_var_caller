@@ -438,11 +438,14 @@ pub struct TractDifference {
     /// identical bases into one observation, so a counter restarting at each observation gave
     /// two reads that differ in different places the same number.
     ///
-    /// **A byte saturates at 255, and the per-locus read cap is 1,000.** Every read numbered
-    /// 255 or above is written as 255, so a locus with more than 255 compared reads in one
-    /// read group can report several reads as one — the confusion this field exists to
-    /// prevent, at the deep end of the range the caller commits to.
-    pub read: u8,
+    /// **Two bytes, not one — WIDENED 2026-08-14 (owner).** A byte stops at 255 where a locus
+    /// enters up to 1,000 reads ([`ReadCap`]), and on the human benchmark trio — about 265
+    /// crossing reads a tract a sample — **one mismatch in five came back numbered 255**, each
+    /// one a read that could no longer be told from the others there. Two bytes reach 65,535,
+    /// which is past any cap this record is written under, so the numbering cannot collapse at
+    /// the deep end of the range the caller commits to. It costs four bytes an entry, on a list
+    /// the error rate fills rather than the variants.
+    pub read: u16,
     /// How far into the tract the mismatching base sat, in bases from its first: `0..len`,
     /// and nothing else.
     ///
@@ -1240,7 +1243,7 @@ impl CensusWriter {
                 for copy in 0..u32::from(reads) {
                     records.differences.push(TractDifference {
                         locus: index as u32,
-                        read: u8::try_from(first_read + copy).unwrap_or(u8::MAX),
+                        read: u16::try_from(first_read + copy).unwrap_or(u16::MAX),
                         offset: i16::try_from(offset).unwrap_or(i16::MAX),
                         base: ObservedAllele::of_base(*read_base),
                     });
@@ -1619,7 +1622,7 @@ mod tests {
         ];
         assert_ne!(shared, scattered);
         let reads_carrying = |list: &[TractDifference]| {
-            let mut reads: Vec<u8> = list.iter().map(|d| d.read).collect();
+            let mut reads: Vec<u16> = list.iter().map(|d| d.read).collect();
             reads.sort_unstable();
             reads.dedup();
             reads.len()
@@ -2293,7 +2296,7 @@ mod tests {
             6,
             "the second read's at the seventh"
         );
-        let mut reads: Vec<u8> = ssr.differences().iter().map(|d| d.read).collect();
+        let mut reads: Vec<u16> = ssr.differences().iter().map(|d| d.read).collect();
         reads.sort_unstable();
         reads.dedup();
         assert_eq!(reads.len(), 2, "two reads, not one read seen twice");
@@ -2315,7 +2318,7 @@ mod tests {
         let ssr = &evidence.ssr[&ReadGroupId(0)];
 
         let at_offset = |offset: i16| {
-            let mut reads: Vec<u8> = ssr
+            let mut reads: Vec<u16> = ssr
                 .differences()
                 .iter()
                 .filter(|d| d.offset == offset)
@@ -2338,6 +2341,37 @@ mod tests {
             ssr.bases_compared(AT_SIX_REPEATS),
             7 * 12,
             "all seven reads were compared, clean ones included"
+        );
+    }
+
+    /// **The depth end of the range, where one byte failed.** A tract may enter up to 1,000
+    /// reads, and while the read number was a byte every read from the 256th onwards was
+    /// written as 255 — on the human benchmark trio, at about 265 crossing reads a tract a
+    /// sample, that was one mismatch in five. Three hundred reads carrying an interruption
+    /// must come back as three hundred reads.
+    #[test]
+    fn three_hundred_reads_at_one_tract_are_three_hundred_reads() {
+        let mut writer = ssr_writer();
+        writer.add_locus(&ssr_locus(vec![
+            observation(b"ATATGTATATAT", 0, 100),
+            observation(b"ATATATGTATAT", 0, 100),
+            observation(b"ATATATATGTAT", 0, 100),
+        ]));
+        let evidence = writer.finish();
+        let ssr = &evidence.ssr[&ReadGroupId(0)];
+
+        let mut reads: Vec<u16> = ssr.differences().iter().map(|d| d.read).collect();
+        assert_eq!(
+            reads.len(),
+            300,
+            "one interruption on each of three hundred"
+        );
+        reads.sort_unstable();
+        reads.dedup();
+        assert_eq!(
+            reads,
+            (0..300).collect::<Vec<u16>>(),
+            "numbered 0 to 299 with none collapsed onto a ceiling"
         );
     }
 
