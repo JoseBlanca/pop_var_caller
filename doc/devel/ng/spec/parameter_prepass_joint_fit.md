@@ -316,6 +316,46 @@ is homozygous for the non-reference allele**, where a real variant at the same f
 samples there. That is not a separate mechanism either — it is what the likelihood of the whole
 cohort's genotypes at one locus already says.
 
+**SHIPS OFF, and the depth term is not a factor — MEASURED 2026-08-14 on the 63 tomato accessions**
+([`../reports/duplicated_class_on_real_reads_2026-08-14.md`](../reports/duplicated_class_on_real_reads_2026-08-14.md)).
+
+**The decision, in the one quantity it moves.** With the class **off**, a sample's heterozygosity comes
+back about **11% too high** — measured on a drawn 63-sample cohort at tomato's depths and inbreeding,
+with duplications planted at the rate the probe measured and allele frequencies drawn from drift. With
+it **on**, heterozygosity comes back **93% too low** on the real tomato panel: the median accession
+falls from 0.867 to 0.064 per kilobase, where a rough SNP caller measures that cohort at 1.049. So
+`duplicated_positions` **defaults to false** until the class is repaired.
+
+**What it claims, and the direction is worse than the size.** The class books each accession as
+carrying an extra copy at 941 to 3,515 positions per two million, median 1,829, where positions that
+actually look duplicated on the same reads — 35–65% of reads disagreeing, in a window at 1.6 to 2.4
+times that accession's normal depth for its GC content — number 24 to 468, median 183. That is
+**8.9-fold over-claiming** on the accessions deep enough to count both. But it is not merely
+over-claiming: it takes **83%** of near-half positions in a two-copy window and **86%** of near-half
+positions at ordinary depth, its median claimed position reads **1.08 times normal** where a
+duplication reads 2.0, and in **53 of 63 accessions** the positions the class-off fit calls
+heterozygous sit in a two-copy window *more often* than the ones the class claims. **It selects
+slightly against the signature it exists to find.**
+
+**Why, and it is starvation rather than a defect.** Its only evidence is *no sample is homozygous for
+the non-reference allele*. On an inbred panel most segregating positions carry a rare allele, at which
+nobody is homozygous — so the evidence is silent almost everywhere; and such a panel's heterozygous
+positions are themselves concentrated at rare alleles, which is exactly where the class is blind. The
+most heterozygous accession keeps 74% of its heterozygosity, the median keeps 7.5%, and 41 of 63 keep
+under a tenth. **On the drawn cohort the same class works** — 11.3% high with it off, 0.4% low with it
+on, at close to the planted weight — because there the real variants come from a spectrum the fit can
+account for.
+
+**And the repair is known, which is why the class stays in the design.** Handing each accession's
+GC-corrected relative depth to the class as a multiplier on the *carrier* branch — which sample carries
+it — halves the damage and does not fix it: the class swells over high-coverage stretches instead of
+sharpening, taking its share from 1 position in 127 to 1 in 31. **Depth must bear on whether a position
+is in the class at all, not only on who carries it**, and the form that does that is the one the
+production caller uses: *a position is duplicated when the samples reading near half **are the deep
+ones***. That is a coupling between the two branches and **not the product of two independent terms**,
+so the factorised form below is withdrawn as the class's shape and survives only as a description of
+what each piece of evidence is.
+
 **The depth term's form, settled 2026-08-14**
 ([`../reports/depth_term_family_2026-08-14.md`](../reports/depth_term_family_2026-08-14.md)). It is
 `ln P(d | 2m) − ln P(d | m)`, where `d` is the position's read count and `m` is what one copy is

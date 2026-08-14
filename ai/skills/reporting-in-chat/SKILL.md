@@ -189,6 +189,38 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-14 — a decision offered as a trade, with the two sides in different units
+
+A switch had to be defaulted on or off. The reply gave both sides in one sentence:
+
+> ❌ "**`duplicated_positions` defaults to `false`.** The trade with both sizes attached: leaving the
+> artefact in puts the benchmark trio 26% above its truth set and the drawn cohort 11% above; taking
+> it out with this class costs 93% of tomato's heterozygosity."
+>
+> Owner: *"I'm not understanding this. Please, give the context clearly and explain."* And after the
+> explanation: *"it was impossible to understand what you were saying, that's a problem."*
+
+> ✅ "With the class **off**, heterozygosity comes back about **11% too high** on a drawn cohort with
+> duplications planted at the rate measured on real reads. With it **on**, it comes back **93% too
+> low** on the real tomato panel. Both are errors in the same number, and they are not the same size."
+
+Four failures, and the first is the new rule:
+
+1. **The two sides were framed from opposite directions** — *leaving the artefact in* and *taking it
+   out with this class* — so the reader had to work out that these were the two settings of one
+   switch. **New rule: when a decision is a switch, name the switch, name the one quantity it moves,
+   and give both settings' error in the same units and the same direction.** "11% too high against 93%
+   too low" is the whole decision; anything else is working.
+2. **Three numbers, three datasets, in one sentence**, and nothing said which dataset was which kind of
+   evidence — a drawn cohort with a planted truth, and a real panel with none.
+3. **One of the numbers measured a different defect.** The trio's 26% excess had been traced two days
+   earlier to 59 positions where a quarter of the reads disagree in every sample — a shape this class
+   does not model, and whose weight it fitted at zero. Putting it on this scale was not compression, it
+   was wrong.
+4. **The reply never said what the switch does.** Two sentences of context — the fit models each
+   position as coming from one of a few classes; with this on, positions in the duplicated class stop
+   counting towards heterozygosity — would have made every number after it legible.
+
 ### 2026-08-12 — a comparison with only one side of it written down
 
 Arguing that contamination cannot be measured at repeat tracts, a reply gave the size of the

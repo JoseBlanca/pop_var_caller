@@ -83,6 +83,11 @@ pub struct SiteClassNoise {
     /// `None` where neither discriminator applies — under about twenty-five samples and
     /// under about twenty-five reads a position — or where the class was fitted at zero
     /// weight. **Absent, never a fitted zero** (spec §6.1).
+    ///
+    /// **`JointFitConfig::duplicated_positions` defaults to `false` as of 2026-08-14**:
+    /// on the 63 tomato accessions the class as built takes heterozygosity 93% low where
+    /// the artefact it removes is worth about 11%, because its evidence is starved on an
+    /// inbred panel (spec §2.2). The type stays; the default waits on the coupled form.
     pub duplicated: Option<DuplicatedSiteClass>,
 }
 

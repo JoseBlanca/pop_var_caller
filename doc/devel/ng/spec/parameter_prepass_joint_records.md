@@ -484,11 +484,26 @@ dispersion**; the walk is where the true counts are. The curve could be refitted
 codes, since a bin's error averages out of a mean — the dispersion cannot, since it is exactly what the
 binning destroys.
 
+**Each position's own GC content is read from the reference, not stored — and this satisfies a
+requirement two reports have now asked for.** Both the removed window summary and its replacement
+need the curve to be *usable*, which means knowing which GC bin a position sits in. The census stores
+no GC: it comes off the reference on the same pass that supplies the position's reference base (§2),
+so nothing is written down and nothing can go stale against a reference the recording terms already
+pin.
+
 **The dispersion must be fitted robustly.** At one accession of eight, **four GC bins of twenty-one run
 between 22 and 41** where the sample's own figure is near 3, and a mean over bins would take its value
 from those four.
 
 ### 4.2 The depth term is a negative binomial, and it is a weight rather than a test — MEASURED 2026-08-14
+
+*What this section prices is the evidence, not the class's shape.* Measured on the tomato panel on the
+same day, a class that multiplies a position term by a per-sample depth term **selects against the
+signature it exists to find**, and the form that works instead couples the two — a position is
+duplicated when the samples reading near half are the deep ones
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §2.2). Everything below about the
+distribution and the ceiling holds under either shape; what does not hold is reading it as an
+independent factor.
 
 ([`../reports/depth_term_family_2026-08-14.md`](../reports/depth_term_family_2026-08-14.md), eight
 tomato accessions from 2.5 to 30.2 reads a position.)
