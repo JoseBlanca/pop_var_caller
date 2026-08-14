@@ -147,7 +147,7 @@ by document kind:
     `spec/locus_generation_ssr.md`.
   - **The per-site route to step 4's parameters, in three companions to the three specs** —
     [`parameter_prepass_joint_loci.md`](arch/parameter_prepass_joint_loci.md) (`CensusLoci`,
-    `SelectionIdentity`, the kept-loci digest; the STR half is two calls on the repeat catalog),
+    `SelectionTerms`, the kept-loci digest; the STR half is two calls on the repeat catalog),
     [`parameter_prepass_joint_records.md`](arch/parameter_prepass_joint_records.md)
     (`SampleCensusEvidence`, the five-bit depth code, the STR difference list, `CensusWriter`) and
     [`parameter_prepass_joint_fit.md`](arch/parameter_prepass_joint_fit.md) (`JointFit`, the

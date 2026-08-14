@@ -98,7 +98,7 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
-use super::records::{DepthCode, SampleRecords};
+use super::census::{DepthCode, SampleCensusEvidence};
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -281,7 +281,7 @@ impl std::fmt::Display for NotIdentifiedReason {
 /// then every position is treated as ordinary — which on real reads returns a floor rather
 /// than a measurement.
 pub fn fit_contamination(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     edges: &DepthBinEdges,
     error_rate: &[f64],
     hom_excess: &[f64],
@@ -354,7 +354,7 @@ pub fn fit_contamination(
 
 /// The positions the cohort varies at, with each sample's reads and its dosage there.
 fn markers(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     edges: &DepthBinEdges,
     error: f64,
     noisy_posterior: &[f32],
@@ -1035,12 +1035,12 @@ mod tests {
 
     // ---- the whole estimator, on a panel drawn with known contamination ----------
 
-    use crate::ng::parameter_estimation::joint::loci::{
-        CatalogBuildSettings, KeptLociDigester, ReferenceDigest, RegionSetDigest, SelectionIdentity,
+    use crate::ng::parameter_estimation::joint::census::{
+        AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
+        PackedDepthCodes, ReadCap, RecordingTerms,
     };
-    use crate::ng::parameter_estimation::joint::records::{
-        AlleleObservation, DepthCap, DepthLadderDigest, GenericRecords, ObservedAllele,
-        PackedDepthCodes, ReadCap, RecordIdentity,
+    use crate::ng::parameter_estimation::joint::loci::{
+        CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
     };
     use crate::ng::repeat_catalog::StrRepeatCriteria;
     use crate::ng::tandem_repeat::ScanParams;
@@ -1114,7 +1114,7 @@ mod tests {
         fst: f64,
         spiked: Option<(usize, f64)>,
         seed: u64,
-    ) -> Vec<SampleRecords> {
+    ) -> Vec<SampleCensusEvidence> {
         const ERROR: f64 = 0.002;
         let mut rng = Rng(seed);
         let edges = DepthBinEdges::new();
@@ -1164,8 +1164,8 @@ mod tests {
             }
         }
 
-        let identity = RecordIdentity {
-            selection: SelectionIdentity {
+        let terms = RecordingTerms {
+            selection: SelectionTerms {
                 seed,
                 reference: ReferenceDigest([7; 16]),
                 analysed_regions: RegionSetDigest([9; 16]),
@@ -1178,7 +1178,7 @@ mod tests {
                 generic_target: markers as u64,
                 ssr_cap: 1_000,
             },
-            kept_loci: KeptLociDigester::new().finish(),
+            kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(1_000),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
@@ -1186,11 +1186,11 @@ mod tests {
             coverage_window: None,
         };
         (0..samples)
-            .map(|s| SampleRecords {
+            .map(|s| SampleCensusEvidence {
                 sample: format!("s{s:02}"),
                 generic: [(
                     ReadGroupId(0),
-                    GenericRecords::from_parts(
+                    GenericEvidence::from_parts(
                         std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
                         std::mem::take(&mut sparse[s]),
                     ),
@@ -1199,7 +1199,7 @@ mod tests {
                 .collect(),
                 ssr: BTreeMap::new(),
                 coverage: None,
-                identity: identity.clone(),
+                terms: terms.clone(),
             })
             .collect()
     }

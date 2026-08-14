@@ -19,7 +19,7 @@
 //!   fitted. Tomato holds 462,701 kept tracts in 141 strata.
 //! - **Offset** — a read's tract length minus the reference tract's, in whole repeat units.
 //!   The records store `-4 … +4` with the ends saturating
-//!   ([`RECORDED_OFFSET_RANGE`](super::records::RECORDED_OFFSET_RANGE)).
+//!   ([`RECORDED_OFFSET_RANGE`](super::census::RECORDED_OFFSET_RANGE)).
 //! - **Length spectrum** — how the stratum's chromosomes are spread over the tract lengths.
 //! - **Concentration** — how monomorphic the stratum's tracts are. Small means most tracts are
 //!   fixed at one length while the stratum as a whole spans many.
@@ -68,10 +68,10 @@ use std::collections::BTreeMap;
 
 use rayon::prelude::*;
 
-use crate::ng::parameter_estimation::joint::loci::KeptLoci;
-use crate::ng::parameter_estimation::joint::records::{
-    RECORDED_OFFSET_RANGE, SampleRecords, SsrLocusState,
+use crate::ng::parameter_estimation::joint::census::{
+    RECORDED_OFFSET_RANGE, SampleCensusEvidence, SsrLocusState,
 };
+use crate::ng::parameter_estimation::joint::loci::CensusLoci;
 use crate::ng::types::{ContigId, ReadGroupId};
 
 // ---------------------------------------------------------------------
@@ -1160,7 +1160,7 @@ fn climb_scalar(mut score: impl FnMut(f64) -> f64, start: f64, span: f64) -> f64
 /// A locus whose contig `contig_of` does not resolve is dropped, exactly as the writer drops
 /// it, so the two lists stay the same length.
 pub fn strata_of_kept_loci(
-    loci: &KeptLoci,
+    loci: &CensusLoci,
     contig_of: &dyn Fn(&str) -> Option<ContigId>,
 ) -> Vec<Stratum> {
     let mut with_position: Vec<((u32, u64, u64), Stratum)> = loci
@@ -1195,15 +1195,15 @@ pub fn strata_of_kept_loci(
 /// read groups ran on one machine may pool them, and one that pools everything is saying it
 /// cannot tell them apart.
 ///
-/// Every sample must hold records for the same STR loci in the same order, which the identity
-/// check on [`SampleRecords`] has already refused to let fail silently.
+/// Every sample must hold evidence for the same STR loci in the same order, which the
+/// recording-terms check on [`SampleCensusEvidence`] has already refused to let fail silently.
 ///
 /// # Panics
 ///
 /// When a sample's STR record length disagrees with `strata`, which means the loci list and
 /// the records were built from different selections.
 pub fn gather_strata(
-    cohort: &[SampleRecords],
+    cohort: &[SampleCensusEvidence],
     strata: &[Stratum],
     slippage_group_of: &BTreeMap<ReadGroupId, u32>,
 ) -> Vec<StratumEvidence> {

@@ -80,7 +80,7 @@ Nothing in this milestone changes an answer.
 step below compares against these two files.
 *Depends:* —. *Source:* preconditions.
 
-☐ **A2 — `records.rs` → `census.rs`, and the seven type names.** `KeptLoci` → `CensusLoci`,
+✅ **A2 — `records.rs` → `census.rs`, and the seven type names.** `KeptLoci` → `CensusLoci`,
 `KeptLociDigest` → `CensusLociDigest`, `SampleRecords` → `SampleCensusEvidence`, `GenericRecords` →
 `GenericEvidence`, `SsrRecords` → `SsrEvidence`, `RecordWriter` → `CensusWriter`, `RecordError` →
 `CensusError`, and `RecordIdentity`/`SelectionIdentity` → `RecordingTerms`/`SelectionTerms`.

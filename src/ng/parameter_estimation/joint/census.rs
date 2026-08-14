@@ -1,6 +1,11 @@
-//! What each sample writes down at a kept locus.
+//! The census — what each sample writes down at a kept locus.
 //!
-//! **The fit reads nothing but these records**, so what is missing from them cannot be
+//! **The same questions put to every sample.** A census is a set of questions asked
+//! identically of a whole population, which is the one property this whole route rests on:
+//! the loci are the same in every sample, so the evidence gathered at them can be compared
+//! sample against sample rather than only summarised within one.
+//!
+//! **The fit reads nothing but this evidence**, so what is missing from it cannot be
 //! recovered later: the walk visits every locus once, and a field not written then would
 //! need a second traversal of the reads, which is the one thing this whole step exists to
 //! avoid.
@@ -8,7 +13,7 @@
 //! Design: `doc/devel/ng/spec/parameter_prepass_joint_records.md`. Types:
 //! `doc/devel/ng/arch/parameter_prepass_joint_records.md`.
 //!
-//! **Two kinds of record, because the two paths observe different things.** At an ordinary
+//! **Two kinds of evidence, because the two paths observe different things.** At an ordinary
 //! position the observation is *which base a read showed*; at a repeat tract it is *how long
 //! a tract a read showed*. Five per-base buckets cannot express a length and a length
 //! distribution cannot express which base was substituted, so the two share the selection
@@ -17,14 +22,14 @@
 //! **Three states must survive a write and a read** — a locus never walked (a bug), a locus
 //! walked with no coverage (data), and a locus whose reads all matched (data) — and at a
 //! repeat tract there is a fourth: reads reached the locus but none crossed the whole tract.
-//! [`DepthCode`] is what makes the first expressible; [`SsrRecords::covering_not_crossing`]
+//! [`DepthCode`] is what makes the first expressible; [`SsrEvidence::covering_not_crossing`]
 //! the fourth.
 //!
 //! # What is not here yet
 //!
-//! **The byte-level file format.** Where the records live between the walk and the fit is a
+//! **The byte-level census file.** Where the evidence lives between the walk and the fit is a
 //! non-goal of the spec (§1.2) — what it requires is a property, that the fit reaches every
-//! sample's records without walking the reads again. The encoding that carries the *content*
+//! sample's evidence without walking the reads again. The encoding that carries the *content*
 //! is here and is tested by packing and unpacking it; the framing that would put it in a file
 //! is the next unit, and it changes none of these types.
 
@@ -35,13 +40,13 @@ use md5::{Digest, Md5};
 use crate::ng::locus_generation::{LocusKind, ReadWitness, SampleLocusObservations};
 use crate::ng::parameter_estimation::generic::depth_bins::{DepthBin, DepthBinEdges};
 use crate::ng::parameter_estimation::joint::loci::{
-    KeptLoci, KeptLociDigest, KeptLociDigester, SelectionIdentity,
+    CensusLoci, CensusLociDigest, CensusLociDigester, SelectionTerms,
 };
 use crate::ng::repeat_catalog::StratumCounts;
 use crate::ng::types::{Bp, ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
 
 // ---------------------------------------------------------------------
-// The generic record
+// The generic half of the census
 // ---------------------------------------------------------------------
 
 /// What a read showed at a position: one of the four bases, or anything else.
@@ -248,12 +253,12 @@ pub struct AlleleObservation {
 /// means that depth with every read on the reference base, and the reference base is a
 /// property of the position rather than of the sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GenericRecords {
+pub struct GenericEvidence {
     depth: PackedDepthCodes,
     non_reference: Vec<AlleleObservation>,
 }
 
-impl GenericRecords {
+impl GenericEvidence {
     /// Records assembled from the two halves directly — **the door a reader comes in
     /// through, and the one a test that draws its own evidence uses.**
     ///
@@ -313,7 +318,7 @@ impl GenericRecords {
 }
 
 // ---------------------------------------------------------------------
-// The STR record
+// The STR half of the census
 // ---------------------------------------------------------------------
 
 /// How far either side of the reference tract length a read's offset is recorded.
@@ -416,7 +421,7 @@ pub struct TractDifference {
 /// [`covering_not_crossing`](Self::covering_not_crossing) is what makes the second
 /// expressible.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SsrRecords {
+pub struct SsrEvidence {
     offsets: Vec<OffsetCounts>,
     covering_not_crossing: Vec<u16>,
     walked: Vec<bool>,
@@ -425,7 +430,7 @@ pub struct SsrRecords {
     differences: Vec<TractDifference>,
 }
 
-impl SsrRecords {
+impl SsrEvidence {
     pub fn never_walked(loci: usize) -> Self {
         Self {
             offsets: vec![OffsetCounts::default(); loci],
@@ -524,12 +529,12 @@ pub enum SsrLocusState {
 }
 
 // ---------------------------------------------------------------------
-// What travels beside the records
+// What travels beside the evidence
 // ---------------------------------------------------------------------
 
 /// How many of a locus's reads are entered, before the rest are subsampled away.
 ///
-/// **A newtype and not a `usize`** because it travels in [`RecordIdentity`] beside other
+/// **A newtype and not a `usize`** because it travels in [`RecordingTerms`] beside other
 /// counts and is compared for equality: a bare integer there is transposable with
 /// [`DepthCap`], and the two are not the same number.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -546,7 +551,7 @@ pub struct DepthCap(pub u32);
 ///
 /// **The generic record stores a five-bit code, not a depth.** Two samples binned under
 /// different edges hold codes that mean different depths, *and every other value in
-/// [`RecordIdentity`] agrees* — the loci were the same, the seed was the same, the digest of
+/// [`RecordingTerms`] agrees* — the loci were the same, the seed was the same, the digest of
 /// the kept loci matches because the loci did match. A code is only a number until something
 /// says what ladder it indexes.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -566,14 +571,14 @@ impl DepthLadderDigest {
 
 /// The thirteen values the fit refuses to pool across.
 ///
-/// Seven say which loci were **asked for** ([`SelectionIdentity`]), one says which came
-/// **back** ([`KeptLociDigest`]), and five say **in what units** the evidence was written
+/// Seven say which loci were **asked for** ([`SelectionTerms`]), one says which came
+/// **back** ([`CensusLociDigest`]), and five say **in what units** the evidence was written
 /// down. An earlier version of this check had none of the last five, which left it able to
 /// pass while two samples' rows meant different things.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordIdentity {
-    pub selection: SelectionIdentity,
-    pub kept_loci: KeptLociDigest,
+pub struct RecordingTerms {
+    pub selection: SelectionTerms,
+    pub kept_loci: CensusLociDigest,
     /// Per stratum, how many loci the analysed regions hold against how many were kept.
     /// Anything pooled across strata is biased without it and silently so.
     pub ssr_stratum_counts: StratumCounts,
@@ -585,32 +590,45 @@ pub struct RecordIdentity {
     pub coverage_window: Option<Bp>,
 }
 
-impl RecordIdentity {
+impl RecordingTerms {
     /// Which value two samples first disagree on — `None` when they may be pooled.
     ///
-    /// **Naming the value is the whole point.** All thirteen fail the same way, silently,
-    /// and only the name says what to fix; the selection's seven delegate to their own
-    /// check for the same reason.
+    /// **Naming the value is the whole point.** Every value here fails the same way,
+    /// silently, and only the name says what to fix; the selection's own values delegate to
+    /// their own check for the same reason.
+    ///
+    /// **Destructured without `..` on purpose.** A value added to this struct stops this
+    /// function compiling rather than quietly going unchecked, and a value that goes
+    /// unchecked lets two samples that recorded different things be pooled without a word.
     pub fn first_disagreement(&self, other: &Self) -> Option<&'static str> {
-        if let Some(field) = self.selection.first_disagreement(&other.selection) {
+        let Self {
+            selection,
+            kept_loci,
+            ssr_stratum_counts,
+            read_cap,
+            depth_ladder,
+            depth_cap,
+            coverage_window,
+        } = self;
+        if let Some(field) = selection.first_disagreement(&other.selection) {
             return Some(field);
         }
-        if self.kept_loci != other.kept_loci {
+        if kept_loci != &other.kept_loci {
             return Some("the loci actually kept");
         }
-        if self.ssr_stratum_counts.iter_sorted() != other.ssr_stratum_counts.iter_sorted() {
+        if ssr_stratum_counts.iter_sorted() != other.ssr_stratum_counts.iter_sorted() {
             return Some("per-stratum locus counts");
         }
-        if self.read_cap != other.read_cap {
+        if read_cap != &other.read_cap {
             return Some("per-locus read cap");
         }
-        if self.depth_ladder != other.depth_ladder {
+        if depth_ladder != &other.depth_ladder {
             return Some("depth ladder edges");
         }
-        if self.depth_cap != other.depth_cap {
+        if depth_cap != &other.depth_cap {
             return Some("per-position depth cap");
         }
-        if self.coverage_window != other.coverage_window {
+        if coverage_window != &other.coverage_window {
             return Some("coverage window size");
         }
         None
@@ -618,7 +636,7 @@ impl RecordIdentity {
 }
 
 // ---------------------------------------------------------------------
-// The third object, which is not a record
+// The third object, which is not census evidence
 // ---------------------------------------------------------------------
 
 /// One sample's depth over fixed windows of the reference, plus the GC curve that corrects
@@ -795,15 +813,15 @@ pub const MIN_ALIGNED_BASES_PER_WINDOW: u32 = 12_000;
 /// sample's counts at a position are the sum of its read groups' — raw counts at one place,
 /// so the equality is exact and the fit may fold freely.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SampleRecords {
+pub struct SampleCensusEvidence {
     pub sample: String,
-    pub generic: BTreeMap<ReadGroupId, GenericRecords>,
-    pub ssr: BTreeMap<ReadGroupId, SsrRecords>,
+    pub generic: BTreeMap<ReadGroupId, GenericEvidence>,
+    pub ssr: BTreeMap<ReadGroupId, SsrEvidence>,
     pub coverage: Option<CoverageByWindow>,
-    pub identity: RecordIdentity,
+    pub terms: RecordingTerms,
 }
 
-impl SampleRecords {
+impl SampleCensusEvidence {
     /// This sample's depth at the `index`-th kept generic position, summed over its read
     /// groups.
     ///
@@ -823,7 +841,7 @@ impl SampleRecords {
 }
 
 // ---------------------------------------------------------------------
-// Filling the records during the walk
+// Filling the census during the walk
 // ---------------------------------------------------------------------
 
 /// Fills a sample's records as the walk hands it loci.
@@ -831,21 +849,21 @@ impl SampleRecords {
 /// **It is handed the same locus stream the histogram accumulators are handed**, borrowing
 /// rather than taking, so one walk fills both routes and the comparison between them is over
 /// identical evidence. It knows which loci are kept and ignores the rest.
-pub struct RecordWriter {
+pub struct CensusWriter {
     /// The kept generic positions, in selection order — the index a record entry carries.
     generic_loci: Vec<GenomePosition>,
     /// The kept STR loci as regions, in genome order.
     ssr_loci: Vec<GenomeRegion>,
     edges: DepthBinEdges,
-    generic: BTreeMap<ReadGroupId, GenericRecords>,
-    ssr: BTreeMap<ReadGroupId, SsrRecords>,
+    generic: BTreeMap<ReadGroupId, GenericEvidence>,
+    ssr: BTreeMap<ReadGroupId, SsrEvidence>,
     /// Non-reference observations before they are sorted — the walk arrives in position
     /// order, so this is already sorted in practice and the sort at `finish` is a guard.
     pending: BTreeMap<ReadGroupId, Vec<AlleleObservation>>,
-    digester: KeptLociDigester,
+    digester: CensusLociDigester,
     /// How far the digester has been fed, so a locus arriving out of order is caught.
     digested: usize,
-    identity: SelectionIdentity,
+    terms: SelectionTerms,
     read_cap: ReadCap,
     depth_cap: DepthCap,
     stratum_counts: StratumCounts,
@@ -871,7 +889,7 @@ fn thin_to_cap(reads: u32, depth: u32, cap: u32) -> u32 {
     (scaled.round() as u32).min(cap).max(u32::from(reads > 0))
 }
 
-impl RecordWriter {
+impl CensusWriter {
     #[allow(
         clippy::too_many_arguments,
         reason = "every one is a distinct input the records cannot be built without; \
@@ -879,10 +897,10 @@ impl RecordWriter {
     )]
     pub fn new(
         sample: String,
-        loci: &KeptLoci,
+        loci: &CensusLoci,
         read_groups: Vec<ReadGroupId>,
         contig_of: &dyn Fn(&str) -> Option<ContigId>,
-        identity: SelectionIdentity,
+        terms: SelectionTerms,
         edges: DepthBinEdges,
         read_cap: ReadCap,
         depth_cap: DepthCap,
@@ -908,9 +926,9 @@ impl RecordWriter {
             edges,
             generic: BTreeMap::new(),
             pending: BTreeMap::new(),
-            digester: KeptLociDigester::new(),
+            digester: CensusLociDigester::new(),
             digested: 0,
-            identity,
+            terms,
             read_cap,
             depth_cap,
             stratum_counts: loci.ssr_stratum_counts().clone(),
@@ -957,7 +975,7 @@ impl RecordWriter {
                 let records = self
                     .generic
                     .entry(*group)
-                    .or_insert_with(|| GenericRecords::never_walked(self.generic_loci.len()));
+                    .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
                 if records.depth.get(index) == DepthCode::NeverWalked {
                     records.depth.set(index, zero);
                 }
@@ -1025,7 +1043,7 @@ impl RecordWriter {
                 let records = self
                     .generic
                     .entry(*group)
-                    .or_insert_with(|| GenericRecords::never_walked(self.generic_loci.len()));
+                    .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
                 let capped = depth[offset].min(self.depth_cap.0);
                 records
                     .depth
@@ -1038,12 +1056,11 @@ impl RecordWriter {
                 if *observation.bases == *locus.reference_bases {
                     continue;
                 }
-                let allele = if observation.bases.len() == 1 {
-                    ObservedAllele::of_base(observation.bases[0])
-                } else {
+                let allele = match &*observation.bases {
+                    [base] => ObservedAllele::of_base(*base),
                     // An insertion or a deletion at a one-base locus: not one of the four,
                     // and the fit scores it as the fifth rather than guessing a base.
-                    ObservedAllele::Other
+                    _ => ObservedAllele::Other,
                 };
                 // **Thinned by the same ratio as the depth**, so the fractions the reads showed
                 // survive the cap exactly. Deterministic rather than a draw: a region-sharded
@@ -1082,7 +1099,7 @@ impl RecordWriter {
             let records = self
                 .ssr
                 .entry(observation.read_group)
-                .or_insert_with(|| SsrRecords::never_walked(self.ssr_loci.len()));
+                .or_insert_with(|| SsrEvidence::never_walked(self.ssr_loci.len()));
             records.walked[index] = true;
             let reads = u16::try_from(observation.num_obs).unwrap_or(u16::MAX);
             if observation.read_witness != crate::ng::locus_generation::ReadWitness::Complete {
@@ -1180,7 +1197,7 @@ impl RecordWriter {
     }
 
     /// The finished records, with the digest of what was actually written.
-    pub fn finish(mut self, coverage: Option<CoverageByWindow>) -> SampleRecords {
+    pub fn finish(mut self, coverage: Option<CoverageByWindow>) -> SampleCensusEvidence {
         // Every kept locus is digested, including any the walk never reached — the digest
         // witnesses the selection, and a run that stopped early must not produce a short
         // digest that happens to match another short one.
@@ -1196,24 +1213,24 @@ impl RecordWriter {
         for group in &self.read_groups {
             self.generic
                 .entry(*group)
-                .or_insert_with(|| GenericRecords::never_walked(self.generic_loci.len()));
+                .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
         }
         for (group, mut entries) in std::mem::take(&mut self.pending) {
             entries.sort_unstable_by_key(|entry| (entry.index, entry.allele));
             let records = self
                 .generic
                 .entry(group)
-                .or_insert_with(|| GenericRecords::never_walked(self.generic_loci.len()));
+                .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
             records.non_reference = entries;
         }
         let coverage_window = coverage.as_ref().map(CoverageByWindow::window_bp);
-        SampleRecords {
+        SampleCensusEvidence {
             sample: self.sample,
             generic: self.generic,
             ssr: self.ssr,
             coverage,
-            identity: RecordIdentity {
-                selection: self.identity,
+            terms: RecordingTerms {
+                selection: self.terms,
                 kept_loci: self.digester.finish(),
                 ssr_stratum_counts: self.stratum_counts,
                 read_cap: self.read_cap,
@@ -1264,14 +1281,17 @@ mod tests {
         assert_eq!(packed.as_bytes().len(), 1_250_000);
     }
 
-    // ---- the generic record --------------------------------------------------
+    // ---- the generic half ---------------------------------------------------
 
-    fn generic_records() -> GenericRecords {
-        let mut records = GenericRecords::never_walked(4);
+    fn generic_evidence() -> GenericEvidence {
+        // Five positions, one per state: walked at zero depth, reads with a non-reference
+        // allele, reads with two of them, reads with none at all, and never walked.
+        let mut records = GenericEvidence::never_walked(5);
         let edges = DepthBinEdges::new();
         records.depth.set(0, DepthCode::Binned(edges.bin_for(0)));
         records.depth.set(1, DepthCode::Binned(edges.bin_for(7)));
         records.depth.set(2, DepthCode::Binned(edges.bin_for(300)));
+        records.depth.set(3, DepthCode::Binned(edges.bin_for(5)));
         records.non_reference = vec![
             AlleleObservation {
                 index: 1,
@@ -1294,13 +1314,19 @@ mod tests {
 
     #[test]
     fn the_dense_half_reconstructs_a_quiet_position_and_the_sparse_half_the_rest() {
-        let records = generic_records();
+        let records = generic_evidence();
         let edges = DepthBinEdges::new();
 
         // Walked, zero depth: data, and distinguishable from never walked.
         assert_eq!(records.at(0), (DepthCode::Binned(edges.bin_for(0)), vec![]));
-        // Reads, none non-reference: also data, and also distinguishable.
-        assert_eq!(records.at(3).0, DepthCode::NeverWalked);
+        // Reads, none of them non-reference: also data, and a third thing again.
+        assert_eq!(
+            records.at(3),
+            (DepthCode::Binned(edges.bin_for(5)), vec![]),
+            "five reads and no sparse entry means five reads on the reference base"
+        );
+        // Never walked, which is the bug the other two must not be confused with.
+        assert_eq!(records.at(4).0, DepthCode::NeverWalked);
         // A multi-allelic position comes back with both alleles.
         let (depth, alleles) = records.at(2);
         assert_eq!(depth, DepthCode::Binned(edges.bin_for(300)));
@@ -1312,29 +1338,34 @@ mod tests {
     #[test]
     fn read_groups_fold_by_addition() {
         // Two read groups, the same position: the sample's count is the sum, exactly.
-        let mut one = GenericRecords::never_walked(2);
+        let mut one = GenericEvidence::never_walked(2);
         one.non_reference = vec![AlleleObservation {
             index: 1,
             allele: ObservedAllele::C,
             reads: 2,
         }];
-        let mut two = GenericRecords::never_walked(2);
+        let mut two = GenericEvidence::never_walked(2);
         two.non_reference = vec![AlleleObservation {
             index: 1,
             allele: ObservedAllele::C,
             reads: 5,
         }];
-        let records = SampleRecords {
+        let records = SampleCensusEvidence {
             sample: "s".to_string(),
             generic: BTreeMap::from([(ReadGroupId(0), one), (ReadGroupId(1), two)]),
             ssr: BTreeMap::new(),
             coverage: None,
-            identity: identity(),
+            terms: terms(),
         };
         assert_eq!(records.allele_counts(1), [0, 7, 0, 0, 0]);
+        assert_eq!(
+            records.allele_counts(0),
+            [0; 5],
+            "the fold reads the position it was asked for, not every entry there is"
+        );
     }
 
-    // ---- the STR record ------------------------------------------------------
+    // ---- the STR half -------------------------------------------------------
 
     #[test]
     fn an_offset_past_the_recorded_range_saturates_rather_than_wrapping() {
@@ -1353,7 +1384,7 @@ mod tests {
 
     #[test]
     fn the_four_states_at_an_str_locus_are_distinguishable() {
-        let mut records = SsrRecords::never_walked(4);
+        let mut records = SsrEvidence::never_walked(4);
         assert_eq!(records.state(0), SsrLocusState::NeverWalked);
 
         records.walked[1] = true;
@@ -1432,7 +1463,7 @@ mod tests {
 
     #[test]
     fn the_guard_threshold_is_one_in_ten_of_the_reads_that_differ() {
-        let mut records = SsrRecords::never_walked(2);
+        let mut records = SsrEvidence::never_walked(2);
         records.walked[0] = true;
         records.offsets[0].add(1, 18);
         records.guard.push(GuardObservation {
@@ -1452,10 +1483,10 @@ mod tests {
 
     // ---- the thirteen values -------------------------------------------------
 
-    fn identity() -> RecordIdentity {
-        RecordIdentity {
-            selection: selection_identity(),
-            kept_loci: KeptLociDigester::new().finish(),
+    fn terms() -> RecordingTerms {
+        RecordingTerms {
+            selection: selection_terms(),
+            kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: StratumCounts::default(),
             read_cap: ReadCap(100),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
@@ -1464,13 +1495,13 @@ mod tests {
         }
     }
 
-    fn selection_identity() -> SelectionIdentity {
+    fn selection_terms() -> SelectionTerms {
         use crate::ng::parameter_estimation::joint::loci::{
             CatalogBuildSettings, ReferenceDigest, RegionSetDigest,
         };
         use crate::ng::repeat_catalog::StrRepeatCriteria;
         use crate::ng::tandem_repeat::ScanParams;
-        SelectionIdentity {
+        SelectionTerms {
             seed: 42,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
@@ -1490,7 +1521,7 @@ mod tests {
         // These are the five that an earlier version of the check did not have: two samples
         // can agree on every locus, every seed and every digest and still have written down
         // rows that mean different things.
-        let base = identity();
+        let base = terms();
 
         let mut ladder = base.clone();
         ladder.depth_ladder = DepthLadderDigest([0; 16]);
@@ -1531,10 +1562,70 @@ mod tests {
 
     #[test]
     fn a_selection_difference_is_named_by_the_selection_rather_than_swallowed() {
-        let base = identity();
+        let base = terms();
         let mut other = base.clone();
         other.selection.seed += 1;
         assert_eq!(base.first_disagreement(&other), Some("selection seed"));
+    }
+
+    /// **The one value that says what a run *produced* rather than what it was asked for**,
+    /// and the only one of them with nothing behind it until now: every fixture in the
+    /// module built its terms with the same empty digest, so disabling this comparison
+    /// altogether left the whole joint module's suite green. Two samples pooled across it
+    /// are two samples whose rows are indexed against different lists of positions.
+    #[test]
+    fn a_different_set_of_kept_loci_is_refused_and_named() {
+        let base = terms();
+        let mut other = base.clone();
+        let mut digester = CensusLociDigester::new();
+        digester.observe(
+            0,
+            GenomePosition {
+                contig: ContigId(0),
+                position: Position(1),
+            },
+        );
+        other.kept_loci = digester.finish();
+        assert_ne!(base.kept_loci, other.kept_loci);
+        assert_eq!(
+            base.first_disagreement(&other),
+            Some("the loci actually kept")
+        );
+    }
+
+    // ---- the per-position depth cap ------------------------------------------
+
+    /// **The one function whose stated contract is byte-identity**, and it had no test: a
+    /// region-sharded walk and a single-threaded one must thin a deep position's counts the
+    /// same way, which is why the share is computed rather than drawn. Turning the rounding
+    /// from nearest to downwards leaves every other test in the module passing.
+    #[test]
+    fn a_thinned_share_rounds_to_nearest_and_never_loses_the_last_read() {
+        assert_eq!(thin_to_cap(7, 20, 20), 7, "at the cap, nothing is thinned");
+        assert_eq!(
+            thin_to_cap(7, 10, 20),
+            7,
+            "below the cap, nothing is thinned"
+        );
+        assert_eq!(thin_to_cap(0, 0, 20), 0, "no depth, no reads");
+        assert_eq!(
+            thin_to_cap(20, 40, 20),
+            10,
+            "half the depth keeps half the reads, so the fraction survives"
+        );
+        assert_eq!(thin_to_cap(3, 8, 5), 2, "1.875 rounds to 2, not down to 1");
+        assert_eq!(thin_to_cap(2, 9, 5), 1, "1.111 rounds to 1, not up to 2");
+        assert_eq!(
+            thin_to_cap(1, 400, 20),
+            1,
+            "a single stray read at 400x is kept rather than rounded away — those reads \
+             are what the error rate is fitted from"
+        );
+        assert_eq!(
+            thin_to_cap(400, 400, 20),
+            20,
+            "and no thinned count ever exceeds the cap"
+        );
     }
 
     // ---- the coverage summary ------------------------------------------------
@@ -1609,8 +1700,8 @@ mod tests {
     }
 
     /// A selection of three positions on one contig, and a writer over it.
-    fn writer_over(positions: &[u64], groups: &[u32]) -> RecordWriter {
-        let loci = KeptLoci::from_parts(
+    fn writer_over(positions: &[u64], groups: &[u32]) -> CensusWriter {
+        let loci = CensusLoci::from_parts(
             positions
                 .iter()
                 .map(|p| GenomePosition {
@@ -1621,12 +1712,12 @@ mod tests {
             Default::default(),
             StratumCounts::default(),
         );
-        RecordWriter::new(
+        CensusWriter::new(
             "sample".to_string(),
             &loci,
             groups.iter().map(|g| ReadGroupId(*g)).collect(),
             &|_| Some(ContigId(0)),
-            selection_identity(),
+            selection_terms(),
             DepthBinEdges::new(),
             ReadCap(100),
             DepthCap(124),
@@ -1715,7 +1806,7 @@ mod tests {
     // ---- the writer at a repeat tract ---------------------------------------
 
     /// A twelve-base `AT` tract, kept, with the writer over it.
-    fn ssr_writer() -> RecordWriter {
+    fn ssr_writer() -> CensusWriter {
         use crate::ng::region_typing::segment_criteria::SsrSegment;
         use crate::ng::repeat_catalog::strata::StratumSampler;
 
@@ -1730,13 +1821,13 @@ mod tests {
         let mut sampler = StratumSampler::new(16, 0);
         sampler.offer(2, 6, segment);
         let (counts, sample) = sampler.finish();
-        let loci = KeptLoci::from_parts(Vec::new(), sample, counts);
-        RecordWriter::new(
+        let loci = CensusLoci::from_parts(Vec::new(), sample, counts);
+        CensusWriter::new(
             "sample".to_string(),
             &loci,
             vec![ReadGroupId(0)],
             &|_| Some(ContigId(0)),
-            selection_identity(),
+            selection_terms(),
             DepthBinEdges::new(),
             ReadCap(100),
             DepthCap(124),
@@ -1900,17 +1991,17 @@ mod tests {
         let mut idle = writer_over(&[10, 20, 30], &[0]);
         idle.add_locus(&generic_locus(30, b"A", vec![observation(b"A", 0, 3)]));
         assert_eq!(
-            walked.finish(None).identity.kept_loci,
-            idle.finish(None).identity.kept_loci
+            walked.finish(None).terms.kept_loci,
+            idle.finish(None).terms.kept_loci
         );
 
         let other = writer_over(&[10, 20, 31], &[0]);
         assert_ne!(
             writer_over(&[10, 20, 30], &[0])
                 .finish(None)
-                .identity
+                .terms
                 .kept_loci,
-            other.finish(None).identity.kept_loci
+            other.finish(None).terms.kept_loci
         );
     }
 

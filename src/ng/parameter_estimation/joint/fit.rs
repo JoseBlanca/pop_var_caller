@@ -1,8 +1,8 @@
 //! The estimator: every parameter fitted once, over every sample at the same loci.
 //!
 //! Design: `doc/devel/ng/spec/parameter_prepass_joint_fit.md`. Types:
-//! `doc/devel/ng/arch/parameter_prepass_joint_fit.md`. It reads the records of
-//! [`records`](super::records) at the loci of [`loci`](super::loci) and nothing else.
+//! `doc/devel/ng/arch/parameter_prepass_joint_fit.md`. It reads the evidence of
+//! [`census`](super::census) at the loci of [`loci`](super::loci) and nothing else.
 //!
 //! **This is the generic path.** The repeat-tract half of the spec (§4) is not here.
 //!
@@ -48,8 +48,8 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
+use super::census::{DepthCode, SampleCensusEvidence};
 use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination};
-use super::records::{DepthCode, SampleRecords};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -328,7 +328,7 @@ pub struct JointFitConfig {
     /// The pass stops when no parameter moves by more than this, relative to itself.
     pub stillness: f64,
     /// The ladder the records' depth codes index. Two samples binned under different edges
-    /// hold codes that mean different depths, which the identity check already refuses.
+    /// hold codes that mean different depths, which the recording-terms check already refuses.
     pub edges: Arc<DepthBinEdges>,
     /// How the share of a sample's reads that came from another individual is measured
     /// ([`contamination`](super::contamination)), which the fit runs once it has converged.
@@ -469,7 +469,7 @@ impl PositionEvidence {
 /// observations are sorted by position, so advancing a cursor costs one comparison; a binary
 /// search per sample per position would cost twenty-one, two million times over.
 struct EvidenceCursor<'a> {
-    samples: &'a [SampleRecords],
+    samples: &'a [SampleCensusEvidence],
     edges: &'a DepthBinEdges,
     /// Each sample's own mean read depth over the kept positions — the centre of the Poisson
     /// that [`fill_depth_weights`] weights a stored code's range with.
@@ -484,7 +484,7 @@ struct EvidenceCursor<'a> {
 }
 
 impl<'a> EvidenceCursor<'a> {
-    fn position_count(samples: &[SampleRecords]) -> usize {
+    fn position_count(samples: &[SampleCensusEvidence]) -> usize {
         samples
             .first()
             .and_then(|s| s.generic.values().next())
@@ -500,7 +500,7 @@ impl<'a> EvidenceCursor<'a> {
     /// What it costs is bounded by the width of a bin, which is why a single number is enough
     /// to be going on with — the per-window coverage summary the records already carry is
     /// where a better one would come from.
-    fn mean_depth(samples: &[SampleRecords], edges: &DepthBinEdges) -> Vec<f64> {
+    fn mean_depth(samples: &[SampleCensusEvidence], edges: &DepthBinEdges) -> Vec<f64> {
         samples
             .iter()
             .map(|sample| {
@@ -542,7 +542,7 @@ impl<'a> EvidenceCursor<'a> {
     /// chunk begins, and walked with a cursor from there, so a chunk costs one search per
     /// sample rather than one per position.
     fn over(
-        samples: &'a [SampleRecords],
+        samples: &'a [SampleCensusEvidence],
         edges: &'a DepthBinEdges,
         coverage: &'a [f64],
         as_a_range: bool,
@@ -1046,12 +1046,12 @@ fn tally_of(
 /// [`JointFitError::IdentityMismatch`] before any arithmetic, when two samples did not keep
 /// the same loci — the refusal [`loci`](super::loci) defines and this call enforces.
 pub fn fit_jointly(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     config: &JointFitConfig,
 ) -> Result<JointFit, JointFitError> {
     let first = samples.first().ok_or(JointFitError::NoSamples)?;
     for other in &samples[1..] {
-        if let Some(field) = first.identity.first_disagreement(&other.identity) {
+        if let Some(field) = first.terms.first_disagreement(&other.terms) {
             return Err(JointFitError::IdentityMismatch {
                 first: first.sample.clone(),
                 second: other.sample.clone(),
@@ -1217,7 +1217,7 @@ pub fn fit_jointly(
 
 /// One run of the alternation, from one starting point.
 fn maximise(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     config: &JointFitConfig,
     groups: &[ReadGroupId],
     group_index: &[Vec<usize>],
@@ -1303,7 +1303,7 @@ fn maximise(
 /// **Split across cores by position.** Positions are independent given the parameters, and a
 /// chunk's counts add to another chunk's, so the pass is a map and a sum.
 fn expectation(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     config: &JointFitConfig,
     group_index: &[Vec<usize>],
     coverage: &[f64],
@@ -1318,7 +1318,7 @@ fn expectation(
 /// and the chunks have to be held until they can be joined in position order rather than
 /// summed as they arrive — so the iterating passes use the streaming sum and pay neither.
 fn expectation_pass(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     config: &JointFitConfig,
     group_index: &[Vec<usize>],
     coverage: &[f64],
@@ -2597,18 +2597,18 @@ mod tests {
     // from parameters chosen here, with no reads and no alignments, and the fit has to return
     // what was drawn.
 
-    use crate::ng::parameter_estimation::joint::loci::{
-        CatalogBuildSettings, KeptLociDigester, ReferenceDigest, RegionSetDigest, SelectionIdentity,
+    use crate::ng::parameter_estimation::joint::census::{
+        AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
+        PackedDepthCodes, ReadCap, RecordingTerms,
     };
-    use crate::ng::parameter_estimation::joint::records::{
-        AlleleObservation, DepthCap, DepthLadderDigest, GenericRecords, ObservedAllele,
-        PackedDepthCodes, ReadCap, RecordIdentity,
+    use crate::ng::parameter_estimation::joint::loci::{
+        CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
     };
     use crate::ng::repeat_catalog::StrRepeatCriteria;
     use crate::ng::tandem_repeat::ScanParams;
 
-    fn selection_identity() -> SelectionIdentity {
-        SelectionIdentity {
+    fn selection_terms() -> SelectionTerms {
+        SelectionTerms {
             seed: 42,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
@@ -2692,7 +2692,7 @@ mod tests {
     }
 
     struct DrawnCohort {
-        samples: Vec<SampleRecords>,
+        samples: Vec<SampleCensusEvidence>,
         clean: f64,
         noisy: f64,
         noisy_share: f64,
@@ -2824,9 +2824,9 @@ mod tests {
             }
         }
 
-        let identity = RecordIdentity {
-            selection: selection_identity(),
-            kept_loci: KeptLociDigester::new().finish(),
+        let terms = RecordingTerms {
+            selection: selection_terms(),
+            kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(100),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
@@ -2834,11 +2834,11 @@ mod tests {
             coverage_window: None,
         };
         let records = (0..samples)
-            .map(|s| SampleRecords {
+            .map(|s| SampleCensusEvidence {
                 sample: format!("s{s}"),
                 generic: [(
                     ReadGroupId(0),
-                    GenericRecords::from_parts(
+                    GenericEvidence::from_parts(
                         std::mem::replace(&mut depth[s], PackedDepthCodes::never_walked(0)),
                         std::mem::take(&mut sparse[s]),
                     ),
@@ -2847,7 +2847,7 @@ mod tests {
                 .collect(),
                 ssr: BTreeMap::new(),
                 coverage: None,
-                identity: identity.clone(),
+                terms: terms.clone(),
             })
             .collect();
         DrawnCohort {
@@ -3186,7 +3186,7 @@ mod tests {
             b: 2.0,
         };
         let mut cohort = draw_cohort(3, 50, 4.0, (0.002, 0.05, 0.01), density, 0.0, 7);
-        cohort.samples[1].identity.depth_cap = DepthCap(60);
+        cohort.samples[1].terms.depth_cap = DepthCap(60);
         let error = fit_jointly(&cohort.samples, &JointFitConfig::default())
             .expect_err("the samples did not record the same evidence");
         match error {

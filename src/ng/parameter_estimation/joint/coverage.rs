@@ -1,6 +1,6 @@
 //! Building one sample's coverage-by-window summary as the walk runs.
 //!
-//! [`CoverageByWindow`](super::records::CoverageByWindow) is the finished object and lives
+//! [`CoverageByWindow`](super::census::CoverageByWindow) is the finished object and lives
 //! with the records it travels beside; this module is what fills it. Design:
 //! `doc/devel/ng/spec/parameter_prepass_joint_records.md` §4.
 //!
@@ -33,12 +33,12 @@
 //! **Windows the analysed regions do not touch are not windows.** A run restricted to a BED
 //! touches a small share of a reference's grid, and giving the untouched ones an entry would
 //! put every one of them in
-//! [`CoverageByWindow`](super::records::CoverageByWindow)'s short-window list — the list whose
+//! [`CoverageByWindow`](super::census::CoverageByWindow)'s short-window list — the list whose
 //! whole design assumes it is sparse — and then weight them, at mean depth zero, into any
 //! wider mean summed across them.
 
+use crate::ng::parameter_estimation::joint::census::CoverageByWindow;
 use crate::ng::parameter_estimation::joint::loci::SelectableRegions;
-use crate::ng::parameter_estimation::joint::records::CoverageByWindow;
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 
 /// The stored window width. **Fine on purpose**: a window's mean separates one copy from two

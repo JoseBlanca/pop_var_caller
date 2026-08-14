@@ -38,6 +38,10 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::joint::census::{
+    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericEvidence, ObservedAllele,
+    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence,
+};
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
 };
@@ -45,11 +49,7 @@ use pop_var_caller::ng::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFit, JointFitConfig, fit_jointly,
 };
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
-    CatalogBuildSettings, KeptLociDigester, ReferenceDigest, RegionSetDigest, SelectionIdentity,
-};
-use pop_var_caller::ng::parameter_estimation::joint::records::{
-    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericRecords, ObservedAllele,
-    PackedDepthCodes, ReadCap, RecordIdentity, SampleRecords,
+    CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
 };
 use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
 use pop_var_caller::ng::tandem_repeat::ScanParams;
@@ -193,7 +193,7 @@ fn main() {
 
 /// One arm: how many markers survived, and every sample's fraction in order.
 fn run(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     fit: &JointFit,
     settings: &ContaminationConfig,
 ) -> (u64, Vec<f64>) {
@@ -231,7 +231,7 @@ fn run(
 }
 
 struct Drawn {
-    samples: Vec<SampleRecords>,
+    samples: Vec<SampleCensusEvidence>,
 }
 
 /// Draw a structured cohort and write it into the records the fit reads.
@@ -358,8 +358,8 @@ fn draw(
         }
     }
 
-    let identity = RecordIdentity {
-        selection: SelectionIdentity {
+    let terms = RecordingTerms {
+        selection: SelectionTerms {
             seed,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
@@ -372,7 +372,7 @@ fn draw(
             generic_target: positions as u64,
             ssr_cap: 1_000,
         },
-        kept_loci: KeptLociDigester::new().finish(),
+        kept_loci: CensusLociDigester::new().finish(),
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(1_000),
         depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
@@ -381,11 +381,11 @@ fn draw(
     };
     Drawn {
         samples: (0..samples)
-            .map(|s| SampleRecords {
+            .map(|s| SampleCensusEvidence {
                 sample: format!("s{s:02}"),
                 generic: [(
                     ReadGroupId(0),
-                    GenericRecords::from_parts(
+                    GenericEvidence::from_parts(
                         std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
                         std::mem::take(&mut sparse[s]),
                     ),
@@ -394,7 +394,7 @@ fn draw(
                 .collect(),
                 ssr: BTreeMap::new(),
                 coverage: None,
-                identity: identity.clone(),
+                terms: terms.clone(),
             })
             .collect(),
     }

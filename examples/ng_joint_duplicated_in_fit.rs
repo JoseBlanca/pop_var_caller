@@ -37,15 +37,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::joint::census::{
+    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericEvidence, ObservedAllele,
+    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence,
+};
 use pop_var_caller::ng::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, fit_jointly,
 };
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
-    CatalogBuildSettings, KeptLociDigester, ReferenceDigest, RegionSetDigest, SelectionIdentity,
-};
-use pop_var_caller::ng::parameter_estimation::joint::records::{
-    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericRecords, ObservedAllele,
-    PackedDepthCodes, ReadCap, RecordIdentity, SampleRecords,
+    CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
 };
 use pop_var_caller::ng::repeat_catalog::StrRepeatCriteria;
 use pop_var_caller::ng::tandem_repeat::ScanParams;
@@ -174,7 +174,7 @@ fn main() {
 }
 
 struct Drawn {
-    samples: Vec<SampleRecords>,
+    samples: Vec<SampleCensusEvidence>,
     /// Per sample, `ln P(coverage | two copies) − ln P(coverage | one)` at every position.
     coverage_odds: Vec<Arc<[f32]>>,
     /// The share of positions at which a sample was drawn genuinely heterozygous, averaged.
@@ -337,8 +337,8 @@ fn draw(
         }
     }
 
-    let identity = RecordIdentity {
-        selection: SelectionIdentity {
+    let terms = RecordingTerms {
+        selection: SelectionTerms {
             seed,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
@@ -351,7 +351,7 @@ fn draw(
             generic_target: positions as u64,
             ssr_cap: 1_000,
         },
-        kept_loci: KeptLociDigester::new().finish(),
+        kept_loci: CensusLociDigester::new().finish(),
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(1_000),
         depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
@@ -360,11 +360,11 @@ fn draw(
     };
     Drawn {
         samples: (0..samples)
-            .map(|s| SampleRecords {
+            .map(|s| SampleCensusEvidence {
                 sample: format!("s{s:02}"),
                 generic: [(
                     ReadGroupId(0),
-                    GenericRecords::from_parts(
+                    GenericEvidence::from_parts(
                         std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
                         std::mem::take(&mut sparse[s]),
                     ),
@@ -373,7 +373,7 @@ fn draw(
                 .collect(),
                 ssr: BTreeMap::new(),
                 coverage: None,
-                identity: identity.clone(),
+                terms: terms.clone(),
             })
             .collect(),
         coverage_odds: odds.into_iter().map(Arc::from).collect(),

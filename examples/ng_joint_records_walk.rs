@@ -2,7 +2,7 @@
 //!
 //! Everything measured for this route so far was measured against truths the measuring
 //! program made up itself. This one drives the real writer —
-//! `parameter_estimation::joint::records::RecordWriter` — through real alignments, and it
+//! `parameter_estimation::joint::census::CensusWriter` — through real alignments, and it
 //! answers three questions the specifications assert without evidence:
 //!
 //! 1. **What do the records weigh?** `parameter_prepass_joint_records.md` §6 prices them by
@@ -55,6 +55,9 @@ use pop_var_caller::ng::locus_generation::{
     GeneratorSet, GeneratorSlot, LocusKind, SampleLocusObservationsIterator, UnhandledReason,
 };
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
+use pop_var_caller::ng::parameter_estimation::joint::census::{
+    CensusWriter, DepthCap, DepthCode, ReadCap, SampleCensusEvidence,
+};
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
 };
@@ -63,11 +66,8 @@ use pop_var_caller::ng::parameter_estimation::joint::coverage::{
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFit, JointFitConfig, fit_jointly};
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
-    CatalogBuildSettings, KeptLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
-    SelectionIdentity, UnambiguousRuns, select_kept_loci,
-};
-use pop_var_caller::ng::parameter_estimation::joint::records::{
-    DepthCap, DepthCode, ReadCap, RecordWriter, SampleRecords,
+    CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
+    SelectionTerms, UnambiguousRuns, select_kept_loci,
 };
 use pop_var_caller::ng::parameter_estimation::joint::ssr_fit;
 use pop_var_caller::ng::read::ReadFilterConfig;
@@ -88,7 +88,7 @@ use pop_var_caller::ng::repeat_catalog::{
 use pop_var_caller::ng::types::{Bp, ContigId};
 use pop_var_caller::regions::ContigBounds;
 
-/// The stored coverage window, and the one the identity makes every sample agree on.
+/// The stored coverage window, and the one the recording terms make every sample agree on.
 const WINDOW_BP: Bp = Bp(500);
 
 /// The seed the locus selection is drawn with. One number, shared by every sample, and part
@@ -152,7 +152,7 @@ fn main() {
         .expect("the catalog is this reference's");
     let criteria = StrRepeatCriteria::from(&TypedRegionConfig::default());
 
-    let identity = SelectionIdentity {
+    let terms = SelectionTerms {
         seed: SEED,
         reference: ReferenceDigest::of(&info).expect("the reference has a digest"),
         analysed_regions: RegionSetDigest::of(&analysed),
@@ -164,7 +164,7 @@ fn main() {
         ssr_cap: 1_000_000,
     };
 
-    let kept = select_kept_loci(&identity, &catalog, &analysed, &unambiguous)
+    let kept = select_kept_loci(&terms, &catalog, &analysed, &unambiguous)
         .expect("the catalog serves these criteria");
     println!(
         "analysed regions {} — {} spans, {} bases",
@@ -206,7 +206,7 @@ fn main() {
     );
 
     // ---- one walk per sample -------------------------------------------------------------
-    let mut cohort: Vec<SampleRecords> = Vec::new();
+    let mut cohort: Vec<SampleCensusEvidence> = Vec::new();
     for alignment in &alignments {
         let at = Instant::now();
         let records = walk_one(
@@ -219,7 +219,7 @@ fn main() {
             &generic_domain,
             &grid,
             &kept,
-            &identity,
+            &terms,
         );
         println!(
             "\n=== {} — {:.1} s",
@@ -231,11 +231,11 @@ fn main() {
     }
 
     // ---- do they pool at all? --------------------------------------------------------------
-    println!("\n--- the identity check, which is what lets these be pooled ---");
+    println!("\n--- the recording-terms check, which is what lets these be pooled ---");
     let first = &cohort[0];
     let mut refused = 0;
     for other in &cohort[1..] {
-        if let Some(field) = first.identity.first_disagreement(&other.identity) {
+        if let Some(field) = first.terms.first_disagreement(&other.terms) {
             println!(
                 "  {} disagrees with {} on {field}",
                 other.sample, first.sample
@@ -302,7 +302,7 @@ fn main() {
         Vec::new()
     };
 
-    depth_code_census(&cohort);
+    depth_ladder_occupancy(&cohort);
 
     // **The ordinary-position half runs once and its answer is handed on.** The repeat-tract
     // half needs each sample's homozygote excess from it and gives nothing back, so re-fitting
@@ -324,7 +324,7 @@ fn main() {
 /// three reads a position is almost entirely exact; one at three hundred is entirely in the
 /// ladder's top bin, which is the cap and so exact again because a deeper position was thinned
 /// down to it. The band in between is where a stored code stands for several depths at once.
-fn depth_code_census(cohort: &[SampleRecords]) {
+fn depth_ladder_occupancy(cohort: &[SampleCensusEvidence]) {
     let edges = DepthBinEdges::new();
     println!("\n--- where the positions sit on the depth ladder ---");
     println!(
@@ -372,7 +372,7 @@ fn depth_code_census(cohort: &[SampleRecords]) {
 /// heterozygosity comes out at with the count of positions that actually carried a read beside
 /// it.
 fn fit_the_cohort(
-    cohort: &[SampleRecords],
+    cohort: &[SampleCensusEvidence],
     coverage_odds: Vec<Arc<[f32]>>,
     kept: &[pop_var_caller::ng::types::GenomePosition],
     contigs: &ContigList,
@@ -708,7 +708,7 @@ fn fit_the_cohort(
 /// `√(copies² × 0.194² + copies × 313 / aligned bases)`, fitted to two points measured across
 /// eight tomato accessions (`duplicated_locus_probe_2026-08-12.md` §4).
 fn coverage_odds(
-    cohort: &[SampleRecords],
+    cohort: &[SampleCensusEvidence],
     grid: &CoverageGrid,
     kept: &[pop_var_caller::ng::types::GenomePosition],
 ) -> Vec<Arc<[f32]>> {
@@ -760,8 +760,8 @@ fn coverage_odds(
 /// a cohort of sixty-three single-read-group samples would otherwise ask 189 numbers of a
 /// stratum holding a few dozen tracts.
 fn fit_the_tracts(
-    cohort: &[SampleRecords],
-    kept: &KeptLoci,
+    cohort: &[SampleCensusEvidence],
+    kept: &CensusLoci,
     contigs: &ContigList,
     fit: &JointFit,
 ) {
@@ -934,9 +934,9 @@ fn walk_one(
     typed: &[TypedRegion],
     generic_domain: &SelectableRegions,
     grid: &CoverageGrid,
-    kept: &pop_var_caller::ng::parameter_estimation::joint::loci::KeptLoci,
-    identity: &SelectionIdentity,
-) -> SampleRecords {
+    kept: &pop_var_caller::ng::parameter_estimation::joint::loci::CensusLoci,
+    terms: &SelectionTerms,
+) -> SampleCensusEvidence {
     let read_groups =
         build_read_groups(&[alignment.to_path_buf()]).expect("the header declares read groups");
     let sample = match read_groups.read_groups_per_sample() {
@@ -1023,12 +1023,12 @@ fn walk_one(
             .position(|entry| entry.name == name)
             .map(|i| ContigId(i as u32))
     };
-    let mut writer = RecordWriter::new(
+    let mut writer = CensusWriter::new(
         sample.sample.to_string(),
         kept,
         sample.read_groups.clone(),
         &contig_of,
-        identity.clone(),
+        terms.clone(),
         DepthBinEdges::new(),
         ReadCap(pop_var_caller::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
         // **The ladder's own top.** The stored code is a bin and the ladder's last bin is the
@@ -1085,7 +1085,7 @@ fn walk_one(
 ///
 /// **Separately and not as a total**, because `parameter_prepass_joint_records.md` §6 claims
 /// the STR set is the larger half and a single number would hide that being wrong.
-fn report_sizes(records: &SampleRecords) {
+fn report_sizes(records: &SampleCensusEvidence) {
     let positions = records
         .generic
         .values()
@@ -1103,7 +1103,7 @@ fn report_sizes(records: &SampleRecords) {
         .sum();
     let sparse_bytes = sparse_entries
         * std::mem::size_of::<
-            pop_var_caller::ng::parameter_estimation::joint::records::AlleleObservation,
+            pop_var_caller::ng::parameter_estimation::joint::census::AlleleObservation,
         >();
 
     let ssr_loci = records.ssr.values().next().map_or(0, |s| s.len());
@@ -1113,7 +1113,7 @@ fn report_sizes(records: &SampleRecords) {
         .map(|s| {
             s.len()
                 * (std::mem::size_of::<
-                    pop_var_caller::ng::parameter_estimation::joint::records::OffsetCounts,
+                    pop_var_caller::ng::parameter_estimation::joint::census::OffsetCounts,
                 >() + std::mem::size_of::<u16>()
                     + std::mem::size_of::<u32>()
                     + std::mem::size_of::<bool>())
@@ -1123,7 +1123,7 @@ fn report_sizes(records: &SampleRecords) {
     let difference_entries: usize = records.ssr.values().map(|s| s.differences().len()).sum();
     let difference_bytes = difference_entries
         * std::mem::size_of::<
-            pop_var_caller::ng::parameter_estimation::joint::records::TractDifference,
+            pop_var_caller::ng::parameter_estimation::joint::census::TractDifference,
         >();
 
     // The three states the depth array must keep apart.
@@ -1208,7 +1208,7 @@ const MIN_SAMPLES_WITH_DATA: usize = 8;
 /// divisor blows up.
 const MIN_FREQUENCY: f64 = 0.05;
 
-fn structure(cohort: &[SampleRecords], positions: usize) {
+fn structure(cohort: &[SampleCensusEvidence], positions: usize) {
     println!("\n--- how far apart the samples are ---");
     let started = Instant::now();
     let markers = markers(cohort, positions);
@@ -1277,7 +1277,7 @@ fn structure(cohort: &[SampleRecords], positions: usize) {
 }
 
 /// The positions worth decomposing on, with each sample's reads at them.
-fn markers(cohort: &[SampleRecords], positions: usize) -> Vec<Marker> {
+fn markers(cohort: &[SampleCensusEvidence], positions: usize) -> Vec<Marker> {
     let samples = cohort.len();
     // Per position, each sample's four allele counts. Built one position at a time would be
     // a binary search per sample per position; instead each sample's sparse list is swept
@@ -1580,7 +1580,7 @@ fn jacobi_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 
 /// Unused today, kept because the STR half of the report will want it.
 #[allow(dead_code)]
-fn per_read_group(records: &SampleRecords) -> BTreeMap<String, usize> {
+fn per_read_group(records: &SampleCensusEvidence) -> BTreeMap<String, usize> {
     records
         .generic
         .iter()

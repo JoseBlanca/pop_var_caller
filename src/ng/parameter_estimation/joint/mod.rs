@@ -11,7 +11,7 @@
 //! `parameter_prepass_joint_loci.md` (which loci), `parameter_prepass_joint_records.md`
 //! (what is recorded at each). Types: the three `arch/parameter_prepass_joint_*.md`.
 //!
-//! **Under construction.** [`loci`] settles which loci every sample keeps, [`records`] what
+//! **Under construction.** [`loci`] settles which loci every sample keeps, [`census`] what
 //! each writes down there, [`coverage`] fills the window summary they travel with, [`fit`] is
 //! the estimator over ordinary positions — including the class for positions a sample carries
 //! more copies of than the reference does — [`ssr_fit`] the estimator over repeat tracts, and
@@ -22,9 +22,9 @@
 //! only**: [`ssr_fit`] takes each sample's homozygote excess from [`fit`] and gives nothing back,
 //! so a run may drop the ordinary-position records before it reads a single tract.
 
+pub mod census;
 pub mod contamination;
 pub mod coverage;
 pub mod fit;
 pub mod loci;
-pub mod records;
 pub mod ssr_fit;

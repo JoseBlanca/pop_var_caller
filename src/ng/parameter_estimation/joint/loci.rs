@@ -397,8 +397,8 @@ impl ReferenceDigest {
     ///
     /// [`SelectionError::ReferenceNotDigested`] when the reference was read from a `.fai`
     /// alone. A `.fai` describes a genome's geometry and holds no bases, so there is
-    /// nothing to digest — and a selection whose identity says nothing about the bases it
-    /// selected over is an identity that cannot refuse a mismatched run.
+    /// nothing to digest — and a selection whose terms say nothing about the bases it
+    /// selected over cannot refuse a mismatched run.
     pub fn of(reference: &ReferenceInfo) -> Result<Self, SelectionError> {
         reference
             .md5
@@ -411,7 +411,7 @@ impl ReferenceDigest {
 ///
 /// **The likeliest of the seven to differ by accident**, because a BED feels like a runtime
 /// convenience and is not: two samples walked under different BEDs selected different loci
-/// from different denominators, and every other value in [`SelectionIdentity`] agrees.
+/// from different denominators, and every other value in [`SelectionTerms`] agrees.
 ///
 /// Digests the spans as coordinates rather than the file's bytes, so two BEDs that name the
 /// same territory with different whitespace, ordering or track lines compare equal — the
@@ -455,14 +455,29 @@ impl CatalogBuildSettings {
 }
 
 impl PartialEq for CatalogBuildSettings {
+    /// **Destructured without `..` on purpose**: a field added to this struct stops this
+    /// function compiling instead of quietly dropping out of the comparison, and a value
+    /// that drops out of the comparison turns a refusal to pool two runs into a silent
+    /// pooling of evidence recorded under different settings.
     fn eq(&self, other: &Self) -> bool {
-        same_criteria(&self.criteria, &other.criteria)
-            && self.scan == other.scan
-            && self.tool_version == other.tool_version
+        let Self {
+            criteria,
+            scan,
+            tool_version,
+        } = self;
+        let Self {
+            criteria: their_criteria,
+            scan: their_scan,
+            tool_version: their_tool_version,
+        } = other;
+        same_criteria(criteria, their_criteria)
+            && scan == their_scan
+            && tool_version == their_tool_version
     }
 }
 
-/// Two sets of criteria, compared as an identity check rather than as two numbers.
+/// Two sets of STR criteria, compared as whole values rather than field by field — a
+/// difference anywhere means the two runs asked the catalog for different loci.
 ///
 /// **The purity floor is compared by bit pattern.** `StrRepeatCriteria` carries an `f32`
 /// purity floor, and the `==` that `derive(PartialEq)` generates answers `false` for two
@@ -491,7 +506,7 @@ fn same_criteria(left: &StrRepeatCriteria, right: &StrRepeatCriteria) -> bool {
 /// **`PartialEq` and not `Eq`, and that is forced rather than chosen** — see
 /// [`same_criteria`].
 #[derive(Debug, Clone)]
-pub struct SelectionIdentity {
+pub struct SelectionTerms {
     /// The run's selection seed. A different seed selects a disjoint set, and both sets
     /// look well-formed.
     pub seed: u64,
@@ -510,44 +525,68 @@ pub struct SelectionIdentity {
     pub ssr_cap: usize,
 }
 
-impl PartialEq for SelectionIdentity {
+impl PartialEq for SelectionTerms {
+    /// **Destructured without `..` on purpose** — see [`CatalogBuildSettings::eq`]. These are
+    /// the values that let the fit refuse two runs walked on different machines, so a field
+    /// that silently left the comparison would pool incomparable evidence and never panic.
     fn eq(&self, other: &Self) -> bool {
-        self.seed == other.seed
-            && self.reference == other.reference
-            && self.analysed_regions == other.analysed_regions
-            && self.catalog_built_under == other.catalog_built_under
-            && same_criteria(&self.ssr_criteria, &other.ssr_criteria)
-            && self.generic_target == other.generic_target
-            && self.ssr_cap == other.ssr_cap
+        let Self {
+            seed,
+            reference,
+            analysed_regions,
+            catalog_built_under,
+            ssr_criteria,
+            generic_target,
+            ssr_cap,
+        } = self;
+        seed == &other.seed
+            && reference == &other.reference
+            && analysed_regions == &other.analysed_regions
+            && catalog_built_under == &other.catalog_built_under
+            && same_criteria(ssr_criteria, &other.ssr_criteria)
+            && generic_target == &other.generic_target
+            && ssr_cap == &other.ssr_cap
     }
 }
 
-impl SelectionIdentity {
-    /// Which field two identities first disagree on, in the order a reader would check
-    /// them — `None` when they agree.
+impl SelectionTerms {
+    /// Which field two sets of selection terms first disagree on, in the order a reader
+    /// would check them — `None` when they agree.
     ///
-    /// **The fit reports this rather than "the identities differ"**, because every one of
-    /// the seven fails the same way and only the name says what to fix.
+    /// **The fit reports this rather than "the terms differ"**, because every value here
+    /// fails the same way and only the name says what to fix.
+    ///
+    /// **Destructured without `..` on purpose** — see [`SelectionTerms::eq`]. A field added
+    /// to this struct stops this function compiling rather than silently going unchecked.
     pub fn first_disagreement(&self, other: &Self) -> Option<&'static str> {
-        if self.seed != other.seed {
+        let Self {
+            seed,
+            reference,
+            analysed_regions,
+            catalog_built_under,
+            ssr_criteria,
+            generic_target,
+            ssr_cap,
+        } = self;
+        if seed != &other.seed {
             return Some("selection seed");
         }
-        if self.reference != other.reference {
+        if reference != &other.reference {
             return Some("reference digest");
         }
-        if self.analysed_regions != other.analysed_regions {
+        if analysed_regions != &other.analysed_regions {
             return Some("analysed region set");
         }
-        if self.catalog_built_under != other.catalog_built_under {
+        if catalog_built_under != &other.catalog_built_under {
             return Some("repeat catalog build settings");
         }
-        if !same_criteria(&self.ssr_criteria, &other.ssr_criteria) {
+        if !same_criteria(ssr_criteria, &other.ssr_criteria) {
             return Some("STR routing criteria");
         }
-        if self.generic_target != other.generic_target {
+        if generic_target != &other.generic_target {
             return Some("generic target position count");
         }
-        if self.ssr_cap != other.ssr_cap {
+        if ssr_cap != &other.ssr_cap {
             return Some("STR per-stratum cap");
         }
         None
@@ -557,16 +596,16 @@ impl SelectionIdentity {
 /// The loci every sample keeps raw evidence at, for one run.
 ///
 /// **Reproducible, not transported**: two samples that build this from the same
-/// [`SelectionIdentity`] get equal values, which is what lets samples be walked on different
-/// machines. Nothing here is written to a sample's records — [`SelectionIdentity`] is, and
-/// [`KeptLociDigest`] witnesses that the rule really did produce the same list on both.
-pub struct KeptLoci {
+/// [`SelectionTerms`] get equal values, which is what lets samples be walked on different
+/// machines. Nothing here is written to a sample's records — [`SelectionTerms`] is, and
+/// [`CensusLociDigest`] witnesses that the rule really did produce the same list on both.
+pub struct CensusLoci {
     generic: Vec<GenomePosition>,
     ssr: StratumSample,
     ssr_stratum_counts: StratumCounts,
 }
 
-impl KeptLoci {
+impl CensusLoci {
     /// Assemble from parts.
     ///
     /// **[`select_kept_loci`] is how a run gets one.** This exists for the consumer that
@@ -609,7 +648,7 @@ impl KeptLoci {
 
 /// A witness that two samples really did keep the same loci.
 ///
-/// The seven values of [`SelectionIdentity`] say what a run was *asked*; this says what it
+/// The seven values of [`SelectionTerms`] say what a run was *asked*; this says what it
 /// *produced*. They fail differently: the seven all agree when a hash function or a
 /// threshold's arithmetic has changed underneath them, and this does not.
 ///
@@ -621,7 +660,7 @@ impl KeptLoci {
 /// the coordinates it covers rather than only a number — 800 blocks on tomato at a
 /// two-million-position budget, which is nothing beside the records.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeptLociDigest {
+pub struct CensusLociDigest {
     whole: [u8; 16],
     per_block: Vec<BlockDigest>,
 }
@@ -635,12 +674,13 @@ pub struct BlockDigest {
     pub digest: u64,
 }
 
-/// Fills a [`KeptLociDigest`] as the record writer walks the kept loci.
+/// Fills a [`CensusLociDigest`] as the [`CensusWriter`](super::census::CensusWriter) walks
+/// the kept loci.
 ///
 /// Separate from the finished digest so that the finished one is immutable and comparable,
 /// and so `observe`'s index check has somewhere to keep its expectation.
 #[derive(Default)]
-pub struct KeptLociDigester {
+pub struct CensusLociDigester {
     whole: Md5,
     blocks: Vec<BlockDigest>,
     open_block: Option<(ContigId, u32, Xxh3)>,
@@ -650,7 +690,7 @@ pub struct KeptLociDigester {
 /// A megabase, in bases. The block width the per-block digests are cut at.
 const DIGEST_BLOCK_BP: u64 = 1_000_000;
 
-impl KeptLociDigester {
+impl CensusLociDigester {
     pub fn new() -> Self {
         Self::default()
     }
@@ -698,21 +738,21 @@ impl KeptLociDigester {
     }
 
     /// How many loci have been absorbed — the count the caller checks against
-    /// [`KeptLoci::generic`]'s length before trusting the digest.
+    /// [`CensusLoci::generic`]'s length before trusting the digest.
     pub fn observed(&self) -> usize {
         self.next_index
     }
 
-    pub fn finish(mut self) -> KeptLociDigest {
+    pub fn finish(mut self) -> CensusLociDigest {
         self.close_block();
-        KeptLociDigest {
+        CensusLociDigest {
             whole: self.whole.finalize().into(),
             per_block: self.blocks,
         }
     }
 }
 
-impl KeptLociDigest {
+impl CensusLociDigest {
     /// The first megabase two digests disagree on, as `(contig, megabase)` — `None` when
     /// they agree.
     ///
@@ -770,17 +810,17 @@ impl KeptLociDigest {
 /// file was not built at — the catalog refuses rather than serving a short list, and a short
 /// list here is a stratum that looks depleted rather than unasked for.
 pub fn select_kept_loci(
-    identity: &SelectionIdentity,
+    terms: &SelectionTerms,
     catalog: &RepeatCatalog,
     analysed: &SelectableRegions,
     unambiguous: &SelectableRegions,
-) -> Result<KeptLoci, SelectionError> {
+) -> Result<CensusLoci, SelectionError> {
     let names: Vec<String> = catalog.contigs().iter().map(|c| c.name.clone()).collect();
 
     let masked = analysed.intersect(unambiguous);
     let mut generic_spans = Vec::new();
     for segment in catalog
-        .genome_segments(&identity.ssr_criteria, ReadScope::Regions(masked.spans()))
+        .genome_segments(&terms.ssr_criteria, ReadScope::Regions(masked.spans()))
         .map_err(SelectionError::Catalog)?
     {
         let segment = segment.map_err(SelectionError::Catalog)?;
@@ -790,19 +830,19 @@ pub fn select_kept_loci(
     }
     let generic_domain = SelectableRegions::new(generic_spans)?;
 
-    let threshold = threshold_for(identity.generic_target, generic_domain.total_length());
-    let generic = select_generic_positions(&generic_domain, &names, identity.seed, threshold)?;
+    let threshold = threshold_for(terms.generic_target, generic_domain.total_length());
+    let generic = select_generic_positions(&generic_domain, &names, terms.seed, threshold)?;
 
     let (ssr_stratum_counts, ssr) = catalog
         .sample_loci_per_stratum(
-            &identity.ssr_criteria,
+            &terms.ssr_criteria,
             ReadScope::Regions(analysed.spans()),
-            identity.ssr_cap,
-            identity.seed,
+            terms.ssr_cap,
+            terms.seed,
         )
         .map_err(SelectionError::Catalog)?;
 
-    Ok(KeptLoci {
+    Ok(CensusLoci {
         generic,
         ssr,
         ssr_stratum_counts,
@@ -834,7 +874,7 @@ pub enum SelectionError {
     #[error("selectable regions name contig {contig:?}, which the reference does not hold")]
     UnknownContig { contig: ContigId },
     /// The reference was read from a `.fai` alone, so there are no bases to digest and the
-    /// identity could not say which reference this selection was made over.
+    /// selection terms could not say which reference this selection was made over.
     #[error("the reference was read without its bases, so it has no content digest")]
     ReferenceNotDigested,
     #[error("the repeat catalog cannot serve this selection")]
@@ -1072,10 +1112,10 @@ mod tests {
         assert_eq!(masked.spans(), [region(1, 40, 60)]);
     }
 
-    // ---- the identity --------------------------------------------------------
+    // ---- the selection terms -------------------------------------------------
 
-    fn identity() -> SelectionIdentity {
-        SelectionIdentity {
+    fn terms() -> SelectionTerms {
+        SelectionTerms {
             seed: 42,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
@@ -1091,10 +1131,10 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_equals_itself_even_with_a_not_a_number_purity_floor() {
+    fn a_set_of_terms_equals_itself_even_with_a_not_a_number_purity_floor() {
         // The one case `derive(PartialEq)` gets wrong: a run refusing itself because a
         // configuration file put a NaN in the purity floor of both copies.
-        let mut left = identity();
+        let mut left = terms();
         left.ssr_criteria.classification.min_purity = f32::NAN;
         let right = left.clone();
         assert_eq!(left, right);
@@ -1103,7 +1143,7 @@ mod tests {
 
     #[test]
     fn a_different_purity_floor_is_a_different_selection() {
-        let left = identity();
+        let left = terms();
         let mut right = left.clone();
         right.ssr_criteria.classification.min_purity += 0.01;
         assert_ne!(left, right);
@@ -1115,7 +1155,7 @@ mod tests {
 
     #[test]
     fn each_field_is_named_when_it_is_the_one_that_differs() {
-        let left = identity();
+        let left = terms();
 
         let mut seed = left.clone();
         seed.seed += 1;
@@ -1175,8 +1215,8 @@ mod tests {
         }
     }
 
-    fn digest_of(loci: &[GenomePosition]) -> KeptLociDigest {
-        let mut digester = KeptLociDigester::new();
+    fn digest_of(loci: &[GenomePosition]) -> CensusLociDigest {
+        let mut digester = CensusLociDigester::new();
         for (index, locus) in loci.iter().enumerate() {
             digester.observe(index, *locus);
         }
@@ -1242,7 +1282,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "index order")]
     fn digesting_out_of_order_fails_loudly() {
-        let mut digester = KeptLociDigester::new();
+        let mut digester = CensusLociDigester::new();
         digester.observe(0, locus(0, 10));
         digester.observe(2, locus(0, 20));
     }
