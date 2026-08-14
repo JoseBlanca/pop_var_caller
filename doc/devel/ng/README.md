@@ -85,7 +85,10 @@ by document kind:
     parameter pre-pass's **random sample of STR loci per repeat-count stratum** needs the genome
     enumerated first. It records **repeats, not loci** — both spans, period, score, motif and purity —
     so a reader derives the segmentation, and the STR loci under any copy floor it chooses, without
-    opening the FASTA. Independent work; step 3 is designed for as a future reader, not wired.
+    opening the FASTA. **Wired, and it is now the only way to find a repeat**: the live scan every
+    walk used to run was deleted on 2026-08-11, so every consumer — region typing, both locus
+    generators, the parameter surveys — reads the file, and a run takes a catalog beside its
+    reference.
     Companions: [`arch/repeat_catalog.md`](arch/repeat_catalog.md) (types & interfaces) and
     [`impl_plan/repeat_catalog.md`](impl_plan/repeat_catalog.md) (the build order).
   - [`synthetic_validation.md`](spec/synthetic_validation.md) — the generated data the calling

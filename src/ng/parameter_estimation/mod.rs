@@ -24,17 +24,28 @@
 //!   trait, an implementation on this path and a second on the STR path.
 //! - [`generic`] — the SNP/indel path: the two accumulators, the cell table, the
 //!   vocabulary they are keyed on, and what each of the four numbers is fitted from.
+//! - [`ssr`] — the STR path: the same procedure over a noise model that lets a read gain
+//!   or lose whole repeat copies, fitted per motif period and repeat count.
+//! - `subsample` — how either path thins a locus's reads down to its cap, seeded from the
+//!   locus's position so that two runs over the same sample keep the same reads however the
+//!   genome was cut into shards. Shared because both caps are the same draw.
 //!
-//! A third sub-unit for the STR path joins them later, which is why the path-specific
-//! vocabulary is not here: an error-rate ladder in per-base probabilities and a window
-//! size for runs of homozygosity are the SNP/indel path's, and they live in [`generic`]
-//! where the STR path will not inherit them. What this file does hold is what **every**
-//! parameter step 4 emits carries — where the number came from, and how much data stood
-//! behind it — and the step's error type.
+//! The path-specific vocabulary is not here: an error-rate ladder in per-base
+//! probabilities and a window size for runs of homozygosity are the SNP/indel path's, and
+//! an offset in whole repeat copies is the STR path's, so each lives in its own folder
+//! where the other cannot inherit it. What this file does hold is what **every** parameter
+//! step 4 emits carries — where the number came from, and how much data stood behind it —
+//! and the step's error type.
+//!
+//! **STR-ness is a property of an implementation, not a top-level division**
+//! (`arch/module_layout.md` principle 2), which is why [`ssr`] is a sibling of [`generic`]
+//! rather than a separate tree.
 
 pub mod fitting;
 pub mod generic;
 pub mod joint;
+pub mod ssr;
+pub(crate) mod subsample;
 
 use crate::ng::types::{DomainError, Ploidy};
 

@@ -205,6 +205,18 @@ impl ReadGroupId {
     }
 }
 
+/// Just the index — `3`, not `ReadGroupId(3)`. A message naming a read group supplies its
+/// own word for it ("read group {read_group}"), so the type renders the number alone.
+///
+/// **It renders an index into the run's read-group table, not a library name.** A caller
+/// holding that table can print the `@RG ID` and should; this is what an error message can
+/// say without one.
+impl fmt::Display for ReadGroupId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A probability held as its natural logarithm — the number stored is `ln(p)`, not
 /// `p` itself.
 ///
@@ -289,11 +301,21 @@ impl MismatchFraction {
 ///
 /// **One predicate, written once.** `NaN`, `+∞` and `-∞` all fail it without any
 /// help from `is_finite`: `contains` is `0.0 <= x && x <= 1.0`, no comparison with
-/// `NaN` is true, `+∞` is not `<= 1` and `-∞` is not `>= 0`. Three constructors
+/// `NaN` is true, `+∞` is not `<= 1` and `-∞` is not `>= 0`. Constructors
 /// spelling the same range test separately is how one of them ends up written
 /// `0.0..1.0` and rejecting a genotype frequency of exactly one — a real answer for
 /// a fully homozygous sample.
-fn checked_probability(x: f64, reject: fn(f64) -> DomainError) -> Result<f64, DomainError> {
+///
+/// `pub(crate)` for that same reason rather than for convenience: the STR path's three
+/// slippage rates are constrained the same way
+/// (`parameter_estimation::ssr::slippage`), so **six** constructors now share this
+/// predicate. It is not hypothetical drift — `SiteNoise::try_new`
+/// (`parameter_estimation::generic`) already spells the range test by hand, which is the
+/// seventh probability in the crate and the one this predicate did not reach.
+pub(crate) fn checked_probability(
+    x: f64,
+    reject: fn(f64) -> DomainError,
+) -> Result<f64, DomainError> {
     if (0.0..=1.0).contains(&x) {
         Ok(x)
     } else {
@@ -458,6 +480,98 @@ pub enum DomainError {
     /// A read's bases and its qualities were paired but differ in length.
     #[error("read has {bases} bases but {qualities} qualities")]
     ReadQualityLengthMismatch { bases: usize, qualities: usize },
+
+    /// An [`SsrPeriod`] was built from zero bases, or from more than a repeat
+    /// unit can hold.
+    ///
+    /// **Zero is the one that has to be unrepresentable.** A tract's length
+    /// becomes a repeat count by dividing by its period, so a period of zero is
+    /// a division by zero rather than an odd answer
+    /// (`arch/parameter_prepass_ssr.md` §2.1).
+    ///
+    /// Carries a `usize` rather than the `u8` the period is stored in, so that
+    /// the message names the value the **caller** offered: every producer of a
+    /// period in this crate holds a `usize` ([`Motif::period`], a tract length
+    /// divided by one), and a variant narrower than its callers is what makes
+    /// `try_new(n as u8)` the natural call — under which 258 arrives as 2 and
+    /// validates as a dinucleotide.
+    #[error("repeat period {0} is outside the STR period range 1..={MAX_MOTIF_LEN}")]
+    SsrPeriod(usize),
+
+    /// A slippage rate — how often a read at a repeat tract shows a length
+    /// other than its allele's — is not a probability in `[0, 1]`.
+    #[error("slippage rate {0} is not a finite probability in [0, 1]")]
+    SlipRate(f64),
+
+    /// The share of slipped reads that **gained** repeats rather than losing
+    /// them is not a probability in `[0, 1]`.
+    ///
+    /// Its own variant beside [`Self::SlipRate`] and [`Self::SlipStepDecay`],
+    /// for the reason the four scalars above have four: all three are fractions
+    /// in `[0, 1]`, and a message naming the wrong one sends a reader to the
+    /// wrong parameter of the same fit.
+    ///
+    /// **The message says what the share is of**, because the two readings
+    /// differ by a factor of the slippage rate — about fiftyfold at a level of
+    /// 0.02 — and a bare "gain share" reads either way.
+    #[error("gain share of slipped reads {0} is not a finite probability in [0, 1]")]
+    SlipGainShare(f64),
+
+    /// The chance that a slipped read moved a second repeat, given that it
+    /// moved a first, is not a probability in `[0, 1]`.
+    #[error("slip step decay {0} is not a finite probability in [0, 1]")]
+    SlipStepDecay(f64),
+
+    /// A locus's reads were laid out across the offset buckets in a number a
+    /// locus shape cannot record: none at all, or more than the read cap
+    /// (`parameter_estimation::ssr::stratum_table::LocusShape`).
+    ///
+    /// **Carries `u64` where the shape stores `u8`**, for the reason
+    /// [`Self::SsrPeriod`] carries a `usize`: the value the message must name is
+    /// the one the *caller* offered, and a caller counting a deep locus's reads
+    /// holds a wide integer. A variant as narrow as the storage is what makes
+    /// `try_new(counts as u8)` the natural call, under which 260 reads arrive as
+    /// 4 and validate.
+    ///
+    /// **The cap travels in the error rather than being named in the message
+    /// text.** Two reasons, and the first alone would not settle it: this file is
+    /// the shared vocabulary and the cap is the STR path's own constant, so a
+    /// `{MAX_LOCUS_READS}` here would point the wrong way up the module tree.
+    /// The second is that the cap is a value the design expects to move —
+    /// `arch/parameter_prepass_ssr.md` §7 leaves it as an impl-time confirmation
+    /// against the precision it costs — so an error that carries the number in
+    /// force says what a run rejected against rather than what this file was
+    /// compiled believing.
+    #[error("a locus shape holds {reads} reads, outside the 1..={cap} one can record")]
+    SsrLocusShapeReads {
+        /// How many reads the caller offered, over all buckets and the guard.
+        reads: u64,
+        /// The cap in force — `MAX_LOCUS_READS`.
+        cap: u32,
+    },
+
+    /// A locus offered more mismatched bases than bases compared
+    /// (`parameter_estimation::ssr::stratum_table::BaseComparison`).
+    ///
+    /// **Not a noisy locus — a swapped pair.** The two counts have the same type
+    /// and one is a subset of the other, so the failure this catches is a caller
+    /// handing them over the wrong way round. Left standing, what it does depends
+    /// on what the locus is pooled with, and the milder-looking outcome is the
+    /// dangerous one: alone it drives the stratum's rate above one, which
+    /// [`ErrorRate`] refuses, so the run dies where the rate is read; pooled with
+    /// well-formed loci it survives as a plausible wrong rate that nothing
+    /// downstream can question.
+    #[error(
+        "a locus counted {bases_mismatched} mismatched bases among only {bases_compared} \
+         compared — mismatched bases cannot outnumber compared ones, so the two counts are \
+         swapped or one was miscounted"
+    )]
+    SsrBaseComparison {
+        /// Bases of the locus's reads that were compared against the tract.
+        bases_compared: u32,
+        /// Of those, the ones the caller says differed.
+        bases_mismatched: u32,
+    },
 }
 
 // ---------------------------------------------------------------------
@@ -550,6 +664,68 @@ impl Motif {
     #[inline]
     pub fn period(&self) -> usize {
         self.len as usize
+    }
+
+    /// The period as the checked domain type, for a consumer that divides by it.
+    ///
+    /// **Beside [`Self::period`] rather than replacing it.** That accessor returns a
+    /// `usize` and has callers across three modules; changing its type under them to
+    /// serve one new consumer is a change to code that is working. A motif is
+    /// constructed only through [`Self::new`], which already rejects a length outside
+    /// `1..=MAX_MOTIF_LEN`, so this conversion cannot fail — the `expect` is a claim
+    /// about that invariant, not a fallible path.
+    #[inline]
+    pub fn ssr_period(&self) -> SsrPeriod {
+        SsrPeriod::try_new(self.period()).expect("a motif's length is checked at construction")
+    }
+}
+
+/// A repeat unit's length in bases — the **period** of a tandem repeat, `1..=MAX_MOTIF_LEN`.
+///
+/// **The first half of the axis a stutter model is stratified by** (`spec/parameter_prepass_ssr.md`
+/// §4): how much a tract slips depends on its motif's period and on how many copies of that motif
+/// it holds, and those two together name the group of loci one set of stutter parameters is fitted
+/// from.
+///
+/// **Constrained, unlike [`Motif::period`]'s `usize`**: a tract's length becomes a repeat count by
+/// dividing by the period, so zero is a division by zero. The upper bound is the STR scope every
+/// other part of ng already works in ([`MAX_MOTIF_LEN`]).
+///
+/// Here rather than in the step that fits stutter, because the likelihood (step 7) and the genotype
+/// prior (step 8) both read a locus's stutter parameters and so both name the period they were
+/// fitted at (`arch/module_layout.md`).
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct SsrPeriod(u8);
+
+impl SsrPeriod {
+    /// The only constructor. A period outside `1..=MAX_MOTIF_LEN` is rejected rather
+    /// than coerced.
+    ///
+    /// **Takes a `usize`, though it stores a `u8`, and the width is the point.** Every
+    /// producer of a period in this crate holds a `usize` — [`Motif::period`], and a
+    /// tract's length divided by one — so a `u8` parameter would make `try_new(n as u8)`
+    /// the natural call at each of them, and that cast turns 258 into 2: a rejected value
+    /// arriving as an accepted dinucleotide. Widening the door is what keeps the check
+    /// meaningful at the call sites that actually exist.
+    pub fn try_new(bases: usize) -> Result<Self, DomainError> {
+        if bases == 0 || bases > MAX_MOTIF_LEN {
+            return Err(DomainError::SsrPeriod(bases));
+        }
+        // Inside `1..=MAX_MOTIF_LEN`, which is 6, so the narrowing cannot lose anything.
+        Ok(Self(bases as u8))
+    }
+
+    #[inline]
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+/// Just the number of bases — `3`, not `SsrPeriod(3)`. A message naming a period supplies
+/// its own word for it ("period {period}"), so the type renders the number and nothing else.
+impl fmt::Display for SsrPeriod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -820,6 +996,21 @@ mod tests {
                 }
             }
         }
+
+        /// A period is accepted **exactly when** it is in `1..=MAX_MOTIF_LEN`, over a range
+        /// reaching well past both the STR scope and a byte — the same lesson `Ploidy`'s
+        /// proptest above records. A bound written so that it truncates or masks admits
+        /// period 8 while still rejecting 0, 7 and 255, and a test at three points would not
+        /// notice; a period no scanner emits would then file loci under a stratum no stutter
+        /// model was ever fitted at.
+        #[test]
+        fn ssr_period_accepts_exactly_the_str_scope(bases in 0usize..=1_000) {
+            let inside = (1..=MAX_MOTIF_LEN).contains(&bases);
+            proptest::prop_assert_eq!(SsrPeriod::try_new(bases).is_ok(), inside, "bases = {}", bases);
+            if let Ok(period) = SsrPeriod::try_new(bases) {
+                proptest::prop_assert_eq!(usize::from(period.get()), bases);
+            }
+        }
     }
 
     fn genome_position(contig: u32, position: u64) -> GenomePosition {
@@ -947,6 +1138,50 @@ mod tests {
             ids,
             vec![ReadGroupId(0), ReadGroupId(1), ReadGroupId(2)],
             "the derived Ord is the index order"
+        );
+    }
+
+    /// Every period the STR scope allows is accepted and reports itself unchanged.
+    #[test]
+    fn ssr_period_accepts_every_period_in_the_str_scope() {
+        for bases in 1..=MAX_MOTIF_LEN {
+            let period = SsrPeriod::try_new(bases).expect("inside the STR scope");
+            assert_eq!(usize::from(period.get()), bases);
+        }
+    }
+
+    /// **Zero is the rejection that matters**, because a tract's length becomes a repeat
+    /// count by dividing by the period. Seven is the other end of the same range: a
+    /// heptamer is outside the scope every other part of ng works in, so admitting one
+    /// here would mint a period no scanner ever emits and no stutter model was fitted at.
+    /// 258 is the value a `u8` parameter would have silently accepted as a dinucleotide.
+    #[test]
+    fn ssr_period_rejects_zero_and_anything_past_the_str_scope() {
+        assert_eq!(SsrPeriod::try_new(0), Err(DomainError::SsrPeriod(0)));
+        assert_eq!(SsrPeriod::try_new(7), Err(DomainError::SsrPeriod(7)));
+        assert_eq!(SsrPeriod::try_new(255), Err(DomainError::SsrPeriod(255)));
+        assert_eq!(SsrPeriod::try_new(258), Err(DomainError::SsrPeriod(258)));
+    }
+
+    /// The two accessors answer the same question in two types, and a motif is the only
+    /// thing that mints a period in the live path — so if these ever disagree, every
+    /// stratum a locus is filed under moves.
+    #[test]
+    fn a_motifs_two_period_accessors_agree_at_every_length() {
+        for bases in [b"A".as_slice(), b"CA", b"CAG", b"AAAT", b"CACAG", b"ACGTGC"] {
+            let motif = Motif::new(bases).expect("a motif inside the STR scope");
+            assert_eq!(motif.period(), bases.len());
+            assert_eq!(usize::from(motif.ssr_period().get()), motif.period());
+        }
+    }
+
+    /// A period renders as the bare number, so a message can supply its own word for it.
+    #[test]
+    fn a_period_renders_as_the_number_of_bases_alone() {
+        assert_eq!(
+            SsrPeriod::try_new(3).unwrap().to_string(),
+            "3",
+            "no type name, no unit — the message says 'period {{period}}'"
         );
     }
 }

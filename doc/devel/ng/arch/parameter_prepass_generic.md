@@ -943,6 +943,19 @@ pub fn fit_mixture_weights(
 ) -> SmallVec<[f64; 3]>;
 ```
 
+> **Built differently, 2026-08-12 — two changes, both from the STR path.** The return is
+> `Vec<f64>`, not `SmallVec<[f64; 3]>`: three is this path's genotype count and a stratum of
+> repeat tracts has 66 to 91 at diploidy and 1,820 at four copies
+> ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §3). The likelihoods arrive as one
+> `GenotypeLikelihoodTable` rather than a slice of slices, which is the same numbers row-major
+> and one allocation instead of one per cell.
+>
+> **And "convergence failure is a bug" holds for this path and not for the other.** The surface
+> is concave either way, so a climb that ran out did not find a wrong summit — but the pass cap
+> was measured against *three* genotypes, and the STR path's climb over 91 of them, most heading
+> to a frequency of zero, routinely reaches it. There the condition is reported and counted
+> rather than asserted; here it is still a bug, and the debug assertion stands.
+
 ### 4.2 The noise model, and the scan over it
 
 ```rust
@@ -1132,6 +1145,11 @@ pub struct ScanResult<P> {
     pub log_likelihood: f64,
     pub argmax_at_ladder_end: bool,        // §4.2 — the rail flag
 }
+// Built as: `genotype_frequencies: BTreeMap<Ploidy, Vec<f64>>` and `log_likelihood: LogProb`.
+// Keyed by ploidy because a haploid region has two genotype classes and a diploid three, so
+// they cannot share a weight vector and the scan climbs once per ploidy; a single vector would
+// mean dropping all but one of them, silently, in the module whose wrong numbers have no
+// symptom. `Vec` rather than `SmallVec<[f64; 3]>` for the reason §4.1 now records.
 
 /// How the alternation ended. Emitted rather than discarded, because a fit that ran out
 /// of iterations is still a number a caller would otherwise consume as if it had settled.

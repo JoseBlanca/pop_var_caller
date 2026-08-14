@@ -8,7 +8,12 @@ than a decision — §5.1 records what adopting it would cost. **Revised 2026-08
 has to hold where a stratum barely stutters — a second floor, on slipped reads rather than on loci,
 because the level and the two shares starve at rates 20,000-fold apart; and agreement with the
 generic path's substitution rate, which is obligatory there because the two noise models coincide
-when nothing slips.*
+when nothing slips. **Revised 2026-08-11** in three places, none of which moves the noise model:
+nothing detects a repeat while a sample is being read any more — the loci arrive from a catalog
+built once per reference (§5.3), which is also why §5.1's sweep-and-re-type instrument no longer
+exists; the copy floors §5.1.1 measured are now the ones the code applies, so §4.4's stratum count
+follows them; and §4.6 asks a question nobody has asked of this path — what a locus that is not the
+tract the stratum thinks it is does to the four numbers.*
 
 *Source for the 2026-08-06 numbers:*
 [`../research/parameter_estimator_experiments_2026-08-06.md`](../research/parameter_estimator_experiments_2026-08-06.md)
@@ -632,10 +637,13 @@ recorded.
 
 **This path runs one fit per (read group × stratum), against the generic path's four fits in total.**
 How many strata there are is bounded by arithmetic rather than guessed: six periods, each running
-from its copy floor (`[6, 4, 4, 3, 3, 3]`, §5.1) up to as many repeats as a read can span, which at
-150 bp reads is 150 for homopolymers and 25 for hexamers. That is 145 + 72 + 47 + 35 + 28 + 23 =
-**350 strata**, of which the ones holding loci are fewer. *(An earlier version said "about 370",
-which counts each period from one repeat rather than from its floor.)* The generic path emits four things beside each fit: whether the answer sat on the edge
+from its copy floor (`[8, 6, 6, 6, 5, 4]`, §5.1.1) up to as many repeats as a read can span, which at
+150 bp reads is 150 for homopolymers and 25 for hexamers. That is 143 + 70 + 45 + 32 + 26 + 22 =
+**338 strata**, of which the ones holding loci are fewer. *(Two earlier versions counted differently:
+"about 370" counted each period from one repeat rather than from its floor, and 350 counted from the
+unmeasured floors `[6, 4, 4, 3, 3, 3]` the code carried until 2026-08-10.)*
+
+The generic path emits four things beside each fit: whether the answer sat on the edge
 of its ladder, the starting points tried, the estimator's resolution, and how the fit terminated. At
 four fits those are readable records; at several hundred they are a file nobody opens, and
 [`parameter_prepass.md`](parameter_prepass.md) §3.1 already warns that a flag nobody reads is how a
@@ -755,6 +763,79 @@ count beside the level, the way §4.4's summary already carries the locus count 
 standing on 4 slipped reads and one standing on 4,000 are different claims, and nothing downstream
 can currently tell them apart.
 
+### 4.6 Loci that are not the tract the stratum thinks they are — ADDED 2026-08-11
+
+**A stratum's four numbers are pooled over hundreds of thousands of loci, and the pooling assumes
+each of them is one tract of that period and that repeat count, read with that chemistry. Some are
+not, for reasons that are biological rather than statistical**, and this section is the question of
+what those do to the fit. It is asked because the sibling path asked it and the answer was expensive:
+one substitution rate per read group described the body of the generic path's distribution and not
+its tail — 818 loci carrying no benchmark variant showed three or more alternative reads where the
+model predicted 29 — and because the only class that could explain such a locus was the heterozygote,
+**the surplus came back as heterozygosity at 1.41 times the benchmark's count**
+([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1).
+
+**Four mechanisms produce a repeat tract that behaves unlike its stratum, and they do not belong to
+the same object:**
+
+- **A duplication the reference does not carry.** Two paralogous tracts, of different lengths,
+  collect their reads at one locus. A diploid genotype offers two allele lengths and the reads then
+  show three or four, so no genotype in the support explains the shape. This is a property of the
+  **genome**, so every library made from it shows it — the same first cause the generic path lists.
+- **Mismapping from a similar tract elsewhere**, which puts a minority of reads at that other
+  tract's length. A property partly of the **library**, since mapping difficulty follows read length
+  and insert size.
+- **Instability within the individual.** A long tract that mutates in the soma gives a spread of
+  lengths wider than any slip kernel, and the spread is a property of the **locus**.
+- **An interruption or a nearby indel** that makes the delimiter anchor a subset of the reads
+  differently, so those reads' lengths move together by more than a copy.
+
+**Which of the four numbers pays for them is not known, and this path has two absorbers where the
+generic path had one.** A stratum's genotype frequencies are fitted freely over allele pairs
+reaching ±6 repeats (§4.2), so a locus with reads at two distant lengths can be explained as a
+locus carrying two distant alleles — which would corrupt the emitted allele spectrum and leave the
+slippage parameters alone. Or the reads land where no pair of alleles reaches and the only
+explanation left is slippage, which is what would move the level and flatten the direction split.
+**Measurable now**, and the harness that measures it exists.
+
+**One class of it is already measured, and it says this path is not robust by construction.** A
+locus whose true allele sits outside the fit's support has its reads explained the only way left,
+as slippage: leaving 2.5% of loci outside costs 0.1% of the level, 7.9% costs 2.5%, and **19.3%
+costs +499% of the level with the direction asymmetry destroyed** — a split of 0.17 becoming 0.47
+([research note](../research/parameter_estimator_experiments_2026-08-06.md) §6.4.1, and §8.1 of this
+document, which reads it as the reason to treat the allele support as a threshold to clear rather
+than a number to tune). That is the same collapse the modal origin produced, from a different cause.
+A locus that is a collapsed duplication is not the same thing as a locus carrying a long allele, but
+it fails the fit in the same place: **the model has nowhere to put it.**
+
+**What must not be done about it, whatever the measurement says: dropping the loci that fit badly.**
+A rule that scores each locus against the fitted model and discards the worst is thresholding on
+the data and then counting what survives, which is the exact bias this whole step exists to remove
+([`parameter_prepass.md`](parameter_prepass.md) §2). It would also remove the wrong loci first: a
+real long allele and a collapsed duplication both sit where the model has least mass, so a trimming
+rule would take genuine STR variation out before it took an artefact. **So if the check fails, the
+fix is a class the model carries, exactly as the generic path's was** — a locus is *ordinary* with
+probability `1 − w` and *aberrant* with probability `w`, an aberrant locus's reads drawn from a
+much flatter distribution over the offsets, and `w` fitted rather than chosen. That costs this path
+one further parameter and touches nothing shared: the noise parameters are an associated type of the
+fitting seam, which is what let the generic path add its second site class without disturbing this
+one.
+
+**The diagnostic it asks of the fit is free, and it is worth having before any of this is decided.**
+Every candidate already evaluates each entry's likelihood, and an entry is one locus's shape — so
+the fit can report **what share of a stratum's loci its own fitted model calls very unlikely**
+without keeping a coordinate, changing the entry key, or walking anything twice. §4.4's summary is
+where it belongs, beside the guard share. **Measured per read rather than per locus**: a shape's
+likelihood is a product over its reads, so a fixed floor on the total would flag every stratum's
+deepest loci by arithmetic and say nothing about any of them.
+
+**And the guard share does not already cover this**, which is the reason a second diagnostic is
+needed rather than a threshold on the first. The guard share counts *reads* that moved by a
+non-whole number of copies, pooled over a stratum (§4.1); a collapsed duplication moves its reads by
+whole copies, and one locus in a thousand behaving strangely is invisible in a stratum-wide ratio.
+The two diagnostics answer different questions: *is this model right for these tracts* against *are
+these all the tracts this model was told they were*.
+
 ---
 
 ## 5. Short tracts carry almost no slippage, and most of what they carry is the wrong kind
@@ -809,12 +890,15 @@ reference; this section answers the second. They are different questions and the
 answers: a hexamer at three copies is unambiguously a tandem repeat and, by this definition, not an
 STR locus.
 
-**ng's code already says this and has never had the evidence for its numbers.** The copy floors are
-`[6, 4, 4, 3, 3, 3]` for periods 1–6
-([`segment_criteria.rs:415`](../../../../src/ng/region_typing/segment_criteria.rs)), documented as
-*"the copy number at which a repeat starts to stutter — below it, the generic SNP/indel caller
-handles the tract fine and only a stuttering one needs the STR route"* (`:403-414`), with every value
-marked *"a starting value, soft and swept"*. This section is the sweep.
+**ng's code already said this and had no evidence for its numbers; it has them now.** The floors
+were `[6, 4, 4, 3, 3, 3]` for periods 1–6, documented as *"the copy number at which a repeat starts
+to stutter — below it, the generic SNP/indel caller handles the tract fine and only a stuttering one
+needs the STR route"*, with every value marked *"a starting value, soft and swept"*. This section is
+the sweep, and **the floors it measured — `[8, 6, 6, 6, 5, 4]` — are what the code applies since
+2026-08-10** ([`segment_criteria.rs:444`](../../../../src/ng/region_typing/segment_criteria.rs), with
+the two surveys' reasoning at `:402-443`). §5.1.1 is the derivation, and the paragraphs below are the
+evidence that got there; where one of them says "ng's `[6, 4, 4, 3, 3, 3]`" it is describing what was
+being argued against, not what runs.
 
 **Two things a floor has to clear, and the second is the one that bites.** There has to be enough
 stutter to be worth a stratum at all — §5's 0.091% below four repeats against 2.006% at six or more.
@@ -884,7 +968,8 @@ takes on the calling step's marker routing.
 **The floors are a default, not a constant.** `MinCopies` is already a per-period knob
 ([`segment_criteria.rs:355`](../../../../src/ng/region_typing/segment_criteria.rs)), so what follows
 changes a default rather than adding a mechanism. Someone cataloguing repeats rather than genotyping
-them wants a lower floor and should set one.
+them wants a lower floor and should set one — and since 2026-08-11 that is exactly what the catalog
+does, at floors of its own that sit under every routing floor (§5.3).
 
 **One thing the measurement has to check, because the current defaults appear to be keyed on the
 axis §4 rejected.** In copies the floors are `[6, 4, 4, 3, 3, 3]`; in **bases** they are
@@ -1007,10 +1092,13 @@ region typing found the same 644,194 as everywhere else. They are reported rathe
 surveyed, which is the failure this section's instrument was rebuilt to make loud.
 
 **And the instrument built to supply it cannot reach below the floors — measured 2026-08-07, and
-this is why the table is still pending.** The obvious way to see under a floor is to lower it and
+this is why the table was pending.** The obvious way to see under a floor is to lower it and
 re-type, which is what `examples/ng_str_stutter_by_library.rs` and
 `scripts/ng_str_library_survey.sh` were built to do. It does not work, and the reason is structural
-rather than a bug in either.
+rather than a bug in either. *(Both tools survive and both now read the catalog rather than typing
+the genome themselves, so "re-type" below means "read the file back at a lower floor". The
+structural failure is unchanged — it is a property of what a low floor does to bundling, not of
+where the repeats came from — and a second bound now sits under it, §5.3.)*
 
 **`MinCopies` decides two different things and only one of them is the floor.** It is read by
 `prefilter`, which runs **before** bundling
@@ -1122,8 +1210,8 @@ mononucleotide's 165, and the trinucleotide extrapolation on 37 libraries at 6 r
 cut short at 181 of 1,400 libraries; more would tighten the tails, and nothing seen so far suggests
 the medians would move.
 
-**What adopting the measured floors would cost, because it is larger than "changing a default"
-suggests and is the reason the constant has not been moved here.** Against the loci ng emits today:
+**What adopting the measured floors cost, because it is larger than "changing a default" suggests.**
+Against the loci ng emitted at the old floors:
 
 | period | current | measured | STR loci today | kept | re-routed |
 |---|---:|---:|---:|---:|---:|
@@ -1138,9 +1226,16 @@ suggests and is the reason the constant has not been moved here.** Against the l
 total is small only because mononucleotides are 84% of the loci and do not move. **Nothing is lost
 by this** — §5.1's own argument is that those tracts are re-described rather than dropped, and they
 go to the generic path where an ordinary indel is what the model expects, which is exactly what
-their 30% to 76% guard shares say they are producing. But it is a large change to what the STR path
-sees, so it is recorded here as measured and left to be taken deliberately rather than folded in as
-a default edit.
+their 30% to 76% guard shares say they are producing.
+
+**The change was taken on 2026-08-10** and `MinCopies::default` is `[8, 6, 6, 6, 5, 4]`
+([`segment_criteria.rs:444`](../../../../src/ng/region_typing/segment_criteria.rs)). **Two things
+this document says about measurements are now dated by it**, and both matter to anyone rerunning
+them: every empirical figure in §2, §3, §5 and §5.1 was taken over the loci the *old* floors
+admitted, and so was the per-stratum accounting the research note reports (the entry counts, the
+guard-share tallies, the modal-offset distribution). Those numbers stand as records of what was
+measured; **a run today sees a different, smaller population of non-mononucleotide loci, and a test
+asserting one of them will fail on arrival** rather than catch a regression.
 
 **And the mononucleotide floor of 6 carries a reason that survives this framing rather than being
 overridden by it.** It was chosen deliberately over ~9 — "the Illumina read-artifact onset, not the
@@ -1202,6 +1297,46 @@ of aperiodic anchor. At 15 that shortfall sits inside the margin.
 **The radius does not move this section's answer**, which is worth recording because it means the
 archive survey's floors do not have to be re-measured when it changes: dinucleotides at 3 repeats
 read a guard share of 63%, 62%, 65% and 64% at radii of 30, 25, 20 and 15.
+
+### 5.3 The loci arrive from a file built once, not from a scan run per sample — ADDED 2026-08-11
+
+**Nothing looks for a tandem repeat while a sample is being read any more.** The reference is
+scanned once, by a command whose only job is that, and the repeats it found are written to a
+catalog file; every run afterwards reads that file
+([`repeat_catalog.md`](repeat_catalog.md)). The walk that used to scan as it went is deleted. On
+tomato chromosome 1 the same 1,829,315 loci over the same 60,580 regions now take 0.618 s against
+2.101 s, and the difference is the scan.
+
+**This changes nothing in this document above §5.** A locus still arrives carrying its reference
+bases, its motif and its reads; the stratum key and every read's offset are still computed from
+those; the noise model, the accumulator and the four fits never knew where the tract came from.
+**Three practical things do change**, and each is a property of a run rather than of the estimator:
+
+- **A run needs the catalog as an input**, beside the alignments and the reference. Every check in
+  §10 that touches real data takes one, and a catalog is bound to the reference it was built from —
+  it carries the contig table and a content digest, and pairing it with a different reference is
+  refused rather than silently served.
+- **The file's own floors bound what any run can ask for, and only downward.** It is built at
+  `[5, 5, 4, 4, 4, 3]` copies, 15 bp of flank either side and periods 1 to 6, deliberately below
+  every floor a caller routes on (§5.1.1's `[8, 6, 6, 6, 5, 4]`). A reader asking beneath any of
+  those three is refused **by name**, saying which axis and both numbers. Above them, the routing
+  floor, the purity floor, the score floor, the satellite cap and the bundle radius are filters over
+  stored fields, so moving one costs a re-read of the file rather than a re-scan of the genome.
+- **So §5.1's per-period evidence cannot be re-run as a flag on a run.** Its tables report guard
+  shares at 3 repeats for periods 2 to 6, which is under the file's own floors at four of them.
+  Reproducing that evidence means building a catalog at lower floors — a build of the reference,
+  taken deliberately, not a sweep inside a walk.
+
+**One thing the file makes possible that this path does not use, said here so nobody wires it in by
+reflex.** The catalog can count and randomly sample loci per `(period, repeat count)` before a read
+is touched, which is the reason it exists at all: the second route to these same parameters keeps
+evidence at a **fixed sample** of loci per stratum and needs the stratum enumerated first
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §3.2). The per-sample route
+described here walks every STR locus the sample covers and needs neither. Its stratum populations
+are therefore available as a denominator — how many loci the genome holds against how many this
+sample witnessed — and that is a diagnostic worth reporting rather than an input to any fit:
+**what a stratum's parameters stand on is the loci this sample actually observed**, and the two
+floors of §4.3 and §4.5 count those.
 
 ---
 
@@ -1367,12 +1502,13 @@ genotype long alleles" is a claim with no number attached to it.
    width of the entry's counters, which is an implementation choice
    ([`../arch/parameter_prepass_ssr.md`](../arch/parameter_prepass_ssr.md) §2.1) rather than a
    question about the design.
-9. **Where do the per-period copy floors go?** — **MEASURED, and the change is not made** (§5.1).
-   The archive survey walked 2,457 tomato libraries and puts them at `[6, 6, 7, 6, 5, 4]` against
-   ng's `[6, 4, 4, 3, 3, 3]` — every period but mononucleotides too low, periods 4 and 5 by three
-   copies. Adopting them re-routes 15% of ng's STR loci to the generic path, and nine in ten of
-   every non-mononucleotide one, which is why it is recorded rather than folded in as a default
-   edit. **What remains open is the decision, not the number.**
+9. **Where do the per-period copy floors go?** — **CLOSED, and the change is made** (§5.1.1). The
+   archive survey walked 2,457 tomato libraries and a slippage-rate survey walked 181; together
+   they put the floors at `[8, 6, 6, 6, 5, 4]`, and that is what the code applies since 2026-08-10.
+   It re-routed 15% of ng's STR loci to the generic path, and nine in ten of every
+   non-mononucleotide one. **What this leaves behind is not an open question but a dated set of
+   measurements**: every empirical figure in this document was taken over the loci the old floors
+   admitted (§5.1.1).
    *Two things that stay soft:* the trinucleotide and pentanucleotide crossings each rest on one
    noisy stratum, and the two-to-four-repeat spread between libraries is **not** yet attributable to
    preparation — grouping by project explains 45% of it, but a project bundles preparation with the
@@ -1392,6 +1528,17 @@ genotype long alleles" is a claim with no number attached to it.
     question. *Leaning:* none, and deliberately — the interesting outcome is a persistent gap, which
     is §1.1's unmeasured finding rather than a defect, and pre-committing to a number invites
     reading it as one.
+12. **What does a locus that is not the tract its stratum thinks it is do to the four numbers?** —
+    OPEN and **measurable now** (§4.6). A collapsed duplication, a mismapped minority, a somatically
+    unstable tract or a mis-anchored subset of reads all put reads where no allele pair in the
+    support reaches, and this path has two places for the surplus to go — the genotype frequencies
+    or the slippage parameters — where the generic path had one. **The experiment:** contaminate a
+    stratum in the exact-bias harness with a share `q` of loci drawn from another process and read
+    the bias in all four numbers against `q`. *Leaning:* none on the size, and one on the shape of
+    any fix — a class the model carries, never a rule that drops loci scoring badly, which is
+    threshold-then-count with the long alleles taken first. The one measurement that already exists
+    says robustness cannot be assumed: 19.3% of loci placed outside the fit's allele support costs
+    **+499% of the level** with the direction split collapsing from 0.17 to 0.47.
 
 ---
 
@@ -1409,10 +1556,23 @@ genotype long alleles" is a claim with no number attached to it.
 - **A guard-bucket rate that depends on the allele length** (§4.1). The factorisation that makes the
   guard bucket free assumes it does not. **Home:** this document, once the per-stratum guard shares
   of §5's threshold have been measured and show whether it matters.
+- **A second class of locus, for tracts the stratum's model does not describe** (§4.6, §8.12).
+  Deferred on a measurement rather than on merit: nobody has yet asked what such loci cost, and the
+  answer decides whether one parameter is worth adding. **Home:** this document, and if it lands it
+  lands the way the generic path's second site class did — its own milestone, on its own evidence,
+  between the end-to-end run and the anchors it would move.
 
 ---
 
 ## 10. How we know it works
+
+**Every check below that reads real alignments also takes a repeat catalog** (§5.3), and the numbers
+each quotes were measured before the copy floors moved on 2026-08-10 (§5.1.1). They are records of
+what was measured, not thresholds to assert: a run today sees a smaller population of
+non-mononucleotide loci, so the shape is what a test should hold — sharded accumulation is an
+equality, the guard share separates some strata from others, the table is tens of thousands of
+entries rather than millions — with the current numbers recorded when the real accumulator first
+walks each cohort.
 
 1. **The fit recovers known stutter behaviour, exactly rather than by simulation.**
    [`../../../../examples/ng_str_stutter_harness.rs`](../../../../examples/ng_str_stutter_harness.rs)
@@ -1448,6 +1608,10 @@ genotype long alleles" is a claim with no number attached to it.
    loci, with no truth genotypes**, which is the design's central claim demonstrated on real reads
    rather than on constructed worlds.
 
+   *That run predates the copy floors of §5.1.1*, so it was fitted over strata reaching down to 4
+   repeats at periods 2 and 3 and 3 repeats at periods 4 to 6. Repeating it today fits a shorter
+   ladder of strata; what must survive is the agreement and the direction, not the third decimal.
+
    *One trap this run walked into first, worth recording because it is a property of the pooling and
    not of the estimator.* A 500-locus floor on which strata are fitted returned 1.077% for the level
    — half the target — because it dropped every stratum beyond 15 repeats, and those carry 14.5% of
@@ -1479,3 +1643,12 @@ genotype long alleles" is a claim with no number attached to it.
    from the model it tests** — the other is §10.3's — because the two rates are fitted by different
    models from different sites, so a misspecification shared with the harness cannot make them
    agree.
+9. **The four numbers survive a minority of loci the model does not describe** (§4.6). Fit a stratum
+   in which a share `q` of the loci were generated by another process — reads split between two
+   tracts several repeats apart, as a duplication the reference does not carry would give — and
+   report the bias in the level, the two shares and the substitution rate against `q`. **What this
+   check must report rather than pass:** the size of the bias at the shares such loci plausibly
+   reach, and **which parameter absorbed it**, because this path can absorb an aberrant locus into
+   its fitted allele spectrum instead of into slippage and the two failures need different fixes.
+   A run that reports "no bias at q = 0.001" without saying what the emitted allele frequencies did
+   has answered half the question.

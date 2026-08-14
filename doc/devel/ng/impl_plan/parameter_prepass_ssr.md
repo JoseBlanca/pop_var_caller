@@ -1,7 +1,15 @@
 # ng parameter pre-pass, the STR path (step 4) — implementation plan
 
 **Status:** draft, 2026-08-07, revised 2026-08-09 for spec §4.5 (a second floor on slipped reads,
-the split provenance it forces, and two new anchors at Milestone G). The build order for the **STR
+the split provenance it forces, and two new anchors at Milestone G); **revised 2026-08-11** for the
+loci's new provenance and one new milestone. Three things moved and none of them is the
+mathematics: the loci reach this step from a repeat catalog built once per reference rather than
+from a scan run while the sample is read (spec §5.3), so every step that touches real data takes a
+catalog as an input; the copy floors became `[8, 6, 6, 6, 5, 4]` on 2026-08-10, which re-routed nine
+in ten non-mononucleotide loci to the generic path and dated every measured number this plan used to
+assert (spec §5.1.1); and **Milestone H asks what a locus that is not the tract its stratum thinks
+it is does to the four numbers** (spec §4.6), which is the question the sibling path had to answer
+after its own end-to-end run and answered with a second class of site. The build order for the **STR
 half of step 4**: one accumulator keyed
 by `(read group, motif period, reference repeat count)`, the four numbers fitted from it — how often
 a read slips, which way, how far, and a per-base substitution rate — and the summary a person reads
@@ -58,9 +66,10 @@ sparse table of locus shapes with its merge; the slippage noise model and its ma
 rule; the substitution rate's closed form; the multi-start search; borrowing against **both** floors
 — loci for the whole model, slipped reads for the direction split and the fall-off alone (spec
 §4.5) — the monotonicity walk, and the per-read-group summary; both entry points. Plus the two
-additive changes to `fitting/`. **One test lands outside this folder**: the agreement between this
-path's substitution rate and the generic path's belongs at step 4's own surface, which is the only
-place holding both (G5).
+additive changes to `fitting/`, and the diagnostic that reports how much of a stratum sits in shapes
+its own fit cannot explain, with the measurement that says what such loci cost (Milestone H).
+**One test lands outside this folder**: the agreement between this path's substitution rate and the
+generic path's belongs at step 4's own surface, which is the only place holding both (G5).
 
 **Out (each handed to a named owner):**
 
@@ -71,11 +80,12 @@ place holding both (G5).
   nothing upstream** (compare each read against the motif tiled to the length that read shows) and
   records its caveat in the emitted provenance. Adopting the aligner's own count later changes one
   function's body and no signature. **Home:** whichever plan revises step 3's alignment output.
-- **The per-period copy floors** — spec §5.1, and blocked on region typing rather than on this step
-  (spec §8.9). They decide which tracts arrive here, not what is done with them, and they are a
-  default a user can already override (`MinCopies`,
-  [`segment_criteria.rs:355`](../../../../src/ng/region_typing/segment_criteria.rs)). **Nothing in
-  this plan waits on them.**
+- **The per-period copy floors** — settled, and settled *against* this plan's measurements rather
+  than by them: `[8, 6, 6, 6, 5, 4]` since 2026-08-10 (spec §5.1.1,
+  [`segment_criteria.rs:444`](../../../../src/ng/region_typing/segment_criteria.rs)). They decide
+  which tracts arrive here, not what is done with them. **Nothing in this plan waits on them, and
+  every measured number it quotes predates them** — which is why the real-data steps assert shapes
+  and record numbers rather than the other way round.
 - **The STR census, and the per-locus model it would make askable** — spec §8.5, §8.6; the census
   has a spec ([`parameter_prepass_census_sites.md`](../spec/parameter_prepass_census_sites.md)) and
   no architecture document.
@@ -95,10 +105,10 @@ place holding both (G5).
   on tables built entry by entry from known parameters. Only once they recover the truth does a
   locus stream fill one (F3). An accumulator bug and a model bug then cannot hide each other.
 - **Isolate the steps whose failure is silent, and say so.** Most of this module fails loudly — a
-  panic, a failing test. **Five do not**: the complete-witness rule (C2), the read cap's draw (C3),
-  the end-bucket scoring (D2), the multi-start search (D4) and the monotonicity merge (E4). Each
-  returns a plausible number nobody can check, and **four of the five have already produced a wrong
-  one** during the measurement work. They land as **their own commit with their oracle green before
+  panic, a failing test. **Six do not**: the complete-witness rule (C2), the read cap's draw (C3),
+  the end-bucket scoring (D2), the multi-start search (D4), the monotonicity merge (E4) and the
+  contamination measurement (H2). Each returns a plausible number nobody can check, and **four of
+  them have already produced a wrong one** during the measurement work. They land as **their own commit with their oracle green before
   and after**, so `git bisect` can find one if a parameter later moves. They are marked **own commit,
   do not bundle**; no other step is.
 - **Incremental, with pauses.** One milestone, then stop for review.
@@ -119,6 +129,20 @@ place holding both (G5).
   drive it over the tomato and HG002 alignments end to end
   ([`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs),
   [`ng_str_stutter_by_library.rs`](../../../../examples/ng_str_stutter_by_library.rs)).
+- **A repeat catalog exists for each reference the real-data steps use, and it is an input like the
+  reference is.** Nothing finds a tandem repeat while a sample is read any more (spec §5.3): the
+  regions the locus stream walks are read from a file written once by
+  `pop_var_caller_exp repeat-catalog`, and a driver of this step opens it. **So Milestones F and G
+  do not run without a catalog for tomato SL4.0 and for GRCh38**, built at the catalog's own floors
+  (`[5, 5, 4, 4, 4, 3]` copies, 15 bp flank, periods 1 to 6), which sit under every floor a run
+  routes on. A catalog is bound to the reference it was built from and refuses to be paired with
+  another. Both files exist on the development machine under `tmp/`; **that is scratch, so a fresh
+  machine builds them first**, and neither the build nor its cost belongs to this plan.
+- **The numbers this plan used to assert are dated, and the milestones below say so where they use
+  them.** The copy floors moved on 2026-08-10 (spec §5.1.1), so a walk today admits a smaller
+  population of non-mononucleotide loci than every measurement quoted here was taken over. Where a
+  step asserted a measured count, it now asserts the shape and **records the current number when the
+  real accumulator first walks each cohort**.
 - **The exact-bias harness runs and its numbers are recorded.**
   [`ng_str_stutter_harness.rs`](../../../../examples/ng_str_stutter_harness.rs), research note §6. It
   is the oracle for Milestones D and E and must be green before either starts.
@@ -145,14 +169,14 @@ place holding both (G5).
 
 ### Milestone A — vocabulary and the local types (types, no logic)
 
-**A1. Scaffold `parameter_estimation/ssr/`.**  ☐
+**A1. Scaffold `parameter_estimation/ssr/`.**  ✅
 `mod.rs`, `locus_offsets.rs`, `stratum_table.rs`, `slippage.rs`, each with its `#[cfg(test)]` block;
 wire `pub mod ssr;` into `parameter_estimation/mod.rs`. A folder rather than a file for the reason
 `generic/` is one: the shaping of data and the mathematics on it never share a file. **No trait over
 the accumulator** — nothing generic drives it, and the walk knows which object it is filling.
 *Depends:* generic A1. *Source:* arch §Module home, [module layout](../arch/module_layout.md).
 
-**A2. `SsrPeriod` into `types.rs`; `RepeatCount` and `Stratum` beside it.**  ☐
+**A2. `SsrPeriod` into `types.rs`; `RepeatCount` and `Stratum` beside it.**  ✅
 `SsrPeriod` is a checked `u8` rejecting zero and anything above `MAX_MOTIF_LEN`, because a period of
 zero divides by zero when a tract length becomes a repeat count. It is shared vocabulary with steps 6
 and 7, which is why it goes in `types.rs`; `Motif` gains `ssr_period()` **beside** its existing
@@ -162,7 +186,7 @@ and 7, which is why it goes in `types.rs`; `Motif` gains `ssr_period()` **beside
 period 7 rejected; `Stratum` ordering is by period then repeat count. *Depends:* A1.
 *Source:* arch §2.1.
 
-**A3. The offset scalars and the two widths.**  ☐
+**A3. The offset scalars and the two widths.**  ✅
 `WholeRepeatOffset`, `OffsetBucket`, `OFFSET_HALF_RANGE = 4`, `OFFSET_BUCKETS = 9`,
 `ALLELE_OFFSET_LIMIT = 6`, `MAX_LOCUS_READS = 12`, `GUARD_SHARE_LIMIT = 0.10`. **The two widths are
 different things and only one is load-bearing**, which the constants' doc comments must say: the
@@ -173,7 +197,7 @@ reaches only −4. Unit tests: `bucket_of` is total and monotone over the offset
 both ends; the allele support at repeat count 3, 6 and 20 has 10, 13 and 13 lengths.
 *Depends:* A2. *Source:* arch §2.1.
 
-**A4. The three slippage rates and the model that holds them.**  ☐
+**A4. The three slippage rates and the model that holds them.**  ✅
 `SlipRate`, `SlipGainShare`, `SlipStepDecay` — three types and not one shared `Probability`, because
 they are all fractions in `[0, 1]` and one type would let a direction split be handed to something
 expecting a slippage rate and compile. Each copies `MismatchFraction`'s shape
@@ -182,7 +206,7 @@ holds all three. Extend `DomainError` with their three variants — its doc alre
 constrained types add their own ([`types.rs:268`](../../../../src/ng/types.rs)). Unit tests:
 boundaries accepted, out-of-range rejected. *Depends:* A2. *Source:* arch §2.1, §2.4.
 
-**A5. The output types.**  ☐
+**A5. The output types.**  ✅
 `StratumFit`, `SlippageStart`, `SsrSampleParameters`, `StratumFitSummary`, `SsrAccumulationCounts`.
 Types only. `StratumFit` carries **two** provenance lists and not one — `fitted_over` for the level,
 `shares_fitted_over` for the direction split and the fall-off — because those starve at rates 20,000
@@ -191,7 +215,7 @@ apart and a stratum routinely measures the first well while borrowing the second
 from one standing on 4,000. A borrowed or merged value is a different claim from one fitted in place
 and a consumer must be able to tell. *Depends:* A4. *Source:* arch §2.4, §4.3.
 
-**A6. `SsrEstimationError`.**  ☐
+**A6. `SsrEstimationError`.**  ✅
 `NoFittableStratumAtPeriod`, `SlippageNotIdentified`, `Domain`, with `MIN_LOCI_TO_FIT = 1_000`,
 `MIN_SLIPPED_READS_TO_FIT_SHARES = 4_000` and `START_AGREEMENT_LIMIT = 1.06`. **The second floor's
 doc comment must carry its derivation**, because it looks arbitrary and is not: at §3's measured
@@ -208,7 +232,7 @@ was too small. *Depends:* A4. *Source:* arch §4.2.
 
 ### Milestone B — the table of locus shapes (storage, no loci)
 
-**B1. `LocusShape` and its invariant.**  ☐
+**B1. `LocusShape` and its invariant.**  ✅
 Nine bucket counts and a guard count, all `u8`, with `counts.iter().sum() + not_whole_repeat ==
 depth` holding always. Ordered and hashable, so it can key a table and so iteration order is fixed —
 which is the whole of the determinism requirement. **The depth is exact, not binned**, and that
@@ -216,7 +240,7 @@ follows from the cap rather than from a separate decision: `MAX_LOCUS_READS` bou
 values, so there is nothing for a ladder to save. Unit test: a shape whose counts exceed the cap
 cannot be built. *Depends:* A3. *Source:* arch §2.2.
 
-**B2. `StratumTable` — storage, `add_locus`, `shapes`, `loci`.**  ☐
+**B2. `StratumTable` — storage, `add_locus`, `shapes`, `loci`.**  ✅
 A `BTreeMap<LocusShape, u32>` and two `u64` composition counters. **Sparse and not dense, and that is
 forced rather than chosen**: an entry is a whole locus's split across ten buckets, so the possible
 space is 220 shapes at three reads a locus and 293,930 at twelve, of which only a small
@@ -226,7 +250,7 @@ floating-point sum over entries and floating-point addition is not associative. 
 loci with the same shape make one entry with a count of two; `shapes()` is stable in order across
 runs. *Depends:* B1. *Source:* arch §2.2.
 
-**B3. `merge`, `substitution_rate` and `not_whole_repeat_share`.**  ☐
+**B3. `merge`, `substitution_rate` and `not_whole_repeat_share`.**  ✅
 `merge` is element-wise integer addition, so it is associative and exact and shards merge to the table
 of the union. `substitution_rate` is mismatched over compared — **a division, not a search** (spec
 §4.1), and the closed form is the maximum rather than a moment estimate. `not_whole_repeat_share`'s
@@ -242,7 +266,7 @@ order; the substitution rate of a table with no bases compared is `None` rather 
 
 ### Milestone C — one locus → one entry (data shaping)
 
-**C1. `stratum_of`.**  ☐
+**C1. `stratum_of`.**  ✅
 The reference tract's period and repeat count, from `reference_bases.len() / motif.period()` — both
 of which the locus carries. **A pure function of the reference**, which is what makes every sample
 stratify identically so a cohort can compare strata. A tract whose reference length is not a whole
@@ -250,7 +274,7 @@ number of copies is **counted and skipped, not rounded**. Unit tests over hand-b
 non-`Ssr` locus returns `None`; a 13-base tract at period 3 is counted and skipped.
 *Depends:* B1. *Source:* arch §2.3.
 
-**C2. `shape_of` — complete witnesses only.**  ☐ **Own commit, do not bundle.**
+**C2. `shape_of` — complete witnesses only.**  ✅ **Own commit, do not bundle.**
 A read's offset is `(observation.bases.len() − reference_bases.len()) / period`, whole only when that
 difference divides by the period; otherwise the read goes to the guard bucket. **The silent failure
 this isolates:** a partial witness saw only part of the tract, so its length is a **lower bound** —
@@ -264,7 +288,7 @@ because a run where it fires everywhere is a run whose depths are the cap's and 
 every read at the origin, and the same locus scored without the guard must produce a visibly
 different one — so the test is proven to bite. *Depends:* C1. *Source:* arch §2.3, spec §3.
 
-**C3. The read cap — subsample, seeded from the locus's position.**  ☐ **Own commit, do not bundle.**
+**C3. The read cap — subsample, seeded from the locus's position.**  ✅ **Own commit, do not bundle.**
 A locus deeper than `MAX_LOCUS_READS` is entered from a uniform random subsample of its reads down to
 the cap. A subsample is exact rather than approximate: thinning a locus's reads uniformly leaves the
 bucket counts distributed exactly as they would be at the lower depth. **The silent failure this
@@ -275,7 +299,7 @@ that does not compare two walks would ever show. *Oracle:* the same locus gives 
 every run and in every shard layout, and over many positions the kept bucket counts are
 hypergeometric in mean and variance. *Depends:* C2. *Source:* arch §2.1, spec §4.1.
 
-**C4. `composition_of` — bases compared and bases mismatched.**  ☐
+**C4. `composition_of` — bases compared and bases mismatched.**  ✅
 Compare each read's bases against the motif tiled to **the length that read shows**, so a mismatch is
 a substitution and not a slip. **This is an alignment, not a call**, so it does not reintroduce the
 threshold-then-count bias step 4 exists to remove. It is the answer that needs nothing upstream; the
@@ -287,14 +311,16 @@ charged to the substitution rate, which `SsrSegment::purity_fraction()`
 per stratum. Unit tests: a perfect tract mismatches nothing; a tract with one interior substitution
 mismatches once at every length the read shows. *Depends:* C1. *Source:* arch §2.3.
 
-**C5. `SsrAccumulators`, `add_locus`, `merge`, `adjustments`.**  ☐
+**C5. `SsrAccumulators`, `add_locus`, `merge`, `adjustments`.**  ✅
 One `StratumTable` per `(read group, stratum)`. `add_locus` **borrows** the locus and passes it on
 untouched, ignores a `kind` that is not `LocusKind::Ssr`, and tallies rather than repairs. **A locus
 covered by two read groups makes two entries and that is sound** — the genotype is drawn once for the
 locus and enters both through the same mixture, so the product over them is a composite likelihood
 and the split costs precision, not correctness. What must not be split is a locus's reads *within*
 one read group, which the entry key prevents. `loci_without_whole_repeat_reference` **must read near
-zero** and is a bug report against region typing if it does not. Unit tests: a non-STR locus changes
+zero** and is a bug report against the classification the catalog reader applies if it does not — a
+tract admitted as a locus whose reference length is not a whole number of copies is a delimiting
+fault upstream, never something this unit rounds away. Unit tests: a non-STR locus changes
 nothing; three shards merged in every order give identical tables and identical counters.
 *Depends:* C3, C4, B3. *Source:* arch §4.
 
@@ -303,7 +329,7 @@ nothing; three shards merged in every order give identical tables and identical 
 
 ### Milestone D — the noise model and the search (the mathematics, no loci)
 
-**D1. The slip kernel.**  ☐
+**D1. The slip kernel.**  ✅
 `P(a read shows exactly d whole repeats more than its allele)` from the three slippage parameters: no
 slip with probability `1 − level`; otherwise a direction drawn from the gain share and a distance
 drawn from a geometric fall-off, **one fall-off shared by both directions** (spec §3). The truncation
@@ -312,7 +338,7 @@ one over its support at every parameter setting tried; at a level of zero it is 
 zero elsewhere; the ratio of the two-step to the one-step term equals the fall-off in both
 directions. *Depends:* A4. *Source:* spec §3, harness `Slip::p`.
 
-**D2. `SsrNoiseModel::genotype_likelihoods` — the marginal end-bucket rule.**  ☐ **Own commit, do
+**D2. `SsrNoiseModel::genotype_likelihoods` — the marginal end-bucket rule.**  ✅ **Own commit, do
 not bundle.**
 A genotype is an unordered pair of allele offsets. Each read picks one of the two copies and then
 slips, so a bucket's probability is the average of the two copies' slip kernels, and a shape's
@@ -330,7 +356,7 @@ level of zero every locus's reads land on its own alleles. Then agreement with t
 expression re-runs all four.** *Depends:* D1, generic D2's `NoiseModel` trait. *Source:* arch §3,
 spec §4.1, research note §6.4.
 
-**D3. Widen `fit_mixture_weights` past three genotypes.**  ☐
+**D3. Widen `fit_mixture_weights` past three genotypes.**  ✅
 Its declared return type is `SmallVec<[f64; 3]>`, which is the diploid generic path's genotype count.
 A stratum here has up to 91 — thirteen allele lengths at `ALLELE_OFFSET_LIMIT = 6`, fewer where the
 support clips at the low end — so the return type widens to a `Vec<f64>` or becomes generic in its
@@ -340,7 +366,7 @@ and the same code, and convergence failure stays a bug rather than a data condit
 existing generic three-genotype test still passes, and a hand-built 45-genotype table recovers its
 known weights from any interior start. *Depends:* generic D1. *Source:* arch §3.
 
-**D4. `fit_by_multistart`, and the spread it must report.**  ☐ **Own commit, do not bundle.**
+**D4. `fit_by_multistart`, and the spread it must report.**  ✅ **Own commit, do not bundle.**
 Maximise the three slippage parameters from several starting points, climbing the genotype
 frequencies at every trial, and return the best-scoring **with every start's outcome beside it**.
 `SLIPPAGE_STARTS` is four starts that disagree about the level, the direction and the decay **at
@@ -366,14 +392,14 @@ has no concavity proof, so it is capped, the best-scoring iterate kept, and the 
 
 ### Milestone E — the four fits, in order
 
-**E1. The substitution rate.**  ☐
+**E1. The substitution rate.**  ✅
 Mismatched bases over bases compared, per stratum. One division, and it needs none of the other
 three, which is why it goes first. Where a stratum holds reads of two different true rates the pooled
 counters return their base-weighted mean, which is the right answer for a model carrying one rate.
 *Oracle:* the harness recovers 0.0030 from a truth of 0.0030 by a search that had no need to run.
 *Depends:* B3, C5. *Source:* arch §4.1, spec §4.1.
 
-**E2. The three slippage parameters, per stratum.**  ☐
+**E2. The three slippage parameters, per stratum.**  ✅
 `fit_by_multistart` over that stratum's shapes, with `fit_mixture_weights` climbing the genotype
 frequencies at each trial. Genotype frequencies are **fitted freely** over unordered allele pairs
 rather than tied through one allele frequency, matching the generic path and for the same reason: a
@@ -382,7 +408,7 @@ quantity this run measures rather than assumes. Each fit records its starts and 
 `StratumFit::starts_tried`, and raises `SlippageNotIdentified` when they span more than
 `START_AGREEMENT_LIMIT` in the level. *Depends:* D4, E1. *Source:* arch §4.1, spec §4.2.
 
-**E3. Borrowing for a thin stratum — two floors, and the fit splits between them.**  ☐
+**E3. Borrowing for a thin stratum — two floors, and the fit splits between them.**  ✅
 Below `MIN_LOCI_TO_FIT`, take the neighbouring repeat counts at the same period rather than fitting
 noise, marked `Provenance::Borrowed` with `fitted_over` naming the strata it came from. A period with
 no fittable stratum anywhere raises `NoFittableStratumAtPeriod` rather than defaulting.
@@ -399,7 +425,7 @@ says so; a stratum with a million loci and 40 slipped reads keeps its level and 
 with the two provenance lists differing; a period whose every stratum is thin errors.
 *Depends:* E2. *Source:* arch §4.1, §4.2, spec §4.5.
 
-**E4. The monotonicity walk — merge and refit.**  ☐ **Own commit, do not bundle.**
+**E4. The monotonicity walk — merge and refit.**  ✅ **Own commit, do not bundle.**
 Last, because it reads the fitted sequence. Visit each period's strata in repeat-count order; where a
 fitted level falls below its predecessor's, merge the two tables and refit, repeating until the
 sequence rises. **The silent failure this isolates:** a merge **changes the estimate** and does so
@@ -413,7 +439,7 @@ strata merged cost **exactly** nothing, which is the control the harness runs; a
 non-monotone synthetic sequence must trigger the merge rather than being accepted, while a monotone
 one must pass through untouched. *Depends:* E3. *Source:* arch §4.1, spec §4.3, research note §6.6.
 
-**E5. The summary, which is the part a person reads.**  ☐
+**E5. The summary, which is the part a person reads.**  ✅
 Several hundred fits per sample against the generic path's four, so the diagnostics **aggregate**
 rather than accumulate: how many strata were fitted in place, borrowed and merged, and which; how
 many kept their level but borrowed their two shares, which is a different claim from a borrow and is
@@ -455,15 +481,22 @@ would turn the sharpest test in this plan into the vaguest. *Depends:* F1. *Sour
 §10.2, research note §6.8.
 
 **F3. The identities that need no truth set, on both real cohorts.**  ☐
-Three assertions on the tomato CRAMs and the HG002 alignments as they stand: one sample walked in one
-region and in many gives **identical** tables, which integer entry counts make an equality rather
-than a tolerance; `adjustments().loci_without_whole_repeat_reference` is near zero, and a large count
-is a bug report against region typing rather than something this unit absorbs; and the table's size
-reproduces the measured walk — 70,305 entries over 1.73 million tomato loci uncapped, 12,727 over
-29,811 HG002 loci. The last is what
-[`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs) already measures, so this step
-**re-runs it against the real accumulator** rather than against the harness's stand-in, which is the
-one change that could move those numbers. *Depends:* F2. *Source:* arch §8, research note §6.8.
+Three assertions on the tomato CRAMs and the HG002 alignments as they stand, **each run against a
+repeat catalog for that reference** (preconditions): one sample walked in one region and in many
+gives **identical** tables, which integer entry counts make an equality rather than a tolerance;
+`adjustments().loci_without_whole_repeat_reference` is near zero, and a large count is a bug report
+against the catalog reader's classification rather than something this unit absorbs; and the table
+stays the small object it was measured to be — **tens of thousands of entries, well under one per
+locus**, rather than the one-entry-per-locus growth the design would have had to defend.
+
+**The third assertion is a shape and not a number, and that is a change.** The measured walk gave
+70,305 entries over 1.73 million tomato loci and 12,727 over 29,811 HG002 loci
+([`ng_str_table_memory.rs`](../../../../examples/ng_str_table_memory.rs), research note §6.8) —
+under the copy floors of the day, which have since taken nine in ten non-mononucleotide loci off
+this path. **Asserting those four numbers would fail on arrival and would say nothing when it did.**
+So this step re-runs that program against the real accumulator, asserts entries-per-locus stays far
+below one, and **records what it now measures** in the research note, which is where the next size
+claim comes from. *Depends:* F2. *Source:* arch §8, research note §6.8, spec §5.1.1.
 
 > **Checkpoint F:** the STR path runs end to end on real alignments, sharded accumulation is an
 > equality, and the table's measured size holds against the real implementation. Pause for review.
@@ -472,19 +505,31 @@ one change that could move those numbers. *Depends:* F2. *Source:* arch §8, res
 
 **G1. Agreement with HG002's truth genotypes.**  ☐
 The parameters fitted by the marginal likelihood must match those measured directly on
-known-homozygous loci — **2.0% slippage at six or more repeats, and a 3.4× direction split** — within
-the fit's own error. **This is the only check in the whole design that does not generate its data
-from the model it then fits**: every recovery test above draws from the model, so a shared
-misspecification cancels and passes. It is also **the test production's estimator fails**, by 2.4-fold
-with the direction reversed, which is the reason for the entire design. *Depends:* F3.
-*Source:* spec §10.3, [`parameter_prepass.md`](../spec/parameter_prepass.md) §2.2.
+known-homozygous loci, **both measured on the same run** rather than one of them read off this page.
+**This is the only check in the whole design that does not generate its data from the model it then
+fits**: every recovery test above draws from the model, so a shared misspecification cancels and
+passes. It is also **the test production's estimator fails**, by 2.4-fold with the direction
+reversed, which is the reason for the entire design.
+
+**Measure both sides in this run, and compare them to each other.** The recorded pair — 2.0%
+slippage at six or more repeats and a 3.4× direction split (spec §10.3) — was taken before the copy
+floors moved, so it is the shape to expect and not the value to assert: a run today fits a shorter
+ladder of strata, and a summary pooled over "six or more repeats" is dominated by where its strata
+stop (spec §10.3's own trap). **What must hold is that the fit agrees with the direct measurement on
+the same loci, and above all that it does not invert the direction split** — reporting gains as more
+common than losses is precisely what the biased estimator does. *Depends:* F3. *Source:* spec §10.3,
+[`parameter_prepass.md`](../spec/parameter_prepass.md) §2.2.
 
 **G2. The guard share separates strata on real data rather than flagging everything or nothing.**  ☐
-The measured walk puts 10 of 132 human strata and 28 of 148 tomato strata above the one-in-ten
-threshold, so the diagnostic discriminates. Assert that shape survives the real accumulator, and
-that a stratum above the limit is distinguishable in `StratumFitSummary` from one that merely had few
-loci. **A diagnostic that fires on nothing is not conservative, it is absent.** *Depends:* G1.
-*Source:* spec §5, §10.4, research note §6.8.
+Under the old copy floors the walk put 10 of 132 human strata and 28 of 148 tomato strata above the
+one-in-ten threshold, so the diagnostic discriminated. **Assert that it still divides the strata —
+some above the limit and most below — rather than the two counts**, which the floors have moved:
+the strata the floors removed are exactly the low-repeat ones that were failing the threshold, so
+the share above it should now be *smaller* and may reach zero on one cohort. **A guard share that
+fires on nothing is not conservative, it is absent** — so if it does reach zero, that is a finding
+about the floors doing their job and it belongs in the research note, not a green test with nothing
+behind it. Also assert that a stratum above the limit is distinguishable in `StratumFitSummary` from
+one that merely had few loci. *Depends:* G1. *Source:* spec §5, §10.4, research note §6.8.
 
 **G3. A deliberately unfittable stratum reaches the summary.**  ☐
 Feed loci generated with the slippage level at zero and the alleles spread — a stratum whose level is
@@ -520,6 +565,78 @@ limit is not widened to accommodate a gap that survives it. *Depends:* G4. *Sour
 > the two diagnostics are proven to discriminate rather than to decorate, and a stratum that barely
 > stutters is proven to keep its level and disown its shares. Pause for review.
 
+### Milestone H — loci that are not the tract their stratum thinks they are
+
+**Why this is a milestone and not a paragraph in Milestone E** (owner, 2026-08-11). A stratum's four
+numbers are pooled over hundreds of thousands of loci on the assumption that each is one tract of
+that period and repeat count. Some are not, for biological reasons: a duplication the reference does
+not carry collects two paralogous tracts' reads at one locus, a minority of reads mismaps in from a
+similar tract elsewhere, a long tract is unstable within the individual, an interruption or a nearby
+indel anchors part of the reads differently (spec §4.6). **The sibling path met the same thing and
+it inflated the sample's heterozygosity by 41%**: one substitution rate per read group fitted the
+body of its distribution and not its tail, and because the only class that could explain such a
+locus was the heterozygote, the surplus arrived as heterozygosity. It took a second class of site to
+fix, added on its own evidence after that path was already running end to end — which is exactly
+where this milestone sits.
+
+**It comes after Milestone G on purpose.** G1 is a real-data comparison against truth genotypes, so
+it is the first thing in this plan that could *show* the problem rather than simulate it; and if H
+ends in a second class of locus, G1 is one of the checks that re-runs.
+
+**H1. The diagnostic: how much of a stratum sits in shapes its own fit cannot explain.**  ☐
+`StratumFit::unexplained_locus_share` and the summary's `worst_unexplained_locus_share` (arch §2.4,
+§4.3): the share of a stratum's loci whose shape scores below `UNEXPLAINED_SHAPE_LN_LIMIT` under the
+fitted model, **per read and not per locus** — a shape's likelihood is a product over its reads, so
+a floor on the total would flag the deepest loci of every stratum by arithmetic. **Free** — every
+candidate already evaluates every entry, and an entry is one locus's shape, so this is one more pass
+over numbers the search's last step held; no coordinate is kept and the entry key does not move. **It is not the guard share**, which counts *reads* moving by a
+non-whole number of copies pooled over a stratum: an aberrant locus can move every read by whole
+copies, and one locus in a thousand is invisible in a stratum-wide ratio. Unit tests: a clean
+generated stratum reports ~0; the same stratum with one planted locus whose reads sit at two
+lengths six repeats apart reports it, and the guard share does not move. Then **read it on tomato
+and HG002**, because that is what says which contamination shares H2 has to cover.
+*Depends:* G1. *Source:* spec §4.6, arch §2.4.
+
+**H2. What such loci cost, measured exactly.**  ☐ **Own commit, do not bundle.**
+In [`ng_str_stutter_harness.rs`](../../../../examples/ng_str_stutter_harness.rs), generate a stratum
+in which a share `q` of the loci come from a **different process** and fit the ordinary model over
+it. Two processes, because they fail differently: reads split between two tracts several repeats
+apart, which is what a duplication the reference does not carry gives; and reads spread far wider
+than any slip kernel, which is instability or mismapping. Report the bias in the level, both shares
+and the substitution rate against `q`, over the range H1 measured on real data.
+
+**The exact-bias method works here and that is worth saying, because it does not work for two other
+open questions in this plan.** The contaminating process is *known*, so each entry's probability
+under the mixture is computable and the table can be weighted by it — no draws, no sampling noise,
+so "unbiased" is decided rather than estimated. **The silent failure this isolates:** this path has
+two absorbers where the generic path had one. A locus with reads at two distant lengths can be
+explained as a locus carrying two distant alleles, which leaves the slippage parameters clean and
+**corrupts the emitted allele spectrum instead** — so a run that reports only the four numbers can
+pass while the thing it damaged goes unmeasured. *Oracle:* the bias at `q = 0` is exactly zero,
+which is the existing control; and the report names **which** parameter moved, the allele
+frequencies included. *Depends:* H1. *Source:* spec §4.6, §8.12, §10.9.
+
+**H3. The decision, taken on H2's numbers rather than in advance.**  ☐
+If the bias at the shares real data shows sits inside `START_AGREEMENT_LIMIT` — 6%, the finest
+difference this design claims a caller can feel — record the measurement, set
+`UNEXPLAINED_SHAPE_LN_LIMIT` from where the two populations separated, and stop. If it does not,
+**the fix is a second class of locus and nothing else**: ordinary with probability `1 − w`, aberrant
+with probability `w` and its reads drawn from a much flatter distribution over the offsets, `w`
+fitted rather than chosen. It costs one parameter, it touches nothing shared — the noise parameters
+are an associated type of the fitting seam, which is how the generic path added its own second class
+without disturbing this one — and it lands the way that one did: **its own milestone, on its own
+written-up evidence, with the owner's approval before it is built.**
+
+**What is refused in advance, whatever H2 says: dropping the loci that score badly.** That is
+threshold-then-count, the exact bias this whole step exists to remove, and it would take real long
+alleles before it took artefacts, since both sit where the model has least mass.
+*Depends:* H2. *Source:* spec §4.6, arch §5, §7.
+
+> **Checkpoint H:** what an aberrant locus costs is a number rather than a worry, the parameter that
+> absorbs it is named, and the diagnostic that finds such loci on real data has a threshold set by
+> measurement. Pause for review — and if a second class of locus is needed, that is a new plan and
+> not an extra step here.
+
 ---
 
 ## Verification summary
@@ -531,8 +648,9 @@ limit is not widened to accommodate a gap that survives it. *Depends:* G4. *Sour
 | C | a partial witness proven not to enter as a lost repeat, with the guard removed shown to change the shape; the cap's draw hypergeometric in mean and variance and reproducible from the locus position alone; three shards merged in every order identical, counters included |
 | D | the three algebraic gates before any fit — sums to one, no negative counts, silent at a zero level — with the un-rescaled plug-in shown to fail the first at 0.9488; agreement with the harness's kernel to floating point; **the control at exactly 0.000% on the level and 0.0000 on both shares, four starts to 1.000×**, paired with the score at the truth unbeaten |
 | E | the harness's own answers: the substitution rate recovered by search, two identical strata merged at exactly zero cost, a non-monotone sequence proven to trigger the merge and a monotone one proven not to |
-| F | recovery from a directly-filled table at ploidy 2 and 4 and at 3 and 45 reads a locus, to zero bias; sharded equals single as an equality; the measured entry counts reproduced against the real accumulator |
-| G | **the fitted parameters against HG002's known-homozygous measurement — 2.0% and 3.4× — and, at a low-slippage stratum, this path's substitution rate against the generic path's within a quarter-Phred: the two checks not generated from the model they test**; the guard share proven to separate real strata; an unfittable stratum proven to reach the summary; a stratum at 0.091% proven to keep its level within sampling error while marking its two shares borrowed |
+| F | recovery from a directly-filled table at ploidy 2 and 4 and at 3 and 45 reads a locus, to zero bias; sharded equals single as an equality; the table proven to stay far below one entry per locus on both cohorts, with the current counts recorded |
+| G | **the fitted parameters against HG002's known-homozygous measurement, both sides measured in the same run, with the direction split proven not to invert — and, at a low-slippage stratum, this path's substitution rate against the generic path's within a quarter-Phred: the two checks not generated from the model they test**; the guard share proven to divide real strata rather than to fire on all or none; an unfittable stratum proven to reach the summary; a stratum at 0.091% proven to keep its level within sampling error while marking its two shares borrowed |
+| H | the bias in all four numbers **and in the emitted allele spectrum** against the share of loci drawn from another process, computed exactly because that process is known, with zero bias at a zero share as the control; the diagnostic proven to see a planted aberrant locus that the guard share cannot |
 
 ## Out of scope (next plans)
 
@@ -548,6 +666,9 @@ limit is not widened to accommodate a gap that survives it. *Depends:* G4. *Sour
   here and nothing about what is done with them.
 - **The mismatch count from the aligner** — arch §2.3's `OPEN`, and the better of its two answers.
   Changes one function's body and no signature.
+- **A second class of locus, if Milestone H says the fit needs one.** A new plan on H2's written-up
+  evidence and with the owner's approval, exactly as the generic path's second class of site was —
+  not an extra step bolted onto H3.
 - **Three measurable questions this plan does not settle, all cheap and all wanting the harness
   rather than the implementation:** whether a thin stratum should use free genotype frequencies or an
   allele spectrum plus the sample's inbreeding coefficient (spec §8.6); how often the monotonicity
