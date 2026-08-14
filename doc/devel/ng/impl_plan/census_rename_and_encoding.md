@@ -139,6 +139,36 @@ it.
 > **Checkpoint B:** the encoding changed, with a per-parameter account of what moved on two real
 > cohorts and why. Pause for review.
 
+### Milestone C — one defect the milestone-A review found
+
+**ADDED 2026-08-14 (owner), after Checkpoint A.** It is not encoding work and it was not in the
+original scope; it is here because the review that milestone A required found it, it is a wrong
+answer rather than an untidiness, and leaving it in a list of open items is how it gets lost.
+
+☐ **C1 — a repeat tract's mismatching bases are attributed to the wrong reads.** When several reads
+cross a tract, `CensusWriter::add_ssr` numbers each mismatch's read from zero **within one
+observation** rather than within the locus, and the walk folds reads carrying identical bases into
+one observation. So two reads that differ from the reference in different places are both written
+down as read 0. **The distinction that destroys is the only reason the field exists**: the same
+substitution at the same place on two reads is an allele, and two substitutions on one read is a bad
+read ([records spec](../spec/parameter_prepass_joint_records.md) §3, §7.3;
+[arch records](../arch/parameter_prepass_joint_records.md) §1.4). Carry a per-locus read counter
+across the observation loop. **Own commit, after milestone B** — it changes what the census records,
+which milestone B's own oracle forbids while B is running.
+*Depends:* B5. *Source:* the A2 review,
+[census_rename_a2_2026-08-14.md](../../reports/reviews/census_rename_a2_2026-08-14.md) finding B1,
+which carries a test that fails against the code as it stands.
+
+☐ **C2 — settle whether a mismatch outside the tract is recorded at all.** `TractDifference::offset`
+is documented as negative in the sequence before the tract and past the end in the sequence after
+it; the writer only ever compares a read against the tract itself, so no code path can produce
+either. **The owner decides which way it goes** — teach the writer the flanks, or narrow the doc —
+and the test that stands for this property today asserts two hand-written values against each other
+and calls no production code, so it must be replaced either way.
+*Depends:* —. *Source:* the same review, finding B2.
+
+> **Checkpoint C:** two defects the census's own tests could not see, fixed. Pause for review.
+
 ---
 
 ## Verification summary
@@ -151,6 +181,8 @@ it.
 | B3 | construction refuses a cap above 255; a position at the cap round-trips; allele fractions unchanged |
 | B4 | the repeat-tract estimator's fitted numbers unchanged on both cohorts, the counts being a denominator it already summed |
 | B | a per-parameter table of what moved, on real reads, against A1 |
+| C1 | a test giving one tract two reads that differ in different places, and asserting they come back as two reads — it fails against the code as it stands |
+| C2 | a test that drives the writer rather than comparing two values it wrote itself, whichever way the owner settles it |
 
 ---
 

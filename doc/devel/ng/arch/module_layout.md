@@ -71,8 +71,15 @@ src/ng/
 │                       SampleSummarizer + CohortEstimator. Specs ../spec/parameter_prepass*.md;
 │                       arch parameter_prepass_generic.md (which owns the shared fitting/
 │                       machinery) and parameter_prepass_ssr.md. Sub-units: fitting/,
-│                       generic/, ssr/ — STR-ness is a property of an implementation
-│                       (principle 2), not a top-level split
+│                       generic/, ssr/, joint/ — STR-ness is a property of an implementation
+│                       (principle 2), not a top-level split.
+│                        · joint/ – step 4's second route to the same parameters: instead of
+│                          folding each sample into histograms, it keeps raw evidence at a
+│                          bounded set of positions that is the same in every sample — the
+│                          census — and fits the whole cohort at once, which is what buys a
+│                          locus's own allele frequency. loci.rs (which positions), census.rs
+│                          (what is recorded there), fit.rs and ssr_fit.rs (the two halves of
+│                          the estimator), contamination.rs. Arch parameter_prepass_joint_*.md.
 ├── allele_candidates/ – step 6  CandidateGenerator + impls (rung_ladder [STR], assembly [generic])
 ├── likelihood/       – step 7  ReadLikelihood + impls (stutter models, pair-HMM)
 ├── genotype_prior/   – step 8  GenotypePrior + impls (flat, dirichlet, sfs, marginalized)

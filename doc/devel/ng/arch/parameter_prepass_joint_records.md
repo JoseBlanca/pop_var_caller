@@ -565,10 +565,13 @@ make a property of the sample look like a property of the file.
 | `StratumCounts` | [`repeat_catalog/strata.rs:15`](../../../../src/ng/repeat_catalog/strata.rs) | stored, not restated |
 | `SelectionTerms`, `CensusLociDigest` | [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §1.2–1.3 | held, not redefined |
 
-**The code has not been renamed yet, and this document leads it — 2026-08-13.** The module is still
-`records.rs` and the types still carry their old names. The sweep is mechanical:
+**Renamed in the code — 2026-08-14** (`refactor(ng): A2`, plan
+[`census_rename_and_encoding.md`](../impl_plan/census_rename_and_encoding.md) step A2). The table
+below is the mapping that was applied, kept because every report, branch and commit written before
+that date uses the right-hand column's names. `CohortCensusEvidence` and `LocusEvidence` are still
+unwritten; `CensusError` was a no-op, there being no such type to rename.
 
-| this document | the code today |
+| this document, and now the code | what the code called it before 2026-08-14 |
 |---|---|
 | `census.rs` | `records.rs` |
 | `CensusLoci`, `CensusLociDigest` | `KeptLoci`, `KeptLociDigest` |
@@ -580,10 +583,12 @@ make a property of the sample look like a property of the file.
 | `CensusError` | `RecordError` |
 | `RecordingTerms`, `SelectionTerms` | `RecordIdentity`, `SelectionIdentity` |
 
-**It waits rather than colliding.** The sweep touches `records.rs`, `loci.rs`, `fit.rs`,
-`contamination.rs` and five examples, and the last two are being changed elsewhere as this is written.
-Do it in one pass when that work is committed — a partial rename leaves the module saying both, which
-is the state this rename exists to end.
+**It was done in one pass**, over `census.rs`, `loci.rs`, `fit.rs`, `ssr_fit.rs`,
+`contamination.rs`, `coverage.rs` and four examples — a partial rename leaves the module saying
+both, which is the state this rename existed to end. The one name still carrying the old word is
+`JointFitError::IdentityMismatch`, because
+[`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) specifies that variant name;
+the code matches its authority, and this document would have to move first.
 
 *Why "census" at all.* It is the word for what this route does that "records" does not carry: **the
 same questions asked of every sample**. A record is any written-down thing; a census is a set of
