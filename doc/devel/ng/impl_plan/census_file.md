@@ -69,7 +69,7 @@ sample once, months apart, and fits later — and for the cohort too large to ho
 
 ### Milestone A — sections, with nothing on disk
 
-☐ **A1 — `SectionKey`, `Section`, `ByteExtent`, and `Sections::Resident`.** The types, and the
+✅ **A1 — `SectionKey`, `Section`, `ByteExtent`, and `Sections::Resident`.** The types, and the
 resident half only. `SectionKey`'s ordering is the enumeration order the contract promises.
 *Depends:* —. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §1.1a.
 

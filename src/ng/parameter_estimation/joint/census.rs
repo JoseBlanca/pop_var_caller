@@ -836,6 +836,166 @@ impl RecordingTerms {
 }
 
 // ---------------------------------------------------------------------
+// What a piece of the census is, and where it sits
+// ---------------------------------------------------------------------
+
+/// Which piece of a sample's evidence — **the smallest piece anything ever asks for**.
+///
+/// There are exactly two kinds: one read group's ordinary-position evidence, and one read
+/// group's tracts for one stratum. **That division is the estimator's own shape rather than an
+/// encoding detail**: the fit finishes the ordinary positions before it reads a tract, and then
+/// reads one band of strata at a time, so a run never has to hold a whole sample's evidence to
+/// use any of it.
+///
+/// **One name for three things that must not drift**: the entries of a census file's directory,
+/// the unit a scoped call lends, and the unit a counting reader measures bytes against.
+///
+/// **The ordering is the enumeration order**, not something a caller sorts: ordinary positions
+/// before tracts, read groups by id, strata by their own key. A fit that iterates sections is
+/// deterministic because this `Ord` is.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SectionKey {
+    /// One read group's ordinary-position evidence.
+    Generic(ReadGroupId),
+    /// One read group's tracts for one stratum.
+    Ssr(ReadGroupId, Stratum),
+}
+
+impl SectionKey {
+    /// The read group this section belongs to — the one thing both kinds share.
+    pub fn read_group(self) -> ReadGroupId {
+        match self {
+            Self::Generic(group) | Self::Ssr(group, _) => group,
+        }
+    }
+
+    /// The stratum, where there is one. Ordinary positions are not in a stratum.
+    pub fn stratum(self) -> Option<Stratum> {
+        match self {
+            Self::Generic(_) => None,
+            Self::Ssr(_, stratum) => Some(stratum),
+        }
+    }
+}
+
+/// The decoded contents of one section.
+///
+/// **The two halves hold different things and are read through different calls**, so this is a
+/// sum rather than a shared shape: five per-base buckets cannot express a tract length and a
+/// length distribution cannot express which base was substituted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Section {
+    Generic(GenericEvidence),
+    Ssr(SsrEvidence),
+}
+
+impl Section {
+    /// Whether this section is what the key asks for — the two must not drift apart.
+    pub fn answers(&self, key: SectionKey) -> bool {
+        matches!(
+            (self, key),
+            (Self::Generic(_), SectionKey::Generic(_)) | (Self::Ssr(_), SectionKey::Ssr(_, _))
+        )
+    }
+}
+
+/// Where a section sits in a file: an offset and a length.
+///
+/// **A pair and not a range**, because it is written into a directory and read back as two
+/// numbers, and because a length says what to allocate where an end does not.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ByteExtent {
+    offset: u64,
+    len: u64,
+}
+
+impl ByteExtent {
+    pub fn new(offset: u64, len: u64) -> Self {
+        Self { offset, len }
+    }
+
+    pub fn offset(self) -> u64 {
+        self.offset
+    }
+
+    pub fn len(self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Whether two sections overlap — **which they never may**, since a call reading one seeks
+    /// to its own offset and takes its own length.
+    pub fn overlaps(self, other: Self) -> bool {
+        self.offset < other.offset + other.len && other.offset < self.offset + self.len
+    }
+}
+
+/// Where a sample's sections are.
+///
+/// **Two states and no more**: a genome walk produces the first, opening a census file produces
+/// the second, and a caller cannot tell which it has — that is what lets the fit be one code
+/// path over a cohort held in memory and a cohort read from disk.
+///
+/// **Only the resident state exists today.** The file, its directory and the reader that seeks
+/// into it are the next unit of work; nothing here changes when they arrive, which is why this
+/// type is written now.
+///
+/// **This type's visibility is not what keeps a section from being retained.** What does that
+/// is the scoped access on the value that owns one: a section is lent for the length of a call
+/// and there is no field a caller could keep it in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sections {
+    /// Built by a walk: every section decoded and held. This is the run that never writes a
+    /// file, at fifty samples or at one.
+    Resident(BTreeMap<SectionKey, Section>),
+}
+
+impl Sections {
+    /// The sections a walk built, checked against their own keys.
+    ///
+    /// # Panics
+    ///
+    /// When a key and its section disagree about which half of the census they are — an
+    /// ordinary-position key holding tracts indexes one thing by another's positions, and
+    /// nothing downstream would notice.
+    pub fn resident(sections: BTreeMap<SectionKey, Section>) -> Self {
+        assert!(
+            sections.iter().all(|(key, section)| section.answers(*key)),
+            "a section is filed under a key of the other kind"
+        );
+        Self::Resident(sections)
+    }
+
+    /// Every section this sample holds, in enumeration order.
+    pub fn keys(&self) -> impl Iterator<Item = SectionKey> + '_ {
+        match self {
+            Self::Resident(sections) => sections.keys().copied(),
+        }
+    }
+
+    /// One section, or `None` where this sample has none — **a stratum no read reached is
+    /// still a section**, holding zero, so `None` means the census was not asked for it.
+    pub fn get(&self, key: SectionKey) -> Option<&Section> {
+        match self {
+            Self::Resident(sections) => sections.get(&key),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Resident(sections) => sections.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+// ---------------------------------------------------------------------
 // The whole input to the fit
 // ---------------------------------------------------------------------
 
@@ -1680,6 +1840,102 @@ mod tests {
             reads: 2,
         });
         assert!(records.guard_is_over_threshold(0), "3 in 21 is over");
+    }
+
+    // ---- what a piece of the census is ---------------------------------------
+
+    /// **The enumeration order is the key's own ordering**, so a fit that walks a sample's
+    /// sections is deterministic without anything sorting: ordinary positions before tracts,
+    /// read groups by id, strata by their own key. The mutation this catches is the two enum
+    /// variants swapping places, which would read every sample's tracts before its ordinary
+    /// positions and break the one dependency between the two halves.
+    #[test]
+    fn sections_enumerate_ordinary_positions_first_then_by_read_group_and_stratum() {
+        let period_one = Stratum {
+            period: 1,
+            reference_repeats: 8,
+        };
+        let keys = [
+            SectionKey::Ssr(ReadGroupId(1), AT_SIX_REPEATS),
+            SectionKey::Generic(ReadGroupId(1)),
+            SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS),
+            SectionKey::Ssr(ReadGroupId(0), period_one),
+            SectionKey::Generic(ReadGroupId(0)),
+        ];
+        let mut sorted = keys;
+        sorted.sort_unstable();
+
+        assert_eq!(
+            sorted,
+            [
+                SectionKey::Generic(ReadGroupId(0)),
+                SectionKey::Generic(ReadGroupId(1)),
+                // Period 1 at 8 repeats sorts before period 2 at 6: the stratum's own order.
+                SectionKey::Ssr(ReadGroupId(0), period_one),
+                SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS),
+                SectionKey::Ssr(ReadGroupId(1), AT_SIX_REPEATS),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_key_says_whose_reads_and_which_stratum() {
+        let generic = SectionKey::Generic(ReadGroupId(3));
+        assert_eq!(generic.read_group(), ReadGroupId(3));
+        assert_eq!(
+            generic.stratum(),
+            None,
+            "ordinary positions are in no stratum"
+        );
+
+        let tracts = SectionKey::Ssr(ReadGroupId(3), AT_SIX_REPEATS);
+        assert_eq!(tracts.read_group(), ReadGroupId(3));
+        assert_eq!(tracts.stratum(), Some(AT_SIX_REPEATS));
+    }
+
+    /// A section filed under a key of the other kind would index one half of the census by the
+    /// other's positions, and nothing downstream would notice — so the constructor refuses it.
+    #[test]
+    #[should_panic(expected = "filed under a key of the other kind")]
+    fn a_section_filed_under_the_wrong_kind_of_key_is_refused() {
+        let _ = Sections::resident(BTreeMap::from([(
+            SectionKey::Generic(ReadGroupId(0)),
+            Section::Ssr(SsrEvidence::never_walked(4)),
+        )]));
+    }
+
+    #[test]
+    fn a_resident_sample_lists_its_sections_and_hands_back_the_one_asked_for() {
+        let generic = SectionKey::Generic(ReadGroupId(0));
+        let tracts = SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS);
+        let sections = Sections::resident(BTreeMap::from([
+            (generic, Section::Generic(GenericEvidence::never_walked(3))),
+            (tracts, Section::Ssr(SsrEvidence::never_walked(2))),
+        ]));
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections.keys().collect::<Vec<_>>(), vec![generic, tracts]);
+        assert!(matches!(sections.get(generic), Some(Section::Generic(_))));
+        assert!(matches!(sections.get(tracts), Some(Section::Ssr(_))));
+        assert!(
+            sections
+                .get(SectionKey::Ssr(ReadGroupId(1), AT_SIX_REPEATS))
+                .is_none(),
+            "a section this sample was never asked for is absent, not empty"
+        );
+    }
+
+    /// Two sections may never share a byte, since a call reading one seeks to its own offset
+    /// and takes its own length.
+    #[test]
+    fn byte_extents_meet_without_overlapping() {
+        let first = ByteExtent::new(0, 100);
+        let second = ByteExtent::new(100, 40);
+        assert!(!first.overlaps(second), "abutting is not overlapping");
+        assert!(first.overlaps(ByteExtent::new(99, 1)));
+        assert!(!first.overlaps(ByteExtent::new(100, 0)));
+        assert_eq!((second.offset(), second.len()), (100, 40));
+        assert!(ByteExtent::new(7, 0).is_empty());
     }
 
     // ---- the twelve values ----------------------------------------------
