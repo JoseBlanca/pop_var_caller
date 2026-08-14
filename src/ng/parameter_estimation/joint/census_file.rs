@@ -146,6 +146,34 @@ pub fn freshness(named: Option<PileupIdentity>, in_hand: Option<PileupIdentity>)
     }
 }
 
+thread_local! {
+    /// Bytes this thread has read out of census files, section by section.
+    static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Count `bytes` against this thread's total — called once a section read.
+pub(super) fn count_bytes_read(bytes: u64) {
+    BYTES_READ.with(|counter| counter.set(counter.get() + bytes));
+}
+
+/// How many bytes of census file this thread has read since [`reset_bytes_read`].
+///
+/// **This is spec §7.15's counting reader, and it is the half worth having.** An
+/// implementation that decoded a whole file and handed back a slice would match every value a
+/// section-by-section reader gives and deliver none of the memory the by-section design exists
+/// for; only the byte count tells them apart.
+///
+/// **Per thread, because a read happens on the thread that asked for it** — so a test measuring
+/// its own calls is not measuring another test's.
+pub fn bytes_read() -> u64 {
+    BYTES_READ.with(std::cell::Cell::get)
+}
+
+/// Start counting again from zero.
+pub fn reset_bytes_read() {
+    BYTES_READ.with(|counter| counter.set(0));
+}
+
 /// A census file, read whole.
 #[derive(Debug)]
 pub struct CensusFile {
@@ -750,7 +778,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
-    use crate::ng::parameter_estimation::joint::census::{DepthCode, SsrLocusState};
+    use crate::ng::parameter_estimation::joint::census::{
+        CohortCensusEvidence, DepthCode, SsrLocusState,
+    };
     use crate::ng::parameter_estimation::joint::loci::CensusLociDigester;
     use crate::ng::types::{GenomePosition, Position};
 
@@ -1112,6 +1142,184 @@ mod tests {
                 .expect("this build's own file");
             assert_eq!(from_file, from_memory, "every tract section of {group:?}");
         }
+    }
+
+    /// **The bytes a call reads are the section's own — spec §7.15's second half.** The first
+    /// half is the values, which the test above pins; this is the one that tells a reader
+    /// seeking to one section from one that decodes the file and hands back a slice, because
+    /// both give the same values and only one of them delivers the memory.
+    #[test]
+    fn asking_for_one_section_reads_that_section_and_no_other_byte() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("counted.census");
+        let census = every_corner();
+        write_census(
+            &census,
+            None,
+            &mut std::fs::File::create(&path).expect("a new file"),
+        )
+        .expect("a file accepts every write");
+        let whole_file = std::fs::metadata(&path).expect("the file exists").len();
+
+        let bytes = std::fs::read(&path).expect("the file reads");
+        let directory = decode_directory_of(&bytes).expect("this build's own file");
+        let extent_of = |wanted: SectionKey| {
+            directory
+                .iter()
+                .find(|(key, _)| *key == wanted)
+                .map(|(_, extent)| extent.len())
+                .expect("the section is in the directory")
+        };
+
+        // Opening reads the head of the file, which is not a section — so the count starts
+        // after it, where the sections do.
+        let (mut backed, _) = open_census(&path).expect("this build's own file");
+        reset_bytes_read();
+        backed
+            .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
+                sections[0].len()
+            })
+            .expect("this build's own file");
+        let one_stratum = extent_of(SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS));
+        assert_eq!(
+            bytes_read(),
+            one_stratum,
+            "one stratum's read is that stratum's bytes and nothing else"
+        );
+        assert!(
+            one_stratum < whole_file,
+            "and that is less than the file: {one_stratum} of {whole_file}"
+        );
+
+        // A band of two reads exactly the two, and a second call for the same band reads them
+        // again — nothing was retained between the calls.
+        reset_bytes_read();
+        backed
+            .with_generic(&[ReadGroupId(0), ReadGroupId(1)], |sections| sections.len())
+            .expect("this build's own file");
+        let both = extent_of(SectionKey::Generic(ReadGroupId(0)))
+            + extent_of(SectionKey::Generic(ReadGroupId(1)));
+        assert_eq!(bytes_read(), both);
+        backed
+            .with_generic(&[ReadGroupId(0), ReadGroupId(1)], |sections| sections.len())
+            .expect("this build's own file");
+        assert_eq!(
+            bytes_read(),
+            2 * both,
+            "a second call reads them again, because the first kept nothing"
+        );
+    }
+
+    /// **What milestone B is for: the same cohort fitted from memory and from files gives the
+    /// same parameters** (spec §7.15's first half, at the grain a user sees it). Three samples
+    /// over 400 positions, drawn so that some carry a non-reference allele and some do not.
+    #[test]
+    fn a_cohort_fitted_from_files_gives_the_parameters_it_gives_from_memory() {
+        use crate::ng::parameter_estimation::joint::fit::{JointFitConfig, fit_jointly};
+
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let samples = drawn_cohort();
+        let mut from_memory =
+            CohortCensusEvidence::new(samples.clone()).expect("every sample recorded one way");
+
+        let mut backed = Vec::new();
+        for sample in &samples {
+            let path = dir.path().join(format!("{}.census", sample.sample));
+            write_census(
+                sample,
+                None,
+                &mut std::fs::File::create(&path).expect("a new file"),
+            )
+            .expect("a file accepts every write");
+            backed.push(open_census(&path).expect("this build's own file").0);
+        }
+        let mut from_files =
+            CohortCensusEvidence::new(backed).expect("every sample recorded one way");
+
+        let config = JointFitConfig::default();
+        let memory = fit_jointly(&mut from_memory, &config).expect("a drawn cohort pools");
+        let files = fit_jointly(&mut from_files, &config).expect("a drawn cohort pools");
+
+        assert_eq!(
+            files.log_likelihood, memory.log_likelihood,
+            "the likelihood is the same number, not a near one"
+        );
+        assert_eq!(files.density.value.a, memory.density.value.a);
+        assert_eq!(files.density.value.b, memory.density.value.b);
+        assert_eq!(files.noisy_share, memory.noisy_share);
+        for sample in &samples {
+            assert_eq!(
+                files.rates[&sample.sample].value.heterozygous,
+                memory.rates[&sample.sample].value.heterozygous,
+                "{}'s heterozygosity",
+                sample.sample
+            );
+            assert_eq!(
+                files.hom_excess[&sample.sample].value.get(),
+                memory.hom_excess[&sample.sample].value.get()
+            );
+        }
+        for group in memory.noise.keys() {
+            assert_eq!(
+                files.noise[group].value.clean,
+                memory.noise[group].value.clean
+            );
+            assert_eq!(
+                files.noise[group].value.noisy,
+                memory.noise[group].value.noisy
+            );
+        }
+    }
+
+    /// Three samples over 400 ordinary positions, drawn from one reproducible stream: most
+    /// positions quiet, one in twenty carrying a non-reference allele in some samples.
+    fn drawn_cohort() -> Vec<SampleCensusEvidence> {
+        let edges = DepthBinEdges::for_census();
+        let terms = terms();
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u32
+        };
+        (0..3)
+            .map(|s| {
+                let mut depth = PackedDepthCodes::never_walked(400);
+                let mut sparse = Vec::new();
+                for index in 0..400 {
+                    let reads = 2 + next() % 6;
+                    depth.set(index, DepthCode::Binned(edges.bin_for(reads)));
+                    if next() % 20 == 0 {
+                        sparse.push(AlleleObservation {
+                            index: index as u32,
+                            allele: ObservedAllele::C,
+                            reads: (1 + next() % reads) as u8,
+                        });
+                    }
+                }
+                SampleCensusEvidence::resident(
+                    format!("s{s}"),
+                    terms.clone(),
+                    BTreeMap::from([(
+                        SectionKey::Generic(ReadGroupId(0)),
+                        Section::Generic(GenericEvidence::from_parts(depth, sparse)),
+                    )]),
+                )
+            })
+            .collect()
+    }
+
+    /// A resident census reads no bytes at all, which is the other half of the same property.
+    #[test]
+    fn a_resident_census_reads_nothing() {
+        let mut census = every_corner();
+        reset_bytes_read();
+        let groups = census.read_groups();
+        census
+            .with_generic(&groups, |sections| sections.len())
+            .expect("a resident census has no file to fail on");
+        assert_eq!(bytes_read(), 0);
     }
 
     /// **A call asks for one section and reads one section's bytes.** The band here is one

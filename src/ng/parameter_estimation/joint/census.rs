@@ -1265,6 +1265,9 @@ impl Sections {
             let len = usize::try_from(extent.len()).map_err(|_| CensusError::Malformed)?;
             buffer.resize(len, 0);
             file.read_exact(&mut buffer)?;
+            // Counted where the bytes actually leave the file, so what spec §7.15 asserts is the
+            // read itself and not a promise about it.
+            super::census_file::count_bytes_read(extent.len());
             into.push(super::census_file::decode_section(*key, &buffer)?);
         }
         Ok(())
@@ -1760,6 +1763,14 @@ impl CohortCensusEvidence {
             .map(|((sample, keys), filled)| sample.borrow_ssr(keys, filled))
             .collect();
         Ok(f(&lent))
+    }
+
+    /// The samples themselves, for a caller that has to write them down.
+    ///
+    /// **This is not a way to reach a section**: a `SampleCensusEvidence` keeps its own private,
+    /// and the scoped calls are still the only door.
+    pub fn samples(&self) -> &[SampleCensusEvidence] {
+        &self.samples
     }
 
     /// The samples back, for a caller that has finished with the cohort.

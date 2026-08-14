@@ -110,7 +110,7 @@ count, never modification time; a mismatch rebuilds where the pileup is reachabl
 field where it is not.
 *Depends:* B1. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1.
 
-☐ **B4 — assert the milestone.** The same cohort fitted from memory and from files gives the same
+✅ **B4 — assert the milestone.** The same cohort fitted from memory and from files gives the same
 parameters, and §7.16's counting reader shows one section's read touches only that section's bytes.
 *Depends:* B2, B3. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §7.15, §7.16.
 

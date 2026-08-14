@@ -402,6 +402,14 @@ fn fit_the_cohort(
             return None;
         }
     };
+    // **The milestone-B assertion, on real reads**: the same cohort fitted from memory and from
+    // files must give the same parameters. `CENSUS_FILES=<dir>` writes each sample's census
+    // there, opens them again as files and refits; without it nothing is written and the run is
+    // what it was.
+    if let Ok(dir) = std::env::var("CENSUS_FILES") {
+        refit_from_files(cohort, Path::new(&dir), &config, &fit);
+    }
+
     println!(
         "  {} passes, {}, log-likelihood {:.0}, {:.1} s",
         fit.passes,
@@ -992,6 +1000,93 @@ fn walk_one(
     }
     println!("  walked         {generic_loci} generic loci, {ssr_loci} STR loci");
     writer.finish()
+}
+
+/// Write every sample's census, read them back as files, and fit the cohort again.
+///
+/// **What it prints is the difference, not the second answer.** The two fits read the same
+/// evidence through the same calls; if they disagree, the file is not the census.
+fn refit_from_files(
+    cohort: &CohortCensusEvidence,
+    dir: &Path,
+    config: &JointFitConfig,
+    from_memory: &JointFit,
+) {
+    use pop_var_caller::ng::parameter_estimation::joint::census_file::{
+        bytes_read, open_census, reset_bytes_read, write_census,
+    };
+
+    println!("\n--- the same cohort, fitted from files ---");
+    std::fs::create_dir_all(dir).expect("the census directory is writable");
+    let at = Instant::now();
+    let mut written = 0_u64;
+    let mut backed = Vec::new();
+    for sample in cohort.samples() {
+        let path = dir.join(format!("{}.census", sample.sample));
+        let mut file = std::fs::File::create(&path).expect("a census file is writable");
+        write_census(sample, None, &mut file).expect("a census writes");
+        drop(file);
+        written += std::fs::metadata(&path).expect("the census exists").len();
+        backed.push(open_census(&path).expect("this build's own census").0);
+    }
+    println!(
+        "  wrote          {} files, {:.3} MB in total ({:.3} MB a sample), in {:.1} s",
+        backed.len(),
+        written as f64 / 1e6,
+        written as f64 / 1e6 / backed.len().max(1) as f64,
+        at.elapsed().as_secs_f64()
+    );
+
+    let mut from_files = CohortCensusEvidence::new(backed).expect("every census records one way");
+    let at = Instant::now();
+    reset_bytes_read();
+    let refit = match fit_jointly(&mut from_files, config) {
+        Ok(refit) => refit,
+        Err(error) => {
+            println!("  refused: {error}");
+            return;
+        }
+    };
+    let read = bytes_read();
+    println!(
+        "  read back      {:.3} MB of section in {:.1} s, {:.2} times what the files hold",
+        read as f64 / 1e6,
+        at.elapsed().as_secs_f64(),
+        read as f64 / written.max(1) as f64
+    );
+
+    // The largest disagreement anywhere, in the numbers a reader of this program acts on.
+    let mut worst: (f64, String) = (0.0, "nothing".to_string());
+    let mut note = |gap: f64, what: String| {
+        if gap.abs() > worst.0 {
+            worst = (gap.abs(), what);
+        }
+    };
+    note(
+        refit.log_likelihood - from_memory.log_likelihood,
+        "the log-likelihood".to_string(),
+    );
+    for (name, rates) in &from_memory.rates {
+        note(
+            refit.rates[name].value.heterozygous - rates.value.heterozygous,
+            format!("{name}'s heterozygosity"),
+        );
+        note(
+            refit.hom_excess[name].value.get() - from_memory.hom_excess[name].value.get(),
+            format!("{name}'s homozygote excess"),
+        );
+    }
+    for (group, noise) in &from_memory.noise {
+        note(
+            refit.noise[group].value.clean - noise.value.clean,
+            format!("{group:?}'s error rate"),
+        );
+    }
+    if worst.0 == 0.0 {
+        println!("  agreement      every fitted number identical, to the last bit");
+    } else {
+        println!("  DISAGREEMENT   {} differs by {:e}", worst.1, worst.0);
+    }
 }
 
 /// What one sample's records weigh, each object on its own line.
