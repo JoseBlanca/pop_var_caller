@@ -398,10 +398,13 @@ fn markers(
         for group in sample.generic.values() {
             for (index, code) in group.depth().iter().enumerate() {
                 if let DepthCode::Binned(bin) = code {
-                    let range = edges.depth_range(bin);
+                    let range = edges.recorded_depths(bin);
                     let (low, high) = (*range.start(), *range.end());
-                    depth[s][index] = depth[s][index]
-                        .saturating_add(edges.representative_depth(bin).round() as u32);
+                    // The middle of the range, for the two things that need a single number:
+                    // which positions the cohort varies at, and how many copies of the allele
+                    // each sample carries. The fraction itself sums over the range.
+                    depth[s][index] =
+                        depth[s][index].saturating_add(low + (high - low).div_ceil(2));
                     depth_low[s][index] = depth_low[s][index].saturating_add(low);
                     depth_high[s][index] = depth_high[s][index].saturating_add(high);
                 }

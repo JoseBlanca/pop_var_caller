@@ -301,33 +301,30 @@ impl DepthBinEdges {
         self.bin_tops.len()
     }
 
-    /// The depth a site in this bin is scored at, when nothing finer is available.
+    /// The depths a **recorded** position's stored code could have come from.
     ///
-    /// **The histogram route never calls this**, because each of its cells carries the mean
-    /// of the exact depths that fell in it and that mean is strictly better — reading a bin's
-    /// midpoint in its place lands the fitted error rate 5.2 rungs low
-    /// ([`crate::ng::parameter_estimation::generic::histogram`]). The joint route has no such
-    /// mean: it stores one five-bit code per position per sample and the exact depth is gone
-    /// by the time anything is fitted, so the midpoint is all there is. **Below depth 9 the
-    /// ladder is exact and this returns the depth itself**, and at three reads a site that is
-    /// where 97 positions in 100 land.
+    /// Almost always [`depth_range`](Self::depth_range), and it differs in one place that
+    /// matters: **the top bin is the cap and nothing else.** A position deeper than the cap is
+    /// thinned down to it — depth and read counts together — before it is recorded, so at a
+    /// 300-read sample every position in the top bin sits exactly on 124 rather than spread
+    /// over the twenty-seven depths the bin nominally holds.
+    ///
+    /// **This is the method a consumer of the records wants**, and `depth_range` is the one a
+    /// histogram's row width wants. There is no method that hands back a single depth from
+    /// inside a bin: the count of reads that disagreed with the reference is exact and the
+    /// depth is a range, so anything that divides one by the other has to carry the range or
+    /// it inherits an error of up to a sixth at thirty reads a position
+    /// (`doc/devel/ng/reports/contamination_floor_and_duplicated_class_2026-08-13.md` §4).
+    ///
+    /// **Below depth 9 the ladder is exact and the range is one value**, and at three reads a
+    /// position that is where 97 positions in 100 land.
     #[must_use]
-    pub fn representative_depth(&self, bin: DepthBin) -> f64 {
-        let top = self.bin_tops[usize::from(bin.0)];
-        // **The top bin answers the cap and not its own midpoint.** A site above the cap has
-        // been subsampled down to it before it was recorded, so at a deep sample every site in
-        // that bin sits exactly on the cap; taking the midpoint instead understates a 300×
-        // sample's depth by a tenth while its alternative counts are undiminished, which
-        // charges it reference reads it never had.
-        if usize::from(bin.0) + 1 == self.bin_tops.len() {
-            return f64::from(top);
+    pub fn recorded_depths(&self, bin: DepthBin) -> RangeInclusive<u32> {
+        if usize::from(bin.0) + 1 == self.bin_count() {
+            let cap = self.max_depth();
+            return cap..=cap;
         }
-        let bottom = if bin.0 == 0 {
-            0
-        } else {
-            self.bin_tops[usize::from(bin.0) - 1] + 1
-        };
-        0.5 * (f64::from(bottom) + f64::from(top))
+        self.depth_range(bin)
     }
 
     /// Every bin, in order.

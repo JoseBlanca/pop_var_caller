@@ -302,10 +302,12 @@ fn main() {
         Vec::new()
     };
 
+    depth_code_census(&cohort);
+
     // **The ordinary-position half runs once and its answer is handed on.** The repeat-tract
     // half needs each sample's homozygote excess from it and gives nothing back, so re-fitting
     // to obtain that would be 883 seconds of the tomato cohort's time spent twice.
-    if let Some(fit) = fit_the_cohort(&cohort, coverage_odds) {
+    if let Some(fit) = fit_the_cohort(&cohort, coverage_odds, kept.generic(), &contigs) {
         fit_the_tracts(&cohort, &kept, &contigs, &fit);
     }
 
@@ -315,6 +317,53 @@ fn main() {
     );
 }
 
+/// Where each sample's positions sit on the depth ladder.
+///
+/// **The ladder is exact to eight reads a position and a range above it**, and how much of a
+/// run is in the exact part decides how much anything about the range can matter. A cohort at
+/// three reads a position is almost entirely exact; one at three hundred is entirely in the
+/// ladder's top bin, which is the cap and so exact again because a deeper position was thinned
+/// down to it. The band in between is where a stored code stands for several depths at once.
+fn depth_code_census(cohort: &[SampleRecords]) {
+    let edges = DepthBinEdges::new();
+    println!("\n--- where the positions sit on the depth ladder ---");
+    println!(
+        "  {:<24}{:>14}{:>18}{:>14}{:>12}",
+        "sample", "exact (0–8)", "a range (9–97)", "the cap (124)", "no reads"
+    );
+    for sample in cohort {
+        let (mut exact, mut ranged, mut capped, mut unwalked) = (0_u64, 0_u64, 0_u64, 0_u64);
+        for records in sample.generic.values() {
+            for code in records.depth().iter() {
+                match code {
+                    DepthCode::NeverWalked => unwalked += 1,
+                    DepthCode::Binned(bin) => {
+                        let range = edges.recorded_depths(bin);
+                        if range.start() == range.end() {
+                            if *range.start() == edges.max_depth() {
+                                capped += 1;
+                            } else {
+                                exact += 1;
+                            }
+                        } else {
+                            ranged += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let total = (exact + ranged + capped).max(1) as f64;
+        println!(
+            "  {:<24}{:>13.1}%{:>17.1}%{:>13.1}%{:>12}",
+            sample.sample,
+            100.0 * exact as f64 / total,
+            100.0 * ranged as f64 / total,
+            100.0 * capped as f64 / total,
+            unwalked
+        );
+    }
+}
+
 /// Fit every parameter from the records just built, and print what came back.
 ///
 /// **These are real reads, so there is no truth here** beyond what a benchmark VCF supplies
@@ -322,15 +371,30 @@ fn main() {
 /// position stay apart, where the population's frequency density lands, and what each sample's
 /// heterozygosity comes out at with the count of positions that actually carried a read beside
 /// it.
-fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) -> Option<JointFit> {
+fn fit_the_cohort(
+    cohort: &[SampleRecords],
+    coverage_odds: Vec<Arc<[f32]>>,
+    kept: &[pop_var_caller::ng::types::GenomePosition],
+    contigs: &ContigList,
+) -> Option<JointFit> {
     println!("\n--- the joint fit, ordinary positions ---");
     let at = Instant::now();
+    let genotype_posteriors = std::env::var("GENOTYPE_POSTERIORS_TSV").ok();
     let config = JointFitConfig {
         quadrature_nodes: 12,
         coverage_odds,
         // The shipped default, unless the run says otherwise — a run comparing contamination
         // against an earlier one wants the rest of the fit held still.
         duplicated_positions: std::env::var("DUPLICATED_CLASS").as_deref() != Ok("0"),
+        genotype_posteriors: genotype_posteriors.is_some(),
+        pass_trace: true,
+        // `DEPTH_AS_A_RANGE=0` restores the point-read, so the same reads can be fitted both
+        // ways and the difference attributed.
+        depth_as_a_range: std::env::var("DEPTH_AS_A_RANGE").as_deref() != Ok("0"),
+        max_passes: std::env::var("MAX_PASSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200),
         ..JointFitConfig::default()
     };
     let fit = match fit_jointly(cohort, &config) {
@@ -380,6 +444,98 @@ fn fit_the_cohort(cohort: &[SampleRecords], coverage_odds: Vec<Arc<[f32]>>) -> O
         fit.expected_heterozygosity,
         1_000.0 * fit.expected_heterozygosity
     );
+
+    // **What the alternation was doing when it stopped.** A fit that ran out of passes and one
+    // that settled report the same numbers, and only the trajectory tells them apart: a
+    // heterozygosity still climbing at the last pass is not the estimator's answer, it is where
+    // the estimator had got to.
+    if !fit.trace.is_empty() {
+        println!(
+            "\n  {:<8}{:>16}{:>14}{:>22}{:>12}{:>10}",
+            "pass",
+            "log-likelihood",
+            "largest move",
+            "het/kb, first sample",
+            "less het by",
+            "Beta a"
+        );
+        let last = fit.trace.len();
+        for entry in &fit.trace {
+            let shown = entry.pass <= 5
+                || entry.pass % 25 == 0
+                || entry.pass as usize == last
+                || entry.pass == 29;
+            if !shown {
+                continue;
+            }
+            println!(
+                "  {:<8}{:>16.0}{:>14.6}{:>22.4}{:>12.3}{:>10.3}",
+                entry.pass,
+                entry.log_likelihood,
+                entry.largest_move,
+                1_000.0 * entry.heterozygous.first().copied().unwrap_or(0.0),
+                entry.hom_excess.first().copied().unwrap_or(0.0),
+                entry.density_a
+            );
+        }
+    }
+
+    // Every sample's posterior at every kept position, for a comparison against a benchmark
+    // VCF that can ask *which* positions the two disagree at rather than only by how much.
+    if let Some(path) = &genotype_posteriors {
+        // The reads the fit saw, beside what it made of them: a posterior is not evidence, and
+        // a position called heterozygous at a read share nothing like a half is a different
+        // finding from one called heterozygous at a half.
+        let edges = DepthBinEdges::new();
+        let non_reference: Vec<Vec<u32>> = cohort
+            .iter()
+            .map(|sample| {
+                let mut counts = vec![0_u32; kept.len()];
+                for group in sample.generic.values() {
+                    for observation in group.non_reference() {
+                        counts[observation.index as usize] += observation.reads;
+                    }
+                }
+                counts
+            })
+            .collect();
+
+        let mut out = String::new();
+        out.push_str("contig\tposition");
+        for sample in cohort {
+            out.push_str(&format!(
+                "\t{0}_het\t{0}_homalt\t{0}_depth\t{0}_nonref",
+                sample.sample
+            ));
+        }
+        out.push('\n');
+        let width = cohort.len() * 2;
+        for (index, position) in kept.iter().enumerate() {
+            let row = &fit.genotype_posterior[index * width..][..width];
+            out.push_str(&contigs.entries[position.contig.get() as usize].name);
+            out.push('\t');
+            out.push_str(&position.position.get().to_string());
+            for (s, sample) in cohort.iter().enumerate() {
+                let mut depth = 0_u32;
+                for group in sample.generic.values() {
+                    if let DepthCode::Binned(bin) = group.depth().get(index) {
+                        let range = edges.recorded_depths(bin);
+                        depth += (*range.start() + *range.end()) / 2;
+                    }
+                }
+                out.push_str(&format!(
+                    "\t{:.4}\t{:.4}\t{}\t{}",
+                    row[s * 2],
+                    row[s * 2 + 1],
+                    depth,
+                    non_reference[s][index]
+                ));
+            }
+            out.push('\n');
+        }
+        std::fs::write(path, out).expect("the genotype-posterior path is writable");
+        println!("\n  genotype posteriors  {path}");
+    }
     println!(
         "\n  {:<26}{:>10}{:>12}{:>14}{:>14}",
         "sample", "het/kb", "hom-alt/kb", "less het by", "positions read"
