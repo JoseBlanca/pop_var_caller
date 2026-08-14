@@ -101,7 +101,7 @@ Terms and digest outside the sections, since they are compared before anything l
 **Own commit, do not bundle**, with a round-trip over every corner state.
 *Depends:* A4. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.2.
 
-☐ **B2 — `Sections::Backed`, and one read per section.** A call seeks once, fills a buffer once and
+✅ **B2 — `Sections::Backed`, and one read per section.** A call seeks once, fills a buffer once and
 decodes from the slice; nothing is retained between calls, because there is no field to retain it in.
 *Depends:* B1. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §1.1a.
 

@@ -98,7 +98,9 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
-use super::census::{CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections};
+use super::census::{
+    CensusError, CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections,
+};
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -287,7 +289,7 @@ pub fn fit_contamination(
     hom_excess: &[f64],
     noisy_posterior: &[f32],
     config: &ContaminationConfig,
-) -> Vec<ContaminationEstimate> {
+) -> Result<Vec<ContaminationEstimate>, CensusError> {
     // The cap the counts were thinned to. Every sample agrees on it or the cohort was refused
     // before a section was read.
     let cap = cohort
@@ -1275,17 +1277,20 @@ mod tests {
             OwnCoordinates::UndoneByAlpha,
             OwnCoordinates::MaximisedFreely,
         ] {
-            let alpha = alphas(&fit_contamination(
-                &mut as_cohort(&panel),
-                &DepthBinEdges::new(),
-                &vec![0.002; samples],
-                &vec![0.0; samples],
-                &[],
-                &ContaminationConfig {
-                    own_coordinates: arm,
-                    ..ContaminationConfig::default()
-                },
-            ));
+            let alpha = alphas(
+                &fit_contamination(
+                    &mut as_cohort(&panel),
+                    &DepthBinEdges::new(),
+                    &vec![0.002; samples],
+                    &vec![0.0; samples],
+                    &[],
+                    &ContaminationConfig {
+                        own_coordinates: arm,
+                        ..ContaminationConfig::default()
+                    },
+                )
+                .expect("a resident census has no file to fail on"),
+            );
             eprintln!(
                 "{arm:?}: spiked at 0.030 came back {:.4}; worst of the 39 clean {:.4}",
                 alpha[0],
@@ -1299,7 +1304,8 @@ mod tests {
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
-        );
+        )
+        .expect("a resident census has no file to fail on");
         let alpha = alphas(&estimates);
         let spiked = alpha[0];
         let worst_clean = alpha[1..].iter().copied().fold(0.0_f64, f64::max);
@@ -1333,7 +1339,8 @@ mod tests {
             &vec![0.0; samples],
             &[],
             &ContaminationConfig::default(),
-        );
+        )
+        .expect("a resident census has no file to fail on");
         let alpha = alphas(&estimates);
         let worst = alpha.iter().copied().fold(0.0_f64, f64::max);
         let mean = alpha.iter().sum::<f64>() / alpha.len() as f64;

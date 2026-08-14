@@ -38,7 +38,9 @@
 //! is the next unit, and it changes none of these types.
 
 use std::collections::BTreeMap;
+use std::io::{Read, Seek};
 use std::ops::RangeInclusive;
+use std::path::PathBuf;
 
 use md5::{Digest, Md5};
 
@@ -1173,6 +1175,23 @@ pub enum Sections {
     /// Built by a walk: every section decoded and held. This is the run that never writes a
     /// file, at fifty samples or at one.
     Resident(BTreeMap<SectionKey, Section>),
+    /// Opened and checked, the directory read, **nothing else decoded**. A call fills the
+    /// sections it was asked for, hands them over, and drops them when it returns — there is no
+    /// field here one could be kept in.
+    ///
+    /// **A path and not an open reader — 2026-08-14, and it is a deviation worth its reason.**
+    /// The architecture (§1.1a) holds a `Box<dyn ReadSeek>`, which would make a cohort hold one
+    /// open file a sample: this caller commits to cohorts of **several thousand**
+    /// (`design_principles.md` §0), and a thousand open descriptors sits at or above the default
+    /// soft limit on both platforms this runs on — before the pileups are counted. A path opens
+    /// the file once a *call* instead, seeks to each section inside it, and closes it again; the
+    /// contract §1.1a states — one read a section, decoded from a slice, nothing retained
+    /// between calls — is unchanged, and a value that names a file rather than holding one open
+    /// can also be cloned and compared, which the fit's own tests and examples need.
+    Backed {
+        path: PathBuf,
+        directory: BTreeMap<SectionKey, ByteExtent>,
+    },
 }
 
 impl Sections {
@@ -1191,10 +1210,92 @@ impl Sections {
         Self::Resident(sections)
     }
 
+    /// A census file, opened and its directory read — **and nothing else decoded**.
+    pub fn backed(path: PathBuf, directory: BTreeMap<SectionKey, ByteExtent>) -> Self {
+        Self::Backed { path, directory }
+    }
+
     /// Every section this sample holds, in enumeration order.
-    pub fn keys(&self) -> impl Iterator<Item = SectionKey> + '_ {
+    ///
+    /// **A file-backed value answers this from its directory**, which is why the directory is at
+    /// the head of the file: knowing what is there costs a few hundred bytes rather than the
+    /// whole of it.
+    pub fn keys(&self) -> Box<dyn Iterator<Item = SectionKey> + '_> {
         match self {
-            Self::Resident(sections) => sections.keys().copied(),
+            Self::Resident(sections) => Box::new(sections.keys().copied()),
+            Self::Backed { directory, .. } => Box::new(directory.keys().copied()),
+        }
+    }
+
+    /// Whether this sample holds the section named — answered without decoding one.
+    pub fn holds(&self, key: SectionKey) -> bool {
+        match self {
+            Self::Resident(sections) => sections.contains_key(&key),
+            Self::Backed { directory, .. } => directory.contains_key(&key),
+        }
+    }
+
+    /// Fill `into` with the sections named by `keys`, **in that order**, for a caller about to
+    /// borrow them.
+    ///
+    /// **Resident leaves it empty**: what it holds is already decoded, and copying it would be
+    /// the memory this design exists to avoid. **Backed opens the file once, seeks to each
+    /// section, reads exactly its own bytes and decodes from the slice** — which is the
+    /// contract, not a preference: reading fields through the file handle would pay an
+    /// indirection per byte and, unbuffered, a syscall per field.
+    ///
+    /// # Errors
+    ///
+    /// [`CensusError::Io`] when the file will not open or read, [`CensusError::Malformed`] when
+    /// a section's bytes are not a section or a key is not in the directory.
+    pub(super) fn fill(
+        &self,
+        keys: &[SectionKey],
+        into: &mut Vec<Section>,
+    ) -> Result<(), CensusError> {
+        into.clear();
+        let Self::Backed { path, directory } = self else {
+            return Ok(());
+        };
+        let mut file = std::fs::File::open(path)?;
+        let mut buffer = Vec::new();
+        for key in keys {
+            let extent = directory.get(key).ok_or(CensusError::Malformed)?;
+            file.seek(std::io::SeekFrom::Start(extent.offset()))?;
+            let len = usize::try_from(extent.len()).map_err(|_| CensusError::Malformed)?;
+            buffer.resize(len, 0);
+            file.read_exact(&mut buffer)?;
+            into.push(super::census_file::decode_section(*key, &buffer)?);
+        }
+        Ok(())
+    }
+
+    /// The sections named by `keys`, in that order — from what this value holds, or from what
+    /// [`fill`](Self::fill) just decoded.
+    ///
+    /// **Neither is a section this call could hand back**: the borrows live as long as `filled`
+    /// does, and `filled` is a local of the scoped call above.
+    ///
+    /// # Panics
+    ///
+    /// When a key is one this sample does not hold, which [`fill`](Self::fill) has already
+    /// refused for a file — so reaching it means a resident caller asked for a section that was
+    /// never recorded, and that is a selection disagreement rather than a file.
+    pub(super) fn borrow<'a>(
+        &'a self,
+        keys: &[SectionKey],
+        filled: &'a [Section],
+    ) -> Vec<&'a Section> {
+        match self {
+            Self::Resident(sections) => keys
+                .iter()
+                .map(|key| {
+                    sections
+                        .get(key)
+                        .unwrap_or_else(|| panic!("this census holds no section for {key:?}"))
+                })
+                .collect(),
+            Self::Backed { .. } => filled.iter().collect(),
         }
     }
 
@@ -1206,20 +1307,16 @@ impl Sections {
     pub(super) fn iter(&self) -> impl Iterator<Item = (SectionKey, &Section)> + '_ {
         match self {
             Self::Resident(sections) => sections.iter().map(|(key, section)| (*key, section)),
-        }
-    }
-
-    /// One section, or `None` where this sample has none — **a stratum no read reached is
-    /// still a section**, holding zero, so `None` means the census was not asked for it.
-    pub fn get(&self, key: SectionKey) -> Option<&Section> {
-        match self {
-            Self::Resident(sections) => sections.get(&key),
+            Self::Backed { .. } => {
+                panic!("a file-backed census is read one section at a time, never all at once")
+            }
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
             Self::Resident(sections) => sections.len(),
+            Self::Backed { directory, .. } => directory.len(),
         }
     }
 
@@ -1266,6 +1363,21 @@ impl SampleCensusEvidence {
         }
     }
 
+    /// A sample whose sections are a file, opened and its directory read — **and nothing else
+    /// decoded**. What a scoped call asks for is filled then, and dropped when it returns.
+    pub fn backed(
+        sample: String,
+        terms: RecordingTerms,
+        path: PathBuf,
+        directory: BTreeMap<SectionKey, ByteExtent>,
+    ) -> Self {
+        Self {
+            sample,
+            terms,
+            sections: Sections::backed(path, directory),
+        }
+    }
+
     /// Every read group this sample recorded, in the order the fit visits them.
     pub fn read_groups(&self) -> Vec<ReadGroupId> {
         self.sections
@@ -1294,41 +1406,72 @@ impl SampleCensusEvidence {
     /// depths, so a call lending one group at a time would leave the fit holding a partial sum
     /// for every kept position while it asked for the next.
     ///
+    /// # Errors
+    ///
+    /// [`CensusError`] where this sample is a file and the file will not answer.
+    ///
     /// # Panics
     ///
-    /// When this sample holds no section for one of the groups — a stratum or a group with no
-    /// reads is still a section holding zero, so an absent one means the caller and the census
-    /// were built from different selections.
+    /// When a *resident* sample holds no section for one of the groups — a stratum or a group
+    /// with no reads is still a section holding zero, so an absent one means the caller and the
+    /// census were built from different selections.
     pub fn with_generic<R>(
         &mut self,
         groups: &[ReadGroupId],
         f: impl FnOnce(&[&GenericEvidence]) -> R,
-    ) -> R {
-        let sections: Vec<&GenericEvidence> = groups
-            .iter()
-            .map(|group| self.generic_section(*group))
+    ) -> Result<R, CensusError> {
+        let keys: Vec<SectionKey> = groups.iter().map(|g| SectionKey::Generic(*g)).collect();
+        let mut filled = Vec::new();
+        self.sections.fill(&keys, &mut filled)?;
+        let sections: Vec<&GenericEvidence> = self
+            .sections
+            .borrow(&keys, &filled)
+            .into_iter()
+            .map(|section| match section {
+                Section::Generic(records) => records,
+                Section::Ssr(_) => {
+                    panic!("a section filed under an ordinary-position key holds tracts")
+                }
+            })
             .collect();
-        f(&sections)
+        Ok(f(&sections))
     }
 
     /// This sample's tracts for one read group over a band of strata, **for the length of the
     /// call**.
     ///
+    /// # Errors
+    ///
+    /// As [`with_generic`](Self::with_generic).
+    ///
     /// # Panics
     ///
-    /// When this sample holds no section for one of the strata — see
+    /// When a resident sample holds no section for one of the strata — see
     /// [`with_generic`](Self::with_generic).
     pub fn with_strata<R>(
         &mut self,
         group: ReadGroupId,
         strata: &[Stratum],
         f: impl FnOnce(&[&SsrEvidence]) -> R,
-    ) -> R {
-        let sections: Vec<&SsrEvidence> = strata
+    ) -> Result<R, CensusError> {
+        let keys: Vec<SectionKey> = strata
             .iter()
-            .map(|stratum| self.ssr_section(group, *stratum))
+            .map(|stratum| SectionKey::Ssr(group, *stratum))
             .collect();
-        f(&sections)
+        let mut filled = Vec::new();
+        self.sections.fill(&keys, &mut filled)?;
+        let sections: Vec<&SsrEvidence> = self
+            .sections
+            .borrow(&keys, &filled)
+            .into_iter()
+            .map(|section| match section {
+                Section::Ssr(records) => records,
+                Section::Generic(_) => {
+                    panic!("a section filed under a tract key holds ordinary positions")
+                }
+            })
+            .collect();
+        Ok(f(&sections))
     }
 
     /// This sample's depth at the `index`-th kept generic position, summed over its read
@@ -1364,6 +1507,67 @@ impl SampleCensusEvidence {
             .collect()
     }
 
+    /// The keys this sample holds among the ordinary-position sections asked for.
+    pub(super) fn generic_keys(&self, groups: &[ReadGroupId]) -> Vec<SectionKey> {
+        groups
+            .iter()
+            .map(|group| SectionKey::Generic(*group))
+            .filter(|key| self.sections.holds(*key))
+            .collect()
+    }
+
+    /// The keys this sample holds among the tract sections in a band of strata, over every read
+    /// group it recorded.
+    pub(super) fn ssr_keys(&self, strata: &[Stratum]) -> Vec<SectionKey> {
+        self.sections
+            .keys()
+            .filter(|key| key.stratum().is_some_and(|s| strata.contains(&s)))
+            .collect()
+    }
+
+    /// Fill `into` with the sections named, for a caller about to borrow them — see
+    /// [`Sections::fill`].
+    pub(super) fn fill(
+        &self,
+        keys: &[SectionKey],
+        into: &mut Vec<Section>,
+    ) -> Result<(), CensusError> {
+        self.sections.fill(keys, into)
+    }
+
+    /// This sample's ordinary-position sections for `keys`, borrowed from what it holds or from
+    /// what [`fill`](Self::fill) decoded.
+    pub(super) fn borrow_generic<'a>(
+        &'a self,
+        keys: &[SectionKey],
+        filled: &'a [Section],
+    ) -> SampleGenericSections<'a> {
+        keys.iter()
+            .zip(self.sections.borrow(keys, filled))
+            .filter_map(|(key, section)| match (key, section) {
+                (SectionKey::Generic(group), Section::Generic(records)) => Some((*group, records)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The same on the tract half.
+    pub(super) fn borrow_ssr<'a>(
+        &'a self,
+        keys: &[SectionKey],
+        filled: &'a [Section],
+    ) -> SampleTractSections<'a> {
+        keys.iter()
+            .zip(self.sections.borrow(keys, filled))
+            .filter_map(|(key, section)| match (key, section) {
+                (SectionKey::Ssr(group, stratum), Section::Ssr(records)) => {
+                    Some((*group, *stratum, records))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every repeat-tract section, with the read group and stratum it belongs to. See
     /// [`generic_sections`](Self::generic_sections) for why this exists.
     pub(super) fn ssr_sections(&self) -> Vec<(ReadGroupId, Stratum, &SsrEvidence)> {
@@ -1376,31 +1580,6 @@ impl SampleCensusEvidence {
                 _ => None,
             })
             .collect()
-    }
-
-    fn generic_section(&self, group: ReadGroupId) -> &GenericEvidence {
-        match self.sections.get(SectionKey::Generic(group)) {
-            Some(Section::Generic(records)) => records,
-            _ => panic!(
-                "sample {} holds no ordinary-position section for read group {}",
-                self.sample,
-                group.get()
-            ),
-        }
-    }
-
-    fn ssr_section(&self, group: ReadGroupId, stratum: Stratum) -> &SsrEvidence {
-        match self.sections.get(SectionKey::Ssr(group, stratum)) {
-            Some(Section::Ssr(records)) => records,
-            _ => panic!(
-                "sample {} holds no tract section for read group {} at period {} and {} \
-                 repeats",
-                self.sample,
-                group.get(),
-                stratum.period,
-                stratum.reference_repeats
-            ),
-        }
     }
 }
 
@@ -1531,19 +1710,26 @@ impl CohortCensusEvidence {
         &mut self,
         groups: &[ReadGroupId],
         f: impl FnOnce(&[SampleGenericSections<'_>]) -> R,
-    ) -> R {
+    ) -> Result<R, CensusError> {
+        let keys: Vec<Vec<SectionKey>> = self
+            .samples
+            .iter()
+            .map(|sample| sample.generic_keys(groups))
+            .collect();
+        // **Decoded first, borrowed second**, and the buffers are locals of this call: when it
+        // returns they go, and a file-backed sample has nothing left decoded.
+        let mut filled: Vec<Vec<Section>> = (0..self.samples.len()).map(|_| Vec::new()).collect();
+        for ((sample, keys), into) in self.samples.iter().zip(&keys).zip(&mut filled) {
+            sample.fill(keys, into)?;
+        }
         let lent: Vec<SampleGenericSections<'_>> = self
             .samples
             .iter()
-            .map(|sample| {
-                sample
-                    .generic_sections()
-                    .into_iter()
-                    .filter(|(group, _)| groups.contains(group))
-                    .collect()
-            })
+            .zip(&keys)
+            .zip(&filled)
+            .map(|((sample, keys), filled)| sample.borrow_generic(keys, filled))
             .collect();
-        f(&lent)
+        Ok(f(&lent))
     }
 
     /// Every sample's tracts for a band of strata, **for the length of the call**.
@@ -1556,19 +1742,24 @@ impl CohortCensusEvidence {
         &mut self,
         strata: &[Stratum],
         f: impl FnOnce(&[SampleTractSections<'_>]) -> R,
-    ) -> R {
+    ) -> Result<R, CensusError> {
+        let keys: Vec<Vec<SectionKey>> = self
+            .samples
+            .iter()
+            .map(|sample| sample.ssr_keys(strata))
+            .collect();
+        let mut filled: Vec<Vec<Section>> = (0..self.samples.len()).map(|_| Vec::new()).collect();
+        for ((sample, keys), into) in self.samples.iter().zip(&keys).zip(&mut filled) {
+            sample.fill(keys, into)?;
+        }
         let lent: Vec<SampleTractSections<'_>> = self
             .samples
             .iter()
-            .map(|sample| {
-                sample
-                    .ssr_sections()
-                    .into_iter()
-                    .filter(|(_, stratum, _)| strata.contains(stratum))
-                    .collect()
-            })
+            .zip(&keys)
+            .zip(&filled)
+            .map(|((sample, keys), filled)| sample.borrow_ssr(keys, filled))
             .collect();
-        f(&lent)
+        Ok(f(&lent))
     }
 
     /// The samples back, for a caller that has finished with the cohort.
@@ -2578,12 +2769,9 @@ mod tests {
 
         assert_eq!(sections.len(), 2);
         assert_eq!(sections.keys().collect::<Vec<_>>(), vec![generic, tracts]);
-        assert!(matches!(sections.get(generic), Some(Section::Generic(_))));
-        assert!(matches!(sections.get(tracts), Some(Section::Ssr(_))));
+        assert!(sections.holds(generic) && sections.holds(tracts));
         assert!(
-            sections
-                .get(SectionKey::Ssr(ReadGroupId(1), AT_SIX_REPEATS))
-                .is_none(),
+            !sections.holds(SectionKey::Ssr(ReadGroupId(1), AT_SIX_REPEATS)),
             "a section this sample was never asked for is absent, not empty"
         );
     }
@@ -2602,6 +2790,11 @@ mod tests {
     }
 
     // ---- the whole cohort ----------------------------------------------------
+
+    /// A resident census never fails to lend, so its calls unwrap in a test.
+    fn lent_ok<R>(lent: Result<R, CensusError>) -> R {
+        lent.expect("a resident census has no file to fail on")
+    }
 
     /// Two samples over the same one-tract selection, so a cohort can be built from them.
     fn two_sample_cohort() -> Vec<SampleCensusEvidence> {
@@ -2641,7 +2834,7 @@ mod tests {
         assert_eq!(cohort.read_groups(), &[ReadGroupId(0)]);
         assert_eq!(cohort.strata(), &[AT_SIX_REPEATS]);
 
-        let crossing = cohort.with_strata(&[AT_SIX_REPEATS], |lent| {
+        let crossing = lent_ok(cohort.with_strata(&[AT_SIX_REPEATS], |lent| {
             assert_eq!(lent.len(), 2, "one row a sample, not one value");
             lent.iter()
                 .map(|sample| {
@@ -2651,19 +2844,19 @@ mod tests {
                         .sum::<u64>()
                 })
                 .collect::<Vec<u64>>()
-        });
+        }));
         assert_eq!(crossing, vec![2, 2], "each sample's two crossing reads");
 
         // A band naming a stratum this cohort does not hold lends nothing rather than a zero
         // that would read as a sample with no reads there.
-        let empty = cohort.with_strata(&[ATG_FOUR_REPEATS], |lent| {
+        let empty = lent_ok(cohort.with_strata(&[ATG_FOUR_REPEATS], |lent| {
             lent.iter().map(|sample| sample.len()).sum::<usize>()
-        });
+        }));
         assert_eq!(empty, 0);
 
-        let positions = cohort.with_generic(&[ReadGroupId(0)], |lent| {
+        let positions = lent_ok(cohort.with_generic(&[ReadGroupId(0)], |lent| {
             lent.iter().map(|sample| sample.len()).sum::<usize>()
-        });
+        }));
         assert_eq!(positions, 2, "one ordinary-position section a sample");
     }
 

@@ -217,7 +217,8 @@ fn run(
         &excess,
         &fit.noisy_posterior,
         settings,
-    );
+    )
+    .expect("a resident census has no file to fail on");
     let markers = estimates
         .iter()
         .find_map(|estimate| match estimate {

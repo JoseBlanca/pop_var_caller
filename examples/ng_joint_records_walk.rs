@@ -94,6 +94,10 @@ const SEED: u64 = 42;
 /// non-reference reads and what the ladder buys is reach for the position's own depth.
 const DEPTH_CAP: DepthCap = DepthCap::new(124);
 
+/// Every census in this program is one a walk just built and is holding, so no scoped call has a
+/// file to fail on.
+const RESIDENT: &str = "a resident census has no file to fail on";
+
 fn main() {
     let usage = "usage: <reference.fa> <catalog.parquet> <regions.bed> <generic-target> \
                  <alignment> [alignment...]";
@@ -316,32 +320,34 @@ fn depth_ladder_occupancy(cohort: &mut CohortCensusEvidence) {
     let groups = cohort.read_groups().to_vec();
     // **The counting happens inside the call**, because that is how long the sections are lent
     // for: the census hands them over, the closure reads them, and it takes them back.
-    let rows = cohort.with_generic(&groups, |lent| {
-        lent.iter()
-            .map(|sections| {
-                let (mut exact, mut ranged, mut capped, mut unwalked) =
-                    (0_u64, 0_u64, 0_u64, 0_u64);
-                for (_, records) in sections {
-                    for code in records.depth().iter() {
-                        match code {
-                            DepthCode::NeverWalked => unwalked += 1,
-                            DepthCode::Binned(bin) => {
-                                let range = edges.depth_range(bin);
-                                if *range.start() > cap {
-                                    capped += 1;
-                                } else if range.start() == range.end() {
-                                    exact += 1;
-                                } else {
-                                    ranged += 1;
+    let rows = cohort
+        .with_generic(&groups, |lent| {
+            lent.iter()
+                .map(|sections| {
+                    let (mut exact, mut ranged, mut capped, mut unwalked) =
+                        (0_u64, 0_u64, 0_u64, 0_u64);
+                    for (_, records) in sections {
+                        for code in records.depth().iter() {
+                            match code {
+                                DepthCode::NeverWalked => unwalked += 1,
+                                DepthCode::Binned(bin) => {
+                                    let range = edges.depth_range(bin);
+                                    if *range.start() > cap {
+                                        capped += 1;
+                                    } else if range.start() == range.end() {
+                                        exact += 1;
+                                    } else {
+                                        ranged += 1;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                (exact, ranged, capped, unwalked)
-            })
-            .collect::<Vec<_>>()
-    });
+                    (exact, ranged, capped, unwalked)
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect(RESIDENT);
     for (name, (exact, ranged, capped, unwalked)) in names.iter().zip(rows) {
         let total = (exact + ranged + capped).max(1) as f64;
         println!(
@@ -482,28 +488,30 @@ fn fit_the_cohort(
         // Each sample's non-reference reads and depth at each kept position, read while the
         // sections are lent — one call, since the closure sees the whole cohort at once.
         let groups = cohort.read_groups().to_vec();
-        let (non_reference, depths) = cohort.with_generic(&groups, |lent| {
-            let mut non_reference: Vec<Vec<u32>> = Vec::with_capacity(lent.len());
-            let mut depths: Vec<Vec<u32>> = Vec::with_capacity(lent.len());
-            for sections in lent {
-                let mut counts = vec![0_u32; kept.len()];
-                let mut depth = vec![0_u32; kept.len()];
-                for (_, group) in sections {
-                    for observation in group.non_reference() {
-                        counts[observation.index as usize] += u32::from(observation.reads);
-                    }
-                    for (index, code) in group.depth().iter().enumerate() {
-                        if let DepthCode::Binned(bin) = code {
-                            let range = edges.depth_range(bin);
-                            depth[index] += (*range.start() + *range.end()) / 2;
+        let (non_reference, depths) = cohort
+            .with_generic(&groups, |lent| {
+                let mut non_reference: Vec<Vec<u32>> = Vec::with_capacity(lent.len());
+                let mut depths: Vec<Vec<u32>> = Vec::with_capacity(lent.len());
+                for sections in lent {
+                    let mut counts = vec![0_u32; kept.len()];
+                    let mut depth = vec![0_u32; kept.len()];
+                    for (_, group) in sections {
+                        for observation in group.non_reference() {
+                            counts[observation.index as usize] += u32::from(observation.reads);
+                        }
+                        for (index, code) in group.depth().iter().enumerate() {
+                            if let DepthCode::Binned(bin) = code {
+                                let range = edges.depth_range(bin);
+                                depth[index] += (*range.start() + *range.end()) / 2;
+                            }
                         }
                     }
+                    non_reference.push(counts);
+                    depths.push(depth);
                 }
-                non_reference.push(counts);
-                depths.push(depth);
-            }
-            (non_reference, depths)
-        });
+                (non_reference, depths)
+            })
+            .expect(RESIDENT);
 
         let mut out = String::new();
         out.push_str("contig\tposition");
@@ -635,7 +643,8 @@ fn fit_the_cohort(
                 &excess,
                 &fit.noisy_posterior,
                 &settings,
-            );
+            )
+            .expect("a resident census has no file to fail on");
             let mut values: Vec<f64> = estimates
                 .iter()
                 .filter_map(|estimate| match estimate {
@@ -749,7 +758,8 @@ fn fit_the_tracts(
         .collect();
 
     let at = Instant::now();
-    let evidence = ssr_fit::gather_strata(cohort, &strata, &slippage_group_of);
+    let evidence = ssr_fit::gather_strata(cohort, &strata, &slippage_group_of)
+        .expect("a resident census has no file to fail on");
     println!(
         "  {} strata over {} tracts, gathered in {:.1} s",
         evidence.len(),
@@ -1021,7 +1031,8 @@ fn report_sizes(records: &mut SampleCensusEvidence) {
                 zero_depth,
                 covered,
             )
-        });
+        })
+        .expect(RESIDENT);
     let sparse_bytes = sparse_entries * std::mem::size_of::<AlleleObservation>();
 
     // ---- the tracts, one read group's band of strata at a time ---------------------------
@@ -1033,8 +1044,8 @@ fn report_sizes(records: &mut SampleCensusEvidence) {
         (0_usize, 0_usize, 0_usize, 0_usize);
     let (mut highest_read, mut at_the_ceiling) = (0_u16, 0_usize);
     for (which, group) in groups.iter().enumerate() {
-        let (loci, dense, guard, differences, highest, saturated) =
-            records.with_strata(*group, &strata, |sections| {
+        let (loci, dense, guard, differences, highest, saturated) = records
+            .with_strata(*group, &strata, |sections| {
                 let mut loci = 0_usize;
                 let mut dense = 0_usize;
                 let mut guard = 0_usize;
@@ -1053,7 +1064,8 @@ fn report_sizes(records: &mut SampleCensusEvidence) {
                     }
                 }
                 (loci, dense, guard, differences, highest, saturated)
-            });
+            })
+            .expect(RESIDENT);
         // The tract count is one read group's, as the position count above is.
         if which == 0 {
             ssr_loci = loci;
@@ -1209,16 +1221,18 @@ fn markers(cohort: &mut CohortCensusEvidence, positions: usize) -> Vec<Marker> {
 
     // First sweep: which non-reference allele the cohort carries at each position.
     let groups = cohort.read_groups().to_vec();
-    cohort.with_generic(&groups, |lent| {
-        for sections in lent {
-            for (_, group) in sections {
-                for observation in group.non_reference() {
-                    alt_counts[observation.index as usize][observation.allele.code() as usize] +=
-                        u32::from(observation.reads);
+    cohort
+        .with_generic(&groups, |lent| {
+            for sections in lent {
+                for (_, group) in sections {
+                    for observation in group.non_reference() {
+                        alt_counts[observation.index as usize]
+                            [observation.allele.code() as usize] += u32::from(observation.reads);
+                    }
                 }
             }
-        }
-    });
+        })
+        .expect(RESIDENT);
     let major: Vec<u8> = alt_counts
         .iter()
         .map(|counts| {
@@ -1232,28 +1246,30 @@ fn markers(cohort: &mut CohortCensusEvidence, positions: usize) -> Vec<Marker> {
         .collect();
 
     // Second sweep: each sample's reads on that allele, and its depth.
-    cohort.with_generic(&groups, |lent| {
-        for (s, sections) in lent.iter().enumerate() {
-            for (_, group) in sections {
-                for (index, code) in group.depth().iter().enumerate() {
-                    if let DepthCode::Binned(bin) = code {
-                        // The stored code is a bin, and the fit reads it as one. A bin's lower
-                        // edge is exact below depth 9, which is where a three-read cohort lives.
-                        let depth = u32::from(bin.0).min(u32::from(u16::MAX));
-                        per_sample_depth[s][index] =
-                            per_sample_depth[s][index].saturating_add(depth as u16);
+    cohort
+        .with_generic(&groups, |lent| {
+            for (s, sections) in lent.iter().enumerate() {
+                for (_, group) in sections {
+                    for (index, code) in group.depth().iter().enumerate() {
+                        if let DepthCode::Binned(bin) = code {
+                            // The stored code is a bin, and the fit reads it as one. A bin's lower
+                            // edge is exact below depth 9, which is where a three-read cohort lives.
+                            let depth = u32::from(bin.0).min(u32::from(u16::MAX));
+                            per_sample_depth[s][index] =
+                                per_sample_depth[s][index].saturating_add(depth as u16);
+                        }
                     }
-                }
-                for observation in group.non_reference() {
-                    if observation.allele.code() == major[observation.index as usize] {
-                        per_sample_alt[s][observation.index as usize] = per_sample_alt[s]
-                            [observation.index as usize]
-                            .saturating_add(u16::from(observation.reads));
+                    for observation in group.non_reference() {
+                        if observation.allele.code() == major[observation.index as usize] {
+                            per_sample_alt[s][observation.index as usize] = per_sample_alt[s]
+                                [observation.index as usize]
+                                .saturating_add(u16::from(observation.reads));
+                        }
                     }
                 }
             }
-        }
-    });
+        })
+        .expect(RESIDENT);
 
     let mut markers = Vec::new();
     for index in 0..positions {
@@ -1508,11 +1524,13 @@ fn jacobi_eigen(matrix: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 #[allow(dead_code)]
 fn per_read_group(records: &mut SampleCensusEvidence) -> BTreeMap<String, usize> {
     let groups = records.read_groups();
-    records.with_generic(&groups, |sections| {
-        groups
-            .iter()
-            .zip(sections)
-            .map(|(group, g)| (format!("{group:?}"), g.non_reference().len()))
-            .collect()
-    })
+    records
+        .with_generic(&groups, |sections| {
+            groups
+                .iter()
+                .zip(sections)
+                .map(|(group, g)| (format!("{group:?}"), g.non_reference().len()))
+                .collect()
+        })
+        .expect(RESIDENT)
 }

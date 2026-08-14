@@ -43,6 +43,7 @@
 //! read here is its parity oracle.
 
 use std::io::{Read, Write};
+use std::path::Path;
 
 use crate::ng::parameter_estimation::joint::loci::{BlockDigest, CensusLociDigest};
 use crate::ng::repeat_catalog::StratumCounts;
@@ -302,18 +303,74 @@ pub fn decode_census(bytes: &[u8]) -> Result<CensusFile, CensusError> {
         let slice = bytes
             .get(at..at.checked_add(len).ok_or(CensusError::Malformed)?)
             .ok_or(CensusError::Malformed)?;
-        let mut inner = Cursor::new(slice);
-        let section = match key {
-            SectionKey::Generic(_) => Section::Generic(decode_generic(&mut inner)?),
-            SectionKey::Ssr(_, _) => Section::Ssr(decode_ssr(&mut inner)?),
-        };
-        sections.insert(key, section);
+        sections.insert(key, decode_section(key, slice)?);
     }
 
     Ok(CensusFile {
         census: SampleCensusEvidence::resident(sample, terms, sections),
         pileup,
     })
+}
+
+/// Open a census file **without decoding a section**: the header is checked and the directory is
+/// read, and nothing else is touched until a scoped call asks for something.
+///
+/// **This is what a run over a cohort too large to hold uses.** What it costs is the header and
+/// the directory — a few hundred bytes plus sixteen a section — where reading the file whole
+/// costs the file.
+///
+/// # Errors
+///
+/// [`CensusError::Io`] when the file will not open or read, [`CensusError::Malformed`] when it is
+/// not a census this build reads.
+pub fn open_census(
+    path: &Path,
+) -> Result<(SampleCensusEvidence, Option<PileupIdentity>), CensusError> {
+    // The header and the directory sit at the front, so only their bytes are read. How many that
+    // is is not known until they are decoded, so the front of the file is read in one go and the
+    // rest is never touched.
+    let mut file = std::fs::File::open(path)?;
+    let mut head = vec![0_u8; HEAD_READ_BYTES];
+    let filled = read_as_much_as_there_is(&mut file, &mut head)?;
+    head.truncate(filled);
+
+    let mut cursor = Cursor::new(&head);
+    if cursor.take(MAGIC.len())? != MAGIC || cursor.u16()? != VERSION {
+        return Err(CensusError::Malformed);
+    }
+    let (sample, terms, pileup) = decode_header(&mut cursor)?;
+    let directory = decode_directory(&mut cursor)?;
+
+    Ok((
+        SampleCensusEvidence::backed(
+            sample,
+            terms,
+            path.to_path_buf(),
+            directory.into_iter().collect(),
+        ),
+        pileup,
+    ))
+}
+
+/// How much of a census file's front is read to find its header and its directory.
+///
+/// **One read rather than a walk of growing reads.** A census of tomato's 141 strata over a
+/// handful of read groups has a directory of a few thousand bytes and a header of a few hundred;
+/// a megabyte covers a directory of about 40,000 sections, and reading it costs one seekless read
+/// of a file that is megabytes long anyway. A file shorter than this is read whole.
+const HEAD_READ_BYTES: usize = 1 << 20;
+
+/// Fill as much of `into` as the stream has, and say how much that was — a short file is not an
+/// error here, since the header may be all there is to read.
+fn read_as_much_as_there_is(from: &mut impl Read, into: &mut [u8]) -> Result<usize, CensusError> {
+    let mut filled = 0;
+    while filled < into.len() {
+        match from.read(&mut into[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
 }
 
 /// Where each section sits, without decoding one — what the seeking reader will open with.
@@ -445,6 +502,27 @@ fn decode_key(cursor: &mut Cursor<'_>) -> Result<SectionKey, CensusError> {
         }
         _ => Err(CensusError::Malformed),
     }
+}
+
+/// One section, from exactly its own bytes — **what a seeking reader calls**, once it has read
+/// the extent the directory gave it.
+///
+/// # Errors
+///
+/// [`CensusError::Malformed`] when the bytes are not a section of the kind the key names, or
+/// when they end inside a value.
+pub(super) fn decode_section(key: SectionKey, bytes: &[u8]) -> Result<Section, CensusError> {
+    let mut cursor = Cursor::new(bytes);
+    let section = match key {
+        SectionKey::Generic(_) => Section::Generic(decode_generic(&mut cursor)?),
+        SectionKey::Ssr(_, _) => Section::Ssr(decode_ssr(&mut cursor)?),
+    };
+    // **A section that does not use all its own bytes is not this section.** The extent came
+    // from the directory, so bytes left over mean the two disagree about what is stored there.
+    if cursor.at != bytes.len() {
+        return Err(CensusError::Malformed);
+    }
+    Ok(section)
 }
 
 fn decode_generic(cursor: &mut Cursor<'_>) -> Result<GenericEvidence, CensusError> {
@@ -909,6 +987,103 @@ mod tests {
                 bytes.len()
             );
         }
+    }
+
+    /// **The oracle for the file-backed reader: it must answer what the resident value answers.**
+    /// Every section of the corner fixture, asked for through the same scoped calls, off a file
+    /// on disk against the value in memory.
+    #[test]
+    fn a_census_read_from_a_file_answers_what_the_one_in_memory_answers() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("corners.census");
+        let mut resident = every_corner();
+        write_census(
+            &resident,
+            None,
+            &mut std::fs::File::create(&path).expect("a new file"),
+        )
+        .expect("a file accepts every write");
+
+        let (mut backed, pileup) = open_census(&path).expect("this build's own file");
+        assert_eq!(pileup, None);
+        assert_eq!(backed.sample, resident.sample);
+        assert_eq!(
+            backed.terms, resident.terms,
+            "the terms are read at the door"
+        );
+        assert_eq!(backed.read_groups(), resident.read_groups());
+        assert_eq!(backed.strata(), resident.strata());
+
+        let groups = resident.read_groups();
+        let from_memory = resident
+            .with_generic(&groups, |sections| {
+                sections.iter().map(|g| (*g).clone()).collect::<Vec<_>>()
+            })
+            .expect("a resident census has no file to fail on");
+        let from_file = backed
+            .with_generic(&groups, |sections| {
+                sections.iter().map(|g| (*g).clone()).collect::<Vec<_>>()
+            })
+            .expect("this build's own file");
+        assert_eq!(from_file, from_memory, "every ordinary-position section");
+
+        // Read group 1 recorded ordinary positions and no tracts in this fixture, so the tract
+        // half is asked of the group that has one — a real census gives every declared group
+        // every stratum, and asking for a section that was never recorded is a panic by
+        // contract.
+        let strata = resident.strata();
+        for group in [ReadGroupId(0)] {
+            let from_memory = resident
+                .with_strata(group, &strata, |sections| {
+                    sections.iter().map(|s| (*s).clone()).collect::<Vec<_>>()
+                })
+                .expect("a resident census has no file to fail on");
+            let from_file = backed
+                .with_strata(group, &strata, |sections| {
+                    sections.iter().map(|s| (*s).clone()).collect::<Vec<_>>()
+                })
+                .expect("this build's own file");
+            assert_eq!(from_file, from_memory, "every tract section of {group:?}");
+        }
+    }
+
+    /// **A call asks for one section and reads one section's bytes.** The band here is one
+    /// stratum of two, and what it must not do is decode the other — which a reader that read
+    /// the file and handed back a slice would.
+    #[test]
+    fn a_call_for_one_stratum_reads_that_stratum_and_leaves_the_rest_alone() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("one.census");
+        let census = every_corner();
+        write_census(
+            &census,
+            None,
+            &mut std::fs::File::create(&path).expect("a new file"),
+        )
+        .expect("a file accepts every write");
+        let file_len = std::fs::metadata(&path).expect("the file exists").len();
+
+        let (mut backed, _) = open_census(&path).expect("this build's own file");
+        let asked = backed
+            .with_strata(ReadGroupId(0), &[AT_SIX_REPEATS], |sections| {
+                assert_eq!(sections.len(), 1, "one stratum was asked for");
+                sections[0].len()
+            })
+            .expect("this build's own file");
+        assert_eq!(asked, 2, "the two tracts that stratum holds");
+
+        // The section's own extent, which is what the call above may read and no more.
+        let bytes = std::fs::read(&path).expect("the file reads");
+        let directory = decode_directory_of(&bytes).expect("this build's own file");
+        let extent = directory
+            .iter()
+            .find(|(key, _)| *key == SectionKey::Ssr(ReadGroupId(0), AT_SIX_REPEATS))
+            .map(|(_, extent)| *extent)
+            .expect("the stratum is in the directory");
+        assert!(
+            extent.len() < file_len,
+            "a section is a part of the file, not the whole of it"
+        );
     }
 
     /// A census with no tracts at all, and one with no ordinary positions — the two ends of the

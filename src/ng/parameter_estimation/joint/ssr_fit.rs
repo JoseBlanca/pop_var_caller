@@ -69,7 +69,7 @@ use std::collections::BTreeMap;
 use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::joint::census::{
-    CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
+    CensusError, CohortCensusEvidence, RECORDED_OFFSET_RANGE, SsrEvidence, SsrLocusState,
 };
 use crate::ng::parameter_estimation::joint::loci::CensusLoci;
 use crate::ng::types::{ContigId, ReadGroupId};
@@ -1209,7 +1209,7 @@ pub fn gather_strata(
     cohort: &mut CohortCensusEvidence,
     strata: &[Stratum],
     slippage_group_of: &BTreeMap<ReadGroupId, u32>,
-) -> Vec<StratumEvidence> {
+) -> Result<Vec<StratumEvidence>, CensusError> {
     let groups = slippage_group_of
         .values()
         .map(|group| *group as usize + 1)

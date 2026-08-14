@@ -49,7 +49,8 @@ use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
 use super::census::{
-    CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections, TermsDisagreement,
+    CensusError, CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections,
+    TermsDisagreement,
 };
 use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination_over};
 
@@ -266,6 +267,10 @@ pub enum JointFitError {
         second: String,
         field: &'static str,
     },
+    /// A sample whose census is a file the fit could not read. **The estimator's own failure to
+    /// obtain evidence, not a property of the evidence** — see [`CensusError`].
+    #[error("a sample's census could not be read")]
+    Census(#[from] CensusError),
     #[error("the joint fit needs at least one sample")]
     NoSamples,
     #[error(
@@ -1181,7 +1186,7 @@ pub fn fit_jointly(
                 trace,
                 contamination,
             )
-        });
+        })?;
     let mut statistics = statistics;
     let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
 
