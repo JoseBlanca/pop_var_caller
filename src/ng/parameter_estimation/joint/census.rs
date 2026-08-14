@@ -1196,6 +1196,179 @@ impl SampleCensusEvidence {
     }
 }
 
+/// One sample's repeat-tract sections, as a scoped call lends them: each (read group, stratum)
+/// the sample holds among the strata asked for.
+///
+/// **The stratum travels with the section** because a call lends a *band* of them — the fit
+/// borrows a thin stratum together with its neighbours (spec §6.2) — so the closure has to be
+/// able to tell which is which.
+pub type SampleTractSections<'a> = Vec<(ReadGroupId, Stratum, &'a SsrEvidence)>;
+
+/// Two samples that did not record the same thing, and the value they first differ on.
+///
+/// **Naming the value is the whole point** (spec §5): every value in [`RecordingTerms`] fails
+/// the same way, silently, and only its name says what to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermsDisagreement {
+    pub first: String,
+    pub second: String,
+    /// What the two disagree on, in the words [`RecordingTerms::first_disagreement`] uses.
+    pub field: &'static str,
+}
+
+impl std::fmt::Display for TermsDisagreement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "samples {} and {} disagree on {}; they did not record the same thing",
+            self.first, self.second, self.field
+        )
+    }
+}
+
+/// Every sample's census, however each one is held.
+///
+/// **This is what the parameters fit reads, and it reads it a band at a time.** A tract's length
+/// frequencies are fitted from every sample with reads there, so the unit lent is one band of
+/// strata across the *whole cohort* rather than one sample's stratum (spec §6.2) — which is why
+/// the scoped calls live here and not only on the sample.
+///
+/// **The twelve recording terms are checked before a single section is read.** They say which
+/// loci were asked for, which came back, and in what units the evidence was written down; two
+/// samples that disagree on any of them hold rows that mean different things, and every one of
+/// them fails silently. So [`new`](Self::new) refuses the cohort at the door, where the refusal
+/// costs nothing, rather than after a pass over two million positions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CohortCensusEvidence {
+    samples: Vec<SampleCensusEvidence>,
+    /// Every read group any sample recorded, in the order the fit visits them. **The union and
+    /// not one sample's**: a cohort's samples need not have been sequenced the same way.
+    read_groups: Vec<ReadGroupId>,
+    /// Every stratum any sample holds tracts for. These do agree across samples — they come
+    /// from the selection, which the terms above have already been checked on.
+    strata: Vec<Stratum>,
+}
+
+impl CohortCensusEvidence {
+    /// Adopt each sample's census, refusing the cohort if two of them did not record the same
+    /// thing.
+    ///
+    /// # Errors
+    ///
+    /// [`TermsDisagreement`], naming the first sample that disagrees with the first and the
+    /// value they differ on. **Checked before any section is decoded**, which is what makes the
+    /// refusal free.
+    pub fn new(samples: Vec<SampleCensusEvidence>) -> Result<Self, TermsDisagreement> {
+        if let Some(first) = samples.first() {
+            for other in &samples[1..] {
+                if let Some(field) = first.terms.first_disagreement(&other.terms) {
+                    return Err(TermsDisagreement {
+                        first: first.sample.clone(),
+                        second: other.sample.clone(),
+                        field,
+                    });
+                }
+            }
+        }
+        let read_groups = samples
+            .iter()
+            .flat_map(|sample| sample.read_groups())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let strata = samples
+            .iter()
+            .flat_map(|sample| sample.strata())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(Self {
+            samples,
+            read_groups,
+            strata,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Each sample's name, in the order every scoped call indexes by.
+    pub fn sample_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.samples.iter().map(|sample| sample.sample.as_str())
+    }
+
+    /// The terms every sample in this cohort recorded under — one set, since
+    /// [`new`](Self::new) has already refused any cohort where they differ.
+    pub fn terms(&self) -> Option<&RecordingTerms> {
+        self.samples.first().map(|sample| &sample.terms)
+    }
+
+    pub fn read_groups(&self) -> &[ReadGroupId] {
+        &self.read_groups
+    }
+
+    pub fn strata(&self) -> &[Stratum] {
+        &self.strata
+    }
+
+    /// Every sample's ordinary-position evidence for a band of read groups, **for the length of
+    /// the call**. Entry `s` is sample `s`'s own sections among those asked for — a sample
+    /// sequenced in one library answers with one where another answers with three.
+    pub fn with_generic<R>(
+        &mut self,
+        groups: &[ReadGroupId],
+        f: impl FnOnce(&[SampleGenericSections<'_>]) -> R,
+    ) -> R {
+        let lent: Vec<SampleGenericSections<'_>> = self
+            .samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .generic_sections()
+                    .into_iter()
+                    .filter(|(group, _)| groups.contains(group))
+                    .collect()
+            })
+            .collect();
+        f(&lent)
+    }
+
+    /// Every sample's tracts for a band of strata, **for the length of the call**.
+    ///
+    /// **A band and not one stratum**: 68 of tomato's 141 strata hold fewer than a hundred
+    /// tracts and are fitted by borrowing from their neighbouring repeat counts
+    /// (`parameter_prepass_joint_loci.md` §3.6), so the fit sometimes wants a stratum and its
+    /// neighbours together.
+    pub fn with_strata<R>(
+        &mut self,
+        strata: &[Stratum],
+        f: impl FnOnce(&[SampleTractSections<'_>]) -> R,
+    ) -> R {
+        let lent: Vec<SampleTractSections<'_>> = self
+            .samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .ssr_sections()
+                    .into_iter()
+                    .filter(|(_, stratum, _)| strata.contains(stratum))
+                    .collect()
+            })
+            .collect();
+        f(&lent)
+    }
+
+    /// The samples back, for a caller that has finished with the cohort.
+    pub fn into_samples(self) -> Vec<SampleCensusEvidence> {
+        self.samples
+    }
+}
+
 // ---------------------------------------------------------------------
 // Filling the census during the walk
 // ---------------------------------------------------------------------
@@ -2203,6 +2376,72 @@ mod tests {
         assert!(!first.overlaps(ByteExtent::new(100, 0)));
         assert_eq!((second.offset(), second.len()), (100, 40));
         assert!(ByteExtent::new(7, 0).is_empty());
+    }
+
+    // ---- the whole cohort ----------------------------------------------------
+
+    /// Two samples over the same one-tract selection, so a cohort can be built from them.
+    fn two_sample_cohort() -> Vec<SampleCensusEvidence> {
+        ["a", "b"]
+            .iter()
+            .map(|name| {
+                let mut writer = ssr_writer();
+                writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", 0, 2)]));
+                let mut evidence = writer.finish();
+                evidence.sample = (*name).to_string();
+                evidence
+            })
+            .collect()
+    }
+
+    /// **The refusal is at the door, before a section is read** (spec §5). Two samples whose
+    /// depth ladders differ hold codes meaning different depths while every other value agrees,
+    /// and the cohort has to say so by name rather than fit them together.
+    #[test]
+    fn a_cohort_refuses_two_samples_that_did_not_record_the_same_thing() {
+        let mut samples = two_sample_cohort();
+        samples[1].terms.depth_ladder = DepthLadderDigest([0; 16]);
+        let refusal =
+            CohortCensusEvidence::new(samples).expect_err("two ladders is two kinds of evidence");
+        assert_eq!(refusal.first, "a");
+        assert_eq!(refusal.second, "b");
+        assert_eq!(refusal.field, "depth ladder edges");
+    }
+
+    /// A cohort lends every sample's section for the band asked for, and **one row a sample**
+    /// — the fit reads a stratum from every sample with reads in it at once.
+    #[test]
+    fn a_cohort_lends_a_band_across_every_sample_and_nothing_outside_it() {
+        let mut cohort =
+            CohortCensusEvidence::new(two_sample_cohort()).expect("both recorded the same thing");
+        assert_eq!(cohort.len(), 2);
+        assert_eq!(cohort.read_groups(), &[ReadGroupId(0)]);
+        assert_eq!(cohort.strata(), &[AT_SIX_REPEATS]);
+
+        let crossing = cohort.with_strata(&[AT_SIX_REPEATS], |lent| {
+            assert_eq!(lent.len(), 2, "one row a sample, not one value");
+            lent.iter()
+                .map(|sample| {
+                    sample
+                        .iter()
+                        .map(|(_, _, records)| u64::from(records.offsets(0).total()))
+                        .sum::<u64>()
+                })
+                .collect::<Vec<u64>>()
+        });
+        assert_eq!(crossing, vec![2, 2], "each sample's two crossing reads");
+
+        // A band naming a stratum this cohort does not hold lends nothing rather than a zero
+        // that would read as a sample with no reads there.
+        let empty = cohort.with_strata(&[ATG_FOUR_REPEATS], |lent| {
+            lent.iter().map(|sample| sample.len()).sum::<usize>()
+        });
+        assert_eq!(empty, 0);
+
+        let positions = cohort.with_generic(&[ReadGroupId(0)], |lent| {
+            lent.iter().map(|sample| sample.len()).sum::<usize>()
+        });
+        assert_eq!(positions, 2, "one ordinary-position section a sample");
     }
 
     // ---- the twelve values ----------------------------------------------

@@ -78,7 +78,7 @@ maps become a private field; access is `with_generic` and `with_strata`, which h
 and take them back. Nothing can retain a section.
 *Depends:* A1. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §1.1, §2.2.
 
-☐ **A3 — `CohortCensusEvidence`, and its scoped calls across every sample.** Built from a vector of
+✅ **A3 — `CohortCensusEvidence`, and its scoped calls across every sample.** Built from a vector of
 per-sample values, checking the twelve recording terms across all of them **before any section is
 decoded**. The unit lent is a band of strata across every sample, because 68 of tomato's 141 strata
 borrow from their neighbours.
