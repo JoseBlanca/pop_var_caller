@@ -356,7 +356,6 @@ fn draw(
         read_cap: ReadCap(1_000),
         depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
         depth_cap: DepthCap(124),
-        coverage_window: None,
     };
     Drawn {
         samples: (0..samples)
@@ -372,7 +371,6 @@ fn draw(
                 .into_iter()
                 .collect(),
                 ssr: BTreeMap::new(),
-                coverage: None,
                 terms: terms.clone(),
             })
             .collect(),

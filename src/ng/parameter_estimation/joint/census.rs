@@ -43,7 +43,7 @@ use crate::ng::parameter_estimation::joint::loci::{
     CensusLoci, CensusLociDigest, CensusLociDigester, SelectionTerms,
 };
 use crate::ng::repeat_catalog::StratumCounts;
-use crate::ng::types::{Bp, ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
+use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position, ReadGroupId};
 
 // ---------------------------------------------------------------------
 // The generic half of the census
@@ -569,7 +569,7 @@ impl DepthLadderDigest {
     }
 }
 
-/// The thirteen values the fit refuses to pool across.
+/// The twelve values the fit refuses to pool across.
 ///
 /// Seven say which loci were **asked for** ([`SelectionTerms`]), one says which came
 /// **back** ([`CensusLociDigest`]), and five say **in what units** the evidence was written
@@ -585,9 +585,6 @@ pub struct RecordingTerms {
     pub read_cap: ReadCap,
     pub depth_ladder: DepthLadderDigest,
     pub depth_cap: DepthCap,
-    /// The coverage-by-window grid, where a summary exists. Windows of different widths are
-    /// not comparable and a relative copy number computed across two grids is meaningless.
-    pub coverage_window: Option<Bp>,
 }
 
 impl RecordingTerms {
@@ -608,7 +605,6 @@ impl RecordingTerms {
             read_cap,
             depth_ladder,
             depth_cap,
-            coverage_window,
         } = self;
         if let Some(field) = selection.first_disagreement(&other.selection) {
             return Some(field);
@@ -628,180 +624,9 @@ impl RecordingTerms {
         if depth_cap != &other.depth_cap {
             return Some("per-position depth cap");
         }
-        if coverage_window != &other.coverage_window {
-            return Some("coverage window size");
-        }
         None
     }
 }
-
-// ---------------------------------------------------------------------
-// The third object, which is not census evidence
-// ---------------------------------------------------------------------
-
-/// One sample's depth over fixed windows of the reference, plus the GC curve that corrects
-/// it. **Over every position the walk visited, not over the kept ones.**
-///
-/// **Why it cannot come out of the records.** The fit's third class of site — a locus the
-/// sample carries more copies of than the reference does — is conditioned on local relative
-/// coverage rather than on the site's own depth, and the records hold one binned depth per
-/// kept position where the kept positions are one in a few hundred. A 500 bp window holds one
-/// or two of them, which is the per-base measurement the class's own constraint rules out.
-///
-/// **Measured, 2026-08-12** (`doc/devel/ng/reports/duplicated_locus_probe_2026-08-12.md`): on
-/// tomato at 25× depth, 1 position in 8,600 sits in a window near two copies and reads
-/// between 35% and 65% alternative, and the near-half rate inside those windows is 1.26%
-/// against 0.033% outside.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CoverageByWindow {
-    window_bp: Bp,
-    median_depth: f32,
-    /// `round(32 × mean / median_depth)`, saturating at 255 — 3% of the sample's own median
-    /// per step, reaching eight times it. **The mean itself in a byte would not do**: at
-    /// three reads a position the difference between one copy and two is the difference
-    /// between 3 and 6.
-    depth: Vec<u8>,
-    /// Windows holding fewer than `window_bp` walked positions, as `(index, positions)` —
-    /// contig ends, and anything the analysed regions or the ambiguity mask cut into.
-    short_windows: Vec<(u32, u16)>,
-    gc_curve: Vec<f32>,
-}
-
-/// The scale a window's mean depth is stored on, relative to the sample's median.
-const WINDOW_DEPTH_SCALE: f32 = 32.0;
-
-impl CoverageByWindow {
-    /// Build from one mean depth per window and the count of positions behind each.
-    ///
-    /// # Panics
-    ///
-    /// When the two slices differ in length — they are two descriptions of one grid.
-    pub fn new(
-        window_bp: Bp,
-        median_depth: f32,
-        means: &[f32],
-        positions: &[u16],
-        gc_curve: Vec<f32>,
-    ) -> Self {
-        assert_eq!(
-            means.len(),
-            positions.len(),
-            "every window's mean needs the count of positions behind it"
-        );
-        let full = u16::try_from(window_bp.get()).unwrap_or(u16::MAX);
-        let depth = means
-            .iter()
-            .map(|mean| {
-                if median_depth <= 0.0 {
-                    return 0;
-                }
-                let scaled = (WINDOW_DEPTH_SCALE * mean / median_depth).round();
-                scaled.clamp(0.0, 255.0) as u8
-            })
-            .collect();
-        let short_windows = positions
-            .iter()
-            .enumerate()
-            .filter(|(_, count)| **count < full)
-            .map(|(index, count)| (index as u32, *count))
-            .collect();
-        Self {
-            window_bp,
-            median_depth,
-            depth,
-            short_windows,
-            gc_curve,
-        }
-    }
-
-    pub fn window_bp(&self) -> Bp {
-        self.window_bp
-    }
-
-    pub fn len(&self) -> usize {
-        self.depth.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.depth.is_empty()
-    }
-
-    pub fn gc_curve(&self) -> &[f32] {
-        &self.gc_curve
-    }
-
-    /// **The sample's own median window depth — the scale every relative reading is against.**
-    ///
-    /// A duplicated stretch is *twice this sample's normal*, never an absolute depth, so
-    /// anything asking whether a window holds one copy or two divides by this first.
-    #[must_use]
-    pub fn median_depth(&self) -> f32 {
-        self.median_depth
-    }
-
-    /// This window's mean depth, in reads a position.
-    pub fn mean_depth(&self, window: usize) -> f32 {
-        f32::from(self.depth[window]) * self.median_depth / WINDOW_DEPTH_SCALE
-    }
-
-    /// How many walked positions stand behind this window.
-    pub fn positions(&self, window: usize) -> u16 {
-        let full = u16::try_from(self.window_bp.get()).unwrap_or(u16::MAX);
-        self.short_windows
-            .binary_search_by_key(&(window as u32), |(index, _)| *index)
-            .map_or(full, |slot| self.short_windows[slot].1)
-    }
-
-    /// The mean depth over `windows` taken together — **the operation the fit reads through**.
-    ///
-    /// **The stored grid is fine and the width read at is the sample's own.** A window's mean
-    /// separates one copy from two only once it has collected about 12,000 aligned bases, so
-    /// 500 bp is enough at 25× and 5 kb is needed at 2.5×; at 3.6× and 500 bp the enrichment
-    /// of the joint cell over independence falls to 1.3, which is no separation at all
-    /// (`parameter_prepass_joint_records.md` §4.1).
-    ///
-    /// It is a ratio of two sums, so it is exact — and it weights each window by its own
-    /// position count, which is why those counts are stored. A sum that treated every window
-    /// as full would agree everywhere except at contig ends and region edges, which is where
-    /// it matters.
-    pub fn mean_depth_over(&self, windows: std::ops::Range<usize>) -> f32 {
-        let mut depth_sum = 0.0_f64;
-        let mut positions = 0.0_f64;
-        for window in windows {
-            let count = f64::from(self.positions(window));
-            depth_sum += f64::from(self.mean_depth(window)) * count;
-            positions += count;
-        }
-        if positions == 0.0 {
-            0.0
-        } else {
-            (depth_sum / positions) as f32
-        }
-    }
-
-    /// How many adjacent windows this sample's depth needs summed before a window's mean
-    /// separates one copy from two.
-    ///
-    /// [`MIN_ALIGNED_BASES_PER_WINDOW`] over the sample's median depth and the stored width,
-    /// rounded up, and never below one.
-    pub fn windows_to_sum(&self) -> usize {
-        if self.median_depth <= 0.0 {
-            return 1;
-        }
-        let per_window = f64::from(self.median_depth) * self.window_bp.get() as f64;
-        ((f64::from(MIN_ALIGNED_BASES_PER_WINDOW) / per_window).ceil() as usize).max(1)
-    }
-}
-
-/// How many aligned bases a window has to collect before its mean depth tells one copy from
-/// two.
-///
-/// **Measured across eight tomato samples from 2.5× to 28.7×**: 2.51× at 5 kb is 12,550
-/// aligned bases a window and 25.2× at 500 bp is 12,600, and the two return the same
-/// enrichment of the joint cell — 14× and 24× — while 3.6× at 500 bp, which is 1,800, returns
-/// 1.3 and separates nothing. The deep sample gains nothing above the floor, so this is a
-/// floor and not a target.
-pub const MIN_ALIGNED_BASES_PER_WINDOW: u32 = 12_000;
 
 // ---------------------------------------------------------------------
 // The whole input to the fit
@@ -817,7 +642,6 @@ pub struct SampleCensusEvidence {
     pub sample: String,
     pub generic: BTreeMap<ReadGroupId, GenericEvidence>,
     pub ssr: BTreeMap<ReadGroupId, SsrEvidence>,
-    pub coverage: Option<CoverageByWindow>,
     pub terms: RecordingTerms,
 }
 
@@ -1196,8 +1020,8 @@ impl CensusWriter {
             .ok()
     }
 
-    /// The finished records, with the digest of what was actually written.
-    pub fn finish(mut self, coverage: Option<CoverageByWindow>) -> SampleCensusEvidence {
+    /// The finished evidence, with the digest of what was actually written.
+    pub fn finish(mut self) -> SampleCensusEvidence {
         // Every kept locus is digested, including any the walk never reached — the digest
         // witnesses the selection, and a run that stopped early must not produce a short
         // digest that happens to match another short one.
@@ -1223,12 +1047,10 @@ impl CensusWriter {
                 .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
             records.non_reference = entries;
         }
-        let coverage_window = coverage.as_ref().map(CoverageByWindow::window_bp);
         SampleCensusEvidence {
             sample: self.sample,
             generic: self.generic,
             ssr: self.ssr,
-            coverage,
             terms: RecordingTerms {
                 selection: self.terms,
                 kept_loci: self.digester.finish(),
@@ -1236,7 +1058,6 @@ impl CensusWriter {
                 read_cap: self.read_cap,
                 depth_ladder: DepthLadderDigest::of(&self.edges),
                 depth_cap: self.depth_cap,
-                coverage_window,
             },
         }
     }
@@ -1354,7 +1175,6 @@ mod tests {
             sample: "s".to_string(),
             generic: BTreeMap::from([(ReadGroupId(0), one), (ReadGroupId(1), two)]),
             ssr: BTreeMap::new(),
-            coverage: None,
             terms: terms(),
         };
         assert_eq!(records.allele_counts(1), [0, 7, 0, 0, 0]);
@@ -1481,7 +1301,7 @@ mod tests {
         assert!(records.guard_is_over_threshold(0), "3 in 21 is over");
     }
 
-    // ---- the thirteen values -------------------------------------------------
+    // ---- the twelve values ----------------------------------------------
 
     fn terms() -> RecordingTerms {
         RecordingTerms {
@@ -1491,7 +1311,6 @@ mod tests {
             read_cap: ReadCap(100),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
             depth_cap: DepthCap(124),
-            coverage_window: Some(Bp(500)),
         }
     }
 
@@ -1517,8 +1336,8 @@ mod tests {
     }
 
     #[test]
-    fn each_of_the_five_unit_values_refuses_on_its_own() {
-        // These are the five that an earlier version of the check did not have: two samples
+    fn each_of_the_four_unit_values_refuses_on_its_own() {
+        // These are the four that an earlier version of the check did not have: two samples
         // can agree on every locus, every seed and every digest and still have written down
         // rows that mean different things.
         let base = terms();
@@ -1539,13 +1358,6 @@ mod tests {
         assert_eq!(
             base.first_disagreement(&read_cap),
             Some("per-locus read cap")
-        );
-
-        let mut window = base.clone();
-        window.coverage_window = Some(Bp(1_000));
-        assert_eq!(
-            base.first_disagreement(&window),
-            Some("coverage window size")
         );
 
         let mut strata = base.clone();
@@ -1628,39 +1440,6 @@ mod tests {
         );
     }
 
-    // ---- the coverage summary ------------------------------------------------
-
-    fn coverage() -> CoverageByWindow {
-        // Ten windows at about three reads a position, one of them short.
-        let means = [3.0_f32, 3.0, 3.0, 3.0, 6.0, 6.0, 3.0, 3.0, 3.0, 3.0];
-        let positions = [500_u16, 500, 500, 500, 500, 500, 500, 500, 500, 100];
-        CoverageByWindow::new(Bp(500), 3.0, &means, &positions, vec![1.0; 20])
-    }
-
-    #[test]
-    fn a_window_mean_survives_the_byte_it_is_stored_in() {
-        let summary = coverage();
-        assert!((summary.mean_depth(0) - 3.0).abs() < 0.05);
-        // The value the class is about: twice the sample's own median, at three reads a
-        // position, where an integer byte could not tell 3 from 4.
-        assert!((summary.mean_depth(4) - 6.0).abs() < 0.05);
-    }
-
-    #[test]
-    fn summing_windows_weights_each_by_its_own_position_count() {
-        let summary = coverage();
-        // Windows 8 and 9: 500 positions at 3.0 and 100 at 3.0 — the same mean either way.
-        assert!((summary.mean_depth_over(8..10) - 3.0).abs() < 0.05);
-
-        // Windows 3..6: 500 at 3.0, 500 at 6.0, 500 at 6.0 → 5.0.
-        assert!((summary.mean_depth_over(3..6) - 5.0).abs() < 0.05);
-
-        // The short window matters: a naive mean of windows 0 and 9 weights the 100-position
-        // one as if it were full. Here it is not, and the count is what says so.
-        assert_eq!(summary.positions(9), 100);
-        assert_eq!(summary.positions(0), 500);
-    }
-
     // ---- the writer ----------------------------------------------------------
 
     use crate::ng::locus_generation::SequenceObservation;
@@ -1730,7 +1509,7 @@ mod tests {
         let mut writer = writer_over(&[10, 20, 30], &[0]);
         writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 4)]));
         writer.add_locus(&generic_locus(20, b"C", Vec::new()));
-        let records = writer.finish(None);
+        let records = writer.finish();
 
         let generic = &records.generic[&ReadGroupId(0)];
         let edges = DepthBinEdges::new();
@@ -1761,7 +1540,7 @@ mod tests {
             end: Position(25),
         });
         writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 4)]));
-        let records = writer.finish(None);
+        let records = writer.finish();
 
         let generic = &records.generic[&ReadGroupId(0)];
         let edges = DepthBinEdges::new();
@@ -1791,7 +1570,7 @@ mod tests {
             start: Position(1),
             end: Position(25),
         });
-        let records = writer.finish(None);
+        let records = writer.finish();
         let generic = &records.generic[&ReadGroupId(0)];
         assert_eq!(
             generic.at(0).0,
@@ -1861,7 +1640,7 @@ mod tests {
     fn two_reads_carrying_one_interruption_are_two_entries_at_one_offset() {
         let mut writer = ssr_writer();
         writer.add_locus(&ssr_locus(vec![observation(b"ATATGTATATAT", 0, 2)]));
-        let records = writer.finish(None);
+        let records = writer.finish();
         let ssr = &records.ssr[&ReadGroupId(0)];
 
         assert_eq!(
@@ -1889,7 +1668,7 @@ mod tests {
             observation(b"ATATATATAT", 0, 3),
             observation(b"ATATATATATAT", 0, 5),
         ]));
-        let records = writer.finish(None);
+        let records = writer.finish();
         let ssr = &records.ssr[&ReadGroupId(0)];
 
         assert_eq!(ssr.offsets(0).at(-1), 3, "one unit short");
@@ -1908,7 +1687,7 @@ mod tests {
         // — the entry is the denominator its own error rate is fitted against.
         let mut writer = writer_over(&[10], &[0, 1]);
         writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 6)]));
-        let records = writer.finish(None);
+        let records = writer.finish();
 
         let edges = DepthBinEdges::new();
         assert_eq!(
@@ -1930,7 +1709,7 @@ mod tests {
             b"A",
             vec![observation(b"A", 0, 5), observation(b"A", 1, 2)],
         ));
-        let records = writer.finish(None);
+        let records = writer.finish();
 
         let edges = DepthBinEdges::new();
         assert_eq!(
@@ -1952,7 +1731,7 @@ mod tests {
             vec![observation(b"A", 0, 3), observation(b"G", 0, 2)],
         ));
         writer.add_locus(&generic_locus(20, b"C", vec![observation(b"C", 0, 4)]));
-        let records = writer.finish(None);
+        let records = writer.finish();
 
         let generic = &records.generic[&ReadGroupId(0)];
         let (depth, alleles) = generic.at(0);
@@ -1975,7 +1754,7 @@ mod tests {
     fn a_position_the_selection_does_not_hold_is_ignored() {
         let mut writer = writer_over(&[10], &[0]);
         writer.add_locus(&generic_locus(11, b"A", vec![observation(b"T", 0, 9)]));
-        let records = writer.finish(None);
+        let records = writer.finish();
         assert_eq!(
             records.generic[&ReadGroupId(0)].at(0).0,
             DepthCode::NeverWalked
@@ -1991,33 +1770,14 @@ mod tests {
         let mut idle = writer_over(&[10, 20, 30], &[0]);
         idle.add_locus(&generic_locus(30, b"A", vec![observation(b"A", 0, 3)]));
         assert_eq!(
-            walked.finish(None).terms.kept_loci,
-            idle.finish(None).terms.kept_loci
+            walked.finish().terms.kept_loci,
+            idle.finish().terms.kept_loci
         );
 
         let other = writer_over(&[10, 20, 31], &[0]);
         assert_ne!(
-            writer_over(&[10, 20, 30], &[0])
-                .finish(None)
-                .terms
-                .kept_loci,
-            other.finish(None).terms.kept_loci
-        );
-    }
-
-    #[test]
-    fn how_many_windows_to_sum_falls_out_of_the_samples_own_depth() {
-        // 25× at 500 bp is 12,500 aligned bases — one window is enough.
-        let deep = CoverageByWindow::new(Bp(500), 25.0, &[25.0], &[500], Vec::new());
-        assert_eq!(deep.windows_to_sum(), 1);
-
-        // 2.5× at 500 bp is 1,250 — ten windows, which is the 5 kb the measurement found.
-        let shallow = CoverageByWindow::new(Bp(500), 2.5, &[2.5], &[500], Vec::new());
-        assert_eq!(shallow.windows_to_sum(), 10);
-        assert_eq!(
-            shallow.windows_to_sum() * 500,
-            5_000,
-            "5 kb is what 2.5x needs, measured on eight tomato samples"
+            writer_over(&[10, 20, 30], &[0]).finish().terms.kept_loci,
+            other.finish().terms.kept_loci
         );
     }
 }

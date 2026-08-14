@@ -76,7 +76,7 @@ number, and milestone B must move them only where the specification predicts.
 
 Nothing in this milestone changes an answer.
 
-☐ **A1 — record the baseline.** Run the tomato cohort and the trio, and keep the full output. Every
+✅ **A1 — record the baseline.** Run the tomato cohort and the trio, and keep the full output. Every
 step below compares against these two files.
 *Depends:* —. *Source:* preconditions.
 
@@ -86,11 +86,11 @@ step below compares against these two files.
 `CensusError`, and `RecordIdentity`/`SelectionIdentity` → `RecordingTerms`/`SelectionTerms`.
 *Depends:* A1. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §4's table.
 
-☐ **A3 — delete the coverage-by-window summary.** `coverage.rs` (about 560 lines), the `coverage`
+✅ **A3 — delete the coverage-by-window summary.** `coverage.rs` (about 560 lines), the `coverage`
 field, `CensusWriter::finish`'s parameter, and the harness's `COVERAGE_DISCRIMINATOR` path.
 *Depends:* A2. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §4.
 
-☐ **A4 — assert the milestone.** Re-run both cohorts; the output must be **byte-identical** to A1.
+✅ **A4 — assert the milestone.** Re-run both cohorts; the output must be **byte-identical** to A1.
 *Depends:* A2, A3. *Source:* this plan's first principle.
 
 > **Checkpoint A:** a rename and a deletion, with byte-identical output on two real cohorts. Pause for

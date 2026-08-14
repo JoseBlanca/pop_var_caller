@@ -273,7 +273,6 @@ fn draw(
         read_cap: ReadCap(1_000),
         depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
         depth_cap: DepthCap(u32::MAX),
-        coverage_window: None,
     };
     let records = (0..samples)
         .map(|s| SampleCensusEvidence {
@@ -288,7 +287,6 @@ fn draw(
             .into_iter()
             .collect(),
             ssr: BTreeMap::new(),
-            coverage: None,
             terms: terms.clone(),
         })
         .collect();

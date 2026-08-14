@@ -2831,7 +2831,6 @@ mod tests {
             read_cap: ReadCap(100),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
             depth_cap: DepthCap(124),
-            coverage_window: None,
         };
         let records = (0..samples)
             .map(|s| SampleCensusEvidence {
@@ -2846,7 +2845,6 @@ mod tests {
                 .into_iter()
                 .collect(),
                 ssr: BTreeMap::new(),
-                coverage: None,
                 terms: terms.clone(),
             })
             .collect();

@@ -12,7 +12,7 @@
 //! (what is recorded at each). Types: the three `arch/parameter_prepass_joint_*.md`.
 //!
 //! **Under construction.** [`loci`] settles which loci every sample keeps, [`census`] what
-//! each writes down there, [`coverage`] fills the window summary they travel with, [`fit`] is
+//! each writes down there, [`fit`] is
 //! the estimator over ordinary positions — including the class for positions a sample carries
 //! more copies of than the reference does — [`ssr_fit`] the estimator over repeat tracts, and
 //! [`contamination`] the share of a sample's reads that came from another individual, which no
@@ -24,7 +24,6 @@
 
 pub mod census;
 pub mod contamination;
-pub mod coverage;
 pub mod fit;
 pub mod loci;
 pub mod ssr_fit;

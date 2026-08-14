@@ -1183,7 +1183,6 @@ mod tests {
             read_cap: ReadCap(1_000),
             depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
             depth_cap: DepthCap(124),
-            coverage_window: None,
         };
         (0..samples)
             .map(|s| SampleCensusEvidence {
@@ -1198,7 +1197,6 @@ mod tests {
                 .into_iter()
                 .collect(),
                 ssr: BTreeMap::new(),
-                coverage: None,
                 terms: terms.clone(),
             })
             .collect()

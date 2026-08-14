@@ -3,16 +3,13 @@
 //! Everything measured for this route so far was measured against truths the measuring
 //! program made up itself. This one drives the real writer —
 //! `parameter_estimation::joint::census::CensusWriter` — through real alignments, and it
-//! answers three questions the specifications assert without evidence:
+//! answers two questions the specifications assert without evidence:
 //!
-//! 1. **What do the records weigh?** `parameter_prepass_joint_records.md` §6 prices them by
+//! 1. **What does the census weigh?** `parameter_prepass_joint_records.md` §6 prices it by
 //!    arithmetic and §7.8 says to measure instead. The generic depth array, the sparse list of
-//!    non-reference observations, the STR set and the coverage-by-window summary are reported
-//!    **separately**, because a single total would hide any one of them being wrong.
-//! 2. **Does the coverage-by-window summary come out where §4 says it does?** It is built in
-//!    the same walk, by `parameter_estimation::joint::coverage`, and its size and its
-//!    short-window list are printed rather than assumed.
-//! 3. **How much population structure does the cohort have?** Handed more than one alignment,
+//!    non-reference observations and the STR set are reported **separately**, because a single
+//!    total would hide any one of them being wrong.
+//! 2. **How much population structure does the cohort have?** Handed more than one alignment,
 //!    the program holds every sample's records at once — which is the state the fit runs in —
 //!    and asks how far apart the samples are. That decides which row of
 //!    `parameter_prepass_joint_fit.md` §3.4.2 a cohort sits in, and so how much the
@@ -61,9 +58,6 @@ use pop_var_caller::ng::parameter_estimation::joint::census::{
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
 };
-use pop_var_caller::ng::parameter_estimation::joint::coverage::{
-    CoverageAccumulator, CoverageGrid,
-};
 use pop_var_caller::ng::parameter_estimation::joint::fit::{JointFit, JointFitConfig, fit_jointly};
 use pop_var_caller::ng::parameter_estimation::joint::loci::{
     CatalogBuildSettings, CensusLoci, ReferenceDigest, RegionSetDigest, SelectableRegions,
@@ -75,7 +69,7 @@ use pop_var_caller::ng::read::input::SampleReads;
 use pop_var_caller::ng::read::input::read_groups::build_read_groups;
 use pop_var_caller::ng::read::input::reference::OpenReference;
 use pop_var_caller::ng::read::left_align::LeftAlignPreparer;
-use pop_var_caller::ng::ref_seq::{RefSeq, WindowedRefSeq};
+use pop_var_caller::ng::ref_seq::WindowedRefSeq;
 use pop_var_caller::ng::reference_info::{
     ReferenceInfo, ReferenceSource, read_reference_info_observing,
 };
@@ -87,9 +81,6 @@ use pop_var_caller::ng::repeat_catalog::{
 };
 use pop_var_caller::ng::types::{Bp, ContigId};
 use pop_var_caller::regions::ContigBounds;
-
-/// The stored coverage window, and the one the recording terms make every sample agree on.
-const WINDOW_BP: Bp = Bp(500);
 
 /// The seed the locus selection is drawn with. One number, shared by every sample, and part
 /// of what the fit refuses to pool across.
@@ -181,8 +172,8 @@ fn main() {
         started.elapsed().as_secs_f64()
     );
 
-    // The walk, the coverage denominator and the selection all run over the same stretch of
-    // genome: the analysed regions with the ambiguous runs cut out.
+    // The walk and the selection run over the same stretch of genome: the analysed regions
+    // with the ambiguous runs cut out.
     let masked = analysed.intersect(&unambiguous);
     let typed: Vec<TypedRegion> = catalog
         .genome_segments(&criteria, ReadScope::Regions(masked.spans()))
@@ -197,14 +188,6 @@ fn main() {
             .collect(),
     )
     .expect("typed regions are disjoint");
-    let grid = CoverageGrid::over(&generic_domain, WINDOW_BP);
-    println!(
-        "coverage grid    {} windows of {} bp over {} generic bases",
-        grid.len(),
-        WINDOW_BP.get(),
-        generic_domain.total_length().get()
-    );
-
     // ---- one walk per sample -------------------------------------------------------------
     let mut cohort: Vec<SampleCensusEvidence> = Vec::new();
     for alignment in &alignments {
@@ -217,7 +200,6 @@ fn main() {
             alignment,
             &typed,
             &generic_domain,
-            &grid,
             &kept,
             &terms,
         );
@@ -244,7 +226,7 @@ fn main() {
         }
     }
     println!(
-        "  {} of {} samples agree on all thirteen values",
+        "  {} of {} samples agree on all twelve values",
         cohort.len() - refused,
         cohort.len()
     );
@@ -274,33 +256,14 @@ fn main() {
         println!("\nkept positions   {path}");
     }
 
-    // **The second discriminator for the duplicated class, and the only one that works at
-    // three samples.** A plant carrying two copies of a stretch the reference holds once
-    // collects twice the reads around it. The cohort pattern — a position where the carriers
-    // are all at a half and nobody is homozygous for the non-reference allele — needs about
-    // twenty-five samples before that absence means anything; a window's depth says the same
-    // thing whoever else is in the run. This turns each sample's coverage summary into
-    // `ln P(this depth | two copies) − ln P(this depth | one)` at every kept position.
-    // **Off unless asked for**, because the GC correction below is missing: on tomato, where
-    // coverage runs from 16.2 reads a base at 20% GC to 29.0 at 36%, an uncorrected reading is
-    // mostly GC content. On the human trio's benchmark regions at 300 reads a position it is
-    // the only discriminator there is, three samples being far below the twenty-five the
-    // cohort pattern needs.
-    let coverage_odds = if std::env::var("COVERAGE_DISCRIMINATOR").is_ok() {
-        let odds = coverage_odds(&cohort, &grid, kept.generic());
-        let loud = odds
-            .first()
-            .map_or(0, |sample| sample.iter().filter(|o| **o > 0.0).count());
-        println!(
-            "\ncoverage odds    built for {} samples; {loud} of {} positions read more like two \
-             copies than one in the first sample",
-            odds.len(),
-            kept.generic().len()
-        );
-        odds
-    } else {
-        Vec::new()
-    };
+    // **The duplicated class's depth term has no supplier here any more.** It used to come
+    // from a per-sample coverage-by-window summary built during this walk; that summary is
+    // gone (`parameter_prepass_joint_records.md` §4), and what replaces it is the position's
+    // own depth, which the census already carries. Until the fit reads that for itself the
+    // class is left with the cohort pattern alone — a position where the carriers all read
+    // near a half and nobody is homozygous for the non-reference allele — which needs about
+    // twenty-five samples before its absence means anything.
+    let coverage_odds = Vec::new();
 
     depth_ladder_occupancy(&cohort);
 
@@ -690,65 +653,6 @@ fn fit_the_cohort(
     Some(fit)
 }
 
-/// `ln P(this sample's depth around here | it has two copies) − ln P(… | one copy)`, per sample
-/// per kept position.
-///
-/// **A window's mean depth is read against this sample's own median**, never an absolute depth,
-/// and windows are summed until they hold the 12,000 aligned bases the classification needs —
-/// one window at 25× and ten at 2.5×.
-///
-/// ⚠ **The GC correction is missing, and it is not a small omission.** Coverage varies with GC
-/// content by a factor of 1.79 across tomato's range, which is larger than the doubling being
-/// looked for, so the reading below is that variation plus the copy number rather than the copy
-/// number. `CoverageByWindow` keeps the sample's depth-against-GC curve but not each window's own
-/// GC content, so the correction cannot be applied from the stored summary; the report proposes
-/// storing it.
-///
-/// The scatter a relative coverage reading has at `copies` copies is
-/// `√(copies² × 0.194² + copies × 313 / aligned bases)`, fitted to two points measured across
-/// eight tomato accessions (`duplicated_locus_probe_2026-08-12.md` §4).
-fn coverage_odds(
-    cohort: &[SampleCensusEvidence],
-    grid: &CoverageGrid,
-    kept: &[pop_var_caller::ng::types::GenomePosition],
-) -> Vec<Arc<[f32]>> {
-    let mut out = Vec::with_capacity(cohort.len());
-    for sample in cohort {
-        let Some(coverage) = sample.coverage.as_ref() else {
-            return Vec::new();
-        };
-        let span = coverage.windows_to_sum();
-        let aligned =
-            f64::from(coverage.median_depth()) * coverage.window_bp().get() as f64 * span as f64;
-        let sd = |copies: f64| {
-            (copies * copies * 0.194 * 0.194 + copies * 313.0 / aligned.max(1.0)).sqrt()
-        };
-        // One relative reading per window, so a position only costs a lookup.
-        let mut per_window = vec![0.0_f32; coverage.len()];
-        for slot in 0..coverage.len() {
-            let first = slot.saturating_sub(span / 2);
-            let last = (first + span).min(coverage.len());
-            let mean = f64::from(coverage.mean_depth_over(first..last));
-            let expected = f64::from(coverage.median_depth()).max(1e-6);
-            let reading = (mean / expected).clamp(0.02, 8.0);
-            let ln_normal = |copies: f64| {
-                let s = sd(copies);
-                -0.5 * ((reading - copies) / s).powi(2) - s.ln()
-            };
-            per_window[slot] = (ln_normal(2.0) - ln_normal(1.0)) as f32;
-        }
-        let odds: Vec<f32> = kept
-            .iter()
-            .map(|position| {
-                grid.slot_of(position.contig, position.position)
-                    .map_or(0.0, |slot| per_window[slot])
-            })
-            .collect();
-        out.push(Arc::from(odds));
-    }
-    out
-}
-
 /// Fit the repeat tracts, stratum by stratum, from the same records.
 ///
 /// **This half runs after the ordinary-position one and takes one thing from it**: each
@@ -919,7 +823,7 @@ fn fit_the_tracts(
     }
 }
 
-/// One sample: one walk, filling the records and the coverage summary together.
+/// One sample: one walk, filling that sample's census evidence.
 #[allow(
     clippy::too_many_arguments,
     reason = "a walk needs all of it, and a config struct \
@@ -932,8 +836,7 @@ fn walk_one(
     index: &Arc<noodles_fasta::fai::Index>,
     alignment: &Path,
     typed: &[TypedRegion],
-    generic_domain: &SelectableRegions,
-    grid: &CoverageGrid,
+    _generic_domain: &SelectableRegions,
     kept: &pop_var_caller::ng::parameter_estimation::joint::loci::CensusLoci,
     terms: &SelectionTerms,
 ) -> SampleCensusEvidence {
@@ -1003,19 +906,6 @@ fn walk_one(
         GeneratorSlot::Unfilled(UnhandledReason::NotImplemented),
     );
 
-    // The coverage denominator and the GC content come from the reference over the same
-    // generic stretch the walk covers, not from what the walk emitted: a window whose reads
-    // are missing has a low mean depth, and that is the truth about it.
-    let mut coverage = CoverageAccumulator::new(grid.clone());
-    let reader = accessor();
-    let mut bases = Vec::new();
-    for span in generic_domain.spans() {
-        reader
-            .fetch_into(span.contig, span.start.get(), span.len(), &mut bases)
-            .expect("a generic span reads from the reference");
-        coverage.observe_reference(*span, &bases);
-    }
-
     let contig_of = |name: &str| {
         contigs
             .entries
@@ -1057,28 +947,14 @@ fn walk_one(
     for locus in &mut stream {
         let locus = locus.expect("the walk runs to completion on a well-formed alignment");
         match locus.kind {
-            LocusKind::Generic => {
-                generic_loci += 1;
-                coverage.add_depths(
-                    locus.region.contig,
-                    locus.region.start,
-                    &locus.num_obs_along_locus(),
-                );
-            }
+            LocusKind::Generic => generic_loci += 1,
             LocusKind::Ssr(_) => ssr_loci += 1,
             _ => {}
         }
         writer.add_locus(&locus);
     }
-    println!(
-        "  walked         {generic_loci} generic loci, {ssr_loci} STR loci; median window depth \
-         {:.2} reads a position, {} windows summed to reach 12,000 aligned bases",
-        coverage.median_depth(),
-        (12_000.0 / (f64::from(coverage.median_depth()) * WINDOW_BP.get() as f64))
-            .ceil()
-            .max(1.0)
-    );
-    writer.finish(Some(coverage.finish()))
+    println!("  walked         {generic_loci} generic loci, {ssr_loci} STR loci");
+    writer.finish()
 }
 
 /// What one sample's records weigh, each object on its own line.
@@ -1165,14 +1041,6 @@ fn report_sizes(records: &SampleCensusEvidence) {
          {difference_entries} entries",
         mb(difference_bytes)
     );
-    if let Some(coverage) = &records.coverage {
-        println!(
-            "  coverage       {:.3} MB over {} windows of {} bp",
-            coverage.len() as f64 / 1e6,
-            coverage.len(),
-            coverage.window_bp().get()
-        );
-    }
     println!(
         "  states         {never_walked} never walked, {zero_depth} walked at zero depth, \
          {covered} with reads"
@@ -1180,10 +1048,6 @@ fn report_sizes(records: &SampleCensusEvidence) {
     println!(
         "  TOTAL          {:.3} MB held for this sample",
         mb(depth_bytes + sparse_bytes + ssr_dense_bytes + difference_bytes)
-            + records
-                .coverage
-                .as_ref()
-                .map_or(0.0, |c| c.len() as f64 / 1e6)
     );
 }
 
