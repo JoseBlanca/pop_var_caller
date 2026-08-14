@@ -48,8 +48,8 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
-use super::census::{DepthCap, DepthCode, SampleCensusEvidence};
-use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination};
+use super::census::{DepthCap, DepthCode, SampleCensusEvidence, SampleGenericSections};
+use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination_over};
 
 // ---------------------------------------------------------------------
 // What the route emits
@@ -469,7 +469,9 @@ impl PositionEvidence {
 /// observations are sorted by position, so advancing a cursor costs one comparison; a binary
 /// search per sample per position would cost twenty-one, two million times over.
 struct EvidenceCursor<'a> {
-    samples: &'a [SampleCensusEvidence],
+    /// Per sample, the ordinary-position sections the census lent for this call — **borrowed
+    /// and never held**: the cursor lives inside the scoped call that produced them.
+    samples: &'a [SampleGenericSections<'a>],
     edges: &'a DepthBinEdges,
     /// The cap the allele counts were thinned to. **Held beside the ladder because the two
     /// answer different questions**: the ladder says what depth a stored code stands for, and
@@ -488,11 +490,11 @@ struct EvidenceCursor<'a> {
 }
 
 impl<'a> EvidenceCursor<'a> {
-    fn position_count(samples: &[SampleCensusEvidence]) -> usize {
+    fn position_count(samples: &[SampleGenericSections<'_>]) -> usize {
         samples
             .first()
-            .and_then(|s| s.generic.values().next())
-            .map_or(0, |g| g.depth().len())
+            .and_then(|sections| sections.first())
+            .map_or(0, |(_, records)| records.depth().len())
     }
 
     /// Each sample's mean read depth over the positions it was walked at.
@@ -505,18 +507,16 @@ impl<'a> EvidenceCursor<'a> {
     /// to be going on with — the per-window coverage summary the records already carry is
     /// where a better one would come from.
     fn mean_depth(
-        samples: &[SampleCensusEvidence],
+        samples: &[SampleGenericSections<'_>],
         edges: &DepthBinEdges,
         cap: DepthCap,
     ) -> Vec<f64> {
         samples
             .iter()
-            .map(|sample| {
-                let positions = sample
-                    .generic
-                    .values()
-                    .next()
-                    .map_or(0, |records| records.depth().len());
+            .map(|sections| {
+                let positions = sections
+                    .first()
+                    .map_or(0, |(_, records)| records.depth().len());
                 let mut total = 0.0_f64;
                 let mut counted = 0_u64;
                 for index in 0..positions {
@@ -524,7 +524,7 @@ impl<'a> EvidenceCursor<'a> {
                     // mean has to be over positions and not over read-group entries.
                     let mut here = 0.0_f64;
                     let mut walked = false;
-                    for records in sample.generic.values() {
+                    for (_, records) in sections.iter() {
                         if let DepthCode::Binned(bin) = records.depth().get(index) {
                             let range = cap.denominator_for(edges.depth_range(bin));
                             here += 0.5 * f64::from(*range.start() + *range.end());
@@ -550,7 +550,7 @@ impl<'a> EvidenceCursor<'a> {
     /// chunk begins, and walked with a cursor from there, so a chunk costs one search per
     /// sample rather than one per position.
     fn over(
-        samples: &'a [SampleCensusEvidence],
+        samples: &'a [SampleGenericSections<'a>],
         edges: &'a DepthBinEdges,
         cap: DepthCap,
         coverage: &'a [f64],
@@ -560,11 +560,10 @@ impl<'a> EvidenceCursor<'a> {
     ) -> Self {
         let at = samples
             .iter()
-            .map(|sample| {
-                sample
-                    .generic
-                    .values()
-                    .map(|records| {
+            .map(|sections| {
+                sections
+                    .iter()
+                    .map(|(_, records)| {
                         records
                             .non_reference()
                             .partition_point(|entry| (entry.index as usize) < first)
@@ -592,14 +591,14 @@ impl<'a> EvidenceCursor<'a> {
         self.next += 1;
         into.observed_alternatives.clear();
         let mut seen = [false; 5];
-        for (s, sample) in self.samples.iter().enumerate() {
+        for (s, sections) in self.samples.iter().enumerate() {
             let slot = &mut into.samples[s];
             *slot = SampleAtPosition::default();
             // The depths this sample's stored codes could stand for, added across its read
             // groups. Two groups' ranges are summed endpoint to endpoint, which is the range
             // the total depth lies in.
             let (mut shallowest, mut deepest) = (0_u32, 0_u32);
-            for (g, records) in sample.generic.values().enumerate() {
+            for (g, (_, records)) in sections.iter().enumerate() {
                 if let DepthCode::Binned(bin) = records.depth().get(index) {
                     // **The counts' own denominator, not the position's depth.** The reads
                     // subtracted below were thinned to the cap; subtracting them from an
@@ -1080,20 +1079,27 @@ pub fn fit_jointly(
         });
     }
 
-    let groups: Vec<ReadGroupId> = samples
+    // **Every section the generic half needs, lent for the length of this call.** The estimator
+    // reads a position from every sample at once, so what it borrows is one row a sample; when
+    // the call returns, a file-backed census has nothing left decoded.
+    let lent: Vec<SampleGenericSections<'_>> = samples
         .iter()
-        .flat_map(|sample| sample.generic.keys().copied())
+        .map(|sample| sample.generic_sections())
+        .collect();
+
+    let groups: Vec<ReadGroupId> = lent
+        .iter()
+        .flat_map(|sections| sections.iter().map(|(group, _)| *group))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
     // Which read group each sample's own groups are, in the order the cursor visits them.
-    let group_index: Vec<Vec<usize>> = samples
+    let group_index: Vec<Vec<usize>> = lent
         .iter()
-        .map(|sample| {
-            sample
-                .generic
-                .keys()
-                .map(|id| {
+        .map(|sections| {
+            sections
+                .iter()
+                .map(|(id, _)| {
                     groups
                         .iter()
                         .position(|g| g == id)
@@ -1107,12 +1113,19 @@ pub fn fit_jointly(
 
     // Each sample's own mean depth, read once from the codes: the centre of the prior a
     // stored code's range is weighted with when the likelihood sums over it.
-    let coverage = EvidenceCursor::mean_depth(samples, &config.edges, depth_cap);
+    let coverage = EvidenceCursor::mean_depth(&lent, &config.edges, depth_cap);
 
     let mut best: Option<(f64, Parameters, Statistics, u32, bool, Vec<PassSummary>)> = None;
     for start in &config.starting_points {
-        let (parameters, statistics, passes, converged, trace) =
-            maximise(samples, config, &groups, &group_index, &coverage, start);
+        let (parameters, statistics, passes, converged, trace) = maximise(
+            &lent,
+            depth_cap,
+            config,
+            &groups,
+            &group_index,
+            &coverage,
+            start,
+        );
         let score = statistics.log_likelihood;
         if best.as_ref().is_none_or(|(current, ..)| score > *current) {
             best = Some((score, parameters, statistics, passes, converged, trace));
@@ -1195,8 +1208,9 @@ pub fn fit_jointly(
     let contamination = samples
         .iter()
         .map(|sample| sample.sample.clone())
-        .zip(fit_contamination(
-            samples,
+        .zip(fit_contamination_over(
+            &lent,
+            depth_cap,
             &config.edges,
             &per_sample_error,
             &parameters.hom_excess,
@@ -1233,7 +1247,8 @@ pub fn fit_jointly(
 
 /// One run of the alternation, from one starting point.
 fn maximise(
-    samples: &[SampleCensusEvidence],
+    samples: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
     config: &JointFitConfig,
     groups: &[ReadGroupId],
     group_index: &[Vec<usize>],
@@ -1264,7 +1279,14 @@ fn maximise(
     let mut trace = Vec::new();
     for pass in 1..=config.max_passes {
         passes = pass;
-        statistics = expectation(samples, config, group_index, coverage, &parameters);
+        statistics = expectation(
+            samples,
+            depth_cap,
+            config,
+            group_index,
+            coverage,
+            &parameters,
+        );
         // The parameters as they stood when this pass read the data — the ones its rates
         // belong to. The maximisation below moves them, and the next entry carries where to.
         let entering = config.pass_trace.then(|| {
@@ -1310,7 +1332,15 @@ fn maximise(
     // maximisation is followed by one more pass rather than by the pass that preceded it —
     // and it is this pass, at the parameters that will be reported, that keeps each
     // position's probability of being mismapped.
-    statistics = expectation_pass(samples, config, group_index, coverage, &parameters, true);
+    statistics = expectation_pass(
+        samples,
+        depth_cap,
+        config,
+        group_index,
+        coverage,
+        &parameters,
+        true,
+    );
     (parameters, statistics, passes, converged, trace)
 }
 
@@ -1332,13 +1362,22 @@ fn depth_cap_of(samples: &[SampleCensusEvidence]) -> DepthCap {
 /// **Split across cores by position.** Positions are independent given the parameters, and a
 /// chunk's counts add to another chunk's, so the pass is a map and a sum.
 fn expectation(
-    samples: &[SampleCensusEvidence],
+    samples: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
     config: &JointFitConfig,
     group_index: &[Vec<usize>],
     coverage: &[f64],
     parameters: &Parameters,
 ) -> Statistics {
-    expectation_pass(samples, config, group_index, coverage, parameters, false)
+    expectation_pass(
+        samples,
+        depth_cap,
+        config,
+        group_index,
+        coverage,
+        parameters,
+        false,
+    )
 }
 
 /// The same pass, told whether to keep each position's probability of being mismapped.
@@ -1347,14 +1386,14 @@ fn expectation(
 /// and the chunks have to be held until they can be joined in position order rather than
 /// summed as they arrive — so the iterating passes use the streaming sum and pay neither.
 fn expectation_pass(
-    samples: &[SampleCensusEvidence],
+    samples: &[SampleGenericSections<'_>],
+    depth_cap: DepthCap,
     config: &JointFitConfig,
     group_index: &[Vec<usize>],
     coverage: &[f64],
     parameters: &Parameters,
     collect_noisy_posterior: bool,
 ) -> Statistics {
-    let depth_cap = depth_cap_of(samples);
     let quadrature = BetaQuadrature::with_genotype_priors(
         parameters.density.a,
         parameters.density.b,
@@ -2630,7 +2669,7 @@ mod tests {
 
     use crate::ng::parameter_estimation::joint::census::{
         AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
-        PackedDepthCodes, ReadCap, RecordingTerms,
+        PackedDepthCodes, ReadCap, RecordingTerms, Section, SectionKey,
     };
     use crate::ng::parameter_estimation::joint::loci::{
         CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
@@ -2865,19 +2904,18 @@ mod tests {
             depth_cap: DepthCap::new(124),
         };
         let records = (0..samples)
-            .map(|s| SampleCensusEvidence {
-                sample: format!("s{s}"),
-                generic: [(
-                    ReadGroupId(0),
-                    GenericEvidence::from_parts(
-                        std::mem::replace(&mut depth[s], PackedDepthCodes::never_walked(0)),
-                        std::mem::take(&mut sparse[s]),
-                    ),
-                )]
-                .into_iter()
-                .collect(),
-                ssr: BTreeMap::new(),
-                terms: terms.clone(),
+            .map(|s| {
+                SampleCensusEvidence::resident(
+                    format!("s{s}"),
+                    terms.clone(),
+                    BTreeMap::from([(
+                        SectionKey::Generic(ReadGroupId(0)),
+                        Section::Generic(GenericEvidence::from_parts(
+                            std::mem::replace(&mut depth[s], PackedDepthCodes::never_walked(0)),
+                            std::mem::take(&mut sparse[s]),
+                        )),
+                    )]),
+                )
             })
             .collect();
         DrawnCohort {

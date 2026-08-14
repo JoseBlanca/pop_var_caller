@@ -69,7 +69,7 @@ use std::collections::BTreeMap;
 use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::joint::census::{
-    RECORDED_OFFSET_RANGE, SampleCensusEvidence, SsrLocusState,
+    RECORDED_OFFSET_RANGE, SampleCensusEvidence, SsrEvidence, SsrLocusState,
 };
 use crate::ng::parameter_estimation::joint::loci::CensusLoci;
 use crate::ng::types::{ContigId, ReadGroupId};
@@ -1197,10 +1197,14 @@ pub fn strata_of_kept_loci(
 /// Every sample must hold evidence for the same STR loci in the same order, which the
 /// recording-terms check on [`SampleCensusEvidence`] has already refused to let fail silently.
 ///
+/// **`strata` is one entry per kept tract, in genome order** — the stratum each tract is in.
+/// The census stores a tract under an index within its own stratum, so this list is also what
+/// says how many tracts each stratum holds, and a section of a different length means the loci
+/// and the evidence were built from different selections.
+///
 /// # Panics
 ///
-/// When a sample's STR record length disagrees with `strata`, which means the loci list and
-/// the records were built from different selections.
+/// When a sample's section for a stratum is not as long as that stratum's share of `strata`.
 pub fn gather_strata(
     cohort: &[SampleCensusEvidence],
     strata: &[Stratum],
@@ -1213,11 +1217,44 @@ pub fn gather_strata(
         .unwrap_or(1);
     let buckets = (2 * RECORDED_OFFSET_RANGE + 1) as usize;
 
-    let mut by_stratum: BTreeMap<Stratum, StratumEvidence> = BTreeMap::new();
+    // How many tracts each stratum holds, which is the length its sections are built at.
+    let mut tracts_in: BTreeMap<Stratum, usize> = BTreeMap::new();
     for stratum in strata {
-        by_stratum
-            .entry(*stratum)
-            .or_insert_with(|| StratumEvidence {
+        *tracts_in.entry(*stratum).or_insert(0) += 1;
+    }
+
+    // Each sample's tract sections, gathered by stratum. **One row a sample and not one value**,
+    // because a stratum is fitted from every sample with reads in it at once.
+    let lent: Vec<BTreeMap<Stratum, Vec<(ReadGroupId, &SsrEvidence)>>> = cohort
+        .iter()
+        .map(|sample| {
+            let mut by_stratum: BTreeMap<Stratum, Vec<(ReadGroupId, &SsrEvidence)>> =
+                BTreeMap::new();
+            for (group, stratum, records) in sample.ssr_sections() {
+                assert_eq!(
+                    records.len(),
+                    tracts_in.get(&stratum).copied().unwrap_or(0),
+                    "sample {} holds {} tracts at period {} and {} repeats where the selection \
+                     has {}",
+                    sample.sample,
+                    records.len(),
+                    stratum.period,
+                    stratum.reference_repeats,
+                    tracts_in.get(&stratum).copied().unwrap_or(0)
+                );
+                by_stratum
+                    .entry(stratum)
+                    .or_default()
+                    .push((group, records));
+            }
+            by_stratum
+        })
+        .collect();
+
+    tracts_in
+        .iter()
+        .map(|(stratum, tracts)| {
+            let mut evidence = StratumEvidence {
                 stratum: *stratum,
                 tracts: Vec::new(),
                 read_span: RECORDED_OFFSET_RANGE,
@@ -1225,80 +1262,57 @@ pub fn gather_strata(
                 tracts_over_guard_threshold: 0,
                 reads_reaching_not_crossing: 0,
                 guard_reads: 0,
-            });
-    }
-
-    // **The reads that reached a tract and crossed none of it are counted per stratum by the
-    // writer**, so they are read once here rather than accumulated a locus at a time (spec §3).
-    // Every sample's every read group contributes its own total.
-    for sample in cohort {
-        for records in sample.ssr.values() {
-            for (stratum, reads) in records.covering_not_crossing_by_stratum() {
-                // A stratum the census charged and the locus list does not hold means the two
-                // were built from different selections, which the recording terms exist to
-                // refuse — and dropping the count instead would understate the censoring
-                // silently, which is the one thing this count is kept to prevent.
-                let evidence = by_stratum.get_mut(&stratum).unwrap_or_else(|| {
-                    panic!(
-                        "sample {} charged {reads} censored reads to a stratum of period {} at \
-                         {} repeats, which the kept loci do not hold",
-                        sample.sample, stratum.period, stratum.reference_repeats
-                    )
-                });
-                evidence.reads_reaching_not_crossing += reads;
-            }
-        }
-    }
-
-    for (locus, stratum) in strata.iter().enumerate() {
-        let evidence = by_stratum.get_mut(stratum).expect("every stratum entered");
-        let mut reads = TractReads::default();
-        let mut over_guard = false;
-        for (sample_index, sample) in cohort.iter().enumerate() {
-            let mut by_group: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-            for (read_group, records) in &sample.ssr {
-                assert_eq!(
-                    records.len(),
-                    strata.len(),
-                    "sample {} holds {} STR loci where the selection has {}",
-                    sample.sample,
-                    records.len(),
-                    strata.len()
-                );
-                if records.guard_is_over_threshold(locus) {
-                    over_guard = true;
+            };
+            // **The reads that reached a tract and crossed none of it are counted per stratum by
+            // the writer**, so they are read once here rather than accumulated a locus at a time
+            // (spec §3). Every sample's every read group contributes its own total.
+            for sample in &lent {
+                for (_, records) in sample.get(stratum).into_iter().flatten() {
+                    evidence.reads_reaching_not_crossing += records.covering_not_crossing();
                 }
-                evidence.guard_reads += records
-                    .guard()
-                    .iter()
-                    .filter(|entry| entry.locus as usize == locus)
-                    .map(|entry| u64::from(entry.reads))
-                    .sum::<u64>();
-                if records.state(locus) != SsrLocusState::Crossed {
+            }
+
+            for locus in 0..*tracts {
+                let mut reads = TractReads::default();
+                let mut over_guard = false;
+                for (sample_index, sample) in lent.iter().enumerate() {
+                    let mut by_group: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+                    for (read_group, records) in sample.get(stratum).into_iter().flatten() {
+                        if records.guard_is_over_threshold(locus) {
+                            over_guard = true;
+                        }
+                        evidence.guard_reads += records
+                            .guard()
+                            .iter()
+                            .filter(|entry| entry.locus as usize == locus)
+                            .map(|entry| u64::from(entry.reads))
+                            .sum::<u64>();
+                        if records.state(locus) != SsrLocusState::Crossed {
+                            continue;
+                        }
+                        let group = *slippage_group_of.get(read_group).unwrap_or(&0);
+                        let counts = by_group.entry(group).or_insert_with(|| vec![0; buckets]);
+                        let offsets = records.offsets(locus);
+                        for (bucket, count) in counts.iter_mut().enumerate() {
+                            *count += u32::from(offsets.at(bucket as i32 - RECORDED_OFFSET_RANGE));
+                        }
+                    }
+                    if !by_group.is_empty() {
+                        reads.samples.push(SampleTractReads {
+                            sample: sample_index as u32,
+                            by_group: by_group.into_iter().collect(),
+                        });
+                    }
+                }
+                if over_guard {
+                    evidence.tracts_over_guard_threshold += 1;
                     continue;
                 }
-                let group = *slippage_group_of.get(read_group).unwrap_or(&0);
-                let counts = by_group.entry(group).or_insert_with(|| vec![0; buckets]);
-                let offsets = records.offsets(locus);
-                for (bucket, count) in counts.iter_mut().enumerate() {
-                    *count += u32::from(offsets.at(bucket as i32 - RECORDED_OFFSET_RANGE));
-                }
+                evidence.tracts.push(reads);
             }
-            if !by_group.is_empty() {
-                reads.samples.push(SampleTractReads {
-                    sample: sample_index as u32,
-                    by_group: by_group.into_iter().collect(),
-                });
-            }
-        }
-        if over_guard {
-            evidence.tracts_over_guard_threshold += 1;
-            continue;
-        }
-        evidence.tracts.push(reads);
-    }
-
-    by_stratum.into_values().collect()
+            evidence
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------

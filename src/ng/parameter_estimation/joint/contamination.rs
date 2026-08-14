@@ -98,7 +98,7 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
-use super::census::{DepthCap, DepthCode, SampleCensusEvidence};
+use super::census::{DepthCap, DepthCode, SampleCensusEvidence, SampleGenericSections};
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -281,7 +281,42 @@ impl std::fmt::Display for NotIdentifiedReason {
 /// then every position is treated as ordinary — which on real reads returns a floor rather
 /// than a measurement.
 pub fn fit_contamination(
-    samples: &[SampleCensusEvidence],
+    cohort: &[SampleCensusEvidence],
+    edges: &DepthBinEdges,
+    error_rate: &[f64],
+    hom_excess: &[f64],
+    noisy_posterior: &[f32],
+    config: &ContaminationConfig,
+) -> Vec<ContaminationEstimate> {
+    // The cap the counts were thinned to. Every sample agrees on it or the fit refused the
+    // cohort before reaching here.
+    let cap = cohort
+        .first()
+        .map_or(DepthCap::MAX, |sample| sample.terms.depth_cap);
+    let lent: Vec<SampleGenericSections<'_>> = cohort
+        .iter()
+        .map(|sample| sample.generic_sections())
+        .collect();
+    fit_contamination_over(
+        &lent,
+        cap,
+        edges,
+        error_rate,
+        hom_excess,
+        noisy_posterior,
+        config,
+    )
+}
+
+/// The same, over sections a caller has already been lent — **what the fit itself calls**, so
+/// that one run does not gather every sample's sections twice.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the wrapper above carries the same list; bundling it would only move it"
+)]
+pub(super) fn fit_contamination_over(
+    samples: &[SampleGenericSections<'_>],
+    cap: DepthCap,
     edges: &DepthBinEdges,
     error_rate: &[f64],
     hom_excess: &[f64],
@@ -298,11 +333,6 @@ pub fn fit_contamination(
         ];
     }
     let mean_error = error_rate.iter().sum::<f64>() / count as f64;
-    // The cap the counts were thinned to. Every sample agrees on it or the fit refused the
-    // cohort before reaching here.
-    let cap = samples
-        .first()
-        .map_or(DepthCap::MAX, |sample| sample.terms.depth_cap);
     let markers = markers(samples, edges, cap, mean_error, noisy_posterior, config);
     if markers.len() < 100 {
         return vec![
@@ -359,7 +389,7 @@ pub fn fit_contamination(
 
 /// The positions the cohort varies at, with each sample's reads and its dosage there.
 fn markers(
-    samples: &[SampleCensusEvidence],
+    samples: &[SampleGenericSections<'_>],
     edges: &DepthBinEdges,
     cap: DepthCap,
     error: f64,
@@ -369,14 +399,14 @@ fn markers(
     let count = samples.len();
     let positions = samples
         .first()
-        .and_then(|s| s.generic.values().next())
-        .map_or(0, |g| g.depth().len());
+        .and_then(|sections| sections.first())
+        .map_or(0, |(_, records)| records.depth().len());
 
     // Which non-reference allele the cohort carries at each position: the one the most reads
     // across the whole panel fell on.
     let mut totals = vec![[0_u32; 5]; positions];
-    for sample in samples {
-        for group in sample.generic.values() {
+    for sections in samples {
+        for (_, group) in sections {
             for observation in group.non_reference() {
                 totals[observation.index as usize][usize::from(observation.allele.code())] +=
                     u32::from(observation.reads);
@@ -400,8 +430,8 @@ fn markers(
     let mut depth = vec![vec![0_u32; positions]; count];
     let mut depth_low = vec![vec![0_u32; positions]; count];
     let mut depth_high = vec![vec![0_u32; positions]; count];
-    for (s, sample) in samples.iter().enumerate() {
-        for group in sample.generic.values() {
+    for (s, sections) in samples.iter().enumerate() {
+        for (_, group) in sections {
             for (index, code) in group.depth().iter().enumerate() {
                 if let DepthCode::Binned(bin) = code {
                     // The denominator the alternative counts below were taken out of: those
@@ -1046,7 +1076,7 @@ mod tests {
 
     use crate::ng::parameter_estimation::joint::census::{
         AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
-        PackedDepthCodes, ReadCap, RecordingTerms,
+        PackedDepthCodes, ReadCap, RecordingTerms, Section, SectionKey,
     };
     use crate::ng::parameter_estimation::joint::loci::{
         CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
@@ -1195,19 +1225,18 @@ mod tests {
             depth_cap: DepthCap::new(124),
         };
         (0..samples)
-            .map(|s| SampleCensusEvidence {
-                sample: format!("s{s:02}"),
-                generic: [(
-                    ReadGroupId(0),
-                    GenericEvidence::from_parts(
-                        std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
-                        std::mem::take(&mut sparse[s]),
-                    ),
-                )]
-                .into_iter()
-                .collect(),
-                ssr: BTreeMap::new(),
-                terms: terms.clone(),
+            .map(|s| {
+                SampleCensusEvidence::resident(
+                    format!("s{s:02}"),
+                    terms.clone(),
+                    BTreeMap::from([(
+                        SectionKey::Generic(ReadGroupId(0)),
+                        Section::Generic(GenericEvidence::from_parts(
+                            std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
+                            std::mem::take(&mut sparse[s]),
+                        )),
+                    )]),
+                )
             })
             .collect()
     }

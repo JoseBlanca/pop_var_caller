@@ -40,7 +40,7 @@ use std::time::Instant;
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericEvidence, ObservedAllele,
-    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence,
+    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
 };
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
@@ -381,19 +381,18 @@ fn draw(
     };
     Drawn {
         samples: (0..samples)
-            .map(|s| SampleCensusEvidence {
-                sample: format!("s{s:02}"),
-                generic: [(
-                    ReadGroupId(0),
-                    GenericEvidence::from_parts(
-                        std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
-                        std::mem::take(&mut sparse[s]),
-                    ),
-                )]
-                .into_iter()
-                .collect(),
-                ssr: BTreeMap::new(),
-                terms: terms.clone(),
+            .map(|s| {
+                SampleCensusEvidence::resident(
+                    format!("s{s:02}"),
+                    terms.clone(),
+                    BTreeMap::from([(
+                        SectionKey::Generic(ReadGroupId(0)),
+                        Section::Generic(GenericEvidence::from_parts(
+                            std::mem::replace(&mut codes[s], PackedDepthCodes::never_walked(0)),
+                            std::mem::take(&mut sparse[s]),
+                        )),
+                    )]),
+                )
             })
             .collect(),
     }

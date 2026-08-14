@@ -73,7 +73,7 @@ sample once, months apart, and fits later — and for the cohort too large to ho
 resident half only. `SectionKey`'s ordering is the enumeration order the contract promises.
 *Depends:* —. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §1.1a.
 
-☐ **A2 — `SampleCensusEvidence` holds its sections privately, and lends them scoped.** The two public
+✅ **A2 — `SampleCensusEvidence` holds its sections privately, and lends them scoped.** The two public
 maps become a private field; access is `with_generic` and `with_strata`, which hand a closure borrows
 and take them back. Nothing can retain a section.
 *Depends:* A1. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §1.1, §2.2.

@@ -409,7 +409,9 @@ impl OffsetCounts {
 /// bare count can raise a threshold without ever explaining it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct GuardObservation {
-    /// Index into the STR selection.
+    /// Which tract, **numbered within its own stratum** rather than across the whole STR
+    /// selection: a section holds one stratum's tracts, so a genome-wide index would name a
+    /// tract the section does not have.
     pub locus: u32,
     /// The read's tract length minus the reference's, in bases.
     pub length_difference: i32,
@@ -426,7 +428,8 @@ pub struct GuardObservation {
 /// interruption, which is what makes an interruption an allele rather than an error.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TractDifference {
-    /// Index into the STR selection.
+    /// Which tract, **numbered within its own stratum** rather than across the whole STR
+    /// selection — a section holds one stratum's tracts (see [`SsrEvidence`]).
     pub locus: u32,
     /// Which of this locus's reads carried it, numbered from zero within the locus and the
     /// read group, over the reads whose tract was the reference's length — the ones a
@@ -523,7 +526,15 @@ impl WalkedBits {
     }
 }
 
-/// One read group's STR evidence.
+/// One read group's tracts **for one stratum** — the smallest piece of the STR half anything
+/// asks for, and what [`SectionKey::Ssr`] names.
+///
+/// **One stratum and not a whole read group — since 2026-08-14.** The slippage numbers are
+/// fitted within a stratum and the fit reads one band of strata at a time, so a value spanning
+/// every stratum is a value no caller can use a part of
+/// (`parameter_prepass_joint_records.md` §6.2). Every per-tract vector here is therefore indexed
+/// by the tract's position **within this stratum**, in genome order, and the two counts that
+/// spanned strata are now one number each.
 ///
 /// **Three states at a locus**: the region was never walked; it was walked and no read crossed
 /// the whole tract, so none reported a length; or reads crossed it. The generic set's
@@ -539,23 +550,24 @@ impl WalkedBits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsrEvidence {
     offsets: Vec<OffsetCounts>,
-    /// Per stratum, not per locus (spec §3). Absent means none.
-    covering_not_crossing: BTreeMap<Stratum, u64>,
+    /// This stratum's censored reads, over every tract in it (spec §3).
+    covering_not_crossing: u64,
     walked: WalkedBits,
-    /// Per stratum, not per locus (spec §3): it is the denominator of a rate fitted per
-    /// stratum, and per locus it was 1.85 MB a read group on tomato that nothing read.
-    bases_compared: BTreeMap<Stratum, u64>,
+    /// This stratum's base-comparison denominator (spec §3): the rate is fitted per stratum,
+    /// and per locus it was 1.85 MB a read group on tomato that nothing read.
+    bases_compared: u64,
     guard: Vec<GuardObservation>,
     differences: Vec<TractDifference>,
 }
 
 impl SsrEvidence {
+    /// A stratum's `loci` tracts, none of them walked.
     pub fn never_walked(loci: usize) -> Self {
         Self {
             offsets: vec![OffsetCounts::default(); loci],
-            covering_not_crossing: BTreeMap::new(),
+            covering_not_crossing: 0,
             walked: WalkedBits::none_of(loci),
-            bases_compared: BTreeMap::new(),
+            bases_compared: 0,
             guard: Vec::new(),
             differences: Vec::new(),
         }
@@ -585,24 +597,14 @@ impl SsrEvidence {
     ///
     /// **Per locus it was 0.93 MB a read group that nothing read**: the fit added it into a
     /// running per-stratum total the moment it saw it (spec §3).
-    pub fn covering_not_crossing(&self, stratum: Stratum) -> u64 {
+    pub fn covering_not_crossing(&self) -> u64 {
         self.covering_not_crossing
-            .get(&stratum)
-            .copied()
-            .unwrap_or(0)
     }
 
-    /// The denominator the STR substitution rate is fitted against, **per stratum** — which is
-    /// the grain that rate is fitted at.
-    pub fn bases_compared(&self, stratum: Stratum) -> u64 {
-        self.bases_compared.get(&stratum).copied().unwrap_or(0)
-    }
-
-    /// Every stratum this read group put a covering-not-crossing read in, with its count.
-    pub fn covering_not_crossing_by_stratum(&self) -> impl Iterator<Item = (Stratum, u64)> + '_ {
-        self.covering_not_crossing
-            .iter()
-            .map(|(stratum, count)| (*stratum, *count))
+    /// The denominator the STR substitution rate is fitted against — one number, because this
+    /// section *is* one stratum and that is the grain the rate is fitted at.
+    pub fn bases_compared(&self) -> u64 {
+        self.bases_compared
     }
 
     pub fn guard(&self) -> &[GuardObservation] {
@@ -899,6 +901,18 @@ impl Section {
     }
 }
 
+/// One sample's ordinary-position sections, as a scoped call lends them: each read group the
+/// sample holds among those asked for, with that group's section.
+///
+/// **The read group travels with the section because a cohort's samples need not hold the same
+/// ones.** A sample sequenced in one library holds one; the fit asks for the union across the
+/// cohort and each sample answers with its own, which is what it did when the maps were public.
+///
+/// **A borrow with no owner of its own.** The whole point of the scoped calls is that this
+/// cannot outlive the call that produced it, so it is a `Vec` of borrows and never a `Vec` of
+/// sections.
+pub type SampleGenericSections<'a> = Vec<(ReadGroupId, &'a GenericEvidence)>;
+
 /// Where a section sits in a file: an offset and a length.
 ///
 /// **A pair and not a range**, because it is written into a directory and read back as two
@@ -976,6 +990,17 @@ impl Sections {
         }
     }
 
+    /// Every section with its key, in enumeration order.
+    ///
+    /// **Resident only, and inside this module only.** A file-backed value cannot answer this
+    /// without decoding the whole file, which is the thing it exists not to do; what it will
+    /// answer is [`keys`](Self::keys) and one section at a time.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (SectionKey, &Section)> + '_ {
+        match self {
+            Self::Resident(sections) => sections.iter().map(|(key, section)| (*key, section)),
+        }
+    }
+
     /// One section, or `None` where this sample has none — **a stratum no read reached is
     /// still a section**, holding zero, so `None` means the census was not asked for it.
     pub fn get(&self, key: SectionKey) -> Option<&Section> {
@@ -1001,18 +1026,103 @@ impl Sections {
 
 /// One sample's evidence at the kept loci, plus the values the fit checks before pooling.
 ///
-/// **`BTreeMap` and not `HashMap`**, so a fit that iterates read groups is deterministic. A
-/// sample's counts at a position are the sum of its read groups' — raw counts at one place,
-/// so the equality is exact and the fit may fold freely.
+/// **The sections are not public, and that is the whole point of the type — 2026-08-14.** A
+/// caller that could reach the map could keep every section it ever looked at, at which point a
+/// run reading a census file has quietly reassembled the file in memory — the outcome the
+/// by-section design exists to prevent, arrived at without anyone deciding to
+/// (`parameter_prepass_joint_records.md` §6.2). So a section is **lent for the length of a
+/// call** by [`with_generic`](Self::with_generic) and [`with_strata`](Self::with_strata), and
+/// there is no field a caller could put one in.
+///
+/// **One type for both kinds of run.** A walk fills every section and holds it; a file-backed
+/// value will fill one when it is asked for and drop it when the call returns. That difference
+/// lives in [`Sections`], so the parameters fit is written once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SampleCensusEvidence {
     pub sample: String,
-    pub generic: BTreeMap<ReadGroupId, GenericEvidence>,
-    pub ssr: BTreeMap<ReadGroupId, SsrEvidence>,
     pub terms: RecordingTerms,
+    sections: Sections,
 }
 
 impl SampleCensusEvidence {
+    /// A sample whose sections a walk built and which are all in memory.
+    pub fn resident(
+        sample: String,
+        terms: RecordingTerms,
+        sections: BTreeMap<SectionKey, Section>,
+    ) -> Self {
+        Self {
+            sample,
+            terms,
+            sections: Sections::resident(sections),
+        }
+    }
+
+    /// Every read group this sample recorded, in the order the fit visits them.
+    pub fn read_groups(&self) -> Vec<ReadGroupId> {
+        self.sections
+            .keys()
+            .map(|key| key.read_group())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Every stratum this sample holds tracts for, in the stratum's own order.
+    pub fn strata(&self) -> Vec<Stratum> {
+        self.sections
+            .keys()
+            .filter_map(|key| key.stratum())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// This sample's ordinary-position evidence for a band of read groups, **for the length of
+    /// the call**.
+    ///
+    /// **A band and not one read group**, for the reason [`with_strata`](Self::with_strata)
+    /// takes a band of strata: a position's depth is the sum of the sample's read groups'
+    /// depths, so a call lending one group at a time would leave the fit holding a partial sum
+    /// for every kept position while it asked for the next.
+    ///
+    /// # Panics
+    ///
+    /// When this sample holds no section for one of the groups — a stratum or a group with no
+    /// reads is still a section holding zero, so an absent one means the caller and the census
+    /// were built from different selections.
+    pub fn with_generic<R>(
+        &mut self,
+        groups: &[ReadGroupId],
+        f: impl FnOnce(&[&GenericEvidence]) -> R,
+    ) -> R {
+        let sections: Vec<&GenericEvidence> = groups
+            .iter()
+            .map(|group| self.generic_section(*group))
+            .collect();
+        f(&sections)
+    }
+
+    /// This sample's tracts for one read group over a band of strata, **for the length of the
+    /// call**.
+    ///
+    /// # Panics
+    ///
+    /// When this sample holds no section for one of the strata — see
+    /// [`with_generic`](Self::with_generic).
+    pub fn with_strata<R>(
+        &mut self,
+        group: ReadGroupId,
+        strata: &[Stratum],
+        f: impl FnOnce(&[&SsrEvidence]) -> R,
+    ) -> R {
+        let sections: Vec<&SsrEvidence> = strata
+            .iter()
+            .map(|stratum| self.ssr_section(group, *stratum))
+            .collect();
+        f(&sections)
+    }
+
     /// This sample's depth at the `index`-th kept generic position, summed over its read
     /// groups.
     ///
@@ -1022,12 +1132,67 @@ impl SampleCensusEvidence {
     /// place and the reverse is not recoverable.
     pub fn allele_counts(&self, index: usize) -> [u32; 5] {
         let mut counts = [0_u32; 5];
-        for records in self.generic.values() {
+        for (_, records) in self.generic_sections() {
             for observation in records.at(index).1 {
                 counts[observation.allele.code() as usize] += u32::from(observation.reads);
             }
         }
         counts
+    }
+
+    /// Every ordinary-position section, with the read group it belongs to.
+    ///
+    /// **Inside this module only, and it is not the door the fit comes in through.** What keeps
+    /// a section from being retained is the scoped calls above; this is the primitive they and
+    /// [`CohortCensusEvidence`] are built on, because a scoped call cannot be composed over a
+    /// list of samples whose length is not known while the code is being written.
+    pub(super) fn generic_sections(&self) -> Vec<(ReadGroupId, &GenericEvidence)> {
+        self.sections
+            .iter()
+            .filter_map(|(key, section)| match (key, section) {
+                (SectionKey::Generic(group), Section::Generic(records)) => Some((group, records)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every repeat-tract section, with the read group and stratum it belongs to. See
+    /// [`generic_sections`](Self::generic_sections) for why this exists.
+    pub(super) fn ssr_sections(&self) -> Vec<(ReadGroupId, Stratum, &SsrEvidence)> {
+        self.sections
+            .iter()
+            .filter_map(|(key, section)| match (key, section) {
+                (SectionKey::Ssr(group, stratum), Section::Ssr(records)) => {
+                    Some((group, stratum, records))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn generic_section(&self, group: ReadGroupId) -> &GenericEvidence {
+        match self.sections.get(SectionKey::Generic(group)) {
+            Some(Section::Generic(records)) => records,
+            _ => panic!(
+                "sample {} holds no ordinary-position section for read group {}",
+                self.sample,
+                group.get()
+            ),
+        }
+    }
+
+    fn ssr_section(&self, group: ReadGroupId, stratum: Stratum) -> &SsrEvidence {
+        match self.sections.get(SectionKey::Ssr(group, stratum)) {
+            Some(Section::Ssr(records)) => records,
+            _ => panic!(
+                "sample {} holds no tract section for read group {} at period {} and {} \
+                 repeats",
+                self.sample,
+                group.get(),
+                stratum.period,
+                stratum.reference_repeats
+            ),
+        }
     }
 }
 
@@ -1046,12 +1211,21 @@ pub struct CensusWriter {
     /// The kept STR loci as regions, in genome order.
     ssr_loci: Vec<GenomeRegion>,
     /// Which stratum each of those loci is in, in the same order. **The writer carries it
-    /// because two of a tract's counts are kept per stratum**, and the locus stream says which
+    /// because the tract half is stored one stratum at a time**, and the locus stream says which
     /// tract a read reached, never which stratum it belongs to.
     ssr_stratum_of: Vec<Stratum>,
+    /// Where each of those loci sits **within its own stratum**, in the same order — the index
+    /// every entry of an [`SsrEvidence`] carries, since a section holds one stratum's tracts and
+    /// a genome-wide index would name a tract it does not have.
+    ssr_index_in_stratum: Vec<u32>,
+    /// How many tracts each stratum holds, which is the length a section of it is built at
+    /// whether or not a read ever reaches one of them.
+    ssr_stratum_size: BTreeMap<Stratum, usize>,
     edges: DepthBinEdges,
     generic: BTreeMap<ReadGroupId, GenericEvidence>,
-    ssr: BTreeMap<ReadGroupId, SsrEvidence>,
+    /// Per read group, then per stratum. **Two levels rather than one key**, because the
+    /// walk asks twice for "every read group seen so far" and the outer map answers it.
+    ssr: BTreeMap<ReadGroupId, BTreeMap<Stratum, SsrEvidence>>,
     /// Non-reference observations before they are sorted — the walk arrives in position
     /// order, so this is already sorted in practice and the sort at `finish` is a guard.
     pending: BTreeMap<ReadGroupId, Vec<AlleleObservation>>,
@@ -1151,13 +1325,26 @@ impl CensusWriter {
             })
             .collect();
         ssr_loci.sort_unstable_by_key(|(r, _)| (r.contig.get(), r.start.get(), r.end.get()));
-        let ssr_stratum_of = ssr_loci.iter().map(|(_, stratum)| *stratum).collect();
+        let ssr_stratum_of: Vec<Stratum> = ssr_loci.iter().map(|(_, stratum)| *stratum).collect();
+        // **Numbered within its stratum in genome order**, so that a section's tracts run in the
+        // same order the whole selection does. The fit sums over a stratum's tracts, and a sum of
+        // floats is not associative — an order that depended on how the strata were interleaved
+        // would move the answer's last digits for no reason anybody could name.
+        let mut ssr_stratum_size: BTreeMap<Stratum, usize> = BTreeMap::new();
+        let mut ssr_index_in_stratum: Vec<u32> = Vec::with_capacity(ssr_stratum_of.len());
+        for stratum in &ssr_stratum_of {
+            let so_far = ssr_stratum_size.entry(*stratum).or_insert(0);
+            ssr_index_in_stratum.push(*so_far as u32);
+            *so_far += 1;
+        }
         let ssr_loci = ssr_loci.into_iter().map(|(region, _)| region).collect();
         Self {
             generic_loci: loci.generic().to_vec(),
             ssr: BTreeMap::new(),
             ssr_loci,
             ssr_stratum_of,
+            ssr_index_in_stratum,
+            ssr_stratum_size,
             edges,
             generic: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1331,6 +1518,10 @@ impl CensusWriter {
         let period = detail.motif.period().max(1) as i64;
         let reference_length = locus.region.len() as i64;
         let stratum = self.ssr_stratum_of[index];
+        // The index every entry below carries: this tract's place **in its own stratum**, since
+        // that is the whole of what a section holds.
+        let local = self.ssr_index_in_stratum[index] as usize;
+        let tracts_here = self.ssr_stratum_size[&stratum];
         // **How many of this read group's reads at this locus have been numbered already.**
         // The read a difference sits on is numbered within the *locus*, not within the
         // observation it arrived in: the walk folds reads carrying identical bases into one
@@ -1347,23 +1538,25 @@ impl CensusWriter {
             let records = self
                 .ssr
                 .entry(observation.read_group)
-                .or_insert_with(|| SsrEvidence::never_walked(self.ssr_loci.len()));
-            records.walked.set(index);
+                .or_default()
+                .entry(stratum)
+                .or_insert_with(|| SsrEvidence::never_walked(tracts_here));
+            records.walked.set(local);
             let reads = u16::try_from(observation.num_obs).unwrap_or(u16::MAX);
             if observation.read_witness != crate::ng::locus_generation::ReadWitness::Complete {
                 // A read that covered the tract without crossing it reports no length; it is a
                 // lower bound. **Counted into this stratum's total rather than at the locus**
                 // (spec §3): the fit summed the per-locus version the moment it read it, and
                 // the loss runs along repeat count, which is what a stratum is.
-                *records.covering_not_crossing.entry(stratum).or_insert(0) += u64::from(reads);
+                records.covering_not_crossing += u64::from(reads);
                 continue;
             }
             let difference = observation.bases.len() as i64 - reference_length;
             if difference % period == 0 {
-                records.offsets[index].add((difference / period) as i32, reads);
+                records.offsets[local].add((difference / period) as i32, reads);
             } else {
                 records.guard.push(GuardObservation {
-                    locus: index as u32,
+                    locus: local as u32,
                     length_difference: difference as i32,
                     reads,
                 });
@@ -1381,8 +1574,7 @@ impl CensusWriter {
             }
             // **Per stratum, for the same reason**: it is the denominator of a rate fitted per
             // stratum, and per locus it was 1.85 MB a read group on tomato that nothing read.
-            *records.bases_compared.entry(stratum).or_insert(0) +=
-                u64::from(reads) * observation.bases.len() as u64;
+            records.bases_compared += u64::from(reads) * observation.bases.len() as u64;
             // **One entry per read, not one per distinct sequence.** The walk has already
             // folded reads carrying the same bases into a single observation with a count, and
             // collapsing them here too would lose the fact this channel exists for: that two
@@ -1402,7 +1594,7 @@ impl CensusWriter {
                 }
                 for copy in 0..u32::from(reads) {
                     records.differences.push(TractDifference {
-                        locus: index as u32,
+                        locus: local as u32,
                         read: u16::try_from(first_read + copy).unwrap_or(u16::MAX),
                         offset: i16::try_from(offset).unwrap_or(i16::MAX),
                         base: ObservedAllele::of_base(*read_base),
@@ -1410,14 +1602,23 @@ impl CensusWriter {
                 }
             }
         }
-        // Reads that reached the locus and produced no observation at all.
+        // Reads that reached the locus and produced no observation at all. **Every read group
+        // seen so far learns the walk reached this tract**, and the count itself is charged
+        // once — to the lowest-numbered group, since the reads cannot be attributed to one and
+        // the fit adds every group's total into the stratum's anyway.
         if locus.reads_without_observation > 0 {
-            for records in self.ssr.values_mut() {
-                records.walked.set(index);
+            for strata in self.ssr.values_mut() {
+                strata
+                    .entry(stratum)
+                    .or_insert_with(|| SsrEvidence::never_walked(tracts_here))
+                    .walked
+                    .set(local);
             }
-            if let Some(records) = self.ssr.values_mut().next() {
-                *records.covering_not_crossing.entry(stratum).or_insert(0) +=
-                    u64::from(locus.reads_without_observation);
+            if let Some(strata) = self.ssr.values_mut().next() {
+                strata
+                    .entry(stratum)
+                    .or_insert_with(|| SsrEvidence::never_walked(tracts_here))
+                    .covering_not_crossing += u64::from(locus.reads_without_observation);
             }
         }
     }
@@ -1476,11 +1677,40 @@ impl CensusWriter {
                 .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
             records.non_reference = entries;
         }
-        SampleCensusEvidence {
-            sample: self.sample,
-            generic: self.generic,
-            ssr: self.ssr,
-            terms: RecordingTerms {
+
+        // **The same sections in every sample, and that is what a census is.** Every declared
+        // read group gets an ordinary-position section and one section per stratum the selection
+        // holds, whether or not a read ever reached one of them — a stratum with no tracts read
+        // is a section holding zero, and an absent section would say instead that this sample was
+        // never asked. The fit enumerates sections; two samples enumerating different ones would
+        // be two samples answering different questions.
+        let mut sections: BTreeMap<SectionKey, Section> = BTreeMap::new();
+        for (group, records) in std::mem::take(&mut self.generic) {
+            sections.insert(SectionKey::Generic(group), Section::Generic(records));
+        }
+        let mut tracts = std::mem::take(&mut self.ssr);
+        for group in &self.read_groups {
+            let mut theirs = tracts.remove(group).unwrap_or_default();
+            for (stratum, size) in &self.ssr_stratum_size {
+                let records = theirs
+                    .remove(stratum)
+                    .unwrap_or_else(|| SsrEvidence::never_walked(*size));
+                sections.insert(SectionKey::Ssr(*group, *stratum), Section::Ssr(records));
+            }
+        }
+        // **The declared groups are all the groups there are.** The generic half already drops
+        // an observation whose read group the sample did not declare, so tract evidence from one
+        // would be half a read group — recorded at the tracts and absent at the positions its
+        // own error rate is fitted from.
+        assert!(
+            tracts.is_empty(),
+            "read group {} put reads on a repeat tract without being declared by the sample",
+            tracts.keys().next().expect("a group").get()
+        );
+
+        SampleCensusEvidence::resident(
+            self.sample,
+            RecordingTerms {
                 selection: self.terms,
                 kept_loci: self.digester.finish(),
                 ssr_stratum_counts: self.stratum_counts,
@@ -1488,7 +1718,8 @@ impl CensusWriter {
                 depth_ladder: DepthLadderDigest::of(&self.edges),
                 depth_cap: self.depth_cap,
             },
-        }
+            sections,
+        )
     }
 }
 
@@ -1600,12 +1831,14 @@ mod tests {
             allele: ObservedAllele::C,
             reads: 5,
         }];
-        let records = SampleCensusEvidence {
-            sample: "s".to_string(),
-            generic: BTreeMap::from([(ReadGroupId(0), one), (ReadGroupId(1), two)]),
-            ssr: BTreeMap::new(),
-            terms: terms(),
-        };
+        let records = SampleCensusEvidence::resident(
+            "s".to_string(),
+            terms(),
+            BTreeMap::from([
+                (SectionKey::Generic(ReadGroupId(0)), Section::Generic(one)),
+                (SectionKey::Generic(ReadGroupId(1)), Section::Generic(two)),
+            ]),
+        );
         assert_eq!(records.allele_counts(1), [0, 7, 0, 0, 0]);
         assert_eq!(
             records.allele_counts(0),
@@ -1687,20 +1920,12 @@ mod tests {
             observation(b"ATATATATATAT", 0, 2),
         ]));
         let evidence = writer.finish();
-        let ssr = &evidence.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&evidence, 0, AT_SIX_REPEATS);
 
         assert_eq!(
-            ssr.covering_not_crossing(AT_SIX_REPEATS),
+            ssr.covering_not_crossing(),
             3,
             "the three reads that stopped inside the tract are this stratum's censored ones"
-        );
-        assert_eq!(
-            ssr.covering_not_crossing(Stratum {
-                period: 3,
-                reference_repeats: 6
-            }),
-            0,
-            "and no other stratum was charged for them"
         );
         assert_eq!(
             ssr.state(0),
@@ -1732,20 +1957,62 @@ mod tests {
         ]));
 
         let evidence = writer.finish();
-        let ssr = &evidence.ssr[&ReadGroupId(0)];
+        // **Two strata, two sections**, and each one's counts are its own — since 2026-08-14 a
+        // section *is* one stratum, so what a wrong stratum would do is put the count in the
+        // other section rather than under the other key of one map.
+        let at = ssr_of(&evidence, 0, AT_SIX_REPEATS);
+        let atg = ssr_of(&evidence, 0, ATG_FOUR_REPEATS);
 
-        assert_eq!(ssr.covering_not_crossing(AT_SIX_REPEATS), 3);
-        assert_eq!(ssr.covering_not_crossing(ATG_FOUR_REPEATS), 5);
+        assert_eq!(at.covering_not_crossing(), 3);
+        assert_eq!(atg.covering_not_crossing(), 5);
         assert_eq!(
-            ssr.bases_compared(AT_SIX_REPEATS),
+            at.bases_compared(),
             2 * 12,
             "two crossing reads over a twelve-base tract"
         );
         assert_eq!(
-            ssr.bases_compared(ATG_FOUR_REPEATS),
+            atg.bases_compared(),
             4 * 12,
             "four of them at the other tract, and neither total leaks into the other"
         );
+    }
+
+    /// **The index a tract's entries carry is its place in its own stratum, and nothing else.**
+    /// Two twelve-base tracts of different motifs: the second is the second locus of the
+    /// selection and the *first* of its own stratum, so a writer that kept the genome-wide
+    /// index would write a guard entry and a mismatch against tract 1 of a one-tract section.
+    #[test]
+    fn a_tract_is_numbered_within_its_stratum_and_not_across_the_selection() {
+        let mut writer = two_stratum_writer();
+        // The `AT` tract, clean and at the reference length.
+        writer.add_locus(&ssr_locus(vec![observation(b"ATATATATATAT", 0, 2)]));
+        // The `ATG` tract: one read carrying an interruption, and one whose length differs by
+        // a base — not a whole copy, so the guard catches it.
+        writer.add_locus(&atg_locus(vec![
+            observation(b"ATGATGCTGATG", 0, 1),
+            observation(b"ATGATGATGATGA", 0, 1),
+        ]));
+        let evidence = writer.finish();
+
+        let at = ssr_of(&evidence, 0, AT_SIX_REPEATS);
+        let atg = ssr_of(&evidence, 0, ATG_FOUR_REPEATS);
+        assert_eq!((at.len(), atg.len()), (1, 1), "one tract in each stratum");
+        assert_eq!(
+            atg.differences()
+                .iter()
+                .map(|d| d.locus)
+                .collect::<Vec<_>>(),
+            vec![0],
+            "the second locus of the selection is the first of its own stratum"
+        );
+        assert_eq!(
+            atg.guard().iter().map(|g| g.locus).collect::<Vec<_>>(),
+            vec![0],
+            "and so is the guard's"
+        );
+        assert!(at.differences().is_empty() && at.guard().is_empty());
+        assert_eq!(at.state(0), SsrLocusState::Crossed);
+        assert_eq!(atg.state(0), SsrLocusState::Crossed);
     }
 
     #[test]
@@ -1805,7 +2072,7 @@ mod tests {
         let mut writer = ssr_writer();
         writer.add_locus(&ssr_locus(vec![observation(b"ATATATATGTAT", 0, 1)]));
         let evidence = writer.finish();
-        let ssr = &evidence.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&evidence, 0, AT_SIX_REPEATS);
 
         assert_eq!(ssr.differences().len(), 1);
         assert_eq!(
@@ -1940,6 +2207,29 @@ mod tests {
 
     // ---- the twelve values ----------------------------------------------
 
+    /// One read group's ordinary-position section, as a test reads it back from a writer.
+    ///
+    /// **A test helper and not a public accessor**: what a caller outside this module gets is
+    /// the scoped calls, which lend a section and take it back.
+    fn generic_of(evidence: &SampleCensusEvidence, group: u32) -> &GenericEvidence {
+        evidence
+            .generic_sections()
+            .into_iter()
+            .find(|(id, _)| *id == ReadGroupId(group))
+            .map(|(_, records)| records)
+            .expect("the read group has an ordinary-position section")
+    }
+
+    /// One read group's tracts for one stratum — the same, on the other half.
+    fn ssr_of(evidence: &SampleCensusEvidence, group: u32, stratum: Stratum) -> &SsrEvidence {
+        evidence
+            .ssr_sections()
+            .into_iter()
+            .find(|(id, at, _)| *id == ReadGroupId(group) && *at == stratum)
+            .map(|(_, _, records)| records)
+            .expect("the read group has a section for this stratum")
+    }
+
     fn terms() -> RecordingTerms {
         RecordingTerms {
             selection: selection_terms(),
@@ -2062,7 +2352,7 @@ mod tests {
             vec![observation(b"A", 0, 30), observation(b"G", 0, 10)],
         ));
         let evidence = writer.finish();
-        let (depth, alleles) = evidence.generic[&ReadGroupId(0)].at(0);
+        let (depth, alleles) = generic_of(&evidence, 0).at(0);
 
         let edges = DepthBinEdges::for_census();
         let DepthCode::Binned(bin) = depth else {
@@ -2107,7 +2397,7 @@ mod tests {
             vec![observation(b"A", 0, 4), observation(b"G", 0, 2)],
         ));
         let evidence = writer.finish();
-        let (depth, alleles) = evidence.generic[&ReadGroupId(0)].at(0);
+        let (depth, alleles) = generic_of(&evidence, 0).at(0);
 
         let edges = DepthBinEdges::for_census();
         assert_eq!(depth, DepthCode::Binned(edges.bin_for(6)));
@@ -2201,7 +2491,7 @@ mod tests {
             vec![observation(b"G", 0, cap.get())],
         ));
         let evidence = writer.finish();
-        let (depth, alleles) = evidence.generic[&ReadGroupId(0)].at(0);
+        let (depth, alleles) = generic_of(&evidence, 0).at(0);
 
         let edges = DepthBinEdges::for_census();
         let DepthCode::Binned(bin) = depth else {
@@ -2301,7 +2591,7 @@ mod tests {
         writer.add_locus(&generic_locus(20, b"C", Vec::new()));
         let records = writer.finish();
 
-        let generic = &records.generic[&ReadGroupId(0)];
+        let generic = generic_of(&records, 0);
         let edges = DepthBinEdges::for_census();
         assert_eq!(generic.at(0).0, DepthCode::Binned(edges.bin_for(4)));
         assert_eq!(
@@ -2332,7 +2622,7 @@ mod tests {
         writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 4)]));
         let records = writer.finish();
 
-        let generic = &records.generic[&ReadGroupId(0)];
+        let generic = generic_of(&records, 0);
         let edges = DepthBinEdges::for_census();
         assert_eq!(
             generic.at(0).0,
@@ -2361,7 +2651,7 @@ mod tests {
             end: Position(25),
         });
         let records = writer.finish();
-        let generic = &records.generic[&ReadGroupId(0)];
+        let generic = generic_of(&records, 0);
         assert_eq!(
             generic.at(0).0,
             DepthCode::Binned(DepthBinEdges::for_census().bin_for(4))
@@ -2503,7 +2793,7 @@ mod tests {
         let mut writer = ssr_writer();
         writer.add_locus(&ssr_locus(vec![observation(b"ATATGTATATAT", 0, 2)]));
         let records = writer.finish();
-        let ssr = &records.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&records, 0, AT_SIX_REPEATS);
 
         assert_eq!(
             ssr.differences().len(),
@@ -2535,7 +2825,7 @@ mod tests {
             observation(b"ATATATGTATAT", 0, 1),
         ]));
         let evidence = writer.finish();
-        let ssr = &evidence.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&evidence, 0, AT_SIX_REPEATS);
 
         assert_eq!(
             ssr.differences().len(),
@@ -2571,7 +2861,7 @@ mod tests {
             observation(b"ATATATATATAT", 0, 4),
         ]));
         let evidence = writer.finish();
-        let ssr = &evidence.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&evidence, 0, AT_SIX_REPEATS);
 
         let at_offset = |offset: i16| {
             let mut reads: Vec<u16> = ssr
@@ -2594,7 +2884,7 @@ mod tests {
             "the third read of the locus, not the first of its observation"
         );
         assert_eq!(
-            ssr.bases_compared(AT_SIX_REPEATS),
+            ssr.bases_compared(),
             7 * 12,
             "all seven reads were compared, clean ones included"
         );
@@ -2614,7 +2904,7 @@ mod tests {
             observation(b"ATATATATGTAT", 0, 100),
         ]));
         let evidence = writer.finish();
-        let ssr = &evidence.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&evidence, 0, AT_SIX_REPEATS);
 
         let mut reads: Vec<u16> = ssr.differences().iter().map(|d| d.read).collect();
         assert_eq!(
@@ -2642,12 +2932,12 @@ mod tests {
             observation(b"ATATATATATAT", 0, 5),
         ]));
         let records = writer.finish();
-        let ssr = &records.ssr[&ReadGroupId(0)];
+        let ssr = ssr_of(&records, 0, AT_SIX_REPEATS);
 
         assert_eq!(ssr.offsets(0).at(-1), 3, "one unit short");
         assert_eq!(ssr.offsets(0).at(0), 5);
         assert_eq!(
-            ssr.bases_compared(AT_SIX_REPEATS),
+            ssr.bases_compared(),
             5 * 12,
             "only the five reads at the reference length were compared"
         );
@@ -2664,11 +2954,11 @@ mod tests {
 
         let edges = DepthBinEdges::for_census();
         assert_eq!(
-            records.generic[&ReadGroupId(0)].at(0).0,
+            generic_of(&records, 0).at(0).0,
             DepthCode::Binned(edges.bin_for(6))
         );
         assert_eq!(
-            records.generic[&ReadGroupId(1)].at(0).0,
+            generic_of(&records, 1).at(0).0,
             DepthCode::Binned(edges.bin_for(0))
         );
     }
@@ -2686,11 +2976,11 @@ mod tests {
 
         let edges = DepthBinEdges::for_census();
         assert_eq!(
-            records.generic[&ReadGroupId(0)].at(0).0,
+            generic_of(&records, 0).at(0).0,
             DepthCode::Binned(edges.bin_for(5))
         );
         assert_eq!(
-            records.generic[&ReadGroupId(1)].at(0).0,
+            generic_of(&records, 1).at(0).0,
             DepthCode::Binned(edges.bin_for(2))
         );
     }
@@ -2706,7 +2996,7 @@ mod tests {
         writer.add_locus(&generic_locus(20, b"C", vec![observation(b"C", 0, 4)]));
         let records = writer.finish();
 
-        let generic = &records.generic[&ReadGroupId(0)];
+        let generic = generic_of(&records, 0);
         let (depth, alleles) = generic.at(0);
         assert_eq!(
             depth,
@@ -2731,10 +3021,7 @@ mod tests {
         let mut writer = writer_over(&[10], &[0]);
         writer.add_locus(&generic_locus(11, b"A", vec![observation(b"T", 0, 9)]));
         let records = writer.finish();
-        assert_eq!(
-            records.generic[&ReadGroupId(0)].at(0).0,
-            DepthCode::NeverWalked
-        );
+        assert_eq!(generic_of(&records, 0).at(0).0, DepthCode::NeverWalked);
     }
 
     #[test]
