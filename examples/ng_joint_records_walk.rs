@@ -996,16 +996,23 @@ fn report_sizes(records: &SampleCensusEvidence) {
         >();
 
     let ssr_loci = records.ssr.values().next().map_or(0, |s| s.len());
+    // A tract costs its offset buckets and one **bit** saying the walk reached it. The two
+    // counts that used to sit beside them — the reads that reached without crossing, and the
+    // base-comparison denominator — are now one pair per stratum, which is the second term.
     let ssr_dense_bytes: usize = records
         .ssr
         .values()
         .map(|s| {
             s.len()
-                * (std::mem::size_of::<
+                * std::mem::size_of::<
                     pop_var_caller::ng::parameter_estimation::joint::census::OffsetCounts,
-                >() + std::mem::size_of::<u16>()
-                    + std::mem::size_of::<u32>()
-                    + std::mem::size_of::<bool>())
+                >()
+                + s.walked_bits().as_bytes().len()
+                + s.covering_not_crossing_by_stratum().count()
+                    * 2
+                    * (std::mem::size_of::<
+                        pop_var_caller::ng::parameter_estimation::joint::census::Stratum,
+                    >() + std::mem::size_of::<u64>())
         })
         .sum();
     let guard_entries: usize = records.ssr.values().map(|s| s.guard().len()).sum();

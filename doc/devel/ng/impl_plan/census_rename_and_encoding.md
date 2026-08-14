@@ -122,7 +122,7 @@ the refusal at construction and assert that a position at the cap round-trips.
 *Depends:* B2. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §2.1, §2.2;
 [arch records](../arch/parameter_prepass_joint_records.md) §1.2, §3.
 
-☐ **B4 — the repeat-tract record's grain.** `covering_not_crossing` and `bases_compared` become one
+✅ **B4 — the repeat-tract record's grain.** `covering_not_crossing` and `bases_compared` become one
 value per (read group × stratum); `walked` becomes a bit per locus. The estimator's accumulator moves
 into the writer. **Own commit, do not bundle** — the counts are a denominator, and a wrong denominator
 is a plausible rate.

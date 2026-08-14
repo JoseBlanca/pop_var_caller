@@ -20,10 +20,14 @@
 //! rule and nothing about their contents.
 //!
 //! **Three states must survive a write and a read** — a locus never walked (a bug), a locus
-//! walked with no coverage (data), and a locus whose reads all matched (data) — and at a
-//! repeat tract there is a fourth: reads reached the locus but none crossed the whole tract.
-//! [`DepthCode`] is what makes the first expressible; [`SsrEvidence::covering_not_crossing`]
-//! the fourth.
+//! walked with no coverage (data), and a locus whose reads all matched (data). [`DepthCode`]
+//! is what makes the first expressible at an ordinary position, and [`WalkedBits`] at a repeat
+//! tract.
+//!
+//! **A repeat tract had a fourth until 2026-08-14** — reads reached it and crossed none of it,
+//! so none reported a length. That count is now kept per *stratum* rather than per locus
+//! ([`SsrEvidence::covering_not_crossing`]), which is the grain the loss runs along: a tract
+//! longer than the reads is never crossed in any sample at any depth.
 //!
 //! # What is not here yet
 //!
@@ -443,19 +447,90 @@ pub struct TractDifference {
     pub base: ObservedAllele,
 }
 
+/// Which stratum a tract is in: its motif length and the reference's repeat count.
+///
+/// **It is what two of a tract's counts are held per, rather than per locus** — see
+/// [`SsrEvidence`] — and it is what the slippage numbers are fitted within, so the two modules
+/// name one type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Stratum {
+    /// How many bases one repeat unit is.
+    pub period: u8,
+    /// How many copies of it the reference carries.
+    pub reference_repeats: u64,
+}
+
+/// One bit a locus: whether the walk reached it.
+///
+/// **A byte would carry 58 kB of information in 0.46 MB** on tomato's 462,701 kept tracts a
+/// read group, and this is the field that has to exist at every locus whether or not anything
+/// happened there — it is the STR half's answer to the generic half's never-walked sentinel,
+/// and every other vector reads the same for a locus never walked and one walked with no read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkedBits {
+    bits: Vec<u8>,
+    len: usize,
+}
+
+impl WalkedBits {
+    /// `len` loci, none of them walked.
+    pub fn none_of(len: usize) -> Self {
+        Self {
+            bits: vec![0; len.div_ceil(8)],
+            len,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// # Panics
+    ///
+    /// When `locus` is past the end — the evidence is sized from the selection, so an index
+    /// outside it means the writer and the selection disagree.
+    pub fn set(&mut self, locus: usize) {
+        assert!(locus < self.len, "locus {locus} is outside the selection");
+        self.bits[locus / 8] |= 1 << (locus % 8);
+    }
+
+    pub fn get(&self, locus: usize) -> bool {
+        assert!(locus < self.len, "locus {locus} is outside the selection");
+        self.bits[locus / 8] & (1 << (locus % 8)) != 0
+    }
+
+    /// The packed bytes — one eighth of what a `bool` a locus costs.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bits
+    }
+}
+
 /// One read group's STR evidence.
 ///
-/// **Four states at a locus, not two**: no read reached it; reads reached it but none
-/// crossed the whole tract, so none reports a length; reads crossed it; and the region was
-/// never walked. The generic set's zero-depth-against-quiet distinction is the last pair, and
-/// [`covering_not_crossing`](Self::covering_not_crossing) is what makes the second
-/// expressible.
+/// **Three states at a locus**: the region was never walked; it was walked and no read crossed
+/// the whole tract, so none reported a length; or reads crossed it. The generic set's
+/// zero-depth-against-quiet distinction is the last pair, and [`walked`](WalkedBits) is what
+/// makes the first expressible.
+///
+/// **A fourth state was expressible per locus until 2026-08-14 and is not any more** — reads
+/// that reached the tract and crossed none of it. Spec §3 moved that count to the stratum, so
+/// what it distinguishes now is a *stratum* whose tracts are longer than the reads from one
+/// that was unlucky with coverage, which is the axis the censoring actually runs along and the
+/// grain the count is reported at. Per locus the fit never acted on it: it summed the count
+/// the moment it read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SsrEvidence {
     offsets: Vec<OffsetCounts>,
-    covering_not_crossing: Vec<u16>,
-    walked: Vec<bool>,
-    bases_compared: Vec<u32>,
+    /// Per stratum, not per locus (spec §3). Absent means none.
+    covering_not_crossing: BTreeMap<Stratum, u64>,
+    walked: WalkedBits,
+    /// Per stratum, not per locus (spec §3): it is the denominator of a rate fitted per
+    /// stratum, and per locus it was 1.85 MB a read group on tomato that nothing read.
+    bases_compared: BTreeMap<Stratum, u64>,
     guard: Vec<GuardObservation>,
     differences: Vec<TractDifference>,
 }
@@ -464,9 +539,9 @@ impl SsrEvidence {
     pub fn never_walked(loci: usize) -> Self {
         Self {
             offsets: vec![OffsetCounts::default(); loci],
-            covering_not_crossing: vec![0; loci],
-            walked: vec![false; loci],
-            bases_compared: vec![0; loci],
+            covering_not_crossing: BTreeMap::new(),
+            walked: WalkedBits::none_of(loci),
+            bases_compared: BTreeMap::new(),
             guard: Vec::new(),
             differences: Vec::new(),
         }
@@ -484,21 +559,36 @@ impl SsrEvidence {
         self.offsets[locus]
     }
 
-    /// Reads that reached this locus and crossed no whole tract — a censored lower bound on
-    /// the length.
+    /// Reads that reached a tract of this stratum and crossed no whole copy of it — a censored
+    /// lower bound on the length, and **counted per stratum**.
     ///
-    /// **The censoring is not random**, which is why it is a field and not an inference: a
-    /// tract longer than a read is never crossed, in every sample at every depth, so it runs
-    /// along repeat count — the very axis the slippage numbers are fitted within — and a
-    /// stratum unobservable with this read length must not look like one that was merely
-    /// unlucky with coverage.
-    pub fn covering_not_crossing(&self, locus: usize) -> u16 {
-        self.covering_not_crossing[locus]
+    /// **The censoring is not random**, which is why it is recorded at all: a tract longer than
+    /// a read is never crossed, in every sample at every depth, so the loss runs along repeat
+    /// count — which is what a stratum is — and a stratum unreadable at this read length must
+    /// not arrive looking like one that was merely unlucky with coverage. On the human
+    /// benchmark trio 37 reads in every 100 that reach a tract never cross it, and on the
+    /// 63-accession tomato cohort it is close to half.
+    ///
+    /// **Per locus it was 0.93 MB a read group that nothing read**: the fit added it into a
+    /// running per-stratum total the moment it saw it (spec §3).
+    pub fn covering_not_crossing(&self, stratum: Stratum) -> u64 {
+        self.covering_not_crossing
+            .get(&stratum)
+            .copied()
+            .unwrap_or(0)
     }
 
-    /// The denominator the STR error rate is fitted against.
-    pub fn bases_compared(&self, locus: usize) -> u32 {
-        self.bases_compared[locus]
+    /// The denominator the STR substitution rate is fitted against, **per stratum** — which is
+    /// the grain that rate is fitted at.
+    pub fn bases_compared(&self, stratum: Stratum) -> u64 {
+        self.bases_compared.get(&stratum).copied().unwrap_or(0)
+    }
+
+    /// Every stratum this read group put a covering-not-crossing read in, with its count.
+    pub fn covering_not_crossing_by_stratum(&self) -> impl Iterator<Item = (Stratum, u64)> + '_ {
+        self.covering_not_crossing
+            .iter()
+            .map(|(stratum, count)| (*stratum, *count))
     }
 
     pub fn guard(&self) -> &[GuardObservation] {
@@ -509,17 +599,25 @@ impl SsrEvidence {
         &self.differences
     }
 
-    /// Which of the four states this locus is in.
+    /// Which of the three states this locus is in.
     pub fn state(&self, locus: usize) -> SsrLocusState {
-        if !self.walked[locus] {
+        if !self.walked.get(locus) {
             SsrLocusState::NeverWalked
         } else if self.offsets[locus].total() > 0 {
             SsrLocusState::Crossed
-        } else if self.covering_not_crossing[locus] > 0 {
-            SsrLocusState::ReachedNotCrossed
         } else {
-            SsrLocusState::NoRead
+            SsrLocusState::NoLengthReported
         }
+    }
+
+    /// Whether the walk reached this locus at all.
+    pub fn walked(&self, locus: usize) -> bool {
+        self.walked.get(locus)
+    }
+
+    /// The walked bits themselves, for a consumer measuring what the evidence costs.
+    pub fn walked_bits(&self) -> &WalkedBits {
+        &self.walked
     }
 
     /// Whether the guard has caught more than one read in ten of those that differ from the
@@ -544,16 +642,20 @@ impl SsrEvidence {
     }
 }
 
-/// Which of the four states a sample is in at a kept STR locus.
+/// Which of the three states a sample is in at a kept STR locus.
+///
+/// **There were four until 2026-08-14**, the fourth being *reads reached the locus and crossed
+/// none of it*. That count moved to the stratum (spec §3), so per locus it can no longer be
+/// told from *no read reached the locus at all* — both report no length, which is the only
+/// thing the fit does with either. The distinction survives where it is acted on: per stratum,
+/// in [`SsrEvidence::covering_not_crossing`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SsrLocusState {
     /// The region was never walked — a bug, not data.
     NeverWalked,
-    /// Walked, and no read reached the locus.
-    NoRead,
-    /// Reads reached the locus and none crossed the whole tract: a lower bound on the
-    /// length, and no length reported.
-    ReachedNotCrossed,
+    /// Walked, and no read crossed the whole tract, so none reported a length. Either no read
+    /// reached the locus, or reads reached it and stopped inside it.
+    NoLengthReported,
     /// At least one read crossed the tract.
     Crossed,
 }
@@ -769,6 +871,10 @@ pub struct CensusWriter {
     generic_loci: Vec<GenomePosition>,
     /// The kept STR loci as regions, in genome order.
     ssr_loci: Vec<GenomeRegion>,
+    /// Which stratum each of those loci is in, in the same order. **The writer carries it
+    /// because two of a tract's counts are kept per stratum**, and the locus stream says which
+    /// tract a read reached, never which stratum it belongs to.
+    ssr_stratum_of: Vec<Stratum>,
     edges: DepthBinEdges,
     generic: BTreeMap<ReadGroupId, GenericEvidence>,
     ssr: BTreeMap<ReadGroupId, SsrEvidence>,
@@ -839,24 +945,45 @@ impl CensusWriter {
         read_cap: ReadCap,
         depth_cap: DepthCap,
     ) -> Self {
-        let mut ssr_loci: Vec<GenomeRegion> = loci
+        // **The stratum travels beside the locus from here on**, because the locus stream the
+        // walk hands over names a tract by where it sits and never by which stratum it is in,
+        // and two of a tract's counts are kept per stratum.
+        let mut ssr_loci: Vec<(GenomeRegion, Stratum)> = loci
             .ssr()
             .iter_sorted()
             .into_iter()
-            .flat_map(|(_, segments)| segments.iter())
-            .filter_map(|segment| {
-                contig_of(segment.chrom()).map(|contig| GenomeRegion {
-                    contig,
-                    start: Position(segment.start()),
-                    end: Position(segment.end()),
+            .flat_map(|((period, reference_repeats), segments)| {
+                segments.iter().map(move |segment| {
+                    (
+                        segment,
+                        Stratum {
+                            period,
+                            reference_repeats,
+                        },
+                    )
+                })
+            })
+            .filter_map(|(segment, stratum)| {
+                contig_of(segment.chrom()).map(|contig| {
+                    (
+                        GenomeRegion {
+                            contig,
+                            start: Position(segment.start()),
+                            end: Position(segment.end()),
+                        },
+                        stratum,
+                    )
                 })
             })
             .collect();
-        ssr_loci.sort_unstable_by_key(|r| (r.contig.get(), r.start.get(), r.end.get()));
+        ssr_loci.sort_unstable_by_key(|(r, _)| (r.contig.get(), r.start.get(), r.end.get()));
+        let ssr_stratum_of = ssr_loci.iter().map(|(_, stratum)| *stratum).collect();
+        let ssr_loci = ssr_loci.into_iter().map(|(region, _)| region).collect();
         Self {
             generic_loci: loci.generic().to_vec(),
             ssr: BTreeMap::new(),
             ssr_loci,
+            ssr_stratum_of,
             edges,
             generic: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -1029,19 +1156,21 @@ impl CensusWriter {
         };
         let period = detail.motif.period().max(1) as i64;
         let reference_length = locus.region.len() as i64;
+        let stratum = self.ssr_stratum_of[index];
 
         for observation in &locus.observations {
             let records = self
                 .ssr
                 .entry(observation.read_group)
                 .or_insert_with(|| SsrEvidence::never_walked(self.ssr_loci.len()));
-            records.walked[index] = true;
+            records.walked.set(index);
             let reads = u16::try_from(observation.num_obs).unwrap_or(u16::MAX);
             if observation.read_witness != crate::ng::locus_generation::ReadWitness::Complete {
-                // A read that covered the tract without crossing it reports no length; it is
-                // a lower bound, and the fit is told so rather than shown a short allele.
-                records.covering_not_crossing[index] =
-                    records.covering_not_crossing[index].saturating_add(reads);
+                // A read that covered the tract without crossing it reports no length; it is a
+                // lower bound. **Counted into this stratum's total rather than at the locus**
+                // (spec §3): the fit summed the per-locus version the moment it read it, and
+                // the loss runs along repeat count, which is what a stratum is.
+                *records.covering_not_crossing.entry(stratum).or_insert(0) += u64::from(reads);
                 continue;
             }
             let difference = observation.bases.len() as i64 - reference_length;
@@ -1065,8 +1194,10 @@ impl CensusWriter {
             if observation.bases.len() as i64 != reference_length {
                 continue;
             }
-            records.bases_compared[index] +=
-                u32::from(reads) * u32::try_from(observation.bases.len()).unwrap_or(u32::MAX);
+            // **Per stratum, for the same reason**: it is the denominator of a rate fitted per
+            // stratum, and per locus it was 1.85 MB a read group on tomato that nothing read.
+            *records.bases_compared.entry(stratum).or_insert(0) +=
+                u64::from(reads) * observation.bases.len() as u64;
             // **One entry per read, not one per distinct sequence.** The walk has already
             // folded reads carrying the same bases into a single observation with a count, and
             // collapsing them here too would lose the fact this channel exists for: that two
@@ -1094,12 +1225,11 @@ impl CensusWriter {
         // Reads that reached the locus and produced no observation at all.
         if locus.reads_without_observation > 0 {
             for records in self.ssr.values_mut() {
-                records.walked[index] = true;
+                records.walked.set(index);
             }
             if let Some(records) = self.ssr.values_mut().next() {
-                let reads = u16::try_from(locus.reads_without_observation).unwrap_or(u16::MAX);
-                records.covering_not_crossing[index] =
-                    records.covering_not_crossing[index].saturating_add(reads);
+                *records.covering_not_crossing.entry(stratum).or_insert(0) +=
+                    u64::from(locus.reads_without_observation);
             }
         }
     }
@@ -1313,21 +1443,121 @@ mod tests {
         assert_eq!(counts.at(RECORDED_OFFSET_RANGE), 8);
     }
 
+    /// A bit a locus, set independently at every offset within a byte — the mutation this
+    /// catches is a mask that also clears its neighbours, which every other test in the module
+    /// passes through because they walk one locus at a time.
     #[test]
-    fn the_four_states_at_an_str_locus_are_distinguishable() {
-        let mut records = SsrEvidence::never_walked(4);
+    fn one_locus_marked_walked_leaves_every_other_locus_alone() {
+        let mut walked = WalkedBits::none_of(20);
+        assert!((0..20).all(|locus| !walked.get(locus)));
+        assert_eq!(
+            walked.as_bytes().len(),
+            3,
+            "twenty loci is three bytes, where a bool a locus is twenty"
+        );
+
+        for locus in (0..20).step_by(3) {
+            walked.set(locus);
+        }
+        for locus in 0..20 {
+            assert_eq!(walked.get(locus), locus % 3 == 0, "locus {locus}");
+        }
+    }
+
+    /// **Spec §7.4, and the answer it left open.** The fourth state — reads reached the tract
+    /// and crossed none of it — was to be planted deliberately, so that the test "either shows
+    /// a lower bound surviving or shows that it does not". It does not survive **per locus**:
+    /// the count moved to the stratum on 2026-08-14, so a locus whose reads all stopped inside
+    /// the tract reads the same as one no read reached. Both reported no length, which is the
+    /// only thing the fit does with either. §7.4's other half is the test below it, where the
+    /// state does survive — at the grain it is acted on.
+    #[test]
+    fn the_three_states_at_an_str_locus_are_distinguishable() {
+        let mut records = SsrEvidence::never_walked(3);
         assert_eq!(records.state(0), SsrLocusState::NeverWalked);
 
-        records.walked[1] = true;
-        assert_eq!(records.state(1), SsrLocusState::NoRead);
+        records.walked.set(1);
+        assert_eq!(records.state(1), SsrLocusState::NoLengthReported);
 
-        records.walked[2] = true;
-        records.covering_not_crossing[2] = 3;
-        assert_eq!(records.state(2), SsrLocusState::ReachedNotCrossed);
+        records.walked.set(2);
+        records.offsets[2].add(0, 5);
+        assert_eq!(records.state(2), SsrLocusState::Crossed);
+    }
 
-        records.walked[3] = true;
-        records.offsets[3].add(0, 5);
-        assert_eq!(records.state(3), SsrLocusState::Crossed);
+    /// The lower bound survives **at the stratum**, which is where the censoring runs: a tract
+    /// longer than the reads is never crossed in any sample at any depth, so the loss follows
+    /// repeat count, and repeat count is half of what a stratum is.
+    #[test]
+    fn a_read_that_reached_a_tract_without_crossing_it_is_counted_against_its_stratum() {
+        let mut writer = ssr_writer();
+        let mut covering = observation(b"ATATAT", 0, 3);
+        covering.read_witness =
+            ReadWitness::from_left(6, crate::ng::locus_generation::LocusLen::from_positions(12))
+                .expect("a read reaching six of the tract's twelve bases");
+        writer.add_locus(&ssr_locus(vec![
+            covering,
+            observation(b"ATATATATATAT", 0, 2),
+        ]));
+        let evidence = writer.finish();
+        let ssr = &evidence.ssr[&ReadGroupId(0)];
+
+        assert_eq!(
+            ssr.covering_not_crossing(AT_SIX_REPEATS),
+            3,
+            "the three reads that stopped inside the tract are this stratum's censored ones"
+        );
+        assert_eq!(
+            ssr.covering_not_crossing(Stratum {
+                period: 3,
+                reference_repeats: 6
+            }),
+            0,
+            "and no other stratum was charged for them"
+        );
+        assert_eq!(
+            ssr.state(0),
+            SsrLocusState::Crossed,
+            "the locus itself reports the length the two crossing reads showed"
+        );
+    }
+
+    /// **The count is only worth moving if it lands in the right stratum**, which is the one
+    /// thing a per-locus count could not get wrong. Two tracts, two strata, one read group:
+    /// each stratum is charged its own censored reads and its own compared bases.
+    #[test]
+    fn two_strata_are_charged_separately_for_their_censored_reads_and_compared_bases() {
+        let mut writer = two_stratum_writer();
+
+        let mut short = observation(b"ATATAT", 0, 3);
+        short.read_witness =
+            ReadWitness::from_left(6, crate::ng::locus_generation::LocusLen::from_positions(12))
+                .expect("a read reaching six of the tract's twelve bases");
+        writer.add_locus(&ssr_locus(vec![short, observation(b"ATATATATATAT", 0, 2)]));
+
+        let mut stopped = observation(b"ATGATG", 0, 5);
+        stopped.read_witness =
+            ReadWitness::from_left(6, crate::ng::locus_generation::LocusLen::from_positions(12))
+                .expect("a read reaching six of the tract's twelve bases");
+        writer.add_locus(&atg_locus(vec![
+            stopped,
+            observation(b"ATGATGATGATG", 0, 4),
+        ]));
+
+        let evidence = writer.finish();
+        let ssr = &evidence.ssr[&ReadGroupId(0)];
+
+        assert_eq!(ssr.covering_not_crossing(AT_SIX_REPEATS), 3);
+        assert_eq!(ssr.covering_not_crossing(ATG_FOUR_REPEATS), 5);
+        assert_eq!(
+            ssr.bases_compared(AT_SIX_REPEATS),
+            2 * 12,
+            "two crossing reads over a twelve-base tract"
+        );
+        assert_eq!(
+            ssr.bases_compared(ATG_FOUR_REPEATS),
+            4 * 12,
+            "four of them at the other tract, and neither total leaks into the other"
+        );
     }
 
     #[test]
@@ -1407,7 +1637,7 @@ mod tests {
     #[test]
     fn the_guard_threshold_is_one_in_ten_of_the_reads_that_differ() {
         let mut records = SsrEvidence::never_walked(2);
-        records.walked[0] = true;
+        records.walked.set(0);
         records.offsets[0].add(1, 18);
         records.guard.push(GuardObservation {
             locus: 0,
@@ -1860,6 +2090,19 @@ mod tests {
 
     // ---- the writer at a repeat tract ---------------------------------------
 
+    /// The stratum every tract in these fixtures is in: a two-base motif at six copies.
+    const AT_SIX_REPEATS: Stratum = Stratum {
+        period: 2,
+        reference_repeats: 6,
+    };
+
+    /// The second stratum, for the fixtures that need two: a three-base motif at four copies,
+    /// so both tracts are twelve bases and only the stratum differs.
+    const ATG_FOUR_REPEATS: Stratum = Stratum {
+        period: 3,
+        reference_repeats: 4,
+    };
+
     /// A twelve-base `AT` tract, kept, with the writer over it.
     fn ssr_writer() -> CensusWriter {
         use crate::ng::region_typing::segment_criteria::SsrSegment;
@@ -1887,6 +2130,65 @@ mod tests {
             ReadCap(100),
             DepthCap::new(124),
         )
+    }
+
+    /// The same, plus a second twelve-base tract at 200 whose motif is three bases — so the two
+    /// tracts differ in their stratum and in nothing else.
+    fn two_stratum_writer() -> CensusWriter {
+        use crate::ng::region_typing::segment_criteria::SsrSegment;
+        use crate::ng::repeat_catalog::strata::StratumSampler;
+
+        let at = SsrSegment::new(
+            "c0".into(),
+            100,
+            111,
+            crate::ng::types::Motif::new(b"AT").expect("a two-base motif"),
+            1.0,
+        )
+        .expect("a well-formed tract");
+        let atg = SsrSegment::new(
+            "c0".into(),
+            200,
+            211,
+            crate::ng::types::Motif::new(b"ATG").expect("a three-base motif"),
+            1.0,
+        )
+        .expect("a well-formed tract");
+        let mut sampler = StratumSampler::new(16, 0);
+        sampler.offer(2, 6, at);
+        sampler.offer(3, 4, atg);
+        let (counts, sample) = sampler.finish();
+        let loci = CensusLoci::from_parts(Vec::new(), sample, counts);
+        CensusWriter::new(
+            "sample".to_string(),
+            &loci,
+            vec![ReadGroupId(0)],
+            &|_| Some(ContigId(0)),
+            selection_terms(),
+            DepthBinEdges::for_census(),
+            ReadCap(100),
+            DepthCap::new(124),
+        )
+    }
+
+    /// The three-base-motif tract at 200, which `two_stratum_writer` keeps.
+    fn atg_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(200),
+                end: Position(211),
+            },
+            reference_bases: b"ATGATGATGATG".to_vec().into_boxed_slice(),
+            observations,
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Ssr(crate::ng::locus_generation::SsrDetail {
+                motif: crate::ng::types::Motif::new(b"ATG").expect("a three-base motif"),
+                left_flank: Box::new([]),
+                right_flank: Box::new([]),
+            }),
+        }
     }
 
     fn ssr_locus(observations: Vec<SequenceObservation>) -> SampleLocusObservations {
@@ -1950,7 +2252,7 @@ mod tests {
         assert_eq!(ssr.offsets(0).at(-1), 3, "one unit short");
         assert_eq!(ssr.offsets(0).at(0), 5);
         assert_eq!(
-            ssr.bases_compared(0),
+            ssr.bases_compared(AT_SIX_REPEATS),
             5 * 12,
             "only the five reads at the reference length were compared"
         );

@@ -139,13 +139,12 @@ impl Slippage {
 // ---------------------------------------------------------------------
 
 /// Which stratum a tract is in: its motif length and the reference's repeat count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Stratum {
-    /// How many bases one repeat unit is.
-    pub period: u8,
-    /// How many copies of it the reference carries.
-    pub reference_repeats: u64,
-}
+///
+/// **It lives in the census** ([`census::Stratum`](super::census::Stratum)), because the
+/// census is keyed by it — two of a tract record's counts are held per stratum rather than per
+/// locus — and re-exported here, where the fit reads it, so a consumer of either module names
+/// one type.
+pub use super::census::Stratum;
 
 /// One sample's spanning reads at one tract, split by the slippage group that produced them.
 ///
@@ -1229,6 +1228,28 @@ pub fn gather_strata(
             });
     }
 
+    // **The reads that reached a tract and crossed none of it are counted per stratum by the
+    // writer**, so they are read once here rather than accumulated a locus at a time (spec §3).
+    // Every sample's every read group contributes its own total.
+    for sample in cohort {
+        for records in sample.ssr.values() {
+            for (stratum, reads) in records.covering_not_crossing_by_stratum() {
+                // A stratum the census charged and the locus list does not hold means the two
+                // were built from different selections, which the recording terms exist to
+                // refuse — and dropping the count instead would understate the censoring
+                // silently, which is the one thing this count is kept to prevent.
+                let evidence = by_stratum.get_mut(&stratum).unwrap_or_else(|| {
+                    panic!(
+                        "sample {} charged {reads} censored reads to a stratum of period {} at \
+                         {} repeats, which the kept loci do not hold",
+                        sample.sample, stratum.period, stratum.reference_repeats
+                    )
+                });
+                evidence.reads_reaching_not_crossing += reads;
+            }
+        }
+    }
+
     for (locus, stratum) in strata.iter().enumerate() {
         let evidence = by_stratum.get_mut(stratum).expect("every stratum entered");
         let mut reads = TractReads::default();
@@ -1244,8 +1265,6 @@ pub fn gather_strata(
                     records.len(),
                     strata.len()
                 );
-                evidence.reads_reaching_not_crossing +=
-                    u64::from(records.covering_not_crossing(locus));
                 if records.guard_is_over_threshold(locus) {
                     over_guard = true;
                 }
