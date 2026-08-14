@@ -316,6 +316,33 @@ is homozygous for the non-reference allele**, where a real variant at the same f
 samples there. That is not a separate mechanism either — it is what the likelihood of the whole
 cohort's genotypes at one locus already says.
 
+**The depth term's form, settled 2026-08-14**
+([`../reports/depth_term_family_2026-08-14.md`](../reports/depth_term_family_2026-08-14.md)). It is
+`ln P(d | 2m) − ln P(d | m)`, where `d` is the position's read count and `m` is what one copy is
+expected to give **at this position's GC content** — not the sample's overall median, since depth runs
+2.5-fold across the GC range on tomato, more than the doubling being detected. Three things about it
+are requirements:
+
+- **`P` is a negative binomial and never a Poisson.** At 26.4 and 30.2 reads a position the variance of
+  depth is 2.5 and 3.2 times its mean inside a single GC bin. A Poisson would hand odds of at least
+  1,000 to 1 in favour of a duplication to **1 position in 74**, where only 5 in 10,000 read near half
+  at all. The dispersion is one number a sample, built during the genome walk
+  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4.1).
+- **The doubled position keeps the *same* dispersion, not twice it.** Two copies double the expectation;
+  they do not make the sampling noisier in proportion, and writing `2m` into both parameters of the
+  distribution would.
+- **The term is a weight and never a yes-or-no test.** Its zero crossing sits at **1.40·`m`** — inside
+  the ordinary spread of depths — so a positive log-ratio does not mean *this position is duplicated*.
+  Scored at its own zero it flags 6 positions in 100 where a threshold flagged 1.8, and separates worse
+  than the threshold did (9.0-fold against 17.1). **No branch of this fit may read `log-ratio > 0` as a
+  classification.** Used as a weight it is the better instrument: at a matched number of flagged
+  positions it separates 24.5-fold against the threshold's 17.1 at 30 reads a position, and it wins at
+  all eight accessions measured.
+
+**And it is silent below about ten reads a position**, where depth is Poisson to within the measurement
+and the term puts 58 positions in 100 above zero. That is the floor §2.2 already states, now with the
+mechanism behind it.
+
 **Two measured floors say where each term has power, and neither is a threshold anywhere in the code.**
 With three samples the missing homozygote means little and with fifty it is nearly decisive: the
 inbreeding coefficient comes back 0.5807 against a truth of 0.5942, where a fit with no third class
@@ -389,6 +416,23 @@ cohort pattern cannot tell the class from a real variant, so it costs more than 
 to 1.28 times its benchmark VCF's count; with the class fitted and a coverage summary supplied, the
 three rates are unchanged to three decimals and **the class's weight is zero**. That excess is
 something else, and this route has now ruled out the explanation that looked most likely.
+
+**What the model does with a position it cannot reach, measured on real reads with a truth set —
+2026-08-14** ([`../reports/trio_heterozygosity_excess_2026-08-14.md`](../reports/trio_heterozygosity_excess_2026-08-14.md)).
+This document has said since it was written that a two-class model cannot reach a position where the
+reads sit between an error rate and a half. **What it has not said is which way it fails, and the
+answer is the one that matters here: it calls them heterozygous, with a posterior of 1.000.**
+
+On the human benchmark trio, **59 positions of 449,489** show about a quarter of the reads disagreeing
+with the reference **in all three people at once** — a mean share of 0.24 against 0.49 at a real
+heterozygote — and they arrive in runs, six of them inside 33 bases. That is a stretch of genome rather
+than a base. Those 59 positions are **79% of a heterozygosity that comes back 26% above the truth set**.
+
+**And a quarter is not any of the three classes.** The noisy class lives between 0.5% and 4.3%, a
+heterozygote at about a half, and the duplicated class predicts about a half **in carriers only**. A
+quarter, in every sample, is a fourth shape, and the model's only home for it is *heterozygous*.
+**Three samples cannot identify the class built for it**, so the trio can show this defect and cannot
+fix it.
 
 **Two consequences for what the class may be used for.** Its fitted weight **must not be emitted as a
 measurement of how much duplication a sample carries** — both discriminators recover it about twice
@@ -480,6 +524,17 @@ evaluated once. Nothing in the record changes: the four allele counts are alread
 ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §2.1), and it is the parameters fit
 that stops picking one of them.
 
+**The depth is summed over rather than read from, and the expectation must be summed the same way —
+REQUIRED, measured 2026-08-14**
+([`../reports/trio_heterozygosity_excess_2026-08-14.md`](../reports/trio_heterozygosity_excess_2026-08-14.md)).
+A stored depth code stands for a range (§2.2 of the records document), so the likelihood sums over
+every depth in that range, weighting each by the Poisson the sample's own coverage implies. **The
+error rate's expected read counts must be taken under that same sum.** Summing the likelihood over the
+range while taking the expectation at the middle of it puts the fitted error rate **24% above the
+truth** on a drawn cohort at eight reads a position, against 4% when the two agree. This is not a
+tuning note: the two halves of an expectation-maximisation step have to be the same statement, and
+getting one right alone is worse than getting both wrong in the same direction.
+
 *Two things this does not do.* It does not model **two** segregating non-reference alleles at one
 position; a triallelic site is scored under whichever of the three the sum favours, and the residue
 falls into the noisy class. And it does not remove the same hazard from the STR path, where the
@@ -510,6 +565,22 @@ tomato's three reads a site, Poisson arithmetic puts about **5 kept loci in 100 
 and 15 in 100 with exactly one**, and a single read barely moves a genotype posterior. **So `Hobs` is
 in part a measurement and in part the model repeating itself, and how much of each depends on the
 sample's depth.**
+
+**The per-sample rates have a per-position form, and it is what a truth set is compared against —
+ADDED 2026-08-14.** Each sample's heterozygous and homozygous-non-reference posterior at each kept
+position, off by default at eight bytes a position a sample. **Without it, a disagreement with a
+benchmark is one ratio; with it, it is a list of positions** — and on the human trio the two readings
+led to opposite conclusions. Recounting the benchmark's truth to include its heterozygous indels would
+have moved the ratio from 1.26 to 1.01 and closed the investigation, where the per-position form shows
+the fit places **exactly zero** heterozygosity at those positions. An arithmetic coincidence would have
+produced a wrong answer that looked like an explanation.
+
+**A run that reports it ran out of passes must be read with its trace — ADDED 2026-08-14.** On the trio
+the label is about the frequency density's shape, which climbs from 0.885 at pass 25 to 4.779 at pass
+200 and is not finished; heterozygosity is settled by pass 25 and moves one part in a thousand after
+it. **Reporting *not converged* without saying which parameter is still moving invites a correct number
+to be discarded and a wandering one to be quoted.** So the label carries the per-pass trace of what
+moved.
 
 **What follows, and it is a reporting requirement rather than a fix.** Emit beside each sample's
 `Hobs` and `π_hom_alt` **how many kept loci carried at least one read and at least two**, so that a

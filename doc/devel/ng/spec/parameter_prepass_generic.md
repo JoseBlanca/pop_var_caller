@@ -452,6 +452,13 @@ Neither is an argument against the ladder — the histograms this section sizes 
 arrangement, and there 0.054 stands. **It is a warning to whoever reads a single stored code: sum over
 the depths the code stands for, rather than taking a value from inside the range.**
 
+**Since 2026-08-14 it is a built rule rather than a warning, and `representative_depth` is gone.**
+`DepthBinEdges` no longer offers a value from inside a bin: it exposes the bin's own range, which is
+what a histogram's row width needs and what a consumer summing over the range needs, and nothing else
+called the removed accessor. **A consumer cannot now take a midpoint by accident**, which is the shape
+this repository already uses for the ladder's width and for the two caps — make the wrong thing
+unrepresentable rather than documented.
+
 **Where a ladder can hurt is 10 to 30 reads a site.** At tomato's 3 reads, 97 sites in 100 sit at
 depth 6 or below and are never binned at all; at 60 reads the genotype is certain whatever the exact
 depth. So **check any change to the ladder in that band and against both consumers** — the runs of

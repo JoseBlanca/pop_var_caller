@@ -465,6 +465,50 @@ and the one real-data test with a truth set, the human benchmark trio, fitted th
 summary supplied and returned a class weight of **zero** with the three rates unchanged to three
 decimals.
 
+### 4.1 What the census carries instead — a per-sample depth model, and it is a few hundred numbers
+
+**The removed object was 1.6 to 6.2 MB a sample of per-window depths. What the depth term needs is a
+few hundred floats, and it is not the same thing coming back.** To ask whether a position carries twice
+what one copy would give, the fit needs two per-sample quantities and no array at all:
+
+- **the depth-against-GC curve** — what depth one copy gives at this position's GC content. It cannot
+  be a single median: per-position depth runs from **11.7 reads at 18% GC to 29.0 at 34%** on one
+  accession, a factor of 2.5, which is larger than the doubling being detected. A few hundred numbers,
+  and a curve fitted from **one position in 300** matches one fitted from all 7.5 million
+  ([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md));
+- **one dispersion number** — a single `f32`, because depth is not Poisson (§4.2).
+
+**Both are built during the genome walk, and that is a requirement rather than a convenience.** The
+records store depth on §2.2's ladder, and **a dispersion measured on binned depths is not a
+dispersion**; the walk is where the true counts are. The curve could be refitted from the census's own
+codes, since a bin's error averages out of a mean — the dispersion cannot, since it is exactly what the
+binning destroys.
+
+**The dispersion must be fitted robustly.** At one accession of eight, **four GC bins of twenty-one run
+between 22 and 41** where the sample's own figure is near 3, and a mean over bins would take its value
+from those four.
+
+### 4.2 The depth term is a negative binomial, and it is a weight rather than a test — MEASURED 2026-08-14
+
+([`../reports/depth_term_family_2026-08-14.md`](../reports/depth_term_family_2026-08-14.md), eight
+tomato accessions from 2.5 to 30.2 reads a position.)
+
+**Depth is overdispersed wherever this term is used.** At the two deepest accessions — 26.4 and 30.2
+reads a position — the variance of depth is **2.5 and 3.2 times its mean**, measured inside a single GC
+bin over 7.5 M positions, running 1.4 to 4.6 across bins. It is not an artefact of the binning (1, 2 and
+4 percentage-point GC bins agree to 0.03) and not the duplications themselves (dropping every near-half
+position moves a bin by 0.024).
+
+**What a Poisson would cost is not a mis-tuned parameter.** It hands odds of at least **1,000 to 1** in
+favour of a duplication to **1 position in 74**, where only **5 positions in 10,000** read near half at
+all; the negative binomial hands those odds to 1 in 254. At a genuinely doubled position the two say
+25-to-1 and 108,000-to-1 — and **25-to-1 is the right answer**, because one position's read count
+cannot do better when depth varies three times as much as a Poisson allows.
+
+**Below about ten reads a position the term carries nothing**, and there depth *is* Poisson to within
+the measurement (0.84 to 1.13) — the overdispersion arrives with the depth. At 2.8 reads a position the
+term puts **58 positions in 100** above zero, which is noise wearing a likelihood's clothes.
+
 ### 4.1 What the position's own depth needs from §2.2's ladder
 
 **The ladder's ceiling, not its width, is what would have stopped this.** A duplicated position carries
