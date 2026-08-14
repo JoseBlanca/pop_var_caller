@@ -42,6 +42,8 @@
 //! seeking reader that fills one section at a time is the next unit of work, and the whole-file
 //! read here is its parity oracle.
 
+use md5::{Digest, Md5};
+
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -77,6 +79,71 @@ pub struct PileupIdentity {
     pub header: [u8; 16],
     /// How many records that pileup holds.
     pub records: u64,
+}
+
+impl PileupIdentity {
+    /// The identity of a pileup whose header is `header` and which holds `records` records.
+    ///
+    /// **The bytes are the pileup's own header** — its reference, its analysed regions, its read
+    /// filters and the command line that produced it (spec §6.1). Which bytes exactly is the
+    /// pileup writer's business; what this promises is that two pileups with the same header and
+    /// the same record count get the same identity and no others do.
+    pub fn of_header(header: &[u8], records: u64) -> Self {
+        let mut hasher = Md5::new();
+        hasher.update(header);
+        Self {
+            header: hasher.finalize().into(),
+            records,
+        }
+    }
+}
+
+/// What a run should do with a census file, given the pileup it means to fit from.
+///
+/// **A verdict and not an action.** Rebuilding a census from a pileup is the second producer
+/// (milestone C); until that exists, this says what should happen and the caller decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The census was built from this pileup. Use it.
+    Fresh,
+    /// It was built from a different pileup, and the pileup in hand can rebuild it. The value
+    /// names what differs, so that a run can say why it spent the time.
+    Rebuild(&'static str),
+    /// It was built from a different pileup and there is none here to rebuild from. **Refuse**:
+    /// a census whose evidence came from other reads is not this run's evidence, and the whole
+    /// point of naming the pileup is that the difference is otherwise invisible.
+    Refused(&'static str),
+}
+
+/// Whether a census may be used as it stands, rebuilt, or refused (spec §6.1).
+///
+/// `named` is what the census file says it was built from and `in_hand` is the pileup this run
+/// has, `None` when it cannot be reached.
+///
+/// **Nothing here reads a modification time**, which is the point: a modification time changes
+/// when a file is copied and does not change when its contents are rewritten in place, so it
+/// answers a question nobody asked.
+pub fn freshness(named: Option<PileupIdentity>, in_hand: Option<PileupIdentity>) -> Freshness {
+    match (named, in_hand) {
+        (Some(named), Some(here)) if named == here => Freshness::Fresh,
+        (Some(named), Some(here)) => {
+            let field = if named.header == here.header {
+                "the pileup's record count"
+            } else {
+                "the pileup's header"
+            };
+            Freshness::Rebuild(field)
+        }
+        // A census that names a pileup, with none here: nothing can rebuild it and nothing can
+        // check it, so it is refused rather than trusted.
+        (Some(_), None) => Freshness::Refused("the pileup it was built from, which is not here"),
+        // A census that names no pileup at all — written by a run that had none. It cannot be
+        // checked, so it is rebuilt where that is possible and refused where it is not.
+        (None, Some(_)) => {
+            Freshness::Rebuild("the pileup it was built from, which it does not name")
+        }
+        (None, None) => Freshness::Refused("the pileup it was built from, which it does not name"),
+    }
 }
 
 /// A census file, read whole.
@@ -1084,6 +1151,76 @@ mod tests {
             extent.len() < file_len,
             "a section is a part of the file, not the whole of it"
         );
+    }
+
+    // ---- the pileup a census names, and what a run does about it ---------------------
+
+    /// **Spec §7.13.** A census built from one pileup and fitted against another must not be
+    /// used as it stands: it is rebuilt where the pileup is there, and refused where it is not.
+    /// The two cases are told apart by *which* value differs, so a run says why.
+    #[test]
+    fn a_census_naming_another_pileup_is_rebuilt_where_it_can_be_and_refused_where_it_cannot() {
+        let built_from = PileupIdentity::of_header(b"reference=A regions=1-100 filters=q20", 4_000);
+        assert_eq!(
+            freshness(Some(built_from), Some(built_from)),
+            Freshness::Fresh
+        );
+
+        // The cheapest thing to change, and the likeliest to change by accident: a different
+        // analysed-region set, which is part of the header.
+        let other_regions =
+            PileupIdentity::of_header(b"reference=A regions=1-200 filters=q20", 4_000);
+        assert_ne!(built_from.header, other_regions.header);
+        assert_eq!(
+            freshness(Some(built_from), Some(other_regions)),
+            Freshness::Rebuild("the pileup's header")
+        );
+        assert_eq!(
+            freshness(Some(built_from), None),
+            Freshness::Refused("the pileup it was built from, which is not here")
+        );
+
+        // The same pileup with records added under it — the header is unchanged and the count
+        // is not, which is exactly what the count is carried for.
+        let grown = PileupIdentity {
+            records: built_from.records + 1,
+            ..built_from
+        };
+        assert_eq!(
+            freshness(Some(built_from), Some(grown)),
+            Freshness::Rebuild("the pileup's record count")
+        );
+    }
+
+    /// **The check must not key on a modification time** (spec §6.1, §7.13), and this is what
+    /// says it does not: the census file is touched, re-opened, and names the same pileup — so
+    /// a run that copied its files, or one whose file system rewrote a timestamp, gets the same
+    /// answer it got before.
+    #[test]
+    fn touching_a_census_changes_nothing_about_which_pileup_it_names() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let path = dir.path().join("touched.census");
+        let identity = PileupIdentity::of_header(b"reference=A regions=1-100 filters=q20", 4_000);
+        write_census(
+            &every_corner(),
+            Some(identity),
+            &mut std::fs::File::create(&path).expect("a new file"),
+        )
+        .expect("a file accepts every write");
+
+        let before = std::fs::metadata(&path).expect("the file exists");
+        let (_, named) = open_census(&path).expect("this build's own file");
+
+        // Touch it: the same bytes, written again, so only the timestamp moves.
+        let bytes = std::fs::read(&path).expect("the file reads");
+        std::fs::write(&path, &bytes).expect("the file is writable");
+        let after = std::fs::metadata(&path).expect("the file exists");
+        assert_eq!(before.len(), after.len(), "the same bytes");
+
+        let (_, named_again) = open_census(&path).expect("this build's own file");
+        assert_eq!(named_again, named);
+        assert_eq!(named, Some(identity));
+        assert_eq!(freshness(named_again, Some(identity)), Freshness::Fresh);
     }
 
     /// A census with no tracts at all, and one with no ordinary positions — the two ends of the

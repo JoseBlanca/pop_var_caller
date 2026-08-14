@@ -105,7 +105,7 @@ Terms and digest outside the sections, since they are compared before anything l
 decodes from the slice; nothing is retained between calls, because there is no field to retain it in.
 *Depends:* B1. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §1.1a.
 
-☐ **B3 — the staleness check.** The census names the pileup by a digest of its header and its record
+✅ **B3 — the staleness check.** The census names the pileup by a digest of its header and its record
 count, never modification time; a mismatch rebuilds where the pileup is reachable and fails naming the
 field where it is not.
 *Depends:* B1. *Source:* [records spec](../spec/parameter_prepass_joint_records.md) §6.1.
