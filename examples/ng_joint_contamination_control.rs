@@ -39,8 +39,9 @@ use std::time::Instant;
 
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
-    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericEvidence, ObservedAllele,
-    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
+    AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
+    GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
+    SampleCensusEvidence, Section, SectionKey,
 };
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
@@ -130,7 +131,9 @@ fn main() {
             duplicated_positions: false,
             ..JointFitConfig::default()
         };
-        let fit = fit_jointly(&drawn.samples, &config).expect("a drawn cohort pools");
+        let mut cohort = CohortCensusEvidence::new(drawn.samples.clone())
+            .expect("a drawn cohort records one way");
+        let fit = fit_jointly(&mut cohort, &config).expect("a drawn cohort pools");
         println!(
             "  the fit: {} of positions booked mismapped against {planted} planted, error rate \
              {:.5} against {CLEAN}, {} passes, {:.0} s",
@@ -205,8 +208,10 @@ fn run(
         .iter()
         .map(|sample| fit.hom_excess[&sample.sample].value.get())
         .collect();
+    let mut cohort =
+        CohortCensusEvidence::new(samples.to_vec()).expect("a drawn cohort records one way");
     let estimates = fit_contamination(
-        samples,
+        &mut cohort,
         &DepthBinEdges::new(),
         &error,
         &excess,

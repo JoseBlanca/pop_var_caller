@@ -85,7 +85,7 @@ borrow from their neighbours.
 *Depends:* A2. *Source:* [arch records](../arch/parameter_prepass_joint_records.md) §2.2;
 [loci spec](../spec/parameter_prepass_joint_loci.md) §3.6.
 
-☐ **A4 — `fit_jointly` takes `&mut CohortCensusEvidence`.** The estimator stops holding whole record
+✅ **A4 — `fit_jointly` takes `&mut CohortCensusEvidence`.** The estimator stops holding whole record
 sets. **The fitted numbers must not move** on either cohort — this is a change of access, not of
 arithmetic.
 *Depends:* A3. *Source:* [arch fit](../arch/parameter_prepass_joint_fit.md) §2.1.

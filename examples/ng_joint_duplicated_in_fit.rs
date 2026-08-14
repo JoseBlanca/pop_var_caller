@@ -38,8 +38,9 @@ use std::time::Instant;
 
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
-    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericEvidence, ObservedAllele,
-    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
+    AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
+    GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
+    SampleCensusEvidence, Section, SectionKey,
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, fit_jointly,
@@ -146,7 +147,9 @@ fn main() {
                     },
                     ..JointFitConfig::default()
                 };
-                let fit = fit_jointly(&drawn.samples, &config).expect("a drawn cohort pools");
+                let mut cohort = CohortCensusEvidence::new(drawn.samples.clone())
+                    .expect("a drawn cohort records one way");
+                let fit = fit_jointly(&mut cohort, &config).expect("a drawn cohort pools");
                 let het: f64 = drawn
                     .samples
                     .iter()

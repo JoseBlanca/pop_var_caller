@@ -98,7 +98,7 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
-use super::census::{DepthCap, DepthCode, SampleCensusEvidence, SampleGenericSections};
+use super::census::{CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections};
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -281,31 +281,30 @@ impl std::fmt::Display for NotIdentifiedReason {
 /// then every position is treated as ordinary — which on real reads returns a floor rather
 /// than a measurement.
 pub fn fit_contamination(
-    cohort: &[SampleCensusEvidence],
+    cohort: &mut CohortCensusEvidence,
     edges: &DepthBinEdges,
     error_rate: &[f64],
     hom_excess: &[f64],
     noisy_posterior: &[f32],
     config: &ContaminationConfig,
 ) -> Vec<ContaminationEstimate> {
-    // The cap the counts were thinned to. Every sample agrees on it or the fit refused the
-    // cohort before reaching here.
+    // The cap the counts were thinned to. Every sample agrees on it or the cohort was refused
+    // before a section was read.
     let cap = cohort
-        .first()
-        .map_or(DepthCap::MAX, |sample| sample.terms.depth_cap);
-    let lent: Vec<SampleGenericSections<'_>> = cohort
-        .iter()
-        .map(|sample| sample.generic_sections())
-        .collect();
-    fit_contamination_over(
-        &lent,
-        cap,
-        edges,
-        error_rate,
-        hom_excess,
-        noisy_posterior,
-        config,
-    )
+        .terms()
+        .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+    let groups = cohort.read_groups().to_vec();
+    cohort.with_generic(&groups, |lent| {
+        fit_contamination_over(
+            lent,
+            cap,
+            edges,
+            error_rate,
+            hom_excess,
+            noisy_posterior,
+            config,
+        )
+    })
 }
 
 /// The same, over sections a caller has already been lent — **what the fit itself calls**, so
@@ -1076,7 +1075,7 @@ mod tests {
 
     use crate::ng::parameter_estimation::joint::census::{
         AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
-        PackedDepthCodes, ReadCap, RecordingTerms, Section, SectionKey,
+        PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
     };
     use crate::ng::parameter_estimation::joint::loci::{
         CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
@@ -1241,6 +1240,11 @@ mod tests {
             .collect()
     }
 
+    /// The drawn panel as the cohort this module's door takes.
+    fn as_cohort(panel: &[SampleCensusEvidence]) -> CohortCensusEvidence {
+        CohortCensusEvidence::new(panel.to_vec()).expect("a drawn panel records one way")
+    }
+
     fn alphas(estimates: &[ContaminationEstimate]) -> Vec<f64> {
         estimates
             .iter()
@@ -1271,7 +1275,7 @@ mod tests {
             OwnCoordinates::MaximisedFreely,
         ] {
             let alpha = alphas(&fit_contamination(
-                &panel,
+                &mut as_cohort(&panel),
                 &DepthBinEdges::new(),
                 &vec![0.002; samples],
                 &vec![0.0; samples],
@@ -1288,7 +1292,7 @@ mod tests {
             );
         }
         let estimates = fit_contamination(
-            &panel,
+            &mut as_cohort(&panel),
             &DepthBinEdges::new(),
             &vec![0.002; samples],
             &vec![0.0; samples],
@@ -1322,7 +1326,7 @@ mod tests {
         let samples = 40;
         let panel = structured_panel(samples, 12_000, 3.0, 4, 0.20, None, 0xA5A5_1234);
         let estimates = fit_contamination(
-            &panel,
+            &mut as_cohort(&panel),
             &DepthBinEdges::new(),
             &vec![0.002; samples],
             &vec![0.0; samples],

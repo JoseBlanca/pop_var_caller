@@ -41,8 +41,9 @@ use std::time::Instant;
 
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
-    AlleleObservation, DepthCap, DepthCode, DepthLadderDigest, GenericEvidence, ObservedAllele,
-    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
+    AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
+    GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
+    SampleCensusEvidence, Section, SectionKey,
 };
 use pop_var_caller::ng::parameter_estimation::joint::fit::{
     FrequencyDensity, JointFitConfig, StartingPoint, fit_jointly,
@@ -128,13 +129,17 @@ fn main() {
         );
         for &arm in &ARMS {
             let at = Instant::now();
-            let subset = &cohort.samples[..arm];
+            // The first `arm` samples as their own cohort. **Cloned**, because the drawn
+            // positions are held fixed across the arms and each arm fits its own prefix.
+            let subset = cohort.samples[..arm].to_vec();
+            let mut fitted_cohort =
+                CohortCensusEvidence::new(subset.clone()).expect("a drawn cohort records one way");
             let config = JointFitConfig {
                 quadrature_nodes: 12,
                 starting_points: StartingPoint::spanning_the_class_separation(),
                 ..JointFitConfig::default()
             };
-            let fit = fit_jointly(subset, &config).expect("a drawn cohort pools");
+            let fit = fit_jointly(&mut fitted_cohort, &config).expect("a drawn cohort pools");
             let drawn: f64 = cohort.heterozygous_per_sample[..arm].iter().sum::<f64>() / arm as f64;
             let fitted: f64 = subset
                 .iter()

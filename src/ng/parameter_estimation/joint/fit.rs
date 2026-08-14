@@ -39,7 +39,7 @@
 //! Each iteration cannot lower the likelihood, which is what expectation-maximisation gives
 //! and a coordinate climb over a non-concave surface does not.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rayon::prelude::*;
@@ -48,7 +48,9 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
-use super::census::{DepthCap, DepthCode, SampleCensusEvidence, SampleGenericSections};
+use super::census::{
+    CohortCensusEvidence, DepthCap, DepthCode, SampleGenericSections, TermsDisagreement,
+};
 use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination_over};
 
 // ---------------------------------------------------------------------
@@ -251,6 +253,13 @@ pub enum JointFitError {
     /// Samples that did not keep the same loci. **Refuses rather than averaging**, and runs
     /// before any arithmetic: a run that would fail on the fiftieth sample fails before the
     /// first likelihood evaluation.
+    ///
+    /// **Raised where the cohort is built, not here — 2026-08-14.**
+    /// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new) makes the check
+    /// before a single section is read, and a caller turns its refusal into this with `?`. The
+    /// variant keeps its name because
+    /// [`parameter_prepass_joint_loci.md`](../../../doc/devel/ng/spec/parameter_prepass_joint_loci.md)
+    /// specifies it.
     #[error("samples {first} and {second} disagree on {field}; they did not keep the same loci")]
     IdentityMismatch {
         first: String,
@@ -441,6 +450,23 @@ impl SampleAtPosition {
 /// The widest range of depths one stored code can stand for, plus room for a ladder someone
 /// later widens. The adopted ladder's widest recorded range is 76–97, which is twenty-two.
 const MAX_RECORDED_SPREAD: usize = 32;
+
+/// A cohort refused at the door, as the fit's own error.
+///
+/// **The check belongs to the census and the name belongs to the fit.**
+/// [`CohortCensusEvidence::new`](super::census::CohortCensusEvidence::new) compares the twelve
+/// recording terms before a section is decoded; the variant a caller sees is the one
+/// [`parameter_prepass_joint_loci.md`](../../../doc/devel/ng/spec/parameter_prepass_joint_loci.md)
+/// specifies.
+impl From<TermsDisagreement> for JointFitError {
+    fn from(refusal: TermsDisagreement) -> Self {
+        Self::IdentityMismatch {
+            first: refusal.first,
+            second: refusal.second,
+            field: refusal.field,
+        }
+    }
+}
 
 /// The cohort at one position.
 struct PositionEvidence {
@@ -1056,83 +1082,107 @@ fn tally_of(
 ///
 /// # Errors
 ///
-/// [`JointFitError::IdentityMismatch`] before any arithmetic, when two samples did not keep
-/// the same loci — the refusal [`loci`](super::loci) defines and this call enforces.
+/// [`JointFitError::NoSamples`] on an empty cohort and [`JointFitError::NotDiploid`] on a
+/// ploidy this estimator does not model. **The refusal for samples that did not record the same
+/// thing has already happened**: building a [`CohortCensusEvidence`] is what makes it, before a
+/// section is read.
 pub fn fit_jointly(
-    samples: &[SampleCensusEvidence],
+    cohort: &mut CohortCensusEvidence,
     config: &JointFitConfig,
 ) -> Result<JointFit, JointFitError> {
-    let first = samples.first().ok_or(JointFitError::NoSamples)?;
-    for other in &samples[1..] {
-        if let Some(field) = first.terms.first_disagreement(&other.terms) {
-            return Err(JointFitError::IdentityMismatch {
-                first: first.sample.clone(),
-                second: other.sample.clone(),
-                field,
-            });
-        }
-    }
+    let names: Vec<String> = cohort.sample_names().map(str::to_string).collect();
+    let first = names.first().ok_or(JointFitError::NoSamples)?.clone();
     if config.ploidy.get() != 2 {
         return Err(JointFitError::NotDiploid {
-            sample: first.sample.clone(),
+            sample: first,
             ploidy: config.ploidy.get(),
         });
     }
+    // **The cap every sample recorded under.** One number, because the cohort refused any panel
+    // whose samples disagree on it before a section was read.
+    let depth_cap = cohort
+        .terms()
+        .map_or(DepthCap::MAX, |terms| terms.depth_cap);
+    let groups: Vec<ReadGroupId> = cohort.read_groups().to_vec();
 
-    // **Every section the generic half needs, lent for the length of this call.** The estimator
-    // reads a position from every sample at once, so what it borrows is one row a sample; when
-    // the call returns, a file-backed census has nothing left decoded.
-    let lent: Vec<SampleGenericSections<'_>> = samples
-        .iter()
-        .map(|sample| sample.generic_sections())
-        .collect();
-
-    let groups: Vec<ReadGroupId> = lent
-        .iter()
-        .flat_map(|sections| sections.iter().map(|(group, _)| *group))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    // Which read group each sample's own groups are, in the order the cursor visits them.
-    let group_index: Vec<Vec<usize>> = lent
-        .iter()
-        .map(|sections| {
-            sections
+    // **Every section the generic half needs, lent for the length of one call.** The estimator
+    // reads a position from every sample at once, so what it borrows is one row a sample — and
+    // when this call returns, a file-backed census has nothing left decoded.
+    let (score, parameters, statistics, passes, converged, trace, contamination) = cohort
+        .with_generic(&groups, |lent| {
+            // Which read group each sample's own groups are, in the order the cursor visits them.
+            let group_index: Vec<Vec<usize>> = lent
                 .iter()
-                .map(|(id, _)| {
-                    groups
+                .map(|sections| {
+                    sections
                         .iter()
-                        .position(|g| g == id)
-                        .expect("every group came from this list")
+                        .map(|(id, _)| {
+                            groups
+                                .iter()
+                                .position(|g| g == id)
+                                .expect("every group came from this list")
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .collect();
+                .collect();
 
-    let depth_cap = depth_cap_of(samples);
+            // Each sample's own mean depth, read once from the codes: the centre of the prior a
+            // stored code's range is weighted with when the likelihood sums over it.
+            let coverage = EvidenceCursor::mean_depth(lent, &config.edges, depth_cap);
 
-    // Each sample's own mean depth, read once from the codes: the centre of the prior a
-    // stored code's range is weighted with when the likelihood sums over it.
-    let coverage = EvidenceCursor::mean_depth(&lent, &config.edges, depth_cap);
+            let mut best: Option<(f64, Parameters, Statistics, u32, bool, Vec<PassSummary>)> = None;
+            for start in &config.starting_points {
+                let (parameters, statistics, passes, converged, trace) = maximise(
+                    lent,
+                    depth_cap,
+                    config,
+                    &groups,
+                    &group_index,
+                    &coverage,
+                    start,
+                );
+                let score = statistics.log_likelihood;
+                if best.as_ref().is_none_or(|(current, ..)| score > *current) {
+                    best = Some((score, parameters, statistics, passes, converged, trace));
+                }
+            }
+            let (score, parameters, statistics, passes, converged, trace) =
+                best.expect("a run always has at least one starting point");
 
-    let mut best: Option<(f64, Parameters, Statistics, u32, bool, Vec<PassSummary>)> = None;
-    for start in &config.starting_points {
-        let (parameters, statistics, passes, converged, trace) = maximise(
-            &lent,
-            depth_cap,
-            config,
-            &groups,
-            &group_index,
-            &coverage,
-            start,
-        );
-        let score = statistics.log_likelihood;
-        if best.as_ref().is_none_or(|(current, ..)| score > *current) {
-            best = Some((score, parameters, statistics, passes, converged, trace));
-        }
-    }
-    let (score, parameters, mut statistics, passes, converged, trace) =
-        best.expect("a run always has at least one starting point");
+            // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
+            // the converged error rates and the converged homozygote excess, and nothing it produces
+            // feeds back into them — a sample's stray reads are a property of the tube it was in
+            // rather than of the population, so the density has no business being told about them.
+            // It runs here, inside the same call, so that the sections are lent once rather than
+            // twice.
+            let per_sample_error: Vec<f64> = (0..lent.len())
+                .map(|s| parameters.clean[group_index[s][0]])
+                .collect();
+            // **The mismapped positions are kept out of it.** A position where two stretches of
+            // genome pile up on one place puts a small share of unexpected reads into *every*
+            // sample, which is the contamination signature exactly; measured over 63 tomato
+            // accessions with those positions left in, the median accession came back 6.5%
+            // contaminated.
+            let contamination = fit_contamination_over(
+                lent,
+                depth_cap,
+                &config.edges,
+                &per_sample_error,
+                &parameters.hom_excess,
+                &statistics.noisy_posterior,
+                &config.contamination,
+            );
+            (
+                score,
+                parameters,
+                statistics,
+                passes,
+                converged,
+                trace,
+                contamination,
+            )
+        });
+    let mut statistics = statistics;
     let genotype_posterior = std::mem::take(&mut statistics.genotype_posterior);
 
     let observations = statistics.positions as u64;
@@ -1153,16 +1203,16 @@ pub fn fit_jointly(
             )
         })
         .collect();
-    let hom_excess = samples
+    let hom_excess = names
         .iter()
         .enumerate()
-        .map(|(s, sample)| {
+        .map(|(s, name)| {
             (
-                sample.sample.clone(),
+                name.clone(),
                 Estimate {
                     value: HomozygoteExcess::try_new(parameters.hom_excess[s])
                         .expect("the maximisation is confined to [0, 1]"),
-                    provenance: if samples.len() >= 2 {
+                    provenance: if names.len() >= 2 {
                         Provenance::FittedHere
                     } else {
                         Provenance::Defaulted
@@ -1172,12 +1222,12 @@ pub fn fit_jointly(
             )
         })
         .collect();
-    let rates = samples
+    let rates = names
         .iter()
         .enumerate()
-        .map(|(s, sample)| {
+        .map(|(s, name)| {
             (
-                sample.sample.clone(),
+                name.clone(),
                 Estimate {
                     value: SampleGenotypeRates {
                         heterozygous: statistics.heterozygous[s] / statistics.positions,
@@ -1192,32 +1242,7 @@ pub fn fit_jointly(
             )
         })
         .collect();
-    // **Contamination is fitted after the alternation, not inside it** (spec §3.4). It reads
-    // the converged error rates and the converged homozygote excess, and nothing it produces
-    // feeds back into them — a sample's stray reads are a property of the tube it was in
-    // rather than of the population, so the density has no business being told about them.
-    let per_sample_error: Vec<f64> = samples
-        .iter()
-        .enumerate()
-        .map(|(s, _)| parameters.clean[group_index[s][0]])
-        .collect();
-    // **The mismapped positions are kept out of it.** A position where two stretches of genome
-    // pile up on one place puts a small share of unexpected reads into *every* sample, which
-    // is the contamination signature exactly; measured over 63 tomato accessions with those
-    // positions left in, the median accession came back 6.5% contaminated.
-    let contamination = samples
-        .iter()
-        .map(|sample| sample.sample.clone())
-        .zip(fit_contamination_over(
-            &lent,
-            depth_cap,
-            &config.edges,
-            &per_sample_error,
-            &parameters.hom_excess,
-            &statistics.noisy_posterior,
-            &config.contamination,
-        ))
-        .collect();
+    let contamination = names.iter().cloned().zip(contamination).collect();
 
     Ok(JointFit {
         noise,
@@ -1342,19 +1367,6 @@ fn maximise(
         true,
     );
     (parameters, statistics, passes, converged, trace)
-}
-
-/// **The cap every sample in this cohort recorded under.**
-///
-/// Read from the first sample rather than passed in, because the recording-terms check has
-/// already refused a cohort whose samples disagree on it, and because it belongs to the
-/// evidence rather than to the run: it is what turns a stored depth into the units the allele
-/// counts beside it were thinned into. An empty cohort answers the widest cap a one-byte
-/// count can hold, which clamps nothing because there is nothing to clamp.
-fn depth_cap_of(samples: &[SampleCensusEvidence]) -> DepthCap {
-    samples
-        .first()
-        .map_or(DepthCap::MAX, |sample| sample.terms.depth_cap)
 }
 
 /// One pass over every position: the posteriors, and every count the maximisations need.
@@ -2669,7 +2681,7 @@ mod tests {
 
     use crate::ng::parameter_estimation::joint::census::{
         AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
-        PackedDepthCodes, ReadCap, RecordingTerms, Section, SectionKey,
+        PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
     };
     use crate::ng::parameter_estimation::joint::loci::{
         CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
@@ -2759,6 +2771,12 @@ mod tests {
             }
             count
         }
+    }
+
+    /// The drawn samples as the cohort the fit takes. **Cloned**, because a drawn cohort is
+    /// refitted several times in one test at different sample counts.
+    fn as_cohort(samples: &[SampleCensusEvidence]) -> CohortCensusEvidence {
+        CohortCensusEvidence::new(samples.to_vec()).expect("a drawn cohort records one way")
     }
 
     struct DrawnCohort {
@@ -2974,7 +2992,7 @@ mod tests {
             }],
             ..JointFitConfig::default()
         };
-        let fit = fit_jointly(&cohort.samples, &config).expect("the cohort pools");
+        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
 
         eprintln!(
             "clean {:.5} (drawn {:.5})  noisy {:.4} (drawn {:.4})  share {:.4} (drawn {:.4})",
@@ -3090,7 +3108,8 @@ mod tests {
                 duplicated_positions: class,
                 ..JointFitConfig::default()
             };
-            let fit = fit_jointly(&cohort.samples, &config).expect("the cohort pools");
+            let fit =
+                fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
             let het: f64 = cohort
                 .samples
                 .iter()
@@ -3171,7 +3190,7 @@ mod tests {
             }],
             ..JointFitConfig::default()
         };
-        let fit = fit_jointly(&cohort.samples, &config).expect("the cohort pools");
+        let fit = fit_jointly(&mut as_cohort(&cohort.samples), &config).expect("the cohort pools");
         for sample in cohort.samples.iter() {
             let excess = fit.hom_excess[&sample.sample].value.get();
             // **Ten samples over three thousand positions is a small cohort and the invented
@@ -3216,7 +3235,7 @@ mod tests {
         };
         let cohort = draw_cohort(1, 3_000, 20.0, (0.002, 0.06, 0.02), density, 0.0, 99);
         let fit = fit_jointly(
-            &cohort.samples,
+            &mut as_cohort(&cohort.samples),
             &JointFitConfig {
                 quadrature_nodes: 12,
                 max_passes: 30,
@@ -3255,9 +3274,11 @@ mod tests {
         };
         let mut cohort = draw_cohort(3, 50, 4.0, (0.002, 0.05, 0.01), density, 0.0, 7);
         cohort.samples[1].terms.depth_cap = DepthCap::new(60);
-        let error = fit_jointly(&cohort.samples, &JointFitConfig::default())
+        // **The refusal has moved to the door.** Building the cohort is what makes the check,
+        // before a section is read, and its refusal becomes the fit's own error unchanged.
+        let refusal = CohortCensusEvidence::new(cohort.samples)
             .expect_err("the samples did not record the same evidence");
-        match error {
+        match JointFitError::from(refusal) {
             JointFitError::IdentityMismatch { field, .. } => {
                 assert_eq!(field, "per-position depth cap")
             }

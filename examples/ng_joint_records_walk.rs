@@ -53,7 +53,7 @@ use pop_var_caller::ng::locus_generation::{
 };
 use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use pop_var_caller::ng::parameter_estimation::joint::census::{
-    CensusWriter, DepthCap, DepthCode, ReadCap, SampleCensusEvidence,
+    CensusWriter, CohortCensusEvidence, DepthCap, DepthCode, ReadCap, SampleCensusEvidence,
 };
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
@@ -239,6 +239,10 @@ fn main() {
         cohort.len()
     );
 
+    // **From here on the samples are one cohort.** Its own door makes the same check the loop
+    // above reports on, so it cannot refuse what that loop said was fine.
+    let mut cohort = CohortCensusEvidence::new(cohort).expect("every sample recorded one way");
+
     if cohort.len() >= 8 {
         structure(&mut cohort, kept.generic().len());
     } else {
@@ -279,7 +283,7 @@ fn main() {
     // half needs each sample's homozygote excess from it and gives nothing back, so re-fitting
     // to obtain that would be 883 seconds of the tomato cohort's time spent twice.
     if let Some(fit) = fit_the_cohort(&mut cohort, coverage_odds, kept.generic(), &contigs) {
-        fit_the_tracts(&cohort, &kept, &contigs, &fit);
+        fit_the_tracts(&mut cohort, &kept, &contigs, &fit);
     }
 
     println!(
@@ -300,43 +304,49 @@ fn main() {
 /// onto one rung; what still collapses is the *allele counts*, which are thinned to the
 /// per-position cap. A position above that cap has an exact depth and a thinned count beside
 /// it, and the fraction it reports is the thinned one.
-fn depth_ladder_occupancy(cohort: &mut [SampleCensusEvidence]) {
+fn depth_ladder_occupancy(cohort: &mut CohortCensusEvidence) {
     let edges = DepthBinEdges::for_census();
     println!("\n--- where the positions sit on the depth ladder ---");
     println!(
         "  {:<24}{:>14}{:>18}{:>16}{:>12}",
         "sample", "exact (0–8)", "a range (9+)", "above the cap", "no reads"
     );
-    for sample in cohort {
-        let cap = sample.terms.depth_cap.get();
-        let groups = sample.read_groups();
-        // **The counting happens inside the call**, because that is how long the sections are
-        // lent for: the census hands them over, the closure reads them, and it takes them back.
-        let (exact, ranged, capped, unwalked) = sample.with_generic(&groups, |sections| {
-            let (mut exact, mut ranged, mut capped, mut unwalked) = (0_u64, 0_u64, 0_u64, 0_u64);
-            for records in sections {
-                for code in records.depth().iter() {
-                    match code {
-                        DepthCode::NeverWalked => unwalked += 1,
-                        DepthCode::Binned(bin) => {
-                            let range = edges.depth_range(bin);
-                            if *range.start() > cap {
-                                capped += 1;
-                            } else if range.start() == range.end() {
-                                exact += 1;
-                            } else {
-                                ranged += 1;
+    let names: Vec<String> = cohort.sample_names().map(str::to_string).collect();
+    let cap = cohort.terms().map_or(0, |terms| terms.depth_cap.get());
+    let groups = cohort.read_groups().to_vec();
+    // **The counting happens inside the call**, because that is how long the sections are lent
+    // for: the census hands them over, the closure reads them, and it takes them back.
+    let rows = cohort.with_generic(&groups, |lent| {
+        lent.iter()
+            .map(|sections| {
+                let (mut exact, mut ranged, mut capped, mut unwalked) =
+                    (0_u64, 0_u64, 0_u64, 0_u64);
+                for (_, records) in sections {
+                    for code in records.depth().iter() {
+                        match code {
+                            DepthCode::NeverWalked => unwalked += 1,
+                            DepthCode::Binned(bin) => {
+                                let range = edges.depth_range(bin);
+                                if *range.start() > cap {
+                                    capped += 1;
+                                } else if range.start() == range.end() {
+                                    exact += 1;
+                                } else {
+                                    ranged += 1;
+                                }
                             }
                         }
                     }
                 }
-            }
-            (exact, ranged, capped, unwalked)
-        });
+                (exact, ranged, capped, unwalked)
+            })
+            .collect::<Vec<_>>()
+    });
+    for (name, (exact, ranged, capped, unwalked)) in names.iter().zip(rows) {
         let total = (exact + ranged + capped).max(1) as f64;
         println!(
             "  {:<24}{:>13.1}%{:>17.1}%{:>13.1}%{:>12}",
-            sample.sample,
+            name,
             100.0 * exact as f64 / total,
             100.0 * ranged as f64 / total,
             100.0 * capped as f64 / total,
@@ -353,7 +363,7 @@ fn depth_ladder_occupancy(cohort: &mut [SampleCensusEvidence]) {
 /// heterozygosity comes out at with the count of positions that actually carried a read beside
 /// it.
 fn fit_the_cohort(
-    cohort: &mut [SampleCensusEvidence],
+    cohort: &mut CohortCensusEvidence,
     coverage_odds: Vec<Arc<[f32]>>,
     kept: &[pop_var_caller::ng::types::GenomePosition],
     contigs: &ContigList,
@@ -379,7 +389,7 @@ fn fit_the_cohort(
             .unwrap_or(200),
         ..JointFitConfig::default()
     };
-    let fit = match fit_jointly(&*cohort, &config) {
+    let fit = match fit_jointly(cohort, &config) {
         Ok(fit) => fit,
         Err(error) => {
             println!("  refused: {error}");
@@ -469,48 +479,38 @@ fn fit_the_cohort(
         // a position called heterozygous at a read share nothing like a half is a different
         // finding from one called heterozygous at a half.
         let edges = DepthBinEdges::for_census();
-        let non_reference: Vec<Vec<u32>> = cohort
-            .iter_mut()
-            .map(|sample| {
-                let groups = sample.read_groups();
-                sample.with_generic(&groups, |sections| {
-                    let mut counts = vec![0_u32; kept.len()];
-                    for group in sections {
-                        for observation in group.non_reference() {
-                            counts[observation.index as usize] += u32::from(observation.reads);
+        // Each sample's non-reference reads and depth at each kept position, read while the
+        // sections are lent — one call, since the closure sees the whole cohort at once.
+        let groups = cohort.read_groups().to_vec();
+        let (non_reference, depths) = cohort.with_generic(&groups, |lent| {
+            let mut non_reference: Vec<Vec<u32>> = Vec::with_capacity(lent.len());
+            let mut depths: Vec<Vec<u32>> = Vec::with_capacity(lent.len());
+            for sections in lent {
+                let mut counts = vec![0_u32; kept.len()];
+                let mut depth = vec![0_u32; kept.len()];
+                for (_, group) in sections {
+                    for observation in group.non_reference() {
+                        counts[observation.index as usize] += u32::from(observation.reads);
+                    }
+                    for (index, code) in group.depth().iter().enumerate() {
+                        if let DepthCode::Binned(bin) = code {
+                            let range = edges.depth_range(bin);
+                            depth[index] += (*range.start() + *range.end()) / 2;
                         }
                     }
-                    counts
-                })
-            })
-            .collect();
-
-        // Each sample's depth at each kept position, read while its sections are lent.
-        let depths: Vec<Vec<u32>> = cohort
-            .iter_mut()
-            .map(|sample| {
-                let groups = sample.read_groups();
-                sample.with_generic(&groups, |sections| {
-                    let mut depths = vec![0_u32; kept.len()];
-                    for group in sections {
-                        for (index, code) in group.depth().iter().enumerate() {
-                            if let DepthCode::Binned(bin) = code {
-                                let range = edges.depth_range(bin);
-                                depths[index] += (*range.start() + *range.end()) / 2;
-                            }
-                        }
-                    }
-                    depths
-                })
-            })
-            .collect();
+                }
+                non_reference.push(counts);
+                depths.push(depth);
+            }
+            (non_reference, depths)
+        });
 
         let mut out = String::new();
         out.push_str("contig\tposition");
-        for sample in cohort.iter() {
+        for name in cohort.sample_names() {
             out.push_str(&format!(
                 "\t{0}_het\t{0}_homalt\t{0}_depth\t{0}_nonref",
-                sample.sample
+                name
             ));
         }
         out.push('\n');
@@ -603,16 +603,13 @@ fn fit_the_cohort(
         "\n  {condemned} of {} positions are more likely mismapped than not",
         fit.noisy_posterior.len()
     );
-    let error: Vec<f64> = cohort
-        .iter()
-        .map(|sample| {
-            let group = *sample.read_groups().first().expect("a read group");
-            fit.noise[&group].value.clean
-        })
+    let group = *cohort.read_groups().first().expect("a read group");
+    let error: Vec<f64> = (0..cohort.len())
+        .map(|_| fit.noise[&group].value.clean)
         .collect();
     let excess: Vec<f64> = cohort
-        .iter()
-        .map(|sample| fit.hom_excess[&sample.sample].value.get())
+        .sample_names()
+        .map(|name| fit.hom_excess[name].value.get())
         .collect();
     println!(
         "\n  {:<44}{:>10}{:>10}{:>10}{:>10}",
@@ -632,7 +629,7 @@ fn fit_the_cohort(
                 ..ContaminationConfig::default()
             };
             let estimates = fit_contamination(
-                &*cohort,
+                cohort,
                 &config.edges,
                 &error,
                 &excess,
@@ -694,7 +691,7 @@ fn fit_the_cohort(
 /// a cohort of sixty-three single-read-group samples would otherwise ask 189 numbers of a
 /// stratum holding a few dozen tracts.
 fn fit_the_tracts(
-    cohort: &[SampleCensusEvidence],
+    cohort: &mut CohortCensusEvidence,
     kept: &CensusLoci,
     contigs: &ContigList,
     fit: &JointFit,
@@ -718,8 +715,8 @@ fn fit_the_tracts(
     // this thin can afford, and which was used is printed rather than assumed.
     let per_read_group = std::env::var("SLIPPAGE_PER_READ_GROUP").is_ok_and(|v| v == "1");
     let mut slippage_group_of: BTreeMap<_, u32> = BTreeMap::new();
-    for sample in cohort {
-        for group in sample.read_groups() {
+    for group in cohort.read_groups().to_vec() {
+        {
             let next = if per_read_group {
                 slippage_group_of.len() as u32
             } else {
@@ -743,10 +740,10 @@ fn fit_the_tracts(
     );
 
     let homozygote_excess: Vec<f64> = cohort
-        .iter()
-        .map(|sample| {
+        .sample_names()
+        .map(|name| {
             fit.hom_excess
-                .get(&sample.sample)
+                .get(name)
                 .map_or(0.0, |estimate| estimate.value.get())
         })
         .collect();
@@ -1131,7 +1128,7 @@ const MIN_SAMPLES_WITH_DATA: usize = 8;
 /// divisor blows up.
 const MIN_FREQUENCY: f64 = 0.05;
 
-fn structure(cohort: &mut [SampleCensusEvidence], positions: usize) {
+fn structure(cohort: &mut CohortCensusEvidence, positions: usize) {
     println!("\n--- how far apart the samples are ---");
     let started = Instant::now();
     let markers = markers(cohort, positions);
@@ -1178,6 +1175,7 @@ fn structure(cohort: &mut [SampleCensusEvidence], positions: usize) {
 
     // Which samples sit where, so a split that is one accession against the rest is visible
     // as such rather than reported as divergence.
+    let names: Vec<String> = cohort.sample_names().map(str::to_string).collect();
     let mut order: Vec<usize> = (0..cohort.len()).collect();
     order.sort_by(|&a, &b| {
         measured.axis1[a]
@@ -1188,7 +1186,7 @@ fn structure(cohort: &mut [SampleCensusEvidence], positions: usize) {
     for chunk in order.chunks(4) {
         let line: Vec<String> = chunk
             .iter()
-            .map(|&s| format!("{} {:+.3}", cohort[s].sample, measured.axis1[s]))
+            .map(|&s| format!("{} {:+.3}", names[s], measured.axis1[s]))
             .collect();
         println!("    {}", line.join("   "));
     }
@@ -1200,7 +1198,7 @@ fn structure(cohort: &mut [SampleCensusEvidence], positions: usize) {
 }
 
 /// The positions worth decomposing on, with each sample's reads at them.
-fn markers(cohort: &mut [SampleCensusEvidence], positions: usize) -> Vec<Marker> {
+fn markers(cohort: &mut CohortCensusEvidence, positions: usize) -> Vec<Marker> {
     let samples = cohort.len();
     // Per position, each sample's four allele counts. Built one position at a time would be
     // a binary search per sample per position; instead each sample's sparse list is swept
@@ -1210,17 +1208,17 @@ fn markers(cohort: &mut [SampleCensusEvidence], positions: usize) -> Vec<Marker>
     let mut per_sample_depth: Vec<Vec<u16>> = vec![vec![0; positions]; samples];
 
     // First sweep: which non-reference allele the cohort carries at each position.
-    for records in cohort.iter_mut() {
-        let groups = records.read_groups();
-        records.with_generic(&groups, |sections| {
-            for group in sections {
+    let groups = cohort.read_groups().to_vec();
+    cohort.with_generic(&groups, |lent| {
+        for sections in lent {
+            for (_, group) in sections {
                 for observation in group.non_reference() {
                     alt_counts[observation.index as usize][observation.allele.code() as usize] +=
                         u32::from(observation.reads);
                 }
             }
-        });
-    }
+        }
+    });
     let major: Vec<u8> = alt_counts
         .iter()
         .map(|counts| {
@@ -1234,10 +1232,9 @@ fn markers(cohort: &mut [SampleCensusEvidence], positions: usize) -> Vec<Marker>
         .collect();
 
     // Second sweep: each sample's reads on that allele, and its depth.
-    for (s, records) in cohort.iter_mut().enumerate() {
-        let groups = records.read_groups();
-        records.with_generic(&groups, |sections| {
-            for group in sections {
+    cohort.with_generic(&groups, |lent| {
+        for (s, sections) in lent.iter().enumerate() {
+            for (_, group) in sections {
                 for (index, code) in group.depth().iter().enumerate() {
                     if let DepthCode::Binned(bin) = code {
                         // The stored code is a bin, and the fit reads it as one. A bin's lower
@@ -1255,8 +1252,8 @@ fn markers(cohort: &mut [SampleCensusEvidence], positions: usize) -> Vec<Marker>
                     }
                 }
             }
-        });
-    }
+        }
+    });
 
     let mut markers = Vec::new();
     for index in 0..positions {
