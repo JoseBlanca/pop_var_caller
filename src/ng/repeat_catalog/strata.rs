@@ -42,6 +42,17 @@ impl StratumCounts {
     pub fn total(&self) -> u64 {
         self.counts.values().sum()
     }
+
+    /// The counts a census file wrote down, read back.
+    ///
+    /// **The inverse of [`iter_sorted`](Self::iter_sorted) and nothing else.** Counting is what
+    /// builds these; this exists so a set of counts that was counted can survive a round trip
+    /// through bytes without being recounted from loci the file does not carry.
+    pub fn from_counted(entries: impl IntoIterator<Item = ((u8, u64), u64)>) -> Self {
+        Self {
+            counts: entries.into_iter().collect(),
+        }
+    }
 }
 
 /// Up to `cap` loci from each stratum: the ones whose hash is lowest.

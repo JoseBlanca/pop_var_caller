@@ -95,6 +95,19 @@ impl ObservedAllele {
             Self::Other => 4,
         }
     }
+
+    /// The allele a stored code stands for — `None` for a code no allele has, which is what a
+    /// census file written by something else looks like.
+    pub fn of_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::A),
+            1 => Some(Self::C),
+            2 => Some(Self::G),
+            3 => Some(Self::T),
+            4 => Some(Self::Other),
+            _ => None,
+        }
+    }
 }
 
 /// A depth, or the one state a depth cannot express.
@@ -242,6 +255,23 @@ impl PackedDepthCodes {
     /// The packed bytes — 1.25 MB at two million positions.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bits
+    }
+
+    /// The array a census file wrote down, read back.
+    ///
+    /// # Panics
+    ///
+    /// When the bytes are not the number `len` entries at five bits each need. A short array
+    /// would read a position off the end of the buffer, and a long one means the writer and the
+    /// reader disagree about the encoding — neither has a symptom in the values.
+    pub fn from_bytes(bits: Vec<u8>, len: usize) -> Self {
+        assert_eq!(
+            bits.len(),
+            len.saturating_mul(DEPTH_CODE_BITS as usize).div_ceil(8),
+            "{len} depth codes at {DEPTH_CODE_BITS} bits each are not {} bytes",
+            bits.len()
+        );
+        Self { bits, len }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = DepthCode> + '_ {
@@ -392,6 +422,16 @@ impl OffsetCounts {
         self.counts[(clamped + RECORDED_OFFSET_RANGE) as usize]
     }
 
+    /// The buckets themselves, `-4 … +4` in order — for the codec that writes them.
+    pub fn counts(&self) -> &[u16; OFFSET_BUCKETS] {
+        &self.counts
+    }
+
+    /// The buckets a census file wrote down, read back.
+    pub fn from_counts(counts: [u16; OFFSET_BUCKETS]) -> Self {
+        Self { counts }
+    }
+
     /// Reads that crossed the tract, whatever length they reported.
     pub fn total(&self) -> u32 {
         self.counts.iter().map(|c| u32::from(*c)).sum()
@@ -524,6 +564,22 @@ impl WalkedBits {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bits
     }
+
+    /// The bits a census file wrote down, read back.
+    ///
+    /// # Panics
+    ///
+    /// When the bytes are not the number `len` loci need — see
+    /// [`PackedDepthCodes::from_bytes`].
+    pub fn from_bytes(bits: Vec<u8>, len: usize) -> Self {
+        assert_eq!(
+            bits.len(),
+            len.div_ceil(8),
+            "{len} loci at one bit each are not {} bytes",
+            bits.len()
+        );
+        Self { bits, len }
+    }
 }
 
 /// One read group's tracts **for one stratum** — the smallest piece of the STR half anything
@@ -570,6 +626,46 @@ impl SsrEvidence {
             bases_compared: 0,
             guard: Vec::new(),
             differences: Vec::new(),
+        }
+    }
+
+    /// A section a census file wrote down, read back.
+    ///
+    /// # Panics
+    ///
+    /// When the offsets and the walked bits are not the same length, or when an entry names a
+    /// tract this stratum does not have. Both leave a consumer reading one tract's evidence at
+    /// another's, and neither has a symptom.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every field of the section, and a struct to bundle them would be the section"
+    )]
+    pub fn from_parts(
+        offsets: Vec<OffsetCounts>,
+        covering_not_crossing: u64,
+        walked: WalkedBits,
+        bases_compared: u64,
+        guard: Vec<GuardObservation>,
+        differences: Vec<TractDifference>,
+    ) -> Self {
+        assert_eq!(
+            offsets.len(),
+            walked.len(),
+            "a section's offsets and its walked bits count different tracts"
+        );
+        let loci = offsets.len() as u32;
+        assert!(
+            guard.iter().all(|entry| entry.locus < loci)
+                && differences.iter().all(|entry| entry.locus < loci),
+            "an entry names a tract this stratum does not hold"
+        );
+        Self {
+            offsets,
+            covering_not_crossing,
+            walked,
+            bases_compared,
+            guard,
+            differences,
         }
     }
 
@@ -778,6 +874,115 @@ impl DepthLadderDigest {
     }
 }
 
+/// The seven selection values as a census file carries them: **one digest a field, with the
+/// field's name beside it**.
+///
+/// **A table and not one digest over the whole**, because a mismatch has to be *named*: every
+/// one of these fails the same way, silently, and "the terms differ" is not something anyone can
+/// act on. **And digests rather than the values**, because [`SelectionTerms`] holds
+/// `StrRepeatCriteria` and `ScanParams` — two other modules' configuration, twenty-odd scalars
+/// between them — and their only use here is equality. A codec over the values would have to
+/// track every field either type ever grows, and a field it failed to track would drop out of
+/// the comparison silently, which is the one failure this whole check exists to prevent
+/// (`arch/parameter_prepass_joint_records.md` §2.2).
+///
+/// **What it gives up, deliberately: a file can say *whether* it matches and not *what it was
+/// built at*.** The seven values are compared and never read, so nothing is lost to a program;
+/// a person wanting to know a run's seed reads it from the run.
+///
+/// **How a field is digested, and the direction it fails in.** The two configuration values are
+/// hashed through their `Debug` rendering, so a field added anywhere inside them changes the
+/// digest without anyone remembering to come back here. The cost is that a changed `Debug` impl
+/// reads as changed settings — which refuses a pooling rather than allowing a wrong one, and is
+/// the direction to fail in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectionTermsDigest {
+    /// In the order [`SelectionTerms::first_disagreement`] checks them, and named as it names
+    /// them, so the sentence a mismatch produces is the same one it always was.
+    fields: Vec<(&'static str, [u8; 16])>,
+}
+
+/// The seven, in the order [`SelectionTerms::first_disagreement`] checks them and under the
+/// names it gives them. **One list, so the writer, the reader and the refusal cannot drift.**
+pub const SELECTION_FIELDS: [&str; 7] = [
+    "selection seed",
+    "reference digest",
+    "analysed region set",
+    "repeat catalog build settings",
+    "STR routing criteria",
+    "generic target position count",
+    "STR per-stratum cap",
+];
+
+impl SelectionTermsDigest {
+    pub fn of(terms: &SelectionTerms) -> Self {
+        // **Destructured without `..` on purpose.** A value added to `SelectionTerms` stops this
+        // compiling rather than quietly going undigested, and a value that goes undigested lets
+        // two samples asked for different loci be pooled without a word.
+        let SelectionTerms {
+            seed,
+            reference,
+            analysed_regions,
+            catalog_built_under,
+            ssr_criteria,
+            generic_target,
+            ssr_cap,
+        } = terms;
+        let digests = [
+            digest_of(&seed.to_le_bytes()),
+            digest_of(&reference.0),
+            digest_of(&analysed_regions.0),
+            digest_of(format!("{catalog_built_under:?}").as_bytes()),
+            digest_of(format!("{ssr_criteria:?}").as_bytes()),
+            digest_of(&generic_target.to_le_bytes()),
+            digest_of(&(*ssr_cap as u64).to_le_bytes()),
+        ];
+        Self {
+            fields: SELECTION_FIELDS.into_iter().zip(digests).collect(),
+        }
+    }
+
+    /// Which selection value two samples first disagree on — `None` when they may be pooled.
+    pub fn first_disagreement(&self, other: &Self) -> Option<&'static str> {
+        self.fields
+            .iter()
+            .zip(&other.fields)
+            .find(|(mine, theirs)| mine != theirs)
+            .map(|(mine, _)| mine.0)
+    }
+
+    /// The table itself, for the codec that writes it and the one that reads it back.
+    pub fn fields(&self) -> &[(&'static str, [u8; 16])] {
+        &self.fields
+    }
+
+    /// A table read back from a census file.
+    ///
+    /// # Panics
+    ///
+    /// When a name is not one this build knows, or when the names do not arrive in this
+    /// build's own order — either means the file was written by a build whose selection terms
+    /// are not these, and comparing the two tables field by field would compare different
+    /// fields.
+    pub fn from_fields(fields: Vec<(&'static str, [u8; 16])>) -> Self {
+        assert!(
+            fields.len() == SELECTION_FIELDS.len()
+                && fields
+                    .iter()
+                    .zip(SELECTION_FIELDS)
+                    .all(|((read, _), mine)| *read == mine),
+            "the selection values in this file are not the ones this build compares"
+        );
+        Self { fields }
+    }
+}
+
+fn digest_of(bytes: &[u8]) -> [u8; 16] {
+    let mut hasher = Md5::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
 /// The twelve values the fit refuses to pool across.
 ///
 /// Seven say which loci were **asked for** ([`SelectionTerms`]), one says which came
@@ -786,7 +991,10 @@ impl DepthLadderDigest {
 /// pass while two samples' rows meant different things.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordingTerms {
-    pub selection: SelectionTerms,
+    /// **Digested rather than held — 2026-08-14.** Their only use is a named equality, and a
+    /// census file has to carry them; see [`SelectionTermsDigest`] for what that buys and what
+    /// it gives up.
+    pub selection: SelectionTermsDigest,
     pub kept_loci: CensusLociDigest,
     /// Per stratum, how many loci the analysed regions hold against how many were kept.
     /// Anything pooled across strata is biased without it and silently so.
@@ -1369,6 +1577,21 @@ impl CohortCensusEvidence {
     }
 }
 
+/// Why a census could not be written or read.
+///
+/// **The guard threshold is not in here.** A locus over one non-whole-repeat read in ten is
+/// well-formed data the parameters fit should decline to fit (spec §3.3); encoding it as a write
+/// failure would make a property of the sample look like a property of the file.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum CensusError {
+    /// The stream is not a census, or is a version this build does not read.
+    #[error("the stream is not a census, or is of a version this build does not read")]
+    Malformed,
+    #[error("i/o while reading or writing a census")]
+    Io(#[from] std::io::Error),
+}
+
 // ---------------------------------------------------------------------
 // Filling the census during the walk
 // ---------------------------------------------------------------------
@@ -1884,7 +2107,7 @@ impl CensusWriter {
         SampleCensusEvidence::resident(
             self.sample,
             RecordingTerms {
-                selection: self.terms,
+                selection: SelectionTermsDigest::of(&self.terms),
                 kept_loci: self.digester.finish(),
                 ssr_stratum_counts: self.stratum_counts,
                 read_cap: self.read_cap,
@@ -2471,7 +2694,7 @@ mod tests {
 
     fn terms() -> RecordingTerms {
         RecordingTerms {
-            selection: selection_terms(),
+            selection: SelectionTermsDigest::of(&selection_terms()),
             kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: StratumCounts::default(),
             read_cap: ReadCap(100),
@@ -2538,12 +2761,26 @@ mod tests {
         assert_eq!(base.first_disagreement(&base.clone()), None);
     }
 
+    /// **The selection travels as a digest a field, and a mismatch is still named** — which is
+    /// the whole reason it is a table rather than one digest over the seven.
     #[test]
     fn a_selection_difference_is_named_by_the_selection_rather_than_swallowed() {
         let base = terms();
+        let mut moved = selection_terms();
+        moved.seed += 1;
         let mut other = base.clone();
-        other.selection.seed += 1;
+        other.selection = SelectionTermsDigest::of(&moved);
         assert_eq!(base.first_disagreement(&other), Some("selection seed"));
+
+        let mut widened = selection_terms();
+        widened.generic_target += 1;
+        let mut later = base.clone();
+        later.selection = SelectionTermsDigest::of(&widened);
+        assert_eq!(
+            base.first_disagreement(&later),
+            Some("generic target position count"),
+            "a field further down the list is named as itself, not as the first one"
+        );
     }
 
     /// **The one value that says what a run *produced* rather than what it was asked for**,

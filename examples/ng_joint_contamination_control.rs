@@ -41,7 +41,7 @@ use pop_var_caller::ng::parameter_estimation::generic::depth_bins::DepthBinEdges
 use pop_var_caller::ng::parameter_estimation::joint::census::{
     AlleleObservation, CohortCensusEvidence, DepthCap, DepthCode, DepthLadderDigest,
     GenericEvidence, ObservedAllele, PackedDepthCodes, ReadCap, RecordingTerms,
-    SampleCensusEvidence, Section, SectionKey,
+    SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest,
 };
 use pop_var_caller::ng::parameter_estimation::joint::contamination::{
     ContaminationConfig, ContaminationEstimate, OwnCoordinates, fit_contamination,
@@ -365,7 +365,7 @@ fn draw(
     }
 
     let terms = RecordingTerms {
-        selection: SelectionTerms {
+        selection: SelectionTermsDigest::of(&SelectionTerms {
             seed,
             reference: ReferenceDigest([7; 16]),
             analysed_regions: RegionSetDigest([9; 16]),
@@ -377,7 +377,7 @@ fn draw(
             ssr_criteria: StrRepeatCriteria::default(),
             generic_target: positions as u64,
             ssr_cap: 1_000,
-        },
+        }),
         kept_loci: CensusLociDigester::new().finish(),
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(1_000),

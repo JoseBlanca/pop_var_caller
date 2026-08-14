@@ -95,7 +95,7 @@ arithmetic.
 
 ### Milestone B — the file
 
-☐ **B1 — the layout and its directory.** A header carrying the twelve recording terms, the kept-loci
+✅ **B1 — the layout and its directory.** A header carrying the twelve recording terms, the kept-loci
 digest and the pileup's identity; then a directory of `SectionKey → ByteExtent`; then the sections.
 Terms and digest outside the sections, since they are compared before anything large is decoded.
 **Own commit, do not bundle**, with a round-trip over every corner state.

@@ -780,6 +780,21 @@ impl CensusLociDigest {
     pub fn blocks(&self) -> &[BlockDigest] {
         &self.per_block
     }
+
+    /// The digest of every kept locus in one value — what two samples compare first, before
+    /// the blocks say *where* they differ.
+    pub fn whole(&self) -> [u8; 16] {
+        self.whole
+    }
+
+    /// A digest read back from a census file.
+    ///
+    /// **Not a way to make one up.** The only honest source is
+    /// [`CensusLociDigester::finish`], fed one call per kept locus; this exists so a value
+    /// that was made that way can survive a round trip through bytes.
+    pub fn from_parts(whole: [u8; 16], per_block: Vec<BlockDigest>) -> Self {
+        Self { whole, per_block }
+    }
 }
 
 // ---------------------------------------------------------------------

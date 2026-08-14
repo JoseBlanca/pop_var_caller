@@ -2682,6 +2682,7 @@ mod tests {
     use crate::ng::parameter_estimation::joint::census::{
         AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
         PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
+        SelectionTermsDigest,
     };
     use crate::ng::parameter_estimation::joint::loci::{
         CatalogBuildSettings, CensusLociDigester, ReferenceDigest, RegionSetDigest, SelectionTerms,
@@ -2914,7 +2915,7 @@ mod tests {
         }
 
         let terms = RecordingTerms {
-            selection: selection_terms(),
+            selection: SelectionTermsDigest::of(&selection_terms()),
             kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(100),

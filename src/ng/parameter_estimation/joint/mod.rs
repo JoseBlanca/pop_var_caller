@@ -23,6 +23,7 @@
 //! so a run may drop the ordinary-position records before it reads a single tract.
 
 pub mod census;
+pub mod census_file;
 pub mod contamination;
 pub mod fit;
 pub mod loci;
