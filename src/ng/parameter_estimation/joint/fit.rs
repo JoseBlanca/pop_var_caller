@@ -48,7 +48,7 @@ use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 use crate::ng::parameter_estimation::{Estimate, Provenance};
 use crate::ng::types::{Ploidy, ReadGroupId};
 
-use super::census::{DepthCode, SampleCensusEvidence};
+use super::census::{DepthCap, DepthCode, SampleCensusEvidence};
 use super::contamination::{ContaminationConfig, ContaminationEstimate, fit_contamination};
 
 // ---------------------------------------------------------------------
@@ -471,6 +471,10 @@ impl PositionEvidence {
 struct EvidenceCursor<'a> {
     samples: &'a [SampleCensusEvidence],
     edges: &'a DepthBinEdges,
+    /// The cap the allele counts were thinned to. **Held beside the ladder because the two
+    /// answer different questions**: the ladder says what depth a stored code stands for, and
+    /// this puts that depth into the units the counts beside it were taken in.
+    cap: DepthCap,
     /// Each sample's own mean read depth over the kept positions — the centre of the Poisson
     /// that [`fill_depth_weights`] weights a stored code's range with.
     coverage: &'a [f64],
@@ -500,7 +504,11 @@ impl<'a> EvidenceCursor<'a> {
     /// What it costs is bounded by the width of a bin, which is why a single number is enough
     /// to be going on with — the per-window coverage summary the records already carry is
     /// where a better one would come from.
-    fn mean_depth(samples: &[SampleCensusEvidence], edges: &DepthBinEdges) -> Vec<f64> {
+    fn mean_depth(
+        samples: &[SampleCensusEvidence],
+        edges: &DepthBinEdges,
+        cap: DepthCap,
+    ) -> Vec<f64> {
         samples
             .iter()
             .map(|sample| {
@@ -518,7 +526,7 @@ impl<'a> EvidenceCursor<'a> {
                     let mut walked = false;
                     for records in sample.generic.values() {
                         if let DepthCode::Binned(bin) = records.depth().get(index) {
-                            let range = edges.recorded_depths(bin);
+                            let range = cap.denominator_for(edges.depth_range(bin));
                             here += 0.5 * f64::from(*range.start() + *range.end());
                             walked = true;
                         }
@@ -544,6 +552,7 @@ impl<'a> EvidenceCursor<'a> {
     fn over(
         samples: &'a [SampleCensusEvidence],
         edges: &'a DepthBinEdges,
+        cap: DepthCap,
         coverage: &'a [f64],
         as_a_range: bool,
         first: usize,
@@ -566,6 +575,7 @@ impl<'a> EvidenceCursor<'a> {
         Self {
             samples,
             edges,
+            cap,
             coverage,
             as_a_range,
             at,
@@ -591,7 +601,11 @@ impl<'a> EvidenceCursor<'a> {
             let (mut shallowest, mut deepest) = (0_u32, 0_u32);
             for (g, records) in sample.generic.values().enumerate() {
                 if let DepthCode::Binned(bin) = records.depth().get(index) {
-                    let range = self.edges.recorded_depths(bin);
+                    // **The counts' own denominator, not the position's depth.** The reads
+                    // subtracted below were thinned to the cap; subtracting them from an
+                    // unthinned depth would charge the position reference reads it never
+                    // had, and at a few hundred reads a position that is most of them.
+                    let range = self.cap.denominator_for(self.edges.depth_range(bin));
                     shallowest += *range.start();
                     deepest += *range.end();
                 }
@@ -1089,9 +1103,11 @@ pub fn fit_jointly(
         })
         .collect();
 
+    let depth_cap = depth_cap_of(samples);
+
     // Each sample's own mean depth, read once from the codes: the centre of the prior a
     // stored code's range is weighted with when the likelihood sums over it.
-    let coverage = EvidenceCursor::mean_depth(samples, &config.edges);
+    let coverage = EvidenceCursor::mean_depth(samples, &config.edges, depth_cap);
 
     let mut best: Option<(f64, Parameters, Statistics, u32, bool, Vec<PassSummary>)> = None;
     for start in &config.starting_points {
@@ -1298,6 +1314,19 @@ fn maximise(
     (parameters, statistics, passes, converged, trace)
 }
 
+/// **The cap every sample in this cohort recorded under.**
+///
+/// Read from the first sample rather than passed in, because the recording-terms check has
+/// already refused a cohort whose samples disagree on it, and because it belongs to the
+/// evidence rather than to the run: it is what turns a stored depth into the units the allele
+/// counts beside it were thinned into. An empty cohort answers a cap nothing can exceed, so
+/// the clamp is a no-op where there is nothing to clamp.
+fn depth_cap_of(samples: &[SampleCensusEvidence]) -> DepthCap {
+    samples
+        .first()
+        .map_or(DepthCap(u32::MAX), |sample| sample.terms.depth_cap)
+}
+
 /// One pass over every position: the posteriors, and every count the maximisations need.
 ///
 /// **Split across cores by position.** Positions are independent given the parameters, and a
@@ -1325,6 +1354,7 @@ fn expectation_pass(
     parameters: &Parameters,
     collect_noisy_posterior: bool,
 ) -> Statistics {
+    let depth_cap = depth_cap_of(samples);
     let quadrature = BetaQuadrature::with_genotype_priors(
         parameters.density.a,
         parameters.density.b,
@@ -1370,6 +1400,7 @@ fn expectation_pass(
         let mut cursor = EvidenceCursor::over(
             samples,
             &config.edges,
+            depth_cap,
             coverage,
             config.depth_as_a_range,
             first,

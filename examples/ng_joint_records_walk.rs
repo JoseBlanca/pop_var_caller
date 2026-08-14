@@ -86,6 +86,14 @@ use pop_var_caller::regions::ContigBounds;
 /// of what the fit refuses to pool across.
 const SEED: u64 = 42;
 
+/// The depth above which a position's reads stop being counted one by one.
+///
+/// **Held at 124 across the ladder's extension on purpose.** It used to be read off the
+/// ladder's top rung, which made one number of two: the ladder now reaches about 1,500 and
+/// this does not follow it, because what the cap buys is a bound on the sparse list of
+/// non-reference reads and what the ladder buys is reach for the position's own depth.
+const DEPTH_CAP: DepthCap = DepthCap(124);
+
 fn main() {
     let usage = "usage: <reference.fa> <catalog.parquet> <regions.bed> <generic-target> \
                  <alignment> [alignment...]";
@@ -284,30 +292,34 @@ fn main() {
 ///
 /// **The ladder is exact to eight reads a position and a range above it**, and how much of a
 /// run is in the exact part decides how much anything about the range can matter. A cohort at
-/// three reads a position is almost entirely exact; one at three hundred is entirely in the
-/// ladder's top bin, which is the cap and so exact again because a deeper position was thinned
-/// down to it. The band in between is where a stored code stands for several depths at once.
+/// three reads a position is almost entirely exact; the band above is where a stored code
+/// stands for several depths at once.
+///
+/// **The last column is the one to watch, and it is about the cap rather than the ladder.**
+/// The depth recorded is now the position's own, so the ladder no longer piles deep positions
+/// onto one rung; what still collapses is the *allele counts*, which are thinned to the
+/// per-position cap. A position above that cap has an exact depth and a thinned count beside
+/// it, and the fraction it reports is the thinned one.
 fn depth_ladder_occupancy(cohort: &[SampleCensusEvidence]) {
-    let edges = DepthBinEdges::new();
+    let edges = DepthBinEdges::for_census();
     println!("\n--- where the positions sit on the depth ladder ---");
     println!(
-        "  {:<24}{:>14}{:>18}{:>14}{:>12}",
-        "sample", "exact (0–8)", "a range (9–97)", "the cap (124)", "no reads"
+        "  {:<24}{:>14}{:>18}{:>16}{:>12}",
+        "sample", "exact (0–8)", "a range (9+)", "above the cap", "no reads"
     );
     for sample in cohort {
+        let cap = sample.terms.depth_cap.0;
         let (mut exact, mut ranged, mut capped, mut unwalked) = (0_u64, 0_u64, 0_u64, 0_u64);
         for records in sample.generic.values() {
             for code in records.depth().iter() {
                 match code {
                     DepthCode::NeverWalked => unwalked += 1,
                     DepthCode::Binned(bin) => {
-                        let range = edges.recorded_depths(bin);
-                        if range.start() == range.end() {
-                            if *range.start() == edges.max_depth() {
-                                capped += 1;
-                            } else {
-                                exact += 1;
-                            }
+                        let range = edges.depth_range(bin);
+                        if *range.start() > cap {
+                            capped += 1;
+                        } else if range.start() == range.end() {
+                            exact += 1;
                         } else {
                             ranged += 1;
                         }
@@ -352,6 +364,7 @@ fn fit_the_cohort(
         genotype_posteriors: genotype_posteriors.is_some(),
         pass_trace: true,
         // `DEPTH_AS_A_RANGE=0` restores the point-read, so the same reads can be fitted both
+        edges: std::sync::Arc::new(DepthBinEdges::for_census()),
         // ways and the difference attributed.
         depth_as_a_range: std::env::var("DEPTH_AS_A_RANGE").as_deref() != Ok("0"),
         max_passes: std::env::var("MAX_PASSES")
@@ -449,7 +462,7 @@ fn fit_the_cohort(
         // The reads the fit saw, beside what it made of them: a posterior is not evidence, and
         // a position called heterozygous at a read share nothing like a half is a different
         // finding from one called heterozygous at a half.
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         let non_reference: Vec<Vec<u32>> = cohort
             .iter()
             .map(|sample| {
@@ -482,7 +495,7 @@ fn fit_the_cohort(
                 let mut depth = 0_u32;
                 for group in sample.generic.values() {
                     if let DepthCode::Binned(bin) = group.depth().get(index) {
-                        let range = edges.recorded_depths(bin);
+                        let range = edges.depth_range(bin);
                         depth += (*range.start() + *range.end()) / 2;
                     }
                 }
@@ -919,13 +932,13 @@ fn walk_one(
         sample.read_groups.clone(),
         &contig_of,
         terms.clone(),
-        DepthBinEdges::new(),
+        DepthBinEdges::for_census(),
         ReadCap(pop_var_caller::ng::locus_generation::ssr::DEFAULT_SSR_MAX_READS_PER_LOCUS),
-        // **The ladder's own top.** The stored code is a bin and the ladder's last bin is the
-        // last there is, so a position deeper than that is thinned down to it before anything
-        // is recorded — otherwise a 300× sample records a depth of about 111 beside an
-        // undiminished count of alternative reads.
-        DepthCap(DepthBinEdges::new().max_depth()),
+        // **Not the ladder's top any more, and the two are separate knobs.** The depth code
+        // records what the position held, all the way to the ladder's ceiling near 1,500; this
+        // is where a position's *reads* stop being counted one by one, and the allele counts
+        // are thinned to it proportionally so the fractions they showed survive.
+        DEPTH_CAP,
     );
 
     // **Every generic stretch handed to the walk is walked**, whether or not a read reached

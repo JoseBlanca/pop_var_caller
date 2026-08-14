@@ -98,7 +98,7 @@ use rayon::prelude::*;
 
 use crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges;
 
-use super::census::{DepthCode, SampleCensusEvidence};
+use super::census::{DepthCap, DepthCode, SampleCensusEvidence};
 
 /// The default number of axes of variation each sample's frequency is a line in.
 ///
@@ -298,7 +298,12 @@ pub fn fit_contamination(
         ];
     }
     let mean_error = error_rate.iter().sum::<f64>() / count as f64;
-    let markers = markers(samples, edges, mean_error, noisy_posterior, config);
+    // The cap the counts were thinned to. Every sample agrees on it or the fit refused the
+    // cohort before reaching here.
+    let cap = samples
+        .first()
+        .map_or(DepthCap(u32::MAX), |sample| sample.terms.depth_cap);
+    let markers = markers(samples, edges, cap, mean_error, noisy_posterior, config);
     if markers.len() < 100 {
         return vec![
             ContaminationEstimate::NotIdentified {
@@ -356,6 +361,7 @@ pub fn fit_contamination(
 fn markers(
     samples: &[SampleCensusEvidence],
     edges: &DepthBinEdges,
+    cap: DepthCap,
     error: f64,
     noisy_posterior: &[f32],
     config: &ContaminationConfig,
@@ -398,7 +404,9 @@ fn markers(
         for group in sample.generic.values() {
             for (index, code) in group.depth().iter().enumerate() {
                 if let DepthCode::Binned(bin) = code {
-                    let range = edges.recorded_depths(bin);
+                    // The denominator the alternative counts below were taken out of: those
+                    // were thinned to the cap, and the depth code is now the position's own.
+                    let range = cap.denominator_for(edges.depth_range(bin));
                     let (low, high) = (*range.start(), *range.end());
                     // The middle of the range, for the two things that need a single number:
                     // which positions the cohort varies at, and how many copies of the allele

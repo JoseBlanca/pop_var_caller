@@ -108,7 +108,7 @@ thirty-bin one.
 *Depends:* A4. *Source:* [generic spec](../spec/parameter_prepass_generic.md) §4;
 [records spec](../spec/parameter_prepass_joint_records.md) §2.2.
 
-☐ **B2 — record the position's true depth, not the subsampled one.** The per-position cap still thins
+✅ **B2 — record the position's true depth, not the subsampled one.** The per-position cap still thins
 the allele counts proportionally; the depth code stops being clipped by it. A consumer needing the
 counts' own denominator computes `min(depth, cap)`, the cap being in the recording terms.
 **Own commit, do not bundle** — this is a silent-failure step: it changes what a code means, and a

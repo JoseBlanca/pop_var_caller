@@ -369,31 +369,19 @@ impl DepthBinEdges {
         self.bin_tops.len()
     }
 
-    /// The depths a **recorded** position's stored code could have come from.
-    ///
-    /// Almost always [`depth_range`](Self::depth_range), and it differs in one place that
-    /// matters: **the top bin is the cap and nothing else.** A position deeper than the cap is
-    /// thinned down to it — depth and read counts together — before it is recorded, so at a
-    /// 300-read sample every position in the top bin sits exactly on 124 rather than spread
-    /// over the twenty-seven depths the bin nominally holds.
-    ///
-    /// **This is the method a consumer of the records wants**, and `depth_range` is the one a
-    /// histogram's row width wants. There is no method that hands back a single depth from
-    /// inside a bin: the count of reads that disagreed with the reference is exact and the
-    /// depth is a range, so anything that divides one by the other has to carry the range or
-    /// it inherits an error of up to a sixth at thirty reads a position
-    /// (`doc/devel/ng/reports/contamination_floor_and_duplicated_class_2026-08-13.md` §4).
-    ///
-    /// **Below depth 9 the ladder is exact and the range is one value**, and at three reads a
-    /// position that is where 97 positions in 100 land.
-    #[must_use]
-    pub fn recorded_depths(&self, bin: DepthBin) -> RangeInclusive<u32> {
-        if usize::from(bin.0) + 1 == self.bin_count() {
-            let cap = self.max_depth();
-            return cap..=cap;
-        }
-        self.depth_range(bin)
-    }
+    // **`recorded_depths` was here and is gone — 2026-08-14.** It answered `depth_range`
+    // except at the ladder's top bin, where it answered the cap and nothing else, and that
+    // was right only while the ladder's top and the per-position depth cap were the same
+    // number: a position deeper than 124 was thinned to exactly 124 before it was written
+    // down, so the top bin held one depth rather than the twenty-seven it spans. It was also
+    // *wrong* for a position that genuinely held 100 reads, which was never thinned and yet
+    // read back as 124.
+    //
+    // The census now stores the position's true depth
+    // (`spec/parameter_prepass_joint_records.md` §2.2), so a code means its bin's whole range
+    // and `depth_range` is the answer. What a consumer needs for the **allele counts'**
+    // denominator is a different question, because those are still thinned: it is
+    // `DepthCap::denominator_for`, in `joint/census.rs`, where the cap lives.
 
     /// Every bin, in order.
     ///

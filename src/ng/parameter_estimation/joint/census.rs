@@ -34,6 +34,7 @@
 //! is the next unit, and it changes none of these types.
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 
 use md5::{Digest, Md5};
 
@@ -564,8 +565,35 @@ pub struct ReadCap(pub u32);
 ///
 /// The generic path's twin of [`ReadCap`]. **It moves independently of the ladder's own top
 /// rung**, and a sample recorded at a different one did not record the same evidence.
+///
+/// **It thins the allele counts and no longer clips the depth — CHANGED 2026-08-14.** The
+/// depth code stores what the position actually held; the counts beside it were thinned to
+/// this cap, keeping the fractions they showed. So a consumer asking *how many copies is
+/// this* reads the depth, and one dividing a count by a depth must first put the depth into
+/// the counts' own units — which is [`denominator_for`](Self::denominator_for), and nothing
+/// else records it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct DepthCap(pub u32);
+
+impl DepthCap {
+    /// The depths the allele counts at a position were counted out of, given the depths its
+    /// stored code stands for.
+    ///
+    /// **A range in, a range out**, because the stored code is a bin: the count of reads that
+    /// disagreed with the reference is exact and the depth is a span, so anything dividing one
+    /// by the other has to carry the span or it inherits the bin's width — an error of up to a
+    /// sixth at thirty reads a position
+    /// (`doc/devel/ng/reports/contamination_floor_and_duplicated_class_2026-08-13.md` §4).
+    ///
+    /// **Both ends are clamped, which is what collapses a deep position to a point.** At a cap
+    /// of 124 a position holding 300 reads has a code standing for 263 to 336; its counts were
+    /// thinned to 124, so the denominator is 124 to 124 and the fit sees the one depth the
+    /// counts were actually taken out of.
+    #[must_use]
+    pub fn denominator_for(self, depths: RangeInclusive<u32>) -> RangeInclusive<u32> {
+        (*depths.start()).min(self.0)..=(*depths.end()).min(self.0)
+    }
+}
 
 /// A digest of the depth ladder's edges.
 ///
@@ -877,21 +905,22 @@ impl CensusWriter {
             // put a read there: the entry is the denominator, and a group with no read here
             // saw zero, which is data and not the absence of it.
             //
-            // **The depth cap is applied here and nowhere else** (§5). Above it the reads are
-            // thinned to it, keeping the fractions they showed, because the stored code is a
-            // bin and the ladder's top bin is the last one there is: a sample at 300 reads a
-            // position whose reads were *not* thinned records a depth of about 111 beside an
-            // undiminished count of alternative reads, which charges it a negative number of
-            // reference reads and inflates every rate fitted from it.
+            // **The depth recorded is the one the position actually held** (§2.2, changed
+            // 2026-08-14). The cap below still thins the allele counts, which is what keeps
+            // them inside their own field and what bounds the sparse list at high depth; it
+            // no longer clips this. Nothing is lost by that and one thing is gained: a
+            // consumer asking *how many copies of this stretch does the sample carry* reads
+            // a depth that can answer, where a clipped one went blind at twice the cap.
+            // A consumer needing the counts' own denominator computes it with
+            // [`DepthCap::denominator_for`], the cap travelling in the recording terms.
             for (group, depth) in &depths {
                 let records = self
                     .generic
                     .entry(*group)
                     .or_insert_with(|| GenericEvidence::never_walked(self.generic_loci.len()));
-                let capped = depth[offset].min(self.depth_cap.0);
                 records
                     .depth
-                    .set(index, DepthCode::Binned(self.edges.bin_for(capped)));
+                    .set(index, DepthCode::Binned(self.edges.bin_for(depth[offset])));
             }
             if !single_base {
                 continue;
@@ -1091,7 +1120,7 @@ mod tests {
 
     #[test]
     fn every_code_survives_packing_at_every_bit_offset() {
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         let mut codes: Vec<DepthCode> = edges.bins().map(DepthCode::Binned).collect();
         codes.push(DepthCode::NeverWalked);
         // Repeat the ladder so that each code lands at every offset within a byte.
@@ -1111,7 +1140,7 @@ mod tests {
         assert!(packed.iter().all(|code| code == DepthCode::NeverWalked));
         assert_ne!(
             DepthCode::NeverWalked,
-            DepthCode::Binned(DepthBinEdges::new().bin_for(0))
+            DepthCode::Binned(DepthBinEdges::for_census().bin_for(0))
         );
     }
 
@@ -1128,7 +1157,7 @@ mod tests {
         // Five positions, one per state: walked at zero depth, reads with a non-reference
         // allele, reads with two of them, reads with none at all, and never walked.
         let mut records = GenericEvidence::never_walked(5);
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         records.depth.set(0, DepthCode::Binned(edges.bin_for(0)));
         records.depth.set(1, DepthCode::Binned(edges.bin_for(7)));
         records.depth.set(2, DepthCode::Binned(edges.bin_for(300)));
@@ -1156,7 +1185,7 @@ mod tests {
     #[test]
     fn the_dense_half_reconstructs_a_quiet_position_and_the_sparse_half_the_rest() {
         let records = generic_evidence();
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
 
         // Walked, zero depth: data, and distinguishable from never walked.
         assert_eq!(records.at(0), (DepthCode::Binned(edges.bin_for(0)), vec![]));
@@ -1341,7 +1370,7 @@ mod tests {
             kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: StratumCounts::default(),
             read_cap: ReadCap(100),
-            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
+            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
             depth_cap: DepthCap(124),
         }
     }
@@ -1439,6 +1468,84 @@ mod tests {
 
     // ---- the per-position depth cap ------------------------------------------
 
+    /// **Spec §7.11.** A position above the cap keeps the depth it actually held, and only its
+    /// allele counts are thinned — so the fraction the reads showed survives, and a consumer
+    /// recovers the counts' own denominator with `min(depth, cap)`.
+    ///
+    /// **This is the step's silent failure made loud.** Before 2026-08-14 the depth was
+    /// clipped here too, and a consumer that kept reading it that way after the change would
+    /// divide a thinned count by an unthinned depth and report a rate several times too low,
+    /// with nothing to notice.
+    #[test]
+    fn a_position_above_the_cap_keeps_its_own_depth_and_thins_only_the_counts() {
+        // Forty reads at a cap of twenty: a quarter of them on a non-reference base.
+        let mut writer = writer_over_capped(&[10], &[0], DepthCap(20));
+        writer.add_locus(&generic_locus(
+            10,
+            b"A",
+            vec![observation(b"A", 0, 30), observation(b"G", 0, 10)],
+        ));
+        let evidence = writer.finish();
+        let (depth, alleles) = evidence.generic[&ReadGroupId(0)].at(0);
+
+        let edges = DepthBinEdges::for_census();
+        let DepthCode::Binned(bin) = depth else {
+            panic!("a walked position is not never-walked")
+        };
+        assert!(
+            edges.depth_range(bin).contains(&40),
+            "the code stands for the depth the position actually held, not for the cap"
+        );
+        assert!(
+            !edges.depth_range(bin).contains(&20),
+            "and it is not the cap's own bin"
+        );
+
+        assert_eq!(alleles.len(), 1);
+        assert_eq!(
+            alleles[0].reads, 5,
+            "a quarter of the cap, as a quarter of the depth was"
+        );
+        assert!(
+            alleles[0].reads <= 20,
+            "no count survives above the cap it was thinned to"
+        );
+
+        // What a consumer must do, and the only thing that recovers the fraction.
+        let denominator = DepthCap(20).denominator_for(edges.depth_range(bin));
+        assert_eq!(denominator, 20..=20, "min(depth, cap) is the cap here");
+        assert!(
+            (f64::from(alleles[0].reads) / f64::from(*denominator.start()) - 0.25).abs() < 1e-12,
+            "the fraction the reads showed survives the thinning"
+        );
+    }
+
+    /// Below the cap the two are the same number, which is the case every other fixture in
+    /// this module sits in — so this is what says the clamp is not simply always firing.
+    #[test]
+    fn a_position_below_the_cap_is_its_own_denominator() {
+        let mut writer = writer_over_capped(&[10], &[0], DepthCap(20));
+        writer.add_locus(&generic_locus(
+            10,
+            b"A",
+            vec![observation(b"A", 0, 4), observation(b"G", 0, 2)],
+        ));
+        let evidence = writer.finish();
+        let (depth, alleles) = evidence.generic[&ReadGroupId(0)].at(0);
+
+        let edges = DepthBinEdges::for_census();
+        assert_eq!(depth, DepthCode::Binned(edges.bin_for(6)));
+        assert_eq!(alleles[0].reads, 2, "nothing is thinned below the cap");
+        let DepthCode::Binned(bin) = depth else {
+            panic!("a walked position is not never-walked")
+        };
+        assert_eq!(
+            DepthCap(20).denominator_for(edges.depth_range(bin)),
+            6..=6,
+            "below the cap the denominator is the depth itself, exactly"
+        );
+    }
+
     /// **The one function whose stated contract is byte-identity**, and it had no test: a
     /// region-sharded walk and a single-threaded one must thin a deep position's counts the
     /// same way, which is why the share is computed rather than drawn. Turning the rounding
@@ -1512,6 +1619,13 @@ mod tests {
 
     /// A selection of three positions on one contig, and a writer over it.
     fn writer_over(positions: &[u64], groups: &[u32]) -> CensusWriter {
+        writer_over_capped(positions, groups, DepthCap(124))
+    }
+
+    /// The same, at a chosen per-position cap. **A cap below the ladder's ceiling is the only
+    /// way to see the cap at all**: it and the ladder's top used to be one number, and the
+    /// tests that came with them all sat at depths neither reaches.
+    fn writer_over_capped(positions: &[u64], groups: &[u32], cap: DepthCap) -> CensusWriter {
         let loci = CensusLoci::from_parts(
             positions
                 .iter()
@@ -1529,9 +1643,9 @@ mod tests {
             groups.iter().map(|g| ReadGroupId(*g)).collect(),
             &|_| Some(ContigId(0)),
             selection_terms(),
-            DepthBinEdges::new(),
+            DepthBinEdges::for_census(),
             ReadCap(100),
-            DepthCap(124),
+            cap,
         )
     }
 
@@ -1544,7 +1658,7 @@ mod tests {
         let records = writer.finish();
 
         let generic = &records.generic[&ReadGroupId(0)];
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         assert_eq!(generic.at(0).0, DepthCode::Binned(edges.bin_for(4)));
         assert_eq!(
             generic.at(1).0,
@@ -1575,7 +1689,7 @@ mod tests {
         let records = writer.finish();
 
         let generic = &records.generic[&ReadGroupId(0)];
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         assert_eq!(
             generic.at(0).0,
             DepthCode::Binned(edges.bin_for(4)),
@@ -1606,11 +1720,11 @@ mod tests {
         let generic = &records.generic[&ReadGroupId(0)];
         assert_eq!(
             generic.at(0).0,
-            DepthCode::Binned(DepthBinEdges::new().bin_for(4))
+            DepthCode::Binned(DepthBinEdges::for_census().bin_for(4))
         );
         assert_eq!(
             generic.at(1).0,
-            DepthCode::Binned(DepthBinEdges::new().bin_for(0))
+            DepthCode::Binned(DepthBinEdges::for_census().bin_for(0))
         );
     }
 
@@ -1639,7 +1753,7 @@ mod tests {
             vec![ReadGroupId(0)],
             &|_| Some(ContigId(0)),
             selection_terms(),
-            DepthBinEdges::new(),
+            DepthBinEdges::for_census(),
             ReadCap(100),
             DepthCap(124),
         )
@@ -1721,7 +1835,7 @@ mod tests {
         writer.add_locus(&generic_locus(10, b"A", vec![observation(b"A", 0, 6)]));
         let records = writer.finish();
 
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         assert_eq!(
             records.generic[&ReadGroupId(0)].at(0).0,
             DepthCode::Binned(edges.bin_for(6))
@@ -1743,7 +1857,7 @@ mod tests {
         ));
         let records = writer.finish();
 
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         assert_eq!(
             records.generic[&ReadGroupId(0)].at(0).0,
             DepthCode::Binned(edges.bin_for(5))
@@ -1767,7 +1881,10 @@ mod tests {
 
         let generic = &records.generic[&ReadGroupId(0)];
         let (depth, alleles) = generic.at(0);
-        assert_eq!(depth, DepthCode::Binned(DepthBinEdges::new().bin_for(5)));
+        assert_eq!(
+            depth,
+            DepthCode::Binned(DepthBinEdges::for_census().bin_for(5))
+        );
         assert_eq!(
             alleles,
             [AlleleObservation {
