@@ -110,12 +110,23 @@ pub enum DepthCode {
     Binned(DepthBin),
 }
 
-/// How many codes fit in one entry. Twenty bins plus the sentinel is 21, so five bits.
+/// How many codes fit in one entry. Thirty bins plus the sentinel is 31, so five bits.
 pub const DEPTH_CODE_BITS: u32 = 5;
 
 /// The value [`DepthCode::NeverWalked`] is stored as — the top of the five-bit range, so
 /// adding a rung to the ladder collides with it loudly rather than shifting it.
 const NEVER_WALKED_CODE: u8 = (1 << DEPTH_CODE_BITS) - 1;
+
+// **The ladder cannot outgrow the field it is stored in without failing to compile.** The
+// bins take codes `0..bin_count` and the sentinel takes the top of the range, so the last
+// bin has to sit strictly below it. `to_bits` asserts the same thing per entry, and that
+// assert fires while a run is walking a genome; this one fires while it is being built.
+const _: () = assert!(
+    crate::ng::parameter_estimation::generic::depth_bins::CENSUS_DEPTH_BIN_COUNT
+        <= NEVER_WALKED_CODE as usize,
+    "the census ladder has outgrown the five-bit depth code: its top rung would be written \
+     as the never-walked sentinel, which is the code for a bug"
+);
 
 impl DepthCode {
     fn to_bits(self) -> u8 {

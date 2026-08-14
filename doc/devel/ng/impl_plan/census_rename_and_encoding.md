@@ -100,7 +100,7 @@ field, `CensusWriter::finish`'s parameter, and the harness's `COVERAGE_DISCRIMIN
 
 Every step moves numbers. Each says where, and each is its own commit.
 
-☐ **B1 — extend the ladder to thirty bins, as a refinement.** Ten more rungs at the existing ratio
+✅ **B1 — extend the ladder to thirty bins, as a refinement.** Ten more rungs at the existing ratio
 carry the top from 124 to about 1,500; the first twenty bins keep their exact edges, so a census code
 maps to a per-sample-route bin by collapsing everything above 124. **Own commit, do not bundle.**
 Assert the refinement property in a test: every edge of the twenty-bin ladder is an edge of the
