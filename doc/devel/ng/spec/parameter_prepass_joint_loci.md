@@ -556,9 +556,14 @@ again**: a run wanting fewer loci recomputes the smaller threshold and skips the
 **Only one direction is free.** Shrinking costs nothing. Growing needs the census rebuilt, which
 outside the direct run means one pass over every sample's pileup
 ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.1). That asymmetry is
-the whole argument for writing large: the generic depth array is five bits a position, so two million
-positions is 1.25 MB per read group and twenty-seven million is about 17 MB, on disk and streamed
-rather than held. Being generous costs megabytes; being stingy costs a pass over every pileup.
+the argument for erring high rather than low, and the depth array is five bits a position so erring
+high is cheap: two million positions is 1.25 MB per read group.
+
+*How far high is no longer a contamination question.* An earlier revision of this section argued for
+about twenty-seven million positions because contamination's noise floor fell as markers were added.
+**That floor was two defects and is fixed** ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md)
+§3.4.4), so nothing now asks for a census larger than §4.3's own table does — three hundred and twenty
+thousand positions for everything measured there, and two million for the margin.
 
 **This corrects the reason §5.1 gives for carrying the generic target count**, though not the
 requirement itself. That table says a different target is *"a different set, not a subset of the larger
@@ -588,14 +593,34 @@ satellite cap, tomato SL4.00 holds **462,701 STR loci in 141 strata**
 (`examples/ng_joint_loci_probe.rs`) — under a quarter of the two million generic positions, and a cap
 above the largest stratum keeps every one of them.
 
-| cap | loci kept | strata capped, of 141 |
-|---:|---:|---:|
-| 100 | 8,699 | 68 |
-| 500 | 27,698 | 35 |
-| 1,000 | 41,271 | 21 |
-| 5,000 | 86,688 | 8 |
-| 20,000 | 157,752 | 3 |
-| none | 462,701 | 0 |
+| cap | loci kept | strata capped, of 141 | what it does to the estimate (§6 question 1) |
+|---:|---:|---:|---|
+| 100 | 8,699 | 68 | below the floor at both depths |
+| 500 | 27,698 | 35 | below the floor at both depths |
+| 1,000 | 41,271 | 21 | the floor at six reads a site; too small at three |
+| **5,000** | **86,688** | **8** | **the floor at three reads a site — the recommended cap** |
+| 20,000 | 157,752 | 3 | above the floor; buys nothing measured |
+| none | 462,701 | 0 | above the floor; buys nothing measured |
+
+*The last column is measured, 2026-08-13*
+([`../reports/str_stratum_size_sweep_2026-08-13.md`](../reports/str_stratum_size_sweep_2026-08-13.md)),
+*and the cap is set by the shallow case because the number that fixes it — the concentration — does not
+improve with depth. §6 question 1 says which of the five fitted numbers breaks first and why.*
+
+**How many strata can be fitted at all is a property of the analysed regions, not of the reference —
+MEASURED 2026-08-13**
+([`../reports/str_fit_on_real_records_2026-08-13.md`](../reports/str_fit_on_real_records_2026-08-13.md)
+§5). The whole tomato reference holds 462,701 tracts in 141 strata. A **452 kb region set** on the
+human reference holds **216 tracts in 32 strata**, of which exactly one could be fitted on its own; and
+on the 63-accession tomato run, **65 of 71 strata could say nothing from their own tracts**, the six
+that could holding 88% of them. The consequence is not the count but what the fit then does: every
+stratum below the floor borrows from its neighbours, and where nearly all of them are below it, they
+pool each other and the repeat-count axis is averaged away
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §4).
+
+**So a run reports, before fitting, how many strata clear the floor on their own.** It costs one pass
+over counts the selection already holds, and it is the difference between a user reading a flat
+repeat-count axis and a user knowing the axis was flattened.
 
 **The distribution is what makes a cap look attractive and then unnecessary.** One stratum — period 1
 at 8 repeats — holds 217,812 loci, 47% of the total, and the next two hold another 32%; **68 strata
@@ -695,24 +720,39 @@ and the test that distinguishes the two.
    - **What the cap should be**: none, for accuracy. A cap set above 217,812 keeps every locus, and
      the only reason to set one lower is the memory bill §4.5's last point names.
 
-     **REOPENED 2026-08-13, and it is now the only part of this question still open.** The memory
-     reason has arrived: reading one stratum at a time bounds what the parameters fit holds, and the
-     bound *is* the cap
-     ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.2). What the cap
-     should be is **measured only from above**: the per-tract estimator recovered a slippage level of
-     0.0803 against a truth of 0.0800 at **6,000 tracts** in one stratum at three reads a site, and
-     the comparisons against the per-stratum model ran at **1,200 to 1,500 tracts** at twenty samples
-     ([`../reports/joint_str_estimator_2026-08-12.md`](../reports/joint_str_estimator_2026-08-12.md)).
-     **Nothing has been run below about a thousand**, so the floor is unknown; and a tract costs about
-     ten bytes a read group, so memory does not choose between 5,000 and 20,000 — at a thousand samples
-     those are 50 MB and 200 MB for the largest section. *Leaning:* a cap of a few thousand, inside
-     the measured range, since above it the extra tracts buy nothing anyone has measured and below it
-     nobody has looked. **Settled by:** the same sweep §4.3 runs on the generic budget, run on one fat
-     stratum — refit at 20,000 / 5,000 / 1,000 / 250 tracts on one drawn truth and report **each of
-     the four slippage numbers and the concentration separately** against it, because they degrade at
-     different rates exactly as the generic parameters do. **Run it on a fat stratum and on a thin
-     one**: the 68 strata below a hundred tracts already borrow from their neighbouring repeat counts
-     (§3.6), so the sweep also says where borrowing has to start.
+     **REOPENED and CLOSED 2026-08-13: the cap is 5,000 tracts**
+     ([`../reports/str_stratum_size_sweep_2026-08-13.md`](../reports/str_stratum_size_sweep_2026-08-13.md)).
+     That is the floor at tomato's three reads a site and not a margin above it — one step down, at
+     1,000 tracts, one of the five fitted numbers has already lost its footing. At six reads a site
+     the floor is 1,000, and **the cap is set by the shallow case** because the number that fixes it
+     does not improve with depth (below). Tomato then keeps 86,688 of its 462,701 tracts, with 8 of
+     its 141 strata capped at all, and the largest section of a records file is 50 kB a sample —
+     50 MB across a thousand.
+
+     **Which of the five sets it is the part worth carrying, because it is not the one anyone would
+     guess.** The slippage level — the number the estimator exists to produce — is the most durable of
+     the five, still within 3.9% at 250 tracts. What breaks first is *how fast two-repeat slips fall
+     off against one-repeat slips*, which rests on the fifth of the slipped reads that slipped by two:
+     roughly 225 reads at 250 tracts. What breaks second is *the concentration*, how monomorphic the
+     stratum's tracts are, **and that is the one the cap exists to supply**: it is counted in tracts
+     rather than in reads, so doubling the depth halves the scatter of the read-driven numbers and
+     leaves it untouched — 14.3% against 14.2% at 100 tracts. A deeper cohort does not get to keep
+     fewer tracts.
+
+     *Why the question was reopened, kept because the reasoning still holds:* reading one stratum at a
+     time bounds what the parameters fit holds, and the bound **is** the cap
+     ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.2). Memory does not
+     choose the number — a tract costs about ten bytes a read group, so at a thousand samples a cap of
+     5,000 and one of 20,000 are 50 MB and 200 MB for the largest section, and both are affordable.
+     What chooses it is the estimate, which is why the sweep was needed.
+
+     **Two parts of that sweep were not run, and each could raise the floor.** It drew **one stratum
+     shape** — three length classes at a concentration of 0.5 — and a more nearly monomorphic stratum
+     carries less signal per tract for exactly the number that sets the cap. And it held the panel at
+     **twenty samples** throughout, so how tracts and samples trade against one another is unmeasured.
+     **Neither touches the thin strata**: the 68 below a hundred tracts borrow from their neighbouring
+     repeat counts whatever the cap is (§3.6), and where that borrowing has to start is still nobody's
+     measurement.
 
      *One consequence of capping that is easy to forget:* §3.5's per-stratum reweighting exists for
      runs that sample, and a capped run samples. The stored counts it needs are already there, but the

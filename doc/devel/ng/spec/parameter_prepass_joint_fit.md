@@ -302,14 +302,70 @@ straight off that spectrum (§5.3), and `Hobs` is a mean of genotype posteriors 
 at every one of those loci. The homozygote excess cannot vent it either, being bounded below by zero
 where these loci demand the opposite sign.
 
-**Decision: a third class of site, and its discriminator is local relative coverage — not the
-alternative-read fraction.** A duplicated locus and a heterozygous one both read about half
-alternative, so the read counts at one locus cannot separate them; what differs is that a duplication
-collects two copies' reads. Production settled the same question for the same artefact:
-[`../../specs/hidden_paralog_filter.md`](../../specs/hidden_paralog_filter.md) §2 makes coverage the
-primary signal, and it is also the only one that leaves an introgression alone, being single-copy and
-so of normal depth. **A site whose window sits near two copies is drawn from a class at about half
-alternative reads**, and the class's weight is fitted as `w` is.
+**Decision, revised 2026-08-13: a third class of site, identified by the genotypes it has no room for
+across the cohort, and by local relative coverage as well wherever the run has it.** It is never the
+alternative-read fraction at one locus in one sample: a duplicated locus and a heterozygous one both
+read about half alternative, so one sample's read counts cannot separate them. Two things can.
+
+- **The cohort's genotype composition, which every run has.** A duplication's carriers are all at a
+  half and none is homozygous for the non-reference allele; a real variant at the same frequency puts
+  some samples there. This is the default discriminator and it carries most of the benefit, measured
+  below.
+- **Local relative coverage, where the run has a coverage-by-window summary**
+  ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). A duplication
+  collects two copies' reads. Production settled the same question for the same artefact:
+  [`../../specs/hidden_paralog_filter.md`](../../specs/hidden_paralog_filter.md) §2 makes coverage the
+  primary signal, and it is the one that leaves an introgression alone, being single-copy and so of
+  normal depth. **It is the only discriminator that works below about twenty-five samples, and the
+  only one at all at a single sample.**
+
+The class's weight is fitted as `w` is, and a site the run believes is in the class is drawn from a
+component at about half alternative reads.
+
+**The strongest argument against the coverage discriminator, and it is not about noise — owner,
+2026-08-13, from the production caller's hidden-paralog work.** *Signal and need are anti-correlated.*
+
+- **Two copies** — the reference's one plus one the reference does not hold — is the case that matters,
+  because that is the one reading 50/50 and therefore the one the model has nowhere to put but
+  *heterozygous*. It is also the case coverage is **worst** at: the depth signal is 2× against 1×, and
+  separating those needs a window that has collected about 12,000 aligned bases (§4.1 of the records
+  document), which at three reads a site is 4 kb of genome and assumes the duplication spans it.
+- **Three or more copies** gives a clean depth signal — 3× against 1× — but the alternative-read
+  fraction moves to about a third or two thirds, **outside the 35–65% band a false heterozygote lives
+  in**. Those sites are not being called heterozygous in the first place.
+
+So the discriminator sharpens exactly as the artefact stops needing discriminating. **This is the
+reason the coverage-by-window summary is a candidate for removal rather than a settled input**, and
+§11 question 12 carries the measurement that would settle it.
+
+**And the anti-correlation argument was tested, 2026-08-13 — the coverage discriminator survives it**
+([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).
+*A revision of this section on the morning of that day read the enrichment series at **500 bp** and
+concluded there was no separation at tomato's depth. That was the wrong row.* The design reads the
+summary at whatever width the sample's depth requires by summing adjacent windows
+([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4.1), which at 2.5 reads a
+position is 5 kb. Both series, over the same eight accessions:
+
+| accession mean depth | 2.5× | 2.7× | 3.6× | 5.2× | 9.9× | 13.3× | 25.2× | 28.7× |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| window read at 500 bp | 1.6× | 1.6× | 1.3× | 1.5× | 2.5× | 7.7× | 24.0× | 24.9× |
+| **window read at the width the depth requires** | **14.0×** | **14.4×** | **6.6×** | **7.9×** | **9.6×** | **16.0×** | **21.3×** | **23.4×** |
+| the position's own read count | 1.14× | 1.01× | 0.63× | 1.00× | 1.65× | 3.21× | 10.8× | 10.8× |
+
+**So the shallow end is where the summary earns its place, not where it fails** — 14-fold against
+1.1-fold at 2.5 reads a position — and it is the shallow end where the decision is made, because a
+deep cohort has other ways to see a duplication. The anti-correlation argument stands as an argument
+about *what coverage can see*; what it does not survive is the claim that widening cannot recover the
+two-copy case at low depth.
+
+**Why the position's own read count is not the discriminator, in one number.** It is not that its
+enrichment is low; it is that its **precision** is hopeless where it matters. At 2.5 reads a position
+it calls **44 in every 100** of the positions it scores "about two copies", against 2.8 in 100 for the
+window. That is not a threshold wanting tuning: a position needs four reads before it can show a
+near-half fraction at all, and among positions with four or more, five and six reads are the two
+commonest values there are — which is exactly what *twice the median* means at that depth. §2.2's
+constraint that the discriminator is local relative coverage and never the site's own depth is
+therefore measured rather than argued.
 
 **Its grain is the (locus, sample) pair, where the other two classes' is the locus, and that
 difference is not a detail.** A collapsed paralog is a property of the reference and of the aligner,
@@ -338,28 +394,62 @@ windows at a few bytes, single-digit megabytes per sample, plus a small GC curve
 both in its Stage-1 pileup; `src/pileup/` is frozen, so ng builds its own. **Nothing in it needs a
 cohort**, which matters because this caller must also run on one sample.
 
-**And it is a third object the genome walk has to keep, which is where it is specified.** It is not derivable
-from the records: those hold one binned depth per kept position, and §2.2's own constraint is that a
-per-base depth cannot answer this question. So the summary is
-[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4's, sized beside the
-records and travelling with the same identity, rather than a cost named here and owned nowhere.
+**The coverage summary is an input this route uses when it has one, not an object it demands —
+REVISED 2026-08-13.** It is not derivable from the records: those hold one binned depth per kept
+position, and a per-position depth cannot answer this question. So the summary is
+[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4's, rather than a cost
+named here and owned nowhere. **What changed is the default**: the run that goes from alignments
+straight to a fit builds it for free while walking, and keeps it; the two-phase run does not spend a
+second full pass over every sample's pileup rebuilding it unless the cohort is under about
+twenty-five samples, the panel is outbred, or the run asks. On a fifty-sample selfing cohort that pass
+is worth about two percentage points on `Hobs` and one on the inbreeding coefficient over the cohort
+pattern alone — against a fit with no third class at all, which is not survivable at any panel size.
 
-**What many samples at one locus add is identification, and it is a bonus rather than the mechanism.**
-A real half-frequency variant leaves about a quarter of the samples in each homozygous class; a
-duplication leaves every sample at a half. So the cohort names *which* loci they are instead of merely
-weighing how many there are.
+**What many samples at one locus add is most of the identification — MEASURED 2026-08-13**
+([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
+The evidence is a genotype the class has no room for: a duplication's carrier is homozygous on both
+its chromosomes and its reads disagree only because half of them came from a stretch the reference
+does not hold, **so no sample is ever homozygous for the non-reference allele**. A real variant does
+produce those samples, and inbreeding is what makes them common. On a fifty-sample selfing panel a fit
+given only that pattern — no coverage reading anywhere — finds **every duplication that five or more
+samples carry (59 of 64)** and 2 of the 37 carried by fewer, while wrongly calling **1 real variant in
+400** duplicated.
 
-**Whether that bonus could be the mechanism is open, and it matters beyond tidiness — raised by the
-owner, 2026-08-13.** A real half-frequency variant produces *every sample heterozygous* with
-probability 0.5⁵⁰, so on a fifty-sample panel the pattern alone is close to decisive, with no coverage
-summary anywhere in it. If it holds, the window summary of
-[`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4 becomes optional rather
-than required, and with it the obligation for the parameters fit to read every sample's pileup a second
-time in a two-phase run. **Two things argue it does not hold on its own**, and they are why this is a
-question and not a decision: at three reads a site, telling *half the reads* from *all the reads*
-within one sample is weak, so the pattern is diluted exactly where the tomato archive sits; and the
-duplication is often carried by one accession — 40 of the 84 doubled windows are read that way by
-exactly one of eight — so the evidence is one sample's, not fifty's. §11 question 11 carries it.
+**What governs the pattern is the number of carriers, not the allele frequency.** It is tempting to
+say a real half-frequency variant leaves every sample heterozygous with probability 0.5⁵⁰ and conclude
+the pattern is decisive; the duplications that matter are not at a frequency of a half, they are
+carried by anything from one sample to fifty, and the pattern's power collapses below about five
+carriers. **What it does not need is reads**: twenty-five reads a position buys it nothing over three,
+because the evidence is which genotypes appear across the panel rather than how sharply any one of
+them is read.
+
+**And what it misses is what matters least, which is not a coincidence.** A duplication few samples
+carry inflates expected heterozygosity nearly as hard as it inflates the observed one, so it largely
+cancels out of their ratio; one the whole panel carries contributes **nothing** to the expected
+heterozygosity and a heterozygote in every sample to the observed one. The blind spot and the harm sit
+in different places.
+
+**What the class is worth, and what it costs where there is nothing to find — MEASURED 2026-08-13
+inside the estimator itself**
+([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md)).
+With the class **off**, a drawn panel carrying duplications returns heterozygosity **60.8% above** the
+truth and a homozygote excess of 0.4209 against a drawn 0.600. With it **on**, −1.2% and 0.5948. On a
+panel with **no duplications at all** the class is not free: it takes heterozygosity 0.5% low at fifty
+samples and **6.4% low at ten**. That last figure is the one a small cohort needs in order to decide
+to switch it off, and it is another face of the same threshold — below about twenty-five samples the
+cohort pattern cannot tell the class from a real variant, so it costs more than it recovers.
+
+**And it does not explain the human benchmark trio's heterozygosity excess.** The trio comes back 1.23
+to 1.28 times its benchmark VCF's count; with the class fitted and a coverage summary supplied, the
+three rates are unchanged to three decimals and **the class's weight is zero**. That excess is
+something else, and this route has now ruled out the explanation that looked most likely.
+
+**Two consequences for what the class may be used for.** Its fitted weight **must not be emitted as a
+measurement of how much duplication a sample carries** — both discriminators recover it about twice
+too large while sorting the positions correctly. And the class's *grain* is unchanged and now has a
+second reason: it is the (position, sample) pair, because the coverage reading is per sample and works
+at any panel size while the cohort pattern is per position and fails on exactly the duplications a
+single accession carries.
 
 **Measured, 2026-08-12, and the class is kept**
 ([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)).
@@ -481,6 +571,13 @@ consumer can see how much of the number is data. Nothing about the estimator cha
 empty loci would trade a self-consistent estimate for a truncated one, and the loci are the same in
 every sample, so a comparison between samples is unaffected either way. What must not happen is the
 number being read as a count of observed heterozygotes when a fifth of its support saw nothing.
+
+**And those empty loci are where a quarter of one known failure lands — MEASURED 2026-08-13.** When
+the third class of §2.2 is missing, about a quarter of the resulting excess in `Hobs` comes from
+positions with **no read at all**: the posterior there is the prior, the prior is read off a frequency
+density the same missing class has already inflated, and the inflation is charged a second time. So
+the two counts this paragraph requires are not only a caveat on how much of `Hobs` is data — they are
+the size of the surface on which a modelling error compounds.
 *This is also why §5.2's opening of the circularity is only half an opening — the same paragraph
 there says which half.*
 
@@ -574,6 +671,39 @@ cohort-gather parameter before this route existed
 it — the choice is the estimator's and nothing here turns on it. The evidence is the generic kept
 loci: for each sample, how much of its low-fraction alternative-read mass falls on loci the parameters fit says
 are segregating, carrying the alleles it says segregate there.
+
+**Two exclusions are requirements of this estimator, not tuning — MEASURED 2026-08-13 on real reads**
+([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md)).
+Without them the 63 tomato accessions came back with a **median accession 6.5% contaminated**, which
+is not a property of the archive.
+
+- **A position the fit judges more likely mismapped than not is not a contamination marker.** Two
+  stretches of genome the reference holds once, piling reads onto one position, put a few unexpected
+  reads into **every** sample — which is the contamination signature exactly. **Two tomato markers in
+  five were such positions**, 20,767 of 52,525. Leaving them in, the median accession reads 0.0684.
+- **A sample's reads are scored against every depth its stored code could stand for**, not against the
+  middle of the range. The count of disagreeing reads is exact while the depth is a five-bit code
+  standing for a *range* above nine reads (§2.2 of the records document), so a heterozygote's read
+  share lands away from a half for a reason that is not the sample. Skipping this, a drawn panel with
+  **nothing in it** reads 0.025 at ten reads a position and 0.0013 at three.
+
+With both, tomato's median goes to **0.0000** and its worst accession to **0.0090**, while a drawn
+panel holding one genuinely 3%-contaminated sample still returns 0.0102 for it against 0.0003 for the
+worst clean one.
+
+**And the per-position probability of being mismapped becomes an output of this route, not an
+internal.** It is what having every sample at one position buys and nothing else in step 4 can
+produce, and it now has two consumers: this estimator, and whatever calls variants afterwards. Four
+bytes a position.
+
+**Correcting the sample's own ancestry coordinates for the contamination was measured and is NOT
+adopted.** `verifyBamID2` maximises over the fraction and the sample's coordinates together, on the
+reasoning that reads from the contaminant drag those coordinates toward the panel average. Undoing
+that drag moves a drawn 3% sample from 0.0115 to 0.0166 against a truth of 0.030 — closer — and moves
+the worst clean sample from 0.0008 to 0.0046, so **the separation between them falls from 14-fold to
+3.6-fold**; searching each axis freely is worse again. **The attenuation and the floor move together**,
+so correcting the coordinates buys accuracy in the value at the cost of the thing a threshold actually
+needs.
 
 ### 3.4.1 The estimator is a two-genotype mixture, and it is standard
 
@@ -836,33 +966,26 @@ distribution, not when it crosses 1%. That is cheaper than the five-times budget
 markers would need, and it is the same reasoning §3.2 uses when it requires the two evidence counts to
 travel beside the rates.
 
-**REVISITED 2026-08-13, and the "do not size the budget for contamination" decision above no longer
-holds as stated.** What it rejected was *ten times the resident memory*, on the assumption that every
-sample's records are held at once. Since the records are now written to a file per sample
-([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §6.1), a larger census for
-contamination costs **disk and one sequential read** instead — about 17 MB per read group of depth
-codes at twenty-seven million positions, roughly 1.5 GB across the sixty-three-accession tomato cohort.
-That is the budget the bottom row of the table above needs, at this panel's density of about one
-usable marker per 125 kept positions, and it takes the floor on a clean sample from about 1% to 0.21%.
+**SUPERSEDED 2026-08-13 — the floor those figures describe was two defects, and both are fixed**
+([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md)).
+The table above measures the worst spurious estimate in a clean panel *before* mismapped positions were
+excluded from the markers and before a sample's reads were scored across the range its stored depth
+code stands for (§3.4). With both, **the drawn floor is 0.0000 for the median accession and 0.0014 for
+the worst, at 8,879 markers** — where this table's 13,700-marker row reported 0.86%.
 
-**How it is computed without holding anything.** The per-sample files are all in genome order over the
-same loci, so a merge across samples yields one locus at a time with only that locus's evidence
-resident — the same shape the cohort caller already reads its per-sample files in. In that pass, each
-sample carries one running log-likelihood per candidate `α` on a grid: memory is samples × grid
-entries, a few tens of thousands of numbers, and it does not grow with the census.
+**So the marker budget is not set by the noise floor, and the recommendation to raise it is withdrawn.**
+An earlier revision of this section argued for a census of about twenty-seven million positions, on the
+grounds that the floor fell from 1% to 0.21% between 10,000 and 219,000 markers and that a file on disk
+made the extra positions cheap. **There is no longer a floor to buy down.** The two-million-position
+budget yields about ten thousand usable markers, which is where a contaminated sample's estimate has
+been right since the first measurement, and the sizing question returns to
+[`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.3 — where three hundred and
+twenty thousand positions is enough for everything else.
 
-**Only `α` moves to the large census; the coordinates do not.** §3.4.2 fits the intended sample's and
-the contaminant's positions in a principal-component space beside `α` — eight numbers a sample, and
-the table above shows a contaminated sample's estimate is already right from 3,400 markers. So those
-eight are fitted on the small census where the rest of the model runs, held fixed, and **`α` alone is
-re-fitted on the large one**, which is where the noise floor lives.
-
-**What has to be checked before this is built**, and it is one measurement rather than an argument: run
-the contamination harness with the coordinates fixed from a small census and `α` re-fitted on a large
-one, and confirm the clean panel's floor still falls the way the table above says it does when
-everything is fitted together. If the two-step version loses the gain, the fallback is to run the
-whole contamination block as a final pass after §3.3's alternation has converged, which costs one more
-sweep over the large census and no accuracy.
+**What does not change is that the value is attenuated.** A drawn sample truly at 3% returns 0.0102,
+and correcting for that attenuation costs more separation than it buys (§3.4). So a sample is still
+judged against the panel's own spread of fitted values rather than against a constant, for the reason
+§3.4.4 gave before the floor was fixed: it costs nothing, since every sample is fitted anyway.
 
 ### 3.4.5 Measure it again from the final calls, and report the two
 
@@ -954,6 +1077,21 @@ comparison of one fitted number rather than of two designs. In the biallelic cas
 Beta, so this is the same object §2.1.2 fits on the generic path with the mean and the concentration
 named separately.
 
+**The concentration has a second consequence a run has to act on: it is what sets how many tracts a
+stratum needs — MEASURED 2026-08-13**
+([`../reports/str_stratum_size_sweep_2026-08-13.md`](../reports/str_stratum_size_sweep_2026-08-13.md)).
+The four slippage numbers are measured from *reads*, so a deeper cohort gets them from fewer tracts.
+**The concentration is measured from tracts** — it says how far each tract's own lengths depart from
+the stratum's, which is a comparison between tracts and cannot be sharpened by reading any one of them
+harder. Doubling the depth from three reads a site to six halves the scatter of the read-driven
+numbers and moves the concentration's not at all: 14.3% against 14.2% at 100 tracts, 7.9% against 8.4%
+at 250. **So the per-stratum cap cannot be relaxed because a cohort was sequenced deeply**, and 5,000
+tracts is the floor at three reads a site
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §6). The number that breaks
+*first* is not this one — it is how fast two-repeat slips fall off against one-repeat slips, which
+rests on the fifth of the slipped reads that slipped by two — but that one depth does buy back, and
+this one it does not.
+
 **Free parameters per stratum: the four slippage numbers, the length spectrum's shape, and `κ`.**
 None of them is per locus.
 
@@ -971,8 +1109,18 @@ None of them is per locus.
   split pins at 1.000 and the fall-off collapses to zero, where the per-locus fit returns +0.3%,
   −0.2% and +1.1%. **That is this route's case on this path, on the cohort the caller is aimed at.**
 
-*What is not measured is which `κ` a real stratum has, and it cannot be until the STR records exist
-and a genome walk fills them.*
+**Which concentration a real stratum carries — MEASURED 2026-08-13, and this closes the question that
+stood here** ([`../reports/str_fit_on_real_records_2026-08-13.md`](../reports/str_fit_on_real_records_2026-08-13.md)
+§6.2). The records exist and a genome walk filled them: on 63 tomato accessions the **homopolymer
+strata carry 0.52 to 1.56, and the dinucleotides at six repeats carry 5.25**.
+
+*Read that against where the drawn work sits.* Every drawn panel behind §4.1 and behind the
+per-stratum cap was drawn at a concentration of **0.5** — which covers the homopolymers and does not
+reach the dinucleotides. So the cap of 5,000 tracts
+([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §6) is measured on a stratum
+shape tomato's homopolymers have and its dinucleotides do not, and the size sweep's own caveat — that
+a differently-shaped stratum could have a different floor — now has a real number attached to it
+rather than a hypothetical.
 
 ### 4.2 Which lengths a locus may carry, and what bounds the sum
 
@@ -1028,6 +1176,36 @@ pass over the STR records once they exist.
 borrows from its neighbours, and the fitted level is held monotonic along the repeat-count axis
 ([`parameter_prepass_ssr.md`](parameter_prepass_ssr.md) §4.3). Nothing about per-locus weighting makes
 a stratum with eleven loci in it fittable.
+
+**How a thin stratum borrows — MEASURED 2026-08-13**
+([`../reports/str_fit_on_real_records_2026-08-13.md`](../reports/str_fit_on_real_records_2026-08-13.md)
+§4). **Borrow below 1,000 tracts. Take both neighbouring repeat counts together, never one and then a
+test. Refuse below 50 tracts even after borrowing.**
+
+*The both-sides rule is the part that is not a detail.* Slippage rises along the repeat count, so each
+neighbour's level is displaced from the thin stratum's — by about 30% a count on the drawn panel.
+Taking one neighbour and then testing whether the floor is cleared keeps whichever side was reached
+first and carries that displacement whole: the borrowed slippage level comes back **23%** from the
+truth. Taking both sides of a distance together leaves the two displacements pointing opposite ways
+and it comes back **1.2%** from the truth. The obvious implementation is the wrong one.
+
+*And borrowing never lost in the measured range*, so the floor is not where it stops paying: at 50
+tracts, fitting alone against borrowing, the slippage level is 9.6% against 1.8%, the fall-off 35.2%
+against 4.2%, the concentration 16.7% against 3.4%; borrowing also won at 250 and at 1,000. **The
+floor is set at 1,000 because that is where a stratum's own answer costs about a percentage point**,
+and keeping its own answer is what preserves a repeat-count axis that varies.
+
+**And borrowing can erase the axis it is defending, which is why the emitted parameters must say what
+stood behind them.** On the human benchmark trio — 216 tracts in 32 strata, from a 452 kb region set —
+every one of the fifteen homopolymer strata fell below the floor, so each reached for its neighbours,
+each ended up pooling all fifteen, and all fifteen were handed the identical four numbers for repeat
+counts 8 through 23. **The stratification was flattened to nothing and no field in the output said
+so.** That is the rule working as specified, not a defect in it — but it means *the answer a run gets
+depends on how much genome it walked*, and a reader of the emitted table cannot see it.
+
+**So each emitted per-stratum parameter carries two more values: how many tracts stood behind its own
+answer, and which strata were pooled to produce it.** They cost nothing — the estimator holds both
+already — and without them a flattened axis is indistinguishable from a flat one.
 
 **How much of the genome's STR loci this route holds decided its standing, and the answer is: all of
 them.** Measured on tomato SL4.00 at the calling floors `[8, 6, 6, 6, 5, 4]`
@@ -1141,6 +1319,16 @@ number. **The constructor refuses a value outside `[0, 1]`** — a fit that want
 is reporting a modelling failure, and the right response is the diagnostic §5.1 lists rather than the
 number.
 
+**What that constraint catches, and what it does not — MEASURED 2026-08-13**
+([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
+On an **outbred** panel a missing third class drives the coefficient to **−0.09** and the constraint
+refuses it, so the failure is loud and the run stops. On a **selfing** panel the same missing class
+lands it at **0.4471 against a true 0.5942** — a perfectly legal value, arrived at silently, with the
+two error rates and the noisy share all within a percentage point of the truth. **So the constraint is
+not a safeguard against this, and nothing else in the fit is either**: on the panels this caller is
+aimed at, a quarter of the inbreeding coefficient can go missing with every other number looking
+right.
+
 **Why fit it at all, given the caller wants the other one:**
 
 - **It is the only external check the autozygosity estimate has.** Nothing else in step 4 measures
@@ -1233,6 +1421,14 @@ emitted as absent rather than as numbers:
   with one, the class posterior is the mixture weight and the parameters fit *is* the blind two-class model
   [`parameter_prepass_generic.md`](parameter_prepass_generic.md) §2.1 already ships. §8's third
   measurement is the curve that says how many samples it takes to matter.
+
+  **The duplicated class is the exception, and only if the coverage summary is kept.** Its cohort
+  discriminator — no sample homozygous for the non-reference allele — has no power at all at one
+  sample, but its coverage discriminator has exactly as much as it ever had, being a comparison within
+  the one sample's own genome. So a single-sample run keeps the third class **if and only if** it
+  keeps the coverage-by-window summary, which is the run that walks alignments and therefore builds it
+  for free ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). A
+  single-sample run that has thrown the summary away emits the class as absent, not as zero.
 - **`F_hom_excess` separately from the density.** One individual's heterozygote deficit and a density
   concentrated near zero are the same observation, so the pair is not identified. Emit
   `F_hom_excess` as *not identified* below the sample floor §12.5 measures, never as a fitted zero.
@@ -1305,7 +1501,7 @@ last item replaces it. If it dominates, the budget is the knob and
 **Determinism.** The parameters fit sums over loci in a fixed order and over samples in a fixed order, so no
 parameter varies with thread count. Multiple starting points are enumerated, not sampled.
 
-**Errors.** The thirteen identity values of
+**Errors.** The twelve recording terms of
 [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §5 must all match across
 samples, and **a mismatch must refuse, not average**. Seven say the samples were asked for the same
 loci; one is a digest of the loci each one actually kept, and it is the only one that would catch a
@@ -1529,12 +1725,12 @@ holds, and where the generic budget starts to matter — are
    by:** the site-budget sweep of that document's §4.3, run along the sample axis — refit at 1,000,
    200, 100 and 50 samples drawn from one cohort and report each parameter's error against the drawn
    truth, one row per parameter, beside what the subsample cost at rest.
-9. **Does re-fitting `α` alone on a larger census keep the noise floor it promises?** — OPEN, raised
-   2026-08-13 (§3.4.4). The two-step scheme fixes each sample's principal-component coordinates on the
-   small census and re-fits only `α` on the large one. *Leaning:* it holds, because a contaminated
-   sample's estimate is already right from 3,400 markers and what the extra markers buy is the floor on
-   clean samples. **Settled by:** the contamination harness, run two-step against all-at-once on the
-   same drawn panel, comparing the worst clean sample's fitted `α`.
+9. **Does re-fitting `α` alone on a larger census keep the noise floor it promises?** — **CLOSED
+    2026-08-13 as moot.** The question existed to price a two-step scheme for buying down a noise floor
+    of about 1%. That floor was two defects rather than a sampling limit — mismapped positions used as
+    markers, and a depth code read as a point rather than a range — and with both fixed the drawn floor
+    is 0.0000 for the median accession at 8,879 markers (§3.4, §3.4.4). **There is nothing left to buy
+    down, so there is no large census to re-fit on.**
 10. **How do these estimates run inside a memory budget when the cohort is thousands of samples?** —
     OPEN, raised 2026-08-13 (owner). Question 8 asks how few samples the parameters fit *needs*; this asks what it
     *does* when it is handed five thousand and a ceiling it must not cross. The two have different
@@ -1561,6 +1757,14 @@ holds, and where the generic budget starts to matter — are
       per-stratum reading halves the repeat-tract peak rather than dividing it by 141, and the
       per-stratum cap is what turns it into a bound
       ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §4.5).
+
+      *The reading order is free of accuracy cost; the cap that turns it into a bound is not, and
+      2026-08-13 priced it.* At **5,000 tracts** it costs nothing measurable — every fitted number
+      within 2.4% of the truth and moving no more than 2.3% between draws at three reads a site. Below
+      1,000 it costs the fall-off of two-repeat slips first and the concentration second
+      ([`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md) §6). So the bound is real
+      and it is not free at every setting: **50 kB a sample per stratum section, and the accuracy is
+      paid for only if the cap goes below the floor.**
 
     **Three more levers bound the three axes, and these do trade something:**
 
@@ -1592,28 +1796,62 @@ holds, and where the generic budget starts to matter — are
     since the free levers make the total meaningless — a run that never holds both has no total to
     report.
 11. **Can the duplicated class be identified from the cohort pattern alone, with no coverage summary?**
-    — OPEN, raised 2026-08-13 (owner). §2.2 files the cohort pattern as a bonus: a real half-frequency
-    variant leaves about a quarter of the samples in each homozygous class, a duplication leaves every
-    sample at a half, and a real variant gives the second pattern with probability 0.5⁵⁰ on fifty
-    samples. **What hangs on it is not the class but the object**: if the pattern suffices, the window
-    summary is optional, and in a two-phase run the parameters fit no longer has to read every sample's
-    pileup a second time to rebuild it
-    ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4).
+    — **CLOSED 2026-08-13: yes from about twenty-five samples up, no below**
+    ([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
+    One drawn fifty-sample cohort, fitted three ways — the class recognised from local relative
+    coverage, from the cohort's genotype composition alone, and not at all.
 
-    **What ignoring the class instead would cost, which is the other end of the same question:** on
-    tomato SRR7279482 the artefact is about a **third** of that sample's near-half positions — the same
-    order as the mismapping class whose absence put HG002's fitted heterozygosity at **1.41 times** the
-    benchmark's count. *And `Hobs` is not the only thing that moves*: such a locus enters the frequency
-    spectrum as a mid-frequency variant, so `Hexp` is read off an inflated spectrum too (§5.3).
-    **Whether the two inflations cancel in `1 − Hobs/Hexp` is unknown**, and that is what decides
-    whether ignoring the class is survivable. Nothing here has measured it.
+    **Ignoring the class does not cancel out of `1 − Hobs/Hexp`.** On a selfing panel at three reads a
+    position it puts `Hobs` **50.6%** above the truth and `Hexp` **10.6%** above it, so the inbreeding
+    coefficient reads **0.4471 where the truth is 0.5942** — a quarter of it gone, silently, with the
+    two error rates and the noisy share all within a percentage point.
 
-    *Leaning:* the pattern helps and does not suffice alone at three reads a site, where telling *half
-    the reads* from *all the reads* within one sample is weak, and where 40 of 84 doubled windows are
-    carried by one accession of eight, so the evidence is one sample's rather than fifty's. **Settled
-    by:** one drawn panel fitted three ways — with the coverage summary, with a third class identified
-    only by the cohort pattern, and with no third class at all — reporting `Hobs`, `Hexp` and the
-    inbreeding coefficient separately, at three reads a site and at twenty-five.
+    **The cohort pattern alone recovers nearly all of it, and it needs samples rather than reads.**
+    The coefficient reads 0.5807 against 0.5942 with `Hobs` 3.0% high, against 0.5855 and 1.3% for
+    coverage. Counted as wrong genotypes it leaves 113 of 1,255 where coverage leaves 5, and calls 2
+    of 822 real variants duplicated. Twenty-five reads a position buys the pattern nothing over three;
+    **panel size is what governs** — `Hobs` 3.0% high at fifty samples, 6.8% at twenty-five, 21.2% at
+    ten.
+
+    **Decision: drop the requirement, keep the capability** (§2.2, and
+    [`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4). The class is
+    always identified from the cohort pattern; the coverage summary becomes an input used when the run
+    has it, which is free in the run that walks alignments. The two-phase run does not rebuild it by
+    default, and does when the cohort is under about twenty-five samples, when the panel is outbred, or
+    when asked.
+
+    **Three things would change that, and the report's §6 has the rest.** On an **outbred** panel the
+    pattern finds only the duplications every sample carries, because its evidence is the absence of
+    samples homozygous for the non-reference allele and inbreeding is what makes those common. Where
+    duplications are overwhelmingly **private** — a spread the eight-accession counts rule out, but
+    only eight accessions say so — the pattern reverses failure mode and calls 80 of 847 real variants
+    duplicated where coverage calls 1. And **at one sample the pattern has no power at all** (§6.1).
+12. **Does the locus's own read count do what the coverage-by-window summary does?** — **CLOSED
+    2026-08-13: no, and the gap is widest at tomato's own depth**
+    ([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).
+    Read at the width the sample's depth requires, the window gives 14-fold enrichment at 2.5 reads a
+    position where the position's own read count gives 1.1-fold, and the cheap arm calls 44 in every
+    100 positions it scores "about two copies" against the window's 2.8 (§2.2). **The coverage-by-window
+    summary is kept.**
+
+    *Three things the measurement settled beyond the question asked.* The GC correction the cheap arm
+    needs does **not** drag the window's machinery in with it — a depth-against-GC curve fitted from one
+    position in 300 matches one fitted from all 7.5 million, 10.72 against 10.77 — so the cheap arm
+    stayed cheap and simply does not work, which is the clean form of the answer. The **per-position
+    depth cap puts a ceiling on any per-position companion**: from 76 reads a position a doubled
+    position's stored code no longer sits above an ordinary one, and from 98 the two are written
+    identically. That never fires on tomato, whose deepest accession has a median position of 31 reads,
+    but it is inside the range this caller commits to, and the window has no such ceiling. And **the
+    five-bit encoding costs the discriminator 11% of its enrichment at 13.3× and 37% at 28.7×**, where
+    below five reads a position it costs nothing — the first measurement of what per-record binning
+    costs a consumer, as against the pooled-cell figure
+    ([`parameter_prepass_generic.md`](parameter_prepass_generic.md) §4).
+
+    *Not adopted:* using the position's own read count as a **second** condition beside the window. It
+    would take 9.6× to 16.7× at 9.9 reads a position and 21.3× to 25.7× at 25.2×, and cost 14.4× → 13.0×
+    and 6.6× → 5.5× at the shallow end, so it needs a depth-conditional rule the fit does not have.
+    **Settled by**, if it is ever wanted: the change in fitted heterozygosity on a drawn panel, not the
+    enrichment — enrichment does not say whether a discriminator reaches anything the caller emits.
 
 ---
 

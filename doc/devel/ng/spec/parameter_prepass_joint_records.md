@@ -18,7 +18,7 @@ carries a note saying so.*
 
 ## 1. What this is, and why it is its own module
 
-**Two words carry this document, and both are named here rather than assumed.**
+**Two terms relevant for this document.**
 
 - **The genome walk** — one pass over **one sample's** alignments, visiting each locus of the genome in turn
   and gathering what that sample's reads say there. It is where a record is filled. One sample, one
@@ -121,6 +121,19 @@ is 21 codes; four bits holds 16 and could not express the bins alone. That senti
 third goal needs, and
 [`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) §7 already requires the
 distinction without having anywhere to put it.
+
+**A bin's width is a source of apparent contamination, and the remedy is the consumer's — MEASURED
+2026-08-13**
+([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md)).
+The count of disagreeing reads is exact and the depth is a *range* above nine reads, so **any consumer
+that divides one by the other inherits the width of the bin** — an error of up to a sixth at thirty
+reads a position. A heterozygote's read share then lands away from a half for a reason that is not the
+sample, and a contamination estimator reading that as evidence returns 0.025 on a drawn panel with
+nothing in it. **The ladder is not the thing to change**: it was measured against a finer one and the
+bias it costs the fits is 0.054 rungs. What belongs here is the warning and the remedy — **a consumer
+sums over the depths the code stands for** rather than taking the middle of the range, which takes that
+same drawn panel to zero
+([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4).
 
 **Allele counts are not binned at all — DECIDED 2026-08-13.** The
 code stores an exact count.
@@ -288,6 +301,17 @@ one count of covering-but-not-crossing reads per locus beside the offsets, which
 states without asking the parameters fit to score a lower bound (which [`locus_generation_ssr.md`](locus_generation_ssr.md)
 leaves to the caller).
 
+**How large that gap is, measured on real reads 2026-08-13** — and it is not a corner case
+([`../reports/str_fit_on_real_records_2026-08-13.md`](../reports/str_fit_on_real_records_2026-08-13.md)).
+On the human benchmark trio, **37 reads in every 100 that reach a tract never cross it**: 102,308
+against 171,930. On the 63-accession tomato cohort it is close to half — 1,538,186 against 1,587,703.
+Every one of them is dropped from the length distribution.
+
+**So the count is not only stored, it is reported per stratum.** The censoring runs along the
+repeat-count axis the slippage numbers are fitted within, so a stratum whose tracts are simply longer
+than the reads must not arrive looking like one that was unlucky with coverage — and at these
+fractions the difference between the two is most of the data.
+
 ---
 
 ## 4. The third object: coverage by window, per sample
@@ -318,13 +342,53 @@ the doubling being looked for, so a window at an extreme of GC content reads hig
 has nothing to do with copy number. Hence *relative*: each window's depth is divided by what this
 sample's own coverage, at this window's own GC content, would predict.
 
-*Whether this object is required at all is open, and the question is not this document's.* The cohort
-carries a second signal for the same loci — a real half-frequency variant leaves about a quarter of the
-samples in each homozygous class, a duplication leaves every sample at a half — and if that suffices,
-the summary becomes optional and a two-phase run stops having to read every pileup a second time to
-rebuild it. [`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §11 question 11 carries
-it, with the measurement that would settle it. **Until then this object is specified as required**,
-because the alternative is unmeasured and this one is not.
+**It was a candidate for removal and it survived the test — MEASURED 2026-08-13**
+([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).
+Building this object costs a genome-wide accumulator, a depth-against-GC curve fitted per sample,
+denominators taken from the reference and the analysed regions, and a second pass over every pileup in
+a two-phase run. The alternative that would have removed all of it — **the position's own read count,
+already in §2's records and costing nothing** — was measured against it on the same eight tomato
+accessions, and does not do the job:
+
+| accession mean depth | 2.5× | 3.6× | 9.9× | 25.2× | 28.7× |
+|---|---:|---:|---:|---:|---:|
+| this summary, read at the width the depth requires | **14.0×** | 6.6× | 9.6× | 21.3× | 23.4× |
+| the position's own read count | 1.14× | 0.63× | 1.65× | 10.8× | 10.8× |
+
+**And the enrichment is the smaller half of it.** At 2.5 reads a position the cheap arm calls **44 in
+every 100** of the positions it scores "about two copies", where this summary calls 2.8 — because a
+position needs four reads to show a near-half fraction at all, and five or six reads at that depth
+*is* twice the median. **The cheap arm stayed cheap and simply does not work**: the GC correction it
+needs does not drag this object's machinery in with it, since a curve fitted from one position in 300
+matches one fitted from all 7.5 million.
+
+**One thing that measurement adds to §2.2's ladder, and it is not about this object.** The
+per-position depth cap of 124 is a ceiling on any per-position companion: from **76 reads a position**
+a doubled position's stored code no longer sits above an ordinary one, and from **98** the two are
+written identically — blind rather than quiet. It never fires on tomato, whose deepest accession has a
+median position of 31 reads, but it is inside the range this caller commits to. **This summary has no
+such ceiling**, which is a second reason it is the discriminator that survives the whole input range.
+
+**This object is used when the run has it, and is not required — MEASURED 2026-08-13**
+([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
+The cohort carries a second signal for the same positions: a duplication's carriers are all at a half
+and **none is homozygous for the non-reference allele**, where a real variant at the same frequency
+puts some samples there. On a fifty-sample panel that signal alone holds observed heterozygosity to
+3.0% above the truth where this summary holds it to 1.3%, and where having no third class at all puts
+it 50.6% above. So the summary earns its place and does not command it:
+
+- **The run that walks alignments builds it for free** and keeps it — it already has every position's
+  depth in hand.
+- **The two-phase run does not spend a second full pass over every sample's pileup rebuilding it by
+  default.** It spends that pass when the cohort is under about **twenty-five samples**, when the panel
+  is outbred, or when the run asks for it. Below twenty-five samples the cohort signal fades — observed
+  heterozygosity 6.8% high at twenty-five samples and 21.2% at ten — and **at one sample it has no
+  power at all**, which makes this summary the only discriminator a single-sample run has
+  ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §6.1).
+
+**So the fifty-sample cohort is the case where this is a choice, and the small cohort is the case where
+it is not.** A caller that must work at one sample and at thousands keeps the mechanism and moves the
+default, rather than deciding once for the panel size it was last tested on.
 
 **None of that can come out of §2's records, which is why this is a third object and not a field.**
 They hold one binned depth per kept position, and the kept positions are one in a few hundred — a
@@ -339,7 +403,15 @@ summary is over **every** position the genome walk visited, not over the kept on
   content and an uncorrected window near an extreme of it reads high or low for a reason that has
   nothing to do with copy number. Production computes both in its Stage-1 pileup
   ([`../../specs/hidden_paralog_filter.md`](../../specs/hidden_paralog_filter.md) §2); `src/pileup/`
-  is frozen, so ng builds its own.
+  is frozen, so ng builds its own;
+- **each window's own GC fraction — ADDED 2026-08-13, and without it the other two are unusable**
+  ([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md)).
+  The curve says what depth a window of *this* GC content should show and the array says what depth
+  this window did show, and **nothing downstream can divide one by the other without knowing which GC
+  bin the window is in**. On tomato the correction is not a refinement: median depth runs from 16.2
+  reads a base at 20% GC to 29.0 at 36%, **a factor of 1.79 — larger than the doubling being looked
+  for** — so an uncorrected reading is mostly GC content and the copy-number discriminator cannot be
+  used on this cohort at all. One byte a window, beside the one the mean depth already costs.
 
 **Decision, 2026-08-13 (owner): this summary is never written to disk.** Unlike the records, it is
 recoverable from the per-sample pileup — every position's depth is in there — so storing it would be a
@@ -381,8 +453,11 @@ finds no path that can still pool two summaries built at different widths.
 
 **Measured, 2026-08-12** ([`../reports/duplicated_locus_probe_2026-08-12.md`](../reports/duplicated_locus_probe_2026-08-12.md)
 §4). A window's mean depth separates one copy from two only once the window has collected about
-**12,000 aligned bases**, which is depth times width. Enrichment of the joint cell — a two-copy
-window *and* a near-half alternative fraction — over what independence predicts, at 500 bp:
+**12,000 aligned bases**, which is depth times width. **This table is also the case against the whole
+object**, and should be quoted with its shallow rows and not only its deep ones: at three reads a site
+— where the tomato archive sits and where this route is aimed — there is no separation to have.
+Enrichment of the joint cell — a two-copy window *and* a near-half alternative fraction — over what
+independence predicts, at 500 bp:
 
 | mean depth | 2.51× | 3.60× | 5.15× | 9.89× | 13.32× | 25.20× | 28.69× |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -403,6 +478,14 @@ at 10 kb — and 2.51× at 5 kb (12,550 bases a window) returns what 25.2× at 5
   Summing binned means back to a wider mean needs the per-window position counts, which the summary
   already has as its denominators. **Summing is exact and free; unsumming is not possible**, which
   is the whole reason the fine grid is the stored one.
+
+**What failing to sum costs, measured 2026-08-13**
+([`../reports/duplicated_class_identification_2026-08-13.md`](../reports/duplicated_class_identification_2026-08-13.md)).
+Read at 1,500 aligned bases a window instead of the 12,000 the floor asks for, a fit conditioned on
+coverage leaves **34 duplicated positions of 1,255** in the wrong class where the summed window leaves
+**5**. So the floor is worth about seven times the error — and a fit reading too narrow a window is
+still **four times better than one with no coverage at all**, which is the comparison that says this is
+a floor to respect rather than a cliff to fear.
 
 **The tomato archive is the cohort that makes this load-bearing.** At its three reads a site the
 class is invisible at 500 bp and plain at 5 kb, so a fit that read the stored grid directly would
@@ -452,10 +535,10 @@ agree when a hash function or a threshold's arithmetic has changed underneath th
 **It must be produced by the code that writes the entries**, not by re-running the selection, or it
 witnesses nothing about this file.
 
-**Five more are this document's**, and every one of them is load-bearing rather than informational.
-The first two say what was recorded; the last three say **in what units**, and an earlier version of
-this section had none of those three — which left the whole check able to pass while two samples' rows
-meant different things.
+**Four more are this document's**, and every one of them is load-bearing rather than informational.
+The first two say what was recorded; the last two say **in what units**, and an earlier version of
+this section had neither — which left the whole check able to pass while two samples' rows meant
+different things.
 
 - **the per-stratum locus counts** — for every stratum, how many loci the analysed regions hold and how
   many were kept. Without them anything pooled across strata is biased and silently so
@@ -471,11 +554,13 @@ meant different things.
   anything is recorded. It is the generic path's twin of the STR read cap on the row above, it moves
   independently of the ladder's own top rung, and a sample recorded at a different one did not record
   the same evidence;
-- **the coverage-by-window size** (§4), where a window summary exists at all. Windows of different
-  widths are not comparable and a relative copy number computed across two grids is meaningless.
-  **This is the weakest of the thirteen since 2026-08-13**, because the summary is no longer written
-  anywhere (§4): the parameters fit builds every sample's itself, at one width, so the disagreement it guards
-  against has no way to arise. It is kept because it costs one comparison.
+*A fifth value stood here until 2026-08-13 — the coverage-by-window grid width — and it is withdrawn.*
+Windows of different widths are genuinely not comparable, but **the summary is never written to a
+file** (§4), so that width described an object these records do not contain, and whoever runs the
+parameters fit builds every sample's summary itself, in one process, at one width. The disagreement it
+guarded had no way to arise. **A term describing something absent from the artifact is worse than no
+term**, because a reader takes each one as guarding something in the file. If summaries are ever
+stored, the width returns attached to the summary rather than to evidence that does not hold one.
 
 *None of the five needs a new mechanism: they are equality comparisons beside the eight above, and
 they fail in exactly the same silent way.*
@@ -554,7 +639,7 @@ nothing at a position no read reached, so silence from the genome walk was indis
 the run never opened: **93,150 of 1,999,404 kept positions on a 25× tomato accession came back as
 *never walked*, and every one of them was data.** A bit that can express a state is not the same as a
 genome walk that produces it. **The genome walk must therefore say which stretches it covered, whatever it found in
-them** — `RecordWriter::mark_walked`, called for each region handed to the generators; a real depth
+them** — `CensusWriter::mark_walked`, called for each region handed to the generators; a real depth
 never overwrites the mark and the mark never overwrites a real depth, so the order does not matter.
 The share is **1.4% to 35% of kept positions across the 63 tomato accessions** and 0.5% on HG002 at
 30×, and it is the denominator of every rate the parameters fit reports.
@@ -618,10 +703,11 @@ modification time.** On a mismatch the parameters fit rebuilds silently when the
 naming the field that differs when it is not. That is the same shape as §5's refusal, pointed at a
 different object.
 
-**Size on disk.** About 6 MB per read group at a two-million-position census, and about 20–26 MB at
-the twenty-seven-million-position one that contamination would use — roughly 1.5 GB across the
-sixty-three-accession tomato cohort, read sequentially rather than held
-([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4).
+**Size on disk.** About 6 MB per read group at a two-million-position census — some 380 MB across the
+sixty-three-accession tomato cohort. *An earlier revision priced a twenty-seven-million-position census
+here, on the grounds that contamination needed the extra markers to bring its noise floor down; that
+floor turned out to be two defects rather than a sampling limit and is gone, so the larger census has
+nothing to buy* ([`parameter_prepass_joint_fit.md`](parameter_prepass_joint_fit.md) §3.4.4).
 
 ### 6.2 The file is read in sections, because the parameters fit is — DECIDED 2026-08-13
 
@@ -646,7 +732,7 @@ should require a program to hold a whole sample's evidence to use any of it.
 
 **What the layout must therefore carry:** a directory at the head of the file giving the byte extent of
 each section — the generic records per read group, and the repeat-tract records per (read group ×
-stratum) — so a reader can take one section without decoding the rest. The thirteen identity values and
+stratum) — so a reader can take one section without decoding the rest. The twelve recording terms and
 the kept-loci digest stay outside the sections, since they are checked before anything is read.
 
 **And "one section at a time" has to be enforced by the interface rather than left to whoever writes
@@ -677,9 +763,21 @@ the cap is set by what the estimator needs, and that is measured only from above
 recovered a slippage level of 0.0803 against a truth of 0.0800 at **6,000 tracts** in a stratum at
 three reads a site, and the comparisons against the per-stratum model ran at **1,200 to 1,500 tracts**
 with twenty samples ([`../reports/joint_str_estimator_2026-08-12.md`](../reports/joint_str_estimator_2026-08-12.md)).
-Nobody has swept downwards, so **where it starts to hurt is unknown**, and a cap above a few thousand
-buys nothing anyone has measured. [`parameter_prepass_joint_loci.md`](parameter_prepass_joint_loci.md)
-§6 question 1 carries the sweep that would settle it.
+**Swept downwards on 2026-08-13, and the floor is 5,000 tracts at three reads a site and 1,000 at
+six** ([`../reports/str_stratum_size_sweep_2026-08-13.md`](../reports/str_stratum_size_sweep_2026-08-13.md)).
+At 5,000 and three reads every one of the five fitted numbers is within 2.4% of the drawn truth and
+moves no more than 2.3% between draws; at 1,000 and three reads, one of them already moves 5.5%.
+Nothing is badly biased anywhere in the sweep — what a small stratum costs is an answer that changes
+with the draw.
+
+**Two of the five set the floor, and neither is the one a reader would guess.** *How fast two-repeat
+slips fall off against one-repeat slips* breaks first, because it rests on the fifth of the slipped
+reads that slipped by two: at 250 tracts that is about 225 reads behind the number. *The concentration*
+— how monomorphic the stratum's tracts are — breaks second, **and it is the one that fixes the cap for
+every run**, because it is counted in tracts rather than in reads. Doubling the depth halves the
+scatter of the read-driven numbers and does nothing at all for it: 14.3% against 14.2% at 100 tracts.
+**So a deeply sequenced cohort does not get to keep fewer tracts**, and the cap cannot be relaxed on
+the strength of coverage.
 
 **Sectioning is one of three levers and bounds one of three axes.** It bounds *which object* is
 resident. Reading every sample's file in genome order together bounds *how many loci* are resident,
@@ -725,9 +823,9 @@ writes a file at all.
    the larger half at 462,701 loci, and a single total would hide it being wrong. *At 300× the
    per-position depth cap fires long before the ladder's top rung does, so what that arm measures is
    the sparse list and not the ladder.*
-9. **The five unit values refuse.** Write two record sets identical in every way except one of: the
-   depth ladder's edges, the per-position depth cap, the STR read cap, the per-stratum counts, the
-   coverage window size. Each must be refused, naming which. **This is the test that would have failed
+9. **The four unit values refuse.** Write two record sets identical in every way except one of: the
+   depth ladder's edges, the per-position depth cap, the STR read cap, the per-stratum counts. Each
+   must be refused, naming which. **This is the test that would have failed
    before this revision and passed after it**, because the eight identity values that existed then all
    agree in every one of those five cases (§5).
 10. **The window summary is comparable across samples and is not derivable from the records** (§4).

@@ -96,7 +96,7 @@ pub struct SiteClassNoise {
 /// **Conditioned on the window's relative copy number, never on the site's own depth**:
 /// per-base coverage at 6× cannot tell a two-copy carrier from a sample reading high,
 /// so the discriminator is the window (spec §2.2). The window summary it reads is
-/// `records.rs`'s third object, not something this parameters fit derives.
+/// `census.rs`'s third object, not something this parameters fit derives.
 pub struct DuplicatedSiteClass {
     pub weight: f64,
     pub alternative_fraction: f64,
@@ -285,7 +285,7 @@ untrustworthy as the `PL` this module already refuses to group by.
 /// [`JointFitError::IdentityMismatch`] before any arithmetic, when two samples did not
 /// keep the same loci — the refusal `loci.rs` defines and this call enforces.
 pub fn fit_jointly(
-    samples: &[SampleRecords],
+    samples: &[SampleCensusEvidence],
     config: &JointFitConfig,
 ) -> Result<JointFit, JointFitError>;
 
@@ -300,12 +300,12 @@ pub struct JointFitConfig {
 }
 ```
 
-**Contract.** Deterministic: loci in `KeptLoci` order and samples in name order, so no parameter
+**Contract.** Deterministic: loci in `CensusLoci` order and samples in name order, so no parameter
 varies with thread count and multiple starting points are enumerated rather than sampled (spec §7).
 The identity check runs first and completely — a run that would fail on the fiftieth sample fails
 before the first likelihood evaluation.
 
-**`&[SampleRecords]` was the fifty-sample signature and it does not survive a thousand — CHANGED
+**`&[SampleCensusEvidence]` was the fifty-sample signature and it does not survive a thousand — CHANGED
 2026-08-13.** A slice of whole record sets requires every sample's whole evidence resident, which is
 6 GB at a thousand samples and 30 GB at five thousand (spec §7, §11 question 10). What the estimator
 actually consumes is narrower: every sample's generic records, and then — after those are dropped —
@@ -315,17 +315,17 @@ the cohort, which lends sections for the length of a call and cannot be made to 
 
 ```rust
 pub fn fit_jointly(
-    records: &mut CohortRecords,
+    records: &mut CohortCensusEvidence,
     config: &JointFitConfig,
 ) -> Result<JointFit, JointFitError>;
 ```
 
-`CohortRecords` is built from every sample's `SampleRecords` — resident ones in the run that never
+`CohortCensusEvidence` is built from every sample's `SampleCensusEvidence` — resident ones in the run that never
 writes a file, file-backed ones otherwise — and this signature does not distinguish the two, which is
 the point. The identity check across samples happens when it is built, before any section is decoded.
 
 **What is still open** is whether the fit also reads locus-major within the generic half, which
-question 10 measures. That would add a call to `CohortRecords`, not change the ones here: the unit of
+question 10 measures. That would add a call to `CohortCensusEvidence`, not change the ones here: the unit of
 lending would become a range of loci across every sample instead of a whole section, and the scoped
 shape is what makes that additive rather than a redesign.
 
@@ -481,7 +481,7 @@ pub enum JointFitError {
 ## 5. Open items
 
 - **`OPEN:`** the duplicated-locus class (§1.2), gated on the measurement in spec §2.2 — and on the
-  window summary it reads, which is `records.rs`'s third object rather than this unit's.
+  window summary it reads, which is `census.rs`'s third object rather than this unit's.
 - **Decided by measurement:** one Beta, not two (§1.3) — spec §11 question 6.
 - **Impl-time:** the frequency quadrature's node count. A `FrequencyQuadrature` value threaded
   through `locus_log_likelihood`, so the accuracy knob is visible in the signature and cannot be

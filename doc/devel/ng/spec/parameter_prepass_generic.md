@@ -425,6 +425,19 @@ of the depths everything occupies
 ([`../research/parameter_estimator_experiments_2026-08-06.md`](../research/parameter_estimator_experiments_2026-08-06.md)
 §4.3). **The bin count and the cap are one decision, not two.**
 
+**That 0.054 is a pooled-cell figure, and a consumer reading one stored code alone pays differently —
+ADDED 2026-08-13.** It was measured where many positions share a bin and the widths average out. Two
+measurements since then are about the other arrangement, where a single sample's single position
+carries one code. **A contamination estimator that divided an exact count of disagreeing reads by a
+point read off the bin returned 2.5% contamination on a drawn panel holding none**
+([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md));
+and **a copy-number discriminator reading the stored code instead of the exact count loses 11% of its
+enrichment at 13× depth and 37% at 29×**
+([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).
+Neither is an argument against the ladder — the histograms this section sizes are the pooled
+arrangement, and there 0.054 stands. **It is a warning to whoever reads a single stored code: sum over
+the depths the code stands for, rather than taking a value from inside the range.**
+
 **Where a ladder can hurt is 10 to 30 reads a site.** At tomato's 3 reads, 97 sites in 100 sit at
 depth 6 or below and are never binned at all; at 60 reads the genotype is certain whatever the exact
 depth. So **check any change to the ladder in that band and against both consumers** — the runs of

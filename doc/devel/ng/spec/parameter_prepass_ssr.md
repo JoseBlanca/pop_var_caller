@@ -612,7 +612,16 @@ borrowed or merged stratum carries `Provenance::Borrowed` and the strata it was 
 
 **What is not measured: how often the monotonicity constraint fires when the truth is monotone.** A
 merge triggered by sampling noise pools two strata that did not need pooling and charges both the
-cost above. The exact method cannot see it — with cells weighted by their exact probabilities there
+cost above.
+
+*First evidence either way, 2026-08-13, and it is one cohort at one motif length*
+([`../reports/str_fit_on_real_records_2026-08-13.md`](../reports/str_fit_on_real_records_2026-08-13.md)
+§6.1). The joint route's estimator, fitting five consecutive tomato homopolymer strata **with no
+monotonicity constraint applied at all**, returned a monotone rise: 0.0020 at 8 repeats, then 0.0027,
+0.0037, 0.0059, and 0.0094 at 12 — 4.7-fold over four repeat counts, about **1.47-fold a count**
+against the 1.3-fold this document predicts. Five separate optimisations, no constraint linking them.
+**So on that cohort the rule would never have fired**, which is the first data point on the question
+above. The exact method cannot see it — with cells weighted by their exact probabilities there
 is no sampling noise to trigger a spurious merge — so this one needs draws. **Measurable now:**
 simulate a monotone sequence of strata at each stratum's real locus count and count how often the
 fitted sequence dips. **Leaning:** the constraint is worth keeping, because the alternative is a

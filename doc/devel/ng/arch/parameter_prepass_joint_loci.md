@@ -2,7 +2,7 @@
 
 *Status: **partly built** (2026-08-12) — `loci.rs` exists and holds the generic rule, the
 unambiguous-base mask and the threshold arithmetic, with the properties §6 asks for asserted in its
-own tests. `KeptLoci`, `SelectionIdentity` and `KeptLociDigest` are still the contract below and not
+own tests. `CensusLoci`, `SelectionTerms` and `CensusLociDigest` are still the contract below and not
 yet code. Companion to the spec
 [`../spec/parameter_prepass_joint_loci.md`](../spec/parameter_prepass_joint_loci.md) (the design and
 its rationale) and to the shared arch docs [`ng_step_interfaces.md`](ng_step_interfaces.md)
@@ -24,8 +24,8 @@ a second route to the same parameters rather than a different step (`module_layo
 ```
 src/ng/parameter_estimation/joint/
 ├── mod.rs      – the route's surface; re-exports the three units below
-├── loci.rs     – THIS DOCUMENT: which loci are kept, and the identity that travels with them
-├── records.rs  – what is recorded at each (its own arch doc)
+├── loci.rs     – THIS DOCUMENT: which loci are kept, and the terms that travel with them
+├── census.rs   – what is recorded at each (its own arch doc)
 └── fit.rs      – the estimator (its own arch doc)
 ```
 
@@ -44,7 +44,7 @@ unit states a policy and calls them (spec §3.2).
 
 ## 1. Types
 
-### 1.1 `KeptLoci` — the selection, as one value
+### 1.1 `CensusLoci` — the selection, as one value
 
 The two sets, and the counts a consumer is obliged to reweight by (spec §3.5). Held together because
 they are produced by one pass over one set of inputs and checked for agreement as one thing.
@@ -53,10 +53,10 @@ they are produced by one pass over one set of inputs and checked for agreement a
 /// The loci every sample keeps raw evidence at, for one run.
 ///
 /// **Reproducible, not transported**: two samples that build this from the same
-/// [`SelectionIdentity`] get byte-identical contents, which is what lets samples be
+/// [`SelectionTerms`] get byte-identical contents, which is what lets samples be
 /// walked on different machines (spec §1). Nothing here is written to a sample's
-/// records — [`SelectionIdentity`] is (spec §5.1).
-pub struct KeptLoci {
+/// records — [`SelectionTerms`] is (spec §5.1).
+pub struct CensusLoci {
     /// The generic set, ascending in genome order. The parameters fit indexes records by
     /// position in this vector, so **the order is part of the contract**, not an
     /// artifact of how it was built.
@@ -70,7 +70,7 @@ pub struct KeptLoci {
 ```
 
 **Contract.** `generic` is sorted, duplicate-free, and every entry lies inside the analysed regions.
-Building it twice from one `SelectionIdentity` yields equal values, whatever the region sharding or
+Building it twice from one `SelectionTerms` yields equal values, whatever the region sharding or
 thread count — the property spec §7.1 tests. `ssr_stratum_counts` is over the same `scope` as the
 sample, never over the whole reference (spec §3.3).
 
@@ -108,10 +108,10 @@ impl UnambiguousRuns {
 is a silent double weight in every rate fitted from the set, and no later check would see it.
 `total_length` is the sum of the spans it holds and is never recomputed from a contig table.
 
-### 1.2 `SelectionIdentity` — the seven values that travel
+### 1.2 `SelectionTerms` — the seven values that travel
 
 What a sample carries so the parameters fit can refuse to pool mismatched runs (spec §5.1). **This is the type
-that crosses the machine boundary**, not `KeptLoci`.
+that crosses the machine boundary**, not `CensusLoci`.
 
 ```rust
 /// Everything that decides which loci a run keeps. Two samples that disagree on any
@@ -124,7 +124,7 @@ that crosses the machine boundary**, not `KeptLoci`.
 /// bits, and the `f64` `==` that `derive(PartialEq)` generates answers `false` for two
 /// `NaN` floors that came from the same configuration file.
 #[derive(Clone, PartialEq)]
-pub struct SelectionIdentity {
+pub struct SelectionTerms {
     /// The run's selection seed. A different seed selects a disjoint set and both
     /// look well-formed.
     pub seed: u64,
@@ -157,7 +157,7 @@ sample's against the first and fails on the first disagreement, naming the field
 **OPEN (impl-time):** `ReferenceDigest` and `RegionSetDigest` are named here as the types
 `reference_info` already produces; pin them when coding rather than minting new ones.
 
-### 1.3 `KeptLociDigest` — the eighth value, which checks the answer
+### 1.3 `CensusLociDigest` — the eighth value, which checks the answer
 
 The seven above say what a run was *asked*. This says what it *produced* (spec §5.1, census sites
 §5.2). Its input is fed by the record writer, not by re-running the rule — a digest derived from the
@@ -169,7 +169,7 @@ was handed.
 
 ```rust
 /// A witness that two samples really did keep the same loci.
-pub struct KeptLociDigest {
+pub struct CensusLociDigest {
     whole: [u8; 16],
     /// One entry per **occupied** megabase, in genome order — 800 on tomato at a
     /// two-million budget.
@@ -180,17 +180,17 @@ pub struct KeptLociDigest {
 pub struct BlockDigest { pub contig: ContigId, pub megabase: u32, pub digest: u64 }
 
 /// Fills one as the record writer walks the kept loci.
-pub struct KeptLociDigester { /* … */ }
+pub struct CensusLociDigester { /* … */ }
 
-impl KeptLociDigester {
+impl CensusLociDigester {
     /// Absorb the `index`-th kept locus. Called by the record writer, in index order.
     pub fn observe(&mut self, index: usize, locus: GenomePosition);
-    /// How many have been absorbed — checked against `KeptLoci::generic().len()`.
+    /// How many have been absorbed — checked against `CensusLoci::generic().len()`.
     pub fn observed(&self) -> usize;
-    pub fn finish(self) -> KeptLociDigest;
+    pub fn finish(self) -> CensusLociDigest;
 }
 
-impl KeptLociDigest {
+impl CensusLociDigest {
     /// The first megabase two digests disagree on — the whole reason for blocking.
     pub fn first_disagreement(&self, other: &Self) -> Option<(ContigId, u32)>;
 }
@@ -225,11 +225,11 @@ between "the digests differ" and "they differ on chromosome 3, megabase 41".
 /// flank the catalog was not built at; the catalog refuses rather than serving a short
 /// list, and the refusal is passed through with both values (spec §7.6).
 pub fn select_kept_loci(
-    identity: &SelectionIdentity,
+    terms: &SelectionTerms,
     catalog: &RepeatCatalog,
     analysed: &SelectableRegions,
     unambiguous: &SelectableRegions,
-) -> Result<KeptLoci, SelectionError>;
+) -> Result<CensusLoci, SelectionError>;
 ```
 
 **Contract.** Pure over its inputs; no interior mutability, no ordering dependence, no I/O beyond the
@@ -325,7 +325,7 @@ pub enum SelectionError {
     /// would be a wrong per-stratum total nothing downstream could notice (spec §3.3).
     #[error("the repeat catalog cannot serve this run's criteria")]
     CatalogTooRestrictive(#[source] RepeatCatalogError),
-    /// Two samples' [`SelectionIdentity`] disagree. Names the field.
+    /// Two samples' [`SelectionTerms`] disagree. Names the field.
     #[error("samples were selected under different {field}; they hold different loci")]
     IdentityMismatch { field: &'static str },
     /// The digests of two samples' kept loci differ although their identities agree —
@@ -342,7 +342,7 @@ produces a number with no meaning (spec §5).
 
 ## 3. Design decisions — decided
 
-- **`KeptLoci` holds the loci; `SelectionIdentity` travels.** The loci are reproducible and
+- **`CensusLoci` holds the loci; `SelectionTerms` travels.** The loci are reproducible and
   coordinates cost 8× the records they index — spec §5 (census sites §5).
 - **The STR half is the catalog's, not this unit's.** `sample_loci_per_stratum` ships with the
   ordering, exactness and refusal properties this consumer needs, asserted in its own spec §10 —
@@ -365,12 +365,12 @@ produces a number with no meaning (spec §5).
 
 | this doc | existing code | how they meet |
 |---|---|---|
-| the STR sampler | `RepeatCatalog::sample_loci_per_stratum` ([`repeat_catalog/reader.rs:260`](../../../../src/ng/repeat_catalog/reader.rs)) | called, not reimplemented; returns `(StratumCounts, StratumSample)` from one pass, which is exactly `KeptLoci`'s two STR fields |
+| the STR sampler | `RepeatCatalog::sample_loci_per_stratum` ([`repeat_catalog/reader.rs:260`](../../../../src/ng/repeat_catalog/reader.rs)) | called, not reimplemented; returns `(StratumCounts, StratumSample)` from one pass, which is exactly `CensusLoci`'s two STR fields |
 | the per-stratum totals | `RepeatCatalog::count_loci_per_stratum` ([`repeat_catalog/reader.rs:242`](../../../../src/ng/repeat_catalog/reader.rs)) | it delegates to the sampler at `cap = 0`, so asking for both costs one pass — take the pair from `sample_loci_per_stratum` and never call this one separately |
-| `StratumCounts`, `StratumSample` | [`repeat_catalog/strata.rs:15,49`](../../../../src/ng/repeat_catalog/strata.rs) | used as-is; `KeptLoci` stores them rather than converting |
+| `StratumCounts`, `StratumSample` | [`repeat_catalog/strata.rs:15,49`](../../../../src/ng/repeat_catalog/strata.rs) | used as-is; `CensusLoci` stores them rather than converting |
 | the hash | `hash_locus` ([`repeat_catalog/strata.rs:158`](../../../../src/ng/repeat_catalog/strata.rs), called from `StratumSampler::offer:110`) | the generic rule uses the same function and seed convention. **It is private today and keyed by contig *name*** — lifting it to `pub(crate)` and taking a `ContigId` is this unit's one edit outside its own file |
-| `StrRepeatCriteria` | [`repeat_catalog/criteria.rs`](../../../../src/ng/repeat_catalog/criteria.rs), taken by `str_loci` ([`reader.rs:220`](../../../../src/ng/repeat_catalog/reader.rs)) | stored in `SelectionIdentity` by value; it is already the run's whole STR policy |
-| the catalog-vs-reference check | `RepeatCatalog::open_checking_against_reference` ([`repeat_catalog/reader.rs:53`](../../../../src/ng/repeat_catalog/reader.rs)) | happens before this unit runs, which is why the catalog's own identity is **not** in `SelectionIdentity` (spec §5.1) |
+| `StrRepeatCriteria` | [`repeat_catalog/criteria.rs`](../../../../src/ng/repeat_catalog/criteria.rs), taken by `str_loci` ([`reader.rs:220`](../../../../src/ng/repeat_catalog/reader.rs)) | stored in `SelectionTerms` by value; it is already the run's whole STR policy |
+| the catalog-vs-reference check | `RepeatCatalog::open_checking_against_reference` ([`repeat_catalog/reader.rs:53`](../../../../src/ng/repeat_catalog/reader.rs)) | happens before this unit runs, which is why the catalog's own identity is **not** in `SelectionTerms` (spec §5.1) |
 | `GenomePosition`, `ContigId`, `Position`, `Bp` | [`src/ng/types.rs:60,13,34,174`](../../../../src/ng/types.rs) | used as-is; this unit seeds no new scalar |
 | the scope of a run | `ReadScope` (taken by `str_loci`/`count_loci_per_stratum`, [`reader.rs:220,242`](../../../../src/ng/repeat_catalog/reader.rs)) | `AnalysedRegions` must convert into one, so a `--regions` run counts and samples inside the BED — spec §3.3 |
 
@@ -383,7 +383,7 @@ produces a number with no meaning (spec §5).
   passes when the driver exists.
 - **Impl-time:** the digest's hash function and width. 32 bytes and per-megabase blocks are the
   contract; which construction fills them is a code-review question.
-- **Impl-time:** whether `KeptLoci::generic` is a `Vec<GenomePosition>` or a per-contig run-length
+- **Impl-time:** whether `CensusLoci::generic` is a `Vec<GenomePosition>` or a per-contig run-length
   form. The contract is *ascending, indexable*; the memory shape is the implementer's.
 
 ---
