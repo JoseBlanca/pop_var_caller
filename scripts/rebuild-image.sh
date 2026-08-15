@@ -65,19 +65,38 @@ fi
 
 mkdir -p "$(dirname "$LOG")"
 echo "rebuilding $IMAGE with $RUNTIME; following along: tail -f $LOG" >&2
+if [ "$RUNTIME" = container ]; then
+    echo "builder: $(container builder status 2>/dev/null | tail -1)" >&2
+fi
+started=$(date +%s)
 
-# `exec` is gone on purpose: the tee has to outlive the build to flush the log,
-# and `PIPESTATUS` is what carries the build's exit code past it.
+# **Every line is stamped with how long the build has been going.** `--progress
+# plain` says which step is running but not for how long, and "which layer is
+# the hour" is the only question a slow rebuild raises.
+#
+# The stamping is a bash read loop rather than `awk`, and rather than `ts`: `ts`
+# is not installed here, and macOS ships the one-true-awk, whose `systime()`
+# does not exist — reaching for it killed a build at four seconds with
+# `awk: calling undefined function systime`. `SECONDS` costs no process a line,
+# where `$(date)` in the loop would fork one, and `printf` in bash flushes as it
+# goes so `tail -f` is live rather than a block at the end.
+#
+# `exec` is gone on purpose: the stamping and the tee have to outlive the build
+# to flush the log, and `PIPESTATUS` is what carries the build's exit code past
+# them.
 set +e
 "$RUNTIME" build \
     --progress plain \
     -t "$IMAGE" \
     -f "$PROJECT_DIR/Containerfile" \
     "$@" \
-    "$PROJECT_DIR" 2>&1 | tee "$LOG"
+    "$PROJECT_DIR" 2>&1 \
+    | { SECONDS=0; while IFS= read -r line; do printf '[%5ds] %s\n' "$SECONDS" "$line"; done; } \
+    | tee "$LOG"
 status=${PIPESTATUS[0]}
 set -e
+echo "build finished in $(( $(date +%s) - started ))s (exit $status); log in $LOG" >&2
 if [ "$status" -ne 0 ]; then
-    echo "build failed (exit $status); the whole log is in $LOG" >&2
+    echo "the slowest steps: grep for the largest jumps in the [   Ns] column" >&2
 fi
 exit "$status"

@@ -766,7 +766,7 @@ fn fit_the_tracts(
         .collect();
 
     let at = Instant::now();
-    let evidence = ssr_fit::gather_strata(cohort, &strata, &slippage_group_of)
+    let mut evidence = ssr_fit::gather_strata(cohort, &strata, &slippage_group_of)
         .expect("a resident census has no file to fail on");
     println!(
         "  {} strata over {} tracts, gathered in {:.1} s",
@@ -774,6 +774,22 @@ fn fit_the_tracts(
         strata.len(),
         at.elapsed().as_secs_f64()
     );
+
+    // **`SSR_TRACT_CAP=<n>` keeps only the first `n` tracts of each stratum**, which is the
+    // question the run time turns on: the fit's cost is linear in how many tracts it reads, and
+    // nobody has measured how many it needs before the numbers it returns stop moving. The cap is
+    // the selection's own `ssr_cap` applied after the walk rather than before it, so one walk can
+    // be fitted at several caps and the answers compared. Tracts are kept in genome order, which
+    // is neither sorted by depth nor by length, so the kept ones are not a favourable sample.
+    if let Ok(cap) = std::env::var("SSR_TRACT_CAP") {
+        let cap: usize = cap.parse().expect("a tract count");
+        let before: usize = evidence.iter().map(|s| s.tracts.len()).sum();
+        for stratum in &mut evidence {
+            stratum.tracts.truncate(cap);
+        }
+        let after: usize = evidence.iter().map(|s| s.tracts.len()).sum();
+        println!("  tract cap {cap}: {before} tracts kept as {after}");
+    }
     let over_guard: u64 = evidence.iter().map(|s| s.tracts_over_guard_threshold).sum();
     let not_crossed: u64 = evidence.iter().map(|s| s.reads_reaching_not_crossing).sum();
     let guard_reads: u64 = evidence.iter().map(|s| s.guard_reads).sum();
