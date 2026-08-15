@@ -189,6 +189,105 @@ real before/after are what make a rule stick — this file's value grows by accr
 not by being rewritten. Keep the owner's own words: they are more precise than a
 paraphrase.
 
+### 2026-08-14 — a whole explanation hung on a project word used to mean something else
+
+Asked to explain a defect, a reply opened by naming the wrong actor and never said which
+object it was talking about:
+
+> ❌ "**What the caller writes down at a repeat tract.** A repeat tract is a stretch like
+> `ATATATATATAT` …"
+>
+> Owner: *"who's the caller here, we're not calling genotypes here. Are we talking about
+> the data store for the fit or about a different thing. I still don't get the context"*
+
+> ✅ "**The census is a store of evidence, and this is one of the things in it.** Before any
+> variant is called, one pass over each sample's reads writes down what that sample showed at
+> a fixed set of positions — the same positions in every sample. That store is what the
+> parameters fit reads, and nothing in it calls a genotype. At each repeat tract in it, a
+> sample keeps two things …"
+
+Three failures, and the first is new:
+
+1. **A word this project already owns was used for something else.** *The caller* means the
+   variant caller here, and the whole point of the parameters fit is that it runs **before**
+   any calling. So the first two words placed the reader in the wrong half of the pipeline
+   and every sentence after inherited it. **New rule: before using an agent noun — the
+   caller, the writer, the walk, the fit — check it names the thing that actually does the
+   action in this sentence.** A word that is right elsewhere in the project is not thereby
+   right here.
+2. **The object was never named.** The reply described a field, a promise and a broken test
+   without once saying they live in *the census*, which is the one noun that would have
+   located all three. The owner had to ask *"the data store for the fit or a different
+   thing"* — a question the first sentence should have answered.
+3. **It was the second attempt.** The first was refused for exactly this
+   (*"I don't understand what you're talking about"*), and the rewrite fixed the vocabulary
+   of the *details* — repeat tract, motif, mismatching base — while leaving the frame wrong.
+   **Re-explaining is where the frame goes unchecked**, because the writer is concentrating
+   on the part that was queried.
+
+### 2026-08-14 — a decision offered as a trade, with the two sides in different units
+
+A switch had to be defaulted on or off. The reply gave both sides in one sentence:
+
+> ❌ "**`duplicated_positions` defaults to `false`.** The trade with both sizes attached: leaving the
+> artefact in puts the benchmark trio 26% above its truth set and the drawn cohort 11% above; taking
+> it out with this class costs 93% of tomato's heterozygosity."
+>
+> Owner: *"I'm not understanding this. Please, give the context clearly and explain."* And after the
+> explanation: *"it was impossible to understand what you were saying, that's a problem."*
+
+> ✅ "With the class **off**, heterozygosity comes back about **11% too high** on a drawn cohort with
+> duplications planted at the rate measured on real reads. With it **on**, it comes back **93% too
+> low** on the real tomato panel. Both are errors in the same number, and they are not the same size."
+
+Four failures, and the first is the new rule:
+
+1. **The two sides were framed from opposite directions** — *leaving the artefact in* and *taking it
+   out with this class* — so the reader had to work out that these were the two settings of one
+   switch. **New rule: when a decision is a switch, name the switch, name the one quantity it moves,
+   and give both settings' error in the same units and the same direction.** "11% too high against 93%
+   too low" is the whole decision; anything else is working.
+2. **Three numbers, three datasets, in one sentence**, and nothing said which dataset was which kind of
+   evidence — a drawn cohort with a planted truth, and a real panel with none.
+3. **One of the numbers measured a different defect.** The trio's 26% excess had been traced two days
+   earlier to 59 positions where a quarter of the reads disagree in every sample — a shape this class
+   does not model, and whose weight it fitted at zero. Putting it on this scale was not compression, it
+   was wrong.
+4. **The reply never said what the switch does.** Two sentences of context — the fit models each
+   position as coming from one of a few classes; with this on, positions in the duplicated class stop
+   counting towards heterozygosity — would have made every number after it legible.
+
+### 2026-08-12 — a comparison with only one side of it written down
+
+Arguing that contamination cannot be measured at repeat tracts, a reply gave the size of the
+noise and never the size of the signal it was being compared with, nor what the noise was:
+
+> ❌ "Slippage size is the smaller half of it: 2 reads in 100 at six repeats and above sit at a
+> length the sample does not carry, which already exceeds any contamination worth measuring."
+>
+> Owner: *"I don't understand what you're talking about."*
+
+> ✅ "When a read crosses a repeat tract, the copying steps before sequencing sometimes add or
+> drop a whole repeat unit, so the read reports a tract one unit longer or shorter than the DNA
+> it came from — about **2 reads in 100** at tracts of six repeats or more. Contamination at 1%
+> would put about **1 read in 100** at a wrong length. So the thing we would be hunting is half
+> the size of the thing that imitates it, before asking whether the two can be told apart."
+
+Three failures:
+
+1. **A comparison was stated as a conclusion.** *"Exceeds any contamination worth measuring"*
+   asks the reader to supply the other number themselves. `CLAUDE.md`'s rule is *never assert a
+   property without its size, its subject and its measure* — here the subject and the measure
+   were present and **the second size was missing**, which is the same failure in a form that
+   looks quantitative because one number is there.
+2. **The noise was named by its effect, never by what it is.** *"Sit at a length the sample does
+   not carry"* is what slippage does; the reply never said a polymerase adds or drops a repeat
+   unit. A reader who does not already know the mechanism cannot check the claim.
+3. **It was carried from a document into chat unchanged.** The sentence works in
+   `parameter_prepass_joint_fit.md` §4.1, where slippage has been defined for pages. Prose that
+   is fine in its own document is not thereby fine in a reply — **the chat reader has not read
+   the document**, even when they are the person who is about to.
+
 ### 2026-08-10 — "worlds": a struct name used as if it were English
 
 `examples/ng_multilib_key_harness.rs` calls its simulated samples `World`. Replies across a

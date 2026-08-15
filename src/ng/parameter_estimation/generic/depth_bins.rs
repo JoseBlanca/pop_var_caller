@@ -77,6 +77,27 @@ const MAX_BINNED_DEPTH: u32 = 124;
 /// bought only memory.
 const DEPTH_BIN_COUNT: usize = 20;
 
+/// How many bins the **census** ladder has: the twenty above, plus ten more rungs at the
+/// same growth ratio, carrying the top from 124 to about 1,500 reads a position.
+///
+/// **A longer ladder, not a different one.** The first twenty rungs are the twenty-bin
+/// ladder's own tops, appended to rather than recomputed, so every edge of the shorter
+/// ladder is an edge of this one and a census code maps to a histogram bin by collapsing
+/// everything above 124. Two independently-derived ladders would let the two routes bin
+/// differently, which is the thing the shared ladder exists to prevent.
+///
+/// **The ceiling is what needed the extension, not the resolution.** A position a sample
+/// carries two copies of holds about twice that sample's median depth, so the signal dies
+/// wherever twice the median runs past what the encoding can say. At a top of 124 that is
+/// 76 reads a position for a doubled position to stop reading deeper than an ordinary one,
+/// and 98 for the two to be written identically — inside the depth range this caller
+/// commits to (`spec/parameter_prepass_joint_records.md` §4.1).
+///
+/// **It is free.** The stored code is five bits, which holds 32 values; twenty bins plus the
+/// never-walked sentinel used 21 of them and left eleven spare. Thirty bins plus the
+/// sentinel is 31.
+pub(crate) const CENSUS_DEPTH_BIN_COUNT: usize = 30;
+
 /// The index of the first widening bin — the one just above the exact region. Named
 /// once, because the offset is otherwise re-derived at each site that needs it, and two
 /// derivations that drift apart return a bin from the wrong region.
@@ -174,9 +195,20 @@ impl Default for DepthBinEdges {
 /// sequence cannot repeat; what it can do instead is walk past the cap, which is the
 /// one thing left to assert. A ladder that ends above its cap leaves the depths between
 /// its real top and the stated cap without a bin.
+/// How much wider each widening bin is than the one below it: the ratio that climbs from
+/// the exact region's top to the cap in exactly the bins left over.
+///
+/// **Named once because two users must not derive it separately.** The census ladder is the
+/// twenty-bin one with ten more rungs *at this same ratio* ([`DepthBinEdges::for_census`]),
+/// and a second derivation that drifted in the last decimal would round a shared rung
+/// differently and break the property that makes the two ladders one.
+fn widening_ratio(exact_limit: u32, cap: u32, widening_bins: usize) -> f64 {
+    (f64::from(cap) / f64::from(exact_limit)).powf(1.0 / widening_bins as f64)
+}
+
 fn ladder_tops(exact_limit: u32, cap: u32, bin_count: usize) -> Vec<u32> {
     let widening_bins = bin_count - exact_limit as usize - 1;
-    let ratio = (f64::from(cap) / f64::from(exact_limit)).powf(1.0 / widening_bins as f64);
+    let ratio = widening_ratio(exact_limit, cap, widening_bins);
 
     let widening = (1..=widening_bins).scan(exact_limit, |previous, step| {
         let top = (f64::from(exact_limit) * ratio.powi(step as i32)).round() as u32;
@@ -208,8 +240,44 @@ impl DepthBinEdges {
     /// 46, 59, 75, 97, 124.
     #[must_use]
     pub fn new() -> Self {
-        let bin_tops = ladder_tops(EXACT_DEPTH_LIMIT, MAX_BINNED_DEPTH, DEPTH_BIN_COUNT);
+        Self::from_tops(ladder_tops(
+            EXACT_DEPTH_LIMIT,
+            MAX_BINNED_DEPTH,
+            DEPTH_BIN_COUNT,
+        ))
+    }
 
+    /// The same ladder with ten more rungs on top — thirty bins, topping out near 1,500
+    /// reads a position. **This is the one the census stores its depth codes on.**
+    ///
+    /// **The twenty-bin ladder's rungs are taken, not recomputed.** The extension appends to
+    /// them at the ratio they were built with, so every edge of the shorter ladder is an edge
+    /// of this one by construction and not by a rounding coincidence — which is what lets a
+    /// census code be turned into a histogram bin by collapsing everything above 124, and
+    /// what stops the two routes binning differently. Rebuilding a thirty-rung geometric
+    /// ladder from scratch over the wider range would move the shared rungs by a base or two
+    /// and quietly break that.
+    ///
+    /// Why the reach is needed rather than the resolution: [`CENSUS_DEPTH_BIN_COUNT`].
+    #[must_use]
+    pub fn for_census() -> Self {
+        let mut bin_tops = ladder_tops(EXACT_DEPTH_LIMIT, MAX_BINNED_DEPTH, DEPTH_BIN_COUNT);
+        let ratio = widening_ratio(
+            EXACT_DEPTH_LIMIT,
+            MAX_BINNED_DEPTH,
+            DEPTH_BIN_COUNT - EXACT_DEPTH_LIMIT as usize - 1,
+        );
+        for step in 1..=(CENSUS_DEPTH_BIN_COUNT - DEPTH_BIN_COUNT) {
+            let top = (f64::from(MAX_BINNED_DEPTH) * ratio.powi(step as i32)).round() as u32;
+            // PANIC-FREE: `ladder_tops` never returns an empty vector.
+            let previous = *bin_tops.last().expect("the ladder has at least one bin");
+            bin_tops.push(top.max(previous + 1));
+        }
+        Self::from_tops(bin_tops)
+    }
+
+    /// Both ladders' shared tail: the row offsets a histogram indexes by.
+    fn from_tops(bin_tops: Vec<u32>) -> Self {
         // A bin's row must be as wide as its deepest site's alternative count, which
         // runs 0..=top — so `top + 1` cells. The leading 0 is bin 0's start; the
         // trailing entry is the total, which `cell_count` reads.
@@ -301,6 +369,20 @@ impl DepthBinEdges {
         self.bin_tops.len()
     }
 
+    // **`recorded_depths` was here and is gone — 2026-08-14.** It answered `depth_range`
+    // except at the ladder's top bin, where it answered the cap and nothing else, and that
+    // was right only while the ladder's top and the per-position depth cap were the same
+    // number: a position deeper than 124 was thinned to exactly 124 before it was written
+    // down, so the top bin held one depth rather than the twenty-seven it spans. It was also
+    // *wrong* for a position that genuinely held 100 reads, which was never thinned and yet
+    // read back as 124.
+    //
+    // The census now stores the position's true depth
+    // (`spec/parameter_prepass_joint_records.md` §2.2), so a code means its bin's whole range
+    // and `depth_range` is the answer. What a consumer needs for the **allele counts'**
+    // denominator is a different question, because those are still thinned: it is
+    // `DepthCap::denominator_for`, in `joint/census.rs`, where the cap lives.
+
     /// Every bin, in order.
     ///
     /// It exists so that a caller walking the ladder does not write `DepthBin(bin as
@@ -362,6 +444,85 @@ mod tests {
         );
         assert_eq!(edges.bin_count(), 20);
         assert_eq!(edges.max_depth(), 124);
+    }
+
+    // ---- the census ladder: the same rungs, and ten more ---------------------
+
+    /// **The property that makes the two ladders one**: every depth at which the
+    /// twenty-bin ladder changes bin is a depth at which the thirty-bin one changes bin
+    /// too, so a census code turns into a histogram bin by collapsing everything above
+    /// 124 and the two routes cannot bin differently.
+    ///
+    /// Asserted on the edges themselves rather than on `bin_for`, because it is the
+    /// edges that a stored code indexes.
+    #[test]
+    fn every_edge_of_the_twenty_bin_ladder_is_an_edge_of_the_census_one() {
+        let histogram = DepthBinEdges::new();
+        let census = DepthBinEdges::for_census();
+
+        let tops_of = |edges: &DepthBinEdges| -> Vec<u32> {
+            edges
+                .bins()
+                .map(|bin| *edges.depth_range(bin).end())
+                .collect()
+        };
+        let short = tops_of(&histogram);
+        let long = tops_of(&census);
+
+        assert_eq!(
+            long[..short.len()],
+            short[..],
+            "the census ladder's first twenty rungs are the histogram ladder's own"
+        );
+        assert_eq!(census.bin_count(), CENSUS_DEPTH_BIN_COUNT);
+        assert_eq!(
+            long[short.len()..],
+            [159, 204, 262, 336, 431, 553, 709, 910, 1168, 1498],
+            "the ten rungs the extension adds, at the same ratio as the eleven below them"
+        );
+        assert_eq!(
+            histogram.cell_count(),
+            583,
+            "extending the census ladder must not move the histogram route's cell table"
+        );
+    }
+
+    /// Below the twenty-bin ladder's cap the two agree on every depth, so a run that
+    /// records on one and reads on the other is only wrong above 124.
+    #[test]
+    fn the_two_ladders_answer_alike_at_every_depth_up_to_the_shorter_ones_cap() {
+        let histogram = DepthBinEdges::new();
+        let census = DepthBinEdges::for_census();
+        for depth in 0..=MAX_BINNED_DEPTH {
+            assert_eq!(
+                histogram.bin_for(depth),
+                census.bin_for(depth),
+                "the two ladders disagree at depth {depth}"
+            );
+        }
+    }
+
+    /// **The half of this the extension exists for**, and the half a ladder that
+    /// saturated early would still pass: a position a sample carries two copies of holds
+    /// about twice that sample's median depth, so twice a depth has to land at least one
+    /// rung above it or the two are written identically and the signal is gone. At the
+    /// twenty-bin ladder that failed from 98 reads a position upwards.
+    #[test]
+    fn a_doubled_depth_lands_at_least_one_rung_higher_all_the_way_to_the_ceiling() {
+        let census = DepthBinEdges::for_census();
+        let ceiling = census.max_depth();
+        assert!(
+            (1_400..=1_600).contains(&ceiling),
+            "the census ladder tops out at {ceiling}, not near 1,500"
+        );
+        for depth in 4..=(ceiling / 2) {
+            assert!(
+                census.bin_for(2 * depth) > census.bin_for(depth),
+                "{depth} reads a position and {} land in the same bin, so a doubled \
+                 position cannot be told from an ordinary one there",
+                2 * depth
+            );
+        }
     }
 
     /// **583 cells**, because a bin's row must be as wide as its deepest site's

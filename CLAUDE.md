@@ -228,3 +228,33 @@ lands where "0.09%" does not.
 - Source tree: `src/` (library) and `src/main.rs` (CLI).
 - Tests: per-module `#[cfg(test)] mod tests` blocks; integration
   tests in `tests/`.
+
+## What this caller has to work on — the range, not the example
+
+**ng is a general SNP/indel/STR caller. Every design decision has to
+degrade gracefully across the whole range of inputs, not merely work on
+whichever data we happen to be testing against.**
+
+Two axes, and a design is not finished until it has an answer at both
+ends of each:
+
+- **Cohort size: one sample to several thousand.** A method that needs a
+  cohort must say what it does at one sample — *emit it as absent* is a
+  legitimate answer, *silently emit a fitted zero* is not. A method that
+  holds every sample at once must say what it does at a thousand.
+- **Read depth: a few reads a position to several hundred.** A method
+  tuned at three reads a site must not break at 300, and one that needs
+  30 must say what it gives up at 3.
+
+A single low-coverage sample is genuinely the hardest case and will be
+the weakest — that is expected and fine. What is not fine is a decision
+taken as though that case did not exist, or a number that comes back
+confident and wrong there.
+
+**The data under `benchmarks/` is an example, not the target.** The
+tomato cohort is 63 accessions at about three reads a position; the GIAB
+human trio is high coverage and three samples. Both exist to catch
+defects. Neither defines what the caller is for. So when a measurement
+is quoted, say which one it was made on and what range it covers — a
+figure measured at 3× on 50 samples is a fact about that corner, not a
+property of the caller.

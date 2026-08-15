@@ -12,6 +12,14 @@ production: everything said about them here is a record, not a change.*
 
 ## 1. What this path produces, and what it reads
 
+**First, what this document is and is not.** The per-sample walk fills **five** accumulators
+([`parameter_prepass.md`](parameter_prepass.md) §5.1): two generic histograms, the STR table, and the
+two censuses. **This document covers the two histograms**, and "the generic path" is that narrower
+thing throughout — not everything the SNP/indel side does. The censuses are filled by the same walk,
+at the same time, over the same loci; they are specified in
+[`parameter_prepass_census_sites.md`](parameter_prepass_census_sites.md) because their consumers are
+cross-sample.
+
 **Four numbers, out of two accumulated objects.**
 
 | parameter | grain | fitted from | section |
@@ -407,7 +415,21 @@ out of hundreds, while merging depth 1 with depth 5 would discard most of what t
 Binning instead of full resolution cuts the memory nearly ninefold (§9) for an answer that moves by 0.054 rungs.
 
 **Settled, and measured rather than argued: the ladder is exact integers to 8, then geometrically
-widening bins to a cap of 124 — twenty bins in all.** An earlier version of this paragraph called
+widening bins at about 1.28 a bin — and EXTENDED 2026-08-14 from twenty bins topping out at 124 to
+thirty topping out at about 1,500.**
+
+*Why it was extended, and it is not this route's reason.* The joint route reads a single stored code as
+a copy-number signal — a duplicated position carries about twice the sample's median — and at a top rung
+of 124 that signal died from 76 reads a position and was gone by 98, inside the depth range the caller
+commits to ([`parameter_prepass_joint_records.md`](parameter_prepass_joint_records.md) §4.1). Five bits
+hold 32 codes and twenty bins plus the never-walked sentinel used 21, so ten spare rungs at the same
+ratio carry the ceiling to about 1,500 for no extra storage in that route's array.
+
+**What it costs here is the cell table**, which is the sum of `top + 1` over the bins: **583 cells at
+twenty bins and about 6,800 at thirty**, per read group per sample. That is this route's bill and not
+the other's, and it is the reason the two ladders can stop being one if this route survives — the
+sharing exists so the two routes cannot bin differently, and a route that is being dropped has no
+comparison to protect. An earlier version of this paragraph called
 the bin count *soft*, "arithmetic rather than measurement". It is neither soft nor arithmetic: **the
 edges are a correctness parameter.** Across twenty worlds the adopted ladder's asymptotic bias is
 0.054 rungs of the error-rate ladder and 0.3% in each genotype frequency; the same cap at sixteen
@@ -416,6 +438,26 @@ no site is deeper than 125, so the extra reach is spent on depths nothing occupi
 of the depths everything occupies
 ([`../research/parameter_estimator_experiments_2026-08-06.md`](../research/parameter_estimator_experiments_2026-08-06.md)
 §4.3). **The bin count and the cap are one decision, not two.**
+
+**That 0.054 is a pooled-cell figure, and a consumer reading one stored code alone pays differently —
+ADDED 2026-08-13.** It was measured where many positions share a bin and the widths average out. Two
+measurements since then are about the other arrangement, where a single sample's single position
+carries one code. **A contamination estimator that divided an exact count of disagreeing reads by a
+point read off the bin returned 2.5% contamination on a drawn panel holding none**
+([`../reports/contamination_floor_and_duplicated_class_2026-08-13.md`](../reports/contamination_floor_and_duplicated_class_2026-08-13.md));
+and **a copy-number discriminator reading the stored code instead of the exact count loses 11% of its
+enrichment at 13× depth and 37% at 29×**
+([`../reports/locus_depth_vs_window_2026-08-13.md`](../reports/locus_depth_vs_window_2026-08-13.md)).
+Neither is an argument against the ladder — the histograms this section sizes are the pooled
+arrangement, and there 0.054 stands. **It is a warning to whoever reads a single stored code: sum over
+the depths the code stands for, rather than taking a value from inside the range.**
+
+**Since 2026-08-14 it is a built rule rather than a warning, and `representative_depth` is gone.**
+`DepthBinEdges` no longer offers a value from inside a bin: it exposes the bin's own range, which is
+what a histogram's row width needs and what a consumer summing over the range needs, and nothing else
+called the removed accessor. **A consumer cannot now take a midpoint by accident**, which is the shape
+this repository already uses for the ladder's width and for the two caps — make the wrong thing
+unrepresentable rather than documented.
 
 **Where a ladder can hurt is 10 to 30 reads a site.** At tomato's 3 reads, 97 sites in 100 sit at
 depth 6 or below and are never binned at all; at 60 reads the genotype is certain whatever the exact

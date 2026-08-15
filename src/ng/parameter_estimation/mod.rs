@@ -43,6 +43,7 @@
 
 pub mod fitting;
 pub mod generic;
+pub mod joint;
 pub mod ssr;
 pub(crate) mod subsample;
 

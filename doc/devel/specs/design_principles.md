@@ -6,6 +6,30 @@ ambiguous.
 
 ### General principles
 
+0. **The caller must degrade gracefully across the whole range of
+   inputs, not work well on the data we happen to be testing.** Two
+   axes, and a design is not finished until it has an answer at both
+   ends of each.
+   - *Cohort size: one sample to several thousand.* A method that needs
+     a cohort must say what it does at one sample — *emit it as absent*
+     is a legitimate answer, *silently emit a fitted zero* is not. A
+     method that holds every sample at once must say what it does at a
+     thousand.
+   - *Read depth: a few reads a position to several hundred.* A method
+     tuned at three reads a site must not break at 300, and one that
+     needs 30 must say what it gives up at 3.
+
+   A single low-coverage sample is the hardest case and will be the
+   weakest; that is expected. What is not acceptable is a decision taken
+   as though that case did not exist, or a number that comes back
+   confident and wrong there. **The data under `benchmarks/` is an
+   example, not the target** — the tomato cohort is 63 accessions at
+   about three reads a position, the GIAB trio is three samples at high
+   coverage, and both exist to catch defects rather than to define what
+   the caller is for. So when a measurement is quoted, say which data it
+   was made on and what range it covers: a figure measured at 3× on 50
+   samples is a fact about that corner, not a property of the caller.
+
 1. **Clarity and readability are paramount.** They apply equally to
    this specification and to the code that implements it — not one more
    than the other. A reader new to the project should be able to
