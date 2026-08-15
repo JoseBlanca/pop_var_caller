@@ -269,6 +269,37 @@ here so that decision does not have to re-derive it. Diffs are in
   threads. **Whether it changes sign on a wider pool is unmeasured**, and is one of the things a
   thread sweep would settle.
 
+### A correctness defect in the repeat delimiter, found by a performance change
+
+**The delimiter reports a lower bound for a read that measures the tract exactly**, and the fit
+loses the measurement. Found while proving that the reference-copy fast path (§5e) is equivalent:
+one read in 131,842 changed class, and chasing it produced this reproducer, printed verbatim from
+the walk.
+
+```
+ref =ATTGACATAAATTTC AAAAAAAAAAAA TGTTCCTCCACCCTA
+read=ATTGACATAAATTTC AAAAAAAAAAAA TGTTCCTCCACCCTA
+        left flank 15   tract 12    right flank 15
+```
+
+The read is byte-identical to the reference across the whole 42-base window; the tract is a clean
+twelve-base homopolymer with a `C` before it and a `T` after it, so the run does not continue into
+either flank. The delimiter returns `RepeatSpan::FromLeft(15..42)`, whose documented meaning at
+[alignment/mod.rs:152-154](../../../../src/ng/alignment/mod.rs#L152-L154) is "the read ends before
+the right flank is reached, so the span runs to the end of the read and the true repeat is **at
+least** this long". **The read does not end before the right flank** — all fifteen of its bases are
+present and matching.
+
+The consequence is one lost measurement per affected read: an exact observation at the reference
+length is recorded as a lower bound instead, which the fit weighs differently.
+
+**Rate, and what it is not.** One read in 131,842 on this input, so it is not a systematic failure
+and it did not move any fitted number to the precision the harness prints — the affected stratum's
+read count went from 877 to 878 in a stratum refused for being too thin. What it does say is that
+the delimiter's right-anchor test can fail on input it should handle, and the reproducer above is a
+42-base string. **This belongs to whoever owns `src/ng/alignment/`, and it is a correctness question
+rather than a performance one.**
+
 ### From round one, still standing
 
 - [src/ng/reference_info.rs:518-520](../../../../src/ng/reference_info.rs#L518-L520) — the FASTA
