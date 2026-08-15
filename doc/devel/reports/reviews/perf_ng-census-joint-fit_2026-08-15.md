@@ -125,7 +125,9 @@ build, four rayon threads, 8 tomato accessions.
 | 6 | H7: the ordinary-position fit's per-pass table of error-rate logarithms | 19.7 s (that phase: 10.4 s → 9.8 s) | — |
 | 7 | the rest of H4: four running sums in the 91-element dot product instead of one | **15.8 s** | — |
 | 8 | the same loop as `wide::f64x4` lanes instead of four scalars | **14.1 s** | **24.6 s** |
-| | **cumulative** | **−70.1%** | **−68.9%** |
+| 9 | bump the pinned compiler 1.95 → 1.97.1, nothing else changed | **13.6 s** | — |
+| 10 | flatten `TractLikelihoods::scaled` to one buffer with a stride | 13.5 s — **no time gain**, kept for the allocations | — |
+| | **cumulative** | **−71.3%** | **−68.9%** |
 
 The whole 6-span run went from 66.8 s to 32.2 s, and the ordinary-position fit from about 10.4 s
 to 9.9 s.
@@ -146,7 +148,41 @@ saying autovectorisation decisions shift silently between versions. Splitting th
 instead needs no toolchain change and is reproducible rather than left to a compiler flag: four
 explicit accumulators took 19.7 s to 15.8 s, and writing the same association as `wide::f64x4`
 lanes — `wide` is already a dependency — took it to 14.1 s. **Together they are worth 28.4% of the
-repeat-tract fit, more than any other single change here.** **Steps 1 and 2 are exactly value-preserving** —
+repeat-tract fit, more than any other single change here.**
+
+**The compiler bump was measured on its own, which is what the pin exists for.** Moving
+`rust-toolchain.toml` from 1.95 to 1.97.1 — the newest stable this machine has, and still below the
+1.98 that stabilises the algebraic operators — was worth 14.1 s → 13.6 s with no source change, and
+left every fitted number where it was. `Containerfile` moves from `rust:1.95-bookworm` to
+`rust:1.97-bookworm` to match; **until the image is rebuilt, every ephemeral container run will
+download the 1.97.1 toolchain**, so the rebuild is worth scheduling.
+
+**Step 10 was kept despite measuring nothing, and the reason is not the clock.** Flattening the
+per-tract likelihood rows from `Vec<Vec<f64>>` into one strided buffer moved 13.6 s to 13.5 s,
+inside noise — at eight samples a tract carries only a few rows, so there were few pointer hops to
+remove. It is kept because it turns one heap allocation *per sample per tract* into one *per tract*:
+on a 5,000-tract stratum at 63 samples that is 315,000 allocations becoming 5,000, which is the axis
+the allocations review priced this structure on. Unlike step 5, it is not neutral on every axis —
+but it should not be reported as a speed win, because it is not one.
+
+### Where the remaining time is, profiled after all ten steps
+
+`sample(1)`, 94,270 samples over 5 threads, 73,356 of them busy:
+
+| | share of busy CPU |
+|---|---|
+| the per-tract likelihood loop | 35.2% |
+| **the ordinary-position kernel `one_position`** | **30.4%** |
+| the incomplete-Beta continued fraction | 11.1% |
+| `log` | 8.9% |
+| `exp` | 7.3% |
+| `Scorer::refresh` | 0.6% |
+
+**The two halves are now level.** The repeat-tract half has had 71% taken off and the
+ordinary-position half about 6%, so `one_position` is the largest single thing left. Its inner loop
+is a running product over samples with a rescale test, node by node — serial by construction, and
+not open to the accumulator trick that paid in the repeat-tract half without changing what the
+rescale means. The next honest step there is the benchmark seam of §3, not another edit. **Steps 1 and 2 are exactly value-preserving** —
 both keep every float addition in its original order, which is why the fitted rows are unchanged.
 **Step 3 is not**: a product of likelihoods replaces a sum of their logarithms, so the result may
 differ in the last bits. On both inputs every printed fitted quantity — slippage level, shorter

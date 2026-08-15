@@ -743,8 +743,16 @@ fn genotype_pairs(classes: usize) -> Vec<(usize, usize)> {
 /// Subtracting each sample's largest log-likelihood makes the inner sum a plain dot product,
 /// and the offsets are added back at the end.
 struct TractLikelihoods {
-    /// `scaled[i]` is the `i`-th sample-with-reads' row over the genotypes.
-    scaled: Vec<Vec<f64>>,
+    /// One row a sample-with-reads, over the genotypes, **laid end to end in one buffer**: row
+    /// `r` is `scaled[r * width..][..width]`.
+    ///
+    /// **Flat and not a vector of vectors**, because the innermost loop sweeps a row against the
+    /// genotype prior in vector lanes: separate heap blocks a sample cost a dependent load before
+    /// each row and leave the rows scattered, where one buffer keeps them contiguous and lets the
+    /// loop walk the whole tract without leaving cache.
+    scaled: Vec<f64>,
+    /// How wide one row is — the number of genotype pairs.
+    width: usize,
     /// That sample's homozygote excess, in the same order.
     homozygote_excess: Vec<f64>,
     /// Σ over those samples of the log-likelihood each row was divided by.
@@ -758,31 +766,33 @@ impl TractLikelihoods {
         genotypes: &[(usize, usize)],
         homozygote_excess: &[f64],
     ) -> Self {
-        let mut scaled = Vec::with_capacity(tract.samples.len());
+        let width = genotypes.len();
+        let mut scaled: Vec<f64> = Vec::with_capacity(tract.samples.len() * width);
         let mut excess = Vec::with_capacity(tract.samples.len());
         let mut ln_offset = 0.0;
         for sample in &tract.samples {
-            let logs: Vec<f64> = genotypes
-                .iter()
-                .map(|(first, second)| {
-                    let mut total = 0.0;
-                    for (group, counts) in &sample.by_group {
-                        let per_allele = &per_group_allele[*group as usize];
-                        for (bucket, reads) in counts.iter().enumerate() {
-                            if *reads == 0 {
-                                continue;
-                            }
-                            let probability =
-                                0.5 * (per_allele[*first][bucket] + per_allele[*second][bucket]);
-                            total += f64::from(*reads) * probability.max(1e-300).ln();
+            let start = scaled.len();
+            scaled.extend(genotypes.iter().map(|(first, second)| {
+                let mut total = 0.0;
+                for (group, counts) in &sample.by_group {
+                    let per_allele = &per_group_allele[*group as usize];
+                    for (bucket, reads) in counts.iter().enumerate() {
+                        if *reads == 0 {
+                            continue;
                         }
+                        let probability =
+                            0.5 * (per_allele[*first][bucket] + per_allele[*second][bucket]);
+                        total += f64::from(*reads) * probability.max(1e-300).ln();
                     }
-                    total
-                })
-                .collect();
-            let largest = logs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                }
+                total
+            }));
+            let row = &mut scaled[start..];
+            let largest = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             ln_offset += largest;
-            scaled.push(logs.into_iter().map(|log| (log - largest).exp()).collect());
+            for value in row {
+                *value = (*value - largest).exp();
+            }
             excess.push(
                 *homozygote_excess
                     .get(sample.sample as usize)
@@ -791,6 +801,7 @@ impl TractLikelihoods {
         }
         Self {
             scaled,
+            width,
             homozygote_excess: excess,
             ln_offset,
         }
@@ -842,7 +853,7 @@ fn ln_tract(
         let mut vanished = false;
         for (row, excess) in likelihoods
             .scaled
-            .iter()
+            .chunks_exact(likelihoods.width)
             .zip(&likelihoods.homozygote_excess)
         {
             // **Four running sums rather than one, and that is the whole trick.** A single
