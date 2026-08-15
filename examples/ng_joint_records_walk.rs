@@ -162,9 +162,24 @@ fn main() {
         catalog_built_under: CatalogBuildSettings::of(&catalog),
         ssr_criteria: criteria.clone(),
         generic_target,
-        // No stratum is capped here: the tomato catalog's largest holds far fewer loci than
-        // this, so the cap never fires and every STR locus is kept.
-        ssr_cap: 1_000_000,
+        // **5,000 tracts a stratum, which is the figure the design settled on and not a number
+        // chosen here.** `str_stratum_size_sweep_2026-08-13.md` drew strata at a known truth and
+        // fitted them from 50 tracts up to 20,000: at three reads a site — tomato's depth — 5,000
+        // is the smallest count where all five fitted numbers land within a few percent of the
+        // truth both on average and between draws, and `parameter_prepass_joint_loci.md` §6
+        // question 1 records the question closed on it.
+        //
+        // **The cap is what bounds the run, and it was previously set where it could never
+        // fire.** Cost is linear in how many tracts a fit reads; this line stood at 1,000,000,
+        // above the largest stratum tomato has, so nothing was ever capped and the 63-accession
+        // cohort extrapolated to days. At 5,000 tomato keeps 86,688 of its 462,701 tracts and 8
+        // of its 141 strata are capped at all — the three fattest strata hold 79% of the loci,
+        // and they are the ones whose parameters are already best determined.
+        //
+        // **What it does not touch is the thin strata**, and that is most of them: 68 of the 141
+        // hold fewer than a hundred tracts each, are far under any cap, and reach a fittable size
+        // only by borrowing from neighbouring repeat counts.
+        ssr_cap: 5_000,
     };
 
     let kept = select_kept_loci(&terms, &catalog, &analysed, &unambiguous)

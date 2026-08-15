@@ -714,42 +714,56 @@ const CANDIDATE_ALTERNATIVES: usize = 3;
 /// [`alternative_read_probability`](crate::ng::parameter_estimation::generic::noise_model)
 /// exactly — the two routes score a read the same way, which is what makes the comparison
 /// between them a comparison.
+/// **The reference-read term and the non-reference total are handed in rather than taken
+/// here**, because neither depends on which base the alternative is. [`ln_reference_reads`]
+/// reads the sample, its depth weights and how many copies of the alternative it carries — and
+/// it is the one logarithm in this block — so the caller takes it once for the three copy
+/// counts and reuses it across every candidate allele and across the invariant branch beside
+/// them. Taken inside this function it was ten calls a sample where three do.
 fn ln_reads_given_genotype(
     sample: &SampleAtPosition,
-    depth_weights: &[f64],
+    non_reference: f64,
     alt_copies: u8,
     alternative: usize,
     logs: &ReadLogs,
+    reference_term: f64,
 ) -> f64 {
     let copies = alt_copies as usize;
     let candidate_reads = sample.on[alternative];
     // `Other` is neither the candidate nor the reference; it is held out of the model
     // entirely, so the depth it occupied is removed with it.
-    let other_reads = sample.non_reference() - candidate_reads - sample.on[4];
+    let other_reads = non_reference - candidate_reads - sample.on[4];
 
     // **A count of zero needs no guard now.** `count_times_ln` branched on it only to keep
     // `0 · −∞` out of the sum; the logarithms below are clamped at `MIN_POSITIVE` when they are
     // built, so every one of them is finite and `0 · finite` is zero.
-    candidate_reads * logs.ln_candidate[copies]
-        + other_reads * logs.ln_neither
-        + ln_reference_reads(
-            sample,
-            depth_weights,
-            logs.reference[copies],
-            logs.ln_reference[copies],
-        )
+    candidate_reads * logs.ln_candidate[copies] + other_reads * logs.ln_neither + reference_term
 }
 
 /// `ln P(this sample's reads | every copy is the reference base)` — the term the invariant
-/// branch needs, and it does not depend on which base would have been the alternative.
+/// branch needs, and it does not depend on which base would have been the alternative. Its
+/// `reference_term` is the zero-copy entry of the same triple.
 fn ln_reads_given_all_reference(
     sample: &SampleAtPosition,
-    depth_weights: &[f64],
+    non_reference: f64,
     logs: &ReadLogs,
+    reference_term: f64,
 ) -> f64 {
-    let non_reference = sample.non_reference() - sample.on[4];
-    non_reference * logs.ln_neither
-        + ln_reference_reads(sample, depth_weights, logs.reference[0], logs.ln_reference[0])
+    (non_reference - sample.on[4]) * logs.ln_neither + reference_term
+}
+
+/// `ln P(the reference reads | this sample carries 0, 1 or 2 copies of the alternative)`.
+///
+/// **Candidate-invariant, which is why it is a function of its own.** Nothing in
+/// [`ln_reference_reads`] reads *which* base the alternative is — only the sample's reference
+/// count, the depths its stored code allows and the per-copy probability from its read group's
+/// table — so one triple serves all three candidate alleles and the invariant branch.
+fn reference_terms(sample: &SampleAtPosition, depth_weights: &[f64], logs: &ReadLogs) -> [f64; 3] {
+    [
+        ln_reference_reads(sample, depth_weights, logs.reference[0], logs.ln_reference[0]),
+        ln_reference_reads(sample, depth_weights, logs.reference[1], logs.ln_reference[1]),
+        ln_reference_reads(sample, depth_weights, logs.reference[2], logs.ln_reference[2]),
+    ]
 }
 
 /// Every logarithm the per-position kernel needs that depends on a read group's error rate
@@ -1750,39 +1764,51 @@ fn one_position(
     let candidates = scratch.candidates.len();
 
     // ---- the read likelihoods, once per candidate and reused across every node -------------
+    //
+    // **The sample loop is on the outside so that the two candidate-invariant quantities are
+    // taken once.** [`reference_terms`] holds this block's only logarithms and
+    // `non_reference()` is a sum over four counts; neither reads which base the alternative
+    // is, so with the candidate loop outermost both were recomputed for every candidate — ten
+    // reference terms a sample where three do the same job. The sums are unchanged: `invariant`
+    // and each candidate's `fixed` still accumulate over the samples in the same order.
     for class in 0..2 {
         let mut invariant = 0.0;
+        let mut fixed = [0.0_f64; MAX_CANDIDATES];
         for s in 0..samples {
-            invariant += ln_reads_given_all_reference(
-                &scratch.evidence.samples[s],
-                scratch.evidence.weights_of(s),
-                &read_logs[class][group_index[s][0]],
-            );
-        }
-        scratch.invariant_ln[class] = invariant;
-
-        for candidate in 0..candidates {
-            let allele = scratch.candidates[candidate];
-            let mut fixed = 0.0;
-            for s in 0..samples {
-                let logs = &read_logs[class][group_index[s][0]];
-                let sample = &scratch.evidence.samples[s];
-                let weights = scratch.evidence.weights_of(s);
+            let logs = &read_logs[class][group_index[s][0]];
+            let sample = &scratch.evidence.samples[s];
+            let weights = scratch.evidence.weights_of(s);
+            let non_reference = sample.non_reference();
+            let reference_term = reference_terms(sample, weights, logs);
+            invariant +=
+                ln_reads_given_all_reference(sample, non_reference, logs, reference_term[0]);
+            for candidate in 0..candidates {
+                let allele = scratch.candidates[candidate];
                 let base = scratch.ell_at(class, candidate, s);
                 let mut largest = f64::NEG_INFINITY;
                 for j in 0..3 {
-                    let value = ln_reads_given_genotype(sample, weights, j as u8, allele, logs);
+                    let value = ln_reads_given_genotype(
+                        sample,
+                        non_reference,
+                        j as u8,
+                        allele,
+                        logs,
+                        reference_term[j],
+                    );
                     scratch.ell[base + j] = value;
                     largest = largest.max(value);
                 }
-                fixed += scratch.ell[base + 2];
+                fixed[candidate] += scratch.ell[base + 2];
                 let slot = scratch.max_at(class, candidate, s);
                 scratch.lik_max[slot] = largest;
                 for j in 0..3 {
                     scratch.lik[base + j] = (scratch.ell[base + j] - largest).exp();
                 }
             }
-            scratch.fixed_ln[class * MAX_CANDIDATES + candidate] = fixed;
+        }
+        scratch.invariant_ln[class] = invariant;
+        for candidate in 0..candidates {
+            scratch.fixed_ln[class * MAX_CANDIDATES + candidate] = fixed[candidate];
         }
     }
 

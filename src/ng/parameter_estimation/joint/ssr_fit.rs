@@ -816,7 +816,17 @@ impl TractLikelihoods {
 /// Building it per tract cost `points × genotypes` fills for every tract of every objective
 /// evaluation, where `points × genotypes` once a quadrature is the whole of it.
 struct Quadrature {
-    frequencies: Vec<Vec<f64>>,
+    /// `point × classes` — the allele-length frequencies at each point, **laid out flat**, in
+    /// the same shape [`independent`](Self::independent) already uses.
+    ///
+    /// **One buffer and not one `Vec` a point.** A vector of vectors cost one heap block per
+    /// point per rebuild, and the climb rebuilds the quadrature whenever it moves the spectrum
+    /// or the concentration: measured with dhat over one profiling run, that was 1,942,272 of
+    /// the repeat-tract fit's 4,078,263 blocks — 48% of every allocation the half makes — for
+    /// 7,587 rebuilds of 256 points each. Flat, a rebuild is one block.
+    frequencies: Vec<f64>,
+    /// How many allele classes one point holds — the stride of `frequencies`.
+    classes: usize,
     ln_weight: f64,
     /// `point × genotypes` — the chance of drawing this genotype from two independent draws at
     /// this point, laid out flat.
@@ -836,12 +846,16 @@ fn ln_tract(
     genotypes: &[(usize, usize)],
 ) -> f64 {
     let width = genotypes.len();
-    let mut terms = Vec::with_capacity(quadrature.frequencies.len());
+    let mut terms = Vec::with_capacity(quadrature.frequencies.len() / quadrature.classes);
     // The genotype prior splits into the part that comes from the two copies being identical
     // by descent and the part that comes from two independent draws, so a sample's own
     // homozygote excess weights two dot products rather than rebuilding the prior per sample.
     // **Both halves are built once with the quadrature**, not once a tract.
-    for (index, point) in quadrature.frequencies.iter().enumerate() {
+    for (index, point) in quadrature
+        .frequencies
+        .chunks_exact(quadrature.classes)
+        .enumerate()
+    {
         let independent = &quadrature.independent[index * width..][..width];
         // **One logarithm a point, not one a sample.** The samples' likelihoods multiply, so the
         // product is carried directly and rescaled when it is about to underflow — the same trick
@@ -1050,28 +1064,32 @@ fn dirichlet_points(
     // their log-Beta to one per stick was tried on 2026-08-15 and moved the repeat-tract fit from
     // 19.7 s to 19.8 s — nothing, because the log-Beta is already computed once a bisection rather
     // than once a step, and a suffix sum over thirteen classes is twelve additions.
-    let frequencies: Vec<Vec<f64>> = (0..points)
-        .into_par_iter()
-        .map(|point| {
+    //
+    // **One buffer, filled in place, rather than one `Vec` a point.** Each point's stick-breaking
+    // is untouched — same values, same order, same `beta_quantile` calls — and the points remain
+    // independent, so this is exactly the same arithmetic written into a row of a flat buffer
+    // instead of into a fresh allocation. What it removes is `points` heap blocks a rebuild.
+    let mut frequencies = vec![0.0_f64; points * classes];
+    frequencies
+        .par_chunks_mut(classes)
+        .enumerate()
+        .for_each(|(point, piece)| {
             let mut remaining = 1.0;
-            let mut piece = Vec::with_capacity(classes);
             for stick in 0..classes - 1 {
                 let a = alpha[stick];
                 let b: f64 = alpha[stick + 1..].iter().sum();
                 let uniform =
                     van_der_corput(point + 1, HALTON_BASES[stick.min(HALTON_BASES.len() - 1)]);
                 let share = beta_quantile(uniform, a, b);
-                piece.push(remaining * share);
+                piece[stick] = remaining * share;
                 remaining *= 1.0 - share;
             }
-            piece.push(remaining);
-            piece
-        })
-        .collect();
+            piece[classes - 1] = remaining;
+        });
     // The genotype prior at every point, and where the homozygous pairs sit. Both depend on the
     // points alone, so this is the one place they are built.
-    let mut independent = vec![0.0_f64; frequencies.len() * genotypes.len()];
-    for (index, point) in frequencies.iter().enumerate() {
+    let mut independent = vec![0.0_f64; points * genotypes.len()];
+    for (index, point) in frequencies.chunks_exact(classes).enumerate() {
         let row = &mut independent[index * genotypes.len()..][..genotypes.len()];
         for (slot, (first, second)) in genotypes.iter().enumerate() {
             row[slot] = if first == second {
@@ -1081,15 +1099,20 @@ fn dirichlet_points(
             };
         }
     }
-    let diagonal: Vec<usize> = genotypes
-        .iter()
-        .enumerate()
-        .filter(|(_, (first, second))| first == second)
-        .map(|(slot, _)| slot)
-        .collect();
+    // **Sized before it is filled**: thirteen classes give thirteen homozygous slots, and a
+    // `collect` from a filter reaches that by three reallocations rather than one.
+    let mut diagonal: Vec<usize> = Vec::with_capacity(classes);
+    diagonal.extend(
+        genotypes
+            .iter()
+            .enumerate()
+            .filter(|(_, (first, second))| first == second)
+            .map(|(slot, _)| slot),
+    );
 
     Quadrature {
         frequencies,
+        classes,
         ln_weight: -(points as f64).ln(),
         independent,
         diagonal,
