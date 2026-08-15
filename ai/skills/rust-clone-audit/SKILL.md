@@ -117,7 +117,7 @@ obj.other_method();
 ```
 The clean fix often involves restructuring: split-borrow via destructuring, hoist the read out of the conflict's scope, or reshape ownership. **This is Tier C — recommend benchmarking first.** If the surrounding work is non-trivial, the clone may already be cheap relative to it, and the refactor is risky.
 
-Worked example: this project's pileup `process_position` (Mi6 fix in `ia/reviews/pileup_2026-05-09.md`) replaced `rec.ref_seq.clone()` per affected record with field-level destructure of `&mut OpenPileupRecord`, saving up to a 5 KB clone per record per walker step. The fix added two lines and changed one helper signature — Tier B because the speedup was bounded, the fix was small, and a regression test already covered the affected path.
+Worked example: this project's pileup `process_position` (Mi6 fix in `doc/devel/reports/reviews/pileup_2026-05-09.md`) replaced `rec.ref_seq.clone()` per affected record with field-level destructure of `&mut OpenPileupRecord`, saving up to a 5 KB clone per record per walker step. The fix added two lines and changed one helper signature — Tier B because the speedup was bounded, the fix was small, and a regression test already covered the affected path.
 
 ## Pattern: field-level destructure
 
