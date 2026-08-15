@@ -169,6 +169,18 @@ dhat-heap = ["dep:dhat"]
 # matters — a measurement naming one allocator while running another — the
 # target refuses at startup instead (`ng_generic_walk_probe`).
 alloc-mimalloc = ["dep:mimalloc"]
+# Compile the joint fit's drawn-evidence generators — `ssr_fit::bench_fixtures`
+# (a stratum drawn at a known slippage) and `fit::bench_fixtures` (a cohort drawn
+# at a known error rate, heterozygosity and inbreeding) — outside `cfg(test)`, so
+# `benches/ng_joint_fit_perf.rs` can time the real `fit_stratum` / `fit_strata` /
+# `fit_jointly` on evidence that needs no CRAM and no reference genome.
+#
+# **The generators are the ones the module's own positive controls draw from**, not
+# copies: a benchmark drawn differently from the oracle would be timing a workload
+# no test has ever checked. Off by default so a release build compiles none of it.
+#
+#     cargo bench --features bench-fixtures --bench ng_joint_fit_perf
+bench-fixtures = []
 
 [dev-dependencies]
 bstr = "1"
@@ -221,6 +233,16 @@ harness = false
 
 [[bench]]
 name = "ng_generic_pileup_perf"
+harness = false
+
+# The joint parameters fit. Needs `--features bench-fixtures` to measure anything;
+# without it the target still builds (so `cargo bench --no-run` covers it) and
+# refuses at startup rather than reporting a time for a fixture it could not draw.
+# `required-features` is deliberately not used: it would make the target invisible
+# to a plain `cargo bench --no-run`, which is where a bench that stopped compiling
+# gets caught.
+[[bench]]
+name = "ng_joint_fit_perf"
 harness = false
 
 

@@ -1453,8 +1453,23 @@ pub fn gather_strata(
 // Tests
 // ---------------------------------------------------------------------
 
-#[cfg(test)]
-mod tests {
+// ---------------------------------------------------------------------
+// Drawn strata: one generator, shared by the positive control and the bench
+// ---------------------------------------------------------------------
+
+/// A stratum drawn at a known truth, for anything that has to fit evidence it already knows
+/// the answer to.
+///
+/// **Compiled under `cfg(test)` and under the `bench-fixtures` feature, and nowhere else.** Two
+/// callers need a drawn stratum and they need the *same* one: this module's positive control
+/// ([`fit_stratum`] must return the numbers a draw was made at) and `benches/ng_joint_fit_perf.rs`
+/// (the fit must be timed on evidence with no CRAM behind it). A second generator would be a
+/// second thing to keep agreeing, and a benchmark drawn differently from the oracle would be
+/// timing a workload no test has ever checked.
+///
+/// Nothing here is production code: a release build without the feature compiles none of it.
+#[cfg(any(test, feature = "bench-fixtures"))]
+pub mod bench_fixtures {
     use super::*;
 
     /// A reproducible stream, the same one the harnesses use.
@@ -1518,7 +1533,21 @@ mod tests {
     }
 
     /// Draw one stratum: `tracts` tracts, `samples` samples, `depth` reads a sample a tract.
-    fn draw_stratum(
+    ///
+    /// `span` is both the read span and the number of allele classes the spectrum must carry
+    /// (`2 × span + 1`), so a caller fitting at [`SsrFitConfig::allele_span`] draws at the same
+    /// span and hands the fit a spectrum of that length.
+    ///
+    /// **Every sample gets `depth` reads at every tract**, where a real cohort at three reads a
+    /// position puts a read at a tract in a minority of its samples. So a drawn stratum of `n`
+    /// samples costs more a tract than a recorded one of `n` samples — which is the right way
+    /// round for a benchmark, and the wrong way round for extrapolating a wall time to a cohort.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the drawn stratum's own parameters, and the two axes CLAUDE.md §0 commits to \
+                  (tracts, samples) are two of them"
+    )]
+    pub fn draw_stratum(
         slippage: Slippage,
         spectrum: &[f64],
         concentration: f64,
@@ -1575,7 +1604,7 @@ mod tests {
 
     /// The three-class spectrum every measurement on this path was made against: most
     /// chromosomes at the reference length, one repeat either side carrying most of the rest.
-    fn spectrum_of(classes: usize) -> Vec<f64> {
+    pub fn spectrum_of(classes: usize) -> Vec<f64> {
         let middle = classes / 2;
         let mut spectrum: Vec<f64> = (0..classes)
             .map(|class| 0.55_f64.powi((class as i32 - middle as i32).abs()))
@@ -1583,6 +1612,12 @@ mod tests {
         normalise(&mut spectrum);
         spectrum
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bench_fixtures::{draw_stratum, spectrum_of};
 
     /// Every read distribution is a distribution: it sums to one, whatever the allele's
     /// distance from the recorded range.

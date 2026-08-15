@@ -2739,11 +2739,25 @@ mod tests {
         assert!((density.expected_heterozygosity() - truth).abs() < 1e-12);
     }
 
-    // ---- the whole fit, against a cohort whose truth is known --------------------
-    //
-    // **The oracle is a drawn cohort and not a fixture** (spec §12.1): records are filled
-    // from parameters chosen here, with no reads and no alignments, and the fit has to return
-    // what was drawn.
+    // The whole fit, against a cohort whose truth is known, is in `whole_fit_tests` below —
+    // the drawn-cohort generator it needs sits between the two modules, because the benchmark
+    // reaches it too.
+}
+
+/// A cohort drawn at known parameters, for anything that has to fit evidence whose answer is
+/// already known.
+///
+/// **Compiled under `cfg(test)` and under the `bench-fixtures` feature, and nowhere else.** The
+/// two callers are this module's own oracle — a cohort drawn at a chosen error rate,
+/// heterozygosity and inbreeding must come back at them — and the benchmark, which needs a
+/// resident census so that [`fit_jointly`] can be timed with no CRAM and no reference genome
+/// between the clock and the estimator. They draw from one generator because a benchmark drawn
+/// differently from the oracle would be timing a workload no test has ever checked.
+///
+/// Nothing here is production code: a release build without the feature compiles none of it.
+#[cfg(any(test, feature = "bench-fixtures"))]
+pub mod bench_fixtures {
+    use super::*;
 
     use crate::ng::parameter_estimation::joint::census::{
         AlleleObservation, DepthCap, DepthLadderDigest, GenericEvidence, ObservedAllele,
@@ -2842,22 +2856,27 @@ mod tests {
 
     /// The drawn samples as the cohort the fit takes. **Cloned**, because a drawn cohort is
     /// refitted several times in one test at different sample counts.
-    fn as_cohort(samples: &[SampleCensusEvidence]) -> CohortCensusEvidence {
+    ///
+    /// A benchmark builds the cohort **once**, outside the timed region, and re-fits the same
+    /// one: a resident census lends its sections and takes them back, so nothing is consumed
+    /// and the clone here is setup a bench must not pay per iteration.
+    pub fn as_cohort(samples: &[SampleCensusEvidence]) -> CohortCensusEvidence {
         CohortCensusEvidence::new(samples.to_vec()).expect("a drawn cohort records one way")
     }
 
-    struct DrawnCohort {
-        samples: Vec<SampleCensusEvidence>,
-        clean: f64,
-        noisy: f64,
-        noisy_share: f64,
-        density: FrequencyDensity,
-        hom_excess: Vec<f64>,
-        heterozygous: Vec<f64>,
+    /// A drawn cohort's records, beside the parameters they were drawn at.
+    pub struct DrawnCohort {
+        pub samples: Vec<SampleCensusEvidence>,
+        pub clean: f64,
+        pub noisy: f64,
+        pub noisy_share: f64,
+        pub density: FrequencyDensity,
+        pub hom_excess: Vec<f64>,
+        pub heterozygous: Vec<f64>,
     }
 
     /// Draw a cohort at known parameters and write it into records the fit will read.
-    fn draw_cohort(
+    pub fn draw_cohort(
         samples: usize,
         positions: usize,
         mean_depth: f64,
@@ -2879,7 +2898,7 @@ mod tests {
         clippy::too_many_arguments,
         reason = "the drawn cohort's own parameters"
     )]
-    fn draw_cohort_with_duplications(
+    pub fn draw_cohort_with_duplications(
         samples: usize,
         positions: usize,
         mean_depth: f64,
@@ -3016,6 +3035,19 @@ mod tests {
                 .collect(),
         }
     }
+}
+
+/// The whole fit, against cohorts whose truth is known.
+///
+/// **A second test module and not a second file**: the generator these tests draw from is
+/// [`bench_fixtures`], which has to be compiled outside `cfg(test)` so the benchmark can reach
+/// it, and a module cannot be half inside a `cfg(test)` one. The tests themselves are
+/// unchanged.
+#[cfg(test)]
+mod whole_fit_tests {
+    use super::*;
+    use super::bench_fixtures::{as_cohort, draw_cohort, draw_cohort_with_duplications};
+    use crate::ng::parameter_estimation::joint::census::DepthCap;
 
     /// **The test that says whether any of this works.** A cohort drawn at known parameters
     /// must come back at them.
