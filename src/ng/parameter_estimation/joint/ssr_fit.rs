@@ -799,9 +799,23 @@ impl TractLikelihoods {
 
 /// One point of the simplex a tract's length frequencies are integrated over, with the weight
 /// it stands for.
+///
+/// **The genotype prior is carried here rather than rebuilt per tract**, because it is a function
+/// of the point alone: a tract enters it only through the read likelihoods it is multiplied by.
+/// Building it per tract cost `points × genotypes` fills for every tract of every objective
+/// evaluation, where `points × genotypes` once a quadrature is the whole of it.
 struct Quadrature {
     frequencies: Vec<Vec<f64>>,
     ln_weight: f64,
+    /// `point × genotypes` — the chance of drawing this genotype from two independent draws at
+    /// this point, laid out flat.
+    independent: Vec<f64>,
+    /// The genotype slot of each homozygous pair, in allele order.
+    ///
+    /// **The by-descent half of the prior is zero everywhere else**, so it is a sum over the
+    /// thirteen allele classes wearing a ninety-one-slot loop until this list splits it out. The
+    /// slot's own value at a point is `frequencies[point][class]`, so nothing else need be stored.
+    diagonal: Vec<usize>,
 }
 
 /// `ln P(this tract's panel | parameters)`.
@@ -810,45 +824,62 @@ fn ln_tract(
     quadrature: &Quadrature,
     genotypes: &[(usize, usize)],
 ) -> f64 {
+    let width = genotypes.len();
     let mut terms = Vec::with_capacity(quadrature.frequencies.len());
     // The genotype prior splits into the part that comes from the two copies being identical
     // by descent and the part that comes from two independent draws, so a sample's own
     // homozygote excess weights two dot products rather than rebuilding the prior per sample.
-    let mut identical = vec![0.0_f64; genotypes.len()];
-    let mut independent = vec![0.0_f64; genotypes.len()];
-    for point in &quadrature.frequencies {
-        for (slot, (first, second)) in genotypes.iter().enumerate() {
-            if first == second {
-                identical[slot] = point[*first];
-                independent[slot] = point[*first] * point[*first];
-            } else {
-                identical[slot] = 0.0;
-                independent[slot] = 2.0 * point[*first] * point[*second];
-            }
-        }
-        let mut total = quadrature.ln_weight;
+    // **Both halves are built once with the quadrature**, not once a tract.
+    for (index, point) in quadrature.frequencies.iter().enumerate() {
+        let independent = &quadrature.independent[index * width..][..width];
+        // **One logarithm a point, not one a sample.** The samples' likelihoods multiply, so the
+        // product is carried directly and rescaled when it is about to underflow — the same trick
+        // the ordinary-position half uses (`fit.rs`'s `RESCALE`), and worth the cohort size: eight
+        // logarithms a point become one here, and three thousand become one at the top of the
+        // range this caller is for.
+        let mut product = 1.0_f64;
+        let mut scaled_by = 0.0_f64;
+        let mut vanished = false;
         for (row, excess) in likelihoods
             .scaled
             .iter()
             .zip(&likelihoods.homozygote_excess)
         {
-            let mut by_descent = 0.0;
             let mut at_random = 0.0;
-            for slot in 0..genotypes.len() {
-                by_descent += identical[slot] * row[slot];
-                at_random += independent[slot] * row[slot];
+            for (weight, value) in independent.iter().zip(&row[..width]) {
+                at_random += weight * value;
+            }
+            // **Only the homozygous slots**: the by-descent prior is zero at every heterozygous
+            // pair, so seventy-eight of ninety-one products were a multiply by zero.
+            let mut by_descent = 0.0;
+            for (class, slot) in quadrature.diagonal.iter().enumerate() {
+                by_descent += point[class] * row[*slot];
             }
             let sum = excess * by_descent + (1.0 - excess) * at_random;
             if sum <= 0.0 {
-                total = f64::NEG_INFINITY;
+                vanished = true;
                 break;
             }
-            total += sum.ln();
+            product *= sum;
+            if product < 1.0 / RESCALE {
+                product *= RESCALE;
+                scaled_by -= LN_RESCALE;
+            }
         }
-        terms.push(total);
+        terms.push(if vanished {
+            f64::NEG_INFINITY
+        } else {
+            quadrature.ln_weight + product.ln() + scaled_by
+        });
     }
     ln_sum_exp(&terms) + likelihoods.ln_offset
 }
+
+/// The scale the running product above is multiplied back up by when it is about to underflow,
+/// and its logarithm. Both are `fit.rs`'s values, and deliberately so: the two halves of the fit
+/// carry the same rescale and should one day share it.
+const RESCALE: f64 = 1e150;
+const LN_RESCALE: f64 = 345.398_899_014_487; // ln(1e150)
 
 /// The evidence with the read likelihoods already computed for one set of slippage numbers.
 ///
@@ -911,6 +942,7 @@ impl<'a> Scorer<'a> {
                     &parameters.length_spectrum,
                     parameters.concentration,
                     self.quadrature_points,
+                    self.genotypes,
                 ),
             ));
         }
@@ -977,7 +1009,12 @@ const HALTON_BASES: [usize; 16] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 4
 /// objective is a smooth function of it rather than a jittery one — the same uniforms are
 /// reused at every value the climb tries, which is what makes this quadrature rather than
 /// Monte Carlo and what stops the search chasing sampling noise.
-fn dirichlet_points(spectrum: &[f64], concentration: f64, points: usize) -> Quadrature {
+fn dirichlet_points(
+    spectrum: &[f64],
+    concentration: f64,
+    points: usize,
+    genotypes: &[(usize, usize)],
+) -> Quadrature {
     let classes = spectrum.len();
     let alpha: Vec<f64> = spectrum
         .iter()
@@ -1001,9 +1038,31 @@ fn dirichlet_points(spectrum: &[f64], concentration: f64, points: usize) -> Quad
             piece
         })
         .collect();
+    // The genotype prior at every point, and where the homozygous pairs sit. Both depend on the
+    // points alone, so this is the one place they are built.
+    let mut independent = vec![0.0_f64; frequencies.len() * genotypes.len()];
+    for (index, point) in frequencies.iter().enumerate() {
+        let row = &mut independent[index * genotypes.len()..][..genotypes.len()];
+        for (slot, (first, second)) in genotypes.iter().enumerate() {
+            row[slot] = if first == second {
+                point[*first] * point[*first]
+            } else {
+                2.0 * point[*first] * point[*second]
+            };
+        }
+    }
+    let diagonal: Vec<usize> = genotypes
+        .iter()
+        .enumerate()
+        .filter(|(_, (first, second))| first == second)
+        .map(|(slot, _)| slot)
+        .collect();
+
     Quadrature {
         frequencies,
         ln_weight: -(points as f64).ln(),
+        independent,
+        diagonal,
     }
 }
 
@@ -1056,19 +1115,35 @@ fn ln_gamma(x: f64) -> f64 {
     0.5 * std::f64::consts::TAU.ln() + (x + 0.5) * t.ln() - t + series.ln()
 }
 
-/// `I_x(a, b)`, by its continued fraction — enough for a Beta quantile by bisection.
-fn regularised_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
+/// `ln B(a, b)`, the constant in front of the incomplete Beta.
+///
+/// **Symmetric in its two shapes**, up to the order the two subtractions happen in, which is why
+/// one value serves both sides of the argument swap in
+/// [`regularised_incomplete_beta_with`].
+fn ln_beta(a: f64, b: f64) -> f64 {
+    ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b)
+}
+
+/// `I_x(a, b)`, by its continued fraction — enough for a Beta quantile by bisection, with
+/// `ln B(a, b)` handed in.
+///
+/// **The bisection above moves only `x`.** Recomputing `ln_beta` per step cost three `ln_gamma`
+/// calls — each nine divisions, two logarithms, and below `x < 0.5` a sine and a recursion — on
+/// every one of sixty steps, at every one of 256 quadrature points, for each of twelve
+/// stick-breaking dimensions: 552,960 calls a quadrature build where twelve do.
+fn regularised_incomplete_beta_with(x: f64, a: f64, b: f64, ln_beta: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;
     }
     if x >= 1.0 {
         return 1.0;
     }
-    let front =
-        (a * x.ln() + b * (1.0 - x).ln() + ln_gamma(a + b) - ln_gamma(a) - ln_gamma(b)).exp() / a;
+    // **The swap is tested before the front factor is built, not after.** On this branch `front`
+    // is dead, and building it costs two logarithms and an exponential for nothing.
     if x > (a + 1.0) / (a + b + 2.0) {
-        return 1.0 - regularised_incomplete_beta(1.0 - x, b, a);
+        return 1.0 - regularised_incomplete_beta_with(1.0 - x, b, a, ln_beta);
     }
+    let front = (a * x.ln() + b * (1.0 - x).ln() + ln_beta).exp() / a;
     let (mut f, mut c, mut d) = (1.0_f64, 1.0_f64, 0.0_f64);
     for index in 0..=200 {
         let m = index / 2;
@@ -1101,10 +1176,12 @@ fn regularised_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
 
 /// The `p`-th quantile of `Beta(a, b)`, by bisection on the cumulative distribution.
 fn beta_quantile(p: f64, a: f64, b: f64) -> f64 {
+    // Neither shape moves across the bisection, so neither does the constant they make.
+    let ln_beta = ln_beta(a, b);
     let (mut low, mut high) = (0.0_f64, 1.0_f64);
     for _ in 0..60 {
         let middle = 0.5 * (low + high);
-        if regularised_incomplete_beta(middle, a, b) < p {
+        if regularised_incomplete_beta_with(middle, a, b, ln_beta) < p {
             low = middle;
         } else {
             high = middle;
