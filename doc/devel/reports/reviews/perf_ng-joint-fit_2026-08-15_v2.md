@@ -369,3 +369,78 @@ hypothesis; only the benchmark is an answer. That is precisely why round one ran
 seam above every code change, and this round is the demonstration.
 
 ---
+### 5b. The measurement discipline this round had to learn, twice
+
+**A cross-run criterion comparison on this host has a floor of about 2%, and the within-run
+confidence interval does not show it.** The control — the *unmodified* code rebuilt and re-timed
+against its own saved baseline, run after the six candidates — came back at **+0.0%, +1.0%, +0.4%,
++2.1%, +1.7%**, every one of them with a within-run interval under 0.5%. Every figure in the table
+above must be read against that floor, and the two winners are the two that clear it on every case.
+**A future round should interleave baseline and variant rather than saving one baseline and
+comparing five variants to it in sequence.**
+
+**And the machine must be idle, checked for the right process.** The first attempt at the baseline
+was taken while two sub-agents ran test suites; the check that missed them looked for `cargo` and
+`rustc`, and a `cargo test` past its compile stage shows neither name — the process is the compiled
+test binary. Numbers from that run were 3.4× off and were discarded.
+
+### 5c. Applied
+
+Both winners are in `e0333b16`, timed separately and then verified together.
+
+| | benchmark | on real reads, 8 accessions over 24 spans |
+|---|---|---|
+| hoist the reference-read term ([fit.rs:1774](../../../../src/ng/parameter_estimation/joint/fit.rs#L1774)) | −2.6% to −3.5% on the ordinary-position cases | ordinary-position fit 10.2 s → 9.6 s |
+| flatten the quadrature's frequencies ([ssr_fit.rs:1057](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L1057)) | −1.9% to −2.9% on every repeat-tract case | repeat-tract fit 48.5 s → 46.9 s |
+
+Together: every printed fitted number byte-identical to the pre-change run on real tomato reads;
+`cargo test --lib ng::parameter_estimation` **644 passed, 0 failed**, the count round one recorded;
+`cargo clippy --release --lib` clean.
+
+The second one also cuts the repeat-tract half's allocation count from 4,078,260 blocks to
+2,120,813 — **−48.0%** — because `dirichlet_points` was building one `Vec` per quadrature point,
+1,942,272 of them in one run, where the sibling field three lines below was already one flat buffer.
+
+### 5d. Allocation findings — the first profile this module has ever had
+
+Measured with `examples/dhat_ng_joint_fit.rs`, which needs no CRAM and no reference. Round one filed
+three memory findings computed from `size_of`; all three are now measured.
+
+**The ordinary-position half's peak is not the estimator — it is contamination.** At 24 samples over
+30,000 positions the peak resident heap is 16,732,920 bytes, of which **14,382,064 (86%) is the
+contamination arm** and 191,136 is the estimator itself. Four lines hold 69% of the whole peak:
+[contamination.rs:430-433](../../../../src/ng/parameter_estimation/joint/contamination.rs#L430-L433),
+at **16.00 bytes a (sample, position) exactly** — which is the figure round one's L9 computed, so
+its extrapolations are now arithmetic on a measured constant: **2.02 GB at 63 samples and the
+production 2,000,000-position target, 32 GB at a thousand samples.** Three of the four arrays are
+read one position at a time in an ordered pass, so the `positions` dimension buys nothing.
+
+**`Prepared` is confirmed at 746.5 bytes a (tract, sample)** against round one's computed 760, and
+"built three times over" is now a count rather than a reading of the source: the same 3,000-tract
+stratum allocates 9,289 blocks at one starting point and 27,856 at three — **2.9988×** — because
+`fit_pooled` constructs the `Scorer` inside the starting-point loop
+([ssr_fit.rs:465](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L465)). Hoisting it out
+is a one-line move. The 2× transient at `refresh` remains unmeasured.
+
+**`gather_strata`'s derived structure is 5.7× the sections it derives from when every sample carries
+a read, and 2.4× at the one-in-three density tomato actually has** — round one's L2 said "~6×",
+which is the worst case rather than the typical one. Rescaled on the measured constant, a thousand
+samples over tomato's 462,701 tracts is 47.7 GB at every-sample density and 19.7 GB at one in three.
+
+**Borrowing copies every row ten times.** `ssr_fit.rs:158` takes 48,000 blocks for inputs holding
+2,400 rows, because `pooled_with` starts from `self.clone()` inside the ring loop.
+
+**The remaining large allocation site is `ln_tract`'s per-call `terms` vector** — 1,394,400 blocks
+and 2.86 GB, 47% of the repeat-tract half's bytes. It sits inside the parallel closure, so a scratch
+buffer needs a per-worker home; and on round one's evidence allocator work is 0.21% of CPU, so it
+should be taken for the footprint, not sold as a speed win.
+
+---
+
+## Author response convention
+
+Address each finding by what it is rather than by a code — this report deliberately carries no `H1`
+/ `L2` labels, because round one's did and they meant nothing to the reader. Answer with one of:
+`applied in <commit>` / `experiment shows no gain — closing` / `disputed because …` / `deferred` /
+`won't fix because …`. Six of this round's candidates took the "no gain" path, which is what the
+benchmark was built for.
