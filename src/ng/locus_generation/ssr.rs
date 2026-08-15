@@ -33,6 +33,7 @@ use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeq
 use crate::ng::region_typing::segment_criteria::SsrSegment;
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 
+
 /// An STR locus ready to align against: the segment plus the reference bases the aligner
 /// aligns the reads to.
 ///
@@ -673,6 +674,7 @@ mod classify {
     use crate::ng::locus_generation::{LocusLen, ReadWitness};
     use crate::ng::read::aligned_read::AlignedRead;
     use crate::ng::types::Bp;
+    use crate::pileup::walker::CigarOp;
     use std::ops::Range;
 
     /// Why a read yielded no usable observation — the tally increments the matching
@@ -765,6 +767,19 @@ mod classify {
         let window_len = reference.len() as u32;
         let region = extract_region(&read.cigar, fp, read_len, window_start, window_len);
 
+        // **A read that copies the reference across the whole window has nothing to align.**
+        // Its repeat count is the reference's, and the tract sits where the reference's tract
+        // sits — so the delimiter would spend a full dynamic-programming pass rediscovering a
+        // span this function already knows. On tomato at three reads a position that is 4 reads
+        // in every 9 reaching the aligner (57,507 of 132,069 over 24 spans of chromosome 1).
+        //
+        // The base-quality gate below still runs: skipping the aligner skips *where the tract
+        // is*, not *whether the read is good enough to be counted*, which is a separate question
+        // and is what turns the span into an observation.
+        if let Some(tract) = tract_needing_no_alignment(read, &region, locus, reference) {
+            return complete_or_low_quality(read, &region, &tract, qual_buffer);
+        }
+
         let span = delimit(aligner, read, &region, reference, context, align_scratch);
         match span {
             RepeatSpan::Between(tract)
@@ -805,6 +820,91 @@ mod classify {
                 Classified::NoObservation(NoObservationReason::NoBorderAnchored)
             }
         }
+    }
+
+    /// The tract's span inside `region`, for a read the aligner has nothing to decide about.
+    ///
+    /// **The condition is that the read reproduces the reference across the whole window.** Then
+    /// the read carries the reference's repeat count — a different count would have to appear in
+    /// the CIGAR as an insertion or a deletion — and the tract sits at the reference's own
+    /// offsets, so the answer is arithmetic rather than a search.
+    ///
+    /// Four things are required, and each rules out a way the CIGAR could be lying:
+    ///
+    /// - **No insertion or deletion anywhere in the read.** One outside the window still shifts
+    ///   every reference-to-read offset after it, and `region` is derived from those offsets.
+    /// - **No clip at either end.** A soft clip is the one place a long allele's extra units can
+    ///   hide from the aligned span — production's own gate admits a clipped read unconditionally
+    ///   for exactly this reason (`src/ssr/pileup/footprint.rs:210-222`) — so a clipped read goes
+    ///   to the aligner however clean the rest of its CIGAR looks.
+    /// - **The aligned span brackets the whole window**, or the read is a partial observation and
+    ///   belongs on the aligner's path, which is what decides how far into the tract it reached.
+    /// - **The bases match the reference over the whole window**, not merely their count. The
+    ///   delimiter scores emissions by base quality, so *equal length* alone would not let this
+    ///   function predict its answer; *equal bases* does, because then the best path is the
+    ///   diagonal at any quality — every alternative either mismatches a base or pays a slip's
+    ///   open cost, and both are strictly worse than a run of exact matches.
+    ///
+    /// The last is why a `SeqMismatch` in the CIGAR is not enough to disqualify a read on its own
+    /// and is not tested for: what matters is the bases, and they are compared directly.
+    ///
+    /// **A fifth condition is about the locus rather than the read, and it was found by
+    /// measurement rather than by argument.** Where the reference's own repeat run continues past
+    /// the boundary region typing drew, the delimiter answers a *lower bound* and not a length —
+    /// on a tomato run it returned `FromLeft(15..42)` for a 12-base `A` tract whose right flank is
+    /// more `A`, because the run reaches the window edge and might go further. That is the right
+    /// answer and this function must not overrule it, so a locus whose run is extendable in the
+    /// reference is left to the aligner entirely. It is checked against the reference and so is
+    /// the same verdict for every read at that locus.
+    fn tract_needing_no_alignment(
+        read: &AlignedRead,
+        region: &Range<usize>,
+        locus: &SsrLocus,
+        reference: &[u8],
+    ) -> Option<Range<u64>> {
+        if reference_run_escapes_the_tract(locus, reference) {
+            return None;
+        }
+        let straight = read.cigar.iter().all(|op| {
+            matches!(
+                op,
+                CigarOp::Match(_) | CigarOp::SeqMatch(_) | CigarOp::SeqMismatch(_)
+            )
+        });
+        if !straight {
+            return None;
+        }
+        // With no indel and no clip, `extract_region` returns exactly the window's width when the
+        // aligned span brackets it, and something shorter when it does not — so this one length
+        // test covers the bracketing requirement.
+        if region.len() != reference.len() {
+            return None;
+        }
+        if &read.seq[region.clone()] != reference {
+            return None;
+        }
+        let left = locus.left_flank_len() as u64;
+        Some(left..left + locus.segment.tract_len())
+    }
+
+    /// Does the reference's own repeat run carry on past the tract region typing drew?
+    ///
+    /// A run of period `p` continues one base to the left when that base repeats the one `p`
+    /// further along, and one base to the right when it repeats the one `p` back. Either way the
+    /// delimiter sees a run that does not end inside the window, so it answers a lower bound
+    /// rather than a length, and [`tract_needing_no_alignment`] must stand aside.
+    ///
+    /// A flank shorter than the period cannot be tested and is treated as escaping, which costs
+    /// an alignment and never a wrong answer.
+    fn reference_run_escapes_the_tract(locus: &SsrLocus, reference: &[u8]) -> bool {
+        let period = locus.segment.motif().as_bytes().len();
+        let left = locus.left_flank_len();
+        let tract_end = left + locus.segment.tract_len() as usize;
+        if period == 0 || left < period || reference.len() < tract_end + period {
+            return true;
+        }
+        reference[left - 1] == reference[left - 1 + period]
+            || reference[tract_end] == reference[tract_end - period]
     }
 
     /// Align the read's `region` slice against the reference frame.
