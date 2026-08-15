@@ -2,7 +2,7 @@
 **Date:** 2026-08-15
 **Reviewer:** rust-performance-review skill (orchestrator)
 **Scope:** the joint parameters fit and the census — `src/ng/parameter_estimation/joint/` plus `generic/depth_bins.rs`, 12,801 lines never before measured
-**Verdict:** Apply the listed wins — **five were applied and measured during the review, halving the repeat-tract fit** (§2a); one design decision remains, and it is the owner's (§2)
+**Verdict:** Apply the listed wins — **seven were applied and measured during the review, taking 70% off the repeat-tract fit** (§2a); one design decision remains, and it is the owner's (§2)
 **Hot-path evidence:** a sampling profile and six timed runs, all taken during this review; none existed before it
 
 ---
@@ -108,19 +108,45 @@ depends on it.
 
 ## 2a. What was applied and measured
 
-Five findings — H2, H3, H4 in part, H5 and H6 — were applied to
-[ssr_fit.rs](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs) during this review and timed
-one change at a time on the same host-native build, four rayon threads, 8 tomato accessions.
+Seven findings — H2 through H7 and one of S1's siblings — were applied to
+[ssr_fit.rs](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs) and
+[fit.rs](../../../../src/ng/parameter_estimation/joint/fit.rs) during this review, and an eighth
+was tried and refuted. Each was timed on its own, one change at a time, on the same host-native
+build, four rayon threads, 8 tomato accessions.
 
 | step | change | 6 spans (299 tracts fitted) | 12 spans (590) |
 |---|---|---|---|
 | baseline | — | 47.1 s | 79.1 s |
-| 1 | H5 + H6: hoist `ln B(a,b)` out of the 60-step bisection, and test the argument swap before building the front factor | **39.1 s** (−17.0%) | — |
+| 1 | H5 + H6: hoist `ln B(a,b)` out of the 60-step bisection, and test the argument swap before building the front factor | **39.1 s** | — |
 | 2 | H3 + part of H4: build the genotype prior once with the quadrature, and sum the by-descent term over the 13 homozygous slots instead of all 91 | **23.1 s** | — |
-| 3 | H2: carry a rescaled running product, one logarithm a quadrature point instead of one a sample | **21.3 s** | **38.1 s** |
-| | **cumulative** | **−54.8%** | **−51.8%** |
+| 3 | H2: carry a rescaled running product, one logarithm a quadrature point instead of one a sample | **21.3 s** | 38.1 s |
+| 4 | S1's sibling: stop the quantile bisection on bracket width rather than always at 60 steps | **19.7 s** | — |
+| 5 | *(hoist the per-stick shapes and their log-Beta out of the 256-point loop)* | *19.8 s — **no gain**, reverted* | — |
+| 6 | H7: the ordinary-position fit's per-pass table of error-rate logarithms | 19.7 s (that phase: 10.4 s → 9.8 s) | — |
+| 7 | the rest of H4: four running sums in the 91-element dot product instead of one | **15.8 s** | — |
+| 8 | the same loop as `wide::f64x4` lanes instead of four scalars | **14.1 s** | **24.6 s** |
+| | **cumulative** | **−70.1%** | **−68.9%** |
 
-The whole 6-span run went from 66.8 s to 40.0 s. **Steps 1 and 2 are exactly value-preserving** —
+The whole 6-span run went from 66.8 s to 32.2 s, and the ordinary-position fit from about 10.4 s
+to 9.9 s.
+
+**Step 5 is recorded because it failed.** Hoisting the two Beta shapes and their log-Beta out of
+the 256-point loop looked like the same class of win as step 1 and moved nothing — 19.7 s to
+19.8 s — because step 1 had already reduced the log-Beta to once a bisection, and a suffix sum
+over thirteen classes is twelve additions. It was reverted rather than kept, and the reason is
+written at the site so nobody re-derives it.
+
+**Steps 7 and 8 are the answer to "can Rust's faster float arithmetic help here", and the answer
+is yes but not by that route.** The dot product is a serial `f64` accumulation, so it ran at the
+latency of one addition and could not use the machine's vector lanes — Rust will not let the
+compiler reassociate it. Rust 1.98's `algebraic_add`/`algebraic_mul` exist to lift exactly that,
+but they are unstable on this repository's pinned 1.95 (`error[E0658]: use of unstable library
+feature 'float_algebraic'`) and `rust-toolchain.toml` pins the version deliberately, with a comment
+saying autovectorisation decisions shift silently between versions. Splitting the sum in the source
+instead needs no toolchain change and is reproducible rather than left to a compiler flag: four
+explicit accumulators took 19.7 s to 15.8 s, and writing the same association as `wide::f64x4`
+lanes — `wide` is already a dependency — took it to 14.1 s. **Together they are worth 28.4% of the
+repeat-tract fit, more than any other single change here.** **Steps 1 and 2 are exactly value-preserving** —
 both keep every float addition in its original order, which is why the fitted rows are unchanged.
 **Step 3 is not**: a product of likelihoods replaces a sum of their logarithms, so the result may
 differ in the last bits. On both inputs every printed fitted quantity — slippage level, shorter
@@ -129,19 +155,21 @@ with the pre-review baseline at the precision the harness prints. That is agreem
 decimals rather than bit-identity, and **the owner has ruled that sufficient** (2026-08-15), so no
 re-baseline of the identity oracle is required for this change.
 
-Checks run after the three steps: `cargo test --lib ng::parameter_estimation::joint` — 103 passed,
-0 failed, including the positive control `a_drawn_stratum_returns_the_numbers_it_was_drawn_with`
-and `a_cohort_fitted_from_files_gives_the_parameters_it_gives_from_memory`. `cargo clippy --release
+Checks run after all steps: `cargo test --lib ng::parameter_estimation` — **644 passed, 0 failed**,
+including the positive control `a_drawn_stratum_returns_the_numbers_it_was_drawn_with`,
+`a_drawn_cohort_comes_back_at_the_parameters_it_was_drawn_at`, and
+`a_cohort_fitted_from_files_gives_the_parameters_it_gives_from_memory`. `cargo clippy --release
 --lib` — clean.
 
 **What this does and does not change about §2.** The per-tract cost falls from about 0.14 s to
-about 0.065 s at 8 samples, so the six-day extrapolation becomes roughly three days. The decision
-in §2 stands unchanged: halving a number that is three orders of magnitude too large is worth
-having and is not an answer.
+about 0.045 s at 8 samples, so the six-day extrapolation becomes roughly two. The decision in §2
+stands unchanged: taking two thirds off a number that is three orders of magnitude too large is
+worth having and is not an answer. Only bounding how many tracts a fit reads is.
 
-Still unapplied and still worth taking: H1 (the owner's call), H7, and everything under Likely —
-in particular L1, which would let the identity oracle stop pinning its CPU count, and the remaining
-half of H4, flattening `TractLikelihoods::scaled` from `Vec<Vec<f64>>` to one buffer with a stride.
+Still unapplied and still worth taking: H1 (the owner's call), and everything under Likely — in
+particular L1, which would let the identity oracle stop pinning its CPU count, and the last piece
+of H4, flattening `TractLikelihoods::scaled` from `Vec<Vec<f64>>` to one buffer with a stride,
+which would also let the dot product read contiguous lanes without the per-sample pointer hop.
 
 ---
 
@@ -349,8 +377,9 @@ Two items:
 
 **H4: [ssr_fit.rs:838](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L838) and [:747](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L747) — the innermost dot product runs over 91 genotypes for a vector that is zero in 78 of them, through a `Vec<Vec<f64>>` the compiler cannot reason about**
 
-- ✅ **APPLIED IN PART** — the by-descent split landed in step 2 of §2a and is value-preserving.
-  **Flattening `scaled` did not, and is still open.**
+- ✅ **APPLIED** — the by-descent split landed in step 2 of §2a, and the dot product itself in
+  steps 7 and 8 (four accumulators, then `wide::f64x4`): 19.7 s → 14.1 s, the largest single win
+  here. **Flattening `scaled` is still open** and would let those lanes read contiguous memory.
 - **Confidence:** High
 - **Hot-path evidence:** the 44% inlined-closure entry. Two categories filed this independently.
 - **Mechanism:** `identical[slot]` is set to zero for every heterozygous pair three lines above, so
@@ -387,7 +416,8 @@ Two items:
 
 **H6: [ssr_fit.rs:1067](../../../../src/ng/parameter_estimation/joint/ssr_fit.rs#L1067) — `regularised_incomplete_beta` computes three `ln_gamma`, two `ln` and an `exp`, then throws them away on the symmetric branch**
 
-- ✅ **APPLIED** — step 1 of §2a, with H5. Value-preserving.
+- ✅ **APPLIED** — step 1 of §2a, with H5. Value-preserving. The bisection above it also gained a
+  bracket-width exit (step 4, 21.3 s → 19.7 s).
 - **Confidence:** High
 - **Hot-path evidence:** the same 21.7% subtree as H5.
 - **Mechanism:** `front` is computed before the argument-swap test and is dead on the branch that
@@ -398,6 +428,8 @@ Two items:
 
 **H7: [fit.rs:717](../../../../src/ng/parameter_estimation/joint/fit.rs#L717) — `ln_reads_given_genotype` recomputes three logarithms per genotype per candidate per sample per position, of probabilities that are constant for a whole pass**
 
+- ✅ **APPLIED** — step 6 of §2a: that phase went 10.4 s → 9.8 s. Bit-identical; the
+  log-likelihood of 72042 is unchanged.
 - **Confidence:** High
 - **Hot-path evidence:** `one_position` at 25,304 of 245,018 samples (10.3%), against a phase clock
   of 11.1 s for 60 passes over 59,900 positions.

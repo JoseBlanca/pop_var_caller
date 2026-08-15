@@ -718,23 +718,26 @@ fn ln_reads_given_genotype(
     sample: &SampleAtPosition,
     depth_weights: &[f64],
     alt_copies: u8,
-    ploidy: Ploidy,
     alternative: usize,
-    error_rate: f64,
+    logs: &ReadLogs,
 ) -> f64 {
-    let carried = f64::from(alt_copies) / f64::from(ploidy.get());
-    let on_candidate = carried * (1.0 - error_rate) + (1.0 - carried) * error_rate / 3.0;
-    let on_reference = reference_read_probability(alt_copies, ploidy, error_rate);
-    let on_neither = error_rate / 3.0;
-
+    let copies = alt_copies as usize;
     let candidate_reads = sample.on[alternative];
     // `Other` is neither the candidate nor the reference; it is held out of the model
     // entirely, so the depth it occupied is removed with it.
     let other_reads = sample.non_reference() - candidate_reads - sample.on[4];
 
-    count_times_ln(candidate_reads, on_candidate)
-        + count_times_ln(other_reads, on_neither)
-        + ln_reference_reads(sample, depth_weights, on_reference)
+    // **A count of zero needs no guard now.** `count_times_ln` branched on it only to keep
+    // `0 · −∞` out of the sum; the logarithms below are clamped at `MIN_POSITIVE` when they are
+    // built, so every one of them is finite and `0 · finite` is zero.
+    candidate_reads * logs.ln_candidate[copies]
+        + other_reads * logs.ln_neither
+        + ln_reference_reads(
+            sample,
+            depth_weights,
+            logs.reference[copies],
+            logs.ln_reference[copies],
+        )
 }
 
 /// `ln P(this sample's reads | every copy is the reference base)` — the term the invariant
@@ -742,11 +745,56 @@ fn ln_reads_given_genotype(
 fn ln_reads_given_all_reference(
     sample: &SampleAtPosition,
     depth_weights: &[f64],
-    error_rate: f64,
+    logs: &ReadLogs,
 ) -> f64 {
     let non_reference = sample.non_reference() - sample.on[4];
-    count_times_ln(non_reference, error_rate / 3.0)
-        + ln_reference_reads(sample, depth_weights, 1.0 - error_rate)
+    non_reference * logs.ln_neither
+        + ln_reference_reads(sample, depth_weights, logs.reference[0], logs.ln_reference[0])
+}
+
+/// Every logarithm the per-position kernel needs that depends on a read group's error rate
+/// rather than on the position.
+///
+/// **Built once for the whole pass**, for exactly the reason [`BetaQuadrature`] beside it is: an
+/// error rate is fixed for a pass, so `ln P(a read shows …)` is fixed with it. Taken per position
+/// it was up to eighteen logarithms a sample — two noise classes × three candidate alleles ×
+/// three genotypes — at every kept position of every pass.
+struct ReadLogs {
+    /// `ln P(a read shows the candidate allele)`, indexed by how many copies of it the sample
+    /// carries.
+    ln_candidate: [f64; 3],
+    /// `P(a read shows the reference base)` by the same index — the power series over a depth
+    /// range needs the probability itself and not only its logarithm.
+    reference: [f64; 3],
+    ln_reference: [f64; 3],
+    /// `ln P(a read shows one of the two bases that are neither)`. No genotype moves it.
+    ln_neither: f64,
+}
+
+impl ReadLogs {
+    fn of(error_rate: f64, ploidy: Ploidy) -> Self {
+        // The same clamp `count_times_ln` applied before taking a logarithm, so the table holds
+        // the values the per-call arithmetic held.
+        let ln = |p: f64| p.max(f64::MIN_POSITIVE).ln();
+        let mut ln_candidate = [0.0; 3];
+        let mut reference = [0.0; 3];
+        let mut ln_reference = [0.0; 3];
+        for copies in 0..3_usize {
+            let carried = copies as f64 / f64::from(ploidy.get());
+            let on_candidate = carried * (1.0 - error_rate) + (1.0 - carried) * error_rate / 3.0;
+            let on_reference =
+                reference_read_probability(copies as u8, ploidy, error_rate);
+            ln_candidate[copies] = ln(on_candidate);
+            reference[copies] = on_reference;
+            ln_reference[copies] = ln(on_reference);
+        }
+        Self {
+            ln_candidate,
+            reference,
+            ln_reference,
+            ln_neither: ln(error_rate / 3.0),
+        }
+    }
 }
 
 /// How much weight each depth in a sample's range carries, relative to the shallowest.
@@ -827,8 +875,13 @@ fn expected_reference_reads(
 ///
 /// The shallowest depth's term is factored out, which is what keeps the sum in range: what is
 /// left runs from one upwards and cannot underflow however small `p` is.
-fn ln_reference_reads(sample: &SampleAtPosition, depth_weights: &[f64], on_reference: f64) -> f64 {
-    let shallowest = count_times_ln(sample.fewest_reference, on_reference);
+fn ln_reference_reads(
+    sample: &SampleAtPosition,
+    depth_weights: &[f64],
+    on_reference: f64,
+    ln_on_reference: f64,
+) -> f64 {
+    let shallowest = sample.fewest_reference * ln_on_reference;
     if sample.spread <= 1 {
         return shallowest;
     }
@@ -1424,6 +1477,14 @@ fn expectation_pass(
             config.quadrature_nodes,
         )
     });
+    // One table a noise class a read group, beside the quadratures and for the same reason.
+    let read_logs: Vec<Vec<ReadLogs>> = (0..2)
+        .map(|class| {
+            (0..parameters.clean.len())
+                .map(|group| ReadLogs::of(class_rate(parameters, class, group), config.ploidy))
+                .collect()
+        })
+        .collect();
     let positions = EvidenceCursor::position_count(samples);
     let chunk = POSITIONS_PER_CHUNK.min(positions.div_ceil(rayon::current_num_threads()).max(1));
     let bounds: Vec<(usize, usize)> = (0..positions)
@@ -1486,6 +1547,7 @@ fn expectation_pass(
                 &mut scratch,
                 group_index,
                 config.ploidy,
+                &read_logs,
                 &quadrature,
                 carrier.as_ref(),
                 &odds,
@@ -1647,6 +1709,7 @@ fn one_position(
     scratch: &mut Scratch,
     group_index: &[Vec<usize>],
     ploidy: Ploidy,
+    read_logs: &[Vec<ReadLogs>],
     quadrature: &BetaQuadrature,
     carrier: Option<&BetaQuadrature>,
     coverage_odds: &[f64],
@@ -1690,11 +1753,10 @@ fn one_position(
     for class in 0..2 {
         let mut invariant = 0.0;
         for s in 0..samples {
-            let rate = class_rate(parameters, class, group_index[s][0]);
             invariant += ln_reads_given_all_reference(
                 &scratch.evidence.samples[s],
                 scratch.evidence.weights_of(s),
-                rate,
+                &read_logs[class][group_index[s][0]],
             );
         }
         scratch.invariant_ln[class] = invariant;
@@ -1703,14 +1765,13 @@ fn one_position(
             let allele = scratch.candidates[candidate];
             let mut fixed = 0.0;
             for s in 0..samples {
-                let rate = class_rate(parameters, class, group_index[s][0]);
+                let logs = &read_logs[class][group_index[s][0]];
                 let sample = &scratch.evidence.samples[s];
                 let weights = scratch.evidence.weights_of(s);
                 let base = scratch.ell_at(class, candidate, s);
                 let mut largest = f64::NEG_INFINITY;
                 for j in 0..3 {
-                    let value =
-                        ln_reads_given_genotype(sample, weights, j as u8, ploidy, allele, rate);
+                    let value = ln_reads_given_genotype(sample, weights, j as u8, allele, logs);
                     scratch.ell[base + j] = value;
                     largest = largest.max(value);
                 }

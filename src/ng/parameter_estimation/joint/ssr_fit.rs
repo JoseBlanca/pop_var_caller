@@ -845,8 +845,23 @@ fn ln_tract(
             .iter()
             .zip(&likelihoods.homozygote_excess)
         {
-            let mut at_random = 0.0;
-            for (weight, value) in independent.iter().zip(&row[..width]) {
+            // **Four running sums rather than one, and that is the whole trick.** A single
+            // accumulator makes ninety-one additions that each wait for the one before, so the
+            // loop runs at the latency of an addition and the machine's vector lanes sit idle —
+            // and the compiler may not split it itself, because reassociating floating-point
+            // addition changes the answer and Rust does not allow it uninvited. Splitting it here
+            // says which association we want, in the source, where it is reproducible.
+            let mut lanes = wide::f64x4::ZERO;
+            let mut weights = independent.chunks_exact(4);
+            let mut values = row[..width].chunks_exact(4);
+            for (weight, value) in weights.by_ref().zip(values.by_ref()) {
+                let weight = wide::f64x4::new([weight[0], weight[1], weight[2], weight[3]]);
+                let value = wide::f64x4::new([value[0], value[1], value[2], value[3]]);
+                lanes += weight * value;
+            }
+            let parts = lanes.to_array();
+            let mut at_random = (parts[0] + parts[1]) + (parts[2] + parts[3]);
+            for (weight, value) in weights.remainder().iter().zip(values.remainder()) {
                 at_random += weight * value;
             }
             // **Only the homozygous slots**: the by-descent prior is zero at every heterozygous
@@ -1020,6 +1035,10 @@ fn dirichlet_points(
         .iter()
         .map(|weight| (concentration * weight).max(1e-3))
         .collect();
+    // **The two shapes are recomputed per point, and that measured as free.** Hoisting them and
+    // their log-Beta to one per stick was tried on 2026-08-15 and moved the repeat-tract fit from
+    // 19.7 s to 19.8 s — nothing, because the log-Beta is already computed once a bisection rather
+    // than once a step, and a suffix sum over thirteen classes is twelve additions.
     let frequencies: Vec<Vec<f64>> = (0..points)
         .into_par_iter()
         .map(|point| {
@@ -1176,10 +1195,25 @@ fn regularised_incomplete_beta_with(x: f64, a: f64, b: f64, ln_beta: f64) -> f64
 
 /// The `p`-th quantile of `Beta(a, b)`, by bisection on the cumulative distribution.
 fn beta_quantile(p: f64, a: f64, b: f64) -> f64 {
-    // Neither shape moves across the bisection, so neither does the constant they make.
-    let ln_beta = ln_beta(a, b);
+    beta_quantile_with(p, a, b, ln_beta(a, b))
+}
+
+/// How narrow the bracket has to get before the bisection stops.
+///
+/// **Sixty halvings of the unit interval reach 2⁻⁶⁰ ≈ 9 × 10⁻¹⁹, which is below what an `f64`
+/// holds near 1**, so the last twenty of them moved the answer by nothing while each cost a whole
+/// continued fraction of up to 201 terms. This stops at a width the answer can still carry — a
+/// stick-breaking share is reported to four decimals and the quantities fitted from it to three.
+const QUANTILE_TOLERANCE: f64 = 1e-12;
+
+/// The same, with `ln B(a, b)` handed in — for a caller inverting the same distribution at many
+/// probabilities, which is what a quadrature build does 256 times a stick.
+fn beta_quantile_with(p: f64, a: f64, b: f64, ln_beta: f64) -> f64 {
     let (mut low, mut high) = (0.0_f64, 1.0_f64);
     for _ in 0..60 {
+        if high - low < QUANTILE_TOLERANCE {
+            break;
+        }
         let middle = 0.5 * (low + high);
         if regularised_incomplete_beta_with(middle, a, b, ln_beta) < p {
             low = middle;
