@@ -29,7 +29,7 @@ Each finding uses this exact format:
 - **Hot-path evidence:** quoted profile / benchmark / "pattern-match only"
 - **Pattern matched:** which rule in this category's checklist the candidate matches
 - **Mechanism:** 1–3 sentences naming the specific cost (allocation, cache miss, lock wait, syscall, branch mispredict, vtable, etc.) and why the proposed fix removes it.
-- **Measurement plan:** the benchmark or profile that would confirm or refute the gain. Concrete: command, metric, and the threshold that makes the change worth merging.
+- **Measurement plan:** the benchmark or profile that would confirm or refute the gain. Concrete: command, metric, and the threshold that makes the change worth merging. When the mechanism is a countable quantity (allocations, syscalls, instructions, channel messages), gate on the count — it is identical run to run — and use wall time as the secondary check (see `methodology.md`). Name only tools available in this environment (see `profiling_environment.md`).
 - **Complexity cost:** what the fix adds (new type, lifetime, dependency, `unsafe`, build flag, extra invariant). Be honest.
 - **Suggested experiment / fix:** unified diff, replacement snippet, or numbered steps. Self-contained.
   ```rust

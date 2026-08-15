@@ -8,6 +8,6 @@
 # the bind-mounted project directory; the container's preinstalled
 # toolchain is overridden if it does not match.
 [toolchain]
-channel = "1.95"
+channel = "1.97.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]

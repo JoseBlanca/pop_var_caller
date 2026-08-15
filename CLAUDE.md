@@ -220,11 +220,12 @@ lands where "0.09%" does not.
 
 ## Project layout pointers
 
-- Architecture and specs: `ia/specs/` — start with
+- Architecture and specs: `doc/devel/specs/` — start with
   `calling_pipeline_architecture.md` and `design_principles.md`.
-- Implementation plans: `ia/feature_implementation_plans/`.
-- Implementation reports: `ia/reports/implementations/` (create on first use).
-- Skills used by the assistant: `ia/skills/`.
+- Implementation plans: `doc/devel/implementation_plans/`.
+- Implementation reports: `doc/devel/reports/implementations/`.
+- Reviews (correctness and performance): `doc/devel/reports/reviews/`.
+- Skills used by the assistant: `ai/skills/`.
 - Source tree: `src/` (library) and `src/main.rs` (CLI).
 - Tests: per-module `#[cfg(test)] mod tests` blocks; integration
   tests in `tests/`.
