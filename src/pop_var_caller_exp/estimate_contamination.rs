@@ -34,9 +34,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use clap::Args;
+use rayon::prelude::*;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -172,10 +174,11 @@ pub struct EstimateContaminationArgs {
     #[arg(long, default_value_t = DEFAULT_SEED, help_heading = "Advanced")]
     pub seed: u64,
 
-    /// How many threads the fit may use. Zero means every core.
+    /// How many threads to use. Zero means every core.
     ///
-    /// **The samples are walked one at a time**; this sizes the fit, which is the long pole —
-    /// on 63 accessions over 8 Mb the walks took 11 minutes and the fit took 645 seconds.
+    /// **It bounds both halves of the run**: how many alignments are walked at once, and how
+    /// wide the fit runs. The walks are what it also bounds the *memory* of — each holds its
+    /// own view of the reference while it runs.
     #[arg(long, default_value_t = 0)]
     pub threads: usize,
 }
@@ -342,8 +345,8 @@ pub fn run_estimate_contamination(
             .build_global();
     }
 
-    // Progress goes to stderr, so that redirecting stdout still leaves a person watching a run
-    // that walks one alignment after another something to watch.
+    // Progress goes to stderr, so that redirecting stdout still leaves a person watching a long
+    // run something to watch.
     let started = Instant::now();
     let prepared = prepare(args)?;
     eprintln!(
@@ -354,19 +357,43 @@ pub fn run_estimate_contamination(
         started.elapsed().as_secs_f64()
     );
 
-    let mut cohort = Vec::with_capacity(args.alignments.len());
-    for alignment in &args.alignments {
-        let at = Instant::now();
-        let sample = walk_one_sample(alignment, &prepared)?;
-        eprintln!(
-            "walked {} ({} of {}), {:.0} s",
-            sample.sample,
-            cohort.len() + 1,
-            args.alignments.len(),
-            at.elapsed().as_secs_f64()
-        );
-        cohort.push(sample);
-    }
+    // **One sample a thread, and it is this subcommand's own arrangement rather than the
+    // caller's.** How ng parallelises a real run is being settled elsewhere; what makes it
+    // easy here is that a sample's walk shares nothing with any other sample's — each builds
+    // its own view of the reference and its own generators inside its own thread, and hands
+    // back only the evidence it wrote down. Those views are file-backed and single-threaded,
+    // so they may not cross a thread boundary; they never do, because nothing outside the
+    // walk ever holds one.
+    //
+    // **The cost is one open view of the reference a thread.** At a hundred samples on a
+    // machine with many cores that is the thing to watch, and `--threads` is what bounds it.
+    let done = AtomicUsize::new(0);
+    let total = args.alignments.len();
+    let cohort: Vec<SampleCensusEvidence> = args
+        .alignments
+        .par_iter()
+        .map(|alignment| {
+            let at = Instant::now();
+            let sample = walk_one_sample(alignment, &prepared)?;
+            // The order lines appear in is the order walks *finish*, which is not the order
+            // the samples were given — so each line names its sample, and the count is how
+            // many are done rather than which one this is.
+            eprintln!(
+                "walked {} ({} of {total} done), {:.0} s",
+                sample.sample,
+                done.fetch_add(1, Ordering::Relaxed) + 1,
+                at.elapsed().as_secs_f64()
+            );
+            Ok(sample)
+        })
+        // **Collected in the order the alignments were given**, whatever order they finished
+        // in: a cohort assembled in a racing order would fit the same numbers but report them
+        // against a different arrangement of samples from one run to the next.
+        .collect::<Result<Vec<_>, EstimateContaminationCliError>>()?;
+    eprintln!(
+        "walked {total} samples in {:.0} s",
+        started.elapsed().as_secs_f64()
+    );
     let mut cohort =
         CohortCensusEvidence::new(cohort).map_err(EstimateContaminationCliError::Cohort)?;
 
