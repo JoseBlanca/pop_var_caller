@@ -158,11 +158,48 @@ scale with leverage. Not run; it would not change the switch either way.
 
 ---
 
-## 5. What this cannot say
+## 5. On real alignments: the 63 tomato accessions
 
-- **Drawn reads, not real ones.** Nothing here has been through an aligner. The 63 tomato accessions
-  sit at three reads a position, where the change does nothing, and this project has no deep cohort to
-  re-measure on — so the first real test of the exact ladder will be somebody else's data.
+*Added the same day, after the rest of this report was written on drawn data alone. The accessions
+were assumed to sit at three reads a position, where the change does nothing. **They do not** — the
+cohort runs from 2.4× to 30.6×, so its deeper accessions had exactly the positions this change is
+about.*
+
+`examples/ng_joint_records_walk.rs` over the 63 benchmark CRAMs, 8 Mb of analysed regions, 1,999,404
+kept positions, the same input as `joint_records_on_real_alignments_2026-08-13.md`. Raw output:
+`tmp/contamination_depth/tomato_n63_exact_ladder.txt`.
+
+**The encoding lands where it was priced, and nothing else moved.** The depth array is **1.999 MB at
+8.00 bits a position**, against 1.25 MB before. The list of disagreeing reads is **89,241 entries for
+the median accession — the same number the August 13th run recorded**, so what changed is the depth
+encoding and not the walk. Every position below the cap now carries an exact depth; the two deepest
+accessions hold **1 position in 1,000 above the cap**, which is the only place a range survives.
+
+**The floor held and the top of the panel rose:**
+
+| | the widening ladder (2026-08-13) | one bin per depth |
+|---|---:|---:|
+| median accession | 0.0000 | **0.0001** |
+| highest accession | 0.0090 | **0.0398** |
+
+**The median not moving is what says this is not a new floor** — a floor lifts everybody. Eight
+accessions now read between 1% and 4%, and the highest supplies 0.024 of its own fitted frequency, so
+it is not a sample reading its own echo. Beside the drawn control, where the exact ladder took a true
+3% from 0.0120 to 0.0263 and left all 39 clean samples at 0.0000, the reading is that **a few of these
+archive accessions are genuinely contaminated at a few percent and were being reported at less than
+half of it**. There is no truth set on real reads; that is a reading and not a proof.
+
+The estimate rests on 36,712 varying positions, one accession of the 63 was refused for supplying most
+of its own frequency, and the rest of the fit is unremarkable: converged in 30 passes and 645 s, error
+rate 0.00334 a base, 3.15% of positions judged mismapped, expected heterozygosity 4.155 per kilobase.
+
+---
+
+## 6. What this cannot say
+
+- **One real cohort, and it is not deep.** The tomato run above reaches 30× in a handful of its
+  accessions and sits far lower in most, so the depths where the change matters most are thinly
+  sampled. A cohort that is deep throughout would say more, and this project does not have one.
 - **A tenth of the value is still missing** at 30 reads: 0.0263 against 0.030. Neither the depth, nor
   the structure, nor the sample's own contribution to its frequency accounts for it, and no candidate
   here has been measured.

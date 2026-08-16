@@ -313,10 +313,11 @@ fn main() {
 
 /// Where each sample's positions sit on the depth ladder.
 ///
-/// **The ladder is exact to eight reads a position and a range above it**, and how much of a
-/// run is in the exact part decides how much anything about the range can matter. A cohort at
-/// three reads a position is almost entirely exact; the band above is where a stored code
-/// stands for several depths at once.
+/// **The ladder is exact to the cap of 124 reads a position and a range only above it**, so the
+/// middle column should read zero for every sample and is kept as the assertion that it does. It
+/// was where a run's positions piled up until 2026-08-16, when a code above eight reads stopped
+/// standing for several depths at once
+/// (`doc/devel/ng/reports/census_depth_resolution_2026-08-16.md`).
 ///
 /// **The last column is the one to watch, and it is about the cap rather than the ladder.**
 /// The depth recorded is now the position's own, so the ladder no longer piles deep positions
@@ -328,7 +329,7 @@ fn depth_ladder_occupancy(cohort: &mut CohortCensusEvidence) {
     println!("\n--- where the positions sit on the depth ladder ---");
     println!(
         "  {:<24}{:>14}{:>18}{:>16}{:>12}",
-        "sample", "exact (0–8)", "a range (9+)", "above the cap", "no reads"
+        "sample", "an exact depth", "a range", "above the cap", "no reads"
     );
     let names: Vec<String> = cohort.sample_names().map(str::to_string).collect();
     let cap = cohort.terms().map_or(0, |terms| terms.depth_cap.get());
