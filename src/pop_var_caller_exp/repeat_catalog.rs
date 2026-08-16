@@ -51,8 +51,13 @@ pub struct RepeatCatalogArgs {
     #[arg(long)]
     pub output: Option<PathBuf>,
 
-    /// How many contigs to scan at once. A speed knob only: the file is byte-identical at
-    /// every value.
+    /// How many contigs to scan at once. The file is byte-identical at every value.
+    ///
+    /// **It buys speed with memory, and a whole contig is the unit.** Each thread holds the
+    /// contig it is scanning, so the peak is set by the largest contigs in flight rather than
+    /// by the genome: six threads on GRCh38 in a 16 GB container is killed by the kernel, while
+    /// the default of one builds the same catalog in 103 seconds. Raise it on a machine with
+    /// room, and expect the first few chromosomes to be the expensive ones.
     #[arg(long, default_value_t = 1)]
     pub threads: usize,
 
