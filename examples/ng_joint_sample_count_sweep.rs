@@ -186,7 +186,7 @@ fn draw(
     seed: u64,
 ) -> Drawn {
     let mut rng = Rng(seed);
-    let edges = DepthBinEdges::new();
+    let edges = DepthBinEdges::for_census();
     let mut codes: Vec<PackedDepthCodes> = (0..samples)
         .map(|_| PackedDepthCodes::never_walked(positions))
         .collect();
@@ -277,7 +277,7 @@ fn draw(
         kept_loci: CensusLociDigester::new().finish(),
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(1_000),
-        depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
+        depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
         depth_cap: DepthCap::MAX,
     };
     let records = (0..samples)

@@ -143,7 +143,7 @@ belongs to by its **index into the selection** rather than by a coordinate.
 
 ```rust
 pub struct GenericEvidence {
-    /// Entry `i` is the `i`-th kept position's depth code, five bits, packed.
+    /// Entry `i` is the `i`-th kept position's depth code, eight bits, packed.
     depth: PackedDepthCodes,
     /// Only where a read was not on the reference base. **Sorted by `index`**, so the
     /// parameters fit walks both halves in one pass.
@@ -176,7 +176,10 @@ pub enum ObservedAllele { A, C, G, T, Other }
 
 A depth bin alone cannot say *this position was never visited*, and that state has to be
 distinguishable from *visited and empty* because only the first is a bug. So the stored code is the
-ladder's bins plus one sentinel — 21 codes, which is why five bits rather than four.
+ladder's bins plus one sentinel. **Eight bits since 2026-08-16**, when the census ladder went to one
+bin per depth to the cap of 124 plus ten rungs above it — 135 codes and the sentinel
+([spec §2.2](../spec/parameter_prepass_joint_records.md), and why in
+[`census_depth_resolution_2026-08-16.md`](../reports/census_depth_resolution_2026-08-16.md)).
 
 ```rust
 #[derive(Copy, Clone, PartialEq, Eq)]

@@ -33,6 +33,13 @@
 //! replacement must be checked in that band — one checked at tomato's own depth would
 //! pass whatever it did.
 //!
+//! **Two ladders, and only the histogram one is coarse.** Everything above is about the
+//! histogram route, where a bin is a row of cells and resolution is paid for in memory that
+//! grows with the square of the depth. The census route stores one code per position instead,
+//! so a finer ladder costs bits and not cells: [`DepthBinEdges::for_census`] gives every depth
+//! to the cap a bin of its own, and widens only above it. What that is worth, and what the
+//! extra bits cost, is on [`CENSUS_DEPTH_BIN_COUNT`].
+//!
 //! Design: `doc/devel/ng/arch/parameter_prepass_generic.md` §2.2,
 //! `doc/devel/ng/spec/parameter_prepass_generic.md` §4.
 
@@ -77,26 +84,46 @@ const MAX_BINNED_DEPTH: u32 = 124;
 /// bought only memory.
 const DEPTH_BIN_COUNT: usize = 20;
 
-/// How many bins the **census** ladder has: the twenty above, plus ten more rungs at the
-/// same growth ratio, carrying the top from 124 to about 1,500 reads a position.
+/// How many rungs the **census** ladder has above the cap: ten, at the growth ratio the
+/// histogram ladder's widening bins were built with, carrying the top from 124 to about
+/// 1,500 reads a position.
 ///
-/// **A longer ladder, not a different one.** The first twenty rungs are the twenty-bin
-/// ladder's own tops, appended to rather than recomputed, so every edge of the shorter
-/// ladder is an edge of this one and a census code maps to a histogram bin by collapsing
-/// everything above 124. Two independently-derived ladders would let the two routes bin
-/// differently, which is the thing the shared ladder exists to prevent.
+/// **The ceiling is what needs them, not the resolution.** A position a sample carries two
+/// copies of holds about twice that sample's median depth, so the signal dies wherever twice
+/// the median runs past what the encoding can say. At a top of 124 that is 76 reads a
+/// position for a doubled position to stop reading deeper than an ordinary one, and 98 for
+/// the two to be written identically — inside the depth range this caller commits to
+/// (`spec/parameter_prepass_joint_records.md` §4.1).
+const CENSUS_REACH_BINS: usize = 10;
+
+/// How many bins the **census** ladder has: one per depth up to the cap of 124, then the
+/// [ten reach rungs](CENSUS_REACH_BINS) above it.
 ///
-/// **The ceiling is what needed the extension, not the resolution.** A position a sample
-/// carries two copies of holds about twice that sample's median depth, so the signal dies
-/// wherever twice the median runs past what the encoding can say. At a top of 124 that is
-/// 76 reads a position for a doubled position to stop reading deeper than an ordinary one,
-/// and 98 for the two to be written identically — inside the depth range this caller
-/// commits to (`spec/parameter_prepass_joint_records.md` §4.1).
+/// **Every depth the counts are exact at has a bin to itself, and coarseness starts where the
+/// counts stop being exact.** A position deeper than the cap has its allele counts thinned to
+/// it, so above 124 the record is approximate whatever the ladder does; below it the record is
+/// exact and the ladder was the only thing making it otherwise.
 ///
-/// **It is free.** The stored code is five bits, which holds 32 values; twenty bins plus the
-/// never-walked sentinel used 21 of them and left eleven spare. Thirty bins plus the
-/// sentinel is 31.
-pub(crate) const CENSUS_DEPTH_BIN_COUNT: usize = 30;
+/// **What the coarse rungs cost was measured on contamination, which is the parameter that
+/// reads a depth and a disagreeing-read count against each other.** On a drawn panel of 40
+/// samples at 30 reads a position with one sample contaminated at 3%, the widening ladder — at
+/// 30 reads its code stood for "between 29 and 36" — returned **0.0120**, and one bin per depth
+/// returns **0.0263**, against a floor that stays at 0.0000 for all 39 clean samples either way
+/// (`reports/census_depth_resolution_2026-08-16.md`). The count of disagreeing reads was always
+/// exact, so a 3% contamination moving a read share by 1.5% sat inside a ±12% uncertainty that
+/// came from nothing but how the depth was written down.
+///
+/// **It is not free, and the price is a third of a byte a position.** The code no longer fits in
+/// five bits: 135 rungs plus the never-walked sentinel needs eight, which takes the depth array
+/// from 1.25 MB to 2.0 MB per sample per read group at two million kept positions — 79 MB to
+/// 126 MB across a cohort of 63. Beside the same sample's list of disagreeing reads (2.7 MB at
+/// 30 reads a position) it is a few percent of the census.
+///
+/// **A longer ladder, not a different one.** Every edge of the twenty-bin histogram ladder is
+/// still an edge of this one — its tops all sit at or below 124, where this ladder has an edge
+/// at every integer — so a census code still maps to a histogram bin by collapsing, and the two
+/// routes cannot bin differently.
+pub(crate) const CENSUS_DEPTH_BIN_COUNT: usize = MAX_BINNED_DEPTH as usize + 1 + CENSUS_REACH_BINS;
 
 /// The index of the first widening bin — the one just above the exact region. Named
 /// once, because the offset is otherwise re-derived at each site that needs it, and two
@@ -247,29 +274,30 @@ impl DepthBinEdges {
         ))
     }
 
-    /// The same ladder with ten more rungs on top — thirty bins, topping out near 1,500
-    /// reads a position. **This is the one the census stores its depth codes on.**
+    /// **The ladder the census stores its depth codes on: one bin per depth to the cap of
+    /// 124, then ten widening rungs to about 1,500 reads a position.**
     ///
-    /// **The twenty-bin ladder's rungs are taken, not recomputed.** The extension appends to
-    /// them at the ratio they were built with, so every edge of the shorter ladder is an edge
-    /// of this one by construction and not by a rounding coincidence — which is what lets a
-    /// census code be turned into a histogram bin by collapsing everything above 124, and
-    /// what stops the two routes binning differently. Rebuilding a thirty-rung geometric
-    /// ladder from scratch over the wider range would move the shared rungs by a base or two
-    /// and quietly break that.
+    /// Exact wherever the record itself is exact, and coarse only above the cap, where a
+    /// position's allele counts have been thinned and the record is approximate anyway. What
+    /// the coarse version cost, and what the extra three bits buy, is on
+    /// [`CENSUS_DEPTH_BIN_COUNT`].
     ///
-    /// Why the reach is needed rather than the resolution: [`CENSUS_DEPTH_BIN_COUNT`].
+    /// **The histogram ladder's rungs survive as edges of this one**, since every one of its
+    /// tops sits at or below 124 and this ladder has an edge at every integer down there. So a
+    /// census code still becomes a histogram bin by collapsing, and the two routes cannot bin
+    /// differently. The ten rungs above the cap are the ones the twenty-bin ladder's own
+    /// growth ratio gives, unchanged.
     #[must_use]
     pub fn for_census() -> Self {
-        let mut bin_tops = ladder_tops(EXACT_DEPTH_LIMIT, MAX_BINNED_DEPTH, DEPTH_BIN_COUNT);
+        let mut bin_tops: Vec<u32> = (0..=MAX_BINNED_DEPTH).collect();
         let ratio = widening_ratio(
             EXACT_DEPTH_LIMIT,
             MAX_BINNED_DEPTH,
             DEPTH_BIN_COUNT - EXACT_DEPTH_LIMIT as usize - 1,
         );
-        for step in 1..=(CENSUS_DEPTH_BIN_COUNT - DEPTH_BIN_COUNT) {
+        for step in 1..=CENSUS_REACH_BINS {
             let top = (f64::from(MAX_BINNED_DEPTH) * ratio.powi(step as i32)).round() as u32;
-            // PANIC-FREE: `ladder_tops` never returns an empty vector.
+            // PANIC-FREE: the vector above always holds the cap.
             let previous = *bin_tops.last().expect("the ladder has at least one bin");
             bin_tops.push(top.max(previous + 1));
         }
@@ -448,10 +476,15 @@ mod tests {
 
     // ---- the census ladder: the same rungs, and ten more ---------------------
 
-    /// **The property that makes the two ladders one**: every depth at which the
-    /// twenty-bin ladder changes bin is a depth at which the thirty-bin one changes bin
-    /// too, so a census code turns into a histogram bin by collapsing everything above
-    /// 124 and the two routes cannot bin differently.
+    /// **The property that keeps the two ladders one**: every depth at which the
+    /// twenty-bin ladder changes bin is a depth at which the census ladder changes bin
+    /// too, so a census code turns into a histogram bin by collapsing and the two routes
+    /// cannot bin differently.
+    ///
+    /// **The census ladder's rungs are no longer the histogram ladder's own** — since
+    /// 2026-08-16 it has one bin per depth to the cap, where the histogram ladder widens
+    /// from 8 — and that is why this is asserted as *every edge survives* rather than as
+    /// *the first twenty rungs match*. The weaker property is the one the collapse needs.
     ///
     /// Asserted on the edges themselves rather than on `bin_for`, because it is the
     /// edges that a stored code indexes.
@@ -469,35 +502,46 @@ mod tests {
         let short = tops_of(&histogram);
         let long = tops_of(&census);
 
-        assert_eq!(
-            long[..short.len()],
-            short[..],
-            "the census ladder's first twenty rungs are the histogram ladder's own"
-        );
+        for top in &short {
+            assert!(
+                long.contains(top),
+                "the histogram ladder's rung at {top} is not an edge of the census ladder, so a \
+                 census bin would straddle two histogram bins"
+            );
+        }
         assert_eq!(census.bin_count(), CENSUS_DEPTH_BIN_COUNT);
         assert_eq!(
-            long[short.len()..],
+            long[..=MAX_BINNED_DEPTH as usize],
+            (0..=MAX_BINNED_DEPTH).collect::<Vec<u32>>()[..],
+            "the census ladder holds one bin per depth up to the cap"
+        );
+        assert_eq!(
+            long[MAX_BINNED_DEPTH as usize + 1..],
             [159, 204, 262, 336, 431, 553, 709, 910, 1168, 1498],
-            "the ten rungs the extension adds, at the same ratio as the eleven below them"
+            "the ten rungs above the cap, at the ratio the histogram ladder's widening bins use"
         );
         assert_eq!(
             histogram.cell_count(),
             583,
-            "extending the census ladder must not move the histogram route's cell table"
+            "refining the census ladder must not move the histogram route's cell table"
         );
     }
 
-    /// Below the twenty-bin ladder's cap the two agree on every depth, so a run that
-    /// records on one and reads on the other is only wrong above 124.
+    /// **A census bin never straddles two histogram bins**, which is what lets a code
+    /// recorded on one be read as a bin of the other. Below the cap the census ladder is
+    /// finer, so this is containment and not equality; the two answered alike at every
+    /// depth until 2026-08-16, and asserting that again would only assert that the
+    /// census ladder had never been refined.
     #[test]
-    fn the_two_ladders_answer_alike_at_every_depth_up_to_the_shorter_ones_cap() {
+    fn every_census_bin_lies_inside_one_histogram_bin() {
         let histogram = DepthBinEdges::new();
         let census = DepthBinEdges::for_census();
         for depth in 0..=MAX_BINNED_DEPTH {
+            let range = census.depth_range(census.bin_for(depth));
             assert_eq!(
-                histogram.bin_for(depth),
-                census.bin_for(depth),
-                "the two ladders disagree at depth {depth}"
+                histogram.bin_for(*range.start()),
+                histogram.bin_for(*range.end()),
+                "the census bin holding depth {depth} spans two histogram bins"
             );
         }
     }

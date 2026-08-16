@@ -177,7 +177,7 @@ fn main() {
                 // things as the one before it, so passes past the first say
                 // nothing new about the shape and only cost time.
                 max_passes: 6,
-                edges: Arc::new(DepthBinEdges::new()),
+                edges: Arc::new(DepthBinEdges::for_census()),
                 ..JointFitConfig::default()
             };
             let (fit, _) = measured(
@@ -467,7 +467,7 @@ fn recording_terms() -> RecordingTerms {
         kept_loci: CensusLociDigester::new().finish(),
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(100),
-        depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
+        depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
         depth_cap: DepthCap::new(124),
     }
 }
@@ -486,7 +486,7 @@ fn drawn_generic_cohort(
     seed: u64,
 ) -> CohortCensusEvidence {
     let mut draw = Draw(seed);
-    let edges = DepthBinEdges::new();
+    let edges = DepthBinEdges::for_census();
     let mut depth: Vec<PackedDepthCodes> = (0..samples)
         .map(|_| PackedDepthCodes::never_walked(positions))
         .collect();

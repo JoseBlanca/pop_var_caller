@@ -394,7 +394,11 @@ impl Default for JointFitConfig {
             starting_points: StartingPoint::spanning_the_class_separation(),
             max_passes: 200,
             stillness: 1e-4,
-            edges: Arc::new(DepthBinEdges::new()),
+            // **The census ladder and not the histogram one.** This fit reads census codes and
+            // nothing else, and since 2026-08-16 the two ladders differ above 8 reads a
+            // position rather than only above 124 — so the histogram ladder here would not be
+            // a coarser reading of the same codes, it would be the wrong depths.
+            edges: Arc::new(DepthBinEdges::for_census()),
             contamination: ContaminationConfig::default(),
             duplicated_positions: true,
             coverage_odds: Vec::new(),
@@ -417,18 +421,26 @@ impl Default for JointFitConfig {
 ///
 /// # The depth is a range, and the reads that disagree are exact
 ///
-/// A position's read count is stored as one of twenty five-bit codes. Below nine reads each
-/// code is one exact depth; above nine a code stands for a range that widens as it climbs, to
-/// 76–97 and then the cap. **The count of reads that disagreed with the reference is exact and
-/// the depth is not**, and the reference count is the difference between them — so reading one
-/// depth out of the range lands a heterozygote's read share away from a half for a reason that
-/// has nothing to do with the sample. Measured elsewhere: a drawn panel with nobody
-/// contaminated returned a median 2.5% contaminated at ten reads a position from this alone
-/// (`contamination_floor_and_duplicated_class_2026-08-13.md` §4).
+/// A position's read count is stored as a code on the census ladder. **To the cap of 124 reads
+/// each code is one exact depth**; above it a code stands for a range that widens as it climbs,
+/// to about 1,500. So a range is now what a position deeper than the cap has — where its allele
+/// counts have been thinned and the record is approximate however the depth is written —
+/// and every position below the cap has a depth, not a range.
+///
+/// The range still has to be summed over rather than read at one depth, because **the count of
+/// reads that disagreed with the reference is exact and a range-valued depth is not**, and the
+/// reference count is the difference between them: taking one depth out of the range lands a
+/// heterozygote's read share away from a half for a reason that has nothing to do with the
+/// sample. What that cost while the ladder widened from nine reads upwards was measured twice —
+/// a drawn panel with nobody contaminated read a median 2.5% contaminated at ten reads a
+/// position from this alone (`contamination_floor_and_duplicated_class_2026-08-13.md` §4), and
+/// a genuinely 3%-contaminated sample at 30 reads read 0.0120 against the 0.0263 an exact
+/// ladder returns (`census_depth_resolution_2026-08-16.md`).
 ///
 /// So the likelihood **sums over every depth the code could stand for**, giving each equal
-/// weight. Below nine reads the range is one value and this is the plain multinomial it always
-/// was, which is where a three-read cohort spends 97 positions in 100.
+/// weight. Below the cap that range is one value and this is the plain multinomial it always
+/// was, which is where every cohort this caller has been run on spends nearly all its
+/// positions.
 #[derive(Copy, Clone, Default, Debug)]
 struct SampleAtPosition {
     /// The mean of the depths the code could stand for. **What the read tallies the error rate
@@ -760,9 +772,24 @@ fn ln_reads_given_all_reference(
 /// table — so one triple serves all three candidate alleles and the invariant branch.
 fn reference_terms(sample: &SampleAtPosition, depth_weights: &[f64], logs: &ReadLogs) -> [f64; 3] {
     [
-        ln_reference_reads(sample, depth_weights, logs.reference[0], logs.ln_reference[0]),
-        ln_reference_reads(sample, depth_weights, logs.reference[1], logs.ln_reference[1]),
-        ln_reference_reads(sample, depth_weights, logs.reference[2], logs.ln_reference[2]),
+        ln_reference_reads(
+            sample,
+            depth_weights,
+            logs.reference[0],
+            logs.ln_reference[0],
+        ),
+        ln_reference_reads(
+            sample,
+            depth_weights,
+            logs.reference[1],
+            logs.ln_reference[1],
+        ),
+        ln_reference_reads(
+            sample,
+            depth_weights,
+            logs.reference[2],
+            logs.ln_reference[2],
+        ),
     ]
 }
 
@@ -796,8 +823,7 @@ impl ReadLogs {
         for copies in 0..3_usize {
             let carried = copies as f64 / f64::from(ploidy.get());
             let on_candidate = carried * (1.0 - error_rate) + (1.0 - carried) * error_rate / 3.0;
-            let on_reference =
-                reference_read_probability(copies as u8, ploidy, error_rate);
+            let on_reference = reference_read_probability(copies as u8, ploidy, error_rate);
             ln_candidate[copies] = ln(on_candidate);
             reference[copies] = on_reference;
             ln_reference[copies] = ln(on_reference);
@@ -2942,7 +2968,7 @@ pub mod bench_fixtures {
             .collect();
         let mut sparse: Vec<Vec<AlleleObservation>> = vec![Vec::new(); samples];
         let mut heterozygous = vec![0_u64; samples];
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
 
         for index in 0..positions {
             let rate = if draw.uniform() < noisy_share {
@@ -3030,7 +3056,7 @@ pub mod bench_fixtures {
             kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(100),
-            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
+            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
             depth_cap: DepthCap::new(124),
         };
         let records = (0..samples)
@@ -3071,8 +3097,8 @@ pub mod bench_fixtures {
 /// unchanged.
 #[cfg(test)]
 mod whole_fit_tests {
-    use super::*;
     use super::bench_fixtures::{as_cohort, draw_cohort, draw_cohort_with_duplications};
+    use super::*;
     use crate::ng::parameter_estimation::joint::census::DepthCap;
 
     /// **The test that says whether any of this works.** A cohort drawn at known parameters

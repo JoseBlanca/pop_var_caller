@@ -149,8 +149,8 @@ fn main() {
         );
 
         println!(
-            "\n  {:<50}{:>10}{:>10}{:>10}{:>10}",
-            "", "markers", "sample 0", "median", "worst other"
+            "\n  {:<50}{:>10}{:>10}{:>10}{:>10}{:>10}",
+            "", "markers", "sample 0", "median", "worst other", "refused"
         );
         for keep_mismapped in [true, false] {
             for (own, integrate) in [
@@ -165,12 +165,26 @@ fn main() {
                     weight_by_posterior: !keep_mismapped,
                     own_coordinates: own,
                     integrate_over_depth_bin: integrate,
+                    // `LEAVE_SELF_OUT=1` runs every arm with each sample taken out of the
+                    // frequency it is judged against. Off by default, as it ships, so the
+                    // measurement that put it there can be repeated from either side.
+                    leave_self_out: std::env::var("LEAVE_SELF_OUT").as_deref() == Ok("1"),
                 };
                 let (markers, alphas) = run(&drawn.samples, &fit, &settings);
-                let mut others: Vec<f64> = alphas[1..].to_vec();
+                // **A refused sample is not a clean one, and it is not a zero either.** It
+                // comes back `NaN`; sorting with `total_cmp` puts those last, so a single
+                // refusal used to be printed as the worst clean sample's fraction. They are
+                // counted instead, because how many samples a panel is too small to answer for
+                // is itself the finding.
+                let mut others: Vec<f64> = alphas[1..]
+                    .iter()
+                    .copied()
+                    .filter(|a| !a.is_nan())
+                    .collect();
+                let refused = alphas.len() - 1 - others.len();
                 others.sort_by(f64::total_cmp);
                 println!(
-                    "  {:<50}{markers:>10}{:>10.4}{:>10.4}{:>10.4}",
+                    "  {:<50}{markers:>10}{:>10.4}{:>10.4}{:>10.4}{refused:>10}",
                     format!(
                         "{}, {}{}",
                         if keep_mismapped {
@@ -212,7 +226,7 @@ fn run(
         CohortCensusEvidence::new(samples.to_vec()).expect("a drawn cohort records one way");
     let estimates = fit_contamination(
         &mut cohort,
-        &DepthBinEdges::new(),
+        &DepthBinEdges::for_census(),
         &error,
         &excess,
         &fit.noisy_posterior,
@@ -269,7 +283,7 @@ fn draw(
         b,
     };
     let mut rng = Rng(seed);
-    let edges = DepthBinEdges::new();
+    let edges = DepthBinEdges::for_census();
     let mut codes: Vec<PackedDepthCodes> = (0..samples)
         .map(|_| PackedDepthCodes::never_walked(positions))
         .collect();
@@ -382,7 +396,7 @@ fn draw(
         kept_loci: CensusLociDigester::new().finish(),
         ssr_stratum_counts: Default::default(),
         read_cap: ReadCap(1_000),
-        depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
+        depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
         depth_cap: DepthCap::new(124),
     };
     Drawn {

@@ -589,7 +589,7 @@ fn main() {
     // (through the depth ladder, after the per-position cap), as the walk saw it, and without
     // the GC correction — so that what the encoding costs and what the correction is worth
     // are separable from what the arm is worth.
-    let edges = DepthBinEdges::new();
+    let edges = DepthBinEdges::for_census();
     let visited_positions: u64 = depth_histogram.iter().sum();
     let mean_position_depth = total_depth as f64 / visited_positions as f64;
     let median_position_depth = median_of_histogram(&depth_histogram);

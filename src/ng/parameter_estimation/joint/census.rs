@@ -116,8 +116,7 @@ impl ObservedAllele {
 ///
 /// A bin alone cannot say *this position was never visited*, and that has to be
 /// distinguishable from *visited and empty* because only the first is a bug. So the stored
-/// code is the ladder's bins plus one sentinel — 21 codes, which is why five bits and not
-/// four.
+/// code is the ladder's bins plus one sentinel.
 ///
 /// **The ladder is not defined here.** It is [`DepthBinEdges`], shared with the histogram
 /// route so the two cannot bin differently — which is what makes the comparison between the
@@ -130,12 +129,20 @@ pub enum DepthCode {
     Binned(DepthBin),
 }
 
-/// How many codes fit in one entry. Thirty bins plus the sentinel is 31, so five bits.
-pub const DEPTH_CODE_BITS: u32 = 5;
+/// How many bits one entry takes. The census ladder holds a bin for every depth to the cap of
+/// 124 and ten rungs above it, so 135 bins plus the sentinel need eight — three more than the
+/// five a ladder of thirty widening bins took, and the reason to spend them is on
+/// [`CENSUS_DEPTH_BIN_COUNT`](crate::ng::parameter_estimation::generic::depth_bins): a coarse
+/// depth beside an exact count of disagreeing reads halves the contamination a 30× sample
+/// reports.
+pub const DEPTH_CODE_BITS: u32 = 8;
 
-/// The value [`DepthCode::NeverWalked`] is stored as — the top of the five-bit range, so
+/// The value [`DepthCode::NeverWalked`] is stored as — the top of the code's range, so
 /// adding a rung to the ladder collides with it loudly rather than shifting it.
-const NEVER_WALKED_CODE: u8 = (1 << DEPTH_CODE_BITS) - 1;
+///
+/// Widened to `u16` before the shift because the code now fills a whole byte, and `1u8 << 8`
+/// does not compile.
+const NEVER_WALKED_CODE: u8 = ((1_u16 << DEPTH_CODE_BITS) - 1) as u8;
 
 // **The ladder cannot outgrow the field it is stored in without failing to compile.** The
 // bins take codes `0..bin_count` and the sentinel takes the top of the range, so the last
@@ -144,7 +151,7 @@ const NEVER_WALKED_CODE: u8 = (1 << DEPTH_CODE_BITS) - 1;
 const _: () = assert!(
     crate::ng::parameter_estimation::generic::depth_bins::CENSUS_DEPTH_BIN_COUNT
         <= NEVER_WALKED_CODE as usize,
-    "the census ladder has outgrown the five-bit depth code: its top rung would be written \
+    "the census ladder has outgrown the depth code: its top rung would be written \
      as the never-walked sentinel, which is the code for a bug"
 );
 
@@ -173,7 +180,7 @@ impl DepthCode {
     }
 }
 
-/// One depth code per kept position, five bits each, in selection order.
+/// One depth code per kept position, [`DEPTH_CODE_BITS`] each, in selection order.
 ///
 /// **No coordinates and no index**: the positions are reproducible from the selection rule,
 /// so entry `i` is the `i`-th kept position and nothing says so on the wire. Storing
@@ -263,7 +270,7 @@ impl PackedDepthCodes {
     ///
     /// # Panics
     ///
-    /// When the bytes are not the number `len` entries at five bits each need. A short array
+    /// When the bytes are not the number `len` entries at [`DEPTH_CODE_BITS`] each need. A short array
     /// would read a position off the end of the buffer, and a long one means the writer and the
     /// reader disagree about the encoding — neither has a symptom in the values.
     pub fn from_bytes(bits: Vec<u8>, len: usize) -> Self {
@@ -818,7 +825,7 @@ impl DepthCap {
     /// Above `u8::MAX`, which is the whole point: [`AlleleObservation::reads`] is one byte
     /// and this cap is what bounds it. `const fn`, so a cap written as a constant is refused
     /// while the run is being built rather than while it is walking a genome — the same move
-    /// the ladder's own five-bit assertion makes.
+    /// the ladder's own width assertion makes.
     #[must_use]
     pub const fn new(cap: u32) -> Self {
         assert!(
@@ -856,7 +863,7 @@ impl DepthCap {
 
 /// A digest of the depth ladder's edges.
 ///
-/// **The generic record stores a five-bit code, not a depth.** Two samples binned under
+/// **The generic record stores a code, not a depth.** Two samples binned under
 /// different edges hold codes that mean different depths, *and every other value in
 /// [`RecordingTerms`] agrees* — the loci were the same, the seed was the same, the digest of
 /// the kept loci matches because the loci did match. A code is only a number until something
@@ -2354,10 +2361,11 @@ mod tests {
     }
 
     #[test]
-    fn five_bits_a_position_and_no_more() {
-        // 1.25 MB at two million positions is the size the spec prices, and it is this.
+    fn eight_bits_a_position_and_no_more() {
+        // 2.0 MB at two million positions is the size the spec prices, and it is this. It was
+        // 1.25 MB at five bits, before the census ladder gained a bin for every depth.
         let packed = PackedDepthCodes::never_walked(2_000_000);
-        assert_eq!(packed.as_bytes().len(), 1_250_000);
+        assert_eq!(packed.as_bytes().len(), 2_000_000);
     }
 
     // ---- the generic half ---------------------------------------------------

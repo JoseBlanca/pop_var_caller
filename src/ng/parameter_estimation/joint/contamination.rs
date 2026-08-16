@@ -37,6 +37,14 @@
 //! neighbour's allele counts. There is no threshold anywhere, so an admixed accession simply
 //! gets an intermediate frequency.
 //!
+//! **A sample is not taken out of the frequency it is judged against, and that was measured
+//! rather than assumed.** The line is fitted from every sample's own reads, so a contaminated
+//! sample's stray reads move the very frequency that is supposed to be surprised by them, by a
+//! share of `(components + 1) / samples`. Removing it is one multiplication a position
+//! ([`ContaminationConfig::leave_self_out`]) — and it changes the fraction by nothing at 30
+//! reads a position on panels of 40 and of 12, while at three reads it lifts the worst clean
+//! sample above the contaminated one. It is built, it is off, and the numbers are on that field.
+//!
 //! # The refusal, and why it is free
 //!
 //! **A sample sitting alone at the end of an axis has a fitted frequency that is mostly its own
@@ -71,12 +79,28 @@
 //!   unexpected reads into *every* sample — the contamination signature exactly. On 63 tomato
 //!   accessions **two markers in five** were such positions — 20,767 of 52,525.
 //! - **A sample's reads are scored against every depth its stored code could stand for.** The
-//!   count of disagreeing reads is exact and the depth is a five-bit code standing for a range, so
-//!   a heterozygote's read share lands away from a half by up to a sixth for a reason that is not
-//!   the sample — and a read share away from a half is what a fraction is made of. A drawn panel
-//!   with nobody contaminated and nothing mismapped returned **0.025 at ten reads a position** and
-//!   **0.0013 at three**, where the ladder is exact; summing over the range returns exactly zero
-//!   at both.
+//!   count of disagreeing reads is exact, so wherever the depth beside it is a range a
+//!   heterozygote's read share lands away from a half for a reason that is not the sample — and
+//!   a read share away from a half is what a fraction is made of. A drawn panel with nobody
+//!   contaminated and nothing mismapped returned **0.025 at ten reads a position** and **0.0013
+//!   at three**, where the ladder was exact; summing over the range returns exactly zero at both.
+//!
+//! # Why the fraction was half of the truth, and what fixed it — 2026-08-16
+//!
+//! Summing over the range removed the *floor* and left the *value* at about a third of the
+//! truth, and until now that shortfall was recorded as unexplained. It was the ladder: the
+//! record's depth code widened from nine reads upwards, so at 30 reads a position a code stood
+//! for "between 29 and 36" — a ±12% uncertainty on a read share that a 3% contamination moves by
+//! 1.5%. **The signal sat inside the resolution of how the depth was written down.**
+//!
+//! Giving every depth to the cap a bin of its own takes a genuinely 3%-contaminated sample from
+//! **0.0120 to 0.0263**, with all 39 clean samples of the same drawn panel staying at exactly
+//! 0.0000 (`reports/census_depth_resolution_2026-08-16.md`). That ladder is what
+//! [`for_census`](crate::ng::parameter_estimation::generic::depth_bins::DepthBinEdges::for_census)
+//! now builds, so the numbers below — measured on the coarse one — understate what this module
+//! returns at depth. The three readings of a sample's own coordinates also collapse onto one
+//! value once the depth is exact, which is why that choice no longer buys or costs anything
+//! above 8 reads a position.
 //!
 //! **Together, on the 63 tomato accessions**: the median accession read **0.0684** contaminated
 //! with neither exclusion, 0.0300 with the depth summed over, 0.0091 with the mismapped positions
@@ -140,6 +164,35 @@ pub struct ContaminationConfig {
     /// positions the median sample came back at 0.0013 at three reads a position and 0.025 at
     /// ten.
     pub integrate_over_depth_bin: bool,
+    /// **Whether a sample is taken back out of the allele frequency it is judged against.**
+    ///
+    /// The line at a position is fitted from every sample's own reads, so a contaminated
+    /// sample's stray reads have already moved the frequency that is supposed to be surprised
+    /// by them. Removing one sample from a least-squares fit has a closed form and the share to
+    /// remove is the *leverage* [`ContaminationEstimate::Estimated`] already reports, so this
+    /// costs one multiplication a position.
+    ///
+    /// **Off, because it was measured and it buys nothing.** The argument for it was that the
+    /// share removed is `(components + 1) / samples` — an eighth of a 40-sample panel, two
+    /// fifths of a panel of 12 — so a small panel should gain most. On the drawn panel at 30
+    /// reads a position with one sample contaminated at 3%, it is worth **0.0263 against
+    /// 0.0263** at 40 samples and **0.0248 against 0.0248** at 12.
+    ///
+    /// **It cancels because of where a frequency is used here.** A sample's own frequency enters
+    /// this likelihood in one place only — the prior over that sample's own genotype — and what
+    /// a genotype predicts about reads carries no frequency at all. Thirty reads settle a
+    /// genotype whatever the prior says, so shifting the prior by an eighth moves nothing.
+    ///
+    /// **And at three reads a position it destroys the finding.** There the contaminated sample
+    /// reads 0.0174 with it against 0.0102 without — nearer the truth of 0.030 — while the worst
+    /// clean sample of the same panel goes from 0.0003 to **0.0192**, which is higher than the
+    /// contaminated one. A cohort at tomato's depth would flag the wrong accession. **Where the
+    /// prior does decide a genotype, the correction costs more in noise than it removes in
+    /// bias** — it divides the fitted value by `1 − leverage`, inflating that value's own error,
+    /// and subtracts a dosage estimated from three reads. A noisy per-sample frequency
+    /// manufactures contamination, which is why the *clean* samples rose furthest
+    /// (`reports/census_depth_resolution_2026-08-16.md` §4).
+    pub leave_self_out: bool,
 }
 
 /// What a sample's own place on the panel's axes of variation is taken to be, while its
@@ -174,6 +227,7 @@ impl Default for ContaminationConfig {
             weight_by_posterior: true,
             own_coordinates: OwnCoordinates::AsRead,
             integrate_over_depth_bin: true,
+            leave_self_out: false,
         }
     }
 }
@@ -196,14 +250,14 @@ struct Marker {
     depth: Vec<u32>,
     /// The lowest and highest depth each sample's stored code stands for.
     ///
-    /// **The alternative count is exact and the depth is not**, because the records keep one
-    /// five-bit code per position and above eight reads that code covers a range. Scoring a
+    /// **The alternative count is exact and the depth need not be**, because the records keep
+    /// one code per position and above the cap of 124 reads that code covers a range. Scoring a
     /// heterozygote's reads against the middle of its range puts its read share away from a
-    /// half by up to a sixth for a reason that has nothing to do with the sample — and a read
-    /// share away from a half is exactly what a contamination fraction is. Measured on a drawn
-    /// panel with nobody contaminated and no mismapped positions: **the median sample comes
-    /// back at 0.0013 at three reads a position, where the ladder is exact, and at 0.025 at
-    /// ten and at thirty, where it is not.**
+    /// half for a reason that has nothing to do with the sample — and a read share away from a
+    /// half is exactly what a contamination fraction is. Measured while the ladder still
+    /// widened from nine reads upwards, on a drawn panel with nobody contaminated and no
+    /// mismapped positions: **the median sample came back at 0.0013 at three reads a position,
+    /// where the ladder was exact, and at 0.025 at ten and at thirty, where it was not.**
     depth_low: Vec<u32>,
     depth_high: Vec<u32>,
     /// The panel-wide frequency, with the error rate inverted out of the read share.
@@ -378,6 +432,7 @@ pub(super) fn fit_contamination_over(
                     &spread,
                     hom_excess[sample],
                     error_rate[sample],
+                    leverage[sample],
                     config,
                     sample,
                 ),
@@ -676,10 +731,27 @@ fn fitted_lines(markers: &[Marker], coordinates: &[Vec<f64>], components: usize)
 
 /// What a straight line says one sample's allele frequency is, at the coordinates it is
 /// standing on. The line is in copies out of two, so a frequency is half of it.
-fn frequency_at(line: &[f64], coordinates: &[f64]) -> f64 {
+///
+/// `own` carries the sample's own dosage here and the share of its own prediction it supplies,
+/// and is `Some` only when [`ContaminationConfig::leave_self_out`] asks for that share to be
+/// taken back out — which is off by default, and the measurements are on that field.
+///
+/// **The removal is first-order and not exact**, because the slopes are shrunk and the
+/// intercept re-centred after the least-squares solve ([`fitted_lines`]), so the fitted value is
+/// no longer a plain hat-matrix projection of the dosages. What it removes is the sample's own
+/// contribution at the rate the projection made it.
+fn frequency_at(line: &[f64], coordinates: &[f64], own: Option<(f64, f64)>) -> f64 {
     let mut copies = line[0];
     for (slope, coordinate) in line[1..].iter().zip(coordinates) {
         copies += slope * coordinate;
+    }
+    // A sample supplying all of its own frequency has nothing left once it is taken out, and
+    // `MAX_LEVERAGE` has already refused it a fraction — this guard is for the arithmetic, so
+    // that a refused sample cannot divide by zero on its way to being refused.
+    if let Some((dosage, leverage)) = own
+        && leverage < MAX_LEVERAGE
+    {
+        copies = (copies - leverage * dosage) / (1.0 - leverage);
     }
     (copies / 2.0).clamp(1e-4, 1.0 - 1e-4)
 }
@@ -700,6 +772,9 @@ fn fit_alpha(
     spread: &[f64],
     hom_excess: f64,
     error: f64,
+    // How much of its own fitted frequency this sample supplies, which is what is taken back
+    // out of it — see `frequency_at`.
+    leverage: f64,
     config: &ContaminationConfig,
     sample: usize,
 ) -> f64 {
@@ -725,7 +800,13 @@ fn fit_alpha(
                         } else {
                             marker.depth[sample]..=marker.depth[sample]
                         },
-                        frequency_at(&lines[m], at),
+                        frequency_at(
+                            &lines[m],
+                            at,
+                            config
+                                .leave_self_out
+                                .then(|| (marker.dosage[sample], leverage)),
+                        ),
                         marker.pooled,
                         hom_excess,
                         error,
@@ -1158,7 +1239,7 @@ mod tests {
     ) -> Vec<SampleCensusEvidence> {
         const ERROR: f64 = 0.002;
         let mut rng = Rng(seed);
-        let edges = DepthBinEdges::new();
+        let edges = DepthBinEdges::for_census();
         let mut codes: Vec<PackedDepthCodes> = (0..samples)
             .map(|_| PackedDepthCodes::never_walked(markers))
             .collect();
@@ -1223,7 +1304,7 @@ mod tests {
             kept_loci: CensusLociDigester::new().finish(),
             ssr_stratum_counts: Default::default(),
             read_cap: ReadCap(1_000),
-            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::new()),
+            depth_ladder: DepthLadderDigest::of(&DepthBinEdges::for_census()),
             depth_cap: DepthCap::new(124),
         };
         (0..samples)
@@ -1280,7 +1361,7 @@ mod tests {
             let alpha = alphas(
                 &fit_contamination(
                     &mut as_cohort(&panel),
-                    &DepthBinEdges::new(),
+                    &DepthBinEdges::for_census(),
                     &vec![0.002; samples],
                     &vec![0.0; samples],
                     &[],
@@ -1299,7 +1380,7 @@ mod tests {
         }
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
-            &DepthBinEdges::new(),
+            &DepthBinEdges::for_census(),
             &vec![0.002; samples],
             &vec![0.0; samples],
             &[],
@@ -1334,7 +1415,7 @@ mod tests {
         let panel = structured_panel(samples, 12_000, 3.0, 4, 0.20, None, 0xA5A5_1234);
         let estimates = fit_contamination(
             &mut as_cohort(&panel),
-            &DepthBinEdges::new(),
+            &DepthBinEdges::for_census(),
             &vec![0.002; samples],
             &vec![0.0; samples],
             &[],

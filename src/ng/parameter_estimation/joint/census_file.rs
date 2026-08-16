@@ -52,10 +52,10 @@ use crate::ng::repeat_catalog::StratumCounts;
 use crate::ng::types::{ContigId, ReadGroupId};
 
 use super::census::{
-    AlleleObservation, ByteExtent, CensusError, DepthCap, DepthLadderDigest, GenericEvidence,
-    GuardObservation, OFFSET_BUCKETS, ObservedAllele, OffsetCounts, PackedDepthCodes, ReadCap,
-    RecordingTerms, SampleCensusEvidence, Section, SectionKey, SelectionTermsDigest, SsrEvidence,
-    Stratum, TractDifference, WalkedBits,
+    AlleleObservation, ByteExtent, CensusError, DEPTH_CODE_BITS, DepthCap, DepthLadderDigest,
+    GenericEvidence, GuardObservation, OFFSET_BUCKETS, ObservedAllele, OffsetCounts,
+    PackedDepthCodes, ReadCap, RecordingTerms, SampleCensusEvidence, Section, SectionKey,
+    SelectionTermsDigest, SsrEvidence, Stratum, TractDifference, WalkedBits,
 };
 
 /// What every census file starts with, so a file that is not one is refused rather than decoded.
@@ -65,7 +65,12 @@ const MAGIC: &[u8; 8] = b"NGCENSUS";
 ///
 /// **A version and not a feature flag.** A census is a cache with a pileup behind it, so the
 /// answer to a version this build does not know is to rebuild rather than to interpret.
-const VERSION: u16 = 1;
+///
+/// **2 since 2026-08-16**, when the depth code went from five bits on a widening ladder to
+/// eight on one with a bin for every depth to the cap. A version-1 file's depth array is a
+/// different number of bytes for the same position count and its codes index a different
+/// ladder, so nothing about it can be salvaged by reading it more carefully.
+const VERSION: u16 = 2;
 
 /// Which pileup a census was built from.
 ///
@@ -623,7 +628,14 @@ pub(super) fn decode_section(key: SectionKey, bytes: &[u8]) -> Result<Section, C
 fn decode_generic(cursor: &mut Cursor<'_>) -> Result<GenericEvidence, CensusError> {
     let positions = usize::try_from(cursor.u64()?).map_err(|_| CensusError::Malformed)?;
     let bits = cursor.bytes()?.to_vec();
-    if bits.len() != positions.saturating_mul(5).div_ceil(8) {
+    // **The width comes from the encoding and is not written again here.** It stood as a bare
+    // `5` until the depth code widened to eight bits, and a second statement of a number the
+    // writer takes from `DEPTH_CODE_BITS` is exactly the bug this check exists to catch.
+    if bits.len()
+        != positions
+            .saturating_mul(DEPTH_CODE_BITS as usize)
+            .div_ceil(8)
+    {
         return Err(CensusError::Malformed);
     }
     let entries = usize::try_from(cursor.u64()?).map_err(|_| CensusError::Malformed)?;

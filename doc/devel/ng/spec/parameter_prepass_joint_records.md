@@ -123,7 +123,20 @@ maximum — small per site, one-directional, and landing on exactly the rare-fre
 everything downstream reads. **A record that collapsed the four counts to "the alternative one and
 the rest" would make that choice unavoidable**, which is the reason the four are kept apart.
 
-### 2.2 The depth ladder: thirty bins, five bits, and the depth is the true one
+### 2.2 The depth ladder: a bin per depth to the cap, eight bits, and the depth is the true one
+
+> **AMENDED 2026-08-16 — the census ladder is now exact to the cap of 124 and the code is eight
+> bits.** The rest of this section describes the ladder as it was, and the reasoning about *sharing*
+> it with the histogram route still holds; what changed is that the census stopped sharing its
+> resolution. In the census a bin costs a code's width, not a table of cells, and the widening cost
+> more than it saved: at 30 reads a position a code stood for "between 29 and 36", which puts a ±12%
+> uncertainty on a read share that a 3% contamination moves by 1.5%. **A sample drawn at 3%
+> contaminated read 0.0120 on the widening ladder and 0.0263 on an exact one, with the clean panel at
+> 0.0000 either way** ([`census_depth_resolution_2026-08-16.md`](../reports/census_depth_resolution_2026-08-16.md)).
+> The ten rungs above the cap are unchanged, so the reach argument below stands as written; the
+> histogram route keeps the twenty-bin ladder, and every one of its edges is still an edge of the
+> census one, so a census code still collapses to a histogram bin. The cost is the array below going
+> from 1.25 MB to 2.0 MB a sample a read group at two million positions.
 
 **Depth is stored binned, on the ladder [`parameter_prepass_generic.md`](parameter_prepass_generic.md)
 §4 settled — exact integers up to 8, then geometrically widening bins at about 1.28 a bin — and
@@ -244,7 +257,7 @@ sample-locus record is binned separately. The argument transfers; the measuremen
 
 | part | what it is | size at two million positions |
 |---|---|---|
-| depth array | entry *i* is the *i*-th kept position's binned depth, five bits, **no coordinates and no index** | **1.25 MB per read group** |
+| depth array | entry *i* is the *i*-th kept position's depth code, eight bits since 2026-08-16 (§2.2), **no coordinates and no index** | **2.0 MB per read group** |
 | non-reference observations | index, allele, count — about four bytes each | 30–250 kB, driven by *errors* rather than variants |
 
 **The positions are never stored**, because they are reproducible from
@@ -600,7 +613,7 @@ and every one of them is kept because the per-stratum cap never has to fire
 
 | object | per sample, per read group | at fifty samples |
 |---|---:|---:|
-| generic depth array, 2 M positions at five bits | 1.25 MB | 63 MB |
+| generic depth array, 2 M positions at eight bits (five before 2026-08-16, §2.2) | 2.0 MB | 100 MB |
 | generic sparse non-reference entries | 30–250 kB | 1.5–13 MB |
 | STR set at 462,701 loci — offsets, guard, censoring count, base-comparison denominator | ~4–5 MB | 200–250 MB |
 | STR difference list, driven by the error rate | ~0.3 MB | 15 MB |
