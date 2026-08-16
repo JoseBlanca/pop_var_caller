@@ -15,7 +15,10 @@
 //!    sample: repeat tracts are excluded, which is what the catalog is for here.
 //! 4. Walks each alignment once, writing down what that sample showed at those positions.
 //! 5. Fits the whole cohort at once — error rates, the population's allele frequencies, each
-//!    sample's genotypes — and, from that, each sample's contamination fraction.
+//!    sample's contamination fraction. **No genotype is called anywhere in this**: every
+//!    position sums over both unknown genotypes, this sample's and the stray reads', each
+//!    weighted by what the allele frequencies make likely and by how well it explains the
+//!    reads.
 //!
 //! # Two things a reader of the output has to know
 //!

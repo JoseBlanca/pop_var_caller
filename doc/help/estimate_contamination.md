@@ -20,16 +20,25 @@ The tool picks a fixed set of ordinary positions — positions outside tandem
 repeats, the same set in every sample — and walks each alignment once,
 recording what that sample showed there. It then fits the whole panel at
 once: the sequencing error rate, each position's allele frequency in the
-population, each sample's genotypes, and, from those, each sample's
-contamination fraction. Reads from a second individual show up as bases that
-the sample's own genotype cannot explain but the population's allele
-frequencies can.
+population, and each sample's contamination fraction.
+
+**No genotype is ever called.** At every position the tool sums over both
+unknowns — which genotype this sample carries, and which genotype the stray
+reads came from — weighting each possibility by how likely the population's
+allele frequencies make it and how well it explains the reads actually seen.
+A position where the reads are ambiguous therefore contributes its ambiguity
+rather than a guess. What contamination looks like under that sum is a small,
+one-sided share of reads carrying an allele that no genotype of this sample
+explains well, at a position where the population does carry that allele —
+where a heterozygote's two alleles would instead be balanced.
 
 Two design choices matter for how you should read the results. First, the
 allele frequencies come from the samples in the run itself — no outside
 reference panel is used. Second, each sample gets its own expected frequency
 at each position: the fit summarises the panel's population structure as a
-few axes of variation (think principal components of the genotypes), and a
+few axes of variation (principal components, computed from how many copies of
+each allele the samples are expected to carry rather than from called
+genotypes), and a
 sample's frequency is a straight line in its coordinates on those axes. A
 genetically diverged sample is therefore not judged against the average of
 everyone else.
