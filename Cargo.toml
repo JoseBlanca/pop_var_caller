@@ -138,6 +138,9 @@ noodles-vcf = "0.88.0"
 parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
+# Only the experiment binary's `estimate-contamination` writes JSON. Already in the
+# lock file through other crates, so it costs no new build.
+serde_json = "1"
 smallvec = "1.13"
 tempfile = "3"
 thiserror = "2.0.18"

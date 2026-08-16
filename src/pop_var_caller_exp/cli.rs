@@ -3,6 +3,7 @@
 
 use clap::{Parser, Subcommand};
 
+use super::estimate_contamination::EstimateContaminationArgs;
 use super::repeat_catalog::RepeatCatalogArgs;
 use super::typed_regions::TypedRegionsArgs;
 
@@ -28,4 +29,14 @@ pub enum PopVarCallerExpCommand {
     /// it, so that every later run reads the file instead of re-scanning the
     /// genome (doc/devel/ng/spec/repeat_catalog.md).
     RepeatCatalog(RepeatCatalogArgs),
+
+    /// Estimate, for each sample in a panel of alignments, what share of its
+    /// reads came from another individual, and write the answers as JSON.
+    ///
+    /// **A side tool, not a step of the caller.** ng fits contamination
+    /// internally before calling; this exposes the same estimator to somebody
+    /// comparing methods. It needs a panel — about a dozen samples — because
+    /// the allele frequencies it judges each sample against are fitted from
+    /// the run itself and no outside panel.
+    EstimateContamination(EstimateContaminationArgs),
 }
