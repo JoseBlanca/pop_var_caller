@@ -487,6 +487,20 @@ impl AlleleTable {
     /// `two_placements_too_far_apart_to_chain_never_meet_in_one_table`). A site with two
     /// half-supported alleles reads as noisy data, not as a defect.
     pub fn over(locus: &ClosedLocus<'_>) -> Self {
+        Self::assemble(locus).0
+    }
+
+    /// The table and every covering sample's support against it, in one pass over the
+    /// samples — what [`CohortObservation::over`] is, with [`over`](Self::over) the same
+    /// walk for a caller that wants the alleles alone.
+    ///
+    /// **One pass, not two.** Interning an allele answers which allele it is, so a sample's
+    /// support can be accumulated as its alleles are derived; the alternative the
+    /// [`index_of`](Self::index_of) doc describes — deriving again and looking the bytes up
+    /// — would compose every read's allele a second time, which is the expensive half of
+    /// this module. A sample's tally is grown as new alleles appear and padded to the
+    /// table's width at the end, so the vectors are parallel however late an allele joins.
+    fn assemble(locus: &ClosedLocus<'_>) -> (Self, Vec<SampleSupport>) {
         let reference = LocusReferenceBases::over(locus);
         let mut alleles = AlleleLookup::default();
         let reference_allele = alleles.intern(reference.bases());
@@ -497,18 +511,70 @@ impl AlleleTable {
 
         let mut scratch = ReadAlleleScratch::default();
         let mut reads_removed_as_evidence = 0u32;
+        let mut per_sample = Vec::with_capacity(locus.members.len());
+
+        // One tally, refilled per sample rather than allocated per sample — the preference
+        // the scratch beside it exists for. It cannot live *in* that scratch: the derivation
+        // holds it mutably for the length of the call while the callback writes this.
+        let mut tally: Vec<AlleleSupportTally> = Vec::new();
+
         for sample_members in &locus.members {
-            let removed = alleles_of_sample(&reference, sample_members, &mut scratch, |bases| {
-                alleles.intern(bases);
-            });
+            let records = sample_members.observations;
+            let sample = sample_members.sample;
+            tally.clear();
+            let mut composed_across_records = 0u32;
+
+            let removed = alleles_of_sample(
+                &reference,
+                sample_members,
+                &mut scratch,
+                |bases, backing| {
+                    let allele = alleles.intern(bases);
+                    if tally.len() <= allele {
+                        tally.resize(allele + 1, AlleleSupportTally::default());
+                    }
+                    match backing {
+                        AlleleBacking::OneSequence(sequence) => tally[allele].add_whole(sequence),
+                        AlleleBacking::OneRead { records, sightings } => {
+                            composed_across_records = composed_across_records.saturating_add(1);
+                            tally[allele]
+                                .add_one_reads_share(share_of_one_read(sample, records, sightings));
+                        }
+                    }
+                },
+            );
             reads_removed_as_evidence = reads_removed_as_evidence.saturating_add(removed);
+
+            per_sample.push(SampleSupport {
+                sample,
+                per_allele: tally
+                    .iter()
+                    .copied()
+                    .map(AlleleSupportTally::finish)
+                    .collect(),
+                reads_without_observation: records.iter().fold(0u32, |total, record| {
+                    total.saturating_add(record.reads_without_observation)
+                }),
+                reads_removed_as_evidence: removed,
+                reads_composed_across_records: composed_across_records,
+            });
         }
 
-        Self {
-            reference,
-            alleles,
-            reads_removed_as_evidence,
+        // A sample whose alleles were all derived before a later sample introduced a new one
+        // still needs a slot for it, so the widths are levelled once the table is final.
+        let width = alleles.distinct.len();
+        for support in &mut per_sample {
+            support.per_allele.resize(width, AlleleSupport::default());
         }
+
+        (
+            Self {
+                reference,
+                alleles,
+                reads_removed_as_evidence,
+            },
+            per_sample,
+        )
     }
 
     /// How many reads were removed as evidence over this locus, summed across the samples.
@@ -554,6 +620,391 @@ impl AlleleTable {
     /// than looked up.
     pub fn index_of(&self, bases: &[u8]) -> Option<usize> {
         self.alleles.by_bases.get(bases).copied()
+    }
+}
+
+/// One cohort locus, assembled: the ground, the alleles the cohort showed over it, and
+/// what each covering sample's reads lend each allele (arch §4).
+///
+/// **This is evidence, not a call.** Nothing here says which alleles are real, what they are
+/// worth, or what genotype a sample has; those are the calling steps' (spec §1.2).
+#[derive(Debug)]
+pub struct CohortObservation {
+    /// The locus span, first position to furthest reach.
+    pub region: GenomeRegion,
+    /// The distinct alleles, the reference at [`REFERENCE_ALLELE`] (spec §4.2).
+    pub alleles: Vec<Box<[u8]>>,
+    /// The covering samples, in ascending sample order — **only** the covering ones.
+    ///
+    /// **A sample with no coverage over the span has no entry**, which is a different fact
+    /// from an entry whose support is all reference and stays one (spec §4.2). The
+    /// architecture's sketch says "indexed by the run's sample order", which reads two ways;
+    /// this is the reading that keeps the distinction structural rather than resting on a
+    /// zeroed row, and it is the shape the walk hands over
+    /// ([`SampleMembers`](super::close::SampleMembers)). Each entry names its own sample.
+    pub per_sample: Vec<SampleSupport>,
+}
+
+impl CohortObservation {
+    /// Assemble one cohort locus: unify the alleles, then attribute every covering sample's
+    /// reads to them.
+    ///
+    /// Only a locus the caller undertakes to build, for the reason
+    /// [`LocusReferenceBases::over`] gives.
+    pub fn over(locus: &ClosedLocus<'_>) -> Self {
+        // Destructured rather than field-accessed, so that anything the table gains has to
+        // be answered for here — dropped deliberately or carried — instead of vanishing.
+        let (
+            AlleleTable {
+                reference: _,
+                alleles,
+                reads_removed_as_evidence: _,
+            },
+            per_sample,
+        ) = AlleleTable::assemble(locus);
+        Self {
+            region: locus.region,
+            alleles: alleles.distinct,
+            per_sample,
+        }
+    }
+}
+
+/// One sample's evidence at one cohort locus, against that locus's allele table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SampleSupport {
+    /// Which sample — its index in the run's sample order, as the walk named it.
+    pub sample: usize,
+    /// Parallel to [`CohortObservation::alleles`], zeroed where this sample showed nothing.
+    ///
+    /// **Support is never merged across alleles**, because a genotype likelihood needs them
+    /// apart (spec §4.2). It *is* merged within one: where two of the sample's own
+    /// observations reached the same allele — the same bases from two read groups, or two
+    /// records' worth of one read — their reads and their sums are added.
+    ///
+    /// **⚠ One row per sample per allele is dense, and at the top of the committed cohort
+    /// range that is the module's memory.** A locus where every sample shows a distinct
+    /// allele costs samples × alleles rows: measured by the B3 review at **614 MB for a
+    /// single observation at 4,000 samples**, against 41 MB at 1,000. Real data reaches that
+    /// shape only at a paralogous or repetitive locus, and `max_cohort_locus_span` does not
+    /// bound it — the bound is on width, not on how many ways the cohort disagreed. Spec §8
+    /// prices a survivor with no sample-count factor at all. The choice between a sparse row,
+    /// a cap on alleles, and pricing it as it stands is the owner's, and it is recorded at
+    /// Checkpoint B.
+    pub per_allele: Vec<AlleleSupport>,
+    /// Reads that covered one of this sample's records here and produced no observation at
+    /// all — carried through from the members, not re-derived (arch §4).
+    ///
+    /// **Summed over the sample's records, which overstates it where a locus spans several
+    /// of them**: a read silent at two of them is counted twice, since the mint records how
+    /// many said nothing and not which ones. Exact where the sample has one record, which is
+    /// the ordinary locus. Saturating.
+    pub reads_without_observation: u32,
+    /// Reads of this sample that were removed as evidence — named at some of its records
+    /// inside the locus and not at all of them, or named more than once at one of them, so
+    /// nothing they showed reaches `per_allele` (see [`alleles_of_sample`]). Lost depth,
+    /// counted rather than inferred from an absence. Saturating.
+    pub reads_removed_as_evidence: u32,
+    /// Reads whose allele was composed across several of this sample's records, and whose
+    /// five quality sums in `per_allele` are therefore **divided rather than measured** (see
+    /// [`AlleleSupport`]). Zero on a one-record sample, where every sum is exact. Saturating.
+    pub reads_composed_across_records: u32,
+}
+
+/// What one sample's reads lend one allele.
+///
+/// **The read count is exact and the five sums are not, wherever a locus spans several of
+/// the sample's records.** Every read is named, so it lands on exactly one allele and
+/// `num_reads` counts it there. The five sums are stored by the mint already summed over the
+/// reads behind one observed sequence, so when those reads take different paths across the
+/// locus the sums have to be divided between the alleles — nothing recorded says how much of
+/// a sum belongs to which read. [`SampleSupport::reads_composed_across_records`] says how
+/// many reads at this locus were treated that way; where it is zero, every sum here is the
+/// mint's own.
+///
+/// **How they are divided follows production's rule, and in one place not production's
+/// code** — its merger faces the same question (`project_compound_scalars`,
+/// `var_calling/per_group_merger.rs`). This is the owner's ruling of 2026-08-17, taken after
+/// checking freebayes, which never faces it because it holds one record per read all the way
+/// to the likelihood (`freebayes/src/Sample.h`, a vector of per-read observations per
+/// allele):
+///
+/// - **the quality sum** takes, for each read, the *weakest* of the mean per-read qualities
+///   among the sequences that read showed across the locus, and adds those up over the
+///   reads — an allele spanning several records is no better evidenced than its weakest
+///   piece, since it is wrong if any piece is. These are sums of `ln P(error)`, so the
+///   weakest read is the **largest** number, and this is the place the code parts company
+///   with production's: see [`share_of_one_read`];
+/// - **the strand and mapping-quality sums** take each read's share as the pooled mean over
+///   the sequences it showed: the sums over those sequences divided by their read counts.
+///   Both are properties of the read and identical at each of its sightings, so the pooling
+///   estimates one number rather than mixing two;
+/// - **the placement count is pooled the same way, and it is the one that mixes two
+///   questions.** It is counted against each record's own position (see `placed_left`), so
+///   two records of one sample ask "did the read start left of here?" about different
+///   *heres*, and the pooled answer is an approximation whose disagreement is bounded by the
+///   locus's width — 50 bases at the default bound.
+///
+/// Rounded once per allele rather than per read, so the counts stay as close to whole reads
+/// as the division allows.
+///
+/// **One row per allele pools the read groups, and that ends a cross the mint went out of
+/// its way to keep.** A sample's reads at one allele may come from several read groups, and
+/// `SequenceObservation` keeps them apart deliberately — "a per-chemistry model needs the
+/// allele × group cross **with its quality moments**"
+/// ([`locus_generation/mod.rs`](../../locus_generation/mod.rs)). Nothing downstream of the
+/// merge asks for that cross today: the per-library error rate is fitted from the census,
+/// which reads the records rather than these observations
+/// (`spec/parameter_prepass_generic.md`). The architecture's own sketch pools them too
+/// (arch §4, `per_allele: Vec<SequenceObservation>`, one entry per allele), so this is where
+/// the loss became visible rather than where it was decided — and if a later step wants the
+/// cross back, the shape is one row per `(allele, read group)`, which folds to this one.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AlleleSupport {
+    /// How many of the sample's reads showed this allele. **Exact** — every read is named,
+    /// so it is counted where it belongs rather than divided. Saturating, which needs four
+    /// billion reads on one allele of one sample at one locus.
+    pub num_reads: u32,
+    /// Of those, how many were on the forward strand — strand bias.
+    pub num_fwd: u32,
+    /// Σ per-read log-error over them — the freebayes per-read error term.
+    pub q_sum: f64,
+    /// Σ MAPQ over them.
+    pub mapq_sum: u32,
+    /// Σ MAPQ² over them; with `mapq_sum` and `num_reads` it recovers the mean and variance
+    /// the MAPQ multi-mapper filter reads.
+    pub mapq_sum_sq: u64,
+    /// How many started strictly left of **the record they were seen at** — freebayes'
+    /// `placedLeft`, and the read-position-bias term.
+    ///
+    /// **Not counted against the cohort locus's own first base.** The mint counts it against
+    /// each record's position — `alignment_start < walker_pos` on the generic path
+    /// (`locus_generation/pileup/fast_column.rs`), the tract's anchor on the STR path
+    /// (`locus_generation/ssr.rs`) — and nothing here re-anchors it, so where a locus spans
+    /// several of a sample's records this mixes as many questions as it has records.
+    pub placed_left: u32,
+}
+
+/// One sample's support as it is accumulated, before the divided sums are rounded.
+///
+/// The four count-like sums are gathered as `f64` because a read's share of them is a
+/// fraction until every read has been added; rounding each read's share on its own would
+/// lose up to half a read per read rather than per allele.
+#[derive(Debug, Clone, Copy, Default)]
+struct AlleleSupportTally {
+    num_reads: u32,
+    sums: SupportSums,
+}
+
+impl AlleleSupportTally {
+    /// Everything one sequence measured, added whole — the exact case, where every read
+    /// behind the sequence showed this allele and nothing has to be divided.
+    fn add_whole(&mut self, sequence: &SequenceObservation) {
+        self.num_reads = self.num_reads.saturating_add(sequence.num_obs);
+        self.sums.add_counts_of(sequence);
+        // The quality is added whole here, where a read's share takes the weakest sighting's
+        // mean instead — the one place the two paths differ, stated at both of them.
+        self.sums.q_sum += sequence.q_sum;
+    }
+
+    /// One read's share, divided out of the sequences it showed across the locus.
+    fn add_one_reads_share(&mut self, share: SupportSums) {
+        self.num_reads = self.num_reads.saturating_add(1);
+        self.sums.add(share);
+    }
+
+    /// Round the divided sums back to whole numbers, once, when the allele is finished.
+    ///
+    /// This is the one place the five are spelled out apart, because it is the one place
+    /// they differ: three are counts of reads and round, one is a sum of squares and rounds
+    /// wider, and the quality is a real number that does not round at all.
+    fn finish(self) -> AlleleSupport {
+        AlleleSupport {
+            num_reads: self.num_reads,
+            num_fwd: round_to_u32(self.sums.num_fwd),
+            q_sum: self.sums.q_sum,
+            mapq_sum: round_to_u32(self.sums.mapq_sum),
+            mapq_sum_sq: round_to_u64(self.sums.mapq_sum_sq),
+            placed_left: round_to_u32(self.sums.placed_left),
+        }
+    }
+}
+
+/// The five quality sums, held as `f64` while they are added up.
+///
+/// **One type for all three jobs they do** — what a sequence measured, what one read's share
+/// of several sequences comes to, and what an allele has accumulated — so the list of five
+/// is written once for gathering and once for rounding, rather than at every site that
+/// touches them. A sixth sum (`placed_start`, which `SequenceObservation` declines to carry
+/// today) would then be added in two places, both of which fail to compile if it is
+/// forgotten.
+///
+/// `f64` because a read's share of a sum is a fraction until every read has been added;
+/// rounding each read's share on its own would lose up to half a read per read rather than
+/// per allele.
+#[derive(Debug, Clone, Copy, Default)]
+struct SupportSums {
+    num_fwd: f64,
+    q_sum: f64,
+    mapq_sum: f64,
+    mapq_sum_sq: f64,
+    placed_left: f64,
+}
+
+impl SupportSums {
+    /// Add the four count-like sums one sequence measured. **The quality is left alone**,
+    /// because the two callers do different things with it: everything one sequence measured
+    /// is added whole, where one read's share takes the weakest sighting's mean rather than
+    /// a sum. Each says so where it stands.
+    fn add_counts_of(&mut self, sequence: &SequenceObservation) {
+        self.num_fwd += f64::from(sequence.num_fwd);
+        self.mapq_sum += f64::from(sequence.mapq_sum);
+        // No `From<u64> for f64` exists because the conversion is lossy above 2^53. It
+        // cannot be reached here: MAPQ is at most 60, so this would need about 10^12 reads
+        // behind one sequence.
+        self.mapq_sum_sq += sequence.mapq_sum_sq as f64;
+        self.placed_left += f64::from(sequence.placed_left);
+    }
+
+    /// **Destructured rather than field-accessed**, so that a sixth sum added to this type
+    /// is a compile error here instead of a zero nobody notices.
+    fn add(&mut self, other: Self) {
+        let Self {
+            num_fwd,
+            q_sum,
+            mapq_sum,
+            mapq_sum_sq,
+            placed_left,
+        } = other;
+        self.num_fwd += num_fwd;
+        self.q_sum += q_sum;
+        self.mapq_sum += mapq_sum;
+        self.mapq_sum_sq += mapq_sum_sq;
+        self.placed_left += placed_left;
+    }
+
+    /// Divide the four count-like sums by the reads they were measured over — **not the
+    /// quality**, which is not pooled but taken from the weakest sighting
+    /// ([`share_of_one_read`]). Destructured for the reason [`add`](Self::add) is.
+    fn divide_counts_by(&mut self, reads: f64) {
+        let Self {
+            num_fwd,
+            q_sum: _,
+            mapq_sum,
+            mapq_sum_sq,
+            placed_left,
+        } = self;
+        *num_fwd /= reads;
+        *mapq_sum /= reads;
+        *mapq_sum_sq /= reads;
+        *placed_left /= reads;
+    }
+}
+
+/// One read's share of the sequences it showed across the locus — the division
+/// [`AlleleSupport`] documents.
+///
+/// `sightings` is the read's own, one per record of the sample. Every one of them names a
+/// complete sequence with at least one read behind it, both of which the derivation enforces
+/// before a sighting is recorded ([`alleles_of_sample`]).
+fn share_of_one_read(
+    sample: usize,
+    records: &[SampleLocusObservations],
+    sightings: &[ReadSighting],
+) -> SupportSums {
+    let mut weakest_mean_quality: Option<f64> = None;
+    let mut reads_behind = 0f64;
+    let mut share = SupportSums::default();
+
+    for sighting in sightings {
+        let sequence = &records[sighting.record as usize].observations[sighting.sequence as usize];
+        // **A backstop, not the guard.** A sequence with no reads is skipped before a
+        // sighting is ever recorded for it, so this cannot fire from the derivation.
+        //
+        // It is here because of what happens without it, which is not a failure and not an
+        // infinity either: dividing by zero reads gives `-inf`, and the `max` below then
+        // **discards it** in favour of the read's other sighting, so the allele comes back
+        // with a plausible quality measured over reads that were not counted. Measured, by
+        // removing this assertion: a read whose two sightings are a zero-read sequence and a
+        // −0.5 one reports −0.5.
+        //
+        // That a sequence's read count agrees with the reads it names is the **producer's**
+        // guarantee, like the reference width and the chain ids, so **when observations are
+        // decoded from a psp file this must become a `RunError`** beside
+        // `ObservationExceedsReachCeiling` (arch §5) rather than a panic.
+        assert!(
+            sequence.num_obs > 0,
+            "the observation {:?} at {} of sample index {} names reads but counts none, so \
+             no read's share of it can be taken",
+            String::from_utf8_lossy(&sequence.bases),
+            records[sighting.record as usize].region,
+            sample,
+        );
+        let reads = f64::from(sequence.num_obs);
+        let mean_quality = sequence.q_sum / reads;
+        weakest_mean_quality = Some(match weakest_mean_quality {
+            Some(weakest) => weakest.max(mean_quality),
+            None => mean_quality,
+        });
+
+        reads_behind += reads;
+        // The four counts only: the quality is not pooled, and adding it here would be
+        // added and then overwritten below — the silent kind of dead work.
+        share.add_counts_of(sequence);
+    }
+
+    // The quality is the weakest sighting's mean read, not the pooled one: a read's evidence
+    // for an allele spanning several records is only as good as the least it saw well, since
+    // the allele is wrong if any of its pieces is.
+    //
+    // **This is production's stated rule and not production's code.** Its merger plan says
+    // the compound's effective quality "cannot exceed any single constituent's"
+    // (`doc/devel/implementation_plans/cohort_per_group_merger.md`, step 3), and its code
+    // takes `min` over the constituents' mean `q_sum`
+    // (`project_compound_scalars`, `var_calling/per_group_merger.rs`). These are opposites
+    // here: `q_sum` is a sum of `ln P(error)` (`pileup_record.rs`), so it is negative and a
+    // *weaker* read is a *larger* number — `min` picks the constituent the read saw best,
+    // which makes a compound allele look better evidenced than any single piece of it. The
+    // divergence is deliberate and recorded in this step's report.
+    //
+    // No fallback for an empty `sightings`: a read's sightings are one group of a `chunk_by`
+    // over the reads seen, which never yields an empty group, and `0.0` would not be a
+    // neutral answer if it did — `ln P(error) = 0` is `P(error) = 1`, the worst quality
+    // expressible, indistinguishable from a measured one.
+    share.q_sum =
+        weakest_mean_quality.expect("a read's sightings are one non-empty group of the reads seen");
+    share.divide_counts_by(reads_behind);
+    share
+}
+
+/// Round a divided count back to a whole one.
+///
+/// **Not a repair**: Rust's float-to-integer `as` has saturated rather than wrapped since
+/// 1.45, so this answers what `value.round() as u32` answers on every input — including
+/// `NaN`, both infinities, negatives and both boundaries, which is measured rather than
+/// assumed (`the_rounding_of_a_divided_count_saturates_at_both_ends`). What it buys is that
+/// the boundary is written where a reader can see it, and that `NaN` has a stated answer
+/// rather than an inherited one.
+fn round_to_u32(value: f64) -> u32 {
+    let rounded = value.round();
+    if rounded <= 0.0 {
+        0
+    } else if rounded >= f64::from(u32::MAX) {
+        u32::MAX
+    } else {
+        rounded as u32
+    }
+}
+
+/// As [`round_to_u32`], for the sum of squares.
+fn round_to_u64(value: f64) -> u64 {
+    let rounded = value.round();
+    if rounded <= 0.0 {
+        0
+    } else if rounded >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        rounded as u64
     }
 }
 
@@ -653,7 +1104,7 @@ fn alleles_of_sample(
     reference: &LocusReferenceBases,
     members: &SampleMembers<'_>,
     scratch: &mut ReadAlleleScratch,
-    mut emit: impl FnMut(&[u8]),
+    mut emit: impl FnMut(&[u8], AlleleBacking<'_>),
 ) -> u32 {
     let ReadAlleleScratch { by_read, composed } = scratch;
     let records = members.observations;
@@ -662,15 +1113,24 @@ fn alleles_of_sample(
     if let [only_record] = records {
         let placement = reference.placing(only_record);
         for sequence in placement.projectable_sequences() {
+            // **A sequence no read is behind is not an allele the sample showed.** Both
+            // branches skip it, and they have to agree: interning it here would put an
+            // allele in the table that nothing supports, carrying a quality nobody measured,
+            // where the branch below would refuse it — the same input answered two ways. No
+            // producer emits one; both mints derive a sequence from the reads that showed
+            // it.
+            if sequence.num_obs == 0 {
+                continue;
+            }
             placement.project_into(sequence, composed);
-            emit(composed);
+            emit(composed, AlleleBacking::OneSequence(sequence));
         }
         return 0;
     }
 
     for (record_index, record) in records.iter().enumerate() {
         for (sequence_index, sequence) in record.observations.iter().enumerate() {
-            if sequence.read_witness != ReadWitness::Complete {
+            if sequence.read_witness != ReadWitness::Complete || sequence.num_obs == 0 {
                 continue;
             }
             // **A read the mint did not name cannot be placed, and dropping it would be
@@ -686,18 +1146,13 @@ fn alleles_of_sample(
             // §4.3), so two of them never overlap and never chain (the same fact `close.rs`
             // rests its never-mixed-kinds check on).
             //
-            // The `num_obs == 0` escape is for an observation that names no reads because
-            // it has none: there is nothing to place, so there is nothing to complain
-            // about. No producer emits one today — both paths derive an observation from
-            // the reads that showed it — so the clause guards a state rather than a caller.
-            //
             // Release-level, like the walk's own checks beside it, and one comparison per
             // sequence against a derivation that already copies every sequence's bases.
             // **When observations are decoded from a psp file this becomes corrupt input
             // and must become a `RunError`** (arch §5), as the reference-width check
             // above must.
             assert!(
-                sequence.num_obs == 0 || !sequence.chain_ids.is_empty(),
+                !sequence.chain_ids.is_empty(),
                 "the observation {:?} at {} of sample index {} carries {} reads and no \
                  chain id, so the reads that showed it cannot be placed across the locus \
                  {}",
@@ -766,10 +1221,39 @@ fn alleles_of_sample(
             );
         }
         composed.extend_from_slice(&reference.bases()[written_to..]);
-        emit(composed);
+        emit(
+            composed,
+            AlleleBacking::OneRead {
+                records,
+                sightings: shown,
+            },
+        );
     }
 
     removed
+}
+
+/// What backed one allele the derivation emitted — the evidence behind the bytes, so that a
+/// caller attributing support need not compose them a second time to find out.
+///
+/// The two arms are the two branches of [`alleles_of_sample`], and the difference matters to
+/// support rather than to identity: what a sequence measured is exact, where what one read
+/// showed across several records has to be divided out of the sequences it was seen in
+/// ([`AlleleSupport`]).
+#[derive(Debug, Clone, Copy)]
+enum AlleleBacking<'a> {
+    /// Every read behind one sequence of the sample's sole record.
+    OneSequence(&'a SequenceObservation),
+    /// One read, with its sighting at each of the sample's records, in coordinate order.
+    ///
+    /// **The records travel with the sightings**, because a sighting is a pair of indices
+    /// and means nothing without the slice they index. A caller that supplied its own slice
+    /// would be right only by coincidence of expression — the same defect B1's review found
+    /// in the projection, where a member and a sequence were two loose arguments.
+    OneRead {
+        records: &'a [SampleLocusObservations],
+        sightings: &'a [ReadSighting],
+    },
 }
 
 /// How far `member_region` starts into `locus_region`, in bases.
@@ -1935,6 +2419,563 @@ mod tests {
             "a sequence no sample showed here",
         );
         assert_eq!(table.reference().bases(), b"ACGTA");
+    }
+
+    // ---------------------------------------------------------------
+    // Per-sample support against the table (arch §4), and the division the owner ruled on.
+    // ---------------------------------------------------------------
+
+    /// One record of a sample, with its sequences spelled out in full — the fixture the
+    /// support tests need, where [`record`] above only sets bases and read ids.
+    fn record_of(
+        region: GenomeRegion,
+        reference_bases: &[u8],
+        sequences: Vec<SequenceObservation>,
+    ) -> SampleLocusObservations {
+        let mut observations = member(region, reference_bases, b"");
+        observations.observations = sequences;
+        observations
+    }
+
+    /// A sequence with its support spelled out: `reads` names the reads that showed it, and
+    /// the five sums are the mint's own numbers over exactly those reads.
+    fn shown_by(
+        bases: &[u8],
+        reads: &[ChainId],
+        q_sum: f64,
+        num_fwd: u32,
+        mapq_sum: u32,
+        mapq_sum_sq: u64,
+        placed_left: u32,
+    ) -> SequenceObservation {
+        SequenceObservation {
+            num_obs: reads.len() as u32,
+            chain_ids: reads.to_vec(),
+            q_sum,
+            num_fwd,
+            mapq_sum,
+            mapq_sum_sq,
+            placed_left,
+            ..sequence(bases)
+        }
+    }
+
+    /// **At a sample with one record every sum is the mint's own** — nothing is divided,
+    /// because each of that record's sequences is one allele and all the reads behind it
+    /// showed that allele.
+    ///
+    /// The sample has four reads showing a SNP and two showing the reference; the SNP's
+    /// allele carries exactly the four reads' numbers and the reference's exactly the two.
+    #[test]
+    fn a_one_record_samples_support_is_the_mints_own_numbers() {
+        let one_record = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                shown_by(b"T", &[7, 9, 11, 13], -8.0, 3, 240, 14_400, 1),
+                shown_by(b"G", &[15, 17], -5.0, 1, 100, 5_000, 0),
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&one_record, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+
+        assert_eq!(support.sample, 0);
+        assert_eq!(support.reads_composed_across_records, 0, "nothing divided");
+        assert_eq!(
+            support.per_allele[REFERENCE_ALLELE],
+            AlleleSupport {
+                num_reads: 2,
+                num_fwd: 1,
+                q_sum: -5.0,
+                mapq_sum: 100,
+                mapq_sum_sq: 5_000,
+                placed_left: 0,
+            },
+            "the reads that agreed with the reference are support for allele 0",
+        );
+        let snp = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACTTA")
+            .expect("the SNP is in the table");
+        assert_eq!(
+            support.per_allele[snp],
+            AlleleSupport {
+                num_reads: 4,
+                num_fwd: 3,
+                q_sum: -8.0,
+                mapq_sum: 240,
+                mapq_sum_sq: 14_400,
+                placed_left: 1,
+            },
+        );
+    }
+
+    /// **Two of a sample's own observations that reach the same allele are summed** (spec
+    /// §4.2), and support is **never** merged across alleles. The same bases from two read
+    /// groups are two observations and one allele.
+    #[test]
+    fn support_is_summed_within_an_allele_and_never_across_them() {
+        let two_groups = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                shown_by(b"T", &[7, 9], -4.0, 2, 120, 7_200, 1),
+                SequenceObservation {
+                    read_group: ReadGroupId(1),
+                    ..shown_by(b"T", &[11], -1.0, 0, 50, 2_500, 0)
+                },
+                shown_by(b"A", &[13], -3.0, 1, 60, 3_600, 0),
+            ],
+        )];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_groups, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let allele_of = |bases: &[u8]| {
+            observed
+                .alleles
+                .iter()
+                .position(|allele| &**allele == bases)
+                .expect("in the table")
+        };
+
+        assert_eq!(
+            support.per_allele[allele_of(b"ACTTA")],
+            AlleleSupport {
+                num_reads: 3,
+                num_fwd: 2,
+                q_sum: -5.0,
+                mapq_sum: 170,
+                mapq_sum_sq: 9_700,
+                placed_left: 1,
+            },
+            "the two read groups' reads and sums added",
+        );
+        assert_eq!(
+            support.per_allele[allele_of(b"ACATA")],
+            AlleleSupport {
+                num_reads: 1,
+                num_fwd: 1,
+                q_sum: -3.0,
+                mapq_sum: 60,
+                mapq_sum_sq: 3_600,
+                placed_left: 0,
+            },
+            "the other allele keeps its own, unmixed",
+        );
+    }
+
+    /// **A read composed across two records has its five sums divided, and its count is
+    /// still exact** — the owner's ruling of 2026-08-17.
+    ///
+    /// Read 7 is named at both of the sample's records. At 12 it is one of two reads behind
+    /// `A`, whose sums are `q = −4.0`, 2 forward, MAPQ 120, MAPQ² 7,200, 0 placed left; at
+    /// 14 it is the only read behind `C`, with `q = −0.5`, 0 forward, MAPQ 50, MAPQ² 2,500,
+    /// 1 placed left. So its share is:
+    ///
+    /// - **quality −0.5**, the weaker of the two means (−4.0/2 = −2.0 against −0.5/1 =
+    ///   −0.5). These are `ln P(error)`, so the number nearer zero is the **worse** read:
+    ///   −0.5 is an error probability of about 3 in 5 and −2.0 about 1 in 7. What read 7
+    ///   saw badly at 14 is what limits its evidence for an allele covering both;
+    /// - **the other four pooled over the three reads behind the two sequences**: forward
+    ///   2/3, MAPQ 170/3 ≈ 56.7, MAPQ² 9,700/3 ≈ 3,233.3, placed left 1/3 — each rounded
+    ///   once, at the allele.
+    ///
+    /// Read 9, named at 12 alone, is removed, so `ACATA` is not in the table at all.
+    #[test]
+    fn a_read_composed_across_records_has_its_sums_divided_and_its_count_exact() {
+        let two_records = [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![shown_by(b"A", &[7, 9], -4.0, 2, 120, 7_200, 0)],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![shown_by(b"C", &[7], -0.5, 0, 50, 2_500, 1)],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let support = &observed.per_sample[0];
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATC")
+            .expect("read 7's allele");
+
+        assert_eq!(
+            support.per_allele[compound],
+            AlleleSupport {
+                num_reads: 1,
+                num_fwd: 1,
+                q_sum: -0.5,
+                mapq_sum: 57,
+                mapq_sum_sq: 3_233,
+                placed_left: 0,
+            },
+        );
+        assert_eq!(support.reads_composed_across_records, 1);
+        assert_eq!(support.reads_removed_as_evidence, 1, "read 9");
+        assert_eq!(observed.per_sample[1].reads_composed_across_records, 0);
+    }
+
+    /// **The case the division exists for: one observation's reads split across two
+    /// alleles**, with a record holding two sequences and the weakest sighting first for one
+    /// read and last for the other.
+    ///
+    /// The sample has records at 12 and 14. At 12 its reads showed `A` (reads 7 and 9, mean
+    /// quality −0.5) or `T` (read 11, mean −8.0); at 14 all three showed `C` (mean −6.0). So
+    /// the three reads of the `C` observation take two different paths across the locus, and
+    /// its five sums have to be divided:
+    ///
+    /// - **reads 7 and 9** compose `ACATC`. Each takes the weaker of −0.5 and −6.0, which is
+    ///   **−0.5 and comes first** — so a rule that kept the last sighting's quality would
+    ///   answer −6.0 here. Their pooled counts come from 5 reads: forward 5/5, MAPQ 300/5,
+    ///   MAPQ² 18,000/5, left 0/5, each ×2 reads.
+    /// - **read 11** composes `ACTTC`, taking the weaker of −8.0 and −6.0, which is **−6.0
+    ///   and comes last**. Its pooled counts come from 4 reads: forward 3/4 → 1, MAPQ 210/4
+    ///   = 52.5 → 53, MAPQ² 11,700/4 = 2,925, left 1/4 → 0.
+    ///
+    /// Reading the wrong sequence of a record — the first rather than the one the read was
+    /// sighted at — gives read 11 read 7's numbers instead.
+    #[test]
+    fn one_observations_reads_split_across_two_alleles_and_each_takes_its_own_share() {
+        let two_records = [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![
+                    shown_by(b"A", &[7, 9], -1.0, 2, 120, 7_200, 0),
+                    shown_by(b"T", &[11], -8.0, 0, 30, 900, 1),
+                ],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![shown_by(b"C", &[7, 9, 11], -18.0, 3, 180, 10_800, 0)],
+            ),
+        ];
+        let one_read_removed = [
+            record_of(
+                region(11, 11),
+                b"C",
+                vec![shown_by(b"G", &[21, 23], -4.0, 1, 60, 3_600, 0)],
+            ),
+            record_of(
+                region(13, 13),
+                b"T",
+                vec![shown_by(b"A", &[21], -2.0, 1, 30, 900, 0)],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(
+            region(10, 14),
+            &[&two_records, &one_read_removed, &deletion],
+        );
+
+        let observed = CohortObservation::over(&locus);
+        let allele_of = |bases: &[u8]| {
+            observed
+                .alleles
+                .iter()
+                .position(|allele| &**allele == bases)
+                .unwrap_or_else(|| panic!("{} is not in the table", String::from_utf8_lossy(bases)))
+        };
+        let split = &observed.per_sample[0];
+
+        assert_eq!(
+            split.per_allele[allele_of(b"ACATC")],
+            AlleleSupport {
+                num_reads: 2,
+                num_fwd: 2,
+                q_sum: -1.0,
+                mapq_sum: 120,
+                mapq_sum_sq: 7_200,
+                placed_left: 0,
+            },
+            "reads 7 and 9, each taking the weaker −0.5 of its two sightings",
+        );
+        assert_eq!(
+            split.per_allele[allele_of(b"ACTTC")],
+            AlleleSupport {
+                num_reads: 1,
+                num_fwd: 1,
+                q_sum: -6.0,
+                mapq_sum: 53,
+                mapq_sum_sq: 2_925,
+                placed_left: 0,
+            },
+            "read 11, from the sequence it was sighted at rather than the record's first",
+        );
+        assert_eq!(
+            split.reads_composed_across_records, 3,
+            "all three reads were composed, not merely one",
+        );
+        assert_eq!(split.reads_removed_as_evidence, 0);
+
+        let with_a_removal = &observed.per_sample[1];
+        assert_eq!(
+            with_a_removal.reads_removed_as_evidence, 1,
+            "read 23, named at 11 and not at 13 — and this sample's count, not the cohort's",
+        );
+        assert_eq!(with_a_removal.reads_composed_across_records, 1);
+        assert_eq!(
+            with_a_removal.per_allele[allele_of(b"AGGAA")].num_reads,
+            1,
+            "read 21 composed across both records",
+        );
+    }
+
+    /// **The weakest sighting sets the quality, and this is where the code parts company
+    /// with production's.** Production's merger plan says a compound's quality "cannot
+    /// exceed any single constituent's" and its code takes the `min` of the constituents'
+    /// mean `q_sum` — which, these being sums of `ln P(error)`, is the constituent the read
+    /// saw *best*.
+    ///
+    /// Here the two sightings mean −6.0 and −1.0 per read, and −1.0 is the worse of the two
+    /// (an error probability of about 1 in 3, against about 1 in 400). That is what the
+    /// allele carries; production's `min` would give −6.0, five nats better, making an
+    /// allele spanning two records look better evidenced than either piece of it.
+    #[test]
+    fn the_weakest_sighting_sets_a_composed_reads_quality() {
+        let two_records = [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![shown_by(b"A", &[7], -6.0, 1, 60, 3_600, 0)],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![shown_by(b"C", &[7], -1.0, 1, 60, 3_600, 0)],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATC")
+            .expect("read 7's allele");
+
+        assert_eq!(
+            observed.per_sample[0].per_allele[compound].q_sum, -1.0,
+            "the weaker of −6.0 and −1.0, not the better",
+        );
+    }
+
+    /// **The rounding of a divided count saturates at both ends and answers 0 for a
+    /// number that is not one.** None of the three is reachable from this module's own
+    /// arithmetic — the divided sums are non-negative and bounded by the reads behind them —
+    /// so the boundaries are asserted here rather than left to a reader to derive from
+    /// `as`'s rules.
+    #[test]
+    fn the_rounding_of_a_divided_count_saturates_at_both_ends() {
+        assert_eq!(round_to_u32(0.5), 1, "half a read rounds up");
+        assert_eq!(round_to_u32(0.4999), 0);
+        assert_eq!(round_to_u32(-3.0), 0, "a negative count is none");
+        assert_eq!(round_to_u32(f64::from(u32::MAX) * 2.0), u32::MAX);
+        assert_eq!(round_to_u32(f64::INFINITY), u32::MAX);
+        assert_eq!(round_to_u32(f64::NAN), 0, "not a number is not a count");
+        assert_eq!(round_to_u64(2.5), 3);
+        assert_eq!(round_to_u64(-1.0), 0);
+        assert_eq!(round_to_u64(f64::INFINITY), u64::MAX);
+        assert_eq!(round_to_u64(f64::NAN), 0);
+    }
+
+    /// **A sequence no read is behind contributes no allele, on either branch.** Nothing
+    /// supports it, so interning it would put an allele in the table carrying a quality
+    /// nobody measured — and the two branches must agree, or the same input is answered one
+    /// way at a one-record sample and another where the locus spans several records.
+    #[test]
+    fn a_sequence_with_no_reads_behind_it_contributes_no_allele_on_either_branch() {
+        let sole_record = [record_of(
+            region(12, 12),
+            b"G",
+            vec![
+                shown_by(b"T", &[7], -2.0, 1, 60, 3_600, 0),
+                SequenceObservation {
+                    num_obs: 0,
+                    chain_ids: Vec::new(),
+                    q_sum: -4.0,
+                    ..sequence(b"A")
+                },
+            ],
+        )];
+        let two_records = [
+            record_of(
+                region(11, 11),
+                b"C",
+                vec![
+                    shown_by(b"G", &[9], -2.0, 1, 60, 3_600, 0),
+                    SequenceObservation {
+                        num_obs: 0,
+                        chain_ids: Vec::new(),
+                        q_sum: -4.0,
+                        ..sequence(b"T")
+                    },
+                ],
+            ),
+            record_of(
+                region(13, 13),
+                b"T",
+                vec![shown_by(b"C", &[9], -2.0, 1, 60, 3_600, 0)],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&sole_record, &two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        assert_eq!(
+            observed.alleles.len(),
+            4,
+            "the reference, one allele from each sample, and the deletion — got {:?}",
+            observed
+                .alleles
+                .iter()
+                .map(|allele| String::from_utf8_lossy(allele).into_owned())
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            observed.per_sample[0]
+                .per_allele
+                .iter()
+                .all(|support| support.q_sum >= -2.0),
+            "no allele carries the unsupported sequence's quality",
+        );
+    }
+
+    /// **The divided counts are rounded once per allele, not once per read**, and the
+    /// left-placed count is where the two answers differ. Reads 7, 9 and 11 are each sighted
+    /// at two sequences with six reads behind them in total, of which **three** started left
+    /// of the anchor and **one** was on the forward strand. So each read's share is a half a
+    /// left-placed read and a sixth of a forward one.
+    ///
+    /// Rounded once: 1.5 left-placed becomes **2** and 0.5 forward becomes **1**. Rounded
+    /// per read, each half would become a whole and the allele would claim **3** reads
+    /// started left, out of three reads — twice the truth, and a number that cannot be
+    /// distinguished from every read starting left.
+    #[test]
+    fn the_divided_counts_are_rounded_once_per_allele() {
+        let two_records = [
+            record_of(
+                region(12, 12),
+                b"G",
+                vec![shown_by(b"A", &[7, 9, 11], -6.0, 1, 90, 5_400, 3)],
+            ),
+            record_of(
+                region(14, 14),
+                b"A",
+                vec![shown_by(b"C", &[7, 9, 11], -6.0, 0, 90, 5_400, 0)],
+            ),
+        ];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        let compound = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATC")
+            .expect("the three reads' allele");
+
+        assert_eq!(
+            observed.per_sample[0].per_allele[compound],
+            AlleleSupport {
+                num_reads: 3,
+                num_fwd: 1,
+                q_sum: -6.0,
+                mapq_sum: 90,
+                mapq_sum_sq: 5_400,
+                placed_left: 2,
+            },
+            "1.5 left-placed reads rounded once are 2, where three halves rounded are 3",
+        );
+    }
+
+    /// **A sample that did not cover the locus has no entry**, which is a different fact
+    /// from an entry whose support is all reference (spec §4.2). Sample 1 here covers
+    /// nothing, and the walk is what leaves it out — so the entries name their samples
+    /// rather than sitting at their index.
+    #[test]
+    fn a_sample_with_no_coverage_has_no_support_at_all() {
+        let covering = [member(region(12, 12), b"G", b"T")];
+        let nothing = [];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+
+        let loci: Vec<_> = LocusCloser::over(
+            &[&covering, &nothing, &deletion],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        )
+        .collect();
+        assert_eq!(loci.len(), 1, "one locus, held open by the deletion");
+
+        let observed = CohortObservation::over(&loci[0]);
+        assert_eq!(
+            observed
+                .per_sample
+                .iter()
+                .map(|s| s.sample)
+                .collect::<Vec<_>>(),
+            vec![0, 2],
+            "the sample that covered nothing is absent, not zeroed",
+        );
+        assert_eq!(observed.region, region(10, 14));
+    }
+
+    /// **Every sample's support is as wide as the final table**, including a sample derived
+    /// before a later one introduced an allele. Sample 0 is derived first and knows nothing
+    /// of sample 1's `ACATA`; its row still has a slot for it, holding no reads.
+    #[test]
+    fn a_samples_support_is_as_wide_as_the_table_however_late_an_allele_joins() {
+        let first = [member(region(12, 12), b"G", b"T")];
+        let second = [member(region(12, 12), b"G", b"A")];
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&first, &second, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        assert_eq!(observed.alleles.len(), 4);
+        for support in &observed.per_sample {
+            assert_eq!(
+                support.per_allele.len(),
+                observed.alleles.len(),
+                "sample {} is not parallel to the table",
+                support.sample,
+            );
+        }
+        let late = observed
+            .alleles
+            .iter()
+            .position(|allele| &**allele == b"ACATA")
+            .expect("sample 1's allele");
+        assert_eq!(observed.per_sample[0].per_allele[late].num_reads, 0);
+    }
+
+    /// The reads that said nothing are carried through from the records rather than
+    /// re-derived, and summed where a sample has several of them (arch §4).
+    #[test]
+    fn the_reads_without_an_observation_are_carried_through_from_the_records() {
+        let mut two_records = a_sample_with_two_records();
+        two_records[0].reads_without_observation = 2;
+        two_records[1].reads_without_observation = 3;
+        let deletion = [member(region(10, 14), b"ACGTA", b"A")];
+        let locus = closed_locus(region(10, 14), &[&two_records, &deletion]);
+
+        let observed = CohortObservation::over(&locus);
+        assert_eq!(observed.per_sample[0].reads_without_observation, 5);
+        assert_eq!(observed.per_sample[1].reads_without_observation, 0);
     }
 
     /// A partial sequence contributes no allele where the sample has one record either —

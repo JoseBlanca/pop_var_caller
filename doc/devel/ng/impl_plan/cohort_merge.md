@@ -163,7 +163,7 @@ projecting each observation on its own already gives; the two differ only where 
 several of a sample's records.
 *Depends:* B1, B0. *Source:* [spec](../spec/cohort_merge.md) §4.2 and the ruling above.
 
-☐ **B3 — `CohortObservation` and `SampleSupport`.** Per sample, support against the allele table,
+✅ **B3 — `CohortObservation` and `SampleSupport`.** Per sample, support against the allele table,
 moments summed where two of its own observations projected onto the same allele; support never
 merged across alleles. A sample with no coverage has no support, which stays distinct from
 reference-only support.
