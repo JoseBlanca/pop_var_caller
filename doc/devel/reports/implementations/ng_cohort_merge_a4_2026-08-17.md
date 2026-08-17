@@ -116,6 +116,54 @@ In the container: `cargo fmt --check` clean; `cargo clippy --lib --all-features 
 -D warnings` clean; `cargo test --lib ng::run::cohort_merge` **34 passed, 0 failed** (25
 before this step). Full-suite figures are in the commit message.
 
+## 5a. The owner's ruling on locus kinds, applied at Checkpoint A
+
+The review raised that the width test was applied to every locus, where spec §3.1 says
+`max_cohort_locus_span` "governs **generic** loci only", and I did not gate it because the
+design did not say how a *cohort* locus takes a kind. **The owner ruled at Checkpoint A**
+(2026-08-17), and the ruling answered both halves:
+
+> the rule for the generic and str loci should be different. a str locus is defined by the
+> str catalog from the genome and it won't have reads covering it if it is too long. Also,
+> the reads in a str locus are re-aligned, but in the generic path we trust the mapper
+> alignements coded in the cigar. So completely different and different rules should be
+> applied.
+
+and, on the mixed case:
+
+> a generic and a str locus shall never be mixed, never ever.
+
+**The two facts together close the question I could not.** A generic locus's width is a
+claim about the reads — the mapper's CIGAR, taken on trust — and the bound is how much of
+that the caller undertakes to call. An STR locus's width is its reference tract, fixed by
+the catalog before a read is looked at, with its reads re-aligned rather than believed;
+bounding it by a calling policy would refuse ground the reference defined, and it needs no
+bound anyway, because a tract too long to span has no reads covering it and one longer than
+`max_str_len` is a satellite that yields no locus at all.
+
+**And a cohort locus is homogeneous by construction, which is why the rule is
+implementable without inventing anything.** Segments are the reference's own partition; no
+observation crosses a segment boundary (run spec §4.3), so no chain of overlapping
+observations can either (§4.1). Every member of a locus comes from one segment, so an STR
+tract's observations can never chain with a generic stretch's. Verified against both
+documents before relying on it.
+
+What landed:
+
+- `judge` takes the locus's kind and matches on it **exhaustively** — a new `LocusKind` is
+  a compile error here until someone decides whether the bound governs it. Only the width
+  test is gated; the keep threshold applies to every locus.
+- the walk asserts, at **release level**, that every member of a locus shares its kind —
+  the owner's "never ever" is not a `debug_assert!`. The comparison is on
+  `std::mem::discriminant`, so it is O(1): `LocusKind`'s payload holds boxed flanks, and
+  comparing those per observation would not be affordable.
+
+Four tests: a 60-base tract against a bound of 10 builds while **the same ground as a
+generic locus fails** (which is what makes it a test of the rule rather than of the
+number); a tract nobody varied at is still `TooQuiet`, since only the width bound is
+generic-only; a bundle is exempt too (§3.1's "the same holds for bundles"); and a fabricated
+mixed locus panics.
+
 ## 6. Tradeoffs and follow-ups
 
 - **The failed count is not summed here.** Spec §3.3 requires it to reach the run summary;

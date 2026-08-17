@@ -17,7 +17,7 @@
 //! the two rules keep different loci.
 
 use super::{MaxCohortLocusSpan, MinAltObs};
-use crate::ng::locus_generation::SampleLocusObservations;
+use crate::ng::locus_generation::{LocusKind, SampleLocusObservations};
 use crate::ng::types::{GenomePosition, GenomeRegion};
 
 /// One sample's observations inside one cohort locus — a borrowed run, never copied
@@ -79,27 +79,43 @@ pub enum Verdict {
 /// exactly `min_alt_obs` is likewise built — the locus is kept when the reads *reach* the
 /// threshold (spec §4.3).
 ///
-/// **⛦ OPEN, and this rule is wider than the spec's: the width test is applied to every
-/// locus, where spec §3.1 says `max_cohort_locus_span` "governs **generic** loci only".**
-/// An STR locus's span is its reference tract — a fact about the reference rather than a
-/// claim about the reads — and §3.1 expects the true ceiling on an emitted observation to
-/// be "the larger of `max_cohort_locus_span` and the widest STR tract the segmentation
-/// admits", 100 rather than 50 at the two defaults. As written, a 60-base tract would be
-/// failed and counted, inflating the one number §3.3 says an operator reads.
+/// **The width test governs generic loci only** (spec §3.1, and the owner's 2026-08-17
+/// ruling). The two paths are not variations on one thing:
 ///
-/// It is not gated here because the design does not say how a *cohort* locus takes a
-/// kind: §4.1's grouping chains observations of any kind into one locus, and neither the
-/// spec nor the architecture rules on a locus whose members are an STR tract in one
-/// sample and a SNP in another. Inventing that rule is not this step's to do. Nothing
-/// feeds this walk yet, so the divergence is inert until milestone C; it is raised at
-/// Checkpoint A and must be settled before then.
+/// - a **generic** locus's width is a claim about the reads, taken from the mapper's own
+///   CIGAR, and `max_cohort_locus_span` is the policy bound on how much of that the
+///   caller undertakes to call;
+/// - an **STR** locus's width is its reference tract, fixed by the catalog before a read
+///   is looked at, and its reads are re-aligned rather than trusted as placed. Bounding
+///   it by a calling policy would refuse ground the reference defined. It needs no bound
+///   anyway: a tract too long to span simply has no reads covering it, and one longer
+///   than `max_str_len` is a satellite that yields no locus at all. The same holds for
+///   bundles (§3.1).
+///
+/// So the keep threshold applies to every locus and the width bound does not. At the two
+/// defaults that makes the true ceiling on an emitted observation 100 rather than 50,
+/// which is what §3.1 says it should be.
+///
+/// **A cohort locus has one kind, and that is structural rather than lucky.** Segments
+/// are the reference's own partition and no observation crosses a segment boundary
+/// (run spec §4.3), so no chain of overlapping observations can either (§4.1) — every
+/// member of a locus comes from one segment, and an STR tract's observations can never
+/// chain with a generic stretch's. The walk asserts it rather than assuming it.
 fn judge(
     span: u64,
     non_reference_reads: u32,
+    kind: &LocusKind,
     max_cohort_locus_span: MaxCohortLocusSpan,
     min_alt_obs: MinAltObs,
 ) -> Verdict {
-    if span > u64::from(max_cohort_locus_span.get()) {
+    // Exhaustive on purpose: a new kind of locus should not silently inherit either
+    // answer, so adding one is a compile error here until somebody decides.
+    let bounded_by_policy = match kind {
+        LocusKind::Generic => true,
+        LocusKind::Ssr(_) | LocusKind::SsrBundle => false,
+    };
+
+    if bounded_by_policy && span > u64::from(max_cohort_locus_span.get()) {
         Verdict::Failed
     } else if non_reference_reads < min_alt_obs.get() {
         Verdict::TooQuiet
@@ -334,6 +350,7 @@ impl<'a> Iterator for LocusCloser<'a> {
         let (_, opening) = self.sample_with_earliest_head()?;
         let contig = opening.region.contig;
         let start = opening.region.start;
+        let kind = &opening.kind;
 
         // Where each sample stands now. What it consumes before the locus closes is its
         // run of members, so no second scan is needed to find them.
@@ -372,6 +389,29 @@ impl<'a> Iterator for LocusCloser<'a> {
                  before the locus that opened at {}",
                 head.region,
                 start.get(),
+            );
+            // **A generic locus and an STR locus must never be mixed** (the owner,
+            // 2026-08-17). They are different in kind, not in degree: a generic
+            // observation's span is the mapper's CIGAR taken on trust, an STR
+            // observation's is a tract the catalog fixed before any read was looked at,
+            // and its reads were re-aligned rather than believed. One locus holding both
+            // would have to be judged under two rules at once, and whichever it got would
+            // be wrong for half its members.
+            //
+            // It cannot happen, and structurally rather than by luck: segments are the
+            // reference's own partition, no observation crosses a segment boundary (run
+            // spec §4.3), so no chain of overlapping observations can either (§4.1). The
+            // check is here because that argument lives in two documents and a
+            // segmentation change could break it silently — and release-level, like the
+            // ordering check above, because a mixed locus must never reach a verdict.
+            // Comparing discriminants keeps it O(1): `LocusKind`'s payload holds boxed
+            // flanks, and comparing those per observation would not be affordable.
+            assert!(
+                std::mem::discriminant(&head.kind) == std::mem::discriminant(kind),
+                "a cohort locus at {contig:?}:{} mixes locus kinds — {:?} with {:?}",
+                start.get(),
+                kind,
+                head.kind,
             );
             reach = reach.max(head.reach());
             non_reference_reads = non_reference_reads.saturating_add(head.non_reference_reads());
@@ -423,6 +463,7 @@ impl<'a> Iterator for LocusCloser<'a> {
             verdict: judge(
                 span_of(region),
                 non_reference_reads,
+                kind,
                 self.max_cohort_locus_span,
                 self.min_alt_obs,
             ),
@@ -433,7 +474,8 @@ impl<'a> Iterator for LocusCloser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
+    use crate::ng::locus_generation::{ReadWitness, SequenceObservation, SsrDetail};
+    use crate::ng::types::Motif;
     use crate::ng::types::{ContigId, Position, ReadGroupId};
     use std::num::NonZeroU32;
 
@@ -832,6 +874,90 @@ mod tests {
         assert_eq!(closed[2].verdict, Verdict::Build);
     }
 
+    /// One sample's observation over an STR tract — a locus whose width is a fact about
+    /// the reference, fixed by the catalog, rather than a claim about the reads.
+    fn str_observation(region: GenomeRegion, non_reference_reads: u32) -> SampleLocusObservations {
+        SampleLocusObservations {
+            kind: LocusKind::Ssr(SsrDetail {
+                motif: Motif::new(b"AT").expect("a two-base motif"),
+                left_flank: Box::from(&b"CCCC"[..]),
+                right_flank: Box::from(&b"GGGG"[..]),
+            }),
+            ..observation(region, non_reference_reads)
+        }
+    }
+
+    /// **An STR tract wider than `max_cohort_locus_span` is built, not failed** — the
+    /// owner's 2026-08-17 ruling and spec §3.1's "governs generic loci only".
+    ///
+    /// A 60-base tract against a bound of 10. The width of a generic locus is the mapper's
+    /// CIGAR taken on trust, and the bound is how much of that the caller undertakes to
+    /// call; an STR tract's width was fixed by the catalog before a read was looked at, and
+    /// its reads are re-aligned rather than believed. Refusing it would refuse ground the
+    /// reference defined. **The same fixture as a generic locus fails**, which is what
+    /// makes this a test of the rule rather than of the number.
+    #[test]
+    fn an_str_tract_wider_than_the_bound_is_not_failed() {
+        let tract = [str_observation(region(10, 69), 4)];
+        let same_ground_generic = [observation(region(10, 69), 4)];
+
+        let str_locus: Vec<_> = LocusCloser::over(&[&tract], max_span(10), keep_at(2)).collect();
+        assert_eq!(str_locus[0].span(), 60);
+        assert_eq!(str_locus[0].verdict, Verdict::Build);
+
+        let generic_locus: Vec<_> =
+            LocusCloser::over(&[&same_ground_generic], max_span(10), keep_at(2)).collect();
+        assert_eq!(generic_locus[0].span(), 60);
+        assert_eq!(generic_locus[0].verdict, Verdict::Failed);
+    }
+
+    /// **The keep threshold still applies to an STR locus.** Only the width bound is
+    /// generic-only: a tract nobody varied at is ground judged empty, exactly as a generic
+    /// locus would be, and nothing is emitted for it.
+    #[test]
+    fn an_str_tract_nobody_varied_at_is_still_too_quiet() {
+        let quiet_tract = [SampleLocusObservations {
+            kind: str_observation(region(10, 69), 0).kind,
+            ..all_reference_observation(region(10, 69), 9)
+        }];
+
+        let closed: Vec<_> = LocusCloser::over(&[&quiet_tract], max_span(10), keep_at(2)).collect();
+        assert_eq!(closed[0].verdict, Verdict::TooQuiet);
+    }
+
+    /// A bundle is exempt from the width bound for the same reason a tract is — spec
+    /// §3.1's "the same holds for bundles".
+    #[test]
+    fn a_bundle_wider_than_the_bound_is_not_failed() {
+        let bundle = [SampleLocusObservations {
+            kind: LocusKind::SsrBundle,
+            ..observation(region(10, 69), 4)
+        }];
+
+        let closed: Vec<_> = LocusCloser::over(&[&bundle], max_span(10), keep_at(2)).collect();
+        assert_eq!(closed[0].span(), 60);
+        assert_eq!(closed[0].verdict, Verdict::Build);
+    }
+
+    /// **A generic locus and an STR locus must never be mixed, and the walk refuses rather
+    /// than judging one under a rule that is wrong for half its members** (the owner,
+    /// 2026-08-17).
+    ///
+    /// It cannot arise from real input: segments are the reference's own partition, no
+    /// observation crosses a segment boundary, so no chain of overlapping observations can
+    /// either — an STR tract's observations and a generic stretch's are always in different
+    /// segments. This fixture reaches past that by fabricating the two on top of each
+    /// other, which is the only way to get here, and it is what stops a future segmentation
+    /// change breaking the assumption silently.
+    #[test]
+    #[should_panic(expected = "mixes locus kinds")]
+    fn a_locus_mixing_an_str_tract_and_a_generic_observation_is_refused() {
+        let tract = [str_observation(region(10, 40), 4)];
+        let generic = [observation(region(20, 20), 4)];
+
+        let _ = LocusCloser::over(&[&tract, &generic], max_span(100), keep_at(2)).count();
+    }
+
     /// **The bystander is what a failed locus costs, and spec §3.2 says so plainly**: one
     /// sample's over-wide deletion suppresses another sample's ordinary SNP, because the
     /// shared bases chain them into one locus. Nothing is emitted over that ground for
@@ -935,16 +1061,19 @@ mod tests {
         let quiet = 0;
 
         assert_eq!(
-            judge(narrow, loud, max_span(10), keep_at(2)),
+            judge(narrow, loud, &LocusKind::Generic, max_span(10), keep_at(2)),
             Verdict::Build
         );
         assert_eq!(
-            judge(narrow, quiet, max_span(10), keep_at(2)),
+            judge(narrow, quiet, &LocusKind::Generic, max_span(10), keep_at(2)),
             Verdict::TooQuiet
         );
-        assert_eq!(judge(wide, loud, max_span(10), keep_at(2)), Verdict::Failed);
         assert_eq!(
-            judge(wide, quiet, max_span(10), keep_at(2)),
+            judge(wide, loud, &LocusKind::Generic, max_span(10), keep_at(2)),
+            Verdict::Failed
+        );
+        assert_eq!(
+            judge(wide, quiet, &LocusKind::Generic, max_span(10), keep_at(2)),
             Verdict::Failed,
             "qualifies for both: the width verdict is the one that stands"
         );
