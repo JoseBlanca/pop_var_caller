@@ -11,10 +11,14 @@
 //! Design: `doc/devel/ng/spec/cohort_merge.md` (what and why),
 //! `doc/devel/ng/arch/cohort_merge.md` (types and contracts).
 //!
-//! **What has landed is this file's three parameters, [`close`]'s walk, and [`build`]'s
-//! projection of a member onto the locus span.** Unifying those projections into one
-//! allele table, and the organiser that resolves overlaps between builders, land beside
-//! them as the plan's milestones complete (`doc/devel/ng/impl_plan/cohort_merge.md`).
+//! **What has landed:** this file's three parameters; [`close`]'s walk and its two
+//! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
+//! span, unified into one allele table, with each covering sample's support against it;
+//! [`serial`]'s single-threaded driver, the oracle every later milestone must reproduce;
+//! and [`organise`]'s observation cache, the window one builder is handed. **Still to
+//! come:** the organiser itself, which resolves the overlaps between builders and releases
+//! loci in genome order, and the parallel arrangement around it
+//! (`doc/devel/ng/impl_plan/cohort_merge.md`, milestone E).
 //!
 //! **`pub`, though the architecture calls this crate-private machinery.** The two
 //! caller objects that will own it do not exist yet, so `pub(crate)` items here would
@@ -25,6 +29,7 @@
 
 pub mod build;
 pub mod close;
+pub mod organise;
 pub mod serial;
 
 use std::num::NonZeroU32;

@@ -187,7 +187,7 @@ milestone must reproduce.
 
 ### Milestone D — the observation cache
 
-☐ **D1 — `ObservationCache`.** One forward reader per sample; `cover`, `with_observations`,
+✅ **D1 — `ObservationCache`.** One forward reader per sample; `cover`, `with_observations`,
 `evict_before`. Tests: a window covering a region also holds an observation that started before it
 and reaches in; eviction drops nothing a live region can still reach.
 *Depends:* C2. *Source:* [spec](../spec/cohort_merge.md) §6.4; [arch](../arch/cohort_merge.md) §4.

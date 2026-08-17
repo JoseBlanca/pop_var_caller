@@ -276,7 +276,11 @@ impl<'a> LocusCloser<'a> {
     ) -> Self {
         let keys = observations_per_sample
             .iter()
-            .map(|observations| observations.first().map(key_of))
+            .map(|observations| {
+                observations
+                    .first()
+                    .map(SampleLocusObservations::start_position)
+            })
             .collect();
         Self {
             cursors: vec![0; observations_per_sample.len()],
@@ -296,7 +300,9 @@ impl<'a> LocusCloser<'a> {
     /// Consume sample `sample`'s head and refresh just that sample's key.
     fn advance(&mut self, sample: usize) {
         self.cursors[sample] += 1;
-        self.keys[sample] = self.head(sample).map(key_of);
+        self.keys[sample] = self
+            .head(sample)
+            .map(SampleLocusObservations::start_position);
     }
 
     /// The sample whose head starts earliest, **ties to the lowest sample index**.
@@ -325,14 +331,6 @@ impl<'a> LocusCloser<'a> {
         // The head comes back with the sample it was found in, so no caller looks it up a
         // second time or has to state an invariant the scan already knows.
         best.map(|(sample, _)| (sample, self.head(sample).expect("a key implies a head")))
-    }
-}
-
-/// Where an observation starts, as a genome-wide key.
-fn key_of(observation: &SampleLocusObservations) -> GenomePosition {
-    GenomePosition {
-        contig: observation.region.contig,
-        position: observation.region.start,
     }
 }
 

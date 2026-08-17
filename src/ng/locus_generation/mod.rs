@@ -26,7 +26,7 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::types::{GenomeRegion, Position, ReadGroupId};
+use crate::ng::types::{GenomePosition, GenomeRegion, Position, ReadGroupId};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -169,6 +169,28 @@ impl SampleLocusObservations {
     /// next position fall within the reach" would close every locus immediately.
     pub fn reach(&self) -> Position {
         self.region.end.max(self.region.start)
+    }
+
+    /// Where this observation begins, genome-wide — the key the cohort merge orders on.
+    ///
+    /// A [`Position`] alone does not identify a base, and every consumer of this one
+    /// compares it across samples and across contigs: the merge's k-way walk keys on it
+    /// (`LocusCloser`) and so does the observation cache, which must know that a later
+    /// contig lies beyond every position of the one before it.
+    pub fn start_position(&self) -> GenomePosition {
+        GenomePosition {
+            contig: self.region.contig,
+            position: self.region.start,
+        }
+    }
+
+    /// The last base this observation covers, genome-wide — [`reach`](Self::reach) with
+    /// its contig, and the sibling of [`start_position`](Self::start_position).
+    pub fn reach_position(&self) -> GenomePosition {
+        GenomePosition {
+            contig: self.region.contig,
+            position: self.reach(),
+        }
     }
 
     /// How many reads here showed something other than the reference — the number the
