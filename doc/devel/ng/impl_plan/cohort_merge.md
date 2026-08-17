@@ -151,7 +151,7 @@ from `reference_bases`. Tests: a narrower SNP inside a deletion's span projects 
 insertion's reference span stays its anchor base.
 *Depends:* A4. *Source:* [spec](../spec/cohort_merge.md) §4.2.
 
-☐ **B2 — unification into one allele table.** Identical projections become one allele, the
+✅ **B2 — unification into one allele table.** Identical projections become one allele, the
 reference among them. **Own commit, do not bundle.** The silent failure is the opposite of a
 crash: one variant written two ways becomes two half-supported alleles, which reads as a noisy
 site. Test a deletion presented at two placements — it must unify, and the test must state that it
