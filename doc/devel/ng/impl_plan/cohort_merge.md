@@ -92,7 +92,7 @@ Nothing here needs a cache, an organiser, or a thread. Every test fabricates obs
 that is what says the move changed nothing.
 *Depends:* —. *Source:* [arch](../arch/cohort_merge.md) §2.
 
-☐ **A3 — the reach walk, closing loci only.** `LocusCloser` over per-sample cursors: argmin across
+✅ **A3 — the reach walk, closing loci only.** `LocusCloser` over per-sample cursors: argmin across
 their heads, extend the reach, close when the next position falls beyond it. No verdicts yet —
 every closed locus comes out. Tests: a SNP at 10 and a SNP at 11 are two loci; a deletion at 10
 reaching 14 and a SNP at 12 are one; a late widening pulls in a following observation without a
