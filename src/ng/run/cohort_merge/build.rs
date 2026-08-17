@@ -884,17 +884,20 @@ pub struct SupportedAllele {
 /// Rounded once per allele rather than per read, so the counts stay as close to whole reads
 /// as the division allows.
 ///
-/// **One row per allele pools the read groups, and that ends a cross the mint went out of
-/// its way to keep.** A sample's reads at one allele may come from several read groups, and
-/// `SequenceObservation` keeps them apart deliberately — "a per-chemistry model needs the
-/// allele × group cross **with its quality moments**"
-/// ([`locus_generation/mod.rs`](../../locus_generation/mod.rs)). Nothing downstream of the
-/// merge asks for that cross today: the per-library error rate is fitted from the census,
-/// which reads the records rather than these observations
-/// (`spec/parameter_prepass_generic.md`). The architecture's own sketch pools them too
-/// (arch §4, `per_allele: Vec<SequenceObservation>`, one entry per allele), so this is where
-/// the loss became visible rather than where it was decided — and if a later step wants the
-/// cross back, the shape is one row per `(allele, read group)`, which folds to this one.
+/// **One row per allele pools the read groups, and the STR path will want them apart again**
+/// (the owner, at Checkpoint C). A sample's reads at one allele may come from several read
+/// groups, and `SequenceObservation` keeps them apart deliberately — "a per-chemistry model
+/// needs the allele × group cross **with its quality moments**"
+/// ([`locus_generation/mod.rs`](../../locus_generation/mod.rs)). **Stutter is fitted per read
+/// group**, so an STR locus called from a pooled row would be scored against a stutter rate
+/// that belongs to no group in particular.
+///
+/// It is pooled here anyway, for now, and deliberately: the architecture's own sketch pools
+/// them (arch §4, `per_allele: Vec<SequenceObservation>`, one entry per allele), nothing in
+/// the generic path needs the cross, and the shape that restores it is one row per
+/// `(allele, read group)`, which folds to this one — so the step that needs it can add it
+/// without unpicking anything. **Whoever brings the STR path through this merge owes that
+/// change.**
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AlleleSupport {
     /// How many of the sample's reads showed this allele. **Exact** — every read is named,
