@@ -25,6 +25,7 @@
 
 pub mod build;
 pub mod close;
+pub mod serial;
 
 use std::num::NonZeroU32;
 

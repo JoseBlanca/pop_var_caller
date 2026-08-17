@@ -1192,10 +1192,18 @@ struct ReadSighting {
 /// read's presence at the sample's own records inside the locus:
 ///
 /// - **A read named at every one of them** showed something at each, and those somethings
-///   are composed in coordinate order into one allele. The ground between two records —
-///   where this sample minted nothing, because none of its reads departed from the
-///   reference there — is filled from the locus's reference, which is what "this sample
-///   had nothing to say here" means.
+///   are composed in coordinate order into one allele, with any ground between two records
+///   filled from the locus's reference.
+///
+///   **That filling is unreachable on the generic path, and the reason is worth knowing.**
+///   The generic mint writes a record at *every position a read covered*, not only where a
+///   read departed from the reference — measured on minted records in
+///   `serial.rs`'s `a_cohort_observation_is_built_from_minted_observations`, where a
+///   thirty-base read yields thirty records. So a gap in a sample's records is ground its
+///   reads did not cover, and a read named at two records is named at every record between
+///   them: there is nothing left to fill. The code fills it anyway, because this walk does
+///   not depend on which generator minted its input, and a mint that recorded only departures
+///   would need it.
 /// - **A read missing from any one of them is removed**, whatever the reason. It may never
 ///   have covered that position; a depth cap may have discarded it there, the cap acting
 ///   per position and leaving no identities (`reads_discarded_by_cap`); or it may have been

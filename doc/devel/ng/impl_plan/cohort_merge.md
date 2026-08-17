@@ -174,10 +174,10 @@ reference-only support.
 
 ### Milestone C — one builder, serially, over the whole genome
 
-☐ **C1 — `build_region`.** Walk, judge, assemble; return the survivors and the failed spans.
+✅ **C1 — `build_region`.** Walk, judge, assemble; return the survivors and the failed spans.
 *Depends:* B3. *Source:* [arch](../arch/cohort_merge.md) §4.
 
-☐ **C2 — a serial driver, and it becomes the oracle.** One builder, no cache, no organiser, reading
+✅ **C2 — a serial driver, and it becomes the oracle.** One builder, no cache, no organiser, reading
 observations straight from a source over the whole analysed stretch. Its output is what every later
 milestone must reproduce.
 *Depends:* C1. *Source:* [spec](../spec/cohort_merge.md) §15's partition-invariance oracle.
