@@ -69,9 +69,22 @@ stage that ran on one thread in production and was the wall floor there.
   `VcfWriter`'s reorder map
   ([`vcf_writer.rs:162-176`](../../../../src/var_calling/vcf_writer.rs)).
 
-**One decision is still open and it blocks milestone B, not milestone A.** Spec §14 question 2 —
-whether a sample's two observations inside one locus combine into one compound allele, and on what
-evidence. It must be ruled on before B2. A1 to A4 do not touch it.
+**Spec §14 question 2 is ruled on — the owner, 2026-08-17 — and the ruling adds a step.** The
+question was what a sample's allele is when it has two separate changes inside one cohort locus.
+The answer is per read, and it admits no third case:
+
+> **Either we know the read covered the whole locus, and its allele is elongated with what it
+> showed there; or we know it did not cover it, and it is removed as evidence. Not being able to
+> decide which is an error that must never happen.**
+
+**Today that third case is the ordinary one**, which is why the ruling adds B0 below: a read that
+agreed with the reference is given no chain id
+([`open_record.rs:483`](../../../../src/ng/locus_generation/pileup/open_record.rs) — *"a chain id
+marks which haplotype a read came from, and the reference is the default — a default needs no
+tag"*), so at a second position *"this read covered it and agreed"* and *"this read never reached
+it"* are the same absence. **This is a departure from production**, which drops the ids of its REF
+bucket for the same reason ng did; the owner accepts its cost in memory and in the per-sample
+files.
 
 ---
 
@@ -110,7 +123,28 @@ meaning "ground the caller refused". Assert both verdicts on a locus that qualif
 
 ### Milestone B — assembling a survivor
 
-**B2 needs spec §14 question 2 ruled on.** Do not start it before that.
+**B2 rests on B0**, which is upstream of this module and is what makes the owner's ruling
+decidable at all.
+
+✅ **B0 — every observation carries the ids of the reads behind it, the reference-matching ones
+included.** The generic mint records a chain id only for a read that disagreed with the reference
+([`open_record.rs:936-954`](../../../../src/ng/locus_generation/pileup/open_record.rs)); it must
+record one for every read it folds, so that a read's presence at a position is a fact the merge can
+read. **What it buys is the ruling above**: with ids everywhere, a read's id at every position of a
+locus says it covered the locus, and its absence says it did not — the two states the caller is
+allowed to be in.
+**Two things this step must also settle, or the "must never happen" error fires on real data:**
+*(a)* the reads a **depth cap** discarded at a position are counted and not identified
+([`SampleLocusObservations::reads_discarded_by_cap`](../../../../src/ng/locus_generation/mod.rs)),
+and the cap acts per position, so a read counted at one position and capped at the next is absent
+there for a reason that is not coverage — the cap must leave the identities it dropped, and such a
+read is removed as evidence rather than elongated, since what it showed was never recorded;
+*(b)* the **STR path** records no ids at all and needs none — an STR locus is one record, so
+[`ReadWitness`](../../../../src/ng/locus_generation/witness.rs) already says whether a read spanned
+it — and B0 should say so rather than leave a reader to infer that the rule is undecidable there.
+*Cost, accepted by the owner:* one identifier per read per position, genome-wide, in memory and in
+the per-sample files. *Depends:* —. *Source:* the owner's ruling above; spec §14 Q2, which should
+be rewritten to carry it.
 
 ✅ **B1 — projection onto the locus span.** Each member's sequence widened to the full span, padded
 from `reference_bases`. Tests: a narrower SNP inside a deletion's span projects to the span; an
@@ -122,7 +156,12 @@ reference among them. **Own commit, do not bundle.** The silent failure is the o
 crash: one variant written two ways becomes two half-supported alleles, which reads as a noisy
 site. Test a deletion presented at two placements — it must unify, and the test must state that it
 relies on left-alignment upstream.
-*Depends:* B1, and the §14 Q2 ruling. *Source:* [spec](../spec/cohort_merge.md) §4.2.
+**Under the owner's ruling a sample's alleles are derived per read**: what one read showed across
+the whole locus is one allele, a read that did not cover the whole locus is removed as evidence,
+and a read whose coverage cannot be decided is an error. At a one-position locus that is what
+projecting each observation on its own already gives; the two differ only where a locus spans
+several of a sample's records.
+*Depends:* B1, B0. *Source:* [spec](../spec/cohort_merge.md) §4.2 and the ruling above.
 
 ☐ **B3 — `CohortObservation` and `SampleSupport`.** Per sample, support against the allele table,
 moments summed where two of its own observations projected onto the same allele; support never

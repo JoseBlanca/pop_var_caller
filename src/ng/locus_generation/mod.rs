@@ -264,8 +264,27 @@ pub struct SequenceObservation {
     /// model consumes it, and it is a pure function of the read's start against the
     /// anchor, so a later consumer can re-derive it without changing the fold (spec §6).
     pub placed_left: u32,
-    /// Phase-chain ids of the reads folded here — what lets a later step chain
-    /// observations at neighbouring loci into a haplotype.
+    /// **The ids of every read folded here** — one per read, or one per read *pair* with
+    /// its mates collapsed onto a single id, and deduplicated, so this is a count of reads
+    /// only where no pair overlapped itself.
+    ///
+    /// It answers two questions, and the second is why the reference-matching reads are
+    /// named too (the owner's ruling of 2026-08-17). **Which haplotype a read came from**,
+    /// which is what lets a later step chain observations at neighbouring loci into one. And
+    /// **whether a read was here at all**: when a cohort locus spans several of a sample's
+    /// records, a read's allele over that locus is what it showed at each of them, so a read
+    /// that covered a position and agreed with the reference has to be told apart from one
+    /// that never reached it. Until the ruling those were the same absence, and the merge
+    /// could only invent a reference stretch the read never saw or throw the read away
+    /// (`doc/devel/ng/impl_plan/cohort_merge.md` B0).
+    ///
+    /// **An id names a read within one walk**, and a read that straddles the boundary
+    /// between two walked regions is met twice and named twice. Nothing downstream links a
+    /// read across such a boundary, because a segment is never cut and no locus crosses one
+    /// (`doc/devel/ng/spec/run_streaming.md` §4.3).
+    ///
+    /// Empty on the STR path, which does not phase and does not need to: an STR locus is one
+    /// record, so [`ReadWitness`] already says whether a read spanned it.
     pub chain_ids: Vec<ChainId>,
 }
 

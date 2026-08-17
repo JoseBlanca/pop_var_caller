@@ -108,9 +108,12 @@ struct PlainObservation {
     placed_left: u32,
     mapq_sum: u32,
     mapq_sum_sq: u64,
-    /// Filled only for reads that disagreed with the reference — the same rule
-    /// `read_agreed_with_reference` states, which for a one-base complete witness is
-    /// exactly `base != reference base`.
+    /// **The ids of every read folded here, whether it departed from the reference or
+    /// agreed with it** — the owner's ruling of 2026-08-17, whose reasons are on the field
+    /// this one fills
+    /// ([`SequenceObservation::chain_ids`](crate::ng::locus_generation::SequenceObservation::chain_ids)).
+    /// This lane used to fill it only for a read whose base differed, matching the general
+    /// path's old rule.
     chain_ids: Vec<ChainId>,
 }
 
@@ -309,9 +312,7 @@ pub(super) fn try_ordinary_column(
         observation.placed_left += u32::from(read.placed_left);
         observation.mapq_sum += mapq;
         observation.mapq_sum_sq += u64::from(mapq) * u64::from(mapq);
-        if read.base != ref_base {
-            observation.chain_ids.push(read.chain_id);
-        }
+        observation.chain_ids.push(read.chain_id);
     }
 
     // `finalise` sorts on `(bases, read_witness, read_group)`; one byte of bases and one

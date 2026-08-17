@@ -2504,10 +2504,18 @@ mod tests {
             );
             let from_fresh = walk_region(&mut fresh, query, stop_after);
 
-            assert_eq!(
-                from_reused, from_fresh,
-                "region {start}..={end}: a reused walker emitted different loci from a \
-                 fresh one"
+            // **Up to what the chain ids are called** — a reused walker carries its
+            // allocator's counter forward from the previous region, so its ids start higher
+            // than a fresh walker's while every other byte is the same (the owner's ruling
+            // of 2026-08-17 put an id on every observation, which is what made the
+            // difference visible).
+            super::super::assert_same_evidence_up_to_chain_renaming(
+                &from_reused,
+                &from_fresh,
+                &format!(
+                    "region {start}..={end}: a reused walker emitted different loci from a \
+                     fresh one"
+                ),
             );
             // The two counters `fold_region_walk` sums region by region. A summary carried
             // across the boundary reads high here, and the caller would triangular-sum it.

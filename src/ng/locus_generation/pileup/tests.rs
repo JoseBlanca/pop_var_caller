@@ -624,7 +624,8 @@ fn paired_mates_with_overlapping_positions_share_chain_id() {
     //
     // The reads carry a non-reference base (`C` over a `A` reference)
     // so the shared chain id is observable on the ALT allele
-    // (`alleles[1]`): the walker drops REF (`alleles[0]`) chain ids.
+    // (`alleles[1]`): the reads here are non-reference, so that is where their ids are — and since
+    // 2026-08-17 the REF observation carries the ids of its own reads too.
     let fa = MockFasta::new("AAAAA");
     let (m1, m2) = paired_snp_reads("pair", 1, 1, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
@@ -712,7 +713,8 @@ fn paired_mates_within_lookup_window_share_chain_id_across_active_set_exit() {
     // 10 → 1 = 9 bp separation is well inside the default
     // `mate_lookup_window` of 10 000 bp.
     // Non-reference reads (`C` over `A`) so the shared chain id shows on
-    // the ALT allele; the walker drops REF (`alleles[0]`) chain ids.
+    // the ALT allele; the reads here are non-reference, so that is where their ids are — and since
+    // 2026-08-17 the REF observation carries the ids of its own reads too.
     let fa = MockFasta::new("AAAAAAAAAAAAAAAAAAAA");
     let (m1, m2) = paired_snp_reads("pair", 1, 10, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
@@ -742,7 +744,8 @@ fn paired_mates_separated_beyond_lookup_window_get_distinct_chain_ids() {
     // threshold (1 + 10_000 + 1 = 10 002 first hits it).
     let n = 12_010_usize;
     // Non-reference reads (`C` over `A`) so the chain ids show on the ALT
-    // allele; the walker drops REF (`alleles[0]`) chain ids.
+    // allele; the reads here are non-reference, so that is where their ids are — and since
+    // 2026-08-17 the REF observation carries the ids of its own reads too.
     let fa = MockFasta::new(&"A".repeat(n));
     let (m1, m2) = paired_snp_reads("pair", 1, 12_001, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
@@ -1155,7 +1158,8 @@ fn chain_ids_are_unique_and_monotonically_allocated() {
     // emitted records must be unique (no recycling) and the ids
     // appear in non-decreasing order of first reference position.
     // Reads carry a non-reference base (`C` over an `A` reference) so
-    // the ids land on ALT alleles — the walker drops REF chain ids.
+    // the ids land on ALT alleles — the reads here are non-reference, so that is where their ids are — and since
+    // 2026-08-17 the REF observation carries the ids of its own reads too.
     let fa = MockFasta::new("AAAAAAAAAA");
     let reads = vec![
         snp_read("a", 1, b"CC", &[30; 2]),
@@ -1190,7 +1194,8 @@ fn chain_ids_are_unique_and_monotonically_allocated() {
 fn paired_mates_share_a_single_chain_id() {
     // First and second mates of a pair must collapse to one chain id.
     // Non-reference reads (`C` over `A`) so the id lands on the ALT
-    // allele — the walker drops REF chain ids.
+    // allele — the reads here are non-reference, so that is where their ids are — and since
+    // 2026-08-17 the REF observation carries the ids of its own reads too.
     let fa = MockFasta::new("AAA");
     let (m1, m2) = paired_snp_reads("p", 1, 1, b"CCC", &[30; 3]);
     let records = drive_walker(vec![m1, m2], fa);
@@ -1217,7 +1222,8 @@ fn chain_ids_persist_across_chromosome_boundaries() {
     // walker's chain-id allocator must NOT reset `next_id` on
     // chromosome change.
     // Non-reference reads (`C` over `A`) so the ids land on ALT alleles —
-    // the walker drops REF chain ids.
+    // the reads here are non-reference, so that is where their ids are — and since
+    // 2026-08-17 the REF observation carries the ids of its own reads too.
     let fa = MockFasta::with_chromosomes(&["AA", "AA"]);
     let mut r0 = snp_read("a", 1, b"CC", &[30; 2]);
     r0.chrom_id = 0;

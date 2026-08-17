@@ -123,6 +123,175 @@ mod witnessed_ref;
 #[cfg(test)]
 pub(crate) mod tests;
 
+/// **Two walks emitted the same evidence, up to what their chain ids are called** — the
+/// comparison the region-tiling tests make since the owner's ruling of 2026-08-17 put an id
+/// on every observation.
+///
+/// **A chain id is allocated in admission order, so it is a label and not a name.** Two
+/// walks over the same ground admit the same reads in the same order *relative to each
+/// other* but not from the same starting number: splitting one region into two adjacent
+/// ones re-admits the reads that straddle the join, so everything after it shifts. Before
+/// the ruling the shift was invisible, because the reads that carry the loci over most of
+/// the genome agree with the reference and carried no id at all; now it shows in every
+/// observation, and byte-equality between two walks is the wrong test.
+///
+/// So this asserts the property that is actually meant: the evidence is identical, and
+/// **one consistent renaming** carries the first walk's ids onto the second's across
+/// everything it is given. A walk that merged two reads into one identity, split one into
+/// two, or renumbered a read partway through fails it.
+///
+/// **Give it one region at a time, because a renaming survives exactly one region.** A read
+/// that straddles a join is admitted in *both* regions of a split walk and allocated an id in
+/// each: on this module's tiling fixture the read that the whole-region walk calls 1
+/// throughout is 1 before position 50 and **3** after it. One read, two identities, and no
+/// way for the walk to know otherwise — it meets the read twice. Handing a whole split walk
+/// to one call would therefore fail; handing it region by region is what asserts that the
+/// renumbering happens **only** at the join, which is the property that matters. A map
+/// rebuilt per locus instead would accept a walk that renumbered its reads mid-region —
+/// measured: adding 100 to every id from position 60 on passed under that weaker form.
+///
+/// **That is safe for everything downstream, and only because of where walks are cut.** The
+/// cohort merge compares ids within one sample's stream inside one cohort locus; a locus
+/// never crosses a segment boundary, and a segment is never cut
+/// (`doc/devel/ng/spec/run_streaming.md` §4.3, the owner's rule of 2026-08-09), so the two
+/// identities of a straddling read always fall in different loci. A run that ever cut inside
+/// a segment would break the merge's read-linking silently, and this is the test that would
+/// stop saying so.
+#[cfg(test)]
+fn assert_same_evidence_up_to_chain_renaming(
+    left: &[crate::ng::locus_generation::SampleLocusObservations],
+    right: &[crate::ng::locus_generation::SampleLocusObservations],
+    what: &str,
+) {
+    use crate::ng::locus_generation::SampleLocusObservations;
+    use crate::pileup_record::ChainId;
+    use std::collections::HashMap;
+
+    let without_ids = |locus: &SampleLocusObservations| {
+        let mut stripped = locus.clone();
+        for observation in &mut stripped.observations {
+            observation.chain_ids.clear();
+        }
+        stripped
+    };
+    let left_without_ids: Vec<_> = left.iter().map(without_ids).collect();
+    let right_without_ids: Vec<_> = right.iter().map(without_ids).collect();
+    assert_eq!(
+        left_without_ids, right_without_ids,
+        "{what}: the evidence differs, chain ids aside",
+    );
+
+    // One map for the whole call, which is why the caller passes one region at a time.
+    let mut onto: HashMap<ChainId, ChainId> = HashMap::new();
+    let mut back: HashMap<ChainId, ChainId> = HashMap::new();
+    for (left_locus, right_locus) in left.iter().zip(right) {
+        for (left_observation, right_observation) in left_locus
+            .observations
+            .iter()
+            .zip(&right_locus.observations)
+        {
+            assert_eq!(
+                left_observation.chain_ids.len(),
+                right_observation.chain_ids.len(),
+                "{what}: {} observations name a different number of reads",
+                left_locus.region,
+            );
+            for (&left_id, &right_id) in left_observation
+                .chain_ids
+                .iter()
+                .zip(&right_observation.chain_ids)
+            {
+                assert_eq!(
+                    *onto.entry(left_id).or_insert(right_id),
+                    right_id,
+                    "{what}: at {} chain id {left_id} stands for two different reads",
+                    left_locus.region,
+                );
+                assert_eq!(
+                    *back.entry(right_id).or_insert(left_id),
+                    left_id,
+                    "{what}: at {} two reads collapsed onto chain id {right_id}",
+                    left_locus.region,
+                );
+            }
+        }
+    }
+}
+
+/// The comparison above is a test's only guard against a walk that renumbers its reads, so
+/// it is itself tested: **it has to reject a renaming that changes partway through.**
+///
+/// Written because the first version rebuilt its map per locus, which accepts exactly that —
+/// measured on the tiling fixture, where adding 100 to every id from position 60 on passed.
+#[cfg(test)]
+mod chain_renaming_tests {
+    use crate::ng::locus_generation::{
+        LocusKind, ReadWitness, SampleLocusObservations, SequenceObservation,
+    };
+    use crate::ng::types::{ContigId, GenomeRegion, Position, ReadGroupId};
+    use crate::pileup_record::ChainId;
+
+    /// One position covered by one read, named `chain`.
+    fn locus_named(position: u64, chain: ChainId) -> SampleLocusObservations {
+        SampleLocusObservations {
+            region: GenomeRegion {
+                contig: ContigId(0),
+                start: Position(position),
+                end: Position(position),
+            },
+            reference_bases: Box::from(&b"A"[..]),
+            observations: vec![SequenceObservation {
+                bases: Box::from(&b"A"[..]),
+                read_witness: ReadWitness::Complete,
+                read_group: ReadGroupId(0),
+                num_obs: 1,
+                num_fwd: 1,
+                q_sum: 0.0,
+                mapq_sum: 60,
+                mapq_sum_sq: 3600,
+                placed_left: 0,
+                chain_ids: vec![chain],
+            }],
+            reads_without_observation: 0,
+            reads_discarded_by_cap: 0,
+            kind: LocusKind::Generic,
+        }
+    }
+
+    /// One read across two positions, called 1 by one walk and 7 by the other, is the same
+    /// read consistently — which is what the two walks of the tiling tests actually differ by.
+    #[test]
+    fn a_renaming_that_holds_throughout_is_accepted() {
+        let one_walk = [locus_named(10, 1), locus_named(11, 1)];
+        let another = [locus_named(10, 7), locus_named(11, 7)];
+
+        super::assert_same_evidence_up_to_chain_renaming(&one_walk, &another, "consistent");
+    }
+
+    /// **The same read renumbered at the second position is refused.** That is one read
+    /// becoming two identities inside a stretch the caller said was one region, which is the
+    /// state the cohort merge cannot work in — and the per-locus map this helper started with
+    /// accepted it.
+    #[test]
+    #[should_panic(expected = "stands for two different reads")]
+    fn a_renaming_that_changes_partway_through_is_refused() {
+        let one_walk = [locus_named(10, 1), locus_named(11, 1)];
+        let renumbered = [locus_named(10, 7), locus_named(11, 100)];
+
+        super::assert_same_evidence_up_to_chain_renaming(&one_walk, &renumbered, "renumbered");
+    }
+
+    /// And two reads collapsing onto one identity is refused from the other side.
+    #[test]
+    #[should_panic(expected = "two reads collapsed onto chain id")]
+    fn two_reads_given_one_identity_are_refused() {
+        let one_walk = [locus_named(10, 1), locus_named(11, 2)];
+        let collapsed = [locus_named(10, 7), locus_named(11, 7)];
+
+        super::assert_same_evidence_up_to_chain_renaming(&one_walk, &collapsed, "collapsed");
+    }
+}
+
 /// **ng's, not a copy** — the textual check that the still-untouched copies are
 /// production's, from outside the files it checks (spec §3).
 #[cfg(test)]

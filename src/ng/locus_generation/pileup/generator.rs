@@ -1897,9 +1897,29 @@ mod tests {
         joined.extend(loci_of(&mut split, region(0, 51, 100), &reads));
 
         assert!(!expected.is_empty(), "the fixture must produce loci at all");
-        assert_eq!(
-            joined, expected,
-            "two adjacent regions must emit exactly what one region does"
+        // **Up to what the chain ids are called**, since the owner's ruling of 2026-08-17
+        // put an id on every observation: the split walk re-admits the read that straddles
+        // the join and allocates it a second id, so from position 51 its ids are 3, 4, 5
+        // where the whole walk says 1, 2, 3 — while every other byte is the same.
+        //
+        // **Compared region by region, which is what pins the renumbering to the join.** One
+        // renaming has to carry each region on its own: inside region 1 the ids *are* the
+        // whole walk's, and inside region 2 they are consistently its own. A single
+        // comparison over both could only say that some renaming exists somewhere, and would
+        // accept a walk that renumbered its reads in the middle of a region.
+        let second_region = expected
+            .iter()
+            .position(|locus| locus.region.start.get() > 50)
+            .expect("the fixture spans the join");
+        super::super::assert_same_evidence_up_to_chain_renaming(
+            &joined[..second_region],
+            &expected[..second_region],
+            "region 1..=50 of two adjacent regions must emit what one region does",
+        );
+        super::super::assert_same_evidence_up_to_chain_renaming(
+            &joined[second_region..],
+            &expected[second_region..],
+            "region 51..=100 of two adjacent regions must emit what one region does",
         );
         assert_eq!(
             whole.counts().records_outside_region,

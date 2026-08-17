@@ -1592,6 +1592,27 @@ fn comparable_exact_q_sum(locus: &SampleLocusObservations) -> SampleLocusObserva
     // production cannot state belongs.
     out.reads_without_observation = 0;
     out.reads_discarded_by_cap = 0;
+    // **The ids of a reference-matching observation are ng's alone since the owner's ruling
+    // of 2026-08-17**, which has ng name every read it folds while production still
+    // withholds the ids of its REF bucket (`allele_index == 0`). Cleared **on both sides by
+    // the same rule**, which is what keeps this projection symmetric: what stays compared is
+    // the ids of the observations that departed from the reference, where the two walkers
+    // record the same thing and an id going missing is still caught.
+    //
+    // **Complete observations only**, which is `matches_reference`'s own precondition: a
+    // partial's bases stop where its read's witness stopped, so comparing them against the
+    // whole locus's reference asks a question about bases the read never saw. A partial that
+    // agreed over what it *did* see therefore keeps its ids on both sides — visible only to
+    // the two consumers, both of which stand down when a partial witness is present.
+    let reference_bases = std::mem::take(&mut out.reference_bases);
+    for observation in &mut out.observations {
+        if observation.read_witness == ReadWitness::Complete
+            && observation.matches_reference(&reference_bases)
+        {
+            observation.chain_ids.clear();
+        }
+    }
+    out.reference_bases = reference_bases;
     out
 }
 
@@ -2133,10 +2154,25 @@ fn evidence_by_bases(locus: &SampleLocusObservations) -> BTreeMap<Vec<u8>, Locus
 /// ever be a *subset* of production's, and ng's id set only ever a **superset** of
 /// production's. An id production has that ng lacks means ng lost a read's identity, which
 /// no part of this change is allowed to do.
+///
+/// **Restricted to the observations that departed from the reference, since 2026-08-17.**
+/// ng now names every read it folds, the reference-matching ones included, while production
+/// still withholds the ids of its REF bucket — so over the whole locus the two sets can no
+/// longer be equal, and comparing them there would only be re-asserting that the rules
+/// differ. Over the departing observations they still record the same thing, and that is
+/// where the comparison keeps its teeth.
 fn locus_chain_ids(locus: &SampleLocusObservations) -> Vec<ChainId> {
     let mut ids: Vec<ChainId> = locus
         .observations
         .iter()
+        // Complete observations only, for `matches_reference`'s own reason: a partial's
+        // bases cover less than the locus's reference, so the comparison would be against
+        // bases its read never saw. A partial keeps its ids here, and the one consumer of
+        // this list stands down when a partial witness is present.
+        .filter(|observation| {
+            observation.read_witness != ReadWitness::Complete
+                || !observation.matches_reference(&locus.reference_bases)
+        })
         .flat_map(|observation| observation.chain_ids.iter().copied())
         .collect();
     ids.sort_unstable();
@@ -2192,6 +2228,31 @@ fn classify_locus(
          id, so a read's identity went missing on production's side of the comparison",
     );
     assert_reads_are_accounted_for(where_, ours, theirs);
+
+    // **Every read ng folded is named** — the owner's ruling of 2026-08-17, asserted on
+    // ng's own locus because production has no counterpart to compare against: it withholds
+    // the ids of its REF bucket, which is exactly what ng stopped doing. An observation with
+    // reads and no id is the state the cohort merge cannot work in, since a read's absence
+    // at a position would no longer mean it was not there.
+    // **Counted, not merely present.** "At least one id" is satisfied by a walk that names
+    // one read of a hundred, and a mutation keeping only the first id of every
+    // reference-matching observation passed the whole suite. The count is not exactly
+    // `num_obs`, because a read *pair* whose mates both reach this observation collapses onto
+    // one id — but no more than two can, so twice the ids must cover the reads.
+    if let Some(undernamed) = ours
+        .observations
+        .iter()
+        .find(|observation| 2 * observation.chain_ids.len() < observation.num_obs as usize)
+    {
+        panic!(
+            "{where_}: at {} an observation carries {} reads and only {} chain ids — every \
+             read folded is named since 2026-08-17, and at most two mates share an id: \
+             {undernamed:?}",
+            ours.region,
+            undernamed.num_obs,
+            undernamed.chain_ids.len(),
+        );
+    }
 
     // **A partial run has at least one position and lies inside its own locus** — an
     // assertion, not a divergence class, because a run outside its locus is not a
@@ -2269,20 +2330,20 @@ fn classify_locus(
         );
     }
 
-    // **Chain ids, where the two rules are the same rule.** ng drops a read's id when the
-    // read agreed with the reference across *everything it witnessed*; production drops it
-    // when the read's bucket is `alleles[0]`. Those coincide exactly when the read witnessed
-    // the whole footprint and both walkers put it in a bucket with the same bases — so that
-    // is where equality is asserted, and it is a stronger claim than the subset the old
-    // record-level comparison could make.
+    // **Chain ids, over the observations where the two walkers still record the same
+    // thing.** Since the owner's ruling of 2026-08-17 ng names every read it folds, while
+    // production still drops a read's id when its bucket is `alleles[0]`
+    // (`pileup/walker/open_record.rs`, `if state.allele_index == 0 { continue }`). So over a
+    // whole locus the two id sets can no longer be equal, and `locus_chain_ids` takes only
+    // the observations that departed from the reference — where the rules do coincide, and
+    // where an id going missing on ng's side is still caught.
     //
-    // Where the bases *do* differ the ids are part of that difference and not a separate
-    // fact: a read whose witnessed window happens to match the reference carries no id on
-    // ng's side while production, having folded it into a bucket its fill made non-REF,
-    // keeps one. An earlier draft asserted "ng's ids are a superset of production's" here
-    // and this census disproved it at `seed 0x5eed0001 case 22, locus 37` — the invariant
-    // held on the *record* comparison it was written for and does not survive the turn to a
-    // per-read rule.
+    // **This is the third rule this comparison has lived under, and the two earlier ones
+    // are why it is not simply a subset check.** An early draft asserted "ng's ids are a
+    // superset of production's" and this census disproved it at
+    // `seed 0x5eed0001 case 22, locus 37`; the rule that replaced it — ng withholding an id
+    // per read rather than per bucket — is the one the ruling has now deleted. Equality over
+    // the departing observations is what survives both.
     if !classes.partial_witness && bases_reconcile {
         assert_eq!(
             locus_chain_ids(ours),

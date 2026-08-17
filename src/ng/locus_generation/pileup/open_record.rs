@@ -469,18 +469,28 @@ pub(super) struct ObservationKey {
 pub(super) struct KeyedObservation {
     pub key: ObservationKey,
     pub support: AlleleSupportStats,
-    /// The chain ids of the reads in this observation — **absent for a read that agreed with the
-    /// reference across everything it witnessed** (spec §6).
+    /// **The chain ids of every read in this observation** — the reads that agreed with the
+    /// reference included (the owner's ruling of 2026-08-17).
     ///
-    /// Production's rule is positional: `allele_index == 0`, the REF bucket. That named a
-    /// unique observation while there was one observation per allele, and it no longer does — observations split by
-    /// witness and by read group, so a reference-matching read can sit in a *partial* observation
-    /// whose bases are a prefix of the reference bytes and never compare equal to them.
+    /// **What changed, and why the old rule could not survive.** Both production and ng
+    /// used to withhold the id of a read that matched the reference — production by
+    /// position (`allele_index == 0`, the REF bucket), ng per read, since observations
+    /// split by witness and by read group and a reference-matching read can sit in a
+    /// *partial* observation whose bases never compare equal to the reference's. The
+    /// argument for withholding was that an id marks which haplotype a read came from and
+    /// the reference is the default, so a default needs no tag.
     ///
-    /// So the rule is stated **per read** instead: it is decidable at fold time from what
-    /// the read is, it survives every split of the observations, and it reduces to production's
-    /// exactly when the observations are one-per-allele. A chain id marks which haplotype a read
-    /// came from, and the reference is the default — a default needs no tag.
+    /// **The cohort merge needs the id to answer a different question: was this read
+    /// here?** When a cohort locus spans several of a sample's records, a read's allele
+    /// over that locus is whatever it showed at each of them — and a read that agreed with
+    /// the reference at one of them had to be told apart from a read that never reached it.
+    /// Without an id those two are the same absence, and the merge would either invent a
+    /// reference stretch the read never saw or throw the read away
+    /// (`doc/devel/ng/impl_plan/cohort_merge.md` B0).
+    ///
+    /// **The cost is real and was accepted rather than avoided**: an identifier per read
+    /// per position, over the whole genome rather than at the positions where something
+    /// varies. It is a departure from production.
     pub chain_ids: Vec<ChainId>,
 }
 
@@ -759,71 +769,6 @@ impl OpenPileupRecord {
         self.pos.saturating_add(self.ref_span())
     }
 
-    /// Whether this read **agreed with the reference across everything it witnessed** — the
-    /// per-read form of production's `allele_index == 0` chain-id rule (spec §6).
-    ///
-    /// Production's rule is positional and unportable once observations split: a reference-matching
-    /// read that witnessed only part of the footprint sits in a *partial* observation whose bases
-    /// are a prefix of the reference bytes, so "the observation whose bases equal
-    /// `reference_bases`" no longer names it. Asking the question of the **read** instead
-    /// works at every split, and reduces to production's rule exactly when the observations are
-    /// one-per-allele: a complete witness that agreed everywhere *is* the REF bucket.
-    ///
-    /// The comparison is against the reference **over the positions the read witnessed**,
-    /// not the whole footprint — that is the entire difference. Note the two axes do not
-    /// have to line up: `bases` is in read coordinates and an insertion makes it longer
-    /// than the run it covers, which simply means it cannot equal the reference slice, and
-    /// the read keeps its id. Correct, and for the right reason.
-    ///
-    /// # A witness with a hole is never claimed to have agreed — decided at C3
-    ///
-    /// The question needs one slice of the reference to compare against, and a holed witness
-    /// does not name one. Comparing against the extent that *encloses* its runs would ask
-    /// whether the read's bases equal the reference **including the positions it was blind
-    /// to**, which is the fabrication this milestone removes, wearing a different hat. And
-    /// the runs cannot be compared one at a time either, for the reason spec §3.2 gives:
-    /// `bases` is in **read** coordinates, where an insertion adds bytes no locus position
-    /// accounts for and a deletion removes positions no byte does, so the two axes cannot be
-    /// indexed against each other.
-    ///
-    /// So a multi-run witness answers `false` — the read keeps its chain id. That is the
-    /// conservative direction (an id is added, never withheld), it holds
-    /// `chain_ids.len() <= num_obs`, and it is honest: a spliced read's allele string does
-    /// depart from the reference across the span it sits in. On DNA-seq it is also
-    /// unreachable — zero holed witnesses in 225 million event-folds (spec §8).
-    fn read_agreed_with_reference(&self, state: &FoldedReadState) -> bool {
-        let reference = &self.alleles[0].seq;
-        let mut runs = state.witnessed.runs();
-        if runs.len() != 1 {
-            return false;
-        }
-        let (start, end) = runs.next().expect("exactly one run, checked a line above");
-        let first = start.saturating_sub(self.pos) as usize;
-        // Half-open on the way in since C1, where the inclusive `RefSpan` needed a `+ 1`.
-        let past_last = (end.saturating_sub(self.pos) as usize).min(reference.len());
-        if first >= past_last {
-            return false;
-        }
-        // **The REF bucket answers this without looking at a byte, and it is the common
-        // case.** A read in bucket 0 has the record's own reference bytes as its allele, so
-        // the comparison below is `reference == reference[first..past_last]` — the same
-        // memory against a slice of itself. Two slices of equal length starting from the
-        // same buffer, one of them the whole of it, are equal exactly when the other is the
-        // whole of it too; and since `past_last <= reference.len()`, that is
-        // `first == 0 && past_last == reference.len()`. So the length test *is* the answer,
-        // and the byte compare after it can only confirm what the lengths already said.
-        //
-        // Worth writing out because it is most of the calls: nearly every read agrees with
-        // the reference, so nearly every read is in bucket 0, and `finalise` asks this once
-        // per folded read — ~113 M times over one whole-genome contig, each one a `memcmp`
-        // call for what is usually a single base (2.3 % of the walk at ~130×, profile
-        // 2026-08-04).
-        if state.allele_index == 0 {
-            return first == 0 && past_last == reference.len();
-        }
-        self.alleles[state.allele_index].seq == reference[first..past_last]
-    }
-
     /// Re-derive this record's observations **per read**, keyed on the full [`ObservationKey`].
     ///
     /// # Why per read, when the buckets already hold the totals
@@ -921,7 +866,6 @@ impl OpenPileupRecord {
                 }
             }
             let read_group = state.read_group;
-            let agreed_with_reference = self.read_agreed_with_reference(state);
             let existing = observations.iter().zip(&observation_alleles).position(
                 |(observation, &observation_allele)| {
                     observation_allele == state.allele_index
@@ -949,9 +893,11 @@ impl OpenPileupRecord {
                 }
             };
             add_contribution(&mut observation.support, &state.contribution);
-            if !agreed_with_reference {
-                observation.chain_ids.push(state.chain_id);
-            }
+            // **Every read folded here is named, whether it departed from the reference or
+            // agreed with it** — the owner's ruling of 2026-08-17, and the whole of the
+            // change: what a read's id is now used for is to say that it *was here*, and a
+            // read that agreed with the reference was here just as much as one that did not.
+            observation.chain_ids.push(state.chain_id);
         }
         for observation in &mut observations {
             observation.chain_ids.sort_unstable();
@@ -970,10 +916,10 @@ impl OpenPileupRecord {
     /// re-fold would come back to correct it, because the read may have expired in between
     /// (spec §4).
     ///
-    /// Chain ids are emitted per observation and **absent for a read that agreed with the reference
-    /// across everything it witnessed** — see
-    /// [`read_agreed_with_reference`](Self::read_agreed_with_reference) for why production's
-    /// positional rule does not survive observations that split.
+    /// Chain ids are emitted per observation and **name every read folded into it**, the
+    /// ones that agreed with the reference included — see
+    /// [`KeyedObservation::chain_ids`] for the ruling that changed and what the cohort
+    /// merge needs it for.
     ///
     /// `placed_start` is **gone**, as A1 said it would be: ng's stats never carried it, the
     /// `PileupRecord` boundary did, and this step removed that boundary. Nothing consumes
@@ -3934,53 +3880,6 @@ mod tests {
     // A4 — the witness resolved at `finalise`, against the final footprint.
     // -----------------------------------------------------------------
 
-    /// **A witness with a hole never counts as agreeing with the reference** — C3's one
-    /// design decision, and until this test nothing pinned it.
-    ///
-    /// The Milestone C review put the **pre-C3 body back verbatim** — compare the read's
-    /// bases against the reference over the extent that *encloses* its runs — and the whole
-    /// suite stayed green: `300 passed; 0 failed`. The two walk-level fixtures that produce a
-    /// holed witness cannot tell the two readings apart, because their concatenated bases are
-    /// *shorter* than the enclosing slice, so both answer `false` for different reasons. This
-    /// fixture is built so the two readings **disagree**.
-    ///
-    /// The read witnessed positions 100 and 102 of a three-base record and sits in a bucket
-    /// holding `ACG`, the whole reference slice. The enclosing reading compares `ACG` against
-    /// `reference[0..3]`, finds them equal, and withholds the read's chain id **on the
-    /// strength of the base at 101 it never saw** — the fabrication this milestone removes,
-    /// wearing a different hat. The per-run rule answers that it cannot tell, and the read
-    /// keeps its id.
-    #[test]
-    fn a_witness_with_a_hole_never_counts_as_agreeing_with_the_reference() {
-        let record = OpenPileupRecord::new(0, 100, b"ACG".to_vec());
-        let state = |witnessed: WitnessedRefPositions| FoldedReadState {
-            // The REF bucket, so the bases compared are the reference's own three bytes.
-            allele_index: 0,
-            contribution: AlleleSupportStats::default(),
-            chain_id: 1,
-            read_group: ReadGroupId(0),
-            witnessed,
-        };
-
-        let holed = state(
-            WitnessedRefPositions::from_half_open_runs([(100, 101), (102, 103)])
-                .expect("two runs with 101 between them"),
-        );
-        assert!(
-            !record.read_agreed_with_reference(&holed),
-            "the read said nothing about 101, so it cannot have agreed with the reference \
-             there — and `ACG` equalling the enclosing slice is not evidence that it did",
-        );
-
-        let contiguous =
-            state(WitnessedRefPositions::from_half_open_runs([(100, 103)]).expect("one run"));
-        assert!(
-            record.read_agreed_with_reference(&contiguous),
-            "the same bases over one run *do* agree — so this test is about the hole and \
-             not about the bytes",
-        );
-    }
-
     /// A witness that tiles the footprint is a complete one.
     #[test]
     fn witness_of_a_witness_covering_the_whole_footprint_is_complete() {
@@ -4568,30 +4467,25 @@ mod tests {
         );
     }
 
-    /// **A read that departed from the reference keeps its chain id even on a partial observation,
-    /// and one that agreed carries none even when its observation is not the REF observation** — the
-    /// per-read rule B2 replaced production's positional one with.
+    /// **Every read folded into an observation is named there, the ones that agreed with
+    /// the reference included** — the owner's ruling of 2026-08-17, which reverses the rule
+    /// this test was written for.
     ///
-    /// Asserted nowhere before this, and the reason is structural rather than a missing
-    /// fixture: replacing the whole rule with production's `allele_index == 0` left 158/158
-    /// green at 10,000 cases, and so did making every partial observation lose its ids. The
-    /// differential compares chain ids by equality only on the complete-reads fixture, where
-    /// the two rules coincide by construction, and the census that does see partial observations
-    /// never looks at ids at all.
+    /// **This is the fixture where the two rules disagree**, which is why it is the one that
+    /// changed. `shortie` matched positions 5..=7 and stopped, so it sits in a *partial*
+    /// observation whose bases equal the reference over what it saw: under the old rule it
+    /// carried no id, because it had departed from nothing. `deleter` witnessed the whole
+    /// footprint through a deletion, so it departed and carried one under either rule.
     ///
-    /// `shortie` matched positions 5..=7 and stopped, so its observation is a *partial* one whose
-    /// bases equal the reference over what it saw — production would give it an id, and ng
-    /// must not. `deleter` witnessed the whole footprint through a deletion, so its bases
-    /// are not the reference and it keeps its id.
+    /// What the id now answers is not *which haplotype* but *was this read here* — the
+    /// question the cohort merge asks when a locus spans several of a sample's records, and
+    /// the one an absent id used to make unanswerable (`KeyedObservation::chain_ids`).
     #[test]
-    fn only_the_reads_that_departed_from_the_reference_carry_a_chain_id() {
+    fn every_read_folded_carries_its_chain_id_including_one_that_matched_the_reference() {
         let (open, active) = same_bases_different_witness();
         let record = open.records.get(&7).expect("the record at 7");
         let observations = record.keyed_observations(record.footprint_end_exclusive());
 
-        // The shortie agreed with the reference across its one witnessed position; the
-        // deleter's fourteen-position witness emits a single base that is not those
-        // fourteen reference bytes.
         let shortie_observation = observations
             .iter()
             .find(|observation| matches!(observation.key.read_witness, ReadWitness::Partial { .. }))
@@ -4604,19 +4498,19 @@ mod tests {
             })
             .expect("the deleter's complete observation");
         assert_eq!(
-            shortie_observation.chain_ids,
-            // Spelled out because `serde_json` (pulled in by the repeat catalog's parquet
-            // dependency) adds `impl PartialEq<Value> for u64`, so a bare `Vec::new()` no
-            // longer infers its element type here.
-            Vec::<ChainId>::new(),
-            "the shortie agreed with the reference across everything it witnessed, so it \
-             carries no id — production's positional rule would have given it one, because \
-             its partial observation is not `alleles[0]`"
+            shortie_observation.chain_ids.len(),
+            1,
+            "the shortie agreed with the reference across everything it witnessed, and is \
+             named anyway — under the old rule this list was empty",
         );
         assert_eq!(
             deleter_observation.chain_ids.len(),
             1,
-            "the deleter deleted thirteen reference bases, so it departed and keeps its id"
+            "the deleter deleted thirteen reference bases, so it departed and is named too"
+        );
+        assert_ne!(
+            shortie_observation.chain_ids, deleter_observation.chain_ids,
+            "two reads, two ids — the point of naming them",
         );
         let _ = read_id_of(&active, "deleter");
     }
