@@ -2081,7 +2081,11 @@ impl CensusWriter {
                 continue;
             }
             for observation in locus.complete_observations() {
-                if *observation.bases == *locus.reference_bases {
+                // The one definition of "non-reference", shared with the cohort merge
+                // rather than spelled here — two spellings of one test are two things
+                // that can disagree. Complete observations only, which is what lets the
+                // whole locus's reference bases be the right stretch to compare against.
+                if observation.matches_reference(&locus.reference_bases) {
                     continue;
                 }
                 let allele = match &*observation.bases {

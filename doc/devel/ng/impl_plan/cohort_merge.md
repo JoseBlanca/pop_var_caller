@@ -86,7 +86,7 @@ Nothing here needs a cache, an organiser, or a thread. Every test fabricates obs
 = 50, `DEFAULT_MIN_ALT_OBS` = 2, `DEFAULT_COHORT_LOCUS_BUILDER_REGIONS_LEN` = 20.
 *Depends:* —. *Source:* [arch](../arch/cohort_merge.md) §1.
 
-☐ **A2 — the two derivations, on the observation types.** `SequenceObservation::matches_reference`,
+✅ **A2 — the two derivations, on the observation types.** `SequenceObservation::matches_reference`,
 `SampleLocusObservations::reach` and `::non_reference_reads`; then move
 `CensusWriter::add_generic` onto the predicate. **The census's existing tests must stay green** —
 that is what says the move changed nothing.

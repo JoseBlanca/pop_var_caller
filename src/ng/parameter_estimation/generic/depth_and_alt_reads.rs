@@ -79,7 +79,7 @@ pub fn count_whole_site(locus: &SampleLocusObservations, edges: &DepthBinEdges) 
 
     for observation in locus.complete_observations() {
         depth = add_support(depth, observation.num_obs, "depth");
-        if *observation.bases != *locus.reference_bases {
+        if !observation.matches_reference(&locus.reference_bases) {
             alt_reads = add_support(alt_reads, observation.num_obs, "alternative reads");
         }
     }
@@ -231,7 +231,7 @@ fn accumulate_by_read_group(locus: &SampleLocusObservations, running: &mut ReadG
         };
         let entry = &mut running[at];
         entry.1 = add_support(entry.1, observation.num_obs, "depth");
-        if *observation.bases != *locus.reference_bases {
+        if !observation.matches_reference(&locus.reference_bases) {
             entry.2 = add_support(entry.2, observation.num_obs, "alternative reads");
         }
     }

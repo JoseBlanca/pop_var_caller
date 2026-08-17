@@ -26,7 +26,7 @@ use crate::ng::read::input::{IngestError, SampleReads};
 use crate::ng::ref_seq::RefSeqError;
 use crate::ng::region_typing::segment_criteria::{Motif, SsrSegment};
 use crate::ng::region_typing::{RegionKind, TypedRegion};
-use crate::ng::types::{GenomeRegion, ReadGroupId};
+use crate::ng::types::{GenomeRegion, Position, ReadGroupId};
 use crate::pileup_record::ChainId;
 
 /// One sample's locus: the stretch of genome it covers, and what that sample's reads
@@ -136,6 +136,72 @@ impl SampleLocusObservations {
             .iter()
             .filter(|obs| obs.read_witness == ReadWitness::Complete)
     }
+
+    /// The last reference base this observation covers.
+    ///
+    /// `region.end` on every well-formed observation, and named rather than read off the
+    /// field because the cohort merge groups by it: production's grouping arithmetic is
+    /// `pos + max(span, 1) − 1` (`reach`, `var_calling/cohort_integration.rs`), and
+    /// whoever compares ng's rule with production's should find one place where the two
+    /// agree rather than an open-coded expression at each use
+    /// (`doc/devel/ng/arch/cohort_merge.md` §2).
+    ///
+    /// **It agrees with production's answer on every region below the top of the
+    /// coordinate space, and it cannot overflow.** Production's own expression saturates
+    /// on both operations and cannot overflow either; what fails at the ceiling is
+    /// *reaching* it from a [`GenomeRegion`], because that needs the span and
+    /// [`GenomeRegion::len`] computes `end + 1` before subtracting — a debug panic at
+    /// `end == u64::MAX`, and a length of 0 in the release profile, which has overflow
+    /// checks off. The larger of the two ends is the same number on every input — `end`
+    /// whenever the region is well formed, `start` when it is not — and reaches it in one
+    /// comparison, with no span in between.
+    ///
+    /// **At the ceiling the two part company by one, and this form is the right one.**
+    /// Production saturates the addition before subtracting, so a one-base region at
+    /// `u64::MAX` reaches `u64::MAX − 1` under its expression and `u64::MAX` under this
+    /// one — and the last base of that region is `u64::MAX`. Pinned by
+    /// `tests::a_locus_at_the_coordinate_ceiling_reaches_its_own_end`, so nobody restores
+    /// "agreement" by reintroducing the arithmetic that panics.
+    ///
+    /// The inverted case is worth naming because [`GenomeRegion`] has public fields and
+    /// no constructor enforcing `start <= end`: reading `region.end` there would put an
+    /// observation's reach *before* its own first base, and a walk keyed on "does the
+    /// next position fall within the reach" would close every locus immediately.
+    pub fn reach(&self) -> Position {
+        self.region.end.max(self.region.start)
+    }
+
+    /// How many reads here showed something other than the reference — the number the
+    /// cohort merge's keep rule sums across a locus
+    /// (`doc/devel/ng/spec/cohort_merge.md` §4.3).
+    ///
+    /// **Counted over the [`Complete`](ReadWitness::Complete) observations only, and
+    /// that is forced by what a partial's bases are.** A partial's `bases` cover only the
+    /// stretch its read witnessed, so comparing them against this locus's whole
+    /// `reference_bases` would report a partial that saw less than the whole locus as
+    /// non-reference — including a read that agreed with the reference over every base it
+    /// actually saw. The census writer makes the same comparison over the same subset
+    /// (`parameter_estimation/joint/census.rs`, `add_generic`), which is what
+    /// [`SequenceObservation::matches_reference`] exists to keep in one place.
+    ///
+    /// The cost is that a variant witnessed only by partial reads does not reach the
+    /// keep threshold. Scoring a partial needs a censored likelihood that does not exist
+    /// yet (`spec/locus_generation.md` §3), so this is where the line sits today.
+    ///
+    /// **The sum saturates, and it costs nothing here**: the only consumer compares the
+    /// total against `min_alt_obs`, default 2, so a total pinned at `u32::MAX` gives the
+    /// same verdict as the true one. The generic pre-pass panics on the same sum instead
+    /// (`parameter_estimation/generic/depth_and_alt_reads.rs`) because its number is a
+    /// histogram key, where a wrapped count would be scored as a shallow site.
+    ///
+    /// The pre-pass counts this same quantity per site under the name `alt_reads`.
+    /// *Non-reference read* is the spec's word (`spec/cohort_merge.md` §1.3); *alt*
+    /// survives in `min_alt_obs`, which is production's parameter name.
+    pub fn non_reference_reads(&self) -> u32 {
+        self.complete_observations()
+            .filter(|obs| !obs.matches_reference(&self.reference_bases))
+            .fold(0u32, |total, obs| total.saturating_add(obs.num_obs))
+    }
 }
 
 /// One distinct `(bases, witness, read group)` the reads showed at a locus, with the
@@ -201,6 +267,48 @@ pub struct SequenceObservation {
     /// Phase-chain ids of the reads folded here — what lets a later step chain
     /// observations at neighbouring loci into a haplotype.
     pub chain_ids: Vec<ChainId>,
+}
+
+impl SequenceObservation {
+    /// Whether these reads showed the reference's own bases over `reference_bases`.
+    ///
+    /// **The one place the comparison is written** — a byte comparison, which is all it
+    /// has ever been, but not open-coded at each use, because two spellings of one test
+    /// are two things that can disagree (`doc/devel/ng/arch/cohort_merge.md` §2). Its
+    /// callers each keep their own sum: the census writer needs the answer per read
+    /// group, the generic pre-pass needs a per-site count beside a depth, and the cohort
+    /// merge needs a flat total per locus. The predicate is the shared thing; the sums
+    /// are not.
+    ///
+    /// **It is equality, not containment.** A deletion's bases are frequently a prefix of
+    /// the locus's reference — `AC` where the reference reads `ACGT` — and that is a
+    /// different sequence, not a shorter spelling of the same one. Pinned by
+    /// `tests::matches_reference_compares_the_bases_it_is_given`, which is there because
+    /// a `starts_with` in place of the `==` passed every other test in the crate.
+    ///
+    /// **Raw bytes, so both sides must already be canonical.** ng's reference fetch
+    /// uppercases ACGT and folds everything else to N (`ref_seq.rs`), so a soft-masked
+    /// reference base cannot come back lowercase and read as a variant — but that is a
+    /// dependency this predicate carries rather than enforces, and it would be silent if
+    /// it broke.
+    ///
+    /// **What still belongs to a model is which observations to ask about.** The generic
+    /// pre-pass decides what counts as an alternative read for its fit — the subset, the
+    /// depth cap, the read-group grain (`parameter_estimation/generic/depth_and_alt_reads.rs`,
+    /// `arch/parameter_prepass_generic.md` §2.3) — and this predicate does not touch any
+    /// of that. It answers one question about one observation.
+    ///
+    /// **`reference_bases` must cover the same stretch these `bases` do.** For a
+    /// [`Complete`](ReadWitness::Complete) observation that is the whole locus's
+    /// [`reference_bases`](SampleLocusObservations::reference_bases); for a
+    /// [`Partial`](ReadWitness::Partial) one it is not, since a partial's bases stop
+    /// where its read's witness stopped, and handing it the whole locus's reference
+    /// would report a read that matched everything it saw as non-reference. Callers that
+    /// cannot supply the matching stretch should stay on
+    /// [`complete_observations`](SampleLocusObservations::complete_observations).
+    pub fn matches_reference(&self, reference_bases: &[u8]) -> bool {
+        *self.bases == *reference_bases
+    }
 }
 
 /// The kind of locus, plus whatever that kind adds to the shared evidence fields.
@@ -1598,5 +1706,259 @@ mod tests {
             .collect();
         assert_eq!(complete, vec![&b"ATATAT"[..], &b"ATGTAT"[..]]);
         assert_eq!(l.complete_observations().count(), 2);
+    }
+
+    // ---------------------------------------------------------------
+    // The two derivations the cohort merge walks on
+    // (`doc/devel/ng/arch/cohort_merge.md` §2).
+    // ---------------------------------------------------------------
+
+    /// A locus with reference bases, which the depth fixtures above do not need.
+    fn locus_over_reference(
+        region: GenomeRegion,
+        reference_bases: &[u8],
+        observed: Vec<SequenceObservation>,
+    ) -> SampleLocusObservations {
+        SampleLocusObservations {
+            reference_bases: Box::from(reference_bases),
+            ..locus(region, observed)
+        }
+    }
+
+    /// Production's grouping arithmetic, copied from `reach` in
+    /// `var_calling/cohort_integration.rs` — what [`SampleLocusObservations::reach`] has
+    /// to agree with, since the cohort merge's chaining rule is production's. It
+    /// saturates on both operations, exactly as production's does.
+    fn production_reach(pos: u64, span: u64) -> u64 {
+        pos.saturating_add(span.max(1)).saturating_sub(1)
+    }
+
+    /// The reach is the locus's last base, and it is production's answer — checked
+    /// against production's own arithmetic rather than against a copy of the result, on
+    /// the two shapes the merge sees: a SNP, which covers one base, and a deletion,
+    /// which covers several.
+    #[test]
+    fn the_reach_agrees_with_production_arithmetic() {
+        let snp = locus_over_reference(region(10, 10), b"A", vec![]);
+        assert_eq!(snp.reach(), Position(10));
+        assert_eq!(
+            snp.reach().get(),
+            production_reach(snp.region.start.get(), snp.region.len())
+        );
+
+        let deletion = locus_over_reference(region(10, 14), b"ACGTA", vec![]);
+        assert_eq!(deletion.reach(), Position(14));
+        assert_eq!(
+            deletion.reach().get(),
+            production_reach(deletion.region.start.get(), deletion.region.len())
+        );
+    }
+
+    proptest::proptest! {
+        /// The agreement is a property of the whole well-formed domain, not of the two
+        /// points the fixture above names — both of which start at 10. A `reach` that
+        /// happened to be right at 10–10 and 10–14 and wrong at `start == 0`, or over a
+        /// long span, passes those and fails this.
+        ///
+        /// Bounded below the ceiling deliberately: that is the one documented input where
+        /// the two forms differ, and where production's cannot be evaluated from a
+        /// `GenomeRegion` at all.
+        #[test]
+        fn the_reach_agrees_with_production_over_every_well_formed_region(
+            start in 0u64..1_000_000,
+            span in 1u64..1_000,
+        ) {
+            let well_formed = region(start, start + span - 1);
+            let l = locus_over_reference(well_formed, b"", vec![]);
+            proptest::prop_assert_eq!(
+                l.reach().get(),
+                production_reach(start, well_formed.len())
+            );
+        }
+    }
+
+    /// **A locus at the top of the coordinate space answers instead of panicking**, which
+    /// is what keeps the merge's arithmetic on the saturating side of spec §11's trap.
+    ///
+    /// **This is the one input where the two ancestors part company**, and it parts them
+    /// in two ways. `GenomeRegion::len` computes `end + 1` before subtracting, so
+    /// `region(u64::MAX, u64::MAX).len()` panics with "attempt to add with overflow" in a
+    /// debug build — a case that method's doc does not cover either way, since it
+    /// promises saturation for an *inverted* region and says nothing about the ceiling.
+    /// And production's expression, handed the span it would have, saturates the addition
+    /// before subtracting and lands one short of the true last base.
+    ///
+    /// The assertion below is what stops someone restoring "agreement" by reintroducing
+    /// arithmetic that both panics and answers `u64::MAX − 1` for a base at `u64::MAX`.
+    #[test]
+    fn a_locus_at_the_coordinate_ceiling_reaches_its_own_end() {
+        let at_the_ceiling = locus_over_reference(region(u64::MAX, u64::MAX), b"A", vec![]);
+        assert_eq!(at_the_ceiling.reach(), Position(u64::MAX));
+
+        // Production's form, given the one-base span it would have here, is short by one.
+        assert_eq!(production_reach(u64::MAX, 1), u64::MAX - 1);
+    }
+
+    /// **An inverted region does not put the reach behind the start.** `GenomeRegion`'s
+    /// fields are public and nothing enforces `start <= end`, and a walk keyed on "does
+    /// the next position fall within the reach" would close every locus at once if one
+    /// ever answered with a base before its own first. Reading `region.end` gives 4 here;
+    /// production's expression gives the start, and so does this.
+    #[test]
+    fn an_inverted_region_reaches_its_own_start() {
+        let inverted = locus_over_reference(region(10, 4), b"", vec![]);
+        assert_eq!(inverted.reach(), Position(10));
+        assert!(inverted.reach() >= inverted.region.start);
+
+        // `len()` saturates to 0 here and production's `span.max(1)` puts it back to 1,
+        // so the two forms land on the start together — asserted, not claimed in prose.
+        assert_eq!(
+            inverted.reach().get(),
+            production_reach(inverted.region.start.get(), inverted.region.len())
+        );
+    }
+
+    /// The predicate is a byte comparison over the stretch it is handed — the same test
+    /// the census writer used to spell inline.
+    ///
+    /// **Bases of a different length from the reference are what earn this test its
+    /// keep**, in both directions. Two containment tests — the shape a reader reaching
+    /// for "handle a partial" writes — pass everything else in the crate: replacing the
+    /// `==` with `reference_bases.starts_with(&self.bases)`, or with
+    /// `self.bases.starts_with(reference_bases)`, left every test in this module and
+    /// every test in the census green before the three assertions below were added,
+    /// because no fixture anywhere compared bases of a different length against the
+    /// reference. A deletion's bases are shorter and an insertion's longer,
+    /// which is the whole indel half of what this caller is for, and
+    /// `non_reference_reads` is what the merge's keep threshold sums — so either mutant
+    /// would have stopped an indel counting, and dropped indel-only loci below the
+    /// threshold with nothing objecting.
+    #[test]
+    fn matches_reference_compares_the_bases_it_is_given() {
+        let reference = obs(b"ACGT", ReadWitness::Complete, 3);
+        let snp = obs(b"ACCT", ReadWitness::Complete, 2);
+        let deletion = obs(b"AT", ReadWitness::Complete, 1);
+
+        assert!(reference.matches_reference(b"ACGT"));
+        assert!(!snp.matches_reference(b"ACGT"));
+        assert!(!deletion.matches_reference(b"ACGT"));
+
+        // Equality, not containment, and both directions of it. `ACGT` starting with
+        // `AC` does not make `AC` the reference; `ACGTT` starting with `ACGT` does not
+        // make the insertion the reference either.
+        let trailing_deletion = obs(b"AC", ReadWitness::Complete, 1);
+        let insertion = obs(b"ACGTT", ReadWitness::Complete, 1);
+        let left_insertion = obs(b"TACGT", ReadWitness::Complete, 1);
+        assert!(!trailing_deletion.matches_reference(b"ACGT"));
+        assert!(!insertion.matches_reference(b"ACGT"));
+        assert!(!left_insertion.matches_reference(b"ACGT"));
+
+        // A different stretch is a different question, and the predicate answers the one
+        // it was asked: the same bases match a reference that is those bases.
+        assert!(deletion.matches_reference(b"AT"));
+    }
+
+    /// The keep rule's input: reads that differ from the reference, summed, and reads
+    /// that agree contributing nothing however deep they are.
+    ///
+    /// The 40 reference reads are what makes this discriminating — an implementation
+    /// that summed every observation, or that inverted the predicate, would answer 45 or
+    /// 40 here rather than 5.
+    #[test]
+    fn non_reference_reads_sums_only_the_reads_that_differ() {
+        let l = locus_over_reference(
+            region(10, 13),
+            b"ACGT",
+            vec![
+                obs(b"ACGT", ReadWitness::Complete, 40),
+                obs(b"ACCT", ReadWitness::Complete, 3),
+                obs(b"AGGT", ReadWitness::Complete, 2),
+            ],
+        );
+        assert_eq!(l.non_reference_reads(), 5);
+
+        let quiet = locus_over_reference(
+            region(10, 13),
+            b"ACGT",
+            vec![obs(b"ACGT", ReadWitness::Complete, 40)],
+        );
+        assert_eq!(quiet.non_reference_reads(), 0);
+    }
+
+    /// **A partial is not counted, and the fixture says why.** This partial's read agreed
+    /// with the reference over every base it saw — it simply stopped after two — so its
+    /// bases are `AC` against a locus reference of `ACGT`. Counting it would report 6
+    /// non-reference reads where the reads showed 2, on a locus where nothing but the
+    /// witness is unusual, and at a threshold of 2 that turns ground the cohort agreed on
+    /// into a built locus.
+    #[test]
+    fn a_partial_that_agreed_with_the_reference_is_not_counted_against_it() {
+        let l = locus_over_reference(
+            region(10, 13),
+            b"ACGT",
+            vec![
+                obs(b"ACGT", ReadWitness::Complete, 10),
+                obs(b"ACCT", ReadWitness::Complete, 2),
+                obs(
+                    b"AC",
+                    ReadWitness::from_left(2, LocusLen::from_positions(4))
+                        .expect("a run covering at least one position"),
+                    4,
+                ),
+            ],
+        );
+        assert_eq!(l.non_reference_reads(), 2);
+    }
+
+    /// A locus nobody covered has no non-reference reads, and that is an answer rather
+    /// than an error — the fold has to be total, since the merge asks this of every
+    /// locus it walks past, most of which are quiet.
+    #[test]
+    fn a_locus_with_no_observations_has_no_non_reference_reads() {
+        let uncovered = locus_over_reference(region(10, 13), b"ACGT", vec![]);
+        assert_eq!(uncovered.non_reference_reads(), 0);
+    }
+
+    /// **The cost of the complete-only rule, pinned.** This partial's read *disagreed*
+    /// with the reference over the two bases it saw, and its 7 reads still contribute
+    /// nothing — so a variant witnessed only by partial reads never reaches
+    /// `min_alt_obs`, and nothing downstream is emitted over that locus.
+    ///
+    /// The neighbouring partial test cannot see this: a partial that *agreed* answers 2
+    /// whether partials are excluded or compared properly against their own stretch. This
+    /// one separates today's rule from a partial-aware one, which is what makes it the
+    /// test that will fail, loudly, when step 7's censored likelihood changes the
+    /// decision.
+    #[test]
+    fn a_variant_seen_only_by_partial_reads_is_not_counted() {
+        let l = locus_over_reference(
+            region(10, 13),
+            b"ACGT",
+            vec![obs(
+                b"AT",
+                ReadWitness::from_left(2, LocusLen::from_positions(4))
+                    .expect("a run covering at least one position"),
+                7,
+            )],
+        );
+        assert_eq!(l.non_reference_reads(), 0);
+    }
+
+    /// **Saturating, not wrapping** — spec §11's trap, at the boundary that separates the
+    /// two. The threshold only asks whether the total reached `min_alt_obs`, so a capped
+    /// total answers that question correctly where a wrapped one answers it backwards,
+    /// and `num_obs` will arrive from a file on the psp path rather than only from a walk
+    /// that caps its columns.
+    #[test]
+    fn non_reference_reads_saturates_rather_than_wrapping() {
+        let l = locus_over_reference(
+            region(10, 13),
+            b"ACGT",
+            vec![
+                obs(b"ACCT", ReadWitness::Complete, u32::MAX),
+                obs(b"AGGT", ReadWitness::Complete, u32::MAX),
+            ],
+        );
+        assert_eq!(l.non_reference_reads(), u32::MAX);
     }
 }

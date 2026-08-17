@@ -164,7 +164,7 @@ impl Locus {
         let matching: Vec<&SequenceObservation> = self
             .observations
             .iter()
-            .filter(|observation| observation.bases.as_ref() == self.reference_bases.as_ref())
+            .filter(|observation| observation.matches_reference(&self.reference_bases))
             .collect();
         assert_eq!(
             matching.len(),
@@ -199,7 +199,7 @@ impl Locus {
     pub fn first_alt_observation(&self) -> &SequenceObservation {
         self.observations
             .iter()
-            .find(|observation| observation.bases.as_ref() != self.reference_bases.as_ref())
+            .find(|observation| !observation.matches_reference(&self.reference_bases))
             .unwrap_or_else(|| {
                 panic!(
                     "the locus at {:?} carries no non-reference observation: {:?}",

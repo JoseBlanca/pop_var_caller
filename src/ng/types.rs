@@ -89,6 +89,17 @@ impl GenomeRegion {
     /// data type with public fields (no constructor to enforce `start <= end`),
     /// and a length of 0 is a truer answer for an empty span than a panic in a
     /// getter would be. Callers that require well-formedness say so themselves.
+    ///
+    /// **Wrong at the coordinate ceiling, and the saturation above does not cover it:**
+    /// `end == u64::MAX` overflows the `+ 1` before anything is subtracted, which is a
+    /// panic in a debug build and a length of 0 in the release profile, where overflow
+    /// checks are off — a region at the ceiling reporting itself empty. Not reachable
+    /// from real contig coordinates, which is why it is recorded rather than fixed here;
+    /// it is why [`SampleLocusObservations::reach`] does not obtain its span from this
+    /// method, and `locus_generation::tests::a_locus_at_the_coordinate_ceiling_reaches_its_own_end`
+    /// is what pins that.
+    ///
+    /// [`SampleLocusObservations::reach`]: crate::ng::locus_generation::SampleLocusObservations::reach
     #[inline]
     pub fn len(self) -> u64 {
         (self.end.get() + 1).saturating_sub(self.start.get())
