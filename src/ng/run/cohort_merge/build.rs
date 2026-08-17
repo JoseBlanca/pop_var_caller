@@ -34,7 +34,8 @@
 
 use ahash::AHashMap;
 
-use super::close::{ClosedLocus, SampleMembers, Verdict, span_of};
+use super::close::{ClosedLocus, LocusCloser, SampleMembers, Verdict, span_of};
+use super::{MaxCohortLocusSpan, MinAltObs};
 use crate::ng::locus_generation::{ReadWitness, SampleLocusObservations, SequenceObservation};
 use crate::ng::types::GenomeRegion;
 use crate::pileup_record::ChainId;
@@ -622,6 +623,116 @@ impl AlleleTable {
     pub fn index_of(&self, bases: &[u8]) -> Option<usize> {
         self.alleles.by_bases.get(bases).copied()
     }
+}
+
+/// What one building region delivers: the cohort observations built over it, and the ground
+/// of the loci it refused (arch §4).
+///
+/// **Exactly one of these per region, even when every field is empty.** The organiser drains
+/// regions in order and gathers what each refused, so a region that built nothing still has to
+/// arrive — a missing one is a gap it cannot tell from a region with no variants
+/// (spec §6.3, §3.3).
+#[derive(Debug, Default)]
+pub struct RegionOutcome {
+    /// The survivors, in genome order. Loci are disjoint within one region, so their
+    /// positions are a total order (spec §9).
+    pub cohort_observations: Vec<CohortObservation>,
+    /// **The ground of the loci that failed the width bound, in genome order.** A failed
+    /// locus is an ordinary locus everywhere but emission (spec §3.2): nothing is built for
+    /// it, and the run still has to be able to say it was refused — which is the whole
+    /// meaning of the failed count (spec §3.3), the only signal that the bound is charging
+    /// more than expected.
+    ///
+    /// **The arch also gives them a second job — displacing what overlaps them — and under
+    /// the input contract stated at [`build_region`] there is nothing for that job to do.**
+    /// Every builder is handed everything overlapping its ground, so a later locus that
+    /// overlapped an earlier one would have chained into it and been skipped as the earlier
+    /// region's; two loci owned by different regions cannot overlap at all. The spans are
+    /// carried anyway, because the displacement rule is the organiser's (spec §6.1) and it
+    /// is that component's business to decide whether it is a live rule or a safety net —
+    /// but the reason to keep them **here** is the count, not the displacement.
+    ///
+    /// A locus that was **too quiet** is in neither vector: it is ground the caller examined
+    /// and found empty, where a failure is ground it refused, and only one of the two is
+    /// counted (spec §4.3, §1.3).
+    pub failed_locus_spans: Vec<GenomeRegion>,
+}
+
+/// Build one region: close the cohort's loci over it, judge them, and assemble the survivors
+/// (spec §6.2).
+///
+/// **A locus belongs to the region its first position falls in, and to no other.** That is
+/// the whole of ownership: the same locus is closed by every builder whose observations reach
+/// it, so without the rule it would be built more than once — and with it, a builder may
+/// finish a locus outside its own region, which is what keeps a locus whole when a deletion
+/// carries it past the end (spec §6.1). So the observations returned may reach beyond
+/// `region`, and this reads past its own end to follow them.
+///
+/// `observations_per_sample` is one slice per sample in the run's sample order, each in
+/// coordinate order, holding everything that overlaps `region` **and everything a locus
+/// starting inside it can reach**. Whoever supplies them owns that guarantee: the walk cannot
+/// know what it was not given, and a locus cut short by a missing observation is a wrong
+/// answer rather than a failure. In the direct path the caller holds the whole stretch
+/// (C2); from milestone D the observation cache draws each sample forward far enough
+/// (spec §6.4).
+///
+/// **Deviation from the architecture's signature, and the plan's own order is why.** Arch §4
+/// takes `&ObservationCache`; the cache is milestone D, and its `with_observations` hands out
+/// exactly the slices this takes. Taking them directly is what lets the serial driver (C2) —
+/// the oracle everything after it must reproduce — exist before the cache does.
+///
+/// **What it costs to hand over more than the region needs, measured.** The walk starts at
+/// the beginning of the slices it is given, so every locus opening before `builder_region` is
+/// closed in full and then discarded: about **3.3 µs per base of that prefix at 63 samples,
+/// and 40 µs at 250** (the C1 review, release build). Handing every builder the whole stretch
+/// therefore makes a run quadratic in its length — around **23 hours for a megabase at 63
+/// samples**, against seconds when each builder is given a window over its own ground. That
+/// is what the observation cache is for (milestone D); until it exists, the serial driver
+/// hands over whole analysed regions rather than short ones, where the prefix is empty by
+/// construction.
+pub fn build_region(
+    builder_region: GenomeRegion,
+    observations_per_sample: &[&[SampleLocusObservations]],
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_obs: MinAltObs,
+) -> RegionOutcome {
+    let mut outcome = RegionOutcome::default();
+
+    for locus in LocusCloser::over(observations_per_sample, max_cohort_locus_span, min_alt_obs) {
+        // **Ownership, and the two ways a locus can fail to be ours.** One starting before
+        // this builder's ground belongs to an earlier builder, which sees it whole; one
+        // starting after its last base belongs to a later builder. Both are skipped rather
+        // than built, so that every locus is built exactly once however the genome is
+        // divided (spec §6.1, §9).
+        //
+        // **Both ends are inclusive**, and both need saying: a locus opening on the
+        // builder's first base is its own, and so is one opening on its last. Widen either
+        // comparison and that locus is skipped by *every* builder — lost from the run with
+        // nothing to say so, and at twenty-base regions that is about one locus in twenty.
+        // Pinned by `a_locus_opening_on_the_regions_first_base_belongs_to_that_region`.
+        if locus.region.contig > builder_region.contig
+            || (locus.region.contig == builder_region.contig
+                && locus.region.start > builder_region.end)
+        {
+            // The walk yields loci in contig-then-position order, so nothing after this one
+            // can start inside this ground either. A later builder owns the rest.
+            break;
+        }
+        if locus.region.contig != builder_region.contig || locus.region.start < builder_region.start
+        {
+            continue;
+        }
+
+        match locus.verdict {
+            Verdict::Build => outcome
+                .cohort_observations
+                .push(CohortObservation::over(&locus)),
+            Verdict::Failed => outcome.failed_locus_spans.push(locus.region),
+            Verdict::TooQuiet => {}
+        }
+    }
+
+    outcome
 }
 
 /// One cohort locus, assembled: the ground, the alleles the cohort showed over it, and
@@ -3003,6 +3114,318 @@ mod tests {
             observed.per_sample[1].support_for(late).num_reads,
             3,
             "and the sample that did show it answers its reads",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // One region's worth of building (spec §6.2), and the ownership rule that makes the
+    // same answer come out however the genome is divided.
+    // ---------------------------------------------------------------
+
+    /// The three verdicts through `build_region`: a locus worth building comes out as an
+    /// observation, a locus too wide comes out as a span and nothing else, and a locus too
+    /// quiet comes out in **neither** — ground the caller examined and found empty, where a
+    /// failure is ground it refused (spec §4.3).
+    ///
+    /// The bound is 5 bases and the threshold 2 reads. The SNP at 12 has 3 non-reference
+    /// reads over one base; the chain from 20 to 27     /// at 40 is carried by a single read, under the threshold.
+    #[test]
+    fn a_region_yields_the_survivors_and_the_failed_spans_and_nothing_for_the_quiet() {
+        let sample = [
+            member(region(12, 12), b"G", b"T"),
+            member(region(20, 27), b"ACGTACGT", b"A"),
+            SampleLocusObservations {
+                observations: vec![SequenceObservation {
+                    num_obs: 1,
+                    ..sequence(b"C")
+                }],
+                ..member(region(40, 40), b"A", b"C")
+            },
+        ];
+
+        let outcome = build_region(
+            region(1, 100),
+            &[&sample],
+            MaxCohortLocusSpan(std::num::NonZeroU32::new(5).expect("5 is non-zero")),
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            outcome
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(12, 12)],
+            "the SNP is built; the wide chain and the single-read SNP are not",
+        );
+        assert_eq!(
+            outcome.failed_locus_spans,
+            vec![region(20, 27)],
+            "refused, and counted"
+        );
+    }
+
+    /// **A locus belongs to the region its first position falls in.** One starting before the
+    /// region is an earlier builder's, even though it reaches well inside this one — the
+    /// deletion at 5–30 covers most of this region and is not ours, and neither is the SNP at
+    /// 12 it swallowed, because they are one locus and that locus starts at 5.
+    #[test]
+    fn a_locus_starting_before_the_region_belongs_to_the_earlier_builder() {
+        let deletion = [member(region(5, 30), &[b'A'; 26], b"A")];
+        let snp = [member(region(12, 12), b"A", b"T")];
+
+        let outcome = build_region(
+            region(10, 50),
+            &[&deletion, &snp],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert!(
+            outcome.cohort_observations.is_empty() && outcome.failed_locus_spans.is_empty(),
+            "the locus opens at 5, which is another region's ground",
+        );
+    }
+
+    /// **A locus starting inside the region is ours whole, however far past the end it
+    /// reaches.** The deletion opens at 48 and runs to 60, ten bases beyond this region, and
+    /// it comes out entire — that is what keeps a locus from being cut at a boundary
+    /// (spec §6.1).
+    #[test]
+    fn a_locus_reaching_past_the_region_is_still_built_whole() {
+        let deletion = [member(region(48, 60), &[b'A'; 13], b"A")];
+        let snp = [member(region(55, 55), b"A", b"T")];
+
+        let outcome = build_region(
+            region(10, 50),
+            &[&deletion, &snp],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            outcome
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(48, 60)],
+            "one locus, reaching ten bases past the region that owns it",
+        );
+        assert_eq!(
+            outcome.cohort_observations[0].per_sample.len(),
+            2,
+            "and both samples' evidence, including the one that only covers the tail",
+        );
+    }
+
+    /// A locus starting after the region's last base belongs to a later builder, and the walk
+    /// stops rather than reading on.
+    #[test]
+    fn a_locus_starting_after_the_region_is_left_to_the_later_builder() {
+        let sample = [
+            member(region(12, 12), b"G", b"T"),
+            member(region(80, 80), b"G", b"T"),
+        ];
+
+        let outcome = build_region(
+            region(1, 50),
+            &[&sample],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            outcome
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(12, 12)],
+        );
+    }
+
+    /// **Every region delivers an outcome, including one with nothing in it.** The organiser
+    /// drains regions in order and sums their counts, so a region that built nothing still
+    /// has to arrive (spec §6.3).
+    #[test]
+    fn a_region_with_nothing_in_it_still_delivers_an_outcome() {
+        let nothing: [SampleLocusObservations; 0] = [];
+
+        let outcome = build_region(
+            region(1, 50),
+            &[&nothing],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert!(outcome.cohort_observations.is_empty());
+        assert!(outcome.failed_locus_spans.is_empty());
+    }
+
+    /// **A region is one contig's ground, and a position on another contig says nothing about
+    /// where the walk is.** The earlier contig's locus sits at position 80, past this
+    /// region's last base of 50 — so a rule that compared positions alone would stop the walk
+    /// there and lose everything on the contig the region is actually on.
+    ///
+    /// The walk yields loci in contig-then-position order, so contig 0's locus at 80 is seen
+    /// first and contig 1's at 5 second.
+    #[test]
+    fn a_locus_on_another_contig_is_not_this_regions() {
+        let elsewhere = [member(region_on(0, 80, 80), b"G", b"T")];
+        let here = [member(region_on(1, 5, 5), b"G", b"T")];
+
+        let outcome = build_region(
+            region_on(1, 1, 50),
+            &[&elsewhere, &here],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            outcome
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region_on(1, 5, 5)],
+            "contig 0's locus is skipped rather than ending the walk, and contig 1's is built",
+        );
+    }
+
+    /// **The keep threshold reaches the walk from here.** A builder forwards both parameters,
+    /// and only one of them was ever handed a value of its own: at three non-reference reads
+    /// the locus is built at the default of two and dropped at four, which is what says the
+    /// argument is passed rather than a default read inside.
+    #[test]
+    fn the_keep_threshold_a_builder_is_given_is_the_one_the_walk_uses() {
+        let sample = [member(region(12, 12), b"G", b"T")];
+        let built = build_region(
+            region(1, 50),
+            &[&sample],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+        let too_quiet = build_region(
+            region(1, 50),
+            &[&sample],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+        );
+
+        assert_eq!(built.cohort_observations.len(), 1, "three reads reach two");
+        assert!(
+            too_quiet.cohort_observations.is_empty() && too_quiet.failed_locus_spans.is_empty(),
+            "and fall short of four, which drops the locus without counting it",
+        );
+    }
+
+    /// **A locus opening on the region's very first base is that region's.** Both ends of
+    /// the ownership rule are inclusive, and this is the end that had no fixture: every
+    /// other one here opens strictly inside its region, so widening the comparison to
+    /// `start <= region.start` — which makes *every* builder skip such a locus, losing it
+    /// from the run with nothing to say so — passed all 104 tests.
+    ///
+    /// It is not a rare shape. Building regions are dealt out end to end, twenty bases wide
+    /// by default, so about one locus in twenty opens on a region's first base.
+    #[test]
+    fn a_locus_opening_on_the_regions_first_base_belongs_to_that_region() {
+        let opening_on_the_boundary = [member(region(21, 21), b"G", b"T")];
+        let opening_on_the_last_base = [member(region(30, 30), b"G", b"T")];
+
+        let outcome = build_region(
+            region(21, 30),
+            &[&opening_on_the_boundary, &opening_on_the_last_base],
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            outcome
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(21, 21), region(30, 30)],
+            "the first base and the last base are both inside the region that owns them",
+        );
+    }
+
+    /// **The same loci come out however the ground is divided into regions** — the property
+    /// the whole parallel arrangement rests on (spec §9, §15), asserted here on the ownership
+    /// rule alone, before any builder or organiser exists to test it end to end.
+    ///
+    /// One walk over 1–100 against ten walks over ten bases each: the same observations, in
+    /// the same order, and the same failed spans. The fixture puts a locus on a boundary
+    /// deliberately — the deletion at 30–34 opens in one ten-base region and ends in the next.
+    #[test]
+    fn dividing_the_ground_into_regions_changes_nothing() {
+        let deletions = [
+            member(region(12, 12), b"G", b"T"),
+            member(region(30, 34), b"ACGTA", b"A"),
+            member(region(77, 77), b"G", b"T"),
+        ];
+        let others = [
+            member(region(32, 32), b"G", b"C"),
+            member(region(90, 96), b"ACGTACG", b"A"),
+        ];
+        let samples: [&[SampleLocusObservations]; 2] = [&deletions, &others];
+        let bound = MaxCohortLocusSpan(std::num::NonZeroU32::new(5).expect("5 is non-zero"));
+
+        let whole = build_region(region(1, 100), &samples, bound, MinAltObs::DEFAULT);
+
+        let mut in_pieces = RegionOutcome::default();
+        for tenth in 0..10u64 {
+            let piece = build_region(
+                region(tenth * 10 + 1, tenth * 10 + 10),
+                &samples,
+                bound,
+                MinAltObs::DEFAULT,
+            );
+            in_pieces
+                .cohort_observations
+                .extend(piece.cohort_observations);
+            in_pieces
+                .failed_locus_spans
+                .extend(piece.failed_locus_spans);
+        }
+
+        assert_eq!(
+            whole
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            in_pieces
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            "the same loci, in the same order",
+        );
+        assert_eq!(whole.failed_locus_spans, in_pieces.failed_locus_spans);
+        for (whole, piece) in whole
+            .cohort_observations
+            .iter()
+            .zip(&in_pieces.cohort_observations)
+        {
+            assert_eq!(whole.alleles, piece.alleles, "at {}", whole.region);
+            assert_eq!(whole.per_sample, piece.per_sample, "at {}", whole.region);
+        }
+        assert_eq!(
+            whole
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(12, 12), region(30, 34), region(77, 77)],
+            "the two SNPs, and the deletion that swallowed the SNP at 32 into one locus",
+        );
+        assert_eq!(
+            whole.failed_locus_spans,
+            vec![region(90, 96)],
+            "seven bases against five"
         );
     }
 
