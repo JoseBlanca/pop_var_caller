@@ -71,7 +71,7 @@ Both are recorded at the types, and neither changes what the step delivers.
   samples, in ascending order, each naming its own `sample` index — the shape the walk hands
   over ([`SampleMembers`](../../../../src/ng/run/cohort_merge/close.rs)) — so the
   distinction is structural rather than resting on a zeroed row.
-- **`per_allele` holds a dedicated `AlleleSupport`, not `SequenceObservation`.** Three of
+- **the per-allele row holds a dedicated `AlleleSupport`, not `SequenceObservation`.** Three of
   that type's fields cannot be right per allele: `bases` (the table already holds them),
   `read_witness` (always `Complete` here) and `read_group` — an allele's support aggregates
   over read groups, so no single value is true, and writing one would be a fabricated field
@@ -95,7 +95,7 @@ All in [`build.rs`](../../../../src/ng/run/cohort_merge/build.rs):
   derived. The alternative — deriving again and looking the bytes up — would compose every
   read's allele a second time, which is the expensive half of this module.
   `AlleleTable::over` is now that walk with the support discarded.
-- **`ShownBy`** — what backed an allele the derivation emitted, so the caller need not
+- **`AlleleBacking`** — what backed an allele the derivation emitted, so the caller need not
   compose it again to attribute support: every read behind one sequence of a sole record, or
   one read with its sighting at each of the sample's records.
 - **`share_of_one_read`**, **`AlleleSupportTally`**, **`round_to_u32`/`round_to_u64`** — the
@@ -119,8 +119,8 @@ whole division exists for had no test**: one observation's reads splitting onto 
   make 2, where rounding per read would claim all three started left;
 - **a sample with no coverage has no entry**, walked through `LocusCloser` rather than
   hand-built;
-- **every row is as wide as the final table**, including a sample derived before a later one
-  introduced an allele;
+- **a sample lists the alleles it showed and answers nothing for the rest** (§9's shape,
+  which replaced the parallel-width test);
 - **the reads that said nothing are carried through** and summed across a sample's records.
 
 **Two of my own expectations were wrong and the code was right both times**, which is why
@@ -149,3 +149,26 @@ In the container (`./scripts/dev.sh`):
   samples × 300 reads; it belongs here or at C1, and it needs the read multiplicity this step
   now has.
 </content>
+
+---
+
+## 9. After Checkpoint B: a sample lists only the alleles it showed
+
+*Applied 2026-08-17 on the owner's ruling at the checkpoint.*
+
+`SampleSupport::per_allele` was a row parallel to the locus's whole allele table, so its cost
+was samples × alleles whether or not a sample showed those alleles. It is now
+`supported: Vec<SupportedAllele>` — the alleles that sample's reads showed, in ascending
+allele order, each naming its own allele — with `support_for(allele)` answering nothing where
+there is no entry, which is what the zeroed row said.
+
+**The owner's correction to how I framed it is worth recording**: the shape the measurement
+used — 4,000 samples each showing a *different* allele — "will never happen". What the change
+buys on real data is proportional to how much of the table each sample missed: at an ordinary
+locus of two or three alleles, one or two entries per sample instead of three. The
+pathological figure is what made the grid visible, not what justifies removing it.
+
+Tests: 97 in the module, unchanged in number —
+`a_sample_lists_the_alleles_it_showed_and_answers_nothing_for_the_rest` replaces the parallel
+-width test and asserts both halves, that an allele a sample never showed answers nothing and
+that the sample which did show it answers its reads. Library tests 3,720 passing, 11 ignored.

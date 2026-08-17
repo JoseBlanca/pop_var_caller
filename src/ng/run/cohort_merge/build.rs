@@ -547,10 +547,18 @@ impl AlleleTable {
 
             per_sample.push(SampleSupport {
                 sample,
-                per_allele: tally
+                // **Only the alleles this sample showed.** A tally entry is reached only by
+                // a sequence or by a read, and both add at least one read, so an untouched
+                // entry is an allele some *other* sample introduced — and it needs no row
+                // here, since asking about it answers no reads either way.
+                supported: tally
                     .iter()
-                    .copied()
-                    .map(AlleleSupportTally::finish)
+                    .enumerate()
+                    .filter(|(_, tally)| tally.num_reads > 0)
+                    .map(|(allele, tally)| SupportedAllele {
+                        allele,
+                        support: tally.finish(),
+                    })
                     .collect(),
                 reads_without_observation: records.iter().fold(0u32, |total, record| {
                     total.saturating_add(record.reads_without_observation)
@@ -558,13 +566,6 @@ impl AlleleTable {
                 reads_removed_as_evidence: removed,
                 reads_composed_across_records: composed_across_records,
             });
-        }
-
-        // A sample whose alleles were all derived before a later sample introduced a new one
-        // still needs a slot for it, so the widths are levelled once the table is final.
-        let width = alleles.distinct.len();
-        for support in &mut per_sample {
-            support.per_allele.resize(width, AlleleSupport::default());
         }
 
         (
@@ -675,23 +676,21 @@ impl CohortObservation {
 pub struct SampleSupport {
     /// Which sample — its index in the run's sample order, as the walk named it.
     pub sample: usize,
-    /// Parallel to [`CohortObservation::alleles`], zeroed where this sample showed nothing.
+    /// **The alleles this sample's reads showed, and only those**, in ascending allele order
+    /// (the owner's ruling at Checkpoint B). An allele it did not show has no entry, which
+    /// [`support_for`](Self::support_for) reads as no reads and no sums — the same answer a
+    /// zeroed row would give, without a row per sample per allele.
+    ///
+    /// **What that saves is proportional to how much of the table each sample missed.** A
+    /// row for every allele costs samples × alleles entries of 32 bytes whatever the cohort
+    /// showed; this costs one entry per allele a sample actually showed, which at an ordinary
+    /// locus of two or three alleles is one or two per sample.
     ///
     /// **Support is never merged across alleles**, because a genotype likelihood needs them
     /// apart (spec §4.2). It *is* merged within one: where two of the sample's own
     /// observations reached the same allele — the same bases from two read groups, or two
     /// records' worth of one read — their reads and their sums are added.
-    ///
-    /// **⚠ One row per sample per allele is dense, and at the top of the committed cohort
-    /// range that is the module's memory.** A locus where every sample shows a distinct
-    /// allele costs samples × alleles rows: measured by the B3 review at **614 MB for a
-    /// single observation at 4,000 samples**, against 41 MB at 1,000. Real data reaches that
-    /// shape only at a paralogous or repetitive locus, and `max_cohort_locus_span` does not
-    /// bound it — the bound is on width, not on how many ways the cohort disagreed. Spec §8
-    /// prices a survivor with no sample-count factor at all. The choice between a sparse row,
-    /// a cap on alleles, and pricing it as it stands is the owner's, and it is recorded at
-    /// Checkpoint B.
-    pub per_allele: Vec<AlleleSupport>,
+    pub supported: Vec<SupportedAllele>,
     /// Reads that covered one of this sample's records here and produced no observation at
     /// all — carried through from the members, not re-derived (arch §4).
     ///
@@ -702,13 +701,39 @@ pub struct SampleSupport {
     pub reads_without_observation: u32,
     /// Reads of this sample that were removed as evidence — named at some of its records
     /// inside the locus and not at all of them, or named more than once at one of them, so
-    /// nothing they showed reaches `per_allele` (see [`alleles_of_sample`]). Lost depth,
+    /// nothing they showed reaches `supported` (see [`alleles_of_sample`]). Lost depth,
     /// counted rather than inferred from an absence. Saturating.
     pub reads_removed_as_evidence: u32,
     /// Reads whose allele was composed across several of this sample's records, and whose
-    /// five quality sums in `per_allele` are therefore **divided rather than measured** (see
+    /// five quality sums in `supported` are therefore **divided rather than measured** (see
     /// [`AlleleSupport`]). Zero on a one-record sample, where every sum is exact. Saturating.
     pub reads_composed_across_records: u32,
+}
+
+impl SampleSupport {
+    /// What this sample's reads lend `allele` — **nothing, where it showed that allele no
+    /// reads**, which is the answer a zeroed row would have given.
+    ///
+    /// A scan, not an index, because [`supported`](Self::supported) holds only the alleles
+    /// the sample showed: at an ordinary locus that is one or two entries, and it is bounded
+    /// by how many alleles the whole cohort showed.
+    pub fn support_for(&self, allele: usize) -> AlleleSupport {
+        self.supported
+            .iter()
+            .find(|supported| supported.allele == allele)
+            .map(|supported| supported.support)
+            .unwrap_or_default()
+    }
+}
+
+/// One allele of the locus, and what one sample's reads lend it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SupportedAllele {
+    /// Which allele — an index into [`CohortObservation::alleles`].
+    pub allele: usize,
+    /// What this sample's reads lend it. Never zero: an allele a sample showed no reads for
+    /// has no entry at all.
+    pub support: AlleleSupport,
 }
 
 /// What one sample's reads lend one allele.
@@ -2485,7 +2510,7 @@ mod tests {
         assert_eq!(support.sample, 0);
         assert_eq!(support.reads_composed_across_records, 0, "nothing divided");
         assert_eq!(
-            support.per_allele[REFERENCE_ALLELE],
+            support.support_for(REFERENCE_ALLELE),
             AlleleSupport {
                 num_reads: 2,
                 num_fwd: 1,
@@ -2502,7 +2527,7 @@ mod tests {
             .position(|allele| &**allele == b"ACTTA")
             .expect("the SNP is in the table");
         assert_eq!(
-            support.per_allele[snp],
+            support.support_for(snp),
             AlleleSupport {
                 num_reads: 4,
                 num_fwd: 3,
@@ -2545,7 +2570,7 @@ mod tests {
         };
 
         assert_eq!(
-            support.per_allele[allele_of(b"ACTTA")],
+            support.support_for(allele_of(b"ACTTA")),
             AlleleSupport {
                 num_reads: 3,
                 num_fwd: 2,
@@ -2557,7 +2582,7 @@ mod tests {
             "the two read groups' reads and sums added",
         );
         assert_eq!(
-            support.per_allele[allele_of(b"ACATA")],
+            support.support_for(allele_of(b"ACATA")),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2613,7 +2638,7 @@ mod tests {
             .expect("read 7's allele");
 
         assert_eq!(
-            support.per_allele[compound],
+            support.support_for(compound),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2693,7 +2718,7 @@ mod tests {
         let split = &observed.per_sample[0];
 
         assert_eq!(
-            split.per_allele[allele_of(b"ACATC")],
+            split.support_for(allele_of(b"ACATC")),
             AlleleSupport {
                 num_reads: 2,
                 num_fwd: 2,
@@ -2705,7 +2730,7 @@ mod tests {
             "reads 7 and 9, each taking the weaker −0.5 of its two sightings",
         );
         assert_eq!(
-            split.per_allele[allele_of(b"ACTTC")],
+            split.support_for(allele_of(b"ACTTC")),
             AlleleSupport {
                 num_reads: 1,
                 num_fwd: 1,
@@ -2729,7 +2754,7 @@ mod tests {
         );
         assert_eq!(with_a_removal.reads_composed_across_records, 1);
         assert_eq!(
-            with_a_removal.per_allele[allele_of(b"AGGAA")].num_reads,
+            with_a_removal.support_for(allele_of(b"AGGAA")).num_reads,
             1,
             "read 21 composed across both records",
         );
@@ -2770,7 +2795,8 @@ mod tests {
             .expect("read 7's allele");
 
         assert_eq!(
-            observed.per_sample[0].per_allele[compound].q_sum, -1.0,
+            observed.per_sample[0].support_for(compound).q_sum,
+            -1.0,
             "the weaker of −6.0 and −1.0, not the better",
         );
     }
@@ -2849,9 +2875,9 @@ mod tests {
         );
         assert!(
             observed.per_sample[0]
-                .per_allele
+                .supported
                 .iter()
-                .all(|support| support.q_sum >= -2.0),
+                .all(|supported| supported.support.q_sum >= -2.0),
             "no allele carries the unsupported sequence's quality",
         );
     }
@@ -2891,7 +2917,7 @@ mod tests {
             .expect("the three reads' allele");
 
         assert_eq!(
-            observed.per_sample[0].per_allele[compound],
+            observed.per_sample[0].support_for(compound),
             AlleleSupport {
                 num_reads: 3,
                 num_fwd: 1,
@@ -2935,11 +2961,14 @@ mod tests {
         assert_eq!(observed.region, region(10, 14));
     }
 
-    /// **Every sample's support is as wide as the final table**, including a sample derived
-    /// before a later one introduced an allele. Sample 0 is derived first and knows nothing
-    /// of sample 1's `ACATA`; its row still has a slot for it, holding no reads.
+    /// **A sample lists the alleles it showed and no others**, however many the cohort ended
+    /// up with. Sample 0 showed one allele and never saw sample 1's `ACATA`; asking about it
+    /// answers no reads and no sums, which is what a zeroed row would have said, and the
+    /// three alleles it did not show cost it nothing.
+    ///
+    /// This is the shape the owner chose at Checkpoint B over one row per sample per allele.
     #[test]
-    fn a_samples_support_is_as_wide_as_the_table_however_late_an_allele_joins() {
+    fn a_sample_lists_the_alleles_it_showed_and_answers_nothing_for_the_rest() {
         let first = [member(region(12, 12), b"G", b"T")];
         let second = [member(region(12, 12), b"G", b"A")];
         let deletion = [member(region(10, 14), b"ACGTA", b"A")];
@@ -2949,18 +2978,32 @@ mod tests {
         assert_eq!(observed.alleles.len(), 4);
         for support in &observed.per_sample {
             assert_eq!(
-                support.per_allele.len(),
-                observed.alleles.len(),
-                "sample {} is not parallel to the table",
+                support.supported.len(),
+                1,
+                "sample {} showed one allele and lists one",
                 support.sample,
             );
+            assert!(
+                support.supported[0].support.num_reads > 0,
+                "an entry with no reads would be a row this shape exists to avoid",
+            );
         }
+
         let late = observed
             .alleles
             .iter()
             .position(|allele| &**allele == b"ACATA")
             .expect("sample 1's allele");
-        assert_eq!(observed.per_sample[0].per_allele[late].num_reads, 0);
+        assert_eq!(
+            observed.per_sample[0].support_for(late),
+            AlleleSupport::default(),
+            "an allele this sample never showed answers nothing at all",
+        );
+        assert_eq!(
+            observed.per_sample[1].support_for(late).num_reads,
+            3,
+            "and the sample that did show it answers its reads",
+        );
     }
 
     /// The reads that said nothing are carried through from the records rather than
