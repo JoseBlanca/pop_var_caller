@@ -33,7 +33,6 @@ use crate::ng::ref_seq::{ContigTable, EvictableRefSeq, RawRefSeq, RefSeq, RefSeq
 use crate::ng::region_typing::segment_criteria::SsrSegment;
 use crate::ng::types::{Bp, ContigId, GenomeRegion, Position};
 
-
 /// An STR locus ready to align against: the segment plus the reference bases the aligner
 /// aligns the reads to.
 ///

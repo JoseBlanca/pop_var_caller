@@ -69,12 +69,12 @@ use std::time::Duration;
 #[cfg(feature = "bench-fixtures")]
 use pop_var_caller::ng::parameter_estimation::joint::census::Stratum;
 #[cfg(feature = "bench-fixtures")]
-use pop_var_caller::ng::parameter_estimation::joint::fit::{
-    FrequencyDensity, JointFitConfig, StartingPoint as GenericStart, fit_jointly,
-};
-#[cfg(feature = "bench-fixtures")]
 use pop_var_caller::ng::parameter_estimation::joint::fit::bench_fixtures::{
     DrawnCohort, as_cohort, draw_cohort,
+};
+#[cfg(feature = "bench-fixtures")]
+use pop_var_caller::ng::parameter_estimation::joint::fit::{
+    FrequencyDensity, JointFitConfig, StartingPoint as GenericStart, fit_jointly,
 };
 #[cfg(feature = "bench-fixtures")]
 use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::bench_fixtures::{
@@ -82,8 +82,8 @@ use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::bench_fixtures::{
 };
 #[cfg(feature = "bench-fixtures")]
 use pop_var_caller::ng::parameter_estimation::joint::ssr_fit::{
-    Slippage, SsrFitConfig, StartingPoint as SsrStart, StratumEvidence, StratumOutcome,
-    fit_strata, fit_stratum,
+    Slippage, SsrFitConfig, StartingPoint as SsrStart, StratumEvidence, StratumOutcome, fit_strata,
+    fit_stratum,
 };
 
 // ---------------------------------------------------------------------------
@@ -531,14 +531,18 @@ fn generic_by_positions(c: &mut Criterion) {
         // so nothing is consumed, and rebuilding it per iteration would put a deep clone of
         // every sample's records inside the measurement.
         let mut cohort = as_cohort(&drawn.samples);
-        group.bench_with_input(BenchmarkId::from_parameter(positions), &positions, |b, _| {
-            b.iter(|| {
-                pool.install(|| {
-                    black_box(fit_jointly(black_box(&mut cohort), black_box(&config)))
-                        .expect("a drawn cohort pools")
-                })
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(positions),
+            &positions,
+            |b, _| {
+                b.iter(|| {
+                    pool.install(|| {
+                        black_box(fit_jointly(black_box(&mut cohort), black_box(&config)))
+                            .expect("a drawn cohort pools")
+                    })
+                });
+            },
+        );
     }
     group.finish();
 }

@@ -165,11 +165,15 @@ fn main() {
         // Two sizes and not one, because the four dense `samples × positions`
         // arrays the review's L9 names are the only thing here that should grow
         // with both — everything else the pass allocates is sized once.
-        for samples in [8_usize, 24].into_iter().take(if generic_half { 2 } else { 0 }) {
+        for samples in [8_usize, 24]
+            .into_iter()
+            .take(if generic_half { 2 } else { 0 })
+        {
             let positions = 30_000;
-            let (cohort, _) = measured(&format!("build resident cohort, {samples} samples"), || {
-                drawn_generic_cohort(samples, positions, 12.0, 0x9E37_79B9_7F4A_7C15)
-            });
+            let (cohort, _) =
+                measured(&format!("build resident cohort, {samples} samples"), || {
+                    drawn_generic_cohort(samples, positions, 12.0, 0x9E37_79B9_7F4A_7C15)
+                });
             let mut cohort = cohort;
             let config = JointFitConfig {
                 ploidy: Ploidy::try_new(2).expect("two is a ploidy"),
@@ -243,8 +247,14 @@ fn main() {
             println!(
                 "    ({} strata, {} tracts with reads, {rows} rows, {} spanning reads)",
                 gathered.len(),
-                gathered.iter().map(StratumEvidence::tracts_with_reads).sum::<usize>(),
-                gathered.iter().map(StratumEvidence::spanning_reads).sum::<u64>()
+                gathered
+                    .iter()
+                    .map(StratumEvidence::tracts_with_reads)
+                    .sum::<usize>(),
+                gathered
+                    .iter()
+                    .map(StratumEvidence::spanning_reads)
+                    .sum::<u64>()
             );
             drop(gathered);
         }
@@ -260,7 +270,10 @@ fn main() {
         // allocates *per tract* — the review's L3 is an arithmetic claim about
         // exactly that slope.
         let samples = 8;
-        for tracts in [25_usize, 50].into_iter().take(if tract_churn { 2 } else { 0 }) {
+        for tracts in [25_usize, 50]
+            .into_iter()
+            .take(if tract_churn { 2 } else { 0 })
+        {
             let (strata, _) = measured(&format!("draw 4 strata x {tracts} tracts"), || {
                 (0..4)
                     .map(|ring| {
@@ -376,7 +389,10 @@ fn main() {
         println!("  total bytes  {}", stats.total_bytes);
         println!("  peak blocks  {}", stats.max_blocks);
         println!("  peak bytes   {}", stats.max_bytes);
-        println!("  live at end  {} blocks, {} bytes", stats.curr_blocks, stats.curr_bytes);
+        println!(
+            "  live at end  {} blocks, {} bytes",
+            stats.curr_blocks, stats.curr_bytes
+        );
     }
 }
 
@@ -634,7 +650,10 @@ fn drawn_ssr_cohort(
 /// One stratum drawn at known slippage — duplicated from `ssr_fit.rs`'s
 /// `draw_stratum`, with the stratum key made an argument so several rings of one
 /// motif length can be drawn and `fit_strata`'s borrowing has neighbours to take.
-#[allow(clippy::too_many_arguments, reason = "the drawn stratum's own parameters")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the drawn stratum's own parameters"
+)]
 fn draw_stratum(
     slippage: Slippage,
     spectrum: &[f64],
