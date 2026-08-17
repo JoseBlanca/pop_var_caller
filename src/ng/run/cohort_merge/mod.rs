@@ -11,9 +11,10 @@
 //! Design: `doc/devel/ng/spec/cohort_merge.md` (what and why),
 //! `doc/devel/ng/arch/cohort_merge.md` (types and contracts).
 //!
-//! **What has landed is this file's three parameters and [`close`]'s walk.** The
-//! assembly of a survivor and the organiser that resolves overlaps land beside them as
-//! the plan's milestones complete (`doc/devel/ng/impl_plan/cohort_merge.md`).
+//! **What has landed is this file's three parameters, [`close`]'s walk, and [`build`]'s
+//! projection of a member onto the locus span.** Unifying those projections into one
+//! allele table, and the organiser that resolves overlaps between builders, land beside
+//! them as the plan's milestones complete (`doc/devel/ng/impl_plan/cohort_merge.md`).
 //!
 //! **`pub`, though the architecture calls this crate-private machinery.** The two
 //! caller objects that will own it do not exist yet, so `pub(crate)` items here would
@@ -22,6 +23,7 @@
 //! `pub` items. The intent is the architecture's — narrow this when the caller objects
 //! land.
 
+pub mod build;
 pub mod close;
 
 use std::num::NonZeroU32;

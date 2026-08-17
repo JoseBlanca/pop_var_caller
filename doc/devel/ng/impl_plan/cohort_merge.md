@@ -112,7 +112,7 @@ meaning "ground the caller refused". Assert both verdicts on a locus that qualif
 
 **B2 needs spec §14 question 2 ruled on.** Do not start it before that.
 
-☐ **B1 — projection onto the locus span.** Each member's sequence widened to the full span, padded
+✅ **B1 — projection onto the locus span.** Each member's sequence widened to the full span, padded
 from `reference_bases`. Tests: a narrower SNP inside a deletion's span projects to the span; an
 insertion's reference span stays its anchor base.
 *Depends:* A4. *Source:* [spec](../spec/cohort_merge.md) §4.2.

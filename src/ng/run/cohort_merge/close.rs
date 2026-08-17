@@ -173,15 +173,16 @@ impl ClosedLocus<'_> {
     }
 }
 
-/// How many reference bases `region` covers — the spelling this module judges on, so the
-/// width a locus is judged on and the width it reports can never be two different
-/// numbers.
+/// How many reference bases `region` covers — the spelling the cohort merge judges and
+/// pads on, so the width a locus is judged on, the width it reports and the width its
+/// members are projected over can never be different numbers.
 ///
 /// **Not `GenomeRegion::len()`**, which answers 0 at the coordinate ceiling in the
-/// release profile (see [`ClosedLocus::span`]). That other spelling is still the one to
-/// reach for on a region no locus produced — an observation's own span, say, where the
-/// ceiling is unreachable.
-fn span_of(region: GenomeRegion) -> u64 {
+/// release profile (see [`ClosedLocus::span`]). **Nothing in this module reaches for that
+/// other spelling, an observation's own span included**: `build.rs` measures a member's
+/// span with this function too, so the width a member is projected over cannot disagree
+/// with the width the locus was judged on.
+pub(super) fn span_of(region: GenomeRegion) -> u64 {
     region
         .end
         .get()
