@@ -14,11 +14,12 @@
 //! **What has landed:** this file's three parameters; [`close`]'s walk and its two
 //! verdicts; [`build`]'s assembly of a survivor — every member projected onto the locus
 //! span, unified into one allele table, with each covering sample's support against it;
-//! [`serial`]'s single-threaded driver, the oracle every later milestone must reproduce;
-//! and [`organise`]'s observation cache, the window one builder is handed. **Still to
-//! come:** the organiser itself, which resolves the overlaps between builders and releases
-//! loci in genome order, and the parallel arrangement around it
-//! (`doc/devel/ng/impl_plan/cohort_merge.md`, milestone E).
+//! [`organise`]'s observation cache — the window one builder is handed — and the division
+//! of the analysed ground into the regions single builders own; and [`serial`]'s **two**
+//! single-threaded drivers: the oracle every later milestone must reproduce, and the same
+//! merge read through the cache, byte for byte. **Still to come:** the organiser itself,
+//! which resolves the overlaps between builders and releases loci in genome order, and the
+//! parallel arrangement around it (`doc/devel/ng/impl_plan/cohort_merge.md`, milestone E).
 //!
 //! **`pub`, though the architecture calls this crate-private machinery.** The two
 //! caller objects that will own it do not exist yet, so `pub(crate)` items here would
@@ -31,6 +32,46 @@ pub mod build;
 pub mod close;
 pub mod organise;
 pub mod serial;
+
+/// The fixtures the module's test suites share — the coordinates every test writes and the
+/// failure every fake source yields.
+///
+/// **One home, because the copies had started to multiply.** `region` and `region_on` are
+/// written out in all four of this module's files, and D2's review found `SourceFailed`
+/// becoming the fifth such copy. [`organise`] and [`serial`] read them from here; [`build`] and
+/// [`close`] still carry their own and are the next two to fold in.
+#[cfg(test)]
+pub(super) mod fixtures {
+    use crate::ng::types::{ContigId, GenomePosition, GenomeRegion, Position};
+
+    /// A region on the named contig, both ends inclusive.
+    pub(super) fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
+        GenomeRegion {
+            contig: ContigId(contig),
+            start: Position(start),
+            end: Position(end),
+        }
+    }
+
+    /// A region on contig 0 — the one most fixtures need.
+    pub(super) fn region(start: u64, end: u64) -> GenomeRegion {
+        region_on(0, start, end)
+    }
+
+    /// One base, genome-wide.
+    pub(super) fn position_on(contig: u32, position: u64) -> GenomePosition {
+        GenomePosition {
+            contig: ContigId(contig),
+            position: Position(position),
+        }
+    }
+
+    /// What a source failure looks like in a test. The run's own error type does not exist
+    /// yet, so the cache is generic over the source's and both drivers pass it through
+    /// (`doc/devel/ng/arch/run_streaming.md` §2, §5).
+    #[derive(Debug, PartialEq, Eq)]
+    pub(super) struct SourceFailed(pub &'static str);
+}
 
 use std::num::NonZeroU32;
 

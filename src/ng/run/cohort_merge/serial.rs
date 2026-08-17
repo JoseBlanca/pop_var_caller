@@ -1,24 +1,29 @@
-//! The whole analysed stretch, merged by one builder on one thread — **the oracle**.
+//! Two serial drivers of the same merge: the oracle, and the same merge read through the cache.
 //!
-//! This is the simplest thing that produces the right answer: one builder, no cache, no
-//! organiser, no threads, holding every sample's observations and walking the analysed
-//! regions in order. Everything the later milestones add is about speed and memory, so
-//! anything that changes this output is a defect rather than a trade
-//! (`doc/devel/ng/spec/cohort_merge.md` §15; the plan's C2).
+//! **Vocabulary, because the whole file turns on it.** An *analysed region* is the run's own
+//! interval — a contig, a `--regions` interval — and they are few and long. A *building region*
+//! is the short stretch one builder owns, `cohort_locus_builder_regions_len` bases, 20 by
+//! default (spec §6.1); building regions divide an analysed region.
 //!
-//! **It is deliberately thin.** With the whole stretch in hand, merging is
-//! [`build_region`](super::build::build_region) over each analysed region and nothing more:
-//! the loci a builder closes depend on the observations it can see, and here it can see all
-//! of them. What the parallel arrangement adds is a *narrower view* per builder — a window
-//! drawn from the cache (milestone D) and regions handed out in parallel (E) — and the loci
-//! that differ between the two are exactly what the organiser's overlap resolution exists to
-//! settle (spec §6.1). That is why this stands as the oracle: it has no window and no
-//! resolution to get wrong.
+//! [`merge_cohort_serially`] is **the oracle**: the simplest thing that produces the right
+//! answer — one builder, no cache, no organiser, no threads, holding every sample's
+//! observations and walking the analysed regions in order. Everything the later milestones add
+//! is about speed and memory, so anything that changes this output is a defect rather than a
+//! trade (`doc/devel/ng/spec/cohort_merge.md` §15; the plan's C2).
+//!
+//! [`merge_cohort_through_cache`] does the same job through **one forward reader per sample**,
+//! and its whole claim is that its output is the oracle's byte for byte (the plan's D2). It is
+//! still one builder on one thread; what changes is the *view* — a window over each builder's
+//! own ground instead of the whole stretch, which is what makes short building regions
+//! affordable. What is still to come is the organiser's overlap resolution and the builders in
+//! parallel (milestone E); the loci that differ once builders see different windows are exactly
+//! what that resolution settles (spec §6.1).
 
 use super::build::{RegionOutcome, build_region};
-use super::{MaxCohortLocusSpan, MinAltObs};
+use super::organise::{ObservationCache, building_regions_of};
+use super::{CohortLocusBuilderRegionsLen, MaxCohortLocusSpan, MinAltObs};
 use crate::ng::locus_generation::SampleLocusObservations;
-use crate::ng::types::GenomeRegion;
+use crate::ng::types::{GenomePosition, GenomeRegion};
 
 /// Merge the cohort over `analysed`, one region at a time, in the order given.
 ///
@@ -60,15 +65,7 @@ pub fn merge_cohort_serially(
     min_alt_obs: MinAltObs,
 ) -> RegionOutcome {
     let mut merged = RegionOutcome::default();
-
-    for pair in analysed.windows(2) {
-        let (earlier, later) = (pair[0], pair[1]);
-        assert!(
-            (earlier.contig, earlier.end) < (later.contig, later.start),
-            "the analysed regions {earlier} and {later} are not disjoint and ascending, so \
-             the loci opening in the ground they share would be built — and carried — twice",
-        );
-    }
+    refuse_malformed_analysed_regions(analysed);
 
     for region in analysed {
         let outcome = build_region(
@@ -86,23 +83,135 @@ pub fn merge_cohort_serially(
     merged
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
-    use crate::ng::types::{ContigId, Position, ReadGroupId};
+/// Merge the cohort over `analysed`, reading each sample through the observation cache and
+/// building in regions of `cohort_locus_builder_regions_len` bases.
+///
+/// **The output is [`merge_cohort_serially`]'s, and that is the whole claim of this step**
+/// (the plan's D2). The oracle holds every sample's observations at once and hands the whole
+/// stretch to every builder; this holds one forward reader per sample and hands each builder a
+/// window over its own ground. Nothing else differs, and nothing else may: the cache exists to
+/// make the merge affordable, not to change what it answers
+/// (`doc/devel/ng/spec/cohort_merge.md` §15).
+///
+/// **What it buys is that the analysed ground can now be divided finely.** Handing a builder
+/// the whole stretch costs it every locus that opened before its own ground, closed in full and
+/// then discarded — about 3.3 µs per prefix base at 63 samples (the C1 review), which is why
+/// the oracle must be given the run's own long analysed regions and this need not. Here the
+/// building regions are as short as the caller asks for, which is what the parallel arrangement
+/// (milestone E) will hand out. **What it costs in exchange is one cover per building region**,
+/// `sweeps × (samples + held)` work each — 616 µs at 1,000 samples and 2.87 ms at 3,000 on
+/// 20-base regions, measured by the D1 review; [`ObservationCache::cover`] carries the table.
+///
+/// **The cache comes in from the caller rather than being made here**, because it outlives one
+/// merge: it holds one reader per sample *for the whole run* (spec §6.4), and at milestone E it
+/// belongs to the organiser. It also makes what this driver does to memory visible — a test can
+/// ask the cache afterwards how much it still holds
+/// ([`held_observations_len`](ObservationCache::held_observations_len)), which is the only way to tell a
+/// driver that evicts from one that does not: their outputs are identical.
+///
+/// Its sources are one per sample **in the run's sample order**, each yielding that sample's
+/// observations in coordinate order — the shape `run_streaming.md` arch §2's `ObservationSource`
+/// will have. The analysed regions must be disjoint and ascending, checked as in the oracle.
+///
+/// **The building regions tile each analysed region exactly, and the last one is clamped to
+/// it.** A locus belongs to the builder whose region holds its first position, so a building
+/// region running past the analysed ground would claim loci the oracle never builds — the
+/// division has to end where the run's own interval ends.
+///
+/// **Eviction happens before each cover, at that region's first base.** What ends before it can
+/// reach no locus a later builder can own (see [`ObservationCache::evict_before`]), and holding
+/// it would make this driver's memory the whole stretch again. Evicting *after* the cover
+/// instead would give the same output and the same final window — what it costs is the sweep,
+/// which re-reads the whole held window: measured on a record every ten bases at 20-base
+/// regions, the pre-cover eviction takes the window from three records to one at every region.
+///
+/// **A failure ends the merge and leaves the cache where it stopped.** The observations built so
+/// far are dropped — the caller gets the source's error and nothing else — and the cache keeps
+/// the readers' position and the window the last cover drew. So **the same cache cannot be used
+/// to try the same ground again**: the ground behind the failure has already been evicted, and a
+/// second merge over it comes back short and says `Ok`. A run that means to retry builds a new
+/// cache over new sources; a run that does not, abandons the stretch. Making that unrepresentable
+/// belongs with the organiser (milestone E), which owns the cache.
+///
+/// **Not every source-side failure arrives as `Err`.** A source whose observations go backwards
+/// trips the cache's coordinate-order check and panics ([`ObservationCache::cover`]), because the
+/// cache has no error of its own to mint — `E` is the source's type and this driver only passes
+/// it through. That is right while observations come from this crate's generator, where going
+/// backwards is a bug; it stops being right when they are decoded from a psp file, and
+/// `organise.rs` records that it owes the change to `RunError`.
+pub fn merge_cohort_through_cache<S, E>(
+    analysed: &[GenomeRegion],
+    cache: &mut ObservationCache<S>,
+    cohort_locus_builder_regions_len: CohortLocusBuilderRegionsLen,
+    max_cohort_locus_span: MaxCohortLocusSpan,
+    min_alt_obs: MinAltObs,
+) -> Result<RegionOutcome, E>
+where
+    S: Iterator<Item = Result<SampleLocusObservations, E>>,
+{
+    let mut merged = RegionOutcome::default();
+    refuse_malformed_analysed_regions(analysed);
 
-    fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
-        GenomeRegion {
-            contig: ContigId(contig),
-            start: Position(start),
-            end: Position(end),
+    for analysed_region in analysed {
+        for building_region in
+            building_regions_of(*analysed_region, cohort_locus_builder_regions_len)
+        {
+            cache.evict_before(GenomePosition {
+                contig: building_region.contig,
+                position: building_region.start,
+            });
+            cache.cover(building_region)?;
+            let outcome = cache.with_observations(building_region, |observations_per_sample| {
+                build_region(
+                    building_region,
+                    observations_per_sample,
+                    max_cohort_locus_span,
+                    min_alt_obs,
+                )
+            });
+            merged
+                .cohort_observations
+                .extend(outcome.cohort_observations);
+            merged.failed_locus_spans.extend(outcome.failed_locus_spans);
         }
     }
 
-    fn region(start: u64, end: u64) -> GenomeRegion {
-        region_on(0, start, end)
+    Ok(merged)
+}
+
+/// Refuse the analysed regions neither driver can merge — see [`merge_cohort_serially`],
+/// whose doc says what a duplicate would cost.
+///
+/// **Two rules, and the second was found by D2's review.** A region must not overlap or precede
+/// the one before it, or the loci in the ground they share are built — and carried — twice. And
+/// a region's own ends must be the right way round: the division orders them
+/// ([`building_regions_of`]) and [`build_region`] does not, so on `50-1` the cached driver
+/// builds the whole of 1–50 and the oracle builds nothing. That is the byte-identity this
+/// module claims, broken by an input nothing was checking.
+fn refuse_malformed_analysed_regions(analysed: &[GenomeRegion]) {
+    for region in analysed {
+        assert!(
+            region.start <= region.end,
+            "the analysed region {region} has its ends the wrong way round, and the two \
+             drivers do not read such a region the same way",
+        );
     }
+    for pair in analysed.windows(2) {
+        let (earlier, later) = (pair[0], pair[1]);
+        assert!(
+            (earlier.contig, earlier.end) < (later.contig, later.start),
+            "the analysed regions {earlier} and {later} are not disjoint and ascending, so \
+             the loci opening in the ground they share would be built — and carried — twice",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::fixtures::{SourceFailed, region, region_on};
+    use super::*;
+    use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
+    use crate::ng::types::{ContigId, Position, ReadGroupId};
 
     /// One sample's record over `region`, showing `observed_bases` to three reads.
     fn member(
@@ -601,6 +710,123 @@ mod tests {
         assert!(too_quiet.cohort_observations.is_empty(), "and not four");
     }
 
+    /// **The two drivers agree on layouts no fixture enumerates.** The five fixtures above are
+    /// hand-written; this walks 200 random ones — 1 to 6 samples, 1 or 2 contigs, records 1 to
+    /// 60 bases with one in ten wide, several analysed regions with gaps between them, building
+    /// widths 1 to 30, span bounds 5 to 64 and keep thresholds 1 to 4 — and compares the whole
+    /// outcome of each.
+    ///
+    /// Written and run by the D2 review at 600 layouts with **no disagreement**, and it is not
+    /// decoration: it killed two of that review's mutations. Its standing value is the regime
+    /// the fixtures do not reach — a record that opens inside an analysed region and ends past
+    /// its last base, which is where the cache must draw past the analysed ground and the oracle
+    /// simply already has it. The counters keep the test from passing vacuously if the generator
+    /// is ever narrowed.
+    #[test]
+    fn the_two_drivers_agree_on_random_layouts() {
+        /// A seeded linear congruential generator — no dependency, and the seed is in the
+        /// failure message.
+        struct Seeded(u64);
+        impl Seeded {
+            fn next(&mut self, bound: u64) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                (self.0 >> 33) % bound
+            }
+        }
+
+        let ground_end = 400u64;
+        let (mut with_observations, mut with_failed, mut with_a_straddling_record) = (0, 0, 0);
+
+        for seed in 0..200u64 {
+            let mut draw = Seeded(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x5EED);
+            let samples = 1 + draw.next(6) as usize;
+            let contigs = 1 + draw.next(2) as u32;
+            let bound = MaxCohortLocusSpan(
+                std::num::NonZeroU32::new(5 + u32::try_from(draw.next(60)).expect("small"))
+                    .expect("at least five"),
+            );
+            let keep = MinAltObs(
+                std::num::NonZeroU32::new(1 + u32::try_from(draw.next(4)).expect("small"))
+                    .expect("at least one"),
+            );
+
+            // Every reference base is `A`: two members of one locus that disagree on the
+            // reference are refused by `build_region`, in both drivers alike.
+            let mut layouts: Vec<Vec<SampleLocusObservations>> = Vec::new();
+            for _ in 0..samples {
+                let mut records = Vec::new();
+                for contig in 0..contigs {
+                    let mut at_base = 1 + draw.next(10);
+                    while at_base <= ground_end {
+                        let bases = match draw.next(10) {
+                            0 => 1 + draw.next(60),
+                            _ => 1 + draw.next(4),
+                        };
+                        let end = at_base + bases - 1;
+                        let width = usize::try_from(end - at_base + 1).expect("small");
+                        records.push(SampleLocusObservations {
+                            reference_bases: vec![b'A'; width].into_boxed_slice(),
+                            ..member(region_on(contig, at_base, end), b"A", b"T")
+                        });
+                        at_base = end + 1 + draw.next(6);
+                    }
+                }
+                layouts.push(records);
+            }
+
+            let analysed_width = 20 + draw.next(80);
+            let mut analysed = Vec::new();
+            for contig in 0..contigs {
+                let mut at_base = 1u64;
+                while at_base <= ground_end {
+                    let end = at_base + analysed_width - 1;
+                    if draw.next(4) != 0 {
+                        analysed.push(region_on(contig, at_base, end));
+                    }
+                    at_base = end + 1;
+                }
+            }
+            let building_width = width(1 + u32::try_from(draw.next(30)).expect("a small width"));
+
+            if layouts.iter().flatten().any(|record| {
+                analysed.iter().any(|ground| {
+                    ground.contig == record.region.contig
+                        && record.region.start >= ground.start
+                        && record.region.start <= ground.end
+                        && record.reach() > ground.end
+                })
+            }) {
+                with_a_straddling_record += 1;
+            }
+
+            let per_sample: Vec<&[SampleLocusObservations]> =
+                layouts.iter().map(Vec::as_slice).collect();
+            let merged = the_outcome_both_drivers_agree_on(
+                &analysed,
+                &per_sample,
+                building_width,
+                bound,
+                keep,
+            );
+            if !merged.cohort_observations.is_empty() {
+                with_observations += 1;
+            }
+            if !merged.failed_locus_spans.is_empty() {
+                with_failed += 1;
+            }
+        }
+
+        assert!(
+            with_observations > 100 && with_failed > 50 && with_a_straddling_record > 100,
+            "the generator stopped producing the shapes this test is for: {with_observations} \
+             layouts with observations, {with_failed} with failed spans, \
+             {with_a_straddling_record} with a record straddling an analysed edge",
+        );
+    }
+
     /// Nothing analysed is not an error: an empty run yields an empty outcome rather than a
     /// failure, and the caller's own emptiness check is where a zero-sample run is refused
     /// (spec §7.2).
@@ -616,5 +842,619 @@ mod tests {
         );
 
         assert!(merged.cohort_observations.is_empty() && merged.failed_locus_spans.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // D2 — the same merge, read through the observation cache. Everything below asserts
+    // one thing: the cache changes nothing (the plan's Checkpoint D).
+    // ---------------------------------------------------------------
+
+    /// One sample's forward reader over the observations it minted.
+    fn source_of(
+        observations: &[SampleLocusObservations],
+    ) -> std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>> {
+        observations
+            .iter()
+            .cloned()
+            .map(Ok)
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    fn width(bases: u32) -> CohortLocusBuilderRegionsLen {
+        CohortLocusBuilderRegionsLen(
+            std::num::NonZeroU32::new(bases).expect("a fixture width is non-zero"),
+        )
+    }
+
+    /// Run both drivers over the same observations, refuse any difference, and hand back the
+    /// outcome they agree on.
+    ///
+    /// **The comparison is on the `Debug` rendering**, which is what "byte-identical" means
+    /// here: `CohortObservation` has no `PartialEq`, and a comparison written field by field
+    /// would silently stop covering a field added later. Two distinct `f64` sums render as
+    /// distinct strings, so a quality divided differently shows.
+    ///
+    /// **Rendered locus by locus rather than whole**, so that a disagreement names the first
+    /// locus that differs: the widest fixture here renders as 26 kB, and two of those inside an
+    /// `assert_eq!` message is not something a reader can diff by eye.
+    ///
+    /// **It asserts rather than returning the material for an assertion.** A call site that
+    /// forgot to compare would look right and check nothing, which is the one failure mode this
+    /// step's tests exist to prevent. What it returns is the outcome itself, so a test can also
+    /// say what its fixture reached — an agreement between two empty outcomes would otherwise
+    /// pass for a proof.
+    fn the_outcome_both_drivers_agree_on(
+        analysed: &[GenomeRegion],
+        per_sample: &[&[SampleLocusObservations]],
+        building_region_width: CohortLocusBuilderRegionsLen,
+        max_cohort_locus_span: MaxCohortLocusSpan,
+        min_alt_obs: MinAltObs,
+    ) -> RegionOutcome {
+        let oracle =
+            merge_cohort_serially(analysed, per_sample, max_cohort_locus_span, min_alt_obs);
+        let mut cache =
+            ObservationCache::over(per_sample.iter().map(|sample| source_of(sample)).collect());
+        let through_cache = merge_cohort_through_cache(
+            analysed,
+            &mut cache,
+            building_region_width,
+            max_cohort_locus_span,
+            min_alt_obs,
+        )
+        .expect("the fixture sources hold");
+
+        let rendered = |outcome: &RegionOutcome| -> Vec<String> {
+            outcome
+                .cohort_observations
+                .iter()
+                .map(|observed| format!("{observed:?}"))
+                .chain(
+                    outcome
+                        .failed_locus_spans
+                        .iter()
+                        .map(|span| format!("failed {span}")),
+                )
+                .collect()
+        };
+        let (from_oracle, from_cache) = (rendered(&oracle), rendered(&through_cache));
+        let bases = building_region_width.get();
+        if let Some(first) = from_oracle
+            .iter()
+            .zip(&from_cache)
+            .position(|(oracle_entry, cache_entry)| oracle_entry != cache_entry)
+        {
+            panic!(
+                "building regions of {bases} bases changed the merge, first at entry {first}:\
+                 \n  oracle:        {}\n  through cache: {}",
+                from_oracle[first], from_cache[first],
+            );
+        }
+        assert_eq!(
+            from_cache.len(),
+            from_oracle.len(),
+            "building regions of {bases} bases changed how many loci the merge produced",
+        );
+
+        oracle
+    }
+
+    /// **The cache changes nothing, at every building-region width** — the milestone's claim.
+    ///
+    /// Three samples over six hundred bases: single-base loci every ten bases, a deletion at
+    /// 305–330 that carries a locus across whatever boundary a width puts near it, and a
+    /// sample whose one record sits inside that deletion, so the two chain into one locus
+    /// however finely the ground is divided.
+    ///
+    /// The widths run from one base — where a building region is narrower than most loci — to
+    /// six hundred, the whole analysed stretch as one region, which is what the oracle does.
+    #[test]
+    fn the_cache_changes_nothing_at_every_building_region_width() {
+        // The whole fixture's reference is `A`, because a locus gathers its reference from
+        // its members and two members that disagree over shared ground are refused — the
+        // deletion's ground covers two of the dotted sample's positions.
+        let dotted: Vec<_> = (0..60)
+            .map(|locus| {
+                let at = 10 * locus + 1;
+                member(region(at, at), b"A", b"T")
+            })
+            .collect();
+        let deleting = [member(region(305, 330), &[b'A'; 26], b"A")];
+        let inside = [member(region(310, 310), b"A", b"C")];
+        let analysed = [region(1, 600)];
+        let per_sample: [&[SampleLocusObservations]; 3] = [&dotted, &deleting, &inside];
+
+        for bases in [1, 3, 20, 47, 600] {
+            let merged = the_outcome_both_drivers_agree_on(
+                &analysed,
+                &per_sample,
+                width(bases),
+                MaxCohortLocusSpan::DEFAULT,
+                MinAltObs::DEFAULT,
+            );
+            assert_eq!(
+                merged.cohort_observations.len(),
+                59,
+                "the fixture's own shape: 60 dotted loci, two of which the deletion \
+                 swallowed into one locus with the sample at 310",
+            );
+        }
+    }
+
+    /// **A locus that opens in one building region and reaches into the next is built once,
+    /// whole, by the region its first position falls in** — the case a window makes possible
+    /// to get wrong, since the builder that owns it has to read past its own end.
+    ///
+    /// The deletion opens at 305 and reaches 330; at twenty-base regions the boundary at 320
+    /// falls inside it, and the sample at 310 is what makes the locus wider than the deletion
+    /// alone would need. The assertion is on the span, not merely on the count: a locus cut at
+    /// the boundary would still be one locus.
+    #[test]
+    fn a_locus_reaching_across_a_building_region_boundary_is_built_once_and_whole() {
+        let deleting = [member(region(305, 330), &[b'A'; 26], b"A")];
+        let inside = [member(region(310, 310), b"A", b"T")];
+
+        let mut cache = ObservationCache::over(vec![source_of(&deleting), source_of(&inside)]);
+        let merged = merge_cohort_through_cache(
+            &[region(1, 600)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        )
+        .expect("the fixture sources hold");
+
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(305, 330)],
+            "one locus over its whole span, owned by the region holding base 305",
+        );
+        assert_eq!(
+            merged.cohort_observations[0].per_sample.len(),
+            2,
+            "and both samples' evidence is in it, though they sit either side of base 320",
+        );
+    }
+
+    /// **The building regions stop where the analysed ground stops.** A locus opening at 55 is
+    /// outside an analysed region ending at 50, so neither driver builds it — but a division
+    /// that let the last building region run to its full width would run to 60 and claim it.
+    #[test]
+    fn a_locus_past_the_analysed_ground_is_not_claimed_by_the_last_building_region() {
+        let sample = [
+            member(region(45, 45), b"G", b"T"),
+            member(region(55, 55), b"G", b"T"),
+        ];
+        let analysed = [region(1, 50)];
+
+        let merged = the_outcome_both_drivers_agree_on(
+            &analysed,
+            &[&sample],
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region(45, 45)],
+            "45 is inside the analysed ground and 55 is not",
+        );
+    }
+
+    /// The failed spans and the quiet ground come through the cache exactly as they come
+    /// through the oracle, across several analysed regions and on both sides of a boundary.
+    #[test]
+    fn the_failed_spans_come_through_the_cache_unchanged() {
+        let wide = [
+            member(region(20, 40), &[b'A'; 21], b"A"),
+            member(region(60, 85), &[b'A'; 26], b"A"),
+        ];
+        let quiet = [SampleLocusObservations {
+            observations: vec![SequenceObservation {
+                num_obs: 1,
+                ..member(region(95, 95), b"A", b"C").observations.remove(0)
+            }],
+            ..member(region(95, 95), b"A", b"C")
+        }];
+        let analysed = [region(1, 50), region(51, 100)];
+        let bound = MaxCohortLocusSpan(std::num::NonZeroU32::new(20).expect("20 is non-zero"));
+
+        let merged = the_outcome_both_drivers_agree_on(
+            &analysed,
+            &[&wide, &quiet],
+            width(7),
+            bound,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            merged.failed_locus_spans,
+            vec![region(20, 40), region(60, 85)],
+            "the fixture is the one that refuses two loci, so the comparison has something \
+             to compare — and the single read at 95 reaches neither vector",
+        );
+        assert!(merged.cohort_observations.is_empty());
+    }
+
+    /// **Several contigs, read through one cache.** Each sample's reader crosses the contig
+    /// boundary forward, and the eviction at the next contig's first base drops the previous
+    /// contig's window — the case where a position comparison blind to the contig would keep
+    /// everything.
+    #[test]
+    fn several_contigs_come_through_the_cache_unchanged() {
+        let first = [
+            member(region_on(0, 20, 20), b"G", b"T"),
+            member(region_on(1, 900, 900), b"G", b"C"),
+        ];
+        let second = [
+            member(region_on(0, 21, 21), b"G", b"C"),
+            member(region_on(1, 40, 40), b"G", b"T"),
+        ];
+        let analysed = [region_on(0, 1, 100), region_on(1, 1, 1000)];
+
+        let merged = the_outcome_both_drivers_agree_on(
+            &analysed,
+            &[&first, &second],
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![
+                region_on(0, 20, 20),
+                region_on(0, 21, 21),
+                region_on(1, 40, 40),
+                region_on(1, 900, 900),
+            ],
+            "the fixture reaches the second contig, and 900 is past every position on the \
+             first",
+        );
+    }
+
+    /// **The cache changes nothing on observations the generator actually minted** — the same
+    /// two samples on disk as Checkpoint C's own fixture, at a building-region width narrower
+    /// than the locus they chain into.
+    #[test]
+    fn the_cache_changes_nothing_on_minted_observations() {
+        let analysed = region_on(1, 80, 140);
+
+        let substituted: Vec<_> = (0..3)
+            .map(|read| {
+                let mut record = read_with_a_substitution(&format!("sub{read}"), 95, 17);
+                if read == 0 {
+                    let mut qualities = vec![30u8; 30];
+                    qualities[15] = 5;
+                    *record.quality_scores_mut() =
+                        noodles_sam::alignment::record_buf::QualityScores::from(qualities);
+                }
+                record
+            })
+            .collect();
+        let deleted: Vec<_> = (0..3)
+            .map(|read| read_with_a_five_base_deletion(&format!("del{read}"), 95, 15, 20))
+            .collect();
+
+        let (_substituted_reference, _substituted_bam, first) = minted_over(&substituted, analysed);
+        let (_deleted_reference, _deleted_bam, second) = minted_over(&deleted, analysed);
+
+        let merged = the_outcome_both_drivers_agree_on(
+            &[analysed],
+            &[&first, &second],
+            width(4),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert_eq!(
+            merged
+                .cohort_observations
+                .iter()
+                .map(|observed| observed.region)
+                .collect::<Vec<_>>(),
+            vec![region_on(1, 109, 114)],
+            "the fixture is Checkpoint C's own locus, so there is something to compare",
+        );
+        assert_eq!(
+            merged.cohort_observations[0]
+                .alleles
+                .iter()
+                .map(|allele| String::from_utf8_lossy(allele).into_owned())
+                .collect::<Vec<_>>(),
+            vec!["AAAAAA", "AAACAA", "A"],
+            "and it is the six-base locus the two samples chained into, alleles and all",
+        );
+    }
+
+    /// A source's failure ends the merge and comes back unchanged, rather than yielding a
+    /// short answer that looks like a cohort with nothing to say.
+    #[test]
+    fn a_failing_source_ends_the_merge_through_the_cache() {
+        let sample = [member(region(12, 12), b"G", b"T")];
+        let failing = vec![
+            Ok(member(region(12, 12), b"G", b"T")),
+            Err(SourceFailed("the block would not decode")),
+        ]
+        .into_iter();
+
+        let mut cache = ObservationCache::over(vec![source_of(&sample), failing]);
+        let outcome = merge_cohort_through_cache(
+            &[region(1, 600)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        // `RegionOutcome` has no `PartialEq` — deliberately, since every comparison of one is
+        // made through its `Debug` rendering — so the failure is matched rather than equated.
+        assert_eq!(
+            outcome.err(),
+            Some(SourceFailed("the block would not decode")),
+        );
+    }
+
+    /// Analysed regions that overlap are refused here for the same reason the oracle refuses
+    /// them: the loci in the ground they share would be carried twice.
+    #[test]
+    #[should_panic(expected = "not disjoint and ascending")]
+    fn analysed_regions_that_overlap_are_refused_through_the_cache() {
+        let sample = [member(region(45, 45), b"G", b"T")];
+
+        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+        let _ = merge_cohort_through_cache(
+            &[region(1, 60), region(40, 100)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+    }
+
+    /// **The driver evicts as it goes, and the merge's own output cannot say so** — a driver
+    /// that never evicted would produce exactly these observations while holding the whole
+    /// stretch. So the claim is made against the cache: after merging six hundred bases at
+    /// twenty-base regions, with a record every ten bases, the window holds **2 of the 60**.
+    ///
+    /// **Two is what the last building region holds**, not a bound a forward reader pays: the
+    /// records at 581 and 591 both lie inside 581–600, and the source is spent after 591, so
+    /// nothing was drawn past the analysed ground. On this same fixture at five-base regions the
+    /// window ends holding none — the number moves with the width and the record spacing. The
+    /// load-bearing comparison is against the sixty the stretch holds when nothing is evicted.
+    ///
+    /// **The order — evict, then cover — is not what this pins.** Evicting after the cover ends
+    /// with the same window and the same output; what it costs is the sweep, which re-reads the
+    /// held window (`ObservationCache::cover`), and on this fixture the pre-cover eviction takes
+    /// the window from three records to one at every region.
+    #[test]
+    fn the_driver_evicts_as_it_goes_and_the_window_stays_short() {
+        let dotted: Vec<_> = (0..60)
+            .map(|locus| {
+                let at = 10 * locus + 1;
+                member(region(at, at), b"A", b"T")
+            })
+            .collect();
+        let mut cache = ObservationCache::over(vec![source_of(&dotted)]);
+
+        let merged = merge_cohort_through_cache(
+            &[region(1, 600)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        )
+        .expect("the fixture source holds");
+
+        assert_eq!(
+            merged.cohort_observations.len(),
+            60,
+            "every locus was built"
+        );
+        assert_eq!(
+            cache.held_observations_len(),
+            2,
+            "the records at 581 and 591, not the sixty the stretch holds",
+        );
+    }
+
+    /// **The width the caller asks for is the width the driver builds in** — which the output
+    /// cannot show, since both answers are identical. What differs is the cache: at twenty-base
+    /// regions the window ends at two records, and handing the whole six hundred bases to one
+    /// builder leaves all sixty held.
+    ///
+    /// Found by the D2 review: mutating the driver's *call site* to build each analysed region
+    /// as one is invisible to the test that checks the division itself, because that test calls
+    /// the divider directly and nothing said the driver used it.
+    #[test]
+    fn the_width_the_caller_asks_for_is_the_width_the_driver_builds_in() {
+        let dotted: Vec<_> = (0..60)
+            .map(|locus| {
+                let at = 10 * locus + 1;
+                member(region(at, at), b"A", b"T")
+            })
+            .collect();
+
+        let held_at = |bases: u32| {
+            let mut cache = ObservationCache::over(vec![source_of(&dotted)]);
+            merge_cohort_through_cache(
+                &[region(1, 600)],
+                &mut cache,
+                width(bases),
+                MaxCohortLocusSpan::DEFAULT,
+                MinAltObs::DEFAULT,
+            )
+            .expect("the fixture source holds");
+            cache.held_observations_len()
+        };
+
+        assert_eq!(
+            held_at(600),
+            60,
+            "one region for the stretch holds all of it"
+        );
+        assert_eq!(
+            held_at(20),
+            2,
+            "and twenty-base regions hold only the last region's records",
+        );
+    }
+
+    /// **The window is short at the moment a merge fails, not merely at the end of one** — the
+    /// only place from outside where the driver's *drawing pace* is visible. A driver that
+    /// covered the whole analysed region instead of each building region would evict down to the
+    /// same window by the end, and every other test here would still pass.
+    #[test]
+    fn the_window_stays_short_up_to_a_failure() {
+        let mut records: Vec<Result<SampleLocusObservations, SourceFailed>> = (0..30)
+            .map(|locus| {
+                let at = 10 * locus + 1;
+                Ok(member(region(at, at), b"A", b"T"))
+            })
+            .collect();
+        records.push(Err(SourceFailed("the block would not decode")));
+        let mut cache = ObservationCache::over(vec![records.into_iter()]);
+
+        let outcome = merge_cohort_through_cache(
+            &[region(1, 600)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+
+        assert!(outcome.is_err());
+        assert_eq!(
+            cache.held_observations_len(),
+            2,
+            "the window at the moment of failure, not the thirty records behind it",
+        );
+    }
+
+    /// **An analysed region whose ends are the wrong way round is refused**, rather than read
+    /// one way by the division and another by the builder: the division orders the two ends and
+    /// `build_region` does not, so `50-1` builds nothing through the oracle and the whole of
+    /// 1–50 through the cache. Found by the D2 review, and it is the byte-identity this module
+    /// claims, broken by an input nothing was checking.
+    #[test]
+    #[should_panic(expected = "the wrong way round")]
+    fn an_analysed_region_with_inverted_ends_is_refused() {
+        let sample = [member(region(45, 45), b"G", b"T")];
+        let inverted = GenomeRegion {
+            contig: ContigId(0),
+            start: Position(50),
+            end: Position(1),
+        };
+        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+
+        let _ = merge_cohort_through_cache(
+            &[inverted],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+    }
+
+    /// **Regions sharing exactly one base are refused**, which is the comparison the guard turns
+    /// on: at `<=` in place of `<` this pair is accepted and the locus at 50 is built by both
+    /// regions and carried twice. The other refusal fixtures overlap by 21 bases, where a
+    /// loosened comparison still refuses.
+    #[test]
+    #[should_panic(expected = "not disjoint and ascending")]
+    fn analysed_regions_sharing_one_base_are_refused() {
+        let sample = [member(region(50, 50), b"G", b"T")];
+        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+
+        let _ = merge_cohort_through_cache(
+            &[region(1, 50), region(50, 100)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        );
+    }
+
+    /// Nothing analysed is not an error here either, and nothing is drawn — so a driver that
+    /// covered or evicted before the loop would show.
+    #[test]
+    fn merging_no_analysed_regions_through_the_cache_yields_nothing() {
+        let sample = [member(region(12, 12), b"G", b"T")];
+        let mut cache = ObservationCache::over(vec![source_of(&sample)]);
+
+        let merged = merge_cohort_through_cache(
+            &[],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        )
+        .expect("nothing can fail");
+
+        assert!(merged.cohort_observations.is_empty() && merged.failed_locus_spans.is_empty());
+        assert_eq!(cache.held_observations_len(), 0, "and nothing was drawn");
+    }
+
+    /// A cohort of no samples merges to nothing rather than failing — the bottom of the range
+    /// this caller commits to (spec §7.2), and the shape `ObservationCache::over(Vec::new())`
+    /// produces.
+    #[test]
+    fn merging_no_samples_through_the_cache_yields_nothing() {
+        let mut cache: ObservationCache<
+            std::vec::IntoIter<Result<SampleLocusObservations, SourceFailed>>,
+        > = ObservationCache::over(Vec::new());
+
+        let merged = merge_cohort_through_cache(
+            &[region(1, 100)],
+            &mut cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        )
+        .expect("nothing can fail");
+
+        assert!(merged.cohort_observations.is_empty() && merged.failed_locus_spans.is_empty());
+    }
+
+    /// The keep threshold reaches the builders through the cache too — every other test here
+    /// runs at the default, so a driver that dropped the argument would ship green.
+    #[test]
+    fn the_keep_threshold_reaches_the_builders_through_the_cache() {
+        let sample = [member(region(12, 12), b"G", b"T")];
+
+        let mut built_cache = ObservationCache::over(vec![source_of(&sample)]);
+        let built = merge_cohort_through_cache(
+            &[region(1, 50)],
+            &mut built_cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs::DEFAULT,
+        )
+        .expect("the fixture source holds");
+        let mut quiet_cache = ObservationCache::over(vec![source_of(&sample)]);
+        let too_quiet = merge_cohort_through_cache(
+            &[region(1, 50)],
+            &mut quiet_cache,
+            width(20),
+            MaxCohortLocusSpan::DEFAULT,
+            MinAltObs(std::num::NonZeroU32::new(4).expect("4 is non-zero")),
+        )
+        .expect("the fixture source holds");
+
+        assert_eq!(built.cohort_observations.len(), 1, "three reads reach two");
+        assert!(too_quiet.cohort_observations.is_empty(), "and not four");
     }
 }

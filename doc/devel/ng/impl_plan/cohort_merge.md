@@ -192,7 +192,7 @@ milestone must reproduce.
 and reaches in; eviction drops nothing a live region can still reach.
 *Depends:* C2. *Source:* [spec](../spec/cohort_merge.md) §6.4; [arch](../arch/cohort_merge.md) §4.
 
-☐ **D2 — the serial driver reads through the cache.** Output byte-identical to C2.
+✅ **D2 — the serial driver reads through the cache.** Output byte-identical to C2.
 *Depends:* D1. *Source:* [spec](../spec/cohort_merge.md) §6.4.
 
 > **Checkpoint D:** the cache feeds the serial builder and changes nothing. Pause for review.

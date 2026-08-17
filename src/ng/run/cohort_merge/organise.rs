@@ -41,8 +41,9 @@
 
 use std::iter::Fuse;
 
+use super::CohortLocusBuilderRegionsLen;
 use crate::ng::locus_generation::SampleLocusObservations;
-use crate::ng::types::{GenomePosition, GenomeRegion};
+use crate::ng::types::{GenomePosition, GenomeRegion, Position};
 
 /// Every sample's observations over the ground currently assigned to builders (spec §6.4).
 ///
@@ -186,6 +187,21 @@ impl<S> ObservationCache<S> {
             })
             .collect();
         f(&observations_per_sample)
+    }
+
+    /// How many observations are held, summed across samples — the size of the window this
+    /// cache is the memory of (spec §8).
+    ///
+    /// **It exists so that "eviction keeps up" can be asserted rather than assumed.** Nothing
+    /// in a merge's output shows whether [`evict_before`](Self::evict_before) was ever called:
+    /// a driver that never evicted would produce exactly the right answer and hold the whole
+    /// stretch while doing it. This is what a test — and later the run's memory report — reads
+    /// to tell those two apart.
+    pub fn held_observations_len(&self) -> usize {
+        self.samples
+            .iter()
+            .map(|sample| sample.held_observations.len())
+            .sum()
     }
 
     /// Drop everything that ends before `position`. Called once the organiser has released
@@ -364,6 +380,59 @@ where
     }
 }
 
+/// One analysed region divided into the regions single builders own — `building_region_width`
+/// bases each, adjacent, in genome order, the last one clamped to the analysed region's own
+/// last base.
+///
+/// **It lives here, beside the cache, because it is the organiser's geometry**: milestone E
+/// hands these regions out to builders, and a second derivation of the clamp there is exactly
+/// the defect this function's tests exist to catch. Its first caller is the serial driver that
+/// reads through the cache (`super::serial::merge_cohort_through_cache`).
+///
+/// **It is a function of its own so that the division can be checked**, which no merge's output
+/// can do: dividing the ground changes nothing a caller sees — that is the whole claim of the
+/// cached driver — so a driver that ignored the width and built each analysed region as one
+/// would give the right answer and lose everything the division buys.
+///
+/// **The clamp is load-bearing.** A locus belongs to the builder whose region holds its first
+/// position, so a last building region running past the analysed ground would claim loci the
+/// run never analysed.
+///
+/// An analysed region whose ends are the wrong way round is read as the ground it names, the
+/// same defence `SampleLocusObservations::reach` makes — belt-and-braces, since the drivers
+/// refuse such a region before they get here
+/// (`super::serial::refuse_malformed_analysed_regions`).
+pub fn building_regions_of(
+    analysed_region: GenomeRegion,
+    building_region_width: CohortLocusBuilderRegionsLen,
+) -> impl Iterator<Item = GenomeRegion> {
+    let first_base = analysed_region.start.min(analysed_region.end);
+    let last_base = analysed_region.end.max(analysed_region.start);
+    let bases_per_region = u64::from(building_region_width.get());
+
+    let building_region_from = move |start: Position| GenomeRegion {
+        contig: analysed_region.contig,
+        start,
+        // Saturating, then clamped: the arithmetic must not wrap at the top of the coordinate
+        // space, and the region must not reach past the ground the run analysed. The `- 1`
+        // cannot underflow — the width wraps a `NonZeroU32`.
+        end: Position(
+            start
+                .0
+                .saturating_add(bases_per_region - 1)
+                .min(last_base.0),
+        ),
+    };
+
+    std::iter::successors(Some(building_region_from(first_base)), move |previous| {
+        // `checked_add`, because a region ending on the last base of the coordinate space has
+        // no successor and the addition would wrap to zero — and with the saturating arithmetic
+        // above, a wrap would divide the genome for ever rather than panic.
+        let next_first_base = previous.end.0.checked_add(1)?;
+        (next_first_base <= last_base.0).then(|| building_region_from(Position(next_first_base)))
+    })
+}
+
 /// The first held observation that reaches `position` or beyond — the window's left edge for
 /// a call at `position`, and the window's length when every one of them ends before it.
 fn first_reaching_index(
@@ -378,30 +447,12 @@ fn first_reaching_index(
 
 #[cfg(test)]
 mod tests {
+    use super::super::fixtures::{SourceFailed, position_on, region, region_on};
     use super::*;
     use crate::ng::locus_generation::{LocusKind, ReadWitness, SequenceObservation};
     use crate::ng::types::{ContigId, Position, ReadGroupId};
     use std::cell::Cell;
     use std::rc::Rc;
-
-    fn region_on(contig: u32, start: u64, end: u64) -> GenomeRegion {
-        GenomeRegion {
-            contig: ContigId(contig),
-            start: Position(start),
-            end: Position(end),
-        }
-    }
-
-    fn region(start: u64, end: u64) -> GenomeRegion {
-        region_on(0, start, end)
-    }
-
-    fn position_on(contig: u32, position: u64) -> GenomePosition {
-        GenomePosition {
-            contig: ContigId(contig),
-            position: Position(position),
-        }
-    }
 
     /// One sample's record over `region`. What it showed is irrelevant to the cache — which
     /// reads nothing but where an observation begins and how far it reaches — so every fixture
@@ -431,11 +482,6 @@ mod tests {
         }
     }
 
-    /// What a source failure looks like. The cache passes it through and invents nothing —
-    /// the run's own error type does not exist yet (see [`ObservationCache`]).
-    #[derive(Debug, PartialEq, Eq)]
-    struct SourceFailed(&'static str);
-
     /// One sample's reader, counting what was drawn out of it. The count is what says whether
     /// the cache stopped drawing where it claims to.
     struct CountingSource {
@@ -453,6 +499,12 @@ mod tests {
             }
             next
         }
+    }
+
+    fn width(bases: u32) -> CohortLocusBuilderRegionsLen {
+        CohortLocusBuilderRegionsLen(
+            std::num::NonZeroU32::new(bases).expect("a fixture width is non-zero"),
+        )
     }
 
     /// A source over the given regions, with the counter the test reads afterwards.
@@ -1118,6 +1170,122 @@ mod tests {
         );
     }
 
+    /// **The held count is the whole cohort's, not the first sample's**, and it is zero before
+    /// anything is drawn. A count over one sample would under-report the cache by the cohort
+    /// size, which is what this accessor exists to measure (spec §8).
+    #[test]
+    fn the_held_count_sums_every_samples_window() {
+        let (first, _first_drawn) = source_over(&[region(45, 45)]);
+        let (second, _second_drawn) = source_over(&[region(46, 46)]);
+        let mut cache = ObservationCache::over(vec![first, second]);
+
+        assert_eq!(
+            cache.held_observations_len(),
+            0,
+            "nothing has been drawn yet"
+        );
+        cache
+            .cover(region(40, 50))
+            .expect("the fixture sources hold");
+
+        assert_eq!(
+            cache.held_observations_len(),
+            2,
+            "one from each sample, not one in all",
+        );
+    }
+
+    /// And a cache over no samples holds nothing rather than failing.
+    #[test]
+    fn the_held_count_is_zero_over_no_samples() {
+        let cache: ObservationCache<CountingSource> = ObservationCache::over(Vec::new());
+
+        assert_eq!(cache.held_observations_len(), 0);
+    }
+
+    /// **The building regions tile the analysed ground exactly** — adjacent, in genome order,
+    /// none of them empty, and the last one clamped to the analysed region's own last base.
+    ///
+    /// **This is what a merge's output cannot check.** Dividing the ground changes nothing a
+    /// caller sees, so a driver that ignored the width and built each analysed region as one
+    /// would pass every byte-identity test in `serial.rs` while losing the whole point of the
+    /// cache. Fifty bases divided five ways, including two widths that do not divide it.
+    #[test]
+    fn the_building_regions_tile_the_analysed_ground_exactly() {
+        for bases in [1, 7, 20, 50, 600] {
+            let divided: Vec<_> = building_regions_of(region(1, 50), width(bases)).collect();
+
+            assert_eq!(divided[0].start, Position(1), "at {bases} bases");
+            assert_eq!(
+                divided.last().expect("at least one region").end,
+                Position(50),
+                "the last region is clamped to the analysed ground, at {bases} bases",
+            );
+            for pair in divided.windows(2) {
+                assert_eq!(
+                    pair[1].start.0,
+                    pair[0].end.0 + 1,
+                    "the regions are adjacent, at {bases} bases",
+                );
+            }
+            for one in &divided {
+                assert!(one.start <= one.end, "no empty region, at {bases} bases");
+                assert!(
+                    one.end.0 - one.start.0 + 1 <= u64::from(bases),
+                    "no region wider than the width asked for, at {bases} bases",
+                );
+            }
+            assert_eq!(
+                divided.len(),
+                usize::try_from(50u64.div_ceil(u64::from(bases))).expect("a small count"),
+                "as many regions as the width divides fifty bases into",
+            );
+        }
+    }
+
+    /// A building region ending on the last base of the coordinate space has no successor, and
+    /// the division stops rather than wrapping to zero and dividing the genome for ever.
+    ///
+    /// **Bounded, because the failure this guards against is unbounded.** With the wrap in
+    /// place the iterator never ends, and an unbounded `collect` would take the whole test
+    /// binary down with it rather than print a difference.
+    #[test]
+    fn the_division_stops_at_the_coordinate_ceiling() {
+        let at_the_ceiling = GenomeRegion {
+            contig: ContigId(0),
+            start: Position(u64::MAX - 1),
+            end: Position(u64::MAX),
+        };
+
+        let divided: Vec<_> = building_regions_of(at_the_ceiling, width(20))
+            .take(3)
+            .collect();
+
+        assert_eq!(
+            divided,
+            vec![at_the_ceiling],
+            "one region, and no second lap"
+        );
+    }
+
+    /// **An analysed region whose ends are the wrong way round is read as the ground it
+    /// names** — belt-and-braces behind the drivers' own refusal
+    /// (`super::serial::refuse_malformed_analysed_regions`), and the reason the division cannot
+    /// yield one empty inverted region instead.
+    #[test]
+    fn the_division_reads_an_inverted_region_as_the_ground_it_names() {
+        let inverted = GenomeRegion {
+            contig: ContigId(0),
+            start: Position(50),
+            end: Position(1),
+        };
+
+        assert_eq!(
+            building_regions_of(inverted, width(20)).collect::<Vec<_>>(),
+            vec![region(1, 20), region(21, 40), region(41, 50)],
+        );
+    }
+
     /// **The window is sufficient**, which is the property this whole file exists for and the
     /// one no single fixture can state: a builder fed from the cache closes exactly the loci it
     /// would close given every observation in the genome
@@ -1131,6 +1299,11 @@ mod tests {
     ///
     /// Written by the D1 review, which measured it: it agrees on 600 of 600 layouts as the code
     /// stands, and disagrees on 410 of 600 under a cover capped at two sweeps.
+    ///
+    /// **The evict/cover/hand-out loop is written out here rather than calling the serial
+    /// driver**, deliberately: this test leaves *gaps* between its builder regions, and the
+    /// driver tiles the analysed ground without gaps. Unifying the two would quietly drop the
+    /// gaps, which are what make the cache jump forward over ground nobody builds.
     #[test]
     fn a_builder_fed_from_the_cache_closes_the_loci_a_whole_stretch_would() {
         use super::super::build::build_region;
